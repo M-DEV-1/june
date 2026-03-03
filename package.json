@@ -1,0 +1,11 @@
+{
+  "name": "voxpilot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "VOXPILOT — Hands-free Voice CLI for Gemini Live API",
+  "scripts": {
+    "adk": "pnpm --filter voxpilot-adk start",
+    "genai": "pnpm --filter voxpilot-genai start",
+    "typecheck": "pnpm -r run typecheck"
+  }
+}
