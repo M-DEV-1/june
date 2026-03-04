@@ -10,7 +10,9 @@
     "./components/StatusBar.js": "./components/StatusBar.tsx",
     "./components/Transcript.js": "./components/Transcript.tsx",
     "./components/Footer.js": "./components/Footer.tsx",
-    "./types/index.js": "./types/index.ts"
+    "./types/index.js": "./types/index.ts",
+    "./utils/audio.js": "./utils/audio.ts",
+    "./utils/api.js": "./utils/api.ts"
   },
   "dependencies": {
     "ink": "^6.8.0",

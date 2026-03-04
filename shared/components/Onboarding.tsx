@@ -5,35 +5,91 @@ import Spinner from 'ink-spinner';
 
 interface OnboardingProps {
     onComplete: (apiKey: string) => void;
+    validateApiKey?: (apiKey: string) => Promise<boolean>;
+    checkDependencies?: () => Promise<{ name: string; found: boolean }[]>;
+    startMicTest?: (onLevel: (level: number) => void) => () => void; // Returns a stop function
+    onInstallDependency?: (name: string) => Promise<boolean>;
 }
 
-const Onboarding: React.FC<OnboardingProps> = ({onComplete}) => {
+const Onboarding: React.FC<OnboardingProps> = ({onComplete, validateApiKey, checkDependencies, startMicTest, onInstallDependency}) => {
     const [step, setStep] = useState(0);
     const [apiKey, setApiKey] = useState('');
     const [navValue, setNavValue] = useState('');
     const [isValidating, setIsValidating] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [audioLevel, setAudioLevel] = useState(0);
+    const [deps, setDeps] = useState<{ name: string; found: boolean }[]>([]);
+    const [isCheckingDeps, setIsCheckingDeps] = useState(false);
+    const [installingDep, setInstallingDep] = useState<string | null>(null);
     const [playbackActive, setPlaybackActive] = useState(false);
     const [selectedVoice, setSelectedVoice] = useState(0);
 
-    const voices = ['Kore (Default)', 'Puck (Energetic)', 'Charon (Analytical)'];
+    const refreshDeps = () => {
+        setIsCheckingDeps(true);
+        if (checkDependencies) {
+            checkDependencies().then(d => {
+                setDeps(d);
+                setIsCheckingDeps(false);
+            });
+        } else {
+            setIsCheckingDeps(false);
+        }
+    }
 
-    const handleSubmitApiKey = () => {
-        if (apiKey.length < 10) return;
-        setIsValidating(true);
-        setTimeout(() => {
-            setIsValidating(false);
-            setStep(2);
-        }, 1500);
+    useEffect(() => {
+        if (step === 0) {
+            refreshDeps();
+        }
+    }, [step]);
+
+    const handleInstall = async (name: string) => {
+        if (!onInstallDependency) return;
+        setInstallingDep(name);
+        try {
+            const success = await onInstallDependency(name);
+            if (success) {
+                refreshDeps();
+            } else {
+                setError(`Failed to install ${name}`);
+            }
+        } catch (e) {
+            setError(`Error installing ${name}`);
+        }
+        setInstallingDep(null);
     };
 
     useEffect(() => {
-        if (step !== 2) return;
-        const interval = setInterval(() => {
-            setAudioLevel(Math.random());
-        }, 100);
-        return () => clearInterval(interval);
+        if (step !== 2 || !startMicTest) return;
+        const stop = startMicTest((level) => {
+            setAudioLevel(level);
+        });
+        return () => stop();
     }, [step]);
+
+    const handleSubmitApiKey = async () => {
+        if (apiKey.length < 10) {
+            setError('Key too short');
+            return;
+        }
+        setError(null);
+        setIsValidating(true);
+        
+        try {
+            if (validateApiKey) {
+                const isValid = await validateApiKey(apiKey);
+                if (!isValid) {
+                    setError('Invalid API Key');
+                    setIsValidating(false);
+                    return;
+                }
+            }
+            setIsValidating(false);
+            setStep(2);
+        } catch (e) {
+            setError('Validation failed');
+            setIsValidating(false);
+        }
+    };
 
     const handleMicTestComplete = () => {
         setPlaybackActive(true);
@@ -50,6 +106,23 @@ const Onboarding: React.FC<OnboardingProps> = ({onComplete}) => {
                     <Text bold color="cyan">{"Welcome to VOXPILOT Commander."}</Text>
                     <Box marginTop={1}>
                         <Text>{"Your ultra-low-latency voice interface to Gemini 2.0."}</Text>
+                    </Box>
+                    <Box marginTop={1} flexDirection="column">
+                        <Text underline>{"Dependency Check:"}</Text>
+                        {isCheckingDeps ? (
+                            <Text color="yellow"><Spinner type="dots" /> Checking system capabilities...</Text>
+                        ) : (
+                            deps.map(d => (
+                                <Text key={d.name} color={d.found ? 'green' : 'red'}>
+                                    {d.found ? `  [✔] ${d.name} found` : `  [✘] ${d.name} NOT FOUND`}
+                                </Text>
+                            ))
+                        )}
+                        {!isCheckingDeps && deps.every(d => !d.found) && (
+                            <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red">
+                                <Text color="red">{"CRITICAL: No audio capture program (sox/ffmpeg) found."}</Text>
+                            </Box>
+                        )}
                     </Box>
                     <Box marginTop={1}>
                         <Text color="gray">{"Press Enter to begin setup..."}</Text>
@@ -78,6 +151,11 @@ const Onboarding: React.FC<OnboardingProps> = ({onComplete}) => {
                                 <Spinner type="dots" />
                                 <Text>{" Validating connection..."}</Text>
                             </Text>
+                        </Box>
+                    )}
+                    {error && (
+                        <Box marginTop={1}>
+                            <Text color="red">{`ERROR: ${error}`}</Text>
                         </Box>
                     )}
                     <Box marginTop={1}>

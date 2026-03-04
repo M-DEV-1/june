@@ -16,8 +16,19 @@ import { z } from 'zod';
 import dotenv from 'dotenv';
 // @ts-ignore
 import record from 'node-record-lpcm16';
+import ffmpegPath from 'ffmpeg-static';
 
 dotenv.config();
+
+// Ensure ffmpeg-static is in the path for node-record-lpcm16
+if (ffmpegPath) {
+    const ffmpegDir = path.dirname(ffmpegPath);
+    if (process.platform === 'win32') {
+        process.env.PATH = `${ffmpegDir};${process.env.PATH}`;
+    } else {
+        process.env.PATH = `${ffmpegDir}:${process.env.PATH}`;
+    }
+}
 
 /* STEPS ---
  - initialize app (startup)
@@ -89,18 +100,54 @@ const saveResearchNotes = new FunctionTool({
     }
 });
 
+const webFetch = new FunctionTool({
+    name: 'web_fetch',
+    description: 'Fetches the content of a webpage and returns the text.',
+    parameters: z.object({
+        url: z.string().url().describe('The URL of the webpage to fetch.')
+    }) as any,
+    execute: async (args: any) => {
+        const { url } = args;
+        try {
+            const response = await fetch(url);
+            const html = await response.text();
+            // Basic HTML to text (removing scripts, styles, and tags)
+            const text = html
+                .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gmi, '')
+                .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gmi, '')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return { content: text.slice(0, 15000) };
+        } catch (e: unknown) {
+            return { error: `Failed to fetch URL: ${(e as Error).message}` };
+        }
+    }
+});
+
 export const researchAgent = new LlmAgent({
     name: "research_agent",
     model: "gemini-2.0-flash-exp",
     description: "An expert research assistant with real-time audio analysis.",
     instruction: `
         You are VOXPILOT, a high-performance Research Voice Assistant.
-        You have direct access to local files and the web.
+        Your goal is to perform deep, autonomous research for the user.
         
         Style: Professional, concise, tech-heavy.
+        
+        AUTONOMOUS RESEARCH LOOP:
+        1. HYPOTHESIZE: Understand the user's research goal and form a plan.
+        2. SEARCH: Use google_search to find relevant sources and papers.
+        3. READ: Use web_fetch and read_research_file to gather deep information.
+        4. SYNTHESIZE: Combine findings, identify gaps, and update the user via voice.
+        5. SAVE: Use save_research_notes to persist important findings.
+        
+        You should run this loop autonomously until you have a comprehensive answer or need user clarification.
+        Always inform the user what you are doing (e.g., "Searching for recent papers on X...").
     `,
     tools: [
         new GoogleSearchTool(),
+        webFetch,
         listDirectory,
         readFile,
         saveResearchNotes
@@ -141,7 +188,7 @@ export async function* runVoxPilotSession(apiKey?: string) {
             sampleRate: 16000,
             threshold: 0,
             verbose: false,
-            recordProgram: 'sox', // or 'rec' or 'ffmpeg'
+            recordProgram: 'ffmpeg',
         }).stream();
 
         micStream?.on('data', (data: Buffer) => {
@@ -151,13 +198,12 @@ export async function* runVoxPilotSession(apiKey?: string) {
             });
         });
 
-        micStream?.on('error', (err: unknown) => {
-            console.error("Mic Stream Error (Likely missing 'sox'):", (err as Error).message);
+        micStream?.on('error', (err: any) => {
+            console.error("Mic Stream Error:", err.message);
             if (micStream) micStream.pause();
-            throw err;
         });
-    } catch (e: unknown) {
-        console.error("Mic capture failed to initialize:", (e as Error).message);
+    } catch (e: any) {
+        console.error("Mic capture failed to initialize:", e.message);
         throw e;
     }
 

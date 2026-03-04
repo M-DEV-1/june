@@ -32,6 +32,20 @@ export const declarations: FunctionDeclaration[] = [
         }
     },
     {
+        name: 'web_fetch',
+        description: 'Fetches the content of a webpage and returns the text.',
+        parameters: {
+            type: Type.OBJECT,
+            properties: {
+                url: {
+                    type: Type.STRING,
+                    description: 'The URL of the webpage to fetch.'
+                }
+            },
+            required: ['url']
+        }
+    },
+    {
         name: 'save_research_notes',
         description: 'Saves synthesized findings or notes to a local file.',
         parameters: {
@@ -70,6 +84,21 @@ export const tools = {
             return { content: content.slice(0, 10000) };
         } catch (e: unknown) {
             return { error: `Failed to read file: ${(e as Error).message}` };
+        }
+    },
+    web_fetch: async ({ url }: { url: string }) => {
+        try {
+            const response = await fetch(url);
+            const html = await response.text();
+            const text = html
+                .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gmi, '')
+                .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gmi, '')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            return { content: text.slice(0, 15000) };
+        } catch (e: unknown) {
+            return { error: `Failed to fetch URL: ${(e as Error).message}` };
         }
     },
     save_research_notes: async ({ path: p, content }: { path: string, content: string }) => {
