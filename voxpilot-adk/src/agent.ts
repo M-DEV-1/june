@@ -1,3 +1,5 @@
+import type { Readable } from 'node:stream';
+import path from 'node:path';
 import {
     LlmAgent,
     GoogleSearchTool,
@@ -8,11 +10,12 @@ import {
     FunctionTool,
     type RunConfig
 } from '@google/adk';
-import type { AudioTranscriptionConfig, Blob } from "@google/genai";
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { z } from 'zod';
 import dotenv from 'dotenv';
+// @ts-ignore
+import record from 'node-record-lpcm16';
 
 dotenv.config();
 
@@ -26,55 +29,62 @@ dotenv.config();
 
 // all ADK bidirectional components must run in an async context - Session Operations, WebSocket operations, Concurrent tasks
 
-export const APP_NAME = "research-voice-agent";
-export const createUserId = () => randomUUID();
-export const createSessionId = () => randomUUID();
+export const APP_NAME = "voxpilot-adk";
 
 const listDirectory = new FunctionTool({
     name: 'list_directory',
-    description: 'Lists files in a given directory path. Use this to find research data or project structures.',
+    description: 'Lists files in a given directory path.',
     parameters: z.object({
         path: z.string().default('.').describe('The directory path to list.')
-    }),
-    execute: async ({ path }) => {
+    }) as any,
+    execute: async (args: any) => {
+        const { path: p } = args;
         try {
-            const files = await fs.readdir(path);
+            const target = path.resolve(process.cwd(), p || '.');
+            if (!target.startsWith(process.cwd())) throw new Error("Path traversal blocked.");
+            const files = await fs.readdir(target);
             return { files };
-        } catch (e: any) {
-            return { error: `Failed to list directory: ${e.message}` };
+        } catch (e: unknown) {
+            return { error: `Failed to list directory: ${(e as Error).message}` };
         }
     }
 });
 
 const readFile = new FunctionTool({
     name: 'read_research_file',
-    description: 'Reads the content of a specific file. Necessary for analyzing research data.',
+    description: 'Reads the content of a specific file.',
     parameters: z.object({
         path: z.string().describe('Path to the file to read.')
-    }),
-    execute: async ({ path }) => {
+    }) as any,
+    execute: async (args: any) => {
+        const { path: p } = args;
         try {
-            const content = await fs.readFile(path, 'utf-8');
-            return { content: content.slice(0, 10000) }; // Sufficient context for analysis
-        } catch (e: any) {
-            return { error: `Failed to read file: ${e.message}` };
+            const target = path.resolve(process.cwd(), p);
+            if (!target.startsWith(process.cwd())) throw new Error("Path traversal blocked.");
+            const content = await fs.readFile(target, 'utf-8');
+            return { content: content.slice(0, 10000) };
+        } catch (e: unknown) {
+            return { error: `Failed to read file: ${(e as Error).message}` };
         }
     }
 });
 
 const saveResearchNotes = new FunctionTool({
     name: 'save_research_notes',
-    description: 'Saves synthesized findings or notes to a local file for persistence.',
+    description: 'Saves synthesized findings or notes to a local file.',
     parameters: z.object({
         path: z.string().describe('File path where notes should be saved.'),
         content: z.string().describe('The synthesized research notes or summary.')
-    }),
-    execute: async ({ path, content }) => {
+    }) as any,
+    execute: async (args: any) => {
+        const { path: p, content } = args;
         try {
-            await fs.writeFile(path, content, 'utf-8');
-            return { success: true, message: `Notes successfully saved to ${path}` };
-        } catch (e: any) {
-            return { error: `Failed to save notes: ${e.message}` };
+            const target = path.resolve(process.cwd(), p);
+            if (!target.startsWith(process.cwd())) throw new Error("Path traversal blocked.");
+            await fs.writeFile(target, content, 'utf-8');
+            return { success: true, message: `Notes successfully saved to ${target}` };
+        } catch (e: unknown) {
+            return { error: `Failed to save notes: ${(e as Error).message}` };
         }
     }
 });
@@ -82,17 +92,12 @@ const saveResearchNotes = new FunctionTool({
 export const researchAgent = new LlmAgent({
     name: "research_agent",
     model: "gemini-2.0-flash-exp",
-    description: "An expert research assistant synthesizing web and local file data via bidirectional voice.",
+    description: "An expert research assistant with real-time audio analysis.",
     instruction: `
-        You are a highly capable Research Voice Assistant.
-        You monitor local files and the web to synthesize facts and suggest next steps.
+        You are VOXPILOT, a high-performance Research Voice Assistant.
+        You have direct access to local files and the web.
         
-        Guidelines:
-        1. Access local contexts using 'list_directory' and 'read_research_file'.
-        2. Use 'google_search' to bridge local data with global knowledge.
-        3. Proactively save summaries using 'save_research_notes' when research milestones are reached.
-        4. Be concise and insightful in voice responses. Use technical precision.
-        5. If you see a file like 'research_log.md', try reading it first to understand current progress.
+        Style: Professional, concise, tech-heavy.
     `,
     tools: [
         new GoogleSearchTool(),
@@ -103,88 +108,74 @@ export const researchAgent = new LlmAgent({
 });
 
 const sessionService = new InMemorySessionService();
-const userId = createUserId();
-const sessionId = createSessionId();
 
-export const runner = new Runner({
-    appName: APP_NAME,
-    agent: researchAgent,
-    sessionService: sessionService,
-});
+export async function* runVoxPilotSession(apiKey?: string) {
+    if (apiKey) process.env['GEMINI_API_KEY'] = apiKey;
 
-const session = await sessionService.getOrCreateSession({
-    appName: APP_NAME,
-    userId: userId,
-    sessionId: sessionId
-});
+    const userId = randomUUID();
+    const sessionId = randomUUID();
 
-export const runConfig: RunConfig = {
-    streamingMode: StreamingMode.BIDI,
-    responseModalities: ["AUDIO", "TEXT"] as any,
-    inputAudioTranscription: { languageCodes: ["en-US"] },
-    outputAudioTranscription: { languageCodes: ["en-US"] },
-    maxLlmCalls: 30
-};
+    const runner = new Runner({
+        appName: APP_NAME,
+        agent: researchAgent,
+        sessionService: sessionService,
+    });
 
+    const runConfig: RunConfig = {
+        streamingMode: StreamingMode.BIDI,
+        responseModalities: ["AUDIO", "TEXT"] as any,
+        inputAudioTranscription: { languageCodes: ["en-US"] },
+        outputAudioTranscription: { languageCodes: ["en-US"] },
+        maxLlmCalls: 100
+    };
 
-(async () => {
     const liveRequestQueue = new LiveRequestQueue();
     // session-specific and stateful
     // thread-safe async queue buffers user messages for orderly processing (text context, audio blobs, activity signals)
     // DO NOT REUSE
 
+    // Initialize real mic capture
+    let micStream: Readable | null = null;
     try {
-        console.log(`[Lifecycle] Session Active: ${session.id}. Ready for live research.`);
+        micStream = record.record({
+            sampleRate: 16000,
+            threshold: 0,
+            verbose: false,
+            recordProgram: 'sox', // or 'rec' or 'ffmpeg'
+        }).stream();
 
-        // Initial Realtime Pulse (Input side)
-        const sendInitialAudio = () => {
-            const initialBlob: Blob = {
+        micStream?.on('data', (data: Buffer) => {
+            liveRequestQueue.sendRealtime({
                 mimeType: "audio/pcm; rate=16000",
-                data: ""
-            };
-            liveRequestQueue.sendRealtime(initialBlob);
-        };
-        sendInitialAudio();
-
-        const stream = runner.runAsync({
-            userId,
-            sessionId,
-            runConfig,
-            // @ts-ignore - liveRequestQueue is the core mechanism for BIDI interaction
-            liveRequestQueue: liveRequestQueue,
-            newMessage: { parts: [{ text: "System Initialized. I am ready to begin the research session." }] }
+                data: data.toString('base64')
+            });
         });
 
-        // Event Processing Loop (Downstream side)
-        for await (const event of stream) {
-            // Handle Synthesis Output
-            if (event.content?.parts) {
-                for (const part of event.content.parts) {
-                    if (part.text) console.log(`[Agent Synthesis]: ${part.text}`);
-                }
-            }
-
-            // Handle Real-time Transcriptions
-            if (event.inputTranscription?.text) {
-                console.log(`[User Audio]: ${event.inputTranscription.text}`);
-
-                // Example Activity Signal: Handle exit
-                if (event.inputTranscription.text.toLowerCase().includes("terminate session")) {
-                    break;
-                }
-            }
-
-            // Handle Interruptions or Turn Completions
-            if (event.interrupted) {
-                console.warn("[Lifecycle] Synthesis interrupted by user activity.");
-            }
-        }
-    } catch (err) {
-        console.error("[Runtime Error] Session crashed:", err);
-    } finally {
-        // --- PHASE 4: TERMINATION & CLEANUP ---
-        console.log("[Lifecycle] Closing live queue and terminating session.");
-        liveRequestQueue.close();
-        process.exit(0);
+        micStream?.on('error', (err: unknown) => {
+            console.error("Mic Stream Error (Likely missing 'sox'):", (err as Error).message);
+            if (micStream) micStream.pause();
+            throw err;
+        });
+    } catch (e: unknown) {
+        console.error("Mic capture failed to initialize:", (e as Error).message);
+        throw e;
     }
-})();
+
+    const stream = runner.runAsync({
+        userId,
+        sessionId,
+        runConfig,
+        // @ts-ignore
+        liveRequestQueue: liveRequestQueue,
+        newMessage: { parts: [{ text: "Initializing VOXPILOT Core." }] }
+    });
+
+    try {
+        for await (const event of stream) {
+            yield event;
+        }
+    } finally {
+        if (micStream) micStream.pause();
+        liveRequestQueue.close();
+    }
+}
