@@ -7,7 +7,11 @@ import Waveform from 'voxpilot-shared/components/Waveform.js';
 import StatusBar from 'voxpilot-shared/components/StatusBar.js';
 import Transcript from 'voxpilot-shared/components/Transcript.js';
 import Footer from 'voxpilot-shared/components/Footer.js';
+import { setupFfmpeg, checkDependencies, startMicTest } from 'voxpilot-shared/utils/audio.js';
+import { validateApiKey } from 'voxpilot-shared/utils/api.js';
 import {runVoxPilotGenAISession} from '../session.js';
+
+setupFfmpeg();
 
 const VoxPilot: React.FC = () => {
 	const { exit } = useApp();
@@ -58,7 +62,13 @@ const VoxPilot: React.FC = () => {
                             .filter(Boolean)
                             .join('');
 						if (text) {
-							setMessages(prev => [...prev, {role: 'agent', text}]);
+							setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last?.role === 'agent') {
+                                    return [...prev.slice(0, -1), { role: 'agent', text: last.text + text }];
+                                }
+                                return [...prev, { role: 'agent', text }];
+                            });
 							setStatus('SPEAKING');
 						}
 
@@ -75,8 +85,9 @@ const VoxPilot: React.FC = () => {
                         setStatus('LISTENING');
                     }
 				}
-			} catch (err) {
+			} catch (err: any) {
 				console.error(err);
+				setMessages(prev => [...prev, { role: 'system', text: `SYSTEM ERROR: ${err.message || 'Unknown error occurred.'}` }]);
 				setStatus('ERROR');
 			}
 		}
@@ -97,13 +108,13 @@ const VoxPilot: React.FC = () => {
 			setAnalyserData(prev => {
                 let newData;
                 if (status === 'SPEAKING') {
-                    newData = prev.map(() => Math.random() * 0.8 + 0.2);
+                    newData = prev.map((_, i) => Math.abs(Math.sin((Date.now() / 100) + i * 0.2)) * 0.9 + (Math.random() * 0.1));
                 } else if (status === 'LISTENING') {
-                    newData = prev.map(() => Math.random() * 0.3);
+                    newData = prev.map((_, i) => (Math.abs(Math.sin((Date.now() / 200) + i * 0.1)) * 0.1) + (Math.random() * 0.2));
                 } else if (status === 'PROCESSING') {
-                    newData = prev.map((_, i) => Math.abs(Math.sin((Date.now() / 150) + i * 0.15)) * 0.7);
+                    newData = prev.map((_, i) => Math.abs(Math.sin((Date.now() / 50) + i * 0.5)) * 0.7);
                 } else {
-                    newData = prev.map(() => Math.random() * 0.05);
+                    newData = prev.map(() => Math.random() * 0.02);
                 }
                 return newData;
             });
@@ -131,7 +142,12 @@ const VoxPilot: React.FC = () => {
 			<Banner />
 			
 			{status === 'INIT' ? (
-				<Onboarding onComplete={handleOnboardingComplete} />
+				<Onboarding 
+                    onComplete={handleOnboardingComplete} 
+                    validateApiKey={validateApiKey}
+                    checkDependencies={checkDependencies}
+                    startMicTest={startMicTest}
+                />
 			) : (
 				<Box flexDirection="column" alignItems="center">
 					<StatusBar status={status} activeTools={activeTools} fps={fps} />

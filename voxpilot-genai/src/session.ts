@@ -5,6 +5,18 @@ import { randomUUID } from 'node:crypto';
 import { tools, declarations } from './tools.js';
 // @ts-ignore
 import record from 'node-record-lpcm16';
+import ffmpegPath from 'ffmpeg-static';
+import path from 'node:path';
+
+// Ensure ffmpeg-static is in the path
+if (ffmpegPath) {
+    const ffmpegDir = path.dirname(ffmpegPath);
+    if (process.platform === 'win32') {
+        process.env.PATH = `${ffmpegDir};${process.env.PATH}`;
+    } else {
+        process.env.PATH = `${ffmpegDir}:${process.env.PATH}`;
+    }
+}
 
 export async function* runVoxPilotGenAISession(apiKey: string) {
     const ai = new GoogleGenAI({ apiKey });
@@ -41,7 +53,7 @@ export async function* runVoxPilotGenAISession(apiKey: string) {
             sampleRate: 16000,
             threshold: 0,
             verbose: false,
-            recordProgram: 'sox',
+            recordProgram: 'ffmpeg',
         }).stream();
 
         micStream?.on('data', (data: Buffer) => {
@@ -52,13 +64,12 @@ export async function* runVoxPilotGenAISession(apiKey: string) {
                 }
             });
         });
-        micStream?.on('error', (err: unknown) => {
-            console.error("Mic Stream Error (Likely missing 'sox'):", (err as Error).message);
+        micStream?.on('error', (err: any) => {
+            console.error("Mic Stream Error:", err.message);
             if (micStream) micStream.pause();
-            throw err;
         });
-    } catch (e: unknown) {
-        console.error("Mic capture failed to initialize:", (e as Error).message);
+    } catch (e: any) {
+        console.error("Mic capture failed to initialize:", e.message);
         throw e;
     }
 
