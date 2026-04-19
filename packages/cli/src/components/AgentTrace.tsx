@@ -1,5 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import { stripAnsi } from '@ora/core';
 
 export interface TraceEntry {
     agent: string;
@@ -40,7 +41,7 @@ const AgentTrace: React.FC<AgentTraceProps> = ({ traces }) => {
                     
                     {trace.thought && (
                         <Box paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor="gray">
-                            <Text color="gray" italic>"{trace.thought.slice(0, 100)}{trace.thought.length > 100 ? '...' : ''}"</Text>
+                            <Text color="gray" italic>"{stripAnsi(trace.thought.slice(0, 100))}{trace.thought.length > 100 ? '...' : ''}"</Text>
                         </Box>
                     )}
 
@@ -58,7 +59,7 @@ const AgentTrace: React.FC<AgentTraceProps> = ({ traces }) => {
                     {trace.args && trace.status === 'pending' && (
                         <Box paddingLeft={4}>
                             <Text color="gray" dimColor italic>
-                                {JSON.stringify(trace.args).slice(0, 50)}...
+                                {stripAnsi(JSON.stringify(trace.args)).slice(0, 50)}...
                             </Text>
                         </Box>
                     )}
