@@ -52,7 +52,7 @@ export const orchestratorAgent = new LlmAgent({
         Voice-first UX: Avoid long lists. Speak naturally but technically.
     `,
     tools: [
-        new AgentTool(researchAgent),
-        new AgentTool(fileAgent)
+        new AgentTool({ agent: researchAgent }),
+        new AgentTool({ agent: fileAgent })
     ]
 });

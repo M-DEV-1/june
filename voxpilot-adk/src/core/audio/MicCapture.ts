@@ -32,6 +32,8 @@ export class MicCapture {
     }
 
     start(): PassThrough {
+        if (this.process) return this.outputStream!;
+
         let winAudioDevice = process.platform === 'win32' ? this.getWindowsAudioDevice() : 'default';
         const args = process.platform === 'win32' 
             ? ['-f', 'dshow', '-i', `audio=${winAudioDevice}`]
@@ -50,8 +52,18 @@ export class MicCapture {
             stdio: ['ignore', 'pipe', 'ignore']
         });
 
-        this.outputStream = new PassThrough();
-        this.process.stdout.pipe(this.outputStream);
+        if (!this.outputStream) {
+            this.outputStream = new PassThrough();
+        }
+        this.process.stdout.pipe(this.outputStream, { end: false });
+
+        this.process.on('exit', (code: number) => {
+            if (code !== 0 && code !== null) {
+                console.error(`MicCapture process exited with code ${code}. Restarting...`);
+                this.process = null;
+                setTimeout(() => this.start(), 1000);
+            }
+        });
 
         this.process.stdout.on('data', (chunk: Buffer) => {
             let sum = 0;

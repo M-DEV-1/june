@@ -52,21 +52,20 @@ const VoxPilot: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        const unsubStatus = eventBus.on('status', (e: any) => setStatus(e.status));
-        const unsubError = eventBus.on('error', (e: any) => {
+        const unsubStatus = eventBus.subscribe('status', (e: any) => setStatus(e.status));
+        const unsubError = eventBus.subscribe('error', (e: any) => {
             setMessages(prev => [...prev, { role: 'system', text: `ERROR: ${e.message}` }]);
         });
-        const unsubTranscript = eventBus.on('transcript', (e: any) => {
+        const unsubTranscript = eventBus.subscribe('transcript', (e: any) => {
             setMessages(prev => {
                 const last = prev[prev.length - 1];
                 if (last && last.role === e.role && e.role === 'agent') {
-                    // Update last message if same role and it was partial (or just append for agent)
                     return [...prev.slice(0, -1), { role: e.role, text: last.text + e.text, partial: e.partial }];
                 }
                 return [...prev, { role: e.role, text: e.text, partial: e.partial }];
             });
         });
-        const unsubToolStart = eventBus.on('tool:start', (e: any) => {
+        const unsubToolStart = eventBus.subscribe('tool:start', (e: any) => {
             const roleMap: Record<string, any> = {
                 'voxpilot': 'orchestrator',
                 'researcher': 'researcher',
@@ -82,7 +81,7 @@ const VoxPilot: React.FC = () => {
                 timestamp: Date.now()
             }]);
         });
-        const unsubToolEnd = eventBus.on('tool:end', (e: any) => {
+        const unsubToolEnd = eventBus.subscribe('tool:end', (e: any) => {
             setTraces(prev => prev.map(t => 
                 t.tool === e.tool && t.status === 'pending' 
                 ? { ...t, status: 'success', durationMs: e.durationMs } 

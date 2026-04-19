@@ -61,11 +61,11 @@ export class SessionManager {
             });
         });
 
+        // ADK 0.5.0: runAsync is the available entry point
         const stream = this.runner.runAsync({
-            userId: this.currentUserId,
-            sessionId: this.currentSessionId,
-            runConfig,
-            liveRequestQueue: this.liveRequestQueue as any,
+            userId: this.currentUserId!,
+            sessionId: this.currentSessionId!,
+            runConfig: runConfig as any,
             newMessage: { 
                 parts: [{ text: `${this.agent.instruction}\n\n${contextManager.getSystemPromptPrefix()}System Booted. Neural Interface Online.` }] 
             }
@@ -138,7 +138,6 @@ export class SessionManager {
 
         if (event.toolResponse) {
             const result = event.toolResponse.content;
-            // Async compression for audit (logic can be expanded to update context)
             toolResultCompressor.compress(event.toolResponse.name, result, "implicit research goal").catch(() => {});
 
             eventBus.emitEvent({ 
