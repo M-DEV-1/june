@@ -13,7 +13,7 @@ interface StatusBarProps {
 const StatusBar: React.FC<StatusBarProps> = ({ status, fps, latency, tokens }) => {
     const [micLevel, setMicLevel] = useState(0);
     const [spkLevel, setSpkLevel] = useState(0);
-    const [cacheHit, setCacheHit] = useState(false);
+    const [cacheHit] = useState(false);
 
     useEffect(() => {
         const unsubLevel = eventBus.subscribe('audio:level', (e) => {

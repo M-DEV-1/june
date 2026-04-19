@@ -1,4 +1,4 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
+import React, { Component, ReactNode } from 'react';
 import { Box, Text } from 'ink';
 
 interface Props {
@@ -20,7 +20,7 @@ export class GlobalErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
-  public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+  public componentDidCatch() {
     // In a real production app, we would log this to a service
     // console.error("Uncaught error:", error, errorInfo);
   }
