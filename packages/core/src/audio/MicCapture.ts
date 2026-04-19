@@ -1,4 +1,4 @@
-import { spawn, execSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import fs from 'node:fs';
 import { ffmpegBin, localFfmpeg } from '../config/paths.js';
@@ -18,14 +18,18 @@ export class MicCapture {
 
     private getWindowsAudioDevice(): string {
         const binaryToUse = fs.existsSync(localFfmpeg) ? localFfmpeg : ffmpegBin;
-        let output: any = '';
+        let output: string = '';
         try {
-            output = execSync(`${binaryToUse} -list_devices true -f dshow -i dummy 2>&1`, { encoding: 'utf8', stdio: 'pipe' });
+            // Using spawnSync for safer command execution without shell interpretation
+            const result = spawnSync(binaryToUse, ['-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'], {
+                encoding: 'utf8',
+                stdio: 'pipe'
+            });
+            output = result.stdout || result.stderr || '';
         } catch (error: any) {
             output = error.stdout || error.stderr || '';
         }
-        const outputStr = output ? output.toString() : '';
-        const lines = outputStr.split('\n');
+        const lines = output.split('\n');
         for (let i = 0; i < lines.length; i++) {
             if (lines[i].includes('(audio)')) {
                 if (i + 1 < lines.length && lines[i + 1].includes('Alternative name')) {
