@@ -8,11 +8,9 @@ vi.mock('@google/adk', async (importOriginal) => {
     const actual = await importOriginal() as any;
     return {
         ...actual,
-        InMemorySessionService: vi.fn().mockImplementation(() => ({
-            createSession: vi.fn().mockResolvedValue({})
-        })),
-        Runner: vi.fn().mockImplementation(() => ({
-            runAsync: vi.fn().mockImplementation(function* () {
+        LlmAgent: vi.fn().mockImplementation((config) => ({
+            ...config,
+            runAsync: vi.fn().mockImplementation(async function* () {
                 // Simulate model producing a thought, then a tool call, then a final response
                 yield { content: { parts: [{ thought: 'I should check the files.' }] } };
                 yield { toolCall: { name: 'researcher', args: { query: 'test' } } };
@@ -21,12 +19,25 @@ vi.mock('@google/adk', async (importOriginal) => {
                 yield { turnComplete: true };
             })
         })),
+        InMemorySessionService: vi.fn().mockImplementation(() => ({
+            createSession: vi.fn().mockResolvedValue({ id: 'test-session' }),
+            getSession: vi.fn().mockResolvedValue({ id: 'test-session', events: [] })
+        })),
+        Runner: vi.fn().mockImplementation(() => ({
+            runAsync: vi.fn(),
+            pluginManager: {
+                runBeforeModelCallback: vi.fn().mockResolvedValue(null),
+                runAfterModelCallback: vi.fn().mockResolvedValue(null)
+            }
+        })),
         LiveRequestQueue: vi.fn().mockImplementation(() => ({
             sendRealtime: vi.fn(),
             sendContent: vi.fn(),
             close: vi.fn()
         })),
-        StreamingMode: { BIDI: 'BIDI' }
+        StreamingMode: { BIDI: 'bidi' },
+        InvocationContext: vi.fn().mockImplementation((params) => params),
+        newInvocationContextId: vi.fn().mockReturnValue('test-invocation-id')
     };
 });
 

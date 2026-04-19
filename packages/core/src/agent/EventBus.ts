@@ -3,7 +3,7 @@ import { OraStatus, AppMessage } from '../types/index.js';
 
 export type OraEvent =
   | { type: 'status'; status: OraStatus }
-  | { type: 'transcript'; role: 'user' | 'agent'; text: string; partial: boolean }
+  | { type: 'transcript'; role: 'user' | 'agent'; text: string; partial: boolean; timestamp: number }
   | { type: 'tool:start'; agent: string; tool: string; args: any; thought?: string }
   | { type: 'tool:end'; agent: string; tool: string; durationMs: number; result: any }
   | { type: 'audio:level'; source: 'mic' | 'speaker'; level: number }

@@ -5,7 +5,11 @@ import {
     Runner,
     StreamingMode,
     LiveRequestQueue,
-    type RunConfig
+    type RunConfig,
+    // @ts-ignore
+    InvocationContext,
+    // @ts-ignore
+    newInvocationContextId
 } from '@google/adk';
 import { micCapture } from '../audio/MicCapture.js';
 import { speakerOutput } from '../audio/SpeakerOutput.js';
@@ -26,17 +30,12 @@ export class SessionManager {
     }
 
     async start(apiKey: string) {
-        // No longer setting process.env['GEMINI_API_KEY'] globally
-        
         this.currentUserId = randomUUID();
         this.currentSessionId = randomUUID();
 
-        // Pass API key via environment but only during the ADK operations if necessary,
-        // though best practice is to pass it to the model/runner constructor.
-        // For ADK 0.5.0, it often looks for the env var.
         process.env['GEMINI_API_KEY'] = apiKey;
 
-        await this.sessionService.createSession({ 
+        const session = await this.sessionService.createSession({ 
             appName: 'ora', 
             userId: this.currentUserId, 
             sessionId: this.currentSessionId 
@@ -66,21 +65,35 @@ export class SessionManager {
             });
         });
 
-        // ADK 0.5.0: runAsync is the available entry point
-        const stream = this.runner.runAsync({
-            userId: this.currentUserId!,
-            sessionId: this.currentSessionId!,
-            runConfig: runConfig as any,
-            newMessage: { 
+        const fullSession = await this.sessionService.getSession({
+            appName: 'ora',
+            userId: this.currentUserId,
+            sessionId: this.currentSessionId
+        });
+
+        if (!fullSession) throw new Error("Failed to create session");
+
+        // Manually create InvocationContext to include liveRequestQueue
+        const invocationContext = new InvocationContext({
+            invocationId: newInvocationContextId(),
+            agent: this.agent,
+            session: fullSession,
+            userContent: { 
                 parts: [{ text: `${this.agent.instruction}\n\n${contextManager.getSystemPromptPrefix()}System Booted. Neural Interface Online.` }] 
-            }
+            },
+            runConfig,
+            liveRequestQueue: this.liveRequestQueue,
+            // @ts-ignore
+            pluginManager: this.runner.pluginManager
         });
 
         eventBus.emitEvent({ type: 'status', status: 'LISTENING' });
 
         try {
+            // Call agent.runAsync directly with the context that has the queue
+            const stream = this.agent.runAsync(invocationContext as any);
             for await (const event of stream as any) {
-                this.handleEvent(event);
+                await this.handleEvent(event);
             }
         } catch (error: any) {
             eventBus.emitEvent({ type: 'error', message: error.message, recoverable: true });
@@ -90,7 +103,7 @@ export class SessionManager {
         }
     }
 
-    private handleEvent(event: any) {
+    private async handleEvent(event: any) {
         // Handle Transcript & Thought
         if (event.content?.parts) {
             const text = event.content.parts.filter((p: any) => p.text).map((p: any) => p.text).join('');
@@ -108,9 +121,9 @@ export class SessionManager {
             }
 
             if (text) {
-                eventBus.emitEvent({ type: 'transcript', role: 'agent', text, partial: false });
+                eventBus.emitEvent({ type: 'transcript', role: 'agent', text, partial: false, timestamp: Date.now() });
                 eventBus.emitEvent({ type: 'status', status: 'SPEAKING' });
-                contextManager.ingestTurn({ role: 'agent', text });
+                await contextManager.ingestTurn({ role: 'agent', text });
             }
         }
 
@@ -126,8 +139,8 @@ export class SessionManager {
 
         // Handle User Transcript (if available from model)
         if (event.inputTranscription?.text) {
-            eventBus.emitEvent({ type: 'transcript', role: 'user', text: event.inputTranscription.text, partial: false });
-            contextManager.ingestTurn({ role: 'user', text: event.inputTranscription.text });
+            eventBus.emitEvent({ type: 'transcript', role: 'user', text: event.inputTranscription.text, partial: false, timestamp: Date.now() });
+            await contextManager.ingestTurn({ role: 'user', text: event.inputTranscription.text });
         }
 
         // Handle Tool Calls

@@ -1,10 +1,11 @@
 {
   "name": "ora",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "ORA — Hands-free Voice CLI powered by Gemini Live API",
+  "description": "simple voice agent which lives on your terminal",
   "scripts": {
     "start": "pnpm --filter @ora/cli start",
+    "dev": "pnpm -r run dev",
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",

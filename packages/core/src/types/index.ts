@@ -4,6 +4,7 @@ export type AppMessage = {
     role: 'user' | 'agent' | 'system';
     text: string;
     partial?: boolean;
+    timestamp: number;
 };
 
 export type WaveformMode = 1 | 2 | 3 | 4;
