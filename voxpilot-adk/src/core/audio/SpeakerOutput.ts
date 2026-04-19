@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
-import fs from 'node:fs';
 import { ffplayBin } from '../config/paths.js';
 import { eventBus } from '../agent/EventBus.js';
 

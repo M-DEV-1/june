@@ -18,10 +18,9 @@ const VoxPilot: React.FC = () => {
 	const [messages, setMessages] = useState<AppMessage[]>([]);
 	const [traces, setTraces] = useState<TraceEntry[]>([]);
 	const [fps, setFps] = useState(0);
-    const [latency, setLatency] = useState(0);
-    const [tokens, setTokens] = useState(0);
-    const [terminalTooSmall, setTerminalTooSmall] = useState(false);
-    const [sessionManager] = useState(() => new SessionManager(orchestratorAgent));
+	const [latency, setLatency] = useState(0);
+	const [tokens] = useState(0);
+	const [terminalTooSmall, setTerminalTooSmall] = useState(false);    const [sessionManager] = useState(() => new SessionManager(orchestratorAgent));
 
     const checkDeps = useCallback(async () => {
         return Doctor.checkAll();

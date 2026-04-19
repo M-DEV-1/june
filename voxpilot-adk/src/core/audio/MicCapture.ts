@@ -1,6 +1,5 @@
 import { spawn, execSync } from 'node:child_process';
-import { Readable, PassThrough } from 'node:stream';
-import fs from 'node:fs';
+import { PassThrough } from 'node:stream';
 import { ffmpegBin } from '../config/paths.js';
 import { eventBus } from '../agent/EventBus.js';
 
