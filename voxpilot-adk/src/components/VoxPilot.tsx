@@ -67,9 +67,16 @@ const VoxPilot: React.FC = () => {
             });
         });
         const unsubToolStart = eventBus.on('tool:start', (e: any) => {
+            const roleMap: Record<string, any> = {
+                'voxpilot': 'orchestrator',
+                'researcher': 'researcher',
+                'librarian': 'librarian'
+            };
             setTraces(prev => [...prev, {
                 agent: e.agent,
+                role: roleMap[e.agent] || 'orchestrator',
                 tool: e.tool,
+                thought: e.thought,
                 args: e.args,
                 status: 'pending',
                 timestamp: Date.now()

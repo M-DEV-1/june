@@ -86,9 +86,22 @@ export class SessionManager {
     }
 
     private handleEvent(event: any) {
-        // Handle Transcript
+        // Handle Transcript & Thought
         if (event.content?.parts) {
-            const text = event.content.parts.map((p: any) => p.text).join('');
+            const text = event.content.parts.filter((p: any) => p.text).map((p: any) => p.text).join('');
+            const thoughts = event.content.parts.filter((p: any) => p.thought).map((p: any) => p.thought).join('');
+
+            if (thoughts) {
+                eventBus.emitEvent({ 
+                    type: 'tool:start', 
+                    agent: this.agent.name, 
+                    args: {}, 
+                    tool: '', 
+                    // @ts-ignore - Expanding schema implicitly
+                    thought: thoughts 
+                } as any);
+            }
+
             if (text) {
                 eventBus.emitEvent({ type: 'transcript', role: 'agent', text, partial: false });
                 eventBus.emitEvent({ type: 'status', status: 'SPEAKING' });
