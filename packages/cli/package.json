@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@ora/core": "workspace:*",
+    "dotenv": "^17.3.1",
     "figlet": "^1.8.0",
     "ink": "^6.8.0",
     "ink-gradient": "^4.0.0",
@@ -16,6 +17,7 @@
     "typescript": "^5.9.3"
   },
   "devDependencies": {
+    "@types/dotenv": "^8.2.3",
     "@types/figlet": "^1.7.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
