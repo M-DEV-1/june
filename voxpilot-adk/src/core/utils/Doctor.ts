@@ -11,31 +11,38 @@ export interface DependencyStatus {
 
 export class Doctor {
     static checkBinary(binName: string): DependencyStatus {
-        try {
-            const output = execSync(`${binName} -version`, { encoding: 'utf8', stdio: 'pipe' });
-            const firstLine = output.split('\n')[0];
-            return {
-                name: binName,
-                found: true,
-                version: firstLine?.trim()
-            };
-        } catch (error: any) {
-            let instruction = '';
-            if (process.platform === 'win32') {
-                instruction = `Install via Chocolatey: 'choco install ffmpeg' or download from ffmpeg.org`;
-            } else if (process.platform === 'darwin') {
-                instruction = `Install via Homebrew: 'brew install ffmpeg'`;
-            } else {
-                instruction = `Install via your package manager: e.g., 'sudo apt install ffmpeg'`;
-            }
+        const tryFlags = ['-version', '--version', '-v'];
+        let lastError = null;
 
-            return {
-                name: binName,
-                found: false,
-                error: error.message,
-                instruction
-            };
+        for (const flag of tryFlags) {
+            try {
+                const output = execSync(`${binName} ${flag}`, { encoding: 'utf8', stdio: 'pipe' });
+                const firstLine = output.split('\n')[0];
+                return {
+                    name: binName,
+                    found: true,
+                    version: firstLine?.trim()
+                };
+            } catch (error: any) {
+                lastError = error;
+            }
         }
+
+        let instruction = '';
+        if (process.platform === 'win32') {
+            instruction = `Install via Chocolatey: 'choco install ffmpeg' or download from ffmpeg.org`;
+        } else if (process.platform === 'darwin') {
+            instruction = `Install via Homebrew: 'brew install ffmpeg'`;
+        } else {
+            instruction = `Install via your package manager: e.g., 'sudo apt install ffmpeg'`;
+        }
+
+        return {
+            name: binName,
+            found: false,
+            error: lastError?.message || 'Binary not found',
+            instruction
+        };
     }
 
     static async checkAll(): Promise<DependencyStatus[]> {

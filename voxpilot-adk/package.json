@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "npx tsx src/app.tsx",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "keywords": [
     "voice",
@@ -39,6 +40,7 @@
     "@google/adk-devtools": "^0.5.0",
     "@types/figlet": "^1.7.0",
     "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0"
+    "@types/react": "^19.0.0",
+    "vitest": "^3.0.0"
   }
 }

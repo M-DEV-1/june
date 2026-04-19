@@ -9,7 +9,7 @@ import AgentTrace, { TraceEntry } from './AgentTrace.js';
 import { Doctor } from '../core/utils/Doctor.js';
 import { eventBus } from '../core/agent/EventBus.js';
 import { SessionManager } from '../core/agent/SessionManager.js';
-import { researchAgent } from '../agent.js';
+import { orchestratorAgent } from '../core/agent/OrchestratorAgent.js';
 
 const VoxPilot: React.FC = () => {
 	const { exit } = useApp();
@@ -21,7 +21,7 @@ const VoxPilot: React.FC = () => {
     const [latency, setLatency] = useState(0);
     const [tokens, setTokens] = useState(0);
     const [terminalTooSmall, setTerminalTooSmall] = useState(false);
-    const [sessionManager] = useState(() => new SessionManager(researchAgent));
+    const [sessionManager] = useState(() => new SessionManager(orchestratorAgent));
 
     const checkDeps = useCallback(async () => {
         return Doctor.checkAll();
