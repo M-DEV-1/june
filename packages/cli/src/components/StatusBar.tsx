@@ -10,22 +10,15 @@ interface StatusBarProps {
     cacheHit?: boolean;
 }
 
-const StatusBar: React.FC<StatusBarProps> = ({ status, fps, latency, tokens }) => {
+const StatusBar: React.FC<StatusBarProps> = ({ status, fps, latency, tokens, cacheHit }) => {
     const [micLevel, setMicLevel] = useState(0);
     const [spkLevel, setSpkLevel] = useState(0);
-    const [cacheHit] = useState(false);
 
     useEffect(() => {
-        const unsubLevel = eventBus.subscribe('audio:level', (e) => {
+        return eventBus.subscribe('audio:level', (e) => {
             if (e.source === 'mic') setMicLevel(e.level);
             if (e.source === 'speaker') setSpkLevel(e.level);
         });
-
-        // Implicitly track cache from status or specific event if ADK provides it
-        // For now, we'll listen for a custom event or status shift
-        return () => {
-            unsubLevel();
-        };
     }, []);
 
     const getStatusColor = () => {
