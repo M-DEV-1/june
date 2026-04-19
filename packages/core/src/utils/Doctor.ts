@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 // @ts-ignore
@@ -28,13 +28,22 @@ export class Doctor {
         for (const p of tryPaths) {
             for (const flag of tryFlags) {
                 try {
-                    const output = execSync(`${p} ${flag}`, { encoding: 'utf8', stdio: 'pipe' });
-                    const firstLine = output.split('\n')[0];
-                    return {
-                        name: binName,
-                        found: true,
-                        version: firstLine?.trim()
-                    };
+                    // Using spawnSync for safer command execution without shell interpretation
+                    const result = spawnSync(p, [flag], {
+                        encoding: 'utf8',
+                        stdio: 'pipe'
+                    });
+                    
+                    if (result.status === 0 || result.stdout) {
+                        const output = result.stdout || result.stderr || '';
+                        const firstLine = output.split('\n')[0];
+                        return {
+                            name: binName,
+                            found: true,
+                            version: firstLine?.trim()
+                        };
+                    }
+                    lastError = new Error(result.stderr || 'Execution failed');
                 } catch (error: any) {
                     lastError = error;
                 }
