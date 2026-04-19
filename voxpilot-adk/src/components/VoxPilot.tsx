@@ -1,14 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Box, useInput, useApp } from 'ink';
-import type { VoxPilotStatus, AppMessage, WaveformMode, PaletteName } from 'voxpilot-shared/types/index.js';
-import Banner from 'voxpilot-shared/components/Banner.js';
-import Onboarding from 'voxpilot-shared/components/Onboarding.js';
-import Waveform from 'voxpilot-shared/components/Waveform.js';
-import StatusBar from 'voxpilot-shared/components/StatusBar.js';
-import Transcript from 'voxpilot-shared/components/Transcript.js';
-import Footer from 'voxpilot-shared/components/Footer.js';
-import { setupFfmpeg, checkDependencies, startMicTest } from 'voxpilot-shared/utils/audio.js';
-import { validateApiKey } from 'voxpilot-shared/utils/api.js';
+import { Box, useInput, useApp, Text } from 'ink';
+import type { VoxPilotStatus, AppMessage, WaveformMode, PaletteName } from '../types/index.js';
+import Onboarding from './Onboarding.js';
+import Waveform from './Waveform.js';
+import StatusBar from './StatusBar.js';
+import Transcript from './Transcript.js';
+import { setupFfmpeg, checkDependencies, startMicTest } from '../utils/audio.js';
+import { validateApiKey } from '../utils/api.js';
 import { runVoxPilotSession } from '../agent.js';
 
 setupFfmpeg();
@@ -19,10 +17,20 @@ const VoxPilot: React.FC = () => {
 	const [apiKey, setApiKey] = useState<string | null>(null);
 	const [mode, setMode] = useState<WaveformMode>(1);
 	const [palette, setPalette] = useState<PaletteName>('cyberpunk');
-	const [analyserData, setAnalyserData] = useState<number[]>(new Array(60).fill(0));
 	const [messages, setMessages] = useState<AppMessage[]>([]);
 	const [activeTools, setActiveTools] = useState<string[]>([]);
 	const [fps, setFps] = useState(0);
+    const [latency, setLatency] = useState(0);
+    const [terminalTooSmall, setTerminalTooSmall] = useState(false);
+
+    useEffect(() => {
+        const checkSize = () => {
+            setTerminalTooSmall(process.stdout.columns < 80 || process.stdout.rows < 12);
+        };
+        checkSize();
+        process.stdout.on('resize', checkSize);
+        return () => { process.stdout.off('resize', checkSize); };
+    }, []);
 
 	useInput((input, key) => {
 		if (input === '1') setMode(1);
@@ -43,16 +51,17 @@ const VoxPilot: React.FC = () => {
 		if (status !== 'CONNECTING' || !apiKey) return;
 
 		let isMounted = true;
+        const start = Date.now();
 
 		async function startSession() {
 			try {
 				const stream = runVoxPilotSession(apiKey!);
 				setStatus('LISTENING');
+                setLatency(Date.now() - start);
 
 				for await (const event of stream as any) {
 					if (!isMounted) break;
 
-					// Process events
 					if (event.content?.parts) {
 						const text = event.content.parts.map((p: any) => p.text).join('');
 						if (text) {
@@ -88,54 +97,30 @@ const VoxPilot: React.FC = () => {
 					if (event.interrupted) {
 						setStatus('LISTENING');
 					}
-
-					if (event.serverContent?.modelTurn?.parts?.some((p: any) => p.inlineData)) {
-						setStatus('SPEAKING');
-					}
 				}
 			} catch (err: any) {
-				console.error(err);
-				setMessages(prev => [...prev, { role: 'system', text: `SYSTEM ERROR: ${err.message || 'Unknown error occurred.'}` }]);
+				setMessages(prev => [...prev, { role: 'system', text: `SYSTEM ERROR: ${err.message || 'Unknown error.'}` }]);
 				setStatus('ERROR');
 			}
 		}
 
 		startSession();
-
 		return () => { isMounted = false; };
 	}, [status, apiKey]);
 
 	useEffect(() => {
 		if (status === 'INIT') return;
-
-		let frameCount = 0;
-		let lastTime = Date.now();
-
+		let frames = 0;
+		let last = Date.now();
 		const interval = setInterval(() => {
-			setAnalyserData(prev => {
-				let newData;
-				if (status === 'SPEAKING') {
-					newData = prev.map((_, i) => Math.abs(Math.sin((Date.now() / 100) + i * 0.2)) * 0.9 + (Math.random() * 0.1));
-				} else if (status === 'LISTENING') {
-					newData = prev.map((_, i) => (Math.abs(Math.sin((Date.now() / 200) + i * 0.1)) * 0.1) + (Math.random() * 0.2));
-				} else if (status === 'PROCESSING') {
-					newData = prev.map((_, i) => Math.abs(Math.sin((Date.now() / 50) + i * 0.5)) * 0.7);
-				} else {
-					newData = prev.map(() => Math.random() * 0.02);
-				}
-				return newData;
-			});
-
-			// Calculate FPS
-			frameCount++;
+			frames++;
 			const now = Date.now();
-			if (now - lastTime >= 1000) {
-				setFps(frameCount);
-				frameCount = 0;
-				lastTime = now;
+			if (now - last >= 1000) {
+				setFps(frames);
+				frames = 0;
+				last = now;
 			}
 		}, 33);
-
 		return () => clearInterval(interval);
 	}, [status]);
 
@@ -144,33 +129,53 @@ const VoxPilot: React.FC = () => {
 		setStatus('CONNECTING');
 	};
 
-	return (
-		<Box flexDirection="column" alignItems="center" padding={1} width={80}>
-			<Banner />
+    if (terminalTooSmall) {
+        return (
+            <Box flexDirection="column" alignItems="center" justifyContent="center" width="100%" height={10}>
+                <Text color="red" bold underline>TERMINAL TOO SMALL</Text>
+                <Text color="yellow">Please expand your terminal to at least 80x12.</Text>
+                <Text color="gray">Current: {process.stdout.columns}x{process.stdout.rows}</Text>
+            </Box>
+        );
+    }
 
-			{status === 'INIT' ? (
-				<Onboarding 
+	if (status === 'INIT') {
+        return (
+            <Box flexDirection="column" alignItems="center" padding={1} width={80}>
+                <Onboarding 
                     onComplete={handleOnboardingComplete} 
                     validateApiKey={validateApiKey}
                     checkDependencies={checkDependencies}
                     startMicTest={startMicTest}
                 />
-			) : (
-				<Box flexDirection="column" alignItems="center">
-					<StatusBar status={status} activeTools={activeTools} fps={fps} />
-					<Box marginTop={1}>
-						<Waveform
-							mode={mode}
-							palette={palette}
-							analyserData={analyserData}
-							isProcessing={status === 'PROCESSING'}
-						/>
-					</Box>
-					<Transcript messages={messages} />
-					<Footer />
-				</Box>
-			)}
-		</Box>
+            </Box>
+        );
+    }
+
+	return (
+		<Box flexDirection="row" width="100%" height="100%" borderStyle="single">
+            <Box flexDirection="column" width={30} height="100%" paddingX={1} borderStyle="single" borderRight={false}>
+                <StatusBar status={status} activeTools={activeTools} fps={fps} latency={latency} />
+                <Box marginTop={1}>
+                    <Waveform 
+                        mode={mode} 
+                        palette={palette} 
+                        isProcessing={status === 'PROCESSING'} 
+                    />
+                </Box>
+                <Box marginTop={1} paddingX={1}>
+                    <Text color="gray" dimColor italic>
+                        VOXPILOT ADK Engine
+                    </Text>
+                    <Text color="gray" dimColor>
+                        Research Mode Active
+                    </Text>
+                </Box>
+            </Box>
+            <Box flexDirection="column" flexGrow={1} height="100%" paddingX={1}>
+                <Transcript messages={messages} />
+            </Box>
+        </Box>
 	);
 };
 

@@ -1,17 +1,16 @@
 import React from 'react';
-import {Box} from 'ink';
-import BigText from 'ink-big-text';
+import {Box, Text} from 'ink';
 import Gradient from 'ink-gradient';
 
 const Banner: React.FC = () => {
 	return (
-		<Box flexDirection="column" alignItems="center" marginBottom={1}>
+		<Box alignItems="center">
 			<Gradient name="vice">
-				<BigText text="VOXPILOT" font="block" />
+				<Text bold italic underline>VOXPILOT COMMANDER</Text>
 			</Gradient>
-			<Box>
+			<Box marginLeft={2}>
 				<Gradient name="passion">
-					<BigText text="   v1.0" font="tiny" />
+					<Text dimColor>v1.5 (Production)</Text>
 				</Gradient>
 			</Box>
 		</Box>

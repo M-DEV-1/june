@@ -14,21 +14,13 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { z } from 'zod';
 import dotenv from 'dotenv';
-// @ts-ignore
-import record from 'node-record-lpcm16';
-import ffmpegPath from 'ffmpeg-static';
+import { MicRecorder, AudioPlayer } from './utils/audio.js';
+import os from 'node:os';
+
+const FINDINGS_DIR = path.join(os.homedir(), '.voxpilot', 'findings');
+const SESSION_DIR = path.join(os.homedir(), '.voxpilot', 'sessions');
 
 dotenv.config();
-
-// Ensure ffmpeg-static is in the path for node-record-lpcm16
-if (ffmpegPath) {
-    const ffmpegDir = path.dirname(ffmpegPath);
-    if (process.platform === 'win32') {
-        process.env.PATH = `${ffmpegDir};${process.env.PATH}`;
-    } else {
-        process.env.PATH = `${ffmpegDir}:${process.env.PATH}`;
-    }
-}
 
 /* STEPS ---
  - initialize app (startup)
@@ -82,16 +74,16 @@ const readFile = new FunctionTool({
 
 const saveResearchNotes = new FunctionTool({
     name: 'save_research_notes',
-    description: 'Saves synthesized findings or notes to a local file.',
+    description: 'Saves synthesized findings or notes to the local findings knowledge base.',
     parameters: z.object({
-        path: z.string().describe('File path where notes should be saved.'),
+        filename: z.string().describe('The filename for the notes (e.g., summary.md).'),
         content: z.string().describe('The synthesized research notes or summary.')
     }) as any,
     execute: async (args: any) => {
-        const { path: p, content } = args;
+        const { filename, content } = args;
         try {
-            const target = path.resolve(process.cwd(), p);
-            if (!target.startsWith(process.cwd())) throw new Error("Path traversal blocked.");
+            await fs.mkdir(FINDINGS_DIR, { recursive: true });
+            const target = path.join(FINDINGS_DIR, path.basename(filename));
             await fs.writeFile(target, content, 'utf-8');
             return { success: true, message: `Notes successfully saved to ${target}` };
         } catch (e: unknown) {
@@ -127,7 +119,7 @@ const webFetch = new FunctionTool({
 
 export const researchAgent = new LlmAgent({
     name: "research_agent",
-    model: "gemini-2.0-flash-exp",
+    model: "gemini-2.5-flash-native-audio-latest",
     description: "An expert research assistant with real-time audio analysis.",
     instruction: `
         You are VOXPILOT, a high-performance Research Voice Assistant.
@@ -162,6 +154,8 @@ export async function* runVoxPilotSession(apiKey?: string) {
     const userId = randomUUID();
     const sessionId = randomUUID();
 
+    await sessionService.createSession({ appName: APP_NAME, userId, sessionId });
+
     const runner = new Runner({
         appName: APP_NAME,
         agent: researchAgent,
@@ -171,8 +165,6 @@ export async function* runVoxPilotSession(apiKey?: string) {
     const runConfig: RunConfig = {
         streamingMode: StreamingMode.BIDI,
         responseModalities: ["AUDIO", "TEXT"] as any,
-        inputAudioTranscription: { languageCodes: ["en-US"] },
-        outputAudioTranscription: { languageCodes: ["en-US"] },
         maxLlmCalls: 100
     };
 
@@ -182,14 +174,12 @@ export async function* runVoxPilotSession(apiKey?: string) {
     // DO NOT REUSE
 
     // Initialize real mic capture
+    let recorder: MicRecorder | null = null;
     let micStream: Readable | null = null;
+    const player = new AudioPlayer();
     try {
-        micStream = record.record({
-            sampleRate: 16000,
-            threshold: 0,
-            verbose: false,
-            recordProgram: 'ffmpeg',
-        }).stream();
+        recorder = new MicRecorder();
+        micStream = recorder.start();
 
         micStream?.on('data', (data: Buffer) => {
             liveRequestQueue.sendRealtime({
@@ -200,7 +190,7 @@ export async function* runVoxPilotSession(apiKey?: string) {
 
         micStream?.on('error', (err: any) => {
             console.error("Mic Stream Error:", err.message);
-            if (micStream) micStream.pause();
+            if (recorder) recorder.stop();
         });
     } catch (e: any) {
         console.error("Mic capture failed to initialize:", e.message);
@@ -217,11 +207,22 @@ export async function* runVoxPilotSession(apiKey?: string) {
     });
 
     try {
-        for await (const event of stream) {
+        for await (const event of stream as any) {
+            if (event.serverContent?.modelTurn?.parts) {
+                for (const part of event.serverContent.modelTurn.parts) {
+                    if (part.inlineData) {
+                        player.addChunk(part.inlineData.data);
+                    }
+                }
+            }
+            if (event.interrupted) {
+                player.interrupt();
+            }
             yield event;
         }
     } finally {
-        if (micStream) micStream.pause();
+        if (recorder) recorder.stop();
+        player.stop();
         liveRequestQueue.close();
     }
 }
