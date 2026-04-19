@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 
-export type VoxPilotStatus = 'INIT' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
+export type OraStatus = 'INIT' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
 
 export type AppMessage = {
     role: 'user' | 'agent' | 'system';
@@ -8,8 +8,8 @@ export type AppMessage = {
     partial?: boolean;
 };
 
-export type VoxPilotEvent =
-  | { type: 'status'; status: VoxPilotStatus }
+export type OraEvent =
+  | { type: 'status'; status: OraStatus }
   | { type: 'transcript'; role: 'user' | 'agent'; text: string; partial: boolean }
   | { type: 'tool:start'; agent: string; tool: string; args: any }
   | { type: 'tool:end'; agent: string; tool: string; durationMs: number; result: any }
@@ -19,14 +19,14 @@ export type VoxPilotEvent =
   | { type: 'memory:compaction'; tokensSaved: number };
 
 export class EventBus extends EventEmitter {
-    emitEvent(event: VoxPilotEvent) {
+    emitEvent(event: OraEvent) {
         this.emit(event.type, event);
         this.emit('all', event);
     }
 
-    onEvent<T extends VoxPilotEvent['type']>(
+    onEvent<T extends OraEvent['type']>(
         type: T,
-        handler: (event: Extract<VoxPilotEvent, { type: T }>) => void
+        handler: (event: Extract<OraEvent, { type: T }>) => void
     ) {
         this.on(type, handler as any);
         return () => this.off(type, handler as any);
@@ -38,9 +38,9 @@ export class EventBus extends EventEmitter {
     }
 
     // Overload for cleaner React usage
-    subscribe<T extends VoxPilotEvent['type']>(
+    subscribe<T extends OraEvent['type']>(
         type: T,
-        handler: (event: Extract<VoxPilotEvent, { type: T }>) => void
+        handler: (event: Extract<OraEvent, { type: T }>) => void
     ) {
         this.on(type, handler as any);
         return () => {

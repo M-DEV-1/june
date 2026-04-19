@@ -5,7 +5,7 @@ import { eventBus } from './EventBus.js';
 
 vi.mock('@google/adk', () => {
     return {
-        LlmAgent: vi.fn().mockImplementation(() => ({ name: 'voxpilot', instruction: 'test' })),
+        LlmAgent: vi.fn().mockImplementation(() => ({ name: 'ora', instruction: 'test' })),
         InMemorySessionService: vi.fn().mockImplementation(() => ({
             createSession: vi.fn().mockResolvedValue({})
         })),
@@ -41,7 +41,7 @@ vi.mock('../audio/SpeakerOutput.js', () => ({
 
 describe('SessionManager', () => {
     let sm: SessionManager;
-    const mockAgent = new LlmAgent({ name: 'voxpilot' }) as any;
+    const mockAgent = new LlmAgent({ name: 'ora' }) as any;
 
     beforeEach(() => {
         sm = new SessionManager(mockAgent);

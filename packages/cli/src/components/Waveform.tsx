@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { eventBus } from '../core/agent/EventBus.js';
+import { eventBus } from '@ora/core';
 
 interface WaveformProps {
     isProcessing?: boolean;

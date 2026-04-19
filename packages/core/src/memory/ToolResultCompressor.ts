@@ -16,7 +16,7 @@ export class ToolResultCompressor {
         });
         this.runner = new InMemoryRunner({
             agent,
-            appName: 'voxpilot-tool-worker'
+            appName: 'ora-tool-worker'
         });
     }
 

@@ -34,11 +34,11 @@ export const fileAgent = new LlmAgent({
 
 // Root Orchestrator - Delegates to subagents
 export const orchestratorAgent = new LlmAgent({
-    name: "voxpilot",
+    name: "ora",
     model: "gemini-2.0-flash-exp", // The primary model
-    description: "The primary orchestrator of the VOXPILOT system.",
+    description: "The primary orchestrator of the ORA system.",
     instruction: `
-        You are VOXPILOT, an autonomous research conductor.
+        You are ORA, an autonomous research conductor.
         Your goal is to fulfill user requests by delegating to specialized agents.
         
         Style: Professional, high-signal, concise.

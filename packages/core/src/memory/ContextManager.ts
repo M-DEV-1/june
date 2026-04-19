@@ -24,7 +24,7 @@ export class ContextManager {
         });
         this.compressionRunner = new InMemoryRunner({
             agent: compressionAgent,
-            appName: 'voxpilot-memory-worker'
+            appName: 'ora-memory-worker'
         });
     }
 

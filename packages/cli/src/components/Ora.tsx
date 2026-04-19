@@ -1,26 +1,30 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Box, useInput, useApp, Text } from 'ink';
-import type { VoxPilotStatus, AppMessage } from '../types/index.js';
+import { 
+    OraStatus, 
+    AppMessage, 
+    eventBus, 
+    SessionManager, 
+    orchestratorAgent, 
+    Doctor 
+} from '@ora/core';
 import Onboarding from './Onboarding.js';
 import Waveform from './Waveform.js';
 import StatusBar from './StatusBar.js';
 import Transcript from './Transcript.js';
 import AgentTrace, { TraceEntry } from './AgentTrace.js';
-import { Doctor } from '../core/utils/Doctor.js';
-import { eventBus } from '../core/agent/EventBus.js';
-import { SessionManager } from '../core/agent/SessionManager.js';
-import { orchestratorAgent } from '../core/agent/OrchestratorAgent.js';
 
-const VoxPilot: React.FC = () => {
+const Ora: React.FC = () => {
 	const { exit } = useApp();
-	const [status, setStatus] = useState<VoxPilotStatus>('INIT');
+	const [status, setStatus] = useState<OraStatus>('INIT');
 	const [apiKey, setApiKey] = useState<string | null>(null);
 	const [messages, setMessages] = useState<AppMessage[]>([]);
 	const [traces, setTraces] = useState<TraceEntry[]>([]);
 	const [fps, setFps] = useState(0);
 	const [latency, setLatency] = useState(0);
 	const [tokens] = useState(0);
-	const [terminalTooSmall, setTerminalTooSmall] = useState(false);    const [sessionManager] = useState(() => new SessionManager(orchestratorAgent));
+	const [terminalTooSmall, setTerminalTooSmall] = useState(false);
+    const [sessionManager] = useState(() => new SessionManager(orchestratorAgent));
 
     const checkDeps = useCallback(async () => {
         return Doctor.checkAll();
@@ -67,7 +71,7 @@ const VoxPilot: React.FC = () => {
         });
         const unsubToolStart = eventBus.subscribe('tool:start', (e: any) => {
             const roleMap: Record<string, any> = {
-                'voxpilot': 'orchestrator',
+                'ora': 'orchestrator',
                 'researcher': 'researcher',
                 'librarian': 'librarian'
             };
@@ -152,7 +156,7 @@ const VoxPilot: React.FC = () => {
 		<Box flexDirection="column" width="100%" height="100%">
             {/* Header */}
             <Box paddingX={1} borderStyle="single" borderColor="cyan" justifyContent="space-between">
-                <Text bold color="cyan">VOXPILOT v2.0</Text>
+                <Text bold color="cyan">ORA v2.0</Text>
                 <Text color="gray">NEURAL INTERFACE [ADK-DRIVEN]</Text>
             </Box>
 
@@ -182,4 +186,4 @@ const VoxPilot: React.FC = () => {
 	);
 };
 
-export default VoxPilot;
+export default Ora;
