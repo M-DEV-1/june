@@ -7,9 +7,7 @@ import {
     LiveRequestQueue,
     type RunConfig,
     // @ts-ignore
-    InvocationContext,
-    // @ts-ignore
-    newInvocationContextId
+    InvocationContext
 } from '@google/adk';
 import { micCapture } from '../audio/MicCapture.js';
 import { speakerOutput } from '../audio/SpeakerOutput.js';
@@ -75,7 +73,7 @@ export class SessionManager {
 
         // Manually create InvocationContext to include liveRequestQueue
         const invocationContext = new InvocationContext({
-            invocationId: newInvocationContextId(),
+            invocationId: randomUUID(),
             agent: this.agent,
             session: fullSession,
             userContent: { 
