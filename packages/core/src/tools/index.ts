@@ -1,17 +1,21 @@
-import { FunctionTool } from '@google/adk';
+import { FunctionTool, zodObjectToSchema, type ToolInputParameters } from '@google/adk';
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { findingsDir, workspaceDir } from '../config/paths.js';
 
+interface ListDirectoryArgs {
+    path?: string;
+}
+
 export const listDirectory = new FunctionTool({
     name: 'list_directory',
     description: 'Lists files in a given directory path within the workspace.',
-    parameters: z.object({
-        path: z.string().default('.').describe('The directory path to list. Must be relative to workspace.')
-    }) as any,
-    execute: async (args: any) => {
-        const { path: p } = args;
+    parameters: zodObjectToSchema(z.object({
+        path: z.string().optional().default('.').describe('The directory path to list. Must be relative to workspace.')
+    })) as any,
+    execute: async (args: unknown) => {
+        const { path: p } = (args || {}) as ListDirectoryArgs;
         try {
             // Strict sanitization: remove leading slashes and drive letters
             const sanitizedPath = (p || '.').replace(/^([a-zA-Z]:)?[\\/]+/, '');
@@ -23,20 +27,25 @@ export const listDirectory = new FunctionTool({
             
             const files = await fs.readdir(target);
             return { files };
-        } catch (e: unknown) {
-            return { error: `Failed to list directory: ${(e as Error).message}` };
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { error: `Failed to list directory: ${message}` };
         }
     }
 });
 
+interface ReadFileArgs {
+    path: string;
+}
+
 export const readFile = new FunctionTool({
     name: 'read_research_file',
     description: 'Reads the content of a specific file within the workspace.',
-    parameters: z.object({
+    parameters: zodObjectToSchema(z.object({
         path: z.string().describe('Path to the file to read. Must be relative to workspace.')
-    }) as any,
-    execute: async (args: any) => {
-        const { path: p } = args;
+    })) as any,
+    execute: async (args: unknown) => {
+        const { path: p } = (args || {}) as ReadFileArgs;
         try {
             const sanitizedPath = (p || '').replace(/^([a-zA-Z]:)?[\\/]+/, '');
             const target = path.resolve(workspaceDir, sanitizedPath);
@@ -52,41 +61,52 @@ export const readFile = new FunctionTool({
 
             const content = await fs.readFile(target, 'utf-8');
             return { content };
-        } catch (e: unknown) {
-            return { error: `Failed to read file: ${(e as Error).message}` };
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { error: `Failed to read file: ${message}` };
         }
     }
 });
 
+interface SaveNotesArgs {
+    filename: string;
+    content: string;
+}
+
 export const saveResearchNotes = new FunctionTool({
     name: 'save_research_notes',
     description: 'Saves synthesized findings or notes to the local findings knowledge base.',
-    parameters: z.object({
+    parameters: zodObjectToSchema(z.object({
         filename: z.string().regex(/^[a-zA-Z0-9._-]+$/, "Invalid filename characters").describe('The filename for the notes (e.g., summary.md).'),
         content: z.string().min(10, "Content too short").describe('The synthesized research notes or summary.')
-    }) as any,
-    execute: async (args: any) => {
-        const { filename, content } = args;
+    })) as any,
+    execute: async (args: unknown) => {
+        const { filename, content } = (args || {}) as SaveNotesArgs;
         try {
             await fs.mkdir(findingsDir, { recursive: true });
             const safeFilename = path.basename(filename);
             const target = path.join(findingsDir, safeFilename);
             await fs.writeFile(target, content, 'utf-8');
             return { success: true, message: `Notes successfully saved to ${target}` };
-        } catch (e: unknown) {
-            return { error: `Failed to save notes: ${(e as Error).message}` };
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { error: `Failed to save notes: ${message}` };
         }
     }
 });
 
+interface WebFetchArgs {
+    url: string;
+}
+
 export const webFetch = new FunctionTool({
     name: 'web_fetch',
     description: 'Fetches the content of a webpage and returns the text. Only http/https supported.',
-    parameters: z.object({
+    parameters: zodObjectToSchema(z.object({
         url: z.string().url().describe('The URL of the webpage to fetch.')
-    }) as any,
-    execute: async (args: any) => {
-        const { url } = args;
+    })) as any,
+    execute: async (args: unknown) => {
+        const { url } = (args || {}) as WebFetchArgs;
         try {
             const parsedUrl = new URL(url);
             
@@ -124,8 +144,9 @@ export const webFetch = new FunctionTool({
                 .replace(/\s+/g, ' ')
                 .trim();
             return { content: text.slice(0, 15000) };
-        } catch (e: unknown) {
-            return { error: `Failed to fetch URL: ${(e as Error).message}` };
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { error: `Failed to fetch URL: ${message}` };
         }
     }
 });

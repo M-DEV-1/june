@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SessionManager } from './agent/SessionManager.js';
 import { orchestratorAgent } from './agent/OrchestratorAgent.js';
-import { eventBus } from './agent/EventBus.js';
+import { eventBus, type OraEvent } from './agent/EventBus.js';
 
 // Deep mock of ADK to simulate full event flow
 vi.mock('@google/adk', async (importOriginal) => {
@@ -59,8 +59,13 @@ describe('ORA Integration Loop', () => {
     });
 
     it('should drive a full agent turn from eventBus perspective', async () => {
-        const events: any[] = [];
-        eventBus.on('all', (e) => events.push(e));
+        const events: OraEvent[] = [];
+        
+        // Listen to all specific events to verify they are emitted correctly
+        eventBus.on('status', (e) => events.push(e));
+        eventBus.on('transcript', (e) => events.push(e));
+        eventBus.on('tool:start', (e) => events.push(e));
+        eventBus.on('tool:end', (e) => events.push(e));
 
         // Start session in background
         const startPromise = sm.start('test-api-key');

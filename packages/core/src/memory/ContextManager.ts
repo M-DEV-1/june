@@ -6,6 +6,14 @@ export interface Turn {
     text: string;
 }
 
+interface AdkChunk {
+    content?: {
+        parts?: Array<{
+            text?: string;
+        }>;
+    };
+}
+
 export class ContextManager {
     private hotWindow: Turn[] = [];
     private episodicSummary: string = '';
@@ -54,9 +62,9 @@ export class ContextManager {
             });
 
             let summaryText = '';
-            for await (const chunk of result as any) {
+            for await (const chunk of result as AsyncIterable<AdkChunk>) {
                 if (chunk.content?.parts) {
-                    summaryText += chunk.content.parts.map((p: any) => p.text).join('');
+                    summaryText += chunk.content.parts.filter(p => p.text).map(p => p.text).join('');
                 }
             }
 
@@ -67,8 +75,8 @@ export class ContextManager {
                     tokensSaved: this.estimateTokens(JSON.stringify(toCompress)) 
                 });
             }
-        } catch (e) {
-            console.error('Memory compression failed:', e);
+        } catch (error: unknown) {
+            console.error('Memory compression failed:', error);
             this.hotWindow = [...toCompress, ...this.hotWindow];
         }
     }

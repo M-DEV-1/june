@@ -7,30 +7,31 @@ export interface TraceEntry {
     agent: 'orch' | 'rsrch' | 'shell' | 'code';
     tool?: string;
     thought?: string;
-    args?: any;
+    args?: Record<string, unknown>;
     status: 'pending' | 'success' | 'error';
     durationMs?: number;
-    startedAt: number;
+    timestamp: number;
 }
 
 export interface MemoryEvent {
-    phase: 'compressing' | 'done';
-    savedTokens: number;
-    fromTier: string;
-    toTier: string;
+    type: 'compaction';
+    tokensSaved: number;
+    timestamp: number;
 }
 
 export interface AppState {
     status: ExtendedOraStatus;
     
-    // Audio
+    // Audio levels
     micLevel: number;
     spkLevel: number;
     analyserData: number[];
-    waveformMode: 1 | 2 | 3 | 4;
-    palette: string;
     
-    // Session
+    // Visuals
+    waveformMode: 1 | 2 | 3 | 4;
+    palette: 'warm' | 'cool' | 'neon';
+    
+    // Session stats
     sessionDuration: number;
     fps: number;
     latencyMs: number;

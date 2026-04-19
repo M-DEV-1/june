@@ -1,7 +1,6 @@
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
-// @ts-ignore
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 
 // Production-grade path configuration
