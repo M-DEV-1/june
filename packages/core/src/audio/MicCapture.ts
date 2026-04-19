@@ -1,6 +1,7 @@
 import { spawn, execSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
-import { ffmpegBin } from '../config/paths.js';
+import fs from 'node:fs';
+import { ffmpegBin, localFfmpeg } from '../config/paths.js';
 import { eventBus } from '../agent/EventBus.js';
 
 export class MicCapture {
@@ -16,9 +17,10 @@ export class MicCapture {
     private currentGain = 1.0;
 
     private getWindowsAudioDevice(): string {
+        const binaryToUse = fs.existsSync(localFfmpeg) ? localFfmpeg : ffmpegBin;
         let output: any = '';
         try {
-            output = execSync(`${ffmpegBin} -list_devices true -f dshow -i dummy 2>&1`, { encoding: 'utf8', stdio: 'pipe' });
+            output = execSync(`${binaryToUse} -list_devices true -f dshow -i dummy 2>&1`, { encoding: 'utf8', stdio: 'pipe' });
         } catch (error: any) {
             output = error.stdout || error.stderr || '';
         }
@@ -40,6 +42,8 @@ export class MicCapture {
     start(): PassThrough {
         if (this.process) return this.outputStream!;
 
+        const binaryToUse = fs.existsSync(localFfmpeg) ? localFfmpeg : ffmpegBin;
+
         let winAudioDevice = process.platform === 'win32' ? this.getWindowsAudioDevice() : 'default';
         const args = process.platform === 'win32' 
             ? ['-f', 'dshow', '-i', `audio=${winAudioDevice}`]
@@ -49,7 +53,7 @@ export class MicCapture {
 
         const { GEMINI_API_KEY, ...safeEnv } = process.env;
 
-        this.process = spawn(ffmpegBin, [
+        this.process = spawn(binaryToUse, [
             ...args, 
             '-acodec', 'pcm_s16le', 
             '-ar', '16000', 

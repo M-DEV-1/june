@@ -2,10 +2,14 @@
   "name": "@ora/core",
   "version": "2.0.0",
   "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
   "dependencies": {
     "@google/adk": "^0.5.0",
     "conf": "^13.0.1",
     "dotenv": "^17.3.1",
+    "ffbinaries": "^1.1.6",
     "zod": "^3.23.0"
   },
   "devDependencies": {

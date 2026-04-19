@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
-import { ffplayBin } from '../config/paths.js';
+import fs from 'node:fs';
+import { ffplayBin, localFfplay } from '../config/paths.js';
 import { eventBus } from '../agent/EventBus.js';
 
 export class SpeakerOutput {
@@ -24,9 +25,10 @@ export class SpeakerOutput {
             return;
         }
 
+        const binaryToUse = fs.existsSync(localFfplay) ? localFfplay : ffplayBin;
         const { GEMINI_API_KEY, ...safeEnv } = process.env;
 
-        this.process = spawn(ffplayBin, [
+        this.process = spawn(binaryToUse, [
             '-f', 's16le', 
             '-ar', '24000', 
             '-ac', '1', 
