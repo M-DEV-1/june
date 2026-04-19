@@ -1,0 +1,35 @@
+import { EventEmitter } from 'node:events';
+
+export type VoxPilotStatus = 'INIT' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
+
+export type AppMessage = {
+    role: 'user' | 'agent' | 'system';
+    text: string;
+    partial?: boolean;
+};
+
+export type VoxPilotEvent =
+  | { type: 'status'; status: VoxPilotStatus }
+  | { type: 'transcript'; role: 'user' | 'agent'; text: string; partial: boolean }
+  | { type: 'tool:start'; agent: string; tool: string; args: any }
+  | { type: 'tool:end'; agent: string; tool: string; durationMs: number; result: any }
+  | { type: 'audio:level'; source: 'mic' | 'speaker'; level: number }
+  | { type: 'error'; message: string; recoverable: boolean }
+  | { type: 'session:end' }
+  | { type: 'memory:compaction'; tokensSaved: number };
+
+export class EventBus extends EventEmitter {
+    emitEvent(event: VoxPilotEvent) {
+        this.emit(event.type, event);
+        this.emit('all', event);
+    }
+
+    onEvent<T extends VoxPilotEvent['type']>(
+        type: T,
+        handler: (event: Extract<VoxPilotEvent, { type: T }>) => void
+    ) {
+        this.on(type, handler as any);
+    }
+}
+
+export const eventBus = new EventBus();
