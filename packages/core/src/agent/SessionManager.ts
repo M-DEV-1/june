@@ -6,14 +6,55 @@ import {
     StreamingMode,
     LiveRequestQueue,
     type RunConfig,
-    // @ts-ignore
     InvocationContext
 } from '@google/adk';
+import { AppMessage } from '../types/index.js';
 import { micCapture } from '../audio/MicCapture.js';
 import { speakerOutput } from '../audio/SpeakerOutput.js';
 import { eventBus } from './EventBus.js';
 import { contextManager } from '../memory/ContextManager.js';
 import { toolResultCompressor } from '../memory/ToolResultCompressor.js';
+
+interface AdkEventPart {
+    text?: string;
+    thought?: string;
+    inlineData?: {
+        data: string;
+        mimeType: string;
+    };
+    functionCall?: {
+        name: string;
+        args: Record<string, unknown>;
+    };
+    functionResponse?: {
+        name: string;
+        content: unknown;
+    };
+}
+
+interface AdkEvent {
+    content?: {
+        parts?: AdkEventPart[];
+    };
+    serverContent?: {
+        modelTurn?: {
+            parts?: AdkEventPart[];
+        };
+    };
+    inputTranscription?: {
+        text?: string;
+    };
+    toolCall?: {
+        name: string;
+        args: Record<string, unknown>;
+    };
+    toolResponse?: {
+        name: string;
+        content: unknown;
+    };
+    turnComplete?: boolean;
+    interrupted?: boolean;
+}
 
 export class SessionManager {
     private runner: Runner | null = null;
@@ -33,7 +74,7 @@ export class SessionManager {
 
         process.env['GEMINI_API_KEY'] = apiKey;
 
-        const session = await this.sessionService.createSession({ 
+        await this.sessionService.createSession({ 
             appName: 'ora', 
             userId: this.currentUserId, 
             sessionId: this.currentSessionId 
@@ -47,9 +88,11 @@ export class SessionManager {
 
         this.liveRequestQueue = new LiveRequestQueue();
 
+        const modalities = ["AUDIO", "TEXT"] as any[];
+
         const runConfig: RunConfig = {
             streamingMode: StreamingMode.BIDI,
-            responseModalities: ["AUDIO", "TEXT"] as any,
+            responseModalities: modalities,
             maxLlmCalls: 100
         };
 
@@ -78,34 +121,37 @@ export class SessionManager {
             session: fullSession,
             userContent: { 
                 parts: [{ text: `${this.agent.instruction}\n\n${contextManager.getSystemPromptPrefix()}System Booted. Neural Interface Online.` }] 
-            },
+            } as any,
             runConfig,
             liveRequestQueue: this.liveRequestQueue,
-            // @ts-ignore
-            pluginManager: this.runner.pluginManager
+            pluginManager: this.runner?.pluginManager
         });
 
         eventBus.emitEvent({ type: 'status', status: 'LISTENING' });
 
         try {
             // Call agent.runAsync directly with the context that has the queue
-            const stream = this.agent.runAsync(invocationContext as any);
-            for await (const event of stream as any) {
-                await this.handleEvent(event);
+            const stream = this.agent.runAsync(invocationContext);
+            for await (const event of stream) {
+                await this.handleEvent(event as AdkEvent);
             }
-        } catch (error: any) {
-            eventBus.emitEvent({ type: 'error', message: error.message, recoverable: true });
+        } catch (error: unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            eventBus.emitEvent({ type: 'error', message: errorMessage, recoverable: true });
             eventBus.emitEvent({ type: 'status', status: 'ERROR' });
         } finally {
             this.stop();
         }
     }
 
-    private async handleEvent(event: any) {
+    private async handleEvent(event: AdkEvent) {
         // Handle Transcript & Thought
         if (event.content?.parts) {
-            const text = event.content.parts.filter((p: any) => p.text).map((p: any) => p.text).join('');
-            const thoughts = event.content.parts.filter((p: any) => p.thought).map((p: any) => p.thought).join('');
+            const textParts = event.content.parts.filter(p => p.text).map(p => p.text as string);
+            const text = textParts.join('');
+            
+            const thoughtParts = event.content.parts.filter(p => p.thought).map(p => p.thought as string);
+            const thoughts = thoughtParts.join('');
 
             if (thoughts) {
                 eventBus.emitEvent({ 
@@ -113,9 +159,8 @@ export class SessionManager {
                     agent: this.agent.name, 
                     args: {}, 
                     tool: '', 
-                    // @ts-ignore - Expanding schema implicitly
                     thought: thoughts 
-                } as any);
+                });
             }
 
             if (text) {
@@ -154,7 +199,7 @@ export class SessionManager {
 
         if (event.toolResponse) {
             const result = event.toolResponse.content;
-            toolResultCompressor.compress(event.toolResponse.name, result, "implicit research goal").catch(() => {});
+            await toolResultCompressor.compress(event.toolResponse.name, result, "implicit research goal");
 
             eventBus.emitEvent({ 
                 type: 'tool:end', 

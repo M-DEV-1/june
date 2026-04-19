@@ -1,5 +1,14 @@
 import type { Readable } from 'node:stream';
 
+declare global {
+    namespace NodeJS {
+        interface ProcessEnv {
+            GEMINI_API_KEY?: string;
+            [key: string]: string | undefined;
+        }
+    }
+}
+
 declare module 'node-record-lpcm16' {
     export interface RecordOptions {
         sampleRate?: number;
@@ -21,3 +30,5 @@ declare module 'node-record-lpcm16' {
         stop(): void;
     };
 }
+
+export {};

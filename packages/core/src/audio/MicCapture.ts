@@ -1,11 +1,11 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import fs from 'node:fs';
 import { ffmpegBin, localFfmpeg } from '../config/paths.js';
 import { eventBus } from '../agent/EventBus.js';
 
 export class MicCapture {
-    private process: any = null;
+    private process: ChildProcess | null = null;
     private outputStream: PassThrough | null = null;
     private meterInterval: NodeJS.Timeout | null = null;
     private currentLevel: number = 0;
@@ -26,8 +26,9 @@ export class MicCapture {
                 stdio: 'pipe'
             });
             output = result.stdout || result.stderr || '';
-        } catch (error: any) {
-            output = error.stdout || error.stderr || '';
+        } catch (error: unknown) {
+            const err = error as { stdout?: string, stderr?: string };
+            output = err.stdout || err.stderr || '';
         }
         const lines = output.split('\n');
         for (let i = 0; i < lines.length; i++) {
@@ -73,33 +74,36 @@ export class MicCapture {
             this.outputStream = new PassThrough();
         }
 
-        this.process.on('exit', (code: number) => {
+        this.process.on('exit', (code: number | null) => {
             if (code !== 0 && code !== null) {
                 this.process = null;
                 setTimeout(() => this.start(), 1000);
             }
         });
 
-        this.process.stdout.on('data', (chunk: Buffer) => {
-            // Write original chunk to outputStream for Gemini
-            this.outputStream?.write(chunk);
+        if (this.process.stdout) {
+            this.process.stdout.on('data', (chunk: Buffer) => {
+                // Write original chunk to outputStream for Gemini
+                this.outputStream?.write(chunk);
 
-            let sum = 0;
-            for (let i = 0; i < chunk.length; i += 2) {
-                const sample = chunk.readInt16LE(i);
-                sum += sample * sample;
-            }
-            const rms = Math.sqrt(sum / (chunk.length / 2));
+                let sum = 0;
+                for (let i = 0; i < chunk.length; i += 2) {
+                    const sample = chunk.readInt16LE(i);
+                    sum += sample * sample;
+                }
+                const rms = Math.sqrt(sum / (chunk.length / 2));
 
-            // Simple AGC logic
-            if (rms > 100) { 
-                const ratio = this.TARGET_RMS / rms;
-                this.currentGain += (ratio - this.currentGain) * 0.05;
-                this.currentGain = Math.max(this.MIN_GAIN, Math.min(this.MAX_GAIN, this.currentGain));
-            }
+                // Simple AGC logic
+                if (rms > 100) { 
+                    const ratio = this.TARGET_RMS / rms;
+                    this.currentGain += (ratio - this.currentGain) * 0.05;
+                    this.currentGain = Math.max(this.MIN_GAIN, Math.min(this.MAX_GAIN, this.currentGain));
+                }
 
-            this.currentLevel = Math.min(1, (rms * this.currentGain) / 15000);
-        });
+                this.currentLevel = Math.min(1, (rms * this.currentGain) / 15000);
+            });
+        }
+
         this.meterInterval = setInterval(() => {
             eventBus.emitEvent({ type: 'audio:level', source: 'mic', level: this.currentLevel });
         }, 33); 

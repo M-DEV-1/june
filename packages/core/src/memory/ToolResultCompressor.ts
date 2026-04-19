@@ -1,5 +1,13 @@
 import { LlmAgent, InMemoryRunner } from '@google/adk';
 
+interface AdkChunk {
+    content?: {
+        parts?: Array<{
+            text?: string;
+        }>;
+    };
+}
+
 export class ToolResultCompressor {
     private runner: InMemoryRunner;
 
@@ -20,7 +28,7 @@ export class ToolResultCompressor {
         });
     }
 
-    async compress(toolName: string, rawResult: any, userGoal: string): Promise<string> {
+    async compress(toolName: string, rawResult: unknown, userGoal: string): Promise<string> {
         const resultString = JSON.stringify(rawResult);
         if (resultString.length < 1000) return resultString;
 
@@ -33,13 +41,14 @@ export class ToolResultCompressor {
             });
 
             let summary = '';
-            for await (const chunk of result as any) {
+            for await (const chunk of result as AsyncIterable<AdkChunk>) {
                 if (chunk.content?.parts) {
-                    summary += chunk.content.parts.map((p: any) => p.text).join('');
+                    summary += chunk.content.parts.filter(p => p.text).map(p => p.text).join('');
                 }
             }
             return summary || resultString.slice(0, 500); // Fallback to truncated
-        } catch (e) {
+        } catch (error: unknown) {
+            console.error('Tool result compression failed:', error);
             return resultString.slice(0, 500);
         }
     }

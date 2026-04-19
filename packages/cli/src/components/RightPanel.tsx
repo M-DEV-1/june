@@ -28,7 +28,7 @@ const MemoryEventLine: React.FC<{ event: AppState['memoryEvent'] }> = ({ event }
     return (
         <Box paddingX={2} paddingY={0} height={1}>
             <Text color="#38bdf8">⟳ </Text>
-            <Text color={COLORS.TEXT_GHOST}>compressing {event.fromTier}→{event.toTier}  ·  saved ~{event.savedTokens} tokens  </Text>
+            <Text color={COLORS.TEXT_GHOST}>Memory compacted: saved ~{event.tokensSaved} tokens  </Text>
             <Text color={COLORS.GREEN}>✓</Text>
         </Box>
     );

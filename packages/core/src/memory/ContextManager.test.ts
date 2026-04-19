@@ -27,8 +27,7 @@ describe('ContextManager', () => {
 
     it('should ingest turns and track window', async () => {
         await cm.ingestTurn({ role: 'user', text: 'hello' });
-        // @ts-ignore
-        expect(cm.hotWindow.length).toBe(1);
+        expect((cm as any).hotWindow.length).toBe(1);
     });
 
     it('should emit compaction event on threshold', async () => {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { eventBus } from '@ora/core';
+import { eventBus, type AudioLevelData } from '@ora/core';
 
 interface WaveformProps {
     isProcessing?: boolean;
@@ -13,7 +13,7 @@ const Waveform: React.FC<WaveformProps> = ({ isProcessing, color = 'cyan' }) => 
     const [phase, setPhase] = useState(0);
 
     useEffect(() => {
-        const unsubscribe = eventBus.subscribe('audio:level', (e: any) => {
+        const unsubscribe = eventBus.subscribe('audio:level', (e: AudioLevelData) => {
             setLevel(prev => Math.max(prev, e.level));
         });
 
@@ -38,7 +38,7 @@ const Waveform: React.FC<WaveformProps> = ({ isProcessing, color = 'cyan' }) => 
             unsubscribe();
             clearInterval(timer);
         };
-    }, [isProcessing]);
+    }, [isProcessing, level]);
 
     const renderOscilloscope = () => {
         const width = 30;

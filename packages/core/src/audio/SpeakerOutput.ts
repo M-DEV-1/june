@@ -1,11 +1,11 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import fs from 'node:fs';
 import { ffplayBin, localFfplay } from '../config/paths.js';
 import { eventBus } from '../agent/EventBus.js';
 
 export class SpeakerOutput {
-    private process: any = null;
+    private process: ChildProcess | null = null;
     private inputStream: PassThrough | null = null;
     private meterInterval: NodeJS.Timeout | null = null;
     private currentLevel: number = 0;
@@ -41,7 +41,7 @@ export class SpeakerOutput {
         });
 
         this.inputStream = new PassThrough();
-        this.inputStream.pipe(this.process.stdin);
+        this.inputStream.pipe(this.process.stdin!);
 
         this.process.on('exit', () => {
             this.process = null;
@@ -109,7 +109,7 @@ export class SpeakerOutput {
         this.currentLevel = Math.max(this.currentLevel, Math.min(1, rms / 5000));
         
         this.chunkQueue.push(chunk);
-        this.processQueue();
+        this.processQueue().catch(() => {});
     }
 
     stop() {

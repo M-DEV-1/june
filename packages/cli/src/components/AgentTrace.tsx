@@ -7,7 +7,7 @@ export interface TraceEntry {
     role?: 'orchestrator' | 'researcher' | 'librarian';
     tool?: string;
     thought?: string;
-    args?: any;
+    args?: Record<string, unknown>;
     status: 'pending' | 'success' | 'error';
     durationMs?: number;
     timestamp: number;

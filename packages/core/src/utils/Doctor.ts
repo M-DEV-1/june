@@ -1,7 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { 
-    ffmpegBin, 
-    ffplayBin, 
+    ffmpegBin,
 } from '../config/paths.js';
 
 export interface DependencyStatus {
@@ -15,7 +14,7 @@ export interface DependencyStatus {
 export class Doctor {
     static checkBinary(binName: string): DependencyStatus {
         const tryFlags = ['-version', '--version', '-v'];
-        let lastError = null;
+        let lastError: Error | null = null;
 
         for (const flag of tryFlags) {
             try {
@@ -35,8 +34,8 @@ export class Doctor {
                     };
                 }
                 lastError = new Error(result.stderr || 'Execution failed');
-            } catch (error: any) {
-                lastError = error;
+            } catch (error: unknown) {
+                lastError = error instanceof Error ? error : new Error(String(error));
             }
         }
 
