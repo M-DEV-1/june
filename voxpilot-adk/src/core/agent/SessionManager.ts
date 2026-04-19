@@ -10,6 +10,8 @@ import {
 import { micCapture } from '../audio/MicCapture.js';
 import { speakerOutput } from '../audio/SpeakerOutput.js';
 import { eventBus } from './EventBus.js';
+import { contextManager } from '../memory/ContextManager.js';
+import { toolResultCompressor } from '../memory/ToolResultCompressor.js';
 
 export class SessionManager {
     private runner: Runner | null = null;
@@ -64,7 +66,9 @@ export class SessionManager {
             sessionId: this.currentSessionId,
             runConfig,
             liveRequestQueue: this.liveRequestQueue as any,
-            newMessage: { parts: [{ text: "System Booted. Neural Interface Online." }] }
+            newMessage: { 
+                parts: [{ text: `${this.agent.instruction}\n\n${contextManager.getSystemPromptPrefix()}System Booted. Neural Interface Online.` }] 
+            }
         });
 
         eventBus.emitEvent({ type: 'status', status: 'LISTENING' });
@@ -88,6 +92,7 @@ export class SessionManager {
             if (text) {
                 eventBus.emitEvent({ type: 'transcript', role: 'agent', text, partial: false });
                 eventBus.emitEvent({ type: 'status', status: 'SPEAKING' });
+                contextManager.ingestTurn({ role: 'agent', text });
             }
         }
 
@@ -104,6 +109,7 @@ export class SessionManager {
         // Handle User Transcript (if available from model)
         if (event.inputTranscription?.text) {
             eventBus.emitEvent({ type: 'transcript', role: 'user', text: event.inputTranscription.text, partial: false });
+            contextManager.ingestTurn({ role: 'user', text: event.inputTranscription.text });
         }
 
         // Handle Tool Calls
@@ -118,12 +124,16 @@ export class SessionManager {
         }
 
         if (event.toolResponse) {
+            const result = event.toolResponse.content;
+            // Async compression for audit (logic can be expanded to update context)
+            toolResultCompressor.compress(event.toolResponse.name, result, "implicit research goal").catch(() => {});
+
             eventBus.emitEvent({ 
                 type: 'tool:end', 
                 agent: this.agent.name, 
                 tool: event.toolResponse.name, 
-                durationMs: 0, // ADK doesn't provide this directly here
-                result: event.toolResponse.content 
+                durationMs: 0, 
+                result: result 
             });
             eventBus.emitEvent({ type: 'status', status: 'LISTENING' });
         }
@@ -148,7 +158,6 @@ export class SessionManager {
 
     reset() {
         this.stop();
-        // UI should trigger restart if needed
     }
 
     toggleMute() {
