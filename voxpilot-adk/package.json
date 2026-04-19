@@ -1,6 +1,6 @@
 {
   "name": "voxpilot-adk",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "VOXPILOT — Voice CLI powered by Gemini Live API via ADK",
   "main": "src/app.tsx",
   "bin": {
@@ -27,11 +27,8 @@
     "dotenv": "^17.3.1",
     "figlet": "^1.8.0",
     "ink": "^6.8.0",
-    "ink-big-text": "^2.0.0",
-    "ink-gradient": "^3.0.0",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
-    "node-record-lpcm16": "^1.0.1",
     "react": "^19.2.4",
     "typescript": "^5.9.3",
     "zod": "^3.23.0"
