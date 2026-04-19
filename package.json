@@ -5,6 +5,7 @@
   "description": "ORA — Hands-free Voice CLI powered by Gemini Live API",
   "scripts": {
     "start": "pnpm --filter @ora/cli start",
+    "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
     "lint": "pnpm -r run --if-present lint"

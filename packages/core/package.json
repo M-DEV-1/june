@@ -13,6 +13,7 @@
     "vitest": "^3.0.0"
   },
   "scripts": {
+    "build": "tsc",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   }
