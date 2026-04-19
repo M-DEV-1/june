@@ -1,103 +1,104 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Box, useInput, useApp, Text } from 'ink';
-import type { VoxPilotStatus, AppMessage, WaveformMode, PaletteName } from '../types/index.js';
+import type { VoxPilotStatus, AppMessage } from '../types/index.js';
 import Onboarding from './Onboarding.js';
 import Waveform from './Waveform.js';
 import StatusBar from './StatusBar.js';
 import Transcript from './Transcript.js';
+import AgentTrace, { TraceEntry } from './AgentTrace.js';
 import { Doctor } from '../core/utils/Doctor.js';
-import { runVoxPilotSession } from '../agent.js';
+import { eventBus } from '../core/agent/EventBus.js';
+import { SessionManager } from '../core/agent/SessionManager.js';
+import { researchAgent } from '../agent.js';
 
 const VoxPilot: React.FC = () => {
 	const { exit } = useApp();
 	const [status, setStatus] = useState<VoxPilotStatus>('INIT');
 	const [apiKey, setApiKey] = useState<string | null>(null);
-	const [mode, setMode] = useState<WaveformMode>(1);
-	const [palette, setPalette] = useState<PaletteName>('cyberpunk');
 	const [messages, setMessages] = useState<AppMessage[]>([]);
-	const [activeTools, setActiveTools] = useState<string[]>([]);
+	const [traces, setTraces] = useState<TraceEntry[]>([]);
 	const [fps, setFps] = useState(0);
     const [latency, setLatency] = useState(0);
+    const [tokens, setTokens] = useState(0);
     const [terminalTooSmall, setTerminalTooSmall] = useState(false);
+    const [sessionManager] = useState(() => new SessionManager(researchAgent));
 
-    const checkDeps = async () => {
+    const checkDeps = useCallback(async () => {
         return Doctor.checkAll();
-    };
+    }, []);
 
 	useInput((input, key) => {
-		if (input === '1') setMode(1);
-		if (input === '2') setMode(2);
-		if (input === '3') setMode(3);
-		if (input === '4') setMode(4);
-		if (input === 'c') {
-			const palettes: PaletteName[] = ['cyberpunk', 'neon', 'aurora', 'sunset'];
-			const next = (palettes.indexOf(palette) + 1) % palettes.length;
-			setPalette(palettes[next]!);
-		}
 		if (key.ctrl && input === 'c') {
-			exit();
+			sessionManager.stop();
+            exit();
 		}
+        if (key.ctrl && input === 'r') {
+            sessionManager.reset();
+            setMessages([]);
+            setTraces([]);
+            if (apiKey) sessionManager.start(apiKey);
+        }
+        if (key.ctrl && input === 'm') {
+            sessionManager.toggleMute();
+        }
 	});
+
+    useEffect(() => {
+        const checkSize = () => {
+            setTerminalTooSmall(process.stdout.columns < 80 || process.stdout.rows < 15);
+        };
+        checkSize();
+        process.stdout.on('resize', checkSize);
+        return () => { process.stdout.off('resize', checkSize); };
+    }, []);
+
+    useEffect(() => {
+        const unsubStatus = eventBus.on('status', (e: any) => setStatus(e.status));
+        const unsubError = eventBus.on('error', (e: any) => {
+            setMessages(prev => [...prev, { role: 'system', text: `ERROR: ${e.message}` }]);
+        });
+        const unsubTranscript = eventBus.on('transcript', (e: any) => {
+            setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === e.role && e.role === 'agent') {
+                    // Update last message if same role and it was partial (or just append for agent)
+                    return [...prev.slice(0, -1), { role: e.role, text: last.text + e.text, partial: e.partial }];
+                }
+                return [...prev, { role: e.role, text: e.text, partial: e.partial }];
+            });
+        });
+        const unsubToolStart = eventBus.on('tool:start', (e: any) => {
+            setTraces(prev => [...prev, {
+                agent: e.agent,
+                tool: e.tool,
+                args: e.args,
+                status: 'pending',
+                timestamp: Date.now()
+            }]);
+        });
+        const unsubToolEnd = eventBus.on('tool:end', (e: any) => {
+            setTraces(prev => prev.map(t => 
+                t.tool === e.tool && t.status === 'pending' 
+                ? { ...t, status: 'success', durationMs: e.durationMs } 
+                : t
+            ));
+        });
+
+        return () => {
+            unsubStatus();
+            unsubError();
+            unsubTranscript();
+            unsubToolStart();
+            unsubToolEnd();
+        };
+    }, []);
 
 	useEffect(() => {
 		if (status !== 'CONNECTING' || !apiKey) return;
-
-		let isMounted = true;
         const start = Date.now();
-
-		async function startSession() {
-			try {
-				const stream = runVoxPilotSession(apiKey!);
-				setStatus('LISTENING');
-                setLatency(Date.now() - start);
-
-				for await (const event of stream as any) {
-					if (!isMounted) break;
-
-					if (event.content?.parts) {
-						const text = event.content.parts.map((p: any) => p.text).join('');
-						if (text) {
-							setMessages(prev => {
-                                const last = prev[prev.length - 1];
-                                if (last?.role === 'agent') {
-                                    return [...prev.slice(0, -1), { role: 'agent', text: last.text + text }];
-                                }
-                                return [...prev, { role: 'agent', text }];
-                            });
-							setStatus('SPEAKING');
-						}
-					}
-
-					if (event.inputTranscription?.text) {
-						setMessages(prev => [...prev, { role: 'user', text: event.inputTranscription.text }]);
-					}
-
-					if (event.toolCall) {
-						setActiveTools(prev => [...new Set([...prev, event.toolCall.name])]);
-						setStatus('PROCESSING');
-					}
-
-					if (event.toolResponse) {
-						setActiveTools(prev => prev.filter(t => t !== event.toolResponse.name));
-						setStatus('LISTENING');
-					}
-
-                    if (event.turnComplete) {
-                        setStatus('LISTENING');
-                    }
-
-					if (event.interrupted) {
-						setStatus('LISTENING');
-					}
-				}
-			} catch (err: any) {
-				setMessages(prev => [...prev, { role: 'system', text: `SYSTEM ERROR: ${err.message || 'Unknown error.'}` }]);
-				setStatus('ERROR');
-			}
-		}
-
-		startSession();
-		return () => { isMounted = false; };
+        sessionManager.start(apiKey).then(() => {
+            setLatency(Date.now() - start);
+        });
 	}, [status, apiKey]);
 
 	useEffect(() => {
@@ -125,7 +126,7 @@ const VoxPilot: React.FC = () => {
         return (
             <Box flexDirection="column" alignItems="center" justifyContent="center" width="100%" height={10}>
                 <Text color="red" bold underline>TERMINAL TOO SMALL</Text>
-                <Text color="yellow">Please expand your terminal to at least 80x12.</Text>
+                <Text color="yellow">Please expand your terminal to at least 80x15 for the dashboard.</Text>
                 <Text color="gray">Current: {process.stdout.columns}x{process.stdout.rows}</Text>
             </Box>
         );
@@ -143,27 +144,34 @@ const VoxPilot: React.FC = () => {
     }
 
 	return (
-		<Box flexDirection="row" width="100%" height="100%" borderStyle="single">
-            <Box flexDirection="column" width={30} height="100%" paddingX={1} borderStyle="single" borderRight={false}>
-                <StatusBar status={status} activeTools={activeTools} fps={fps} latency={latency} />
-                <Box marginTop={1}>
-                    <Waveform 
-                        mode={mode} 
-                        palette={palette} 
-                        isProcessing={status === 'PROCESSING'} 
-                    />
-                </Box>
-                <Box marginTop={1} paddingX={1}>
-                    <Text color="gray" dimColor italic>
-                        VOXPILOT ADK Engine
-                    </Text>
-                    <Text color="gray" dimColor>
-                        Research Mode Active
-                    </Text>
-                </Box>
+		<Box flexDirection="column" width="100%" height="100%">
+            {/* Header */}
+            <Box paddingX={1} borderStyle="single" borderColor="cyan" justifyContent="space-between">
+                <Text bold color="cyan">VOXPILOT v2.0</Text>
+                <Text color="gray">NEURAL INTERFACE [ADK-DRIVEN]</Text>
             </Box>
-            <Box flexDirection="column" flexGrow={1} height="100%" paddingX={1}>
-                <Transcript messages={messages} />
+
+            <Box flexDirection="row" flexGrow={1}>
+                {/* Left Panel: Status & Diagnostics */}
+                <Box flexDirection="column" width={32} borderStyle="single" borderTop={false} paddingX={1}>
+                    <StatusBar status={status} fps={fps} latency={latency} tokens={tokens} />
+                    <Box marginTop={1}>
+                        <Waveform isProcessing={status === 'PROCESSING'} />
+                    </Box>
+                    <Box marginTop={1} flexGrow={1}>
+                        <AgentTrace traces={traces} />
+                    </Box>
+                    <Box marginTop={1} borderStyle="round" borderColor="gray" paddingX={1}>
+                        <Text color="gray" dimColor>
+                            [^M] MUTE  [^R] RESET  [^C] QUIT
+                        </Text>
+                    </Box>
+                </Box>
+
+                {/* Main Panel: Transcript */}
+                <Box flexDirection="column" flexGrow={1} borderStyle="single" borderTop={false} borderLeft={false} paddingX={1}>
+                    <Transcript messages={messages} />
+                </Box>
             </Box>
         </Box>
 	);
