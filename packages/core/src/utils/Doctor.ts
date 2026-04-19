@@ -1,14 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-// @ts-ignore
-import ffbinaries from 'ffbinaries';
 import { 
     ffmpegBin, 
     ffplayBin, 
-    localFfmpeg, 
-    localFfplay, 
-    binDir 
 } from '../config/paths.js';
 
 export interface DependencyStatus {
@@ -20,33 +13,30 @@ export interface DependencyStatus {
 }
 
 export class Doctor {
-    static checkBinary(binName: string, localPath?: string): DependencyStatus {
-        const tryPaths = localPath ? [localPath, binName] : [binName];
+    static checkBinary(binName: string): DependencyStatus {
         const tryFlags = ['-version', '--version', '-v'];
         let lastError = null;
 
-        for (const p of tryPaths) {
-            for (const flag of tryFlags) {
-                try {
-                    // Using spawnSync for safer command execution without shell interpretation
-                    const result = spawnSync(p, [flag], {
-                        encoding: 'utf8',
-                        stdio: 'pipe'
-                    });
-                    
-                    if (result.status === 0 || result.stdout) {
-                        const output = result.stdout || result.stderr || '';
-                        const firstLine = output.split('\n')[0];
-                        return {
-                            name: binName,
-                            found: true,
-                            version: firstLine?.trim()
-                        };
-                    }
-                    lastError = new Error(result.stderr || 'Execution failed');
-                } catch (error: any) {
-                    lastError = error;
+        for (const flag of tryFlags) {
+            try {
+                // Using spawnSync for safer command execution without shell interpretation
+                const result = spawnSync(binName, [flag], {
+                    encoding: 'utf8',
+                    stdio: 'pipe'
+                });
+                
+                if (result.status === 0 || result.stdout) {
+                    const output = result.stdout || result.stderr || '';
+                    const firstLine = output.split('\n')[0];
+                    return {
+                        name: binName,
+                        found: true,
+                        version: firstLine?.trim()
+                    };
                 }
+                lastError = new Error(result.stderr || 'Execution failed');
+            } catch (error: any) {
+                lastError = error;
             }
         }
 
@@ -69,8 +59,8 @@ export class Doctor {
 
     static async checkAll(): Promise<DependencyStatus[]> {
         return [
-            this.checkBinary(ffmpegBin, localFfmpeg),
-            this.checkBinary(ffplayBin, localFfplay)
+            this.checkBinary(ffmpegBin),
+            // We only strictly need ffmpeg for the new architecture
         ];
     }
 
@@ -80,28 +70,9 @@ export class Doctor {
     }
 
     /**
-     * Attempts to download missing binaries if possible.
-     * This is blocking during the boot phase to ensure stability.
+     * Binary provisioning is now handled by npm install via @ffmpeg-installer/ffmpeg.
      */
     static async provisionBinaries(): Promise<boolean> {
-        return new Promise((resolve) => {
-            if (!fs.existsSync(binDir)) {
-                fs.mkdirSync(binDir, { recursive: true });
-            }
-
-            const missing = [];
-            if (!fs.existsSync(localFfmpeg)) missing.push('ffmpeg');
-            if (!fs.existsSync(localFfplay)) missing.push('ffplay');
-
-            if (missing.length === 0) return resolve(true);
-
-            ffbinaries.downloadBinaries(missing, { destination: binDir, quiet: true }, (err: any) => {
-                if (err) {
-                    resolve(false);
-                } else {
-                    resolve(true);
-                }
-            });
-        });
+        return true; 
     }
 }

@@ -93,7 +93,9 @@ export class SpeakerOutput {
         }
 
         this.isProcessingQueue = false;
-        this.isBuffering = true; // Reset for next exchange
+        if (this.chunkQueue.length === 0) {
+            this.isBuffering = true;
+        }
     }
 
     addChunk(chunk: Buffer) {

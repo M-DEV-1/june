@@ -71,15 +71,15 @@ const Ora: React.FC = () => {
     useEffect(() => {
         const unsubStatus = eventBus.subscribe('status', (e: any) => setStatus(e.status));
         const unsubError = eventBus.subscribe('error', (e: any) => {
-            setMessages(prev => [...prev, { role: 'system', text: `ERROR: ${e.message}` }]);
+            setMessages(prev => [...prev, { role: 'system', text: `ERROR: ${e.message}`, timestamp: Date.now() }]);
         });
         const unsubTranscript = eventBus.subscribe('transcript', (e: any) => {
             setMessages(prev => {
                 const last = prev[prev.length - 1];
                 if (last && last.role === e.role && e.role === 'agent') {
-                    return [...prev.slice(0, -1), { role: e.role, text: last.text + e.text, partial: e.partial }];
+                    return [...prev.slice(0, -1), { role: e.role, text: last.text + e.text, partial: e.partial, timestamp: last.timestamp }];
                 }
-                return [...prev, { role: e.role, text: e.text, partial: e.partial }];
+                return [...prev, { role: e.role, text: e.text, partial: e.partial, timestamp: e.timestamp || Date.now() }];
             });
         });
         const unsubToolStart = eventBus.subscribe('tool:start', (e: any) => {
@@ -102,7 +102,7 @@ const Ora: React.FC = () => {
         });
 
         const unsubCompaction = eventBus.subscribe('memory:compaction', (e: any) => {
-            setMessages(prev => [...prev, { role: 'system', text: `⚡ Memory compacted: saved ~${e.tokensSaved} tokens` }]);
+            setMessages(prev => [...prev, { role: 'system', text: `⚡ Memory compacted: saved ~${e.tokensSaved} tokens`, timestamp: Date.now() }]);
         });
 
         const unsubAll = eventBus.subscribe('all' as any, (e: any) => {
@@ -131,7 +131,7 @@ const Ora: React.FC = () => {
 
             const hasDeps = await Doctor.hasRequiredDeps();
             if (!hasDeps) {
-                setMessages(prev => [...prev, { role: 'system', text: 'CRITICAL: Audio engine (ffmpeg/ffplay) missing.' }]);
+                setMessages(prev => [...prev, { role: 'system', text: 'CRITICAL: Audio engine (ffmpeg/ffplay) missing.', timestamp: Date.now() }]);
                 setStatus('ERROR');
                 return;
             }

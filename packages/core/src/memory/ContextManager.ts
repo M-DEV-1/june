@@ -30,13 +30,12 @@ export class ContextManager {
 
     async ingestTurn(turn: Turn) {
         this.hotWindow.push(turn);
-        
+
         const estimatedTokens = this.estimateTokens(JSON.stringify(this.hotWindow));
         if (estimatedTokens > this.HOT_TOKEN_THRESHOLD) {
-            this.compress().catch(console.error);
+            await this.compress();
         }
     }
-
     private estimateTokens(text: string): number {
         return Math.ceil(text.length / 4);
     }

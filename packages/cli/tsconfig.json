@@ -7,13 +7,14 @@
     "declaration": false,
     "strict": true,
     "jsx": "react-jsx",
+    "outDir": "dist",
     "isolatedModules": true,
     "skipLibCheck": true,
     "moduleDetection": "force",
     "esModuleInterop": true,
     "baseUrl": ".",
     "paths": {
-      "@ora/core": ["../core/src/index.js"]
+      "@ora/core": ["../core/src/index.ts"]
     }
   },
   "include": ["src/**/*"],

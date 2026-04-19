@@ -27,6 +27,7 @@
   },
   "scripts": {
     "start": "npx tsx src/app.tsx",
+    "dev": "npx tsx --watch src/app.tsx",
     "build": "tsc",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit"

@@ -72,7 +72,6 @@ export class MicCapture {
         if (!this.outputStream) {
             this.outputStream = new PassThrough();
         }
-        this.process.stdout.pipe(this.outputStream, { end: false });
 
         this.process.on('exit', (code: number) => {
             if (code !== 0 && code !== null) {
@@ -82,31 +81,25 @@ export class MicCapture {
         });
 
         this.process.stdout.on('data', (chunk: Buffer) => {
+            // Write original chunk to outputStream for Gemini
+            this.outputStream?.write(chunk);
+
             let sum = 0;
             for (let i = 0; i < chunk.length; i += 2) {
                 const sample = chunk.readInt16LE(i);
                 sum += sample * sample;
             }
             const rms = Math.sqrt(sum / (chunk.length / 2));
-            
+
             // Simple AGC logic
-            if (rms > 100) { // Only adjust if there's actual signal
+            if (rms > 100) { 
                 const ratio = this.TARGET_RMS / rms;
-                // Move gain towards target slowly
                 this.currentGain += (ratio - this.currentGain) * 0.05;
                 this.currentGain = Math.max(this.MIN_GAIN, Math.min(this.MAX_GAIN, this.currentGain));
             }
 
-            // Apply gain to the buffer before passing it on
-            for (let i = 0; i < chunk.length; i += 2) {
-                const sample = chunk.readInt16LE(i);
-                const normalized = Math.max(-32768, Math.min(32767, sample * this.currentGain));
-                chunk.writeInt16LE(normalized, i);
-            }
-
             this.currentLevel = Math.min(1, (rms * this.currentGain) / 15000);
         });
-
         this.meterInterval = setInterval(() => {
             eventBus.emitEvent({ type: 'audio:level', source: 'mic', level: this.currentLevel });
         }, 33); 

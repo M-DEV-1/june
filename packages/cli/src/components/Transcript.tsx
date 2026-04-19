@@ -40,7 +40,7 @@ const Transcript: React.FC<TranscriptProps> = ({ messages }) => {
                         <Box key={i} flexDirection="column" marginBottom={1}>
                             <Box>
                                 <Text color={COLORS.GOLD}>YOU</Text>
-                                <Text color={COLORS.TEXT_GHOST}>  ·  10:42</Text>
+                                <Text color={COLORS.TEXT_GHOST}>  Â·  {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
                             </Box>
                             <Box paddingLeft={2}>
                                 <Text color={COLORS.TEXT_DIM}>{stripAnsi(msg.text)}</Text>
@@ -53,9 +53,10 @@ const Transcript: React.FC<TranscriptProps> = ({ messages }) => {
                     <Box key={i} flexDirection="column" marginBottom={1}>
                         <Box>
                             <Text color="#8b5cf6">ORA</Text>
-                            <Text color={COLORS.TEXT_GHOST}>  ·  10:42</Text>
+                            <Text color={COLORS.TEXT_GHOST}>  Â·  {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
                         </Box>
                         <Box borderLeft borderStyle="single" borderColor="#1e1530" paddingLeft={2}>
+
                             <Text color={COLORS.TEXT}>
                                 {stripAnsi(msg.text)}
                                 {showCursor && (
