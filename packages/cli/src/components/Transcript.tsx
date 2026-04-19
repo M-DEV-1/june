@@ -1,14 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-
-export interface Message {
-	role: 'user' | 'agent' | 'system';
-	text: string;
-    partial?: boolean;
-}
+import { AppMessage } from '@ora/core';
 
 interface TranscriptProps {
-	messages: Message[];
+	messages: AppMessage[];
 }
 
 const Transcript: React.FC<TranscriptProps> = ({ messages }) => {
@@ -34,7 +29,7 @@ const Transcript: React.FC<TranscriptProps> = ({ messages }) => {
                     <Box key={i} marginBottom={1} flexDirection="column">
                         <Box>
                             <Text bold color={msg.role === 'user' ? 'cyan' : msg.role === 'agent' ? 'magenta' : 'gray'}>
-                                {msg.role === 'user' ? 'YOU' : msg.role === 'agent' ? 'VOX' : 'SYS'}
+                                {msg.role === 'user' ? 'YOU' : msg.role === 'agent' ? 'ORA' : 'SYS'}
                             </Text>
                             <Text color="gray"> ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</Text>
                         </Box>

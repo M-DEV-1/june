@@ -51,7 +51,7 @@ const Onboarding: React.FC<OnboardingProps> = ({onComplete, checkDependencies}) 
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={2} paddingY={1} width={70}>
             {step === 0 && (
                 <Box flexDirection="column">
-                    <Text bold color="cyan">VOXPILOT SYSTEM SETUP</Text>
+                    <Text bold color="cyan">ORA SYSTEM SETUP</Text>
                     <Box marginTop={1}>
                         <Text>Checking neural interface requirements...</Text>
                     </Box>

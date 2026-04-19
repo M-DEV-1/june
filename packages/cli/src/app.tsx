@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 import React from 'react';
 import {render} from 'ink';
-import VoxPilot from './components/VoxPilot.js';
+import Ora from './components/Ora.js';
 
-render(<VoxPilot />);
+render(<Ora />);

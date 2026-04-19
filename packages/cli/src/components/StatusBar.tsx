@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import type { VoxPilotStatus } from '../types/index.js';
-import { eventBus } from '../core/agent/EventBus.js';
+import { OraStatus, eventBus } from '@ora/core';
 
 interface StatusBarProps {
-    status: VoxPilotStatus;
+    status: OraStatus;
     fps: number;
     latency?: number;
     tokens?: number;
@@ -16,7 +15,7 @@ const StatusBar: React.FC<StatusBarProps> = ({ status, fps, latency, tokens, cac
     const [spkLevel, setSpkLevel] = useState(0);
 
     useEffect(() => {
-        eventBus.onEvent('audio:level', (e) => {
+        return eventBus.subscribe('audio:level', (e) => {
             if (e.source === 'mic') setMicLevel(e.level);
             if (e.source === 'speaker') setSpkLevel(e.level);
         });

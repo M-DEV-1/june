@@ -32,13 +32,13 @@ export class SessionManager {
         this.currentSessionId = randomUUID();
 
         await this.sessionService.createSession({ 
-            appName: 'voxpilot-adk', 
+            appName: 'ora', 
             userId: this.currentUserId, 
             sessionId: this.currentSessionId 
         });
 
         this.runner = new Runner({
-            appName: 'voxpilot-adk',
+            appName: 'ora',
             agent: this.agent,
             sessionService: this.sessionService,
         });

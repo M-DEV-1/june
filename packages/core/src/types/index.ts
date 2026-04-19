@@ -1,8 +1,9 @@
-export type VoxPilotStatus = 'INIT' | 'CONNECTING' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'IDLE' | 'ERROR';
+export type OraStatus = 'INIT' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
 
 export type AppMessage = {
     role: 'user' | 'agent' | 'system';
     text: string;
+    partial?: boolean;
 };
 
 export type WaveformMode = 1 | 2 | 3 | 4;
