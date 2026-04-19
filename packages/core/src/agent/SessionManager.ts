@@ -26,10 +26,15 @@ export class SessionManager {
     }
 
     async start(apiKey: string) {
-        process.env['GEMINI_API_KEY'] = apiKey;
+        // No longer setting process.env['GEMINI_API_KEY'] globally
         
         this.currentUserId = randomUUID();
         this.currentSessionId = randomUUID();
+
+        // Pass API key via environment but only during the ADK operations if necessary,
+        // though best practice is to pass it to the model/runner constructor.
+        // For ADK 0.5.0, it often looks for the env var.
+        process.env['GEMINI_API_KEY'] = apiKey;
 
         await this.sessionService.createSession({ 
             appName: 'ora', 

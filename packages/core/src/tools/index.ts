@@ -2,7 +2,7 @@ import { FunctionTool } from '@google/adk';
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { findingsDir } from '../config/paths.js';
+import { findingsDir, workspaceDir } from '../config/paths.js';
 
 export const listDirectory = new FunctionTool({
     name: 'list_directory',
@@ -13,8 +13,8 @@ export const listDirectory = new FunctionTool({
     execute: async (args: any) => {
         const { path: p } = args;
         try {
-            const target = path.resolve(process.cwd(), p || '.');
-            if (!target.startsWith(process.cwd())) throw new Error("Path traversal blocked.");
+            const target = path.resolve(workspaceDir, p || '.');
+            if (!target.startsWith(workspaceDir)) throw new Error("Sandbox violation: Access outside workspace is blocked.");
             const files = await fs.readdir(target);
             return { files };
         } catch (e: unknown) {
@@ -32,8 +32,8 @@ export const readFile = new FunctionTool({
     execute: async (args: any) => {
         const { path: p } = args;
         try {
-            const target = path.resolve(process.cwd(), p);
-            if (!target.startsWith(process.cwd())) throw new Error("Path traversal blocked.");
+            const target = path.resolve(workspaceDir, p);
+            if (!target.startsWith(workspaceDir)) throw new Error("Sandbox violation: Access outside workspace is blocked.");
             const content = await fs.readFile(target, 'utf-8');
             return { content: content.slice(0, 10000) };
         } catch (e: unknown) {
@@ -53,7 +53,9 @@ export const saveResearchNotes = new FunctionTool({
         const { filename, content } = args;
         try {
             await fs.mkdir(findingsDir, { recursive: true });
-            const target = path.join(findingsDir, path.basename(filename));
+            // Securely join and resolve path, preventing traversal
+            const safeFilename = path.basename(filename);
+            const target = path.join(findingsDir, safeFilename);
             await fs.writeFile(target, content, 'utf-8');
             return { success: true, message: `Notes successfully saved to ${target}` };
         } catch (e: unknown) {
@@ -71,7 +73,41 @@ export const webFetch = new FunctionTool({
     execute: async (args: any) => {
         const { url } = args;
         try {
-            const response = await fetch(url);
+            const parsedUrl = new URL(url);
+            
+            // Strict Protocol Validation
+            if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+                throw new Error("Invalid protocol. Only http and https are supported.");
+            }
+
+            // Simple blocklist for private/local ranges
+            const hostname = parsedUrl.hostname.toLowerCase();
+            
+            // Comprehensive blocklist for private/reserved ranges
+            const isPrivate = (host: string) => {
+                const privatePatterns = [
+                    /^localhost$/,
+                    /^127\./,
+                    /^10\./,
+                    /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
+                    /^192\.168\./,
+                    /^169\.254\./,
+                    /^0\./,
+                    /^::1$/,
+                    /^fe80:/,
+                    /^fc00:/,
+                    /^fd00:/
+                ];
+                return privatePatterns.some(p => p.test(host)) || host.endsWith('.local') || host.endsWith('.internal');
+            };
+
+            if (isPrivate(hostname)) {
+                throw new Error("Access to internal/private hosts is blocked.");
+            }
+
+            const response = await fetch(url, {
+                headers: { 'User-Agent': 'Ora/2.0 (Research Conductor)' }
+            });
             const html = await response.text();
             const text = html
                 .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gmi, '')

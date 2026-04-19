@@ -41,6 +41,9 @@ export class MicCapture {
             ? ['-f', 'avfoundation', '-i', ':default']
             : ['-f', 'alsa', '-i', 'default'];
 
+        // Sanitize environment to prevent secret leakage
+        const { GEMINI_API_KEY, ...safeEnv } = process.env;
+
         this.process = spawn(ffmpegBin, [
             ...args, 
             '-acodec', 'pcm_s16le', 
@@ -49,7 +52,8 @@ export class MicCapture {
             '-f', 's16le', 
             '-'
         ], {
-            stdio: ['ignore', 'pipe', 'ignore']
+            stdio: ['ignore', 'pipe', 'ignore'],
+            env: safeEnv
         });
 
         if (!this.outputStream) {

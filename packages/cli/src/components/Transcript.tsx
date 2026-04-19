@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import { AppMessage } from '@ora/core';
+import { AppMessage, stripAnsi } from '@ora/core';
 
 interface TranscriptProps {
 	messages: AppMessage[];
@@ -35,7 +35,7 @@ const Transcript: React.FC<TranscriptProps> = ({ messages }) => {
                         </Box>
                         <Box paddingLeft={1}>
                             <Text dimColor={msg.role === 'system'}>
-                                {msg.text}
+                                {stripAnsi(msg.text)}
                                 {showCursor && (
                                     <Text color="magenta">{cursorVisible ? ' ▌' : '  '}</Text>
                                 )}

@@ -19,6 +19,9 @@ export class SpeakerOutput {
             return;
         }
 
+        // Sanitize environment to prevent secret leakage
+        const { GEMINI_API_KEY, ...safeEnv } = process.env;
+
         this.process = spawn(ffplayBin, [
             '-f', 's16le', 
             '-ar', '24000', 
@@ -27,7 +30,8 @@ export class SpeakerOutput {
             '-autoexit',
             '-'
         ], {
-            stdio: ['pipe', 'ignore', 'ignore']
+            stdio: ['pipe', 'ignore', 'ignore'],
+            env: safeEnv
         });
 
         this.inputStream = new PassThrough();
