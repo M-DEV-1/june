@@ -12,6 +12,11 @@ export class SpeakerOutput {
     private readonly IDLE_TIMEOUT = 2000; 
     private chunkQueue: Buffer[] = [];
     private isProcessingQueue = false;
+    
+    // Jitter Buffer Settings
+    private readonly BUFFER_THRESHOLD_MS = 300; // 300ms buffer
+    private readonly BYTES_PER_MS = (24000 * 2) / 1000; // 24kHz * 16-bit / 1000ms
+    private isBuffering = true;
 
     private ensureProcess() {
         if (this.process) {
@@ -19,7 +24,6 @@ export class SpeakerOutput {
             return;
         }
 
-        // Sanitize environment to prevent secret leakage
         const { GEMINI_API_KEY, ...safeEnv } = process.env;
 
         this.process = spawn(ffplayBin, [
@@ -37,15 +41,9 @@ export class SpeakerOutput {
         this.inputStream = new PassThrough();
         this.inputStream.pipe(this.process.stdin);
 
-        this.process.on('exit', (code: number) => {
-            if (code !== 0 && code !== null && this.chunkQueue.length > 0) {
-                this.process = null;
-                this.inputStream = null;
-                this.ensureProcess(); // Restart if queue not empty
-            } else {
-                this.process = null;
-                this.inputStream = null;
-            }
+        this.process.on('exit', () => {
+            this.process = null;
+            this.inputStream = null;
         });
 
         this.lastChunkTime = Date.now();
@@ -67,7 +65,19 @@ export class SpeakerOutput {
         this.isProcessingQueue = true;
 
         while (this.chunkQueue.length > 0) {
+            // Check if we have enough data to stop buffering
+            const totalBufferedBytes = this.chunkQueue.reduce((acc, b) => acc + b.length, 0);
+            const bufferedMs = totalBufferedBytes / this.BYTES_PER_MS;
+
+            if (this.isBuffering && bufferedMs < this.BUFFER_THRESHOLD_MS) {
+                // Not enough data yet, wait for more
+                await new Promise(r => setTimeout(r, 50));
+                continue;
+            }
+            
+            this.isBuffering = false;
             const chunk = this.chunkQueue.shift()!;
+            
             this.ensureProcess();
             if (this.inputStream) {
                 const drained = this.inputStream.write(chunk);
@@ -75,11 +85,13 @@ export class SpeakerOutput {
                     await new Promise(r => this.inputStream!.once('drain', r));
                 }
             }
-            // Small artificial delay for jitter buffering
-            await new Promise(r => setTimeout(r, 5));
+
+            // Small delay to prevent tight loop from eating CPU
+            await new Promise(r => setTimeout(r, 1));
         }
 
         this.isProcessingQueue = false;
+        this.isBuffering = true; // Reset for next exchange
     }
 
     addChunk(chunk: Buffer) {
@@ -98,6 +110,7 @@ export class SpeakerOutput {
 
     stop() {
         this.chunkQueue = [];
+        this.isBuffering = true;
         if (this.process) {
             this.process.kill();
             this.process = null;

@@ -9,6 +9,12 @@ export class MicCapture {
     private meterInterval: NodeJS.Timeout | null = null;
     private currentLevel: number = 0;
 
+    // AGC Settings
+    private readonly TARGET_RMS = 3000;
+    private readonly MAX_GAIN = 10.0;
+    private readonly MIN_GAIN = 0.5;
+    private currentGain = 1.0;
+
     private getWindowsAudioDevice(): string {
         let output: any = '';
         try {
@@ -41,7 +47,6 @@ export class MicCapture {
             ? ['-f', 'avfoundation', '-i', ':default']
             : ['-f', 'alsa', '-i', 'default'];
 
-        // Sanitize environment to prevent secret leakage
         const { GEMINI_API_KEY, ...safeEnv } = process.env;
 
         this.process = spawn(ffmpegBin, [
@@ -63,7 +68,6 @@ export class MicCapture {
 
         this.process.on('exit', (code: number) => {
             if (code !== 0 && code !== null) {
-                console.error(`MicCapture process exited with code ${code}. Restarting...`);
                 this.process = null;
                 setTimeout(() => this.start(), 1000);
             }
@@ -76,12 +80,28 @@ export class MicCapture {
                 sum += sample * sample;
             }
             const rms = Math.sqrt(sum / (chunk.length / 2));
-            this.currentLevel = Math.min(1, rms / 5000);
+            
+            // Simple AGC logic
+            if (rms > 100) { // Only adjust if there's actual signal
+                const ratio = this.TARGET_RMS / rms;
+                // Move gain towards target slowly
+                this.currentGain += (ratio - this.currentGain) * 0.05;
+                this.currentGain = Math.max(this.MIN_GAIN, Math.min(this.MAX_GAIN, this.currentGain));
+            }
+
+            // Apply gain to the buffer before passing it on
+            for (let i = 0; i < chunk.length; i += 2) {
+                const sample = chunk.readInt16LE(i);
+                const normalized = Math.max(-32768, Math.min(32767, sample * this.currentGain));
+                chunk.writeInt16LE(normalized, i);
+            }
+
+            this.currentLevel = Math.min(1, (rms * this.currentGain) / 15000);
         });
 
         this.meterInterval = setInterval(() => {
             eventBus.emitEvent({ type: 'audio:level', source: 'mic', level: this.currentLevel });
-        }, 33); // ~30fps
+        }, 33); 
 
         return this.outputStream;
     }

@@ -27,31 +27,43 @@ const AgentTrace: React.FC<AgentTraceProps> = ({ traces }) => {
         }
     };
 
+    const getRoleIcon = (role?: string) => {
+        switch (role) {
+            case 'orchestrator': return '◈';
+            case 'researcher': return '🔍';
+            case 'librarian': return '📚';
+            default: return '●';
+        }
+    };
+
     return (
         <Box flexDirection="column" paddingX={1} borderStyle="round" borderColor="gray">
-            <Box borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} marginBottom={1}>
+            <Box borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} marginBottom={1} justifyContent="space-between">
                 <Text bold color="cyan">AGENT TRACE</Text>
+                <Text color="gray" dimColor>{traces.length} operations</Text>
             </Box>
-            {traces.slice(-10).map((trace, i) => (
+            {traces.slice(-12).map((trace, i) => (
                 <Box key={trace.timestamp + i} flexDirection="column" marginBottom={1}>
                     <Box justifyContent="space-between">
-                        <Text color={getRoleColor(trace.role)}>[{trace.agent.toUpperCase()}]</Text>
-                        <Text color="gray">{new Date(trace.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>
+                        <Box>
+                            <Text color={getRoleColor(trace.role)}>{getRoleIcon(trace.role)} [{trace.agent.toUpperCase()}]</Text>
+                        </Box>
+                        <Text color="gray" dimColor>{new Date(trace.timestamp).toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' })}</Text>
                     </Box>
                     
                     {trace.thought && (
                         <Box paddingLeft={1} borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor="gray">
-                            <Text color="gray" italic>"{stripAnsi(trace.thought.slice(0, 100))}{trace.thought.length > 100 ? '...' : ''}"</Text>
+                            <Text color="gray" italic dimColor>"{stripAnsi(trace.thought.slice(0, 150))}{trace.thought.length > 150 ? '...' : ''}"</Text>
                         </Box>
                     )}
 
                     {trace.tool && (
                         <Box paddingLeft={2}>
-                            <Text color="cyan">⚙ {trace.tool}</Text>
+                            <Text color="cyan">↳ {trace.tool}</Text>
                             {trace.status === 'pending' ? (
-                                <Text color="yellow">  (acting...)</Text>
+                                <Text color="yellow"> …</Text>
                             ) : (
-                                <Text color="green">  ✓ {trace.durationMs || '?'}ms</Text>
+                                <Text color="green"> ✓ {trace.durationMs || '?'}ms</Text>
                             )}
                         </Box>
                     )}
@@ -59,7 +71,7 @@ const AgentTrace: React.FC<AgentTraceProps> = ({ traces }) => {
                     {trace.args && trace.status === 'pending' && (
                         <Box paddingLeft={4}>
                             <Text color="gray" dimColor italic>
-                                {stripAnsi(JSON.stringify(trace.args)).slice(0, 50)}...
+                                params: {stripAnsi(JSON.stringify(trace.args)).slice(0, 60)}...
                             </Text>
                         </Box>
                     )}

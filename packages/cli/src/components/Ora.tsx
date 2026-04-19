@@ -93,12 +93,17 @@ const Ora: React.FC = () => {
             ));
         });
 
+        const unsubCompaction = eventBus.subscribe('memory:compaction', (e: any) => {
+            setMessages(prev => [...prev, { role: 'system', text: `⚡ Memory compacted: saved ~${e.tokensSaved} tokens` }]);
+        });
+
         return () => {
             unsubStatus();
             unsubError();
             unsubTranscript();
             unsubToolStart();
             unsubToolEnd();
+            unsubCompaction();
         };
     }, []);
 
