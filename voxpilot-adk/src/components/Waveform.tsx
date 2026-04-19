@@ -13,7 +13,7 @@ const Waveform: React.FC<WaveformProps> = ({ isProcessing, color = 'cyan' }) => 
     const [phase, setPhase] = useState(0);
 
     useEffect(() => {
-        const unsubscribe = eventBus.on('audio:level', (e: any) => {
+        const unsubscribe = eventBus.subscribe('audio:level', (e: any) => {
             setLevel(prev => Math.max(prev, e.level));
         });
 

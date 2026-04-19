@@ -9,7 +9,9 @@ export class SpeakerOutput {
     private meterInterval: NodeJS.Timeout | null = null;
     private currentLevel: number = 0;
     private lastChunkTime: number = 0;
-    private readonly IDLE_TIMEOUT = 1000; // Close ffplay if no audio for 1s
+    private readonly IDLE_TIMEOUT = 2000; 
+    private chunkQueue: Buffer[] = [];
+    private isProcessingQueue = false;
 
     private ensureProcess() {
         if (this.process) {
@@ -31,9 +33,15 @@ export class SpeakerOutput {
         this.inputStream = new PassThrough();
         this.inputStream.pipe(this.process.stdin);
 
-        this.process.on('exit', () => {
-            this.process = null;
-            this.inputStream = null;
+        this.process.on('exit', (code: number) => {
+            if (code !== 0 && code !== null && this.chunkQueue.length > 0) {
+                this.process = null;
+                this.inputStream = null;
+                this.ensureProcess(); // Restart if queue not empty
+            } else {
+                this.process = null;
+                this.inputStream = null;
+            }
         });
 
         this.lastChunkTime = Date.now();
@@ -44,16 +52,33 @@ export class SpeakerOutput {
                     this.stop();
                 } else {
                     eventBus.emitEvent({ type: 'audio:level', source: 'speaker', level: this.currentLevel });
-                    // Decay level
                     this.currentLevel *= 0.8;
                 }
             }, 33);
         }
     }
 
+    private async processQueue() {
+        if (this.isProcessingQueue) return;
+        this.isProcessingQueue = true;
+
+        while (this.chunkQueue.length > 0) {
+            const chunk = this.chunkQueue.shift()!;
+            this.ensureProcess();
+            if (this.inputStream) {
+                const drained = this.inputStream.write(chunk);
+                if (!drained) {
+                    await new Promise(r => this.inputStream!.once('drain', r));
+                }
+            }
+            // Small artificial delay for jitter buffering
+            await new Promise(r => setTimeout(r, 5));
+        }
+
+        this.isProcessingQueue = false;
+    }
+
     addChunk(chunk: Buffer) {
-        this.ensureProcess();
-        
         let sum = 0;
         for (let i = 0; i < chunk.length; i += 2) {
             if (i + 1 >= chunk.length) break;
@@ -63,12 +88,12 @@ export class SpeakerOutput {
         const rms = Math.sqrt(sum / (chunk.length / 2));
         this.currentLevel = Math.max(this.currentLevel, Math.min(1, rms / 5000));
         
-        if (this.inputStream) {
-            this.inputStream.write(chunk);
-        }
+        this.chunkQueue.push(chunk);
+        this.processQueue();
     }
 
     stop() {
+        this.chunkQueue = [];
         if (this.process) {
             this.process.kill();
             this.process = null;
@@ -86,7 +111,7 @@ export class SpeakerOutput {
     }
 
     interrupt() {
-        this.stop(); // Killing ffplay is the fastest way to stop audio
+        this.stop(); 
     }
 }
 

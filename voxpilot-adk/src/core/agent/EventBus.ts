@@ -29,6 +29,23 @@ export class EventBus extends EventEmitter {
         handler: (event: Extract<VoxPilotEvent, { type: T }>) => void
     ) {
         this.on(type, handler as any);
+        return () => this.off(type, handler as any);
+    }
+
+    on(type: string | symbol, handler: (...args: any[]) => void): this {
+        super.on(type, handler);
+        return this;
+    }
+
+    // Overload for cleaner React usage
+    subscribe<T extends VoxPilotEvent['type']>(
+        type: T,
+        handler: (event: Extract<VoxPilotEvent, { type: T }>) => void
+    ) {
+        this.on(type, handler as any);
+        return () => {
+            this.off(type, handler as any);
+        };
     }
 }
 
