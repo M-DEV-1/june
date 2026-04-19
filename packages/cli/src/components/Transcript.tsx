@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { AppMessage, stripAnsi } from '@ora/core';
+import { COLORS } from '../themes/index.js';
 
 interface TranscriptProps {
 	messages: AppMessage[];
@@ -16,28 +17,49 @@ const Transcript: React.FC<TranscriptProps> = ({ messages }) => {
         return () => clearInterval(interval);
     }, []);
 
-	// Show last 12 messages for high-density view
-	const displayMessages = messages.slice(-12);
+	// Show last 4 exchanges
+	const displayMessages = messages.slice(-8);
 
 	return (
-		<Box flexDirection="column" paddingX={1} flexGrow={1} minHeight={10}>
+		<Box flexDirection="column" paddingX={3} paddingY={1} flexGrow={1} justifyContent="flex-end">
 			{displayMessages.map((msg, i) => {
                 const isLast = i === displayMessages.length - 1;
                 const showCursor = isLast && msg.role === 'agent' && msg.partial;
 
-                return (
-                    <Box key={i} marginBottom={1} flexDirection="column">
-                        <Box>
-                            <Text bold color={msg.role === 'user' ? 'cyan' : msg.role === 'agent' ? 'magenta' : 'gray'}>
-                                {msg.role === 'user' ? 'YOU' : msg.role === 'agent' ? 'ORA' : 'SYS'}
-                            </Text>
-                            <Text color="gray"> ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄</Text>
+                if (msg.role === 'system') {
+                    return (
+                        <Box key={i} marginBottom={1}>
+                            <Text color={COLORS.GOLD_DIM}>⚡ </Text>
+                            <Text color={COLORS.TEXT_GHOST}>{stripAnsi(msg.text)}</Text>
                         </Box>
-                        <Box paddingLeft={1}>
-                            <Text dimColor={msg.role === 'system'}>
+                    );
+                }
+
+                if (msg.role === 'user') {
+                    return (
+                        <Box key={i} flexDirection="column" marginBottom={1}>
+                            <Box>
+                                <Text color={COLORS.GOLD}>YOU</Text>
+                                <Text color={COLORS.TEXT_GHOST}>  ·  10:42</Text>
+                            </Box>
+                            <Box paddingLeft={2}>
+                                <Text color={COLORS.TEXT_DIM}>{stripAnsi(msg.text)}</Text>
+                            </Box>
+                        </Box>
+                    );
+                }
+
+                return (
+                    <Box key={i} flexDirection="column" marginBottom={1}>
+                        <Box>
+                            <Text color="#8b5cf6">ORA</Text>
+                            <Text color={COLORS.TEXT_GHOST}>  ·  10:42</Text>
+                        </Box>
+                        <Box borderLeft borderStyle="single" borderColor="#1e1530" paddingLeft={2}>
+                            <Text color={COLORS.TEXT}>
                                 {stripAnsi(msg.text)}
                                 {showCursor && (
-                                    <Text color="magenta">{cursorVisible ? ' ▌' : '  '}</Text>
+                                    <Text color={COLORS.GOLD}>{cursorVisible ? '▌' : ' '}</Text>
                                 )}
                             </Text>
                         </Box>
@@ -46,8 +68,8 @@ const Transcript: React.FC<TranscriptProps> = ({ messages }) => {
             })}
 			{messages.length === 0 && (
                 <Box height="100%" alignItems="center" justifyContent="center">
-                    <Text color="gray" dimColor italic>
-                        Waiting for user input or agent thought...
+                    <Text color={COLORS.TEXT_GHOST} italic>
+                        waiting for first exchange...
                     </Text>
                 </Box>
             )}
