@@ -5,11 +5,8 @@ import Onboarding from './Onboarding.js';
 import Waveform from './Waveform.js';
 import StatusBar from './StatusBar.js';
 import Transcript from './Transcript.js';
-import { setupFfmpeg, checkDependencies, startMicTest } from '../utils/audio.js';
-import { validateApiKey } from '../utils/api.js';
+import { Doctor } from '../core/utils/Doctor.js';
 import { runVoxPilotSession } from '../agent.js';
-
-setupFfmpeg();
 
 const VoxPilot: React.FC = () => {
 	const { exit } = useApp();
@@ -23,14 +20,9 @@ const VoxPilot: React.FC = () => {
     const [latency, setLatency] = useState(0);
     const [terminalTooSmall, setTerminalTooSmall] = useState(false);
 
-    useEffect(() => {
-        const checkSize = () => {
-            setTerminalTooSmall(process.stdout.columns < 80 || process.stdout.rows < 12);
-        };
-        checkSize();
-        process.stdout.on('resize', checkSize);
-        return () => { process.stdout.off('resize', checkSize); };
-    }, []);
+    const checkDeps = async () => {
+        return Doctor.checkAll();
+    };
 
 	useInput((input, key) => {
 		if (input === '1') setMode(1);
@@ -144,9 +136,7 @@ const VoxPilot: React.FC = () => {
             <Box flexDirection="column" alignItems="center" padding={1} width={80}>
                 <Onboarding 
                     onComplete={handleOnboardingComplete} 
-                    validateApiKey={validateApiKey}
-                    checkDependencies={checkDependencies}
-                    startMicTest={startMicTest}
+                    checkDependencies={checkDeps as any}
                 />
             </Box>
         );

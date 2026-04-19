@@ -19,8 +19,8 @@ export const ensureBinaries = (): Promise<void> => {
         if (!fs.existsSync(binPath)) fs.mkdirSync(binPath, { recursive: true });
         if (fs.existsSync(ffmpegPath)) return resolve();
 
-        console.log('Downloading required audio engine (ffmpeg)...');
-        ffbinaries.downloadBinaries(['ffmpeg'], { destination: binPath, quiet: true }, (err: any) => {
+        console.log('Downloading required audio engine (ffmpeg & ffplay)...');
+        ffbinaries.downloadBinaries(['ffmpeg', 'ffplay'], { destination: binPath, quiet: true }, (err: any) => {
             if (err) reject(err);
             else resolve();
         });
