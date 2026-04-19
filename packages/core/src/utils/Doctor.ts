@@ -51,4 +51,9 @@ export class Doctor {
             this.checkBinary(ffplayBin)
         ];
     }
+
+    static async hasRequiredDeps(): Promise<boolean> {
+        const deps = await this.checkAll();
+        return deps.every(d => d.found);
+    }
 }

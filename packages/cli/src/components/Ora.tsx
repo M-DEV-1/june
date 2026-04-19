@@ -1,12 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Box, useInput, useApp, Text } from 'ink';
+import Gradient from 'ink-gradient';
+import figlet from 'figlet';
 import { 
     OraStatus, 
     AppMessage, 
     eventBus, 
     SessionManager, 
     orchestratorAgent, 
-    Doctor 
+    Doctor,
+    stripAnsi
 } from '@ora/core';
 import Onboarding from './Onboarding.js';
 import Waveform from './Waveform.js';
@@ -22,9 +25,15 @@ const Ora: React.FC = () => {
 	const [traces, setTraces] = useState<TraceEntry[]>([]);
 	const [fps, setFps] = useState(0);
 	const [latency, setLatency] = useState(0);
-	const [tokens] = useState(0);
+	const [tokens, setTokens] = useState(0);
+    const [cacheHit, setCacheHit] = useState(false);
 	const [terminalTooSmall, setTerminalTooSmall] = useState(false);
     const [sessionManager] = useState(() => new SessionManager(orchestratorAgent));
+    const [banner, setBanner] = useState('');
+
+    useEffect(() => {
+        setBanner(figlet.textSync('ORA', { font: 'Slant' }));
+    }, []);
 
     const checkDeps = useCallback(async () => {
         return Doctor.checkAll();
@@ -39,7 +48,7 @@ const Ora: React.FC = () => {
             sessionManager.reset();
             setMessages([]);
             setTraces([]);
-            if (apiKey) sessionManager.start(apiKey);
+            if (apiKey) setStatus('CONNECTING');
         }
         if (key.ctrl && input === 'm') {
             sessionManager.toggleMute();
@@ -48,7 +57,7 @@ const Ora: React.FC = () => {
 
     useEffect(() => {
         const checkSize = () => {
-            setTerminalTooSmall(process.stdout.columns < 80 || process.stdout.rows < 15);
+            setTerminalTooSmall(process.stdout.columns < 100 || process.stdout.rows < 20);
         };
         checkSize();
         process.stdout.on('resize', checkSize);
@@ -97,6 +106,13 @@ const Ora: React.FC = () => {
             setMessages(prev => [...prev, { role: 'system', text: `⚡ Memory compacted: saved ~${e.tokensSaved} tokens` }]);
         });
 
+        // ADK 0.5.0: Listen for server metadata to track caching
+        const unsubAll = eventBus.subscribe('all' as any, (e: any) => {
+            if (e.serverContent?.modelTurn?.parts?.[0]?.metadata?.cacheHit) {
+                setCacheHit(true);
+            }
+        });
+
         return () => {
             unsubStatus();
             unsubError();
@@ -104,19 +120,31 @@ const Ora: React.FC = () => {
             unsubToolStart();
             unsubToolEnd();
             unsubCompaction();
+            unsubAll();
         };
     }, []);
 
 	useEffect(() => {
 		if (status !== 'CONNECTING' || !apiKey) return;
-        const start = Date.now();
-        sessionManager.start(apiKey).then(() => {
-            setLatency(Date.now() - start);
-        });
+        
+        async function run() {
+            if (!(await Doctor.hasRequiredDeps())) {
+                setMessages(prev => [...prev, { role: 'system', text: 'CRITICAL: Audio engine (ffmpeg/ffplay) missing. See setup guide.' }]);
+                setStatus('ERROR');
+                return;
+            }
+
+            const start = Date.now();
+            sessionManager.start(apiKey).then(() => {
+                setLatency(Date.now() - start);
+            });
+        }
+        
+        run();
 	}, [status, apiKey]);
 
 	useEffect(() => {
-		if (status === 'INIT') return;
+		if (status === 'INIT' || status === 'CONNECTING') return;
 		let frames = 0;
 		let last = Date.now();
 		const interval = setInterval(() => {
@@ -140,15 +168,18 @@ const Ora: React.FC = () => {
         return (
             <Box flexDirection="column" alignItems="center" justifyContent="center" width="100%" height={10}>
                 <Text color="red" bold underline>TERMINAL TOO SMALL</Text>
-                <Text color="yellow">Please expand your terminal to at least 80x15 for the dashboard.</Text>
-                <Text color="gray">Current: {process.stdout.columns}x{process.stdout.rows}</Text>
+                <Text color="yellow">Please expand your terminal for the full dashboard experience.</Text>
+                <Text color="gray">Current: {process.stdout.columns}x{process.stdout.rows} | Required: 100x20</Text>
             </Box>
         );
     }
 
 	if (status === 'INIT') {
         return (
-            <Box flexDirection="column" alignItems="center" padding={1} width={80}>
+            <Box flexDirection="column" alignItems="center" padding={1} width="100%">
+                <Gradient name="atlas">
+                    <Text>{banner}</Text>
+                </Gradient>
                 <Onboarding 
                     onComplete={handleOnboardingComplete} 
                     checkDependencies={checkDeps as any}
@@ -158,32 +189,37 @@ const Ora: React.FC = () => {
     }
 
 	return (
-		<Box flexDirection="column" width="100%" height="100%">
-            {/* Header */}
-            <Box paddingX={1} borderStyle="single" borderColor="cyan" justifyContent="space-between">
-                <Text bold color="cyan">ORA v2.0</Text>
-                <Text color="gray">NEURAL INTERFACE [ADK-DRIVEN]</Text>
+		<Box flexDirection="column" width="100%" height="100%" paddingX={2}>
+            {/* Header Area */}
+            <Box justifyContent="space-between" alignItems="flex-end" marginBottom={1}>
+                <Box flexDirection="column">
+                    <Gradient name="atlas">
+                        <Text>{banner}</Text>
+                    </Gradient>
+                    <Text color="gray" dimColor>  NEURAL INTERFACE [ADK-DRIVEN] · v2.0</Text>
+                </Box>
+                <Box flexDirection="column" alignItems="flex-end">
+                    <StatusBar status={status} fps={fps} latency={latency} tokens={tokens} cacheHit={cacheHit} />
+                </Box>
             </Box>
 
             <Box flexDirection="row" flexGrow={1}>
-                {/* Left Panel: Status & Diagnostics */}
-                <Box flexDirection="column" width={32} borderStyle="single" borderTop={false} paddingX={1}>
-                    <StatusBar status={status} fps={fps} latency={latency} tokens={tokens} />
-                    <Box marginTop={1}>
-                        <Waveform isProcessing={status === 'PROCESSING'} />
-                    </Box>
+                {/* Left Side: Waveform & Traces */}
+                <Box flexDirection="column" width={38} marginRight={2}>
+                    <Waveform isProcessing={status === 'PROCESSING'} />
                     <Box marginTop={1} flexGrow={1}>
                         <AgentTrace traces={traces} />
                     </Box>
-                    <Box marginTop={1} borderStyle="round" borderColor="gray" paddingX={1}>
-                        <Text color="gray" dimColor>
-                            [^M] MUTE  [^R] RESET  [^C] QUIT
-                        </Text>
+                    <Box marginTop={1} paddingX={1} borderStyle="round" borderColor="gray">
+                         <Text color="gray" dimColor>[^M] MUTE  [^R] RESET  [^C] QUIT</Text>
                     </Box>
                 </Box>
 
-                {/* Main Panel: Transcript */}
-                <Box flexDirection="column" flexGrow={1} borderStyle="single" borderTop={false} borderLeft={false} paddingX={1}>
+                {/* Right Side: Primary Transcript */}
+                <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="cyan" paddingX={1}>
+                    <Box borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} marginBottom={1}>
+                        <Text bold color="cyan">COMMUNICATION UPLINK</Text>
+                    </Box>
                     <Transcript messages={messages} />
                 </Box>
             </Box>
