@@ -9,25 +9,28 @@ import {
     SessionManager, 
     orchestratorAgent, 
     Doctor,
-    stripAnsi
+    stripAnsi 
 } from '@ora/core';
+import Header from './Header.js';
+import LeftPanel from './LeftPanel.js';
+import RightPanel from './RightPanel.js';
+import BootScreen from './BootScreen.js';
 import Onboarding from './Onboarding.js';
-import Waveform from './Waveform.js';
-import StatusBar from './StatusBar.js';
-import Transcript from './Transcript.js';
-import AgentTrace, { TraceEntry } from './AgentTrace.js';
+import Footer from './Footer.js';
+import { COLORS } from '../themes/index.js';
+import { AppState } from '../types/ui.js';
 
 const Ora: React.FC = () => {
-	const { exit } = useApp();
-	const [status, setStatus] = useState<OraStatus>('INIT');
-	const [apiKey, setApiKey] = useState<string | null>(null);
-	const [messages, setMessages] = useState<AppMessage[]>([]);
-	const [traces, setTraces] = useState<TraceEntry[]>([]);
-	const [fps, setFps] = useState(0);
-	const [latency, setLatency] = useState(0);
-	const [tokens, setTokens] = useState(0);
-    const [cacheHit, setCacheHit] = useState(false);
-	const [terminalTooSmall, setTerminalTooSmall] = useState(false);
+    const { exit } = useApp();
+    const [status, setStatus] = useState<OraStatus>('BOOTING');
+    const [apiKey, setApiKey] = useState<string | null>(process.env.GEMINI_API_KEY || null);
+    const [messages, setMessages] = useState<AppMessage[]>([]);
+    const [traces, setTraces] = useState<any[]>([]);
+    const [fps, setFps] = useState(0);
+    const [latency, setLatency] = useState(0);
+    const [tokens, setTokens] = useState(0);
+    const [cacheHit, setCacheHit] = useState<boolean | null>(null);
+    const [terminalTooSmall, setTerminalTooSmall] = useState(false);
     const [sessionManager] = useState(() => new SessionManager(orchestratorAgent));
     const [banner, setBanner] = useState('');
 
@@ -39,25 +42,26 @@ const Ora: React.FC = () => {
         return Doctor.checkAll();
     }, []);
 
-	useInput((input, key) => {
-		if (key.ctrl && input === 'c') {
-			sessionManager.stop();
+    useInput((input, key) => {
+        if (key.ctrl && input === 'c') {
+            sessionManager.stop();
             exit();
-		}
+        }
         if (key.ctrl && input === 'r') {
             sessionManager.reset();
             setMessages([]);
             setTraces([]);
             if (apiKey) setStatus('CONNECTING');
+            else setStatus('INIT');
         }
         if (key.ctrl && input === 'm') {
             sessionManager.toggleMute();
         }
-	});
+    });
 
     useEffect(() => {
         const checkSize = () => {
-            setTerminalTooSmall(process.stdout.columns < 100 || process.stdout.rows < 20);
+            setTerminalTooSmall(process.stdout.columns < 100 || process.stdout.rows < 12);
         };
         checkSize();
         process.stdout.on('resize', checkSize);
@@ -79,14 +83,9 @@ const Ora: React.FC = () => {
             });
         });
         const unsubToolStart = eventBus.subscribe('tool:start', (e: any) => {
-            const roleMap: Record<string, any> = {
-                'ora': 'orchestrator',
-                'researcher': 'researcher',
-                'librarian': 'librarian'
-            };
             setTraces(prev => [...prev, {
-                agent: e.agent,
-                role: roleMap[e.agent] || 'orchestrator',
+                id: Math.random().toString(36),
+                agent: e.agent === 'ora' ? 'orch' : e.agent === 'researcher' ? 'rsrch' : e.agent === 'librarian' ? 'shell' : 'code',
                 tool: e.tool,
                 thought: e.thought,
                 args: e.args,
@@ -97,7 +96,7 @@ const Ora: React.FC = () => {
         const unsubToolEnd = eventBus.subscribe('tool:end', (e: any) => {
             setTraces(prev => prev.map(t => 
                 t.tool === e.tool && t.status === 'pending' 
-                ? { ...t, status: 'success', durationMs: e.durationMs } 
+                ? { ...t, status: 'success', durationMs: e.durationMs || 100 } 
                 : t
             ));
         });
@@ -106,7 +105,6 @@ const Ora: React.FC = () => {
             setMessages(prev => [...prev, { role: 'system', text: `⚡ Memory compacted: saved ~${e.tokensSaved} tokens` }]);
         });
 
-        // ADK 0.5.0: Listen for server metadata to track caching
         const unsubAll = eventBus.subscribe('all' as any, (e: any) => {
             if (e.serverContent?.modelTurn?.parts?.[0]?.metadata?.cacheHit) {
                 setCacheHit(true);
@@ -124,107 +122,103 @@ const Ora: React.FC = () => {
         };
     }, []);
 
-	useEffect(() => {
-		if (status !== 'CONNECTING' || !apiKey) return;
+    useEffect(() => {
+        if (status !== 'CONNECTING' || !apiKey) return;
         
         async function run() {
-            if (!(await Doctor.hasRequiredDeps())) {
-                setMessages(prev => [...prev, { role: 'system', text: 'CRITICAL: Audio engine (ffmpeg/ffplay) missing. See setup guide.' }]);
+            // Attempt to self-heal binaries if missing (non-blocking)
+            await Doctor.provisionBinaries();
+
+            const hasDeps = await Doctor.hasRequiredDeps();
+            if (!hasDeps) {
+                setMessages(prev => [...prev, { role: 'system', text: 'CRITICAL: Audio engine (ffmpeg/ffplay) missing.' }]);
                 setStatus('ERROR');
                 return;
             }
-
-            const start = Date.now();
-            sessionManager.start(apiKey).then(() => {
-                setLatency(Date.now() - start);
-            });
+            sessionManager.start(apiKey!);
         }
-        
         run();
-	}, [status, apiKey]);
+    }, [status, apiKey, sessionManager]);
 
-	useEffect(() => {
-		if (status === 'INIT' || status === 'CONNECTING') return;
-		let frames = 0;
-		let last = Date.now();
-		const interval = setInterval(() => {
-			frames++;
-			const now = Date.now();
-			if (now - last >= 1000) {
-				setFps(frames);
-				frames = 0;
-				last = now;
-			}
-		}, 33);
-		return () => clearInterval(interval);
-	}, [status]);
+    useEffect(() => {
+        if (status === 'INIT' || status === 'BOOTING' || status === 'CONNECTING') return;
+        let frames = 0;
+        let last = Date.now();
+        const interval = setInterval(() => {
+            frames++;
+            const now = Date.now();
+            if (now - last >= 1000) {
+                setFps(frames);
+                frames = 0;
+                last = now;
+            }
+        }, 33);
+        return () => clearInterval(interval);
+    }, [status]);
 
-	const handleOnboardingComplete = (key: string) => {
-		setApiKey(key);
-		setStatus('CONNECTING');
-	};
+    const handleBootComplete = () => {
+        if (apiKey) {
+            setStatus('CONNECTING');
+        } else {
+            setStatus('INIT');
+        }
+    };
 
-    if (terminalTooSmall) {
-        return (
-            <Box flexDirection="column" alignItems="center" justifyContent="center" width="100%" height={10}>
-                <Text color="red" bold underline>TERMINAL TOO SMALL</Text>
-                <Text color="yellow">Please expand your terminal for the full dashboard experience.</Text>
-                <Text color="gray">Current: {process.stdout.columns}x{process.stdout.rows} | Required: 100x20</Text>
-            </Box>
-        );
+    const appState: AppState = {
+        status,
+        micLevel: 0,
+        spkLevel: 0,
+        analyserData: [],
+        waveformMode: 1,
+        palette: 'warm',
+        sessionDuration: 0,
+        fps,
+        latencyMs: latency,
+        tokenCount: tokens,
+        tokenBudget: 8000,
+        memoryTier: 'L1',
+        cacheHit,
+        transcript: messages,
+        agentTrace: traces,
+        memoryEvent: null,
+        isStreaming: status === 'SPEAKING'
+    };
+
+    if (status === 'BOOTING') {
+        return <BootScreen onComplete={handleBootComplete} />;
     }
 
-	if (status === 'INIT') {
-        return (
-            <Box flexDirection="column" alignItems="center" padding={1} width="100%">
-                <Gradient name="atlas">
-                    <Text>{banner}</Text>
-                </Gradient>
-                <Onboarding 
-                    onComplete={handleOnboardingComplete} 
-                    checkDependencies={checkDeps as any}
-                />
-            </Box>
-        );
-    }
-
-	return (
-		<Box flexDirection="column" width="100%" height="100%" paddingX={2}>
-            {/* Header Area */}
-            <Box justifyContent="space-between" alignItems="flex-end" marginBottom={1}>
-                <Box flexDirection="column">
-                    <Gradient name="atlas">
-                        <Text>{banner}</Text>
-                    </Gradient>
-                    <Text color="gray" dimColor>  NEURAL INTERFACE [ADK-DRIVEN] · v2.0</Text>
+    const MainLayout = (
+        <Box flexDirection="column" width="100%" height="100%" backgroundColor={COLORS.BG_BASE}>
+            {terminalTooSmall && (
+                <Box backgroundColor={COLORS.RED} paddingX={2}>
+                    <Text color="white">⚠ TERMINAL TOO SMALL (Min: 100x12) - UI MAY BE CLIPPED</Text>
                 </Box>
-                <Box flexDirection="column" alignItems="flex-end">
-                    <StatusBar status={status} fps={fps} latency={latency} tokens={tokens} cacheHit={cacheHit} />
-                </Box>
-            </Box>
-
+            )}
+            <Header status={status} />
             <Box flexDirection="row" flexGrow={1}>
-                {/* Left Side: Waveform & Traces */}
-                <Box flexDirection="column" width={38} marginRight={2}>
-                    <Waveform isProcessing={status === 'PROCESSING'} />
-                    <Box marginTop={1} flexGrow={1}>
-                        <AgentTrace traces={traces} />
-                    </Box>
-                    <Box marginTop={1} paddingX={1} borderStyle="round" borderColor="gray">
-                         <Text color="gray" dimColor>[^M] MUTE  [^R] RESET  [^C] QUIT</Text>
-                    </Box>
-                </Box>
-
-                {/* Right Side: Primary Transcript */}
-                <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="cyan" paddingX={1}>
-                    <Box borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} marginBottom={1}>
-                        <Text bold color="cyan">COMMUNICATION UPLINK</Text>
-                    </Box>
-                    <Transcript messages={messages} />
-                </Box>
+                <LeftPanel state={appState} />
+                <Box borderRight borderStyle="single" borderColor={COLORS.BORDER} />
+                <RightPanel state={appState} />
             </Box>
+            <Footer fps={fps} />
         </Box>
-	);
+    );
+
+    if (status === 'INIT') {
+        return (
+            <Box flexDirection="column" alignItems="center" justifyContent="center" width="100%" height="100%">
+                {terminalTooSmall && (
+                    <Box backgroundColor={COLORS.RED} paddingX={2} marginBottom={1}>
+                        <Text color="white">⚠ TERMINAL TOO SMALL (Min: 100x12)</Text>
+                    </Box>
+                )}
+                <Onboarding onComplete={(key) => { setApiKey(key); setStatus('CONNECTING'); }} checkDependencies={checkDeps as any} />
+            </Box>
+        );
+    }
+
+    return MainLayout;
 };
 
 export default Ora;

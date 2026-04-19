@@ -1,7 +1,5 @@
 {
   "compilerOptions": {
-    "rootDir": "./src",
-    "outDir": "./dist",
     "module": "nodenext",
     "target": "esnext",
     "types": ["node"],
@@ -15,7 +13,7 @@
     "esModuleInterop": true,
     "baseUrl": ".",
     "paths": {
-      "@ora/core": ["../core/dist/index.d.ts"]
+      "@ora/core": ["../core/src/index.js"]
     }
   },
   "include": ["src/**/*"],
