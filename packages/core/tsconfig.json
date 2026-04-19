@@ -1,20 +1,16 @@
 {
   "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
     "module": "nodenext",
     "target": "esnext",
     "types": ["node"],
     "sourceMap": true,
-    "declaration": false,
+    "declaration": true,
     "strict": true,
-    "jsx": "react-jsx",
-    "isolatedModules": true,
     "skipLibCheck": true,
     "moduleDetection": "force",
-    "esModuleInterop": true,
-    "baseUrl": ".",
-    "paths": {
-      "@ora/core": ["../core/src/index.js"]
-    }
+    "esModuleInterop": true
   },
   "include": ["src/**/*"]
 }

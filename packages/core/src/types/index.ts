@@ -1,4 +1,4 @@
-export type OraStatus = 'INIT' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
+export type OraStatus = 'INIT' | 'CONNECTING' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
 
 export type AppMessage = {
     role: 'user' | 'agent' | 'system';

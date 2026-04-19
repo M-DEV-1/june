@@ -1,17 +1,10 @@
 import { EventEmitter } from 'node:events';
-
-export type OraStatus = 'INIT' | 'LISTENING' | 'PROCESSING' | 'SPEAKING' | 'ERROR';
-
-export type AppMessage = {
-    role: 'user' | 'agent' | 'system';
-    text: string;
-    partial?: boolean;
-};
+import { OraStatus, AppMessage } from '../types/index.js';
 
 export type OraEvent =
   | { type: 'status'; status: OraStatus }
   | { type: 'transcript'; role: 'user' | 'agent'; text: string; partial: boolean }
-  | { type: 'tool:start'; agent: string; tool: string; args: any }
+  | { type: 'tool:start'; agent: string; tool: string; args: any; thought?: string }
   | { type: 'tool:end'; agent: string; tool: string; durationMs: number; result: any }
   | { type: 'audio:level'; source: 'mic' | 'speaker'; level: number }
   | { type: 'error'; message: string; recoverable: boolean }
