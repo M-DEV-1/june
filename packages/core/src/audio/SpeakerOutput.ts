@@ -26,7 +26,8 @@ export class SpeakerOutput {
         }
 
         const binaryToUse = fs.existsSync(localFfplay) ? localFfplay : ffplayBin;
-        const { GEMINI_API_KEY, ...safeEnv } = process.env;
+        const safeEnv = { ...process.env };
+        delete safeEnv.GEMINI_API_KEY;
 
         this.process = spawn(binaryToUse, [
             '-f', 's16le', 

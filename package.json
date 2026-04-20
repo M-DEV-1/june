@@ -2,6 +2,7 @@
   "name": "ora",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "simple voice agent which lives on your terminal",
   "scripts": {
     "start": "pnpm --filter @ora/cli start",
@@ -9,6 +10,24 @@
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
-    "lint": "pnpm -r run --if-present lint"
+    "lint": "pnpm -r run --if-present lint",
+    "prepare": "husky",
+    "pre-commit": "node scripts/pre-commit.js"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix --max-warnings 0 --no-warn-ignored"
+    ],
+    "*.{json,md}": [
+      "prettier --write"
+    ]
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.58.2",
+    "@typescript-eslint/parser": "^8.58.2",
+    "eslint": "^9.39.4",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.3"
   }
 }
