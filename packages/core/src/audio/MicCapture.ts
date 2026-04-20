@@ -30,18 +30,41 @@ export class MicCapture {
             const err = error as { stdout?: string, stderr?: string };
             output = err.stdout || err.stderr || '';
         }
+        
         const lines = output.split('\n');
+        let isAudioSection = false;
+        let bestDevice = '';
+
         for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes('(audio)')) {
-                if (i + 1 < lines.length && lines[i + 1].includes('Alternative name')) {
-                    const match = lines[i + 1].match(/"([^"]+)"/);
-                    if (match) return match[1];
+            const line = lines[i].trim();
+            
+            // Detect start of audio devices section
+            if (line.includes('DirectShow audio devices')) {
+                isAudioSection = true;
+                continue;
+            }
+            // Detect end of audio devices section
+            if (line.includes('DirectShow video devices') || (isAudioSection && line.includes('DirectShow') && !line.includes('audio'))) {
+                if (line.includes('DirectShow audio devices')) continue; // skip self
+                isAudioSection = false;
+            }
+
+            if (isAudioSection && line.startsWith('[dshow')) {
+                // Check for Friendly Name: [dshow @ ...]  "Device Name"
+                const friendlyMatch = line.match(/"([^"]+)"/);
+                if (friendlyMatch) {
+                    const friendlyName = friendlyMatch[1];
+                    // Check if next line is Alternative Name (Moniker)
+                    if (i + 1 < lines.length && lines[i + 1].includes('Alternative name')) {
+                        const altMatch = lines[i + 1].match(/"([^"]+)"/);
+                        if (altMatch) return altMatch[1]; // Prefer Moniker as it's more stable
+                    }
+                    if (!bestDevice) bestDevice = friendlyName;
                 }
-                const match = lines[i].match(/"([^"]+)"/);
-                if (match) return match[1];
             }
         }
-        return 'default';
+        
+        return bestDevice || 'default';
     }
 
     start(): PassThrough {
@@ -56,7 +79,8 @@ export class MicCapture {
             ? ['-f', 'avfoundation', '-i', ':default']
             : ['-f', 'alsa', '-i', 'default'];
 
-        const { GEMINI_API_KEY, ...safeEnv } = process.env;
+        const safeEnv = { ...process.env };
+        delete safeEnv.GEMINI_API_KEY;
 
         this.process = spawn(binaryToUse, [
             ...args, 
@@ -88,6 +112,7 @@ export class MicCapture {
 
                 let sum = 0;
                 for (let i = 0; i < chunk.length; i += 2) {
+                    if (i + 1 >= chunk.length) break;
                     const sample = chunk.readInt16LE(i);
                     sum += sample * sample;
                 }
