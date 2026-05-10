@@ -1,12 +1,8 @@
-# ORA
+<div align="center">
+  <img src="./docs/images/logo.png" width="600" alt="ORA Logo">
+</div>
 
-```text
-██████  ██████  ██████
-██  ██  ██  ██  ██  ██
-██  ██  ██████  ██████
-██  ██  ██  ██  ██  ██
-██████  ██  ██  ██  ██
-```
+# ORA
 
 ORA is a high-performance, low-latency TUI (Terminal User Interface) voice agent powered by the Gemini 2.0 Multimodal Live API. It enables autonomous research through real-time voice interaction.
 
@@ -32,7 +28,7 @@ ORA is a high-performance, low-latency TUI (Terminal User Interface) voice agent
     ```
     _Note: Ensure you have `GEMINI_API_KEY` set in your environment or a `.env` file in the root._
 
-## âŒ¨ï¸ Controls
+## ⌨️ Controls
 
 - **[^M]**: Toggle mute.
 - **[^R]**: Reset session.
