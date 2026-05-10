@@ -36,6 +36,3 @@ Thumbs.db
 
 # Project specific
 old/
-node_modules/
-package-lock.json
-*.tsbuildinfo
