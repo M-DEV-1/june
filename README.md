@@ -1,5 +1,13 @@
 # ORA
 
+```text
+██████  ██████  ██████
+██  ██  ██  ██  ██  ██
+██  ██  ██████  ██████
+██  ██  ██  ██  ██  ██
+██████  ██  ██  ██  ██
+```
+
 ORA is a high-performance, low-latency TUI (Terminal User Interface) voice agent powered by the Gemini 2.0 Multimodal Live API. It enables autonomous research through real-time voice interaction.
 
 ## Key Features
