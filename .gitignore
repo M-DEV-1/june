@@ -1,6 +1,41 @@
+# Binaries
+bin/
 dist/
-node_modules/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test coverage
+*.out
+*.test
+*.prof
+
+# Environment variables
 .env
-*.tsbuildinfo
-ora_full_ui.html
+.env.local
+
+# Dependency directories
+vendor/
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+old/
+node_modules/
 package-lock.json
+*.tsbuildinfo
