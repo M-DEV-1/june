@@ -93,9 +93,14 @@ func (s *Store) ensureUser(username string) (int64, error) {
 	return id, err
 }
 
-// methods over struct Store
+// logs current user activity
 func (s *Store) LogActivity(ctx context.Context, app, title string) error {
-	return ctx.Err()
+	// temporary app + title placeholder
+
+	content := fmt.Sprintf("%s | %s", app, title)
+	_, err := s.db.ExecContext(ctx, "INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)", s.currentParentID, "activity", content)
+
+	return err
 }
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
