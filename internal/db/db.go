@@ -4,13 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite" // blank import
 )
 
 // store to hold db conn
 type Store struct {
-	db *sql.DB
+	db              *sql.DB
+	currentParentID int64 // bookmark
 }
 
 // constructor, return pointer to struct and err
@@ -31,7 +33,28 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{db: db}, err
+	userID, err := s.ensureUser("default_user") // make this configurable to system user
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure user: %w", err)
+	}
+
+	today := time.Now().Format("2006-01-02") // YYYY-MM-DD
+	var dayID int64
+
+	err = s.db.QueryRow("SELECT id FROM nodes WHERE type = 'day' AND content = ? AND parent_id = ?", today, userID).Scan(&dayID)
+	if err == sql.ErrNoRows {
+		res, insertErr := s.db.Exec("INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)", userID, "day", today)
+		if insertErr != nil {
+			return nil, fmt.Errorf("failed to insert day node: %w", insertErr)
+		}
+		dayID, _ = res.LastInsertId()
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to query for day node: %w", err)
+	}
+
+	s.currentParentID = dayID
+
+	return s, nil
 }
 
 func (s *Store) createSchema() error {
@@ -49,6 +72,27 @@ func (s *Store) createSchema() error {
 	return err
 }
 
+// get or create
+func (s *Store) ensureUser(username string) (int64, error) {
+	var id int64
+
+	// get user id
+	err := s.db.QueryRow("SELECT id FROM nodes WHERE type = 'user' AND content = ?", username).Scan(&id)
+
+	// create user if not found, return created user id
+	if err == sql.ErrNoRows {
+		fmt.Println("Existing user not found, initializing new user...")
+		res, err := s.db.Exec("INSERT INTO nodes (type, content) VALUES (?, ?)", "user", username)
+		if err != nil {
+			return 0, err
+		}
+		return res.LastInsertId()
+		// returns both id and err
+	}
+
+	return id, err
+}
+
 // methods over struct Store
 func (s *Store) LogActivity(ctx context.Context, app, title string) error {
 	return ctx.Err()
@@ -59,5 +103,5 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 }
 
 func (s *Store) Close() error {
-	return nil
+	return s.db.Close()
 }
