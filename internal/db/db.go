@@ -98,13 +98,58 @@ func (s *Store) LogActivity(ctx context.Context, app, title string) error {
 	// temporary app + title placeholder
 
 	content := fmt.Sprintf("%s | %s", app, title)
-	_, err := s.db.ExecContext(ctx, "INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)", s.currentParentID, "activity", content)
+	query := `INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
+	_, err := s.db.ExecContext(ctx, query, s.currentParentID, "activity", content)
 
 	return err
 }
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
-	return []string{"mock context"}, nil
+	// recursive common table expression, kind of like a while loop
+	// bottom to top search of db, flips it around for readability in the end
+	query := `WITH RECURSIVE branch AS (
+
+		-- most recent activity
+		SELECT id, parent_id, type, content 
+		FROM nodes 
+		WHERE id = (SELECT MAX(id) FROM nodes)
+
+		UNION ALL	
+
+		-- recursively join to parent
+		SELECT n.id, n.parent_id, n.type, n.content 
+		FROM nodes n
+		JOIN branch b ON n.id = b.parent_id
+	)
+	-- select in ascending order
+	SELECT type, content FROM branch ORDER BY id ASC`
+
+	rows, err := s.db.QueryContext(ctx, query)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to query context: %w", err)
+	}
+
+	defer rows.Close()
+
+	var branch []string
+
+	for rows.Next() {
+		var nodeType, content string
+
+		if err := rows.Scan(&nodeType, &content); err != nil {
+			return nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		nodeString := fmt.Sprintf("[%s] %s", nodeType, content)
+		branch = append(branch, nodeString)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	return branch, nil
 }
 
 func (s *Store) Close() error {
