@@ -1,5 +1,7 @@
 package db_test
 
+// tests are first class citizens
+
 import (
 	"context"
 	"ora/internal/db"
