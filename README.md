@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./docs/images/logo.png" width="600" alt="ORA Logo">
 
-# ORA\_
+# ORA
 
 Ora is a thin, Go-native OS companion. It monitors your workspace activity locally and provides instant, voice-first assistance.
 
