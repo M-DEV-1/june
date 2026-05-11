@@ -17,6 +17,7 @@ type Store struct {
 
 // constructor, return pointer to struct and err
 func New(path string) (*Store, error) {
+	// write-ahead logging (multi tasking)
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)" // data source name
 	db, err := sql.Open("sqlite", dsn)
 
@@ -33,26 +34,28 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 
-	userID, err := s.ensureUser("default_user") // make this configurable to system user
+	// USER --> DAY --> SESSION --> ACTIVITY
+	// check for user node
+	userID, err := s.ensureNode(0, "user", "default_user") // make this configurable to system user
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure user: %w", err)
 	}
 
+	// check for day node
 	today := time.Now().Format("2006-01-02") // YYYY-MM-DD
-	var dayID int64
-
-	err = s.db.QueryRow("SELECT id FROM nodes WHERE type = 'day' AND content = ? AND parent_id = ?", today, userID).Scan(&dayID)
-	if err == sql.ErrNoRows {
-		res, insertErr := s.db.Exec("INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)", userID, "day", today)
-		if insertErr != nil {
-			return nil, fmt.Errorf("failed to insert day node: %w", insertErr)
-		}
-		dayID, _ = res.LastInsertId()
-	} else if err != nil {
-		return nil, fmt.Errorf("failed to query for day node: %w", err)
+	dayID, err := s.ensureNode(userID, "day", today)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure day: %w", err)
 	}
 
-	s.currentParentID = dayID
+	// check for session node
+	sessionID, err := s.ensureNode(dayID, "session", "Active Session")
+	// TODO: semantic session naming
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure session: %w", err)
+	}
+
+	s.currentParentID = sessionID // bookmark
 
 	return s, nil
 }
@@ -68,29 +71,50 @@ func (s *Store) createSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_parent_id ON nodes(parent_id);
 	`
+	// db struc: USER --> DAY --> SESSION --> ACTIVITY
+	// TODO: salience score to prioritize important activities and not track menial activities
+	// i.e. what do we choose to remember
 	_, err := s.db.Exec(query)
 	return err
 }
 
 // get or create
-func (s *Store) ensureUser(username string) (int64, error) {
+func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, error) {
 	var id int64
+	var err error
 
-	// get user id
-	err := s.db.QueryRow("SELECT id FROM nodes WHERE type = 'user' AND content = ?", username).Scan(&id)
-
-	// create user if not found, return created user id
-	if err == sql.ErrNoRows {
-		fmt.Println("Existing user not found, initializing new user...")
-		res, err := s.db.Exec("INSERT INTO nodes (type, content) VALUES (?, ?)", "user", username)
-		if err != nil {
-			return 0, err
-		}
-		return res.LastInsertId()
-		// returns both id and err
+	if parentID == 0 {
+		// ROOT, i.e. user
+		query := `SELECT id FROM nodes WHERE parent_id IS NULL AND type = ? AND content = ?`
+		err = s.db.QueryRow(query, nodeType, content).Scan(&id)
+	} else {
+		// CHILD, i.e. day, session or activity
+		query := `SELECT id FROM nodes WHERE parent_id = ? AND type = ? AND content = ?`
+		err = s.db.QueryRow(query, parentID, nodeType, content).Scan(&id)
 	}
 
-	return id, err
+	if err == sql.ErrNoRows {
+		var res sql.Result
+		var insertErr error
+		if parentID == 0 {
+			fmt.Println("Existing user not found, intializing new user...")
+			query := `INSERT INTO nodes (parent_id, type, content) VALUES (0, ?, ?) `
+			res, insertErr = s.db.Exec(query, nodeType, content)
+		} else {
+			query := `INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
+			res, insertErr = s.db.Exec(query, parentID, nodeType, content)
+		}
+
+		if insertErr != nil {
+			return 0, fmt.Errorf("failed to ensure %s node: %w", nodeType, insertErr)
+		}
+
+		id, _ = res.LastInsertId()
+	} else if err != nil {
+		return 0, err
+	}
+
+	return id, nil
 }
 
 // logs current user activity
