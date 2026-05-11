@@ -20,7 +20,7 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 	defer store.Close()
 
 	// 2. be able to log an activity with normalization
-	err = store.LogActivity(ctx, "Antigravity", "main.go - ora")
+	err = store.LogActivity(ctx, "VSCode", "main.go - ora")
 	if err != nil {
 		t.Errorf("Failed to log activity: %v", err)
 	}
