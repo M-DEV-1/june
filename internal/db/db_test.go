@@ -15,7 +15,7 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 	// 1. be able to create new store in memory for testing
 	store, err := db.New(":memory:")
 	if err != nil {
-		t.Fatalf("Failed to create store :%v", err)
+		t.Fatalf("Failed to create store : %v", err)
 	}
 	defer store.Close()
 
