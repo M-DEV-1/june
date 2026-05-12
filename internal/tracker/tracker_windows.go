@@ -57,10 +57,10 @@ func (w *winTracker) GetActiveWindow() (*Activity, error) {
 	// 0x1000 - windows constant for PROCESS_QUERY_LIMITED_INFORMATION
 	// returns 0 for access denied
 	hProcess, _, _ := procOpenProcess.Call(0x1000, 0, uintptr(pid))
-	defer procCloseHandle.Call(hProcess)
 
 	app := "Unknown" // safe init
 	if hProcess != 0 {
+		defer procCloseHandle.Call(hProcess)
 		appBuf := make([]uint16, 1024)
 		size := uint32(len(appBuf))
 		// hProcess, dwFlags (0 for win32 path) lpExeName, lpdwSize
