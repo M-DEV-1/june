@@ -13,6 +13,10 @@ type Daemon struct {
 }
 
 func NewDaemon(eye Tracker, interval time.Duration, eventChan chan Activity) *Daemon {
+	if interval <= 0 {
+		interval = 2 * time.Second // default polling
+	}
+
 	return &Daemon{eye, interval, eventChan}
 }
 
@@ -20,8 +24,8 @@ func (d *Daemon) Start(ctx context.Context) {
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
 
-	// short term mem
-	var lastTitle string
+	// short term mem (empty at first)
+	var lastActivity *Activity
 
 	for {
 		select {
@@ -34,11 +38,14 @@ func (d *Daemon) Start(ctx context.Context) {
 				continue
 			}
 
-			// starts with ""
 			// updates at every logged window change
-			if activity.Title != lastTitle {
-				lastTitle = activity.Title
-				d.eventChan <- *activity
+			if lastActivity == nil || activity.App != lastActivity.App || activity.Title != lastActivity.Title {
+				lastActivity = activity
+				select {
+				case d.eventChan <- *activity: // successfully pushed
+				case <-ctx.Done():
+					return // user exit + pipe full // safe exit
+				}
 			}
 		}
 	}
