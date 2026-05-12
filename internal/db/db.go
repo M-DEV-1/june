@@ -97,8 +97,8 @@ func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, err
 		var res sql.Result
 		var insertErr error
 		if parentID == 0 {
-			fmt.Println("Existing user not found, intializing new user...")
-			query := `INSERT INTO nodes (parent_id, type, content) VALUES (0, ?, ?) `
+			// fmt.Println("Existing user not found, intializing new user...")
+			query := `INSERT INTO nodes (type, content) VALUES (?, ?)`
 			res, insertErr = s.db.Exec(query, nodeType, content)
 		} else {
 			query := `INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
@@ -109,7 +109,11 @@ func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, err
 			return 0, fmt.Errorf("failed to ensure %s node: %w", nodeType, insertErr)
 		}
 
-		id, _ = res.LastInsertId()
+		id, err = res.LastInsertId()
+
+		if err != nil {
+			return 0, fmt.Errorf("failed to get last insert id: %w", err)
+		}
 	} else if err != nil {
 		return 0, err
 	}
@@ -136,8 +140,10 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 		-- most recent activity
 		SELECT id, parent_id, type, content 
 		FROM nodes 
-		WHERE id = (SELECT MAX(id) FROM nodes)
-
+		WHERE id = (
+			SELECT MAX(id) FROM nodes
+			WHERE type = 'activity' AND parent_id = ?
+		)
 		UNION ALL	
 
 		-- recursively join to parent
@@ -148,7 +154,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	-- select in ascending order
 	SELECT type, content FROM branch ORDER BY id ASC`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query, s.currentParentID)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to query context: %w", err)

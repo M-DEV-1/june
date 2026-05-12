@@ -1,3 +1,5 @@
+//go:build windows
+
 package tracker_test
 
 import (
@@ -12,17 +14,17 @@ import (
 func TestTracker_GetActiveWindow(t *testing.T) {
 	eye, err := tracker.New()
 	if err != nil {
-		t.Fatalf("Failed to initialize tracker: %v", err)
+		t.Fatalf("Failed to initialize tracker: %+v", err)
 	}
 
-	app, title, err := eye.GetActiveWindow() // TODO: improve the capturing mechanism
+	activity, err := eye.GetActiveWindow() // TODO: improve the capturing mechanism
 	if err != nil {
-		t.Fatalf("Failed to capture active window: %v", err)
+		t.Fatalf("Failed to capture active window: %+v", err)
 	}
 
-	if app == "" || title == "" {
+	if activity.App == "" || activity.Title == "" {
 		t.Error("Expected app and title to not be empty")
 	}
 
-	t.Logf("Successfully capture window. App: %s | Title: %s", app, title)
+	t.Logf("Successfully capture window. App: %s | Title: %s", activity.App, activity.Title)
 }
