@@ -33,13 +33,16 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 	}
 
 	// 4. we verify the tree structure
-	if len(branch) < 3 {
-		t.Fatalf("Expected at least 3 nodes (User, Day, Activity), got %d: %+v", len(branch), branch)
+	if len(branch) < 4 {
+		t.Fatalf("Expected at least 4 nodes (User, Day, Session, Activity), got %d: %+v", len(branch), branch)
 	}
 
 	// check nodes ordering, expected ROOT to LEAF
 	if !strings.Contains(branch[0], "default_user") {
 		t.Errorf("Expected root node to contain user, got: %s", branch[0])
+	}
+	if !strings.Contains(branch[2], "session") {
+		t.Errorf("Expected leaf node to contain a session, got %s", branch[2])
 	}
 	if !strings.Contains(branch[len(branch)-1], "VSCode") {
 		t.Errorf("Expected leaf node to contain activity, got %s", branch[len(branch)-1])
