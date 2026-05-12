@@ -16,20 +16,20 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 	// 1. be able to create new store in memory for testing
 	store, err := db.New(":memory:")
 	if err != nil {
-		t.Fatalf("Failed to create store : %v", err)
+		t.Fatalf("Failed to create store : %+v", err)
 	}
 	defer store.Close()
 
 	// 2. be able to log an activity with normalization
 	err = store.LogActivity(ctx, "VSCode", "main.go - ora")
 	if err != nil {
-		t.Errorf("Failed to log activity: %v", err)
+		t.Errorf("Failed to log activity: %+v", err)
 	}
 
 	// 3. we want to get context back
 	branch, err := store.GetImplicitContext(ctx)
 	if err != nil {
-		t.Errorf("Failed to get context: %v", err)
+		t.Errorf("Failed to get context: %+v", err)
 	}
 
 	// 4. we verify the tree structure
