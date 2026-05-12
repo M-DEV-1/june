@@ -40,15 +40,21 @@ func TestDaemon_OnlyLogOnWindowsChange(t *testing.T) {
 	go daemon.Start(ctx)
 
 	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	close(eventChan)
 
 	// verification
 	var receivedEvents []tracker.Activity
-	for ev := range eventChan {
-		receivedEvents = append(receivedEvents, ev)
+	timeout := time.After(150 * time.Millisecond)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-eventChan:
+			receivedEvents = append(receivedEvents, ev)
+		case <-timeout:
+			t.Fatalf("Test timed out waiting for events. Only got %d", len(receivedEvents))
+		}
 	}
+
+	cancel()
 
 	if len(receivedEvents) != 2 {
 		t.Fatalf("Expected 2 events, got %d: %+v", len(receivedEvents), receivedEvents)
