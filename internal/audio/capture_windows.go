@@ -19,10 +19,12 @@ func NewMic() (Microphone, error) {
 	// must initialize COM for the entire audio engine
 	// go-ole is bridge between go and msft Component Object Model 1993, universal translator of sorts
 	// new com thread
+	// com is strictly per-thread
 
 	if err := ole.CoInitialize(0); err != nil {
 		return nil, fmt.Errorf("failed to init COM: %w", err)
 	}
+	// initializes COM with a reserved param 0, does nothing. pvReversed in docs or smth
 	return &winMic{}, nil
 }
 
@@ -32,7 +34,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 
 	// first go-routine written in this codebase
 	// god bless
-	// number of hours spent here: 1
+	// number of hours spent here: 3
 	// earlier this was a 100 line goroutine, and that was hella suspicious plus it mixed hardware inits plus thread locks. rewrote with helpers.
 	go func() {
 		// com threading rules - needs to be on the same thread ofc
