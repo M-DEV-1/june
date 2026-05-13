@@ -54,6 +54,8 @@ func NewSpeaker() (Speaker, error) {
 
 func (p *otoPlayer) Play(pcm []byte) error {
 	// drop the audio chunk here, and read() should pick it up
+	// the backpressure is required in streaming media. natural backpressure forces the llm to wait for real time playback?
+	// i think im right but i'll see? update:
 	p.streamer.chunks <- pcm
 	return nil
 }
