@@ -31,6 +31,9 @@ func NewMic() (Microphone, error) {
 func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 
 	micChan := make(chan []byte, 100)
+	// we are forced to init hardware inside goroutine bcz com is per-thread
+	// 1 slot error channel that we ill use to return error to main thread
+	startupErr := make(chan error, 1)
 
 	// first go-routine written in this codebase
 	// god bless
@@ -42,6 +45,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 		defer runtime.UnlockOSThread()
 
 		if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+			startupErr <- err
 			close(micChan)
 			return
 		}
@@ -51,7 +55,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 		// ac - audioclient, acc - audiocaptureclient
 		ac, acc, err := setupAudioHardware()
 		if err != nil {
-			fmt.Printf("Hardware setup failed: %v\n", err)
+			startupErr <- fmt.Errorf("Hardware setup failed: %w\n", err)
 			close(micChan)
 			return
 		}
@@ -59,6 +63,9 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 		defer acc.Release()
 		defer ac.Stop()
 		defer close(micChan)
+
+		// signalling success to main thread
+		startupErr <- nil
 
 		// inf read loop
 		// inf seemed dangerous at first because i'm playing with threads here
@@ -78,9 +85,11 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 					continue
 				}
 
+				var pcm []byte
+
 				if frames > 0 {
 					floatData := unsafe.Slice((*float32)(unsafe.Pointer(data)), frames)
-					pcm := make([]byte, frames*2)
+					pcm = make([]byte, frames*2)
 
 					for i := 0; i < int(frames); i++ {
 						val := float32ToInt16(floatData[i])
@@ -88,16 +97,22 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 						pcm[i*2+1] = byte(val >> 8)
 					}
 
+					// releasing gives memory back to soundcard before we block further audio
+					acc.ReleaseBuffer(frames)
 					select {
 					case micChan <- pcm:
 					case <-ctx.Done():
 						return
 					}
 				}
-				acc.ReleaseBuffer(frames)
 			}
 		}
 	}()
+
+	err := <-startupErr
+	if err != nil {
+		return nil, err // at least now we are passing the exact hardware error back into caller
+	}
 
 	return micChan, nil
 }
