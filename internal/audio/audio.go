@@ -1,16 +1,13 @@
 package audio
 
-import "context"
-
-// embedded interface
-type Engine interface {
-	// release all hardware occupied resources
-	Close() error
-}
+import (
+	"context"
+	"io"
+)
 
 type Microphone interface {
-	Engine
-
+	io.Closer
+	// this is what i expect the audio behavior to be
 	// open mic and return a channel of 16-bit PCM chunks
 	// pulse code modulation is the raw format for sound, uncompressed + zero lag
 	// 16-bit is the bit depth/quality, chunks are 20ms to 100ms long
@@ -20,7 +17,7 @@ type Microphone interface {
 }
 
 type Speaker interface {
-	Engine
+	io.Closer
 	// play audio output through speaker
 	Play(pcm []byte) error
 }
