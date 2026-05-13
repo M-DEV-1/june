@@ -9,17 +9,21 @@ import (
 
 func TestAudioEngine_BidiFlow(t *testing.T) {
 	// init os-specific internally so we will have seperate _windows, _linux files
-	engine, err := audio.NewEngine()
-	if err != nil {
-		t.Fatalf("Failed to init audio engine: %v", err)
+	mic, micErr := audio.NewMic()
+	speaker, speakerErr := audio.NewSpeaker()
+	if micErr != nil {
+		t.Fatalf("Failed to init microphone: %v", micErr)
 	}
-	defer engine.Close()
+	if speakerErr != nil {
+		t.Fatalf("Failed to init speaker: %v", speakerErr)
+	}
+	defer mic.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	// start mic capture
-	micChan, err := engine.StartCapture(ctx)
+	micChan, err := mic.StartCapture(ctx)
 	if err != nil {
 		t.Fatalf("Failed to start audio capture: %v", err)
 	}
@@ -33,7 +37,7 @@ func TestAudioEngine_BidiFlow(t *testing.T) {
 		bytesCaptured += len(pcm)
 
 		// play back the echo
-		err = engine.Play(pcm)
+		err = speaker.Play(pcm)
 		if err != nil {
 			t.Errorf("failed to play audio: %v", err)
 		}
