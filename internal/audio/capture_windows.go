@@ -21,9 +21,9 @@ func NewMic() (Microphone, error) {
 	// new com thread
 	// com is strictly per-thread
 
-	if err := ole.CoInitialize(0); err != nil {
-		return nil, fmt.Errorf("failed to init COM: %w", err)
-	}
+	// if err := ole.CoInitialize(0); err != nil {
+	// 	return nil, fmt.Errorf("failed to init COM: %w", err)
+	// }
 	// initializes COM with a reserved param 0, does nothing. pvReversed in docs or smth
 	return &winMic{}, nil
 }
@@ -120,7 +120,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 }
 
 func (m *winMic) Close() error {
-	ole.CoUninitialize()
+	// ole.CoUninitialize()
 	return nil
 }
 
