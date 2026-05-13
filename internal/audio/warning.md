@@ -12,4 +12,4 @@ I will eventually try to improve this, as and when time permits
 
 Well, TDD saved my life with go, I think. and the time I spent reading about audio pipelines for the Gemini Live API working? That too.s
 
-Either way, here's a proactive count of hours wasted on this module in total: 4
+Either way, here's a proactive count of hours wasted on this module in total: 6
