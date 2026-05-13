@@ -25,7 +25,11 @@ func TestMicrophone_Capture(t *testing.T) {
 	var bytesCaptured int
 	for {
 		select {
-		case pcm := <-micChan:
+		// if channel is closed early it'll continue to receive zero len slices therefore now executes goto if not ok
+		case pcm, ok := <-micChan:
+			if !ok {
+				goto Verify
+			}
 			bytesCaptured += len(pcm)
 		case <-ctx.Done():
 			goto Verify
@@ -41,6 +45,8 @@ Verify:
 }
 
 // FLAKY TEST
+// REQUIRES A REAL OUTPUT DEVICE, INTEGRATION TEST ONLY
+// DO NOT EXECUTE IN CI, use testing.Short and skip in CI
 func TestSpeaker_Playing(t *testing.T) {
 	speaker, err := audio.NewSpeaker()
 	if err != nil {
