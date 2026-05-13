@@ -7,7 +7,7 @@ import (
 	"github.com/ebitengine/oto/v3"
 )
 
-// number of hours spent here: 2
+// number of hours spent here: 4
 
 type otoPlayer struct {
 	ctx *oto.Context
@@ -15,9 +15,8 @@ type otoPlayer struct {
 	// we store WCA handles here if later needed for cleanup
 
 	// Windows Core Audio 2006, lowest audio level possible, allows contains a share mode for multi-active-window mic capturing
-	player     *oto.Player
-	pipeWriter *io.PipeWriter
-	// for continuous streaming
+	player   *oto.Player
+	streamer *audioStreamer
 }
 
 func NewSpeaker() (Speaker, error) {
@@ -31,45 +30,67 @@ func NewSpeaker() (Speaker, error) {
 		Format:       oto.FormatSignedInt16LE,
 	}
 
-	pr, pw := io.Pipe() // pipereader, pipewriter
-
-	// without priming, or init, this will hang indefinitely because io.Pipe is synchronous and oto will wait for someone to call Write()
-
 	ctx, readyChan, err := oto.NewContext(op)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init oto context: %w", err)
 	}
 	<-readyChan
 
-	// usually lazy inits are better for this but using channels is better because real time audio can't wait for init (priming)
-	go func() {
-		pw.Write(make([]byte, 4096)) // 4kb silence
-	}()
+	// here we will create streamer with a buffered channel (upto 100 chunks)
+	streamer := &audioStreamer{
+		chunks: make(chan []byte, 100),
+	}
 
-	player := ctx.NewPlayer(pr) // greedily trying to read first buffer of audio from pipe
-	// oto will look for data here, and eat the instantiated silence, and return immediately
+	// now we give it to oto and start it
+	player := ctx.NewPlayer(streamer) // this is extremely greedy, so initially eats silence
 	player.Play()
 
 	return &otoPlayer{
-		ctx:        ctx,
-		player:     player,
-		pipeWriter: pw,
+		ctx:      ctx,
+		player:   player,
+		streamer: streamer,
 	}, nil
 }
 
 func (p *otoPlayer) Play(pcm []byte) error {
-	go func() {
-		p.pipeWriter.Write(pcm)
-	}()
-	// this blocks naturally as log as needed to make room in the pipe
-	// offloaded to a bg thread, because without it caused frezing agent loop
+	// drop the audio chunk here, and read() should pick it up
+	p.streamer.chunks <- pcm
 	return nil
 }
 
 func (p *otoPlayer) Close() error {
-	// no specific context cleanup required, just to satisfy og struct
-	// idk, while oto doesn't require the cleanup anymore, I think it's still beneficial to maintain this pattern, just in case I change stuff later (i did need it apparently)
-
-	p.pipeWriter.Close() // EOF signal to oto.Player
+	// closing the channel here makes it so that Read() knows to return io.EOF
+	close(p.streamer.chunks)
 	return nil
+}
+
+type audioStreamer struct {
+	chunks chan []byte
+	buffer []byte
+}
+
+func (s *audioStreamer) Read(p []byte) (n int, err error) {
+	// if no current audio, check channel
+	if len(s.buffer) == 0 {
+		select {
+		case chunk, ok := <-s.chunks:
+			if !ok {
+				return 0, io.EOF // close the channel + end of stream
+			}
+			s.buffer = chunk
+		default:
+			// this should run when no audio is ready
+			// returning silence for some time so that hardware doesn't deadlock
+			for i := range p {
+				p[i] = 0
+			}
+			return len(p), nil
+		}
+	}
+
+	// copy real audio (recoreded) into the destination buffer
+
+	n = copy(p, s.buffer)
+	s.buffer = s.buffer[n:]
+	return n, nil
 }

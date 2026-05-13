@@ -48,7 +48,7 @@ func TestSpeaker_Playing(t *testing.T) {
 	}
 	defer speaker.Close()
 
-	// TODO: find ways to improve this test by actually playing smth maybe
+	// TODO: find ways to improve this test by actually playing smth maybe, first step is a Sine Wave or smth. Eventually maybe "test audio" or smth
 
 	// simulating dummy audio streaming
 	dummyChunk := make([]byte, 1024) // 1kb of silence
