@@ -104,6 +104,8 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 					case <-ctx.Done():
 						return
 					}
+				} else {
+					acc.ReleaseBuffer(0)
 				}
 			}
 		}
