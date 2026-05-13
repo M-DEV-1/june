@@ -7,47 +7,59 @@ import (
 	"time"
 )
 
-func TestAudioEngine_BidiFlow(t *testing.T) {
-	// init os-specific internally so we will have seperate _windows, _linux files
-	mic, micErr := audio.NewMic()
-	speaker, speakerErr := audio.NewSpeaker()
-	if micErr != nil {
-		t.Fatalf("Failed to init microphone: %v", micErr)
-	}
-	if speakerErr != nil {
-		t.Fatalf("Failed to init speaker: %v", speakerErr)
+func TestMicrophone_Capture(t *testing.T) {
+	mic, err := audio.NewMic()
+	if err != nil {
+		t.Fatalf("Failed to init mic: %+v", err)
 	}
 	defer mic.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	// start mic capture
 	micChan, err := mic.StartCapture(ctx)
 	if err != nil {
-		t.Fatalf("Failed to start audio capture: %v", err)
+		t.Fatalf("Failed to start capture: %+v", err)
 	}
 
-	// we need to verify that we receive data then play it back as echo test
 	var bytesCaptured int
-
-	// we be waiting for first audio chunk
-	select {
-	case pcm := <-micChan:
-		bytesCaptured += len(pcm)
-
-		// play back the echo
-		err = speaker.Play(pcm)
-		if err != nil {
-			t.Errorf("failed to play audio: %v", err)
+	for {
+		select {
+		case pcm := <-micChan:
+			bytesCaptured += len(pcm)
+		case <-ctx.Done():
+			goto Verify
 		}
-	case <-ctx.Done():
-		t.Fatal("Timed out waiting for microphone data")
 	}
 
+Verify:
 	if bytesCaptured == 0 {
 		t.Error("Expected to capture audio bytes, got 0")
 	} else {
-		t.Logf("Successfully captured and echoed %d bytes of PCM audio", bytesCaptured)
+		t.Logf("Microphone captured %d bytes", bytesCaptured)
 	}
+}
+
+// FLAKY TEST
+func TestSpeaker_Playing(t *testing.T) {
+	speaker, err := audio.NewSpeaker()
+	if err != nil {
+		t.Fatalf("Failed to init speaker: %+v", err)
+	}
+	defer speaker.Close()
+
+	// TODO: find ways to improve this test by actually playing smth maybe
+
+	// simulating dummy audio streaming
+	dummyChunk := make([]byte, 1024) // 1kb of silence
+
+	// 3 chunks of silence
+	for i := 0; i < 3; i++ {
+		err := speaker.Play(dummyChunk)
+		if err != nil {
+			t.Fatalf("Failed to play chunk %d: %+v", i, err)
+		}
+	}
+
+	t.Log("Speaker successfully processed streaming chunks")
 }
