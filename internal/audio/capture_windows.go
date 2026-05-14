@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -13,7 +14,11 @@ import (
 	"github.com/moutend/go-wca/pkg/wca"
 	"go.opentelemetry.io/otel"
 )
-
+type winMic struct {
+	mu          sync.Mutex
+	isCapturing bool
+	cancel      context.CancelFunc
+}
 type winMic struct{}
 
 func NewMic() (Microphone, error) {
@@ -30,6 +35,19 @@ func NewMic() (Microphone, error) {
 }
 
 func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
+	// wasapi windows audio sys
+	// this is very picky, prone to crashing or zombie threads in subsequent repeated calls (from what i read), hence the mutex
+	m.mu.Lock()
+	if m.isCapturing {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("microphone is already capturing")
+	}
+	m.isCapturing = true
+	m.mu.Unlock()
+
+	// cancellable context allows us to stop goroutine with close()
+	ctx, m.cancel = context.WithCancel(ctx)
+
 	tracer := otel.Tracer("ora.audio")
 	setupCtx, span := tracer.Start(ctx, "Mic.StartCaptureSetup")
 
@@ -125,6 +143,13 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 
 func (m *winMic) Close() error {
 	// ole.CoUninitialize()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.isCapturing = false
+
+	if m.cancel != nil {
+		m.cancel()
+	}
 	return nil
 }
 
