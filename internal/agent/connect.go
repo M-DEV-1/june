@@ -143,6 +143,10 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 			recvSpan.RecordError(err)
 			recvSpan.SetStatus(codes.Error, "receive failed")
 			errChan <- fmt.Errorf("receive loop error: %w", err)
+			select {
+			case a.ErrorChan <- err:
+			default:
+			}
 			return
 		}
 
@@ -189,6 +193,14 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 				toolSpan.SetAttributes(attribute.String("tool.name", fc.Name))
 
 				result := a.executeTool(fc.Name, fc.Args)
+
+				// Safety
+				// truncate massive results to prevent 1011 crash
+				if len(result) > 10000 {
+					result = result[:10000] + "\n\n[Output Truncated: Result too large for Live context]"
+					slog.Warn("tool result truncated", "tool", fc.Name, "length", len(result))
+				}
+
 				slog.Info("tool result", "tool", fc.Name, "result", result)
 
 				// send result back to model with matching ID
@@ -227,6 +239,10 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 				sendSpan.RecordError(err)
 				sendSpan.SetStatus(codes.Error, "send failed")
 				errChan <- fmt.Errorf("failed to send audio: %w", err)
+				select {
+				case a.ErrorChan <- err:
+				default:
+				}
 				return
 			}
 		case <-sendCtx.Done():
