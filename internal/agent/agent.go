@@ -20,6 +20,18 @@ type Agent struct {
 }
 
 // initializer and orchestrates all hardware (2) and memory (1) moduels
+func (a *Agent) GetMic() audio.Microphone {
+	return a.mic
+}
+
+func (a *Agent) GetSpeaker() audio.Speaker {
+	return a.speaker
+}
+
+func (a *Agent) GetBrain() ContextReader {
+	return a.brain
+}
+
 func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, apiKey string) *Agent {
 	return &Agent{
 		mic:              mic,
