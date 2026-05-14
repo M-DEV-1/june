@@ -9,7 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel"
+	"ora/internal/obs"
+
 	"go.opentelemetry.io/otel/attribute"
 	_ "modernc.org/sqlite" // blank import
 )
@@ -130,7 +131,7 @@ func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, err
 
 // logs current user activity
 func (s *Store) LogActivity(ctx context.Context, app, title string) error {
-	tracer := otel.Tracer("ora-db.db")
+	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "LogActivity")
 	defer span.End()
 
@@ -157,7 +158,7 @@ func (s *Store) LogActivity(ctx context.Context, app, title string) error {
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	// init tracer to db module
-	tracer := otel.Tracer("ora-db.db")
+	tracer := obs.GetTracer(ctx, "ora.db")
 
 	// starts the span, and will inherit a trace id from context
 	ctx, span := tracer.Start(ctx, "GetImplicitContext")
