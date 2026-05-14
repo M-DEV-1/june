@@ -30,7 +30,7 @@ var rootCmd = &cobra.Command{
 		// globally load the .env
 		// take user input for API key
 		if err := godotenv.Load(); err != nil {
-			fmt.Println("No .env file found, read from sys env")
+			slog.Info("No .env file found, read from sys env")
 		}
 		// global context that listens for sigint
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
