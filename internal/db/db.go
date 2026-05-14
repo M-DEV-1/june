@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite" // blank import
@@ -19,6 +21,16 @@ type Store struct {
 func New(path string) (*Store, error) {
 	// write-ahead logging (multi tasking)
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)" // data source name
+	// filenames multi-os needs to be managed
+
+	if path != ":memory:" {
+		dir := filepath.Dir(path)
+
+		// 0755 is octal for 755 chmod with owner 421 full access, group 401 read and enter only, others 401
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create directory: %w", err)
+		}
+	}
 	db, err := sql.Open("sqlite", dsn)
 
 	if err != nil {

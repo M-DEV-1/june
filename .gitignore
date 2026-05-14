@@ -27,6 +27,7 @@ vendor/
 .Trashes
 ehthumbs.db
 Thumbs.db
+*ora-db
 
 # IDE settings
 .vscode/
