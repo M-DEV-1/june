@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"ora/internal/audio"
 	"strings"
 
@@ -60,7 +61,7 @@ func (a *Agent) Connect(ctx context.Context) error {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to fetch context")
-		fmt.Printf("context fetch failed?: %v\nContinuing..", err)
+		slog.Warn("context fetch failed, continuing without history", "error", err)
 	}
 
 	var contextParts []string
@@ -91,11 +92,11 @@ func (a *Agent) Connect(ctx context.Context) error {
 		},
 	}
 
-	fmt.Println("[DEBUG] connecting to live API...")
+	slog.Debug("connecting to live API")
 
 	session, err := client.Live.Connect(handshakeCtx, model, config)
 
-	fmt.Println("[DEBUG] connected!", err)
+	slog.Debug("connected to Live API", "error", err)
 	if err != nil {
 		span.RecordError(err)
 		span.End()
@@ -116,7 +117,7 @@ func (a *Agent) Connect(ctx context.Context) error {
 	})
 	if err != nil {
 		span.RecordError(err)
-		fmt.Printf("[SEND] failed to send initial client turn: %v\n", err)
+		slog.Error("failed to send initial client turn", "error", err)
 	}
 
 	// Handshake complete, end span
@@ -149,7 +150,7 @@ func (a *Agent) Connect(ctx context.Context) error {
 				_, turnSpan := tracer.Start(ctx, "Agent.ModelTurn")
 				for _, part := range msg.ServerContent.ModelTurn.Parts {
 					if part.Text != "" {
-						fmt.Printf("\n[ORA]: %s\n", part.Text)
+						slog.Info("ora response", "text", part.Text)
 
 						turnSpan.SetAttributes(
 							attribute.String("llm.model_name", model),
