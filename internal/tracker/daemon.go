@@ -51,9 +51,10 @@ func (d *Daemon) Start(ctx context.Context) {
 			}
 
 			// updates at every logged window change or 10 min heartbeat
-			if lastActivity == nil || activity.App != lastActivity.App || activity.Title != lastActivity.Title || time.Since(lastEmitTime) > 10*time.Minute {
+			changed := lastActivity != nil && (activity.App != lastActivity.App || activity.Title != lastActivity.Title)
+			if lastActivity == nil || changed || time.Since(lastEmitTime) > 10*time.Minute {
 				span.SetAttributes(
-					attribute.Bool("tracker.changed", activity.App != lastActivity.App || activity.Title != lastActivity.Title),
+					attribute.Bool("tracker.changed", changed),
 					attribute.String("tracker.app", activity.App),
 				)
 				lastActivity = activity
