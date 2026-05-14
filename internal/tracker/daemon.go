@@ -5,7 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"go.opentelemetry.io/otel"
+	"ora/internal/obs"
+
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -30,7 +31,7 @@ func (d *Daemon) Start(ctx context.Context) {
 	// short term mem (empty at first)
 	var lastActivity *Activity
 	var lastEmitTime time.Time
-	tracer := otel.Tracer("ora.tracker")
+	tracer := obs.GetTracer(ctx, "ora.tracker")
 
 	for {
 		select {
