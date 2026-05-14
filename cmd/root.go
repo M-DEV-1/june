@@ -80,7 +80,7 @@ var rootCmd = &cobra.Command{
 
 		speaker, err := audio.NewSpeaker()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "fatal: could not initiaize audio pipeline speaker: %v\n", err)
+			fmt.Fprintf(os.Stderr, "fatal: could not initialize audio pipeline speaker: %v\n", err)
 			return
 		}
 		defer speaker.Close()
@@ -111,12 +111,5 @@ func Execute() {
 }
 
 func init() {
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.ora.yaml)")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
+	// Root flags can be added here
 }
