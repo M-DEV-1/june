@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -44,7 +45,7 @@ func (d *Daemon) Start(ctx context.Context) {
 			activity, err := d.eye.GetActiveWindow()
 			if err != nil {
 				span.RecordError(err)
-				fmt.Printf("Couldn't get last active window: %v", err)
+				slog.Error("tracker: failed to get active window", "error", err)
 				span.End()
 				continue
 			}
