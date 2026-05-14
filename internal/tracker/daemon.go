@@ -2,7 +2,6 @@ package tracker
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -30,6 +29,7 @@ func (d *Daemon) Start(ctx context.Context) {
 
 	// short term mem (empty at first)
 	var lastActivity *Activity
+	var lastEmitTime time.Time
 	tracer := otel.Tracer("ora.tracker")
 
 	for {
@@ -50,13 +50,14 @@ func (d *Daemon) Start(ctx context.Context) {
 				continue
 			}
 
-			// updates at every logged window change
-			if lastActivity == nil || activity.App != lastActivity.App || activity.Title != lastActivity.Title {
+			// updates at every logged window change or 10 min heartbeat
+			if lastActivity == nil || activity.App != lastActivity.App || activity.Title != lastActivity.Title || time.Since(lastEmitTime) > 10*time.Minute {
 				span.SetAttributes(
-					attribute.Bool("tracker.changed", true),
+					attribute.Bool("tracker.changed", activity.App != lastActivity.App || activity.Title != lastActivity.Title),
 					attribute.String("tracker.app", activity.App),
 				)
 				lastActivity = activity
+				lastEmitTime = time.Now()
 				select {
 				case d.eventChan <- *activity: // successfully pushed
 				case <-ctx.Done():
