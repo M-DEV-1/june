@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	_ "modernc.org/sqlite" // blank import
 )
 
@@ -135,16 +137,34 @@ func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, err
 
 // logs current user activity
 func (s *Store) LogActivity(ctx context.Context, app, title string) error {
+	tracer := otel.Tracer("ora-db.db")
+	ctx, span := tracer.Start(ctx, "LogActivity")
+	defer span.End()
+
 	// temporary app + title placeholder
+	span.SetAttributes(
+		attribute.String("db.app", app),
+		attribute.String("db.window_title", title),
+	)
 
 	content := fmt.Sprintf("%s | %s", app, title)
 	query := `INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, query, s.currentParentID, "activity", content)
 
+	if err != nil {
+		span.RecordError(err)
+	}
+
 	return err
 }
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
+	// init tracer to db module
+	tracer := otel.Tracer("ora-db.db")
+
+	// starts the span, and will inherit a trace id from context
+	ctx, span := tracer.Start(ctx, "GetImplicitContext")
+	defer span.End()
 	// recursive common table expression, kind of like a while loop
 	// bottom to top search of db, flips it around for readability in the end
 	query := `WITH RECURSIVE branch AS (
@@ -191,6 +211,9 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
+	// some db specific metadata
+	// this span will return exact no of nodes returned for a specific request
+	span.SetAttributes(attribute.Int("db.node_count", len(branch)))
 	return branch, nil
 }
 
