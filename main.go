@@ -1,6 +1,8 @@
 package main
 
-import "ora/cmd"
+import (
+	"ora/cmd"
+)
 
 func main() {
 	cmd.Execute()

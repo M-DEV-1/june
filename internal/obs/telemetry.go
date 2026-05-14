@@ -12,15 +12,30 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // global slog logger, otel traceprovider init
 // returns shutdown, must defer in main.go
 func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) error, error) {
+	// we create a log file to move all otel logs
+	logDir := "ora-db"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	logFile, err := os.OpenFile(logDir+"/ora.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
+
 	// setup slog
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	// so instead of one big setup, i decided to make it seperated, also created a custom slog Handler. extracts trace, span from context for every log and injects as json
+	options := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
-	}))
+	}
+	jsonHandler := slog.NewJSONHandler(logFile, options)
+	logger := slog.New(&TraceHandler{handler: jsonHandler})
 	slog.SetDefault(logger)
 
 	if isTest {
@@ -79,3 +94,31 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 
 // apparently this is a one time setup file?
 // counter for how many times i changed this file: 0
+
+// handler struct to wrap another handler which is the basis of this tracer middleware tbh (json)
+type TraceHandler struct {
+	handler slog.Handler
+}
+
+func (h *TraceHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.handler.Enabled(ctx, level)
+}
+
+func (h *TraceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &TraceHandler{handler: h.handler.WithAttrs(attrs)}
+}
+
+func (h *TraceHandler) WithGroup(name string) slog.Handler {
+	return &TraceHandler{handler: h.handler.WithGroup(name)}
+}
+
+func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
+	span := trace.SpanFromContext(ctx)
+	if span.SpanContext().IsValid() {
+		r.AddAttrs(
+			slog.String("trace_id", span.SpanContext().TraceID().String()),
+			slog.String("span_id", span.SpanContext().SpanID().String()),
+		)
+	}
+	return h.handler.Handle(ctx, r)
+}
