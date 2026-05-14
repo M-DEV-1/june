@@ -3,11 +3,13 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"ora/internal/agent"
 	"ora/internal/audio"
 	"ora/internal/db"
 	"ora/internal/obs"
 	"ora/internal/tracker"
+	"ora/internal/ui"
 	"os"
 	"os/signal"
 	"time"
@@ -90,10 +92,18 @@ var rootCmd = &cobra.Command{
 		// inject dependencies
 		orchestrator := agent.NewAgent(mic, speaker, store, apiKey)
 
-		// start voice loop
-		fmt.Println("Starting Ora. Press Ctrl+C to stop.")
-		if err := orchestrator.Connect(ctx); err != nil {
-			fmt.Printf("Agent Crashed: %v\n", err)
+		// voice loop starts in bg
+		go func() {
+			if err := orchestrator.Connect(ctx); err != nil {
+				// if tui is running, we might not want to print to stdout directly
+				// but for now this is fine for debugging crashes
+				slog.Error("agent connection crashed", "error", err)
+			}
+		}()
+
+		// starts TUI
+		if err := ui.Run(orchestrator); err != nil {
+			fmt.Printf("UI Error: %v\n", err)
 			return
 		}
 
