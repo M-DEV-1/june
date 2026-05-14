@@ -145,7 +145,7 @@ func (s *Store) LogActivity(ctx context.Context, app, title string) error {
 	s.mu.RUnlock()
 
 	content := fmt.Sprintf("%s | %s", app, title)
-	query := `INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
+	query := `INSERT OR IGNORE INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, query, parentID, "activity", content)
 
 	if err != nil {
