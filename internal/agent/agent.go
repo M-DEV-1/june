@@ -143,10 +143,18 @@ func (a *Agent) Connect(ctx context.Context) error {
 				return
 			}
 
+			// this has very interesting spanning logic
 			if msg.ServerContent != nil && msg.ServerContent.ModelTurn != nil {
+				// creating one span which will be a child span
+				_, turnSpan := tracer.Start(ctx, "Agent.ModelTurn")
 				for _, part := range msg.ServerContent.ModelTurn.Parts {
 					if part.Text != "" {
 						fmt.Printf("\n[ORA]: %s\n", part.Text)
+
+						turnSpan.SetAttributes(
+							attribute.String("llm.model_name", model),
+							attribute.String("llm.output_messages", part.Text),
+						)
 					}
 					// if part is audio
 					if part.InlineData != nil {
@@ -154,6 +162,7 @@ func (a *Agent) Connect(ctx context.Context) error {
 						a.speaker.Play(part.InlineData.Data)
 					}
 				}
+				turnSpan.End()
 			}
 		}
 	}()
