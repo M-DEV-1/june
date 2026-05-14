@@ -6,6 +6,9 @@ import (
 	"ora/internal/audio"
 	"strings"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"google.golang.org/genai"
 )
 
@@ -32,7 +35,10 @@ func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, 
 }
 
 func (a *Agent) Connect(ctx context.Context) error {
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+	tracer := otel.Tracer("ora.agent")
+	handshakeCtx, span := tracer.Start(ctx, "Agent.ConnectHandshake")
+
+	client, err := genai.NewClient(handshakeCtx, &genai.ClientConfig{
 		APIKey:  a.apiKey,
 		Backend: genai.BackendGeminiAPI,
 		HTTPOptions: genai.HTTPOptions{
@@ -40,15 +46,20 @@ func (a *Agent) Connect(ctx context.Context) error {
 		},
 	})
 	if err != nil {
+		span.RecordError(err)
+		span.End()
 		return fmt.Errorf("failed to initialize genai client: %w", err)
 	}
 
 	// drumrolllllll
 	// connectttt to livee apiii
 	model := "models/gemini-2.5-flash-native-audio-latest"
+	span.SetAttributes(attribute.String("agent.model", model))
 
-	resp, err := a.brain.GetImplicitContext(ctx)
+	resp, err := a.brain.GetImplicitContext(handshakeCtx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to fetch context")
 		fmt.Printf("context fetch failed?: %v\nContinuing..", err)
 	}
 
@@ -82,10 +93,12 @@ func (a *Agent) Connect(ctx context.Context) error {
 
 	fmt.Println("[DEBUG] connecting to live API...")
 
-	session, err := client.Live.Connect(ctx, model, config)
+	session, err := client.Live.Connect(handshakeCtx, model, config)
 
 	fmt.Println("[DEBUG] connected!", err)
 	if err != nil {
+		span.RecordError(err)
+		span.End()
 		return fmt.Errorf("websocket handshake failed: %w", err)
 	}
 	defer session.Close()
@@ -102,12 +115,20 @@ func (a *Agent) Connect(ctx context.Context) error {
 		},
 	})
 	if err != nil {
+		span.RecordError(err)
 		fmt.Printf("[SEND] failed to send initial client turn: %v\n", err)
 	}
+
+	// Handshake complete, end span
+	span.End()
 
 	errChan := make(chan error, 1) // 1 slot error channel
 
 	go func() {
+		// child span setup for send/receive loop turns
+		_, recvSpan := tracer.Start(ctx, "Agent.ReceiveLoop")
+		defer recvSpan.End()
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -116,7 +137,8 @@ func (a *Agent) Connect(ctx context.Context) error {
 			}
 			msg, err := session.Receive()
 			if err != nil {
-				fmt.Printf("\n[RECV] Error: %v\n", err)
+				recvSpan.RecordError(err)
+				recvSpan.SetStatus(codes.Error, "receive failed")
 				errChan <- fmt.Errorf("receive loop error: %w", err)
 				return
 			}
@@ -142,6 +164,8 @@ func (a *Agent) Connect(ctx context.Context) error {
 	}
 
 	go func() {
+		_, sendSpan := tracer.Start(ctx, "Agent.SendLoop")
+		defer sendSpan.End()
 		for {
 			select {
 			case pcm := <-micChan:
@@ -153,6 +177,8 @@ func (a *Agent) Connect(ctx context.Context) error {
 				}
 
 				if err := session.SendRealtimeInput(input); err != nil {
+					sendSpan.RecordError(err)
+					sendSpan.SetStatus(codes.Error, "send failed")
 					errChan <- fmt.Errorf("failed to send audio: %w", err)
 					return
 				}

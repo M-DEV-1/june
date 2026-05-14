@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-ole/go-ole"
 	"github.com/moutend/go-wca/pkg/wca"
+	"go.opentelemetry.io/otel"
 )
 
 type winMic struct{}
@@ -29,6 +30,8 @@ func NewMic() (Microphone, error) {
 }
 
 func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
+	tracer := otel.Tracer("ora.audio")
+	setupCtx, span := tracer.Start(ctx, "Mic.StartCaptureSetup")
 
 	micChan := make(chan []byte, 100)
 	// we are forced to init hardware inside goroutine bcz com is per-thread
@@ -71,7 +74,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 		// inf seemed dangerous at first because i'm playing with threads here
 		for {
 			select {
-			case <-ctx.Done(): // stop listening altogether (llm resp, or sigint)
+			case <-setupCtx.Done(): // stop listening altogether (llm resp, or sigint)
 				return
 			default:
 				var frames uint32
@@ -112,6 +115,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	}()
 
 	err := <-startupErr
+	span.End()
 	if err != nil {
 		return nil, err // at least now we are passing the exact hardware error back into caller
 	}
