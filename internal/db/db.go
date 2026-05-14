@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -16,6 +17,7 @@ import (
 // store to hold db conn
 type Store struct {
 	db              *sql.DB
+	mu              sync.RWMutex
 	currentParentID int64 // bookmark
 }
 
@@ -69,7 +71,9 @@ func New(path string) (*Store, error) {
 		return nil, fmt.Errorf("failed to ensure session: %w", err)
 	}
 
+	s.mu.Lock()
 	s.currentParentID = sessionID // bookmark
+	s.mu.Unlock()
 
 	return s, nil
 }
@@ -83,6 +87,7 @@ func (s *Store) createSchema() error {
 		content TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_unique ON nodes(IFNULL(parent_id, 0), type, content);
 	CREATE INDEX IF NOT EXISTS idx_parent_id ON nodes(parent_id);
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
@@ -99,37 +104,25 @@ func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, err
 
 	if parentID == 0 {
 		// ROOT, i.e. user
-		query := `SELECT id FROM nodes WHERE parent_id IS NULL AND type = ? AND content = ?`
-		err = s.db.QueryRow(query, nodeType, content).Scan(&id)
+		// insert if not there already, or ignore and move on
+		query := `INSERT OR IGNORE INTO nodes (type, content) VALUES (?, ?)`
+		_, err = s.db.Exec(query, nodeType, content)
+		if err == nil {
+			query = `SELECT id FROM nodes WHERE parent_id IS NULL AND type = ? AND content = ?`
+			err = s.db.QueryRow(query, nodeType, content).Scan(&id)
+		}
 	} else {
 		// CHILD, i.e. day, session or activity
-		query := `SELECT id FROM nodes WHERE parent_id = ? AND type = ? AND content = ?`
-		err = s.db.QueryRow(query, parentID, nodeType, content).Scan(&id)
+		query := `INSERT OR IGNORE INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
+		_, err = s.db.Exec(query, parentID, nodeType, content)
+		if err == nil {
+			query = `SELECT id FROM nodes WHERE parent_id = ? AND type = ? AND content = ?`
+			err = s.db.QueryRow(query, parentID, nodeType, content).Scan(&id)
+		}
 	}
 
-	if err == sql.ErrNoRows {
-		var res sql.Result
-		var insertErr error
-		if parentID == 0 {
-			// fmt.Println("Existing user not found, intializing new user...")
-			query := `INSERT INTO nodes (type, content) VALUES (?, ?)`
-			res, insertErr = s.db.Exec(query, nodeType, content)
-		} else {
-			query := `INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
-			res, insertErr = s.db.Exec(query, parentID, nodeType, content)
-		}
-
-		if insertErr != nil {
-			return 0, fmt.Errorf("failed to ensure %s node: %w", nodeType, insertErr)
-		}
-
-		id, err = res.LastInsertId()
-
-		if err != nil {
-			return 0, fmt.Errorf("failed to get last insert id: %w", err)
-		}
-	} else if err != nil {
-		return 0, err
+	if err != nil {
+		return 0, fmt.Errorf("failed to ensure %s node: %w", nodeType, err)
 	}
 
 	return id, nil
@@ -147,9 +140,13 @@ func (s *Store) LogActivity(ctx context.Context, app, title string) error {
 		attribute.String("db.window_title", title),
 	)
 
+	s.mu.RLock()
+	parentID := s.currentParentID
+	s.mu.RUnlock()
+
 	content := fmt.Sprintf("%s | %s", app, title)
 	query := `INSERT INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
-	_, err := s.db.ExecContext(ctx, query, s.currentParentID, "activity", content)
+	_, err := s.db.ExecContext(ctx, query, parentID, "activity", content)
 
 	if err != nil {
 		span.RecordError(err)
@@ -186,7 +183,11 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	-- select in ascending order
 	SELECT type, content FROM branch ORDER BY id ASC`
 
-	rows, err := s.db.QueryContext(ctx, query, s.currentParentID)
+	s.mu.RLock()
+	parentID := s.currentParentID
+	s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, query, parentID)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to query context: %w", err)
