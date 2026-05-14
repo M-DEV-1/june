@@ -5,20 +5,26 @@ package audio
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
+	"ora/internal/obs"
+
 	"github.com/go-ole/go-ole"
 	"github.com/moutend/go-wca/pkg/wca"
-	"go.opentelemetry.io/otel"
 )
 
 type winMic struct {
 	mu          sync.Mutex
 	isCapturing bool
 	cancel      context.CancelFunc
+	// rw ops happen instantly and atomically
+	// mutex locks, hence slower sometimes due to waits
+	currentAmp atomic.Uint64
 }
 
 func NewMic() (Microphone, error) {
@@ -48,7 +54,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	// cancellable context allows us to stop goroutine with close()
 	ctx, m.cancel = context.WithCancel(ctx)
 
-	tracer := otel.Tracer("ora.audio")
+	tracer := obs.GetTracer(ctx, "ora.audio")
 	setupCtx, span := tracer.Start(ctx, "Mic.StartCaptureSetup")
 
 	micChan := make(chan []byte, 100)
@@ -112,11 +118,21 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 					floatData := unsafe.Slice((*float32)(unsafe.Pointer(data)), frames)
 					pcm = make([]byte, frames*2)
 
+					var maxAmp float32
 					for i := 0; i < int(frames); i++ {
 						val := float32ToInt16(floatData[i])
 						pcm[i*2] = byte(val)
 						pcm[i*2+1] = byte(val >> 8)
+						// extra amp values for tui waveform
+						absVal := floatData[i]
+						if absVal < 0 {
+							absVal = -absVal
+						}
+						if absVal > maxAmp {
+							maxAmp = absVal
+						}
 					}
+					m.currentAmp.Store(math.Float64bits(float64(maxAmp)))
 
 					// releasing gives memory back to soundcard before we block further audio
 					acc.ReleaseBuffer(frames)
@@ -124,8 +140,11 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 					case micChan <- pcm:
 					case <-ctx.Done():
 						return
+					default:
+						// drop audio chunk to prevent deadlock of capture thread (net or agent gets slow for some reason or the otehr)
 					}
 				} else {
+					m.currentAmp.Store(math.Float64bits(0.0))
 					acc.ReleaseBuffer(0)
 				}
 			}
@@ -139,6 +158,10 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	}
 
 	return micChan, nil
+}
+
+func (m *winMic) CurrentAmplitude() float64 {
+	return math.Float64frombits(m.currentAmp.Load())
 }
 
 func (m *winMic) Close() error {
@@ -187,7 +210,6 @@ func setupAudioHardware() (*wca.IAudioClient, *wca.IAudioCaptureClient, error) {
 	if err := ac.Initialize(wca.AUDCLNT_SHAREMODE_SHARED, wca.AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, 10000000, 0, format, nil); err != nil {
 		return nil, nil, err
 	}
-
 
 	var acc *wca.IAudioCaptureClient
 	if err := ac.GetService(wca.IID_IAudioCaptureClient, &acc); err != nil {
