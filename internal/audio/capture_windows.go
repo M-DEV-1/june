@@ -6,14 +6,20 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/go-ole/go-ole"
 	"github.com/moutend/go-wca/pkg/wca"
+	"go.opentelemetry.io/otel"
 )
 
-type winMic struct{}
+type winMic struct {
+	mu          sync.Mutex
+	isCapturing bool
+	cancel      context.CancelFunc
+}
 
 func NewMic() (Microphone, error) {
 	// must initialize COM for the entire audio engine
@@ -29,6 +35,21 @@ func NewMic() (Microphone, error) {
 }
 
 func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
+	// wasapi windows audio sys
+	// this is very picky, prone to crashing or zombie threads in subsequent repeated calls (from what i read), hence the mutex
+	m.mu.Lock()
+	if m.isCapturing {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("microphone is already capturing")
+	}
+	m.isCapturing = true
+	m.mu.Unlock()
+
+	// cancellable context allows us to stop goroutine with close()
+	ctx, m.cancel = context.WithCancel(ctx)
+
+	tracer := otel.Tracer("ora.audio")
+	setupCtx, span := tracer.Start(ctx, "Mic.StartCaptureSetup")
 
 	micChan := make(chan []byte, 100)
 	// we are forced to init hardware inside goroutine bcz com is per-thread
@@ -71,7 +92,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 		// inf seemed dangerous at first because i'm playing with threads here
 		for {
 			select {
-			case <-ctx.Done(): // stop listening altogether (llm resp, or sigint)
+			case <-setupCtx.Done(): // stop listening altogether (llm resp, or sigint)
 				return
 			default:
 				var frames uint32
@@ -112,6 +133,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	}()
 
 	err := <-startupErr
+	span.End()
 	if err != nil {
 		return nil, err // at least now we are passing the exact hardware error back into caller
 	}
@@ -121,6 +143,13 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 
 func (m *winMic) Close() error {
 	// ole.CoUninitialize()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.isCapturing = false
+
+	if m.cancel != nil {
+		m.cancel()
+	}
 	return nil
 }
 
@@ -159,6 +188,7 @@ func setupAudioHardware() (*wca.IAudioClient, *wca.IAudioCaptureClient, error) {
 		return nil, nil, err
 	}
 
+
 	var acc *wca.IAudioCaptureClient
 	if err := ac.GetService(wca.IID_IAudioCaptureClient, &acc); err != nil {
 		return nil, nil, err
@@ -182,5 +212,9 @@ func float32ToInt16(f float32) int16 {
 	} else if f < -1.0 {
 		f = -1.0
 	}
-	return int16(f * 32767)
+
+	if f >= 0 {
+		return int16(f * 32767)
+	}
+	return int16(f * 32768)
 }

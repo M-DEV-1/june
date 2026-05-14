@@ -3,6 +3,7 @@ package audio
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/ebitengine/oto/v3"
 )
@@ -36,9 +37,9 @@ func NewSpeaker() (Speaker, error) {
 	}
 	<-readyChan
 
-	// here we will create streamer with a buffered channel (upto 100 chunks)
+	// here we will create streamer with a buffered channel (upto 1024 chunks)
 	streamer := &audioStreamer{
-		chunks: make(chan []byte, 100),
+		chunks: make(chan []byte, 1024),
 	}
 
 	// now we give it to oto and start it
@@ -56,8 +57,27 @@ func (p *otoPlayer) Play(pcm []byte) error {
 	// drop the audio chunk here, and read() should pick it up
 	// the backpressure is required in streaming media. natural backpressure forces the llm to wait for real time playback?
 	// i think im right but i'll see? update:
-	p.streamer.chunks <- pcm
+	// a non-blocking send to ensure the agent never deadlocks if the audio buffer is full as dropping a chunk is better than hanging the whole process ig
+	select {
+	case p.streamer.chunks <- pcm:
+	default:
+		// TODO: logger warning here if needed
+	}
 	return nil
+}
+
+// INTERRUPT HANDLING HAHA
+func (p *otoPlayer) Flush() {
+	// drain the chunks channel immediately
+	for len(p.streamer.chunks) > 0 {
+		select {
+		case <-p.streamer.chunks:
+		default:
+			return
+		}
+	}
+	// also clear the active buffer in the streamer
+	p.streamer.buffer = nil
 }
 
 func (p *otoPlayer) Close() error {
@@ -83,10 +103,17 @@ func (s *audioStreamer) Read(p []byte) (n int, err error) {
 		default:
 			// this should run when no audio is ready
 			// returning silence for some time so that hardware doesn't deadlock
-			for i := range p {
+			// we sleep for 10ms to prevent CPU spinning
+			silenceLen := 480 // 24khz mono 16bit
+			if silenceLen > len(p) {
+				silenceLen = len(p)
+			}
+			for i := 0; i < silenceLen; i++ {
 				p[i] = 0
 			}
-			return len(p), nil
+			time.Sleep(time.Millisecond)
+			// we dont want cpu spinning and just blocking everything either
+			return silenceLen, nil
 		}
 	}
 
