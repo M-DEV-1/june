@@ -17,6 +17,7 @@ type Agent struct {
 	apiKey           string
 	TextChan         chan string // this is for tui text input
 	TextResponseChan chan string // results for tui text resp
+	ErrorChan        chan error  // websocket connection crashes
 }
 
 // initializer and orchestrates all hardware (2) and memory (1) moduels
