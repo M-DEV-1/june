@@ -14,6 +14,8 @@ type Microphone interface {
 	// audio is 16-bit, every 2 bytes represents 1 single sample of sound
 	// 640 bytes, contains 320 moments of sound (like sock pairs)
 	StartCapture(ctx context.Context) (<-chan []byte, error)
+	// this is for tui waveform
+	CurrentAmplitude() float64
 }
 
 type Speaker interface {
@@ -22,4 +24,6 @@ type Speaker interface {
 	Play(pcm []byte) error
 	// clear the current audio buffer immediately (for interrupts)
 	Flush()
+	// returns peak amp
+	CurrentAmplitude() float64
 }
