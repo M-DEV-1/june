@@ -188,6 +188,20 @@ func setupAudioHardware() (*wca.IAudioClient, *wca.IAudioCaptureClient, error) {
 		return nil, nil, err
 	}
 
+	// defensive check: verify that windows actually gave us mono
+	// trust but verify smth
+	var negotiatedFormat *wca.WAVEFORMATEX
+	if err := ac.GetMixFormat(&negotiatedFormat); err == nil {
+		// free the memory ptr when done altogether
+		defer ole.CoTaskMemFree(uintptr(unsafe.Pointer(negotiatedFormat)))
+		//if its anything other than mono, then we stop
+		// im not sure how other audio lm apis would need audio, but we'll see later
+		if negotiatedFormat.NChannels != 1 {
+			ac.Release()
+			return nil, nil, fmt.Errorf("hardware refused mono capture (got %d channels)", negotiatedFormat.NChannels)
+		}
+	}
+
 	var acc *wca.IAudioCaptureClient
 	if err := ac.GetService(wca.IID_IAudioCaptureClient, &acc); err != nil {
 		return nil, nil, err
@@ -211,5 +225,9 @@ func float32ToInt16(f float32) int16 {
 	} else if f < -1.0 {
 		f = -1.0
 	}
-	return int16(f * 32767)
+
+	if f >= 0 {
+		return int16(f * 32767)
+	}
+	return int16(f * 32768)
 }
