@@ -17,6 +17,7 @@ func (m *mockMic) Close() error                                            { ret
 type mockSpeaker struct{}
 
 func (s *mockSpeaker) Play(pcm []byte) error { return nil }
+func (s *mockSpeaker) Flush()                {}
 func (s *mockSpeaker) Close() error          { return nil }
 
 type mockBrain struct{}
