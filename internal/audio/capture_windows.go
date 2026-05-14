@@ -14,12 +14,12 @@ import (
 	"github.com/moutend/go-wca/pkg/wca"
 	"go.opentelemetry.io/otel"
 )
+
 type winMic struct {
 	mu          sync.Mutex
 	isCapturing bool
 	cancel      context.CancelFunc
 }
-type winMic struct{}
 
 func NewMic() (Microphone, error) {
 	// must initialize COM for the entire audio engine
