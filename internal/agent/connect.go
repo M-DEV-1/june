@@ -7,14 +7,15 @@ import (
 	"runtime"
 	"strings"
 
-	"go.opentelemetry.io/otel"
+	"ora/internal/obs"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"google.golang.org/genai"
 )
 
 func (a *Agent) Connect(ctx context.Context) error {
-	tracer := otel.Tracer("ora.agent")
+	tracer := obs.GetTracer(ctx, "ora.agent")
 	handshakeCtx, span := tracer.Start(ctx, "Agent.ConnectHandshake")
 
 	client, err := genai.NewClient(handshakeCtx, &genai.ClientConfig{
@@ -127,7 +128,7 @@ func (a *Agent) Connect(ctx context.Context) error {
 }
 
 func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model string, errChan chan error) {
-	otelTracer := otel.Tracer("ora.agent.receive")
+	otelTracer := obs.GetTracer(ctx, "ora.agent")
 	recvCtx, recvSpan := otelTracer.Start(ctx, "Agent.ReceiveLoop")
 	defer recvSpan.End()
 
@@ -142,6 +143,10 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 			recvSpan.RecordError(err)
 			recvSpan.SetStatus(codes.Error, "receive failed")
 			errChan <- fmt.Errorf("receive loop error: %w", err)
+			select {
+			case a.ErrorChan <- err:
+			default:
+			}
 			return
 		}
 
@@ -188,6 +193,14 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 				toolSpan.SetAttributes(attribute.String("tool.name", fc.Name))
 
 				result := a.executeTool(fc.Name, fc.Args)
+
+				// Safety
+				// truncate massive results to prevent 1011 crash
+				if len(result) > 10000 {
+					result = result[:10000] + "\n\n[Output Truncated: Result too large for Live context]"
+					slog.Warn("tool result truncated", "tool", fc.Name, "length", len(result))
+				}
+
 				slog.Info("tool result", "tool", fc.Name, "result", result)
 
 				// send result back to model with matching ID
@@ -209,7 +222,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 }
 
 func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micChan <-chan []byte, errChan chan error) {
-	otelTracer := otel.Tracer("ora.agent.send")
+	otelTracer := obs.GetTracer(ctx, "ora.agent")
 	sendCtx, sendSpan := otelTracer.Start(ctx, "Agent.SendLoop")
 	defer sendSpan.End()
 	for {
@@ -226,6 +239,10 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 				sendSpan.RecordError(err)
 				sendSpan.SetStatus(codes.Error, "send failed")
 				errChan <- fmt.Errorf("failed to send audio: %w", err)
+				select {
+				case a.ErrorChan <- err:
+				default:
+				}
 				return
 			}
 		case <-sendCtx.Done():
