@@ -20,4 +20,6 @@ type Speaker interface {
 	io.Closer
 	// play audio output through speaker
 	Play(pcm []byte) error
+	// clear the current audio buffer immediately (for interrupts)
+	Flush()
 }
