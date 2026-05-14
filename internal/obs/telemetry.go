@@ -18,12 +18,23 @@ import (
 // global slog logger, otel traceprovider init
 // returns shutdown, must defer in main.go
 func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) error, error) {
+	// we create a log file to move all otel logs
+	logDir := "ora-db"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	logFile, err := os.OpenFile(logDir+"/ora.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
+
 	// setup slog
 	// so instead of one big setup, i decided to make it seperated, also created a custom slog Handler. extracts trace, span from context for every log and injects as json
 	options := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}
-	jsonHandler := slog.NewJSONHandler(os.Stdout, options)
+	jsonHandler := slog.NewJSONHandler(logFile, options)
 	logger := slog.New(&TraceHandler{handler: jsonHandler})
 	slog.SetDefault(logger)
 
