@@ -5,6 +5,7 @@ package db_test
 import (
 	"context"
 	"ora/internal/db"
+	"os"
 	"strings"
 	"testing"
 )
@@ -49,4 +50,19 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 	}
 
 	t.Logf("Successfully retrieved branch: %+v", branch)
+}
+
+func TestStore_InitCreatesDirectory(t *testing.T) {
+	path := "test_dir/test.db"
+	defer os.RemoveAll("test_dir")
+
+	store, err := db.New(path)
+	if err != nil {
+		t.Fatalf("Failed to create store in new directory: %+v", err)
+	}
+	defer store.Close()
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Errorf("Database file was not created at %s", path)
+	}
 }
