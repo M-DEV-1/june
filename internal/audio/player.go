@@ -3,6 +3,8 @@ package audio
 import (
 	"fmt"
 	"io"
+	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/ebitengine/oto/v3"
@@ -16,8 +18,9 @@ type otoPlayer struct {
 	// we store WCA handles here if later needed for cleanup
 
 	// Windows Core Audio 2006, lowest audio level possible, allows contains a share mode for multi-active-window mic capturing
-	player   *oto.Player
-	streamer *audioStreamer
+	player     *oto.Player
+	streamer   *audioStreamer
+	currentAmp atomic.Uint64
 }
 
 func NewSpeaker() (Speaker, error) {
@@ -37,9 +40,10 @@ func NewSpeaker() (Speaker, error) {
 	}
 	<-readyChan
 
-	// here we will create streamer with a buffered channel (upto 1024 chunks)
+	// here we will create streamer with a buffered channel (upto 10000 chunks)
+	// i tried 1024, but it got choppy, maybe 10k should work
 	streamer := &audioStreamer{
-		chunks: make(chan []byte, 1024),
+		chunks: make(chan []byte, 10000),
 	}
 
 	// now we give it to oto and start it
@@ -54,6 +58,18 @@ func NewSpeaker() (Speaker, error) {
 }
 
 func (p *otoPlayer) Play(pcm []byte) error {
+	var maxAmp int16
+	for i := 0; i < len(pcm)-1; i += 2 {
+		sample := int16(pcm[i]) | int16(pcm[i+1])<<8
+		if sample < 0 {
+			sample = -sample
+		}
+		if sample > maxAmp {
+			maxAmp = sample
+		}
+	}
+	p.currentAmp.Store(math.Float64bits(float64(maxAmp) / 32768.0))
+
 	// drop the audio chunk here, and read() should pick it up
 	// the backpressure is required in streaming media. natural backpressure forces the llm to wait for real time playback?
 	// i think im right but i'll see? update:
@@ -64,6 +80,10 @@ func (p *otoPlayer) Play(pcm []byte) error {
 		// TODO: logger warning here if needed
 	}
 	return nil
+}
+
+func (p *otoPlayer) CurrentAmplitude() float64 {
+	return math.Float64frombits(p.currentAmp.Load())
 }
 
 // INTERRUPT HANDLING HAHA
