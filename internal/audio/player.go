@@ -3,6 +3,7 @@ package audio
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/ebitengine/oto/v3"
 )
@@ -56,7 +57,12 @@ func (p *otoPlayer) Play(pcm []byte) error {
 	// drop the audio chunk here, and read() should pick it up
 	// the backpressure is required in streaming media. natural backpressure forces the llm to wait for real time playback?
 	// i think im right but i'll see? update:
-	p.streamer.chunks <- pcm
+	// a non-blocking send to ensure the agent never deadlocks if the audio buffer is full as dropping a chunk is better than hanging the whole process ig
+	select {
+	case p.streamer.chunks <- pcm:
+	default:
+		// TODO: logger warning here if needed
+	}
 	return nil
 }
 
@@ -83,9 +89,11 @@ func (s *audioStreamer) Read(p []byte) (n int, err error) {
 		default:
 			// this should run when no audio is ready
 			// returning silence for some time so that hardware doesn't deadlock
+			// we sleep for 5ms to prevent CPU spinning
 			for i := range p {
 				p[i] = 0
 			}
+			time.Sleep(5 * time.Millisecond)
 			return len(p), nil
 		}
 	}
