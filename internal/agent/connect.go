@@ -1,11 +1,9 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"runtime"
 	"strings"
 
@@ -120,18 +118,6 @@ func (a *Agent) Connect(ctx context.Context) error {
 	// text send loop (uses textchan)
 	go a.textSendLoop(ctx, session)
 
-	// stdin reader - temporary until TUI is built
-	// TODO: get rid of this when TUI is there
-	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" {
-				a.TextChan <- line
-			}
-		}
-	}()
-
 	select {
 	case err := <-errChan:
 		return err
@@ -141,13 +127,13 @@ func (a *Agent) Connect(ctx context.Context) error {
 }
 
 func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model string, errChan chan error) {
-	otelTracer := otel.Tracer("ora.agent")
-	_, recvSpan := otelTracer.Start(ctx, "Agent.ReceiveLoop")
+	otelTracer := otel.Tracer("ora.agent.receive")
+	recvCtx, recvSpan := otelTracer.Start(ctx, "Agent.ReceiveLoop")
 	defer recvSpan.End()
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-recvCtx.Done():
 			return
 		default:
 		}
@@ -161,7 +147,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 
 		// this has very interesting spanning logic
 		if msg.ServerContent != nil && msg.ServerContent.ModelTurn != nil {
-			_, turnSpan := otelTracer.Start(ctx, "Agent.ModelTurn")
+			_, turnSpan := otelTracer.Start(recvCtx, "Agent.ModelTurn")
 
 			var audioBytes int
 			var textContent string
@@ -170,6 +156,10 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 				if part.Text != "" {
 					slog.Info("ora response", "text", part.Text)
 					textContent = part.Text
+					select {
+					case a.TextResponseChan <- part.Text:
+					default:
+					}
 				}
 				// if part is audio
 				if part.InlineData != nil {
@@ -191,7 +181,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 
 		// tool calling - check if model wants to use a tool
 		if msg.ToolCall != nil {
-			_, toolSpan := otelTracer.Start(ctx, "Agent.ToolExecution")
+			_, toolSpan := otelTracer.Start(recvCtx, "Agent.ToolExecution")
 
 			for _, fc := range msg.ToolCall.FunctionCalls {
 				slog.Info("tool call received", "tool", fc.Name, "args", fc.Args)
@@ -219,8 +209,8 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 }
 
 func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micChan <-chan []byte, errChan chan error) {
-	otelTracer := otel.Tracer("ora.agent")
-	_, sendSpan := otelTracer.Start(ctx, "Agent.SendLoop")
+	otelTracer := otel.Tracer("ora.agent.send")
+	sendCtx, sendSpan := otelTracer.Start(ctx, "Agent.SendLoop")
 	defer sendSpan.End()
 	for {
 		select {
@@ -238,7 +228,7 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 				errChan <- fmt.Errorf("failed to send audio: %w", err)
 				return
 			}
-		case <-ctx.Done():
+		case <-sendCtx.Done():
 			return
 		}
 	}
@@ -251,6 +241,9 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 			if text == "" {
 				continue
 			}
+			// flush when barge-in and stop talking immediately
+			// this is voice haha
+			a.speaker.Flush()
 			slog.Debug("sending text to model", "text", text)
 			err := session.SendClientContent(genai.LiveSendClientContentParameters{
 				Turns: []*genai.Content{
