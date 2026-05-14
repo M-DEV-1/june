@@ -24,6 +24,9 @@ func Normalize(app, title string) *Activity {
 		cleanTitle = "Unknown"
 	}
 
+	// cleanApp = strings.TrimSuffix(cleanApp, ".exe")
+	// we will decide later
+
 	return &Activity{
 		App:   cleanApp,
 		Title: cleanTitle,
