@@ -123,11 +123,8 @@ func (s *audioStreamer) Read(p []byte) (n int, err error) {
 		default:
 			// this should run when no audio is ready
 			// returning silence for some time so that hardware doesn't deadlock
-			// we sleep for 10ms to prevent CPU spinning
-			silenceLen := 480 // 24khz mono 16bit
-			if silenceLen > len(p) {
-				silenceLen = len(p)
-			}
+			// we fill the entire buffer p to maintain clock sync
+			silenceLen := len(p) // 24khz mono 16bit
 			for i := 0; i < silenceLen; i++ {
 				p[i] = 0
 			}
