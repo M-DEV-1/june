@@ -31,12 +31,16 @@ type Styles struct {
 	HeaderSep  lipgloss.Style
 	LivePill   lipgloss.Style
 
-	PrefixSystem lipgloss.Style
-	PrefixYou    lipgloss.Style
-	PrefixOra    lipgloss.Style
-	TextSystem   lipgloss.Style
-	TextYou      lipgloss.Style
-	TextOra      lipgloss.Style
+	PrefixSystem  lipgloss.Style
+	PrefixYou     lipgloss.Style
+	PrefixOra     lipgloss.Style
+	PrefixThought lipgloss.Style
+	TextSystem    lipgloss.Style
+	TextYou       lipgloss.Style
+	TextOra       lipgloss.Style
+	TextThought   lipgloss.Style
+	BgThought     lipgloss.Color
+	GutterWidth   int
 
 	ToolDot  lipgloss.Style
 	ToolText lipgloss.Style
@@ -68,8 +72,11 @@ func DefaultStyles() Styles {
 		BorderColor: lipgloss.Color("#1a1a24"),
 	}
 
-	// Structural Definitions
-	s.AppFrame = lipgloss.NewStyle().Background(s.BgBase).Foreground(s.White)
+	// centralized gutter width so we can change it in one place if we want more room
+	gutterWidth := GutterWidth
+
+	// structural definitions
+	s.AppFrame = lipgloss.NewStyle().Foreground(s.White)
 
 	s.Header = lipgloss.NewStyle().
 		Background(s.BgHeader).
@@ -91,7 +98,7 @@ func DefaultStyles() Styles {
 		Background(s.BgInput).
 		Padding(1, 4)
 
-	// Component Identities
+	// branding and status bits
 	s.OraLogo = lipgloss.NewStyle().Foreground(s.Purple).Bold(true)
 	s.HeaderPath = lipgloss.NewStyle().Foreground(s.Muted)
 	s.HeaderSep = lipgloss.NewStyle().Foreground(s.BorderColor).Margin(0, 1)
@@ -101,31 +108,57 @@ func DefaultStyles() Styles {
 		Background(lipgloss.Color("#061611")).
 		Padding(0, 1)
 
-	// Text Block Identities
-	s.PrefixSystem = lipgloss.NewStyle().Background(lipgloss.Color("#13131a")).Foreground(s.Muted).Width(10)
-	s.TextSystem = lipgloss.NewStyle().Background(lipgloss.Color("#13131a")).Foreground(s.Muted)
+	// chat block prefixes and colors
+	s.PrefixSystem = lipgloss.NewStyle().Foreground(s.Muted).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.TextSystem = lipgloss.NewStyle().Foreground(s.Muted)
 
-	s.PrefixYou = lipgloss.NewStyle().Foreground(s.Green).Bold(true).Width(10)
-	s.TextYou = lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635")) // bright lime-green for pop
+	s.PrefixThought = lipgloss.NewStyle().Foreground(lipgloss.Color("#a78bfa")).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.TextThought = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#c4b5fd")).
+		Italic(true).
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("#363650")).
+		PaddingLeft(1)
+	s.BgThought = lipgloss.Color("#13131a") // slightly lighter Zinc/Navy for thoughts
 
-	s.PrefixOra = lipgloss.NewStyle().Foreground(s.Purple).Bold(true).Width(10)
+	s.PrefixYou = lipgloss.NewStyle().Foreground(s.Green).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.TextYou = lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635"))
+
+	s.PrefixOra = lipgloss.NewStyle().Foreground(s.Purple).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
 	s.TextOra = lipgloss.NewStyle().Foreground(s.White)
 
 	s.ToolDot = lipgloss.NewStyle().Foreground(s.Purple)
 	s.ToolText = lipgloss.NewStyle().Foreground(s.Gray).Italic(true)
 
-	// Interaction Elements
-	s.InputPrefix = lipgloss.NewStyle().Foreground(s.Purple).MarginRight(2).Bold(true)
-	s.KbdKey = lipgloss.NewStyle().
-		Background(s.BgStatus).
-		Foreground(s.Muted).
-		Padding(0, 1)
-	s.KbdLabel = lipgloss.NewStyle().Foreground(s.Muted).MarginLeft(1)
-	s.KbdSep = lipgloss.NewStyle().Foreground(s.BorderColor).Margin(0, 1)
+	// keyboard hints and input styling - locking to BgInput
+	s.InputPrefix = lipgloss.NewStyle().
+		Foreground(s.Purple).
+		Background(s.BgInput).
+		PaddingRight(2).
+		Bold(true)
 
-	// Waves
-	s.WaveUser = lipgloss.NewStyle().Foreground(s.Green)
-	s.WaveOra = lipgloss.NewStyle().Foreground(s.Purple)
+	// kbd keys - light lavender / button look
+	s.KbdKey = lipgloss.NewStyle().
+		Background(lipgloss.Color("#dcd7ff")).
+		Foreground(lipgloss.Color("#2e2a4a")).
+		Padding(0, 1).
+		Bold(true)
+
+	s.KbdLabel = lipgloss.NewStyle().
+		Foreground(s.Gray).
+		Background(s.BgInput).
+		PaddingLeft(1).
+		PaddingRight(1)
+
+	s.KbdSep = lipgloss.NewStyle().
+		Foreground(s.BorderColor).
+		Background(s.BgInput).
+		PaddingLeft(1).
+		PaddingRight(1)
+
+	// waveforms - anchored to the input deck's background
+	s.WaveUser = lipgloss.NewStyle().Foreground(s.Green).Background(s.BgInput)
+	s.WaveOra = lipgloss.NewStyle().Foreground(s.Purple).Background(s.BgInput)
 
 	return s
 }
