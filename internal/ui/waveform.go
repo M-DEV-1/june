@@ -13,7 +13,6 @@ import (
 */
 
 // god bless gemini for this one
-
 type Waveform struct {
 	history []float64
 	width   int
@@ -30,6 +29,7 @@ func NewWaveform(width int) *Waveform {
 }
 
 func (w *Waveform) Update(amp float64) {
+	// push the new amplitude and slide the history
 	w.history = append(w.history[1:], amp)
 }
 
@@ -37,6 +37,7 @@ func (w *Waveform) SetWidth(width int) {
 	if width <= 0 || width == w.width {
 		return
 	}
+	// resizing logic so we don't lose the waves when the window moves
 	newHistory := make([]float64, width)
 	copyLen := len(w.history)
 	if copyLen > width {
@@ -114,22 +115,27 @@ func (w *Waveform) Render(style lipgloss.Style, label string) string {
 		}
 	}
 
-	var sb strings.Builder
-	// FORCE unbackgrounded color only
-	waveStyle := lipgloss.NewStyle().Foreground(style.GetForeground()).UnsetBackground()
-
-	for i := 0; i < height; i++ {
-		sb.WriteString(waveStyle.Render(rows[i].String()))
-		if i < height-1 {
-			sb.WriteString("\n")
-		}
+	// use the background from the style if it exists, otherwise fallback to transparent
+	waveStyle := lipgloss.NewStyle().Foreground(style.GetForeground())
+	if style.GetBackground() != nil {
+		waveStyle = waveStyle.Background(style.GetBackground())
 	}
 
-	// this is for like speaker title (ORA VOICE) before waveform
+	// ensure every line in the wave block has a background and fills the width
+	// otherwise we get "holes" where the background doesn't reach
+	var waveRows []string
+	for i := 0; i < height; i++ {
+		waveRows = append(waveRows, waveStyle.Width(w.width).Render(rows[i].String()))
+	}
+
+	// speaker title (like ORA VOICE) sits right above the wave
 	lblStyle := lipgloss.NewStyle().
 		Foreground(style.GetForeground()).
-		Bold(true).
-		UnsetBackground()
+		Background(style.GetBackground()). // force background on label
+		Width(w.width).                    // force label to be as wide as the wave
+		Bold(true)
 
-	return lblStyle.Render(label) + "\n" + sb.String()
+	// join the label and wave block vertically
+	elements := append([]string{lblStyle.Render(label)}, waveRows...)
+	return lipgloss.JoinVertical(lipgloss.Left, elements...)
 }
