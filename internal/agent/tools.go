@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,6 +24,7 @@ func toolDefinitions() []*genai.Tool {
 	return []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
+				// TODO: need an approve/suggest feature for these tools
 				Name:        "shell_exec",
 				Description: "Execute a shell command on the user's system. Use powershell syntax on windows, sh on linux/mac. ALWAYS ask for confirmation before running destructive commands (rm, del, format, etc).",
 				Parameters: &genai.Schema{
@@ -72,11 +74,23 @@ func toolDefinitions() []*genai.Tool {
 					Required: []string{"url"},
 				},
 			},
+			{
+				Name:        "query_memory",
+				Description: "Search the user's historical semantic memory tasks. Use this when the user asks about something they did in the past that is not in the immediate context window.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"query": {Type: genai.TypeString, Description: "The keyword or phrase to search for in historical task summaries."},
+					},
+					Required: []string{"query"},
+				},
+			},
 		},
 	}}
 }
 
 // executeTool runs a tool and returns the result as a string
+// maybe this can be seperated into /agent/tools altogether later and be compiled with OS specific code?
 func (a *Agent) executeTool(name string, args map[string]any) string {
 	switch name {
 	case "shell_exec":
@@ -172,6 +186,22 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 			return fmt.Sprintf("error opening url: %v", err)
 		}
 		return fmt.Sprintf("opened %s in browser", url)
+
+	case "query_memory":
+		query, ok := args["query"].(string)
+		if !ok {
+			return "error: query argument is required"
+		}
+		slog.Info("querying long-term memory", "query", query)
+
+		results, err := a.brain.QueryMemory(context.Background(), query)
+		if err != nil {
+			return fmt.Sprintf("error querying memory: %v", err)
+		}
+		if len(results) == 0 {
+			return "No memories found matching that query."
+		}
+		return "Found memories:\n" + strings.Join(results, "\n")
 
 	default:
 		return fmt.Sprintf("unknown tool: %s", name)
