@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"ora/internal/config"
+	"ora/internal/obs"
 	"ora/internal/tracker"
 	"strings"
 
@@ -42,6 +43,10 @@ func NewGeminiSummarizer(apiKey string) (*GeminiSummarizer, error) {
 }
 
 func (g *GeminiSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*TaskSummary, error) {
+	tracer := obs.GetTracer(ctx, "ora.memory")
+	ctx, span := tracer.Start(ctx, "GeminiSummarizer.Summarize")
+	defer span.End()
+
 	var activityList []string
 	for _, a := range activities {
 		activityList = append(activityList, fmt.Sprintf("- %s: %s", a.App, a.Title))
@@ -67,12 +72,16 @@ func (g *GeminiSummarizer) Summarize(ctx context.Context, activities []tracker.A
 	s}`,
 		currentTask, strings.Join(activityList, "\n"))
 
+	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent")
 	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), &genai.GenerateContentConfig{
 		ResponseMIMEType: "application/json",
 	})
 	if err != nil {
+		genSpan.RecordError(err)
+		genSpan.End()
 		return nil, err
 	}
+	genSpan.End()
 
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
 		return nil, fmt.Errorf("empty response from model")
@@ -119,6 +128,10 @@ func (c *Compiler) flush(ctx context.Context) {
 	if len(c.buffer) == 0 {
 		return
 	}
+
+	tracer := obs.GetTracer(ctx, "ora.memory")
+	ctx, span := tracer.Start(ctx, "Compiler.FlushBuffer")
+	defer span.End()
 
 	summary, err := c.llm.Summarize(ctx, c.buffer, "")
 	if err != nil || summary == nil {
