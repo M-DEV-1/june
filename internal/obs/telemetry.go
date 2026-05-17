@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -17,9 +16,7 @@ import (
 )
 
 var (
-	providers = make(map[string]*sdktrace.TracerProvider)
-	mu        sync.RWMutex
-	exporter  sdktrace.SpanExporter
+	tp *sdktrace.TracerProvider
 )
 
 // global slog logger, otel traceprovider init
@@ -53,12 +50,25 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	// setup otlp trace exporter (for any collector)
 	// otlptracegrpc localhost:4317
 	// data moves to 4317 and then to any collector (whatever is setup)
-	var errExport error
-	exporter, errExport = otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
-	if errExport != nil {
-		return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", errExport)
+	exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
 	}
 
+	res, _ := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceNameKey.String("ora"),
+			semconv.ServiceVersionKey.String("0.1.1"),
+		),
+	)
+
+	tp = sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+
+	otel.SetTracerProvider(tp)
 	// set global propagator
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
@@ -66,14 +76,9 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 
 	// shutdown
 	shutdown := func(shutdownCtx context.Context) error {
-		mu.Lock()
-		defer mu.Unlock()
-
-		slog.Info("Shutting down segmented telemetry providers...")
-		for name, tp := range providers {
-			if err := tp.Shutdown(shutdownCtx); err != nil {
-				slog.Error("failed to shutdown provider", "service", name, "error", err)
-			}
+		slog.Info("Shutting down telemetry provider...")
+		if tp != nil {
+			return tp.Shutdown(shutdownCtx)
 		}
 		return nil
 	}
@@ -83,41 +88,12 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 
 // GetTracer returns a tracer for a specific logical service.
 // should create segmented view in jaeger or whatever
-func GetTracer(ctx context.Context, serviceName string) trace.Tracer {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if tp, ok := providers[serviceName]; ok {
-		return tp.Tracer(serviceName)
-	}
-
-	// new provider for this logical service
-	res, _ := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String(serviceName),
-			semconv.ServiceVersionKey.String("1.0.0"),
-		),
-	)
-	// create global tracer provider
-	// data batcher, sort of. manages exporter and resource combined
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-		// 100% visibility for a local agent is okay
-		// TODO: use cloud/local selector if any cloud provider is integrated
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-
-	providers[serviceName] = tp
-
-	// don't call otel.SetTracerProvider(tp) because we want to maintain multiple providers
-	// for multiple logical services within the same binary.
-	// abracadabra magic for tracers
-	return tp.Tracer(serviceName)
+func GetTracer(ctx context.Context, name string) trace.Tracer {
+	return otel.Tracer(name)
 }
 
 // apparently this is a one time setup file?
-// counter for how many times i changed this file: 2
+// counter for how many times i changed this file: 3
 
 // handler struct to wrap another handler which is the basis of this tracer middleware tbh (json)
 type TraceHandler struct {
