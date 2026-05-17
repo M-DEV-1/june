@@ -3,7 +3,10 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"encoding/json"
 	"fmt"
+	"ora/internal/memory"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,7 +22,8 @@ import (
 type Store struct {
 	db              *sql.DB
 	mu              sync.RWMutex
-	currentParentID int64 // bookmark
+	currentParentID int64 // bookmark for session
+	currentTaskID   int64 // bookmark for task
 }
 
 // constructor, return pointer to struct and err
@@ -74,6 +78,13 @@ func New(path string) (*Store, error) {
 
 	s.mu.Lock()
 	s.currentParentID = sessionID // bookmark
+
+	// rehydrate the latest task ID for continuity
+	var taskID int64
+	err = db.QueryRow("SELECT id FROM nodes WHERE parent_id = ? AND type = 'task' ORDER BY id DESC LIMIT 1", sessionID).Scan(&taskID)
+	if err == nil {
+		s.currentTaskID = taskID
+	}
 	s.mu.Unlock()
 
 	return s, nil
@@ -101,29 +112,39 @@ func (s *Store) createSchema() error {
 // get or create
 func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, error) {
 	var id int64
-	var err error
+
+	// wrap in a transaction to ensure atomicity
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	if parentID == 0 {
 		// ROOT, i.e. user
 		// insert if not there already, or ignore and move on
 		query := `INSERT OR IGNORE INTO nodes (type, content) VALUES (?, ?)`
-		_, err = s.db.Exec(query, nodeType, content)
+		_, err = tx.Exec(query, nodeType, content)
 		if err == nil {
 			query = `SELECT id FROM nodes WHERE parent_id IS NULL AND type = ? AND content = ?`
-			err = s.db.QueryRow(query, nodeType, content).Scan(&id)
+			err = tx.QueryRow(query, nodeType, content).Scan(&id)
 		}
 	} else {
 		// CHILD, i.e. day, session or activity
 		query := `INSERT OR IGNORE INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
-		_, err = s.db.Exec(query, parentID, nodeType, content)
+		_, err = tx.Exec(query, parentID, nodeType, content)
 		if err == nil {
 			query = `SELECT id FROM nodes WHERE parent_id = ? AND type = ? AND content = ?`
-			err = s.db.QueryRow(query, parentID, nodeType, content).Scan(&id)
+			err = tx.QueryRow(query, parentID, nodeType, content).Scan(&id)
 		}
 	}
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to ensure %s node: %w", nodeType, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return id, nil
