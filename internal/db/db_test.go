@@ -5,6 +5,7 @@ package db_test
 import (
 	"context"
 	"ora/internal/db"
+	"ora/internal/memory"
 	"os"
 	"strings"
 	"testing"
@@ -21,10 +22,14 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 	}
 	defer store.Close()
 
-	// 2. be able to log an activity with normalization
-	err = store.LogActivity(ctx, "VSCode", "main.go - ora")
+	// 2. be able to log a semantic node (simulating the compiler)
+	err = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "TDD Testing",
+		Summary:  "Writing tests for SQLite CTE",
+	})
 	if err != nil {
-		t.Errorf("Failed to log activity: %+v", err)
+		t.Errorf("Failed to log semantic node: %+v", err)
 	}
 
 	// 3. we want to get context back
@@ -33,9 +38,9 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 		t.Errorf("Failed to get context: %+v", err)
 	}
 
-	// 4. we verify the tree structure
-	if len(branch) < 4 {
-		t.Fatalf("Expected at least 4 nodes (User, Day, Session, Activity), got %d: %+v", len(branch), branch)
+	// 4. we verify the tree structure (User, Day, Session, Task, Summary)
+	if len(branch) < 5 {
+		t.Fatalf("Expected at least 5 nodes, got %d: %+v", len(branch), branch)
 	}
 
 	// check nodes ordering, expected ROOT to LEAF
@@ -43,10 +48,10 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 		t.Errorf("Expected root node to contain user, got: %s", branch[0])
 	}
 	if !strings.Contains(branch[2], "session") {
-		t.Errorf("Expected leaf node to contain a session, got %s", branch[2])
+		t.Errorf("Expected node to contain a session, got %s", branch[2])
 	}
-	if !strings.Contains(branch[len(branch)-1], "VSCode") {
-		t.Errorf("Expected leaf node to contain activity, got %s", branch[len(branch)-1])
+	if !strings.Contains(branch[len(branch)-1], "Writing tests") {
+		t.Errorf("Expected leaf node to contain summary, got %s", branch[len(branch)-1])
 	}
 
 	t.Logf("Successfully retrieved branch: %+v", branch)
@@ -64,5 +69,39 @@ func TestStore_InitCreatesDirectory(t *testing.T) {
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		t.Errorf("Database file was not created at %s", path)
+	}
+}
+
+func TestStore_QueryMemory(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// semantic summaries
+	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "Debugging UI",
+		Summary:  "Fixing lipgloss layout issues",
+	})
+	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "Research",
+		Summary:  "Reading StackOverflow about websockets",
+	})
+
+	// Search for 'StackOverflow'
+	results, err := store.QueryMemory(ctx, "StackOverflow")
+	if err != nil {
+		t.Fatalf("QueryMemory failed: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+	if !strings.Contains(results[0], "StackOverflow") {
+		t.Errorf("Expected result to contain 'StackOverflow', got: %s", results[0])
 	}
 }
