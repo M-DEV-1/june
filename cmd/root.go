@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"ora/internal/agent"
 	"ora/internal/audio"
+	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/memory"
 	"ora/internal/obs"
 	"ora/internal/tracker"
 	"ora/internal/ui"
@@ -28,7 +30,6 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 
 		// globally load the .env
-		// take user input for API key
 		if err := godotenv.Load(); err != nil {
 			slog.Info("No .env file found, read from sys env")
 		}
@@ -44,13 +45,44 @@ var rootCmd = &cobra.Command{
 		}
 		defer shutdownObs(ctx)
 
-		// initialize db
-		store, err := db.New("ora-db/db")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fatal: could not initialize db: %v\n", err)
-			return
+		// 🚀 Parallel Hardware & DB Initialization
+		var (
+			store   *db.Store
+			mic     audio.Microphone
+			speaker audio.Speaker
+		)
+
+		initErrChan := make(chan error, 3)
+
+		go func() {
+			var err error
+			store, err = db.New("ora-db/db")
+			initErrChan <- err
+		}()
+
+		go func() {
+			var err error
+			mic, err = audio.NewMic()
+			initErrChan <- err
+		}()
+
+		go func() {
+			var err error
+			speaker, err = audio.NewSpeaker()
+			initErrChan <- err
+		}()
+
+		// wait for all 3 to finish
+		for i := 0; i < 3; i++ {
+			if err := <-initErrChan; err != nil {
+				fmt.Fprintf(os.Stderr, "fatal: startup component failure: %v\n", err)
+				return
+			}
 		}
+
 		defer store.Close()
+		defer mic.Close()
+		defer speaker.Close()
 
 		// initialize tracker and daemon
 		eye, err := tracker.New()
@@ -59,38 +91,34 @@ var rootCmd = &cobra.Command{
 			return
 		}
 
+		apiKey := os.Getenv("GEMINI_API_KEY")
+
+		// initialize compiler
+		summarizer, err := memory.NewGeminiSummarizer(apiKey)
+		if err != nil {
+			slog.Warn("failed to initialize summarizer, semantic memory disabled", "error", err)
+		}
+		compiler := memory.NewCompiler(summarizer, store)
+
 		eventChan := make(chan tracker.Activity, 100)
 		daemon := tracker.NewDaemon(eye, 2*time.Second, eventChan)
-		// TODO: allow 2s, 5s both in TUI
 
 		// starts daemon in the background!!!
 		go daemon.Start(ctx)
 
 		go func() {
 			for ev := range eventChan {
+				// temp integration of compiler
 				store.LogActivity(ctx, ev.App, ev.Title)
+				if compiler != nil {
+					compiler.Ingest(ctx, ev)
+				}
 			}
 		}()
 
-		// initialize voice and audio
-		mic, err := audio.NewMic()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fatal: could not initialize audio pipeline mic: %v\n", err)
-			return
-		}
-		defer mic.Close()
-
-		speaker, err := audio.NewSpeaker()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fatal: could not initialize audio pipeline speaker: %v\n", err)
-			return
-		}
-		defer speaker.Close()
-
-		apiKey := os.Getenv("GEMINI_API_KEY")
-
 		// inject dependencies
-		orchestrator := agent.NewAgent(mic, speaker, store, apiKey)
+		orchestrator := agent.NewAgent(mic, speaker, store, compiler, apiKey)
+		orchestrator.SetModel(config.VoiceModel)
 
 		// voice loop starts in bg
 		go func() {
