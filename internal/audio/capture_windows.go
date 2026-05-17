@@ -71,21 +71,35 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
-		if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+		initHardware := func() (*wca.IAudioClient, *wca.IAudioCaptureClient, error) {
+			_, comSpan := tracer.Start(setupCtx, "COM.Initialize")
+			err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED)
+			comSpan.End()
+
+			if err != nil {
+				return nil, nil, err
+			}
+
+			_, hwSpan := tracer.Start(setupCtx, "WASAPI.SetupHardware")
+			defer hwSpan.End()
+
+			ac, acc, err := setupAudioHardware()
+			if err != nil {
+				ole.CoUninitialize() // failure clean up
+				return nil, nil, err
+			}
+			return ac, acc, nil
+		}
+
+		// hardware setup using our super cool helper func
+		// ac - audioclient, acc - audiocaptureclient
+		ac, acc, err := initHardware()
+		if err != nil {
 			startupErr <- err
 			close(micChan)
 			return
 		}
 		defer ole.CoUninitialize()
-
-		// hardware setup using our super cool helper func
-		// ac - audioclient, acc - audiocaptureclient
-		ac, acc, err := setupAudioHardware()
-		if err != nil {
-			startupErr <- fmt.Errorf("Hardware setup failed: %w\n", err)
-			close(micChan)
-			return
-		}
 		defer ac.Release()
 		defer acc.Release()
 		defer ac.Stop()

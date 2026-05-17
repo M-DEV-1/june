@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 
+	"ora/internal/config"
 	"ora/internal/obs"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -33,40 +34,56 @@ func (a *Agent) Connect(ctx context.Context) error {
 
 	// drumrolllllll
 	// connectttt to livee apiii
-	model := "models/gemini-2.5-flash-native-audio-latest"
-	span.SetAttributes(attribute.String("agent.model", model))
+	span.SetAttributes(attribute.String("agent.model", config.VoiceModel))
 
+	_, ctxSpan := tracer.Start(handshakeCtx, "Agent.GetImplicitContext")
 	resp, err := a.brain.GetImplicitContext(handshakeCtx)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to fetch context")
+		ctxSpan.RecordError(err)
+		ctxSpan.SetStatus(codes.Error, "failed to fetch context")
 		slog.Warn("context fetch failed, continuing without history", "error", err)
 	}
+	ctxSpan.End()
 
 	var contextParts []string
 	for _, node := range resp {
 		contextParts = append(contextParts, "  "+node)
 	}
+
+	// current uncompiled buffer (immediate ctx)
+	if a.compiler != nil {
+		buffer := a.compiler.GetCurrentBuffer()
+		for _, act := range buffer {
+			contextParts = append(contextParts, fmt.Sprintf("  [working] %s: %s", act.App, act.Title))
+		}
+	}
+
 	contextStr := strings.Join(contextParts, "\n")
+
+	tools := toolDefinitions()
+	toolsCount := 0
+	if len(tools) > 0 {
+		toolsCount = len(tools[0].FunctionDeclarations)
+	}
 
 	// config
 	// TODO: add more voices, with pre-view to main app
-	config := &genai.LiveConnectConfig{
+	cfg := &genai.LiveConnectConfig{
 		ResponseModalities: []genai.Modality{genai.ModalityAudio},
 		SpeechConfig: &genai.SpeechConfig{
 			VoiceConfig: &genai.VoiceConfig{
 				PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
 					// aoede, puck, fenrir, charon, kore
-					VoiceName: "Puck",
+					VoiceName: "Iapetus",
 				},
 			},
 		},
-		Tools: toolDefinitions(),
+		Tools: tools,
 		SystemInstruction: &genai.Content{
 			Role: "system",
 			Parts: []*genai.Part{
 				{
-					Text: fmt.Sprintf("You are Ora, an ambient AI agent and private memory companion. You act as a 'Temporal Brain,' maintaining a high-fidelity understanding of the user's workspace to provide seamless, context-aware assistance while strictly prioritizing privacy and performance.\n\nSystem Environment:\n  OS: %s\n  Arch: %s\n  Shell: %s\n\nThe user's current session context is derived from their local activity tree:\n%s\n\nUse this state to offer precise, technically-grounded help, acknowledging their current focus without being intrusive. Keep responses concise and conversational unless the user asks for detail, optimized for real-time audio interaction. Avoid long lists or markdown formatting.\n\nYou have access to tools. Use shell_exec to run commands when the user asks. Use the correct shell syntax for the user's OS (powershell for windows, sh for linux/mac). Always confirm destructive operations first.", runtime.GOOS, runtime.GOARCH, shellName(), contextStr),
+					Text: fmt.Sprintf("You are Ora, an ambient AI agent and private memory companion. You act as a 'Temporal Brain,' maintaining a high-fidelity understanding of the user's workspace to provide seamless, context-aware assistance.\n\nSystem Environment:\n  OS: %s\n  Arch: %s\n  Shell: %s\n\nThe user's current session context is derived from their local activity tree (historical tasks + current windows):\n%s\n\nUse this state to offer precise, technically-grounded help, acknowledging their current focus without being intrusive. Keep responses concise and conversational unless the user asks for detail, optimized for real-time audio interaction. Avoid long lists or markdown formatting.\n\nYou have access to %d tools. Use shell_exec to run commands when the user asks. Use the correct shell syntax for the user's OS (powershell for windows, sh for linux/mac). Always confirm destructive operations first.", runtime.GOOS, runtime.GOARCH, shellName(), contextStr, toolsCount),
 				},
 			},
 		},
@@ -74,27 +91,34 @@ func (a *Agent) Connect(ctx context.Context) error {
 
 	slog.Debug("connecting to live API")
 
-	session, err := client.Live.Connect(handshakeCtx, model, config)
-
-	slog.Debug("connected to Live API", "error", err)
+	_, wsSpan := tracer.Start(handshakeCtx, "Agent.LiveConnectWebSocket")
+	session, err := client.Live.Connect(handshakeCtx, config.VoiceModel, cfg)
 	if err != nil {
+		wsSpan.RecordError(err)
+		wsSpan.End()
 		span.RecordError(err)
 		span.End()
 		return fmt.Errorf("websocket handshake failed: %w", err)
 	}
+	wsSpan.End()
+
+	slog.Debug("connected to Live API")
 	defer session.Close()
 
 	// kickstartttterrr
+	a.writeMu.Lock()
 	err = session.SendClientContent(genai.LiveSendClientContentParameters{
 		Turns: []*genai.Content{
 			{
 				Role: "user",
 				Parts: []*genai.Part{
-					{Text: "Hello Ora. You are online. Greet me briefly."},
+					{Text: "Hello Ora. You are online. Greet me briefly and acknowledge what I'm working on right now."},
+					// experiment prompt
 				},
 			},
 		},
 	})
+	a.writeMu.Unlock()
 	if err != nil {
 		span.RecordError(err)
 		slog.Error("failed to send initial client turn", "error", err)
@@ -106,7 +130,7 @@ func (a *Agent) Connect(ctx context.Context) error {
 	errChan := make(chan error, 1) // 1 slot error channel
 
 	// receive loop - handles model responses and tool calls
-	go a.receiveLoop(ctx, session, model, errChan)
+	go a.receiveLoop(ctx, session, a.GetModel(), errChan)
 
 	micChan, err := a.mic.StartCapture(ctx)
 	if err != nil {
@@ -204,13 +228,15 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 				slog.Info("tool result", "tool", fc.Name, "result", result)
 
 				// send result back to model with matching ID
-				err := session.SendToolResponse(genai.LiveToolResponseInput{
+				a.writeMu.Lock()
+				err := session.SendToolResponse(genai.LiveSendToolResponseParameters{
 					FunctionResponses: []*genai.FunctionResponse{{
 						ID:       fc.ID,
 						Name:     fc.Name,
 						Response: map[string]any{"output": result},
 					}},
 				})
+				a.writeMu.Unlock()
 				if err != nil {
 					toolSpan.RecordError(err)
 					slog.Error("failed to send tool response", "error", err)
@@ -228,6 +254,9 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 	for {
 		select {
 		case pcm := <-micChan:
+			if a.isMuted.Load() {
+				continue // drop mic input if muted
+			}
 			input := genai.LiveRealtimeInput{
 				Media: &genai.Blob{
 					Data:     pcm,
@@ -235,7 +264,11 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 				},
 			}
 
-			if err := session.SendRealtimeInput(input); err != nil {
+			a.writeMu.Lock()
+			err := session.SendRealtimeInput(input)
+			a.writeMu.Unlock()
+
+			if err != nil {
 				sendSpan.RecordError(err)
 				sendSpan.SetStatus(codes.Error, "send failed")
 				errChan <- fmt.Errorf("failed to send audio: %w", err)
@@ -262,6 +295,8 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 			// this is voice haha
 			a.speaker.Flush()
 			slog.Debug("sending text to model", "text", text)
+			
+			a.writeMu.Lock()
 			err := session.SendClientContent(genai.LiveSendClientContentParameters{
 				Turns: []*genai.Content{
 					{
@@ -272,6 +307,8 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 					},
 				},
 			})
+			a.writeMu.Unlock()
+			
 			if err != nil {
 				slog.Error("failed to send text", "error", err)
 			}
@@ -280,3 +317,4 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 		}
 	}
 }
+
