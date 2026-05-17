@@ -36,12 +36,14 @@ func (a *Agent) Connect(ctx context.Context) error {
 	// connectttt to livee apiii
 	span.SetAttributes(attribute.String("agent.model", config.VoiceModel))
 
+	_, ctxSpan := tracer.Start(handshakeCtx, "Agent.GetImplicitContext")
 	resp, err := a.brain.GetImplicitContext(handshakeCtx)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to fetch context")
+		ctxSpan.RecordError(err)
+		ctxSpan.SetStatus(codes.Error, "failed to fetch context")
 		slog.Warn("context fetch failed, continuing without history", "error", err)
 	}
+	ctxSpan.End()
 
 	var contextParts []string
 	for _, node := range resp {
@@ -89,14 +91,18 @@ func (a *Agent) Connect(ctx context.Context) error {
 
 	slog.Debug("connecting to live API")
 
+	_, wsSpan := tracer.Start(handshakeCtx, "Agent.LiveConnectWebSocket")
 	session, err := client.Live.Connect(handshakeCtx, config.VoiceModel, cfg)
-
-	slog.Debug("connected to Live API", "error", err)
 	if err != nil {
+		wsSpan.RecordError(err)
+		wsSpan.End()
 		span.RecordError(err)
 		span.End()
 		return fmt.Errorf("websocket handshake failed: %w", err)
 	}
+	wsSpan.End()
+
+	slog.Debug("connected to Live API")
 	defer session.Close()
 
 	// kickstartttterrr
