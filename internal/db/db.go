@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"ora/internal/memory"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,7 +21,8 @@ import (
 type Store struct {
 	db              *sql.DB
 	mu              sync.RWMutex
-	currentParentID int64 // bookmark
+	currentParentID int64 // bookmark for session
+	currentTaskID   int64 // bookmark for task
 }
 
 // constructor, return pointer to struct and err
@@ -53,20 +56,20 @@ func New(path string) (*Store, error) {
 
 	// USER --> DAY --> SESSION --> ACTIVITY
 	// check for user node
-	userID, err := s.ensureNode(0, "user", "default_user") // make this configurable to system user
+	userID, err := s.ensureNode(context.Background(), 0, "user", "default_user") // make this configurable to system user
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure user: %w", err)
 	}
 
 	// check for day node
 	today := time.Now().Format("2006-01-02") // YYYY-MM-DD
-	dayID, err := s.ensureNode(userID, "day", today)
+	dayID, err := s.ensureNode(context.Background(), userID, "day", today)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure day: %w", err)
 	}
 
 	// check for session node
-	sessionID, err := s.ensureNode(dayID, "session", "Active Session")
+	sessionID, err := s.ensureNode(context.Background(), dayID, "session", "Active Session")
 	// TODO: semantic session naming
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure session: %w", err)
@@ -74,6 +77,13 @@ func New(path string) (*Store, error) {
 
 	s.mu.Lock()
 	s.currentParentID = sessionID // bookmark
+
+	// rehydrate the latest task ID for continuity
+	var taskID int64
+	err = db.QueryRow("SELECT id FROM nodes WHERE parent_id = ? AND type = 'task' ORDER BY id DESC LIMIT 1", sessionID).Scan(&taskID)
+	if err == nil {
+		s.currentTaskID = taskID
+	}
 	s.mu.Unlock()
 
 	return s, nil
@@ -99,31 +109,46 @@ func (s *Store) createSchema() error {
 }
 
 // get or create
-func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, error) {
+func (s *Store) ensureNode(ctx context.Context, parentID int64, nodeType, content string) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	_, span := tracer.Start(ctx, "DB.EnsureNode")
+	span.SetAttributes(attribute.String("node.type", nodeType))
+	defer span.End()
+
 	var id int64
-	var err error
+
+	// wrap in a transaction to ensure atomicity
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	if parentID == 0 {
 		// ROOT, i.e. user
 		// insert if not there already, or ignore and move on
 		query := `INSERT OR IGNORE INTO nodes (type, content) VALUES (?, ?)`
-		_, err = s.db.Exec(query, nodeType, content)
+		_, err = tx.Exec(query, nodeType, content)
 		if err == nil {
 			query = `SELECT id FROM nodes WHERE parent_id IS NULL AND type = ? AND content = ?`
-			err = s.db.QueryRow(query, nodeType, content).Scan(&id)
+			err = tx.QueryRow(query, nodeType, content).Scan(&id)
 		}
 	} else {
 		// CHILD, i.e. day, session or activity
 		query := `INSERT OR IGNORE INTO nodes (parent_id, type, content) VALUES (?, ?, ?)`
-		_, err = s.db.Exec(query, parentID, nodeType, content)
+		_, err = tx.Exec(query, parentID, nodeType, content)
 		if err == nil {
 			query = `SELECT id FROM nodes WHERE parent_id = ? AND type = ? AND content = ?`
-			err = s.db.QueryRow(query, parentID, nodeType, content).Scan(&id)
+			err = tx.QueryRow(query, parentID, nodeType, content).Scan(&id)
 		}
 	}
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to ensure %s node: %w", nodeType, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return id, nil
@@ -163,26 +188,29 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	// starts the span, and will inherit a trace id from context
 	ctx, span := tracer.Start(ctx, "GetImplicitContext")
 	defer span.End()
+
 	// recursive common table expression, kind of like a while loop
-	// bottom to top search of db, flips it around for readability in the end
+	// we grab the last 5 summaries and walk them up to the root (user/day/session)
 	query := `WITH RECURSIVE branch AS (
-
-		-- most recent activity
-		SELECT id, parent_id, type, content 
-		FROM nodes 
-		WHERE id = (
-			SELECT MAX(id) FROM nodes
-			WHERE type = 'activity' AND parent_id = ?
+		-- Anchor: The last 5 summaries under the current session
+		SELECT * FROM (
+			SELECT id, parent_id, type, content 
+			FROM nodes 
+			WHERE type = 'summary' AND parent_id IN (
+				SELECT id FROM nodes WHERE parent_id = ? AND type = 'task'
+			)
+			ORDER BY id DESC LIMIT 5
 		)
+		
 		UNION ALL	
-
-		-- recursively join to parent
+		
+		-- recursively walk up the tree
 		SELECT n.id, n.parent_id, n.type, n.content 
 		FROM nodes n
 		JOIN branch b ON n.id = b.parent_id
 	)
-	-- select in ascending order
-	SELECT type, content FROM branch ORDER BY id ASC`
+	-- DISTINCT to avoid repeating common ancestors (Session, Day, User)
+	SELECT DISTINCT type, content FROM branch ORDER BY id ASC`
 
 	s.mu.RLock()
 	parentID := s.currentParentID
@@ -191,6 +219,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, query, parentID)
 
 	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("failed to query context: %w", err)
 	}
 
@@ -202,6 +231,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 		var nodeType, content string
 
 		if err := rows.Scan(&nodeType, &content); err != nil {
+			span.RecordError(err)
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -210,6 +240,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	}
 
 	if err := rows.Err(); err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
@@ -221,4 +252,77 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// implements the memory.Storage interface.
+// It creates task nodes and summary leaf nodes in the temporal tree.
+func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "LogSemanticNode")
+	defer span.End()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// if new task, and no task id - create task node
+	if !summary.SameTask || s.currentTaskID == 0 {
+		taskID, err := s.ensureNode(ctx, s.currentParentID, "task", summary.TaskName)
+		if err != nil {
+			span.RecordError(err)
+			return err
+		}
+		s.currentTaskID = taskID
+	}
+
+	// log summary as child to task node
+	payload, _ := json.Marshal(summary)
+	_, err := s.ensureNode(ctx, s.currentTaskID, "summary", string(payload))
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+
+	span.SetAttributes(
+		attribute.String("db.task_name", summary.TaskName),
+		attribute.Bool("db.same_task", summary.SameTask),
+	)
+
+	return nil
+}
+
+// searches historic summaries
+func (s *Store) QueryMemory(ctx context.Context, query string) ([]string, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "QueryMemory")
+	defer span.End()
+
+	// simple LIKE query on summary nodes
+	sqlQuery := `
+		SELECT content 
+		FROM nodes 
+		WHERE type = 'summary' AND content LIKE ?
+		ORDER BY id DESC 
+		LIMIT 10
+	`
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, "%"+query+"%")
+	// wildcard search i.e. "any length"
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("failed to search memory: %w", err)
+	}
+	defer rows.Close()
+
+	var results []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+		results = append(results, content)
+	}
+
+	span.SetAttributes(attribute.Int("db.search_results", len(results)))
+	return results, nil
 }
