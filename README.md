@@ -11,6 +11,8 @@
 
 Ora is a thin, Go-native OS companion.
 
+from Latin _Orare_. To speak, to know, to ask of what cannot be seen.
+
 It monitors your workspace activity locally and provides voice-first contextual assistance from your terminal and desktop environment.
 
 ---
