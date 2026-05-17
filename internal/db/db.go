@@ -56,20 +56,20 @@ func New(path string) (*Store, error) {
 
 	// USER --> DAY --> SESSION --> ACTIVITY
 	// check for user node
-	userID, err := s.ensureNode(0, "user", "default_user") // make this configurable to system user
+	userID, err := s.ensureNode(context.Background(), 0, "user", "default_user") // make this configurable to system user
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure user: %w", err)
 	}
 
 	// check for day node
 	today := time.Now().Format("2006-01-02") // YYYY-MM-DD
-	dayID, err := s.ensureNode(userID, "day", today)
+	dayID, err := s.ensureNode(context.Background(), userID, "day", today)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure day: %w", err)
 	}
 
 	// check for session node
-	sessionID, err := s.ensureNode(dayID, "session", "Active Session")
+	sessionID, err := s.ensureNode(context.Background(), dayID, "session", "Active Session")
 	// TODO: semantic session naming
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure session: %w", err)
@@ -109,7 +109,12 @@ func (s *Store) createSchema() error {
 }
 
 // get or create
-func (s *Store) ensureNode(parentID int64, nodeType, content string) (int64, error) {
+func (s *Store) ensureNode(ctx context.Context, parentID int64, nodeType, content string) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	_, span := tracer.Start(ctx, "DB.EnsureNode")
+	span.SetAttributes(attribute.String("node.type", nodeType))
+	defer span.End()
+
 	var id int64
 
 	// wrap in a transaction to ensure atomicity
@@ -261,7 +266,7 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 
 	// if new task, and no task id - create task node
 	if !summary.SameTask || s.currentTaskID == 0 {
-		taskID, err := s.ensureNode(s.currentParentID, "task", summary.TaskName)
+		taskID, err := s.ensureNode(ctx, s.currentParentID, "task", summary.TaskName)
 		if err != nil {
 			span.RecordError(err)
 			return err
@@ -271,7 +276,7 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 
 	// log summary as child to task node
 	payload, _ := json.Marshal(summary)
-	_, err := s.ensureNode(s.currentTaskID, "summary", string(payload))
+	_, err := s.ensureNode(ctx, s.currentTaskID, "summary", string(payload))
 	if err != nil {
 		span.RecordError(err)
 		return err
