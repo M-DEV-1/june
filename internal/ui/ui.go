@@ -132,6 +132,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vpCmd tea.Cmd
 	)
 
+	// all slash cmds, and tui updates
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
 		if m.showCmdList {
@@ -142,21 +143,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport, vpCmd = m.viewport.Update(msg)
 		m.textarea, tiCmd = m.textarea.Update(msg)
 		return m, tea.Batch(vpCmd, tiCmd)
-	}
 
-	m.textarea, tiCmd = m.textarea.Update(msg)
-	m.viewport, vpCmd = m.viewport.Update(msg)
-
-	// all key/slash commands
-	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		inputVal := m.textarea.Value()
-		m.showCmdList = strings.HasPrefix(inputVal, "/") || (len(inputVal) == 0 && msg.Type == tea.KeyRunes && msg.String() == "/")
-
+		// navigate through the menu list
 		if m.showCmdList {
-			if strings.HasPrefix(inputVal, "/") {
-				FilterCommands(&m.cmdList, inputVal[1:])
-			}
 			switch msg.Type {
 			case tea.KeyUp, tea.KeyDown:
 				var cmd tea.Cmd
@@ -173,11 +163,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// hotkeys
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyCtrlJ:
 			m.textarea.InsertString("\n")
+			return m, nil
 		case tea.KeyEnter:
 			input := strings.TrimSpace(m.textarea.Value())
 			if input != "" {
@@ -190,8 +182,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.streamLine("you", input)
 					m.textarea.Reset()
 				}
+				return m, nil
 			}
 		}
+
+		// textarea updates (typing)
+		m.textarea, tiCmd = m.textarea.Update(msg)
+
+		// recalculation to prevent lag altogether
+		inputVal := m.textarea.Value()
+		m.showCmdList = strings.HasPrefix(inputVal, "/")
+		if m.showCmdList {
+			FilterCommands(&m.cmdList, inputVal[1:])
+		}
+
+		return m, tiCmd
 
 	case responseMsg:
 		m.streamLine("ora", string(msg))
@@ -277,6 +282,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewport()
 	}
 
+	m.viewport, vpCmd = m.viewport.Update(msg)
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
@@ -317,7 +323,7 @@ func (m *model) executeCommand(input string) {
 	case "/voice":
 		m.mode = ModeVoice
 		m.agent.SetMute(false)
-		m.messages = append(m.messages, Message{Sender: "system", Content: "Switched to Voice-Only Mode (Ora text output hidden)"})
+		m.messages = append(m.messages, Message{Sender: "system", Content: "Switched to Voice-Only Mode"})
 	case "/text":
 		m.mode = ModeText
 		m.agent.SetMute(true)
