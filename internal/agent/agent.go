@@ -17,6 +17,11 @@ type ContextReader interface {
 	QueryMemory(ctx context.Context, query string) ([]string, error)
 }
 
+type ToolRequest struct {
+	Command    string
+	ResultChan chan<- string
+}
+
 type Agent struct {
 	mic              audio.Microphone
 	speaker          audio.Speaker
@@ -29,6 +34,8 @@ type Agent struct {
 	TextChan         chan string // this is for tui text input
 	TextResponseChan chan string // results for tui text resp
 	ErrorChan        chan error  // websocket connection crashes
+	ToolApprovalChan chan ToolRequest
+	AllowedCmds      sync.Map // session allowlist for shell commands
 }
 
 // initializer and orchestrates all hardware (2) and memory (1) moduels
@@ -80,6 +87,7 @@ func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, 
 		TextChan:         make(chan string, 100),
 		TextResponseChan: make(chan string, 100),
 		ErrorChan:        make(chan error, 10),
+		ToolApprovalChan: make(chan ToolRequest, 1),
 	}
 	return a
 }
