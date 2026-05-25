@@ -4,7 +4,7 @@ package ui
 const (
 	MinViewportHeight     = 5
 	LayoutPadding         = 6
-	SignalFieldHeight     = 5
+	SignalFieldHeight     = 7
 	GutterWidth           = 10
 	DefaultWidth          = 80
 	MaxTextareaHeight     = 6
