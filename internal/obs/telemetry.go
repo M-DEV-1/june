@@ -42,17 +42,31 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	logger := slog.New(&TraceHandler{handler: jsonHandler})
 	slog.SetDefault(logger)
 
+	noop := func(ctx context.Context) error { return nil }
+
 	if isTest {
 		slog.Debug("Running in test mode, bypassing OTLP exporter setup.")
-		return func(ctx context.Context) error { return nil }, nil
+		return noop, nil
 	}
 
 	// setup otlp trace exporter (for any collector)
 	// otlptracegrpc localhost:4317
 	// data moves to 4317 and then to any collector (whatever is setup)
-	exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
+	// but now, we only enable OTLP exporter if endpoint is explicitly configured
+	// mosts won't have Jaeger running; blocking on gRPC dial added 3-5s startup cost
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		slog.Info("tracing disabled (set OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 to enable)")
+		return noop, nil
+	}
+
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithEndpoint(endpoint),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
+		slog.Warn("failed to create OTLP exporter, tracing disabled", "error", err)
+		return noop, nil
 	}
 
 	res, _ := resource.New(ctx,
