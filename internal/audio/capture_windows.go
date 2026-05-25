@@ -132,21 +132,20 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 					floatData := unsafe.Slice((*float32)(unsafe.Pointer(data)), frames)
 					pcm = make([]byte, frames*2)
 
-					var maxAmp float32
+					var sumSq float64
 					for i := 0; i < int(frames); i++ {
+						// windows gives 32 bit, api requires 16 bit
 						val := float32ToInt16(floatData[i])
 						pcm[i*2] = byte(val)
 						pcm[i*2+1] = byte(val >> 8)
-						// extra amp values for tui waveform
-						absVal := floatData[i]
-						if absVal < 0 {
-							absVal = -absVal
-						}
-						if absVal > maxAmp {
-							maxAmp = absVal
-						}
+						f := float64(floatData[i])
+						sumSq += f * f
 					}
-					m.currentAmp.Store(math.Float64bits(float64(maxAmp)))
+					rms := math.Sqrt(sumSq/float64(frames)) * 3.0
+					if rms > 1.0 {
+						rms = 1.0
+					}
+					m.currentAmp.Store(math.Float64bits(rms))
 
 					// releasing gives memory back to soundcard before we block further audio
 					acc.ReleaseBuffer(frames)
