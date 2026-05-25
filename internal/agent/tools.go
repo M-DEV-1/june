@@ -89,6 +89,25 @@ func toolDefinitions() []*genai.Tool {
 	}}
 }
 
+func RunShellCommand(command string) string {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("powershell", "-Command", command)
+	} else {
+		cmd = exec.Command("sh", "-c", command)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("error: %v\noutput: %s", err, string(output))
+	}
+	result := string(output)
+	if len(result) > 2000 {
+		result = result[:2000] + "\n... (truncated)"
+	}
+	return result
+}
+
 // executeTool runs a tool and returns the result as a string
 // maybe this can be seperated into /agent/tools altogether later and be compiled with OS specific code?
 func (a *Agent) executeTool(name string, args map[string]any) string {
@@ -98,24 +117,24 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 		if !ok {
 			return "error: command argument is required"
 		}
-		slog.Warn("executing shell command", "command", command)
 
-		var cmd *exec.Cmd
-		if runtime.GOOS == "windows" {
-			cmd = exec.Command("powershell", "-Command", command)
-		} else {
-			cmd = exec.Command("sh", "-c", command)
+		// Check session allowlist
+		if _, allowed := a.AllowedCmds.Load(command); allowed {
+			slog.Info("executing auto-allowed shell command", "command", command)
+			return RunShellCommand(command)
 		}
 
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Sprintf("error: %v\noutput: %s", err, string(output))
+		slog.Warn("intercepting shell command for HITL", "command", command)
+
+		resChan := make(chan string, 1)
+		select {
+		case a.ToolApprovalChan <- ToolRequest{Command: command, ResultChan: resChan}:
+		default:
+			// TUI approval queue full — another tool is pending. Reject to unblock.
+			return "error: approval queue busy, command rejected"
 		}
-		result := string(output)
-		if len(result) > 2000 {
-			result = result[:2000] + "\n... (truncated)"
-		}
-		return result
+
+		return <-resChan
 
 	case "read_clipboard":
 		var cmd *exec.Cmd
