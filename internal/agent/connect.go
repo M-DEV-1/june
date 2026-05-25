@@ -15,7 +15,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func (a *Agent) Connect(ctx context.Context) error {
+func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	tracer := obs.GetTracer(ctx, "ora.agent")
 	handshakeCtx, span := tracer.Start(ctx, "Agent.ConnectHandshake")
 
@@ -105,6 +105,11 @@ func (a *Agent) Connect(ctx context.Context) error {
 	slog.Debug("connected to Live API")
 	defer session.Close()
 
+	// per-session context: cancels all goroutines for THIS session when Connect returns
+	// w/o this, textSendLoop and audioSendLoop from a dead session linger across reconnects
+	sessCtx, sessCancel := context.WithCancel(ctx)
+	defer sessCancel()
+
 	// kickstartttterrr
 	a.writeMu.Lock()
 	err = session.SendClientContent(genai.LiveSendClientContentParameters{
@@ -127,27 +132,19 @@ func (a *Agent) Connect(ctx context.Context) error {
 	// handshake complete, end span
 	span.End()
 
-	errChan := make(chan error, 1) // 1 slot error channel
+	// Buffer 2: receiveLoop and audioSendLoop both write here; without room for both
+	// the second writer blocks forever if Connect has already returned on the first error.
+	errChan := make(chan error, 2)
 
-	// receive loop - handles model responses and tool calls
-	go a.receiveLoop(ctx, session, a.GetModel(), errChan)
-
-	micChan, err := a.mic.StartCapture(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to start microphone: %w", err)
-	}
-
-	// audio send loop
-	go a.audioSendLoop(ctx, session, micChan, errChan)
-
-	// text send loop (uses textchan)
-	go a.textSendLoop(ctx, session)
+	go a.receiveLoop(sessCtx, session, a.GetModel(), errChan)
+	go a.audioSendLoop(sessCtx, session, micChan, errChan)
+	go a.textSendLoop(sessCtx, session)
 
 	select {
 	case err := <-errChan:
 		return err
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-sessCtx.Done():
+		return sessCtx.Err()
 	}
 }
 
@@ -172,6 +169,20 @@ func (a *Agent) receiveLoop(ctx context.Context, session *genai.Session, model s
 			default:
 			}
 			return
+		}
+
+		// check for server-side barge-in (VAD)
+		if msg.ServerContent != nil && msg.ServerContent.Interrupted {
+			slog.Info("barge-in detected: server interrupted model generation")
+			a.speaker.Flush()
+
+			// optional: send a visual cue to the UI
+			// TODO: remove in dev, or idk keep it
+			select {
+			case a.TextResponseChan <- "\n*[ora stopped]*\n":
+			default:
+			}
+			continue
 		}
 
 		// this has very interesting spanning logic
@@ -295,7 +306,7 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 			// this is voice haha
 			a.speaker.Flush()
 			slog.Debug("sending text to model", "text", text)
-			
+
 			a.writeMu.Lock()
 			err := session.SendClientContent(genai.LiveSendClientContentParameters{
 				Turns: []*genai.Content{
@@ -308,7 +319,7 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 				},
 			})
 			a.writeMu.Unlock()
-			
+
 			if err != nil {
 				slog.Error("failed to send text", "error", err)
 			}
@@ -317,4 +328,3 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 		}
 	}
 }
-
