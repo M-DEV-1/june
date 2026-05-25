@@ -14,12 +14,11 @@ type Message struct {
 }
 
 func (m *model) renderMessage(msg Message, width int) string {
-	// Fixed width for alignment
 	gutterWidth := GutterWidth
 	contentWidth := width - gutterWidth
 
-	// Base row style with no background forced, to rely on lipgloss.Place
-	rowStyle := lipgloss.NewStyle().Width(width).UnsetBackground()
+	// Explicit background on every row prevents terminal bleed-through in viewport.
+	rowStyle := lipgloss.NewStyle().Width(width).Background(m.styles.BgViewport)
 
 	var prefix, content string
 
@@ -76,13 +75,20 @@ func (m *model) renderBanner(content string, width int) string {
 func (m *model) updateViewport() {
 	var wrapped []string
 
-	// internal width accounting for the padding
-	renderWidth := m.viewport.Width - 4
+	// account for the viewport's own padding (2,4) → 8 chars horizontal
+	renderWidth := m.viewport.Width - 8
+	if renderWidth < 20 {
+		renderWidth = 20
+	}
+
+	// Styled blank line so the separator between messages has the same background
+	// as the viewport. Plain "\n\n" shows the terminal color through.
+	sep := lipgloss.NewStyle().Background(m.styles.BgViewport).Width(renderWidth).Render("")
 
 	for _, msg := range m.messages {
 		wrapped = append(wrapped, m.renderMessage(msg, renderWidth))
 	}
 
-	m.viewport.SetContent(strings.Join(wrapped, "\n\n"))
+	m.viewport.SetContent(strings.Join(wrapped, "\n"+sep+"\n"))
 	m.viewport.GotoBottom()
 }

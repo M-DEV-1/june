@@ -4,14 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"ora/internal/agent"
-	"ora/internal/audio"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/memory"
+	"net/http"
 	"ora/internal/obs"
-	"ora/internal/tracker"
-	"ora/internal/ui"
 	"os"
 	"os/signal"
 	"time"
@@ -29,7 +23,6 @@ var rootCmd = &cobra.Command{
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
 
-		// globally load the .env
 		if err := godotenv.Load(); err != nil {
 			slog.Info("No .env file found, read from sys env")
 		}
@@ -45,96 +38,45 @@ var rootCmd = &cobra.Command{
 		}
 		defer shutdownObs(ctx)
 
-		// 🚀 Parallel Hardware & DB Initialization
-		var (
-			store   *db.Store
-			mic     audio.Microphone
-			speaker audio.Speaker
-		)
+		isDaemon, _ := cmd.Flags().GetBool("daemon")
 
-		initErrChan := make(chan error, 3)
-
-		go func() {
-			var err error
-			store, err = db.New("ora-db/db")
-			initErrChan <- err
-		}()
-
-		go func() {
-			var err error
-			mic, err = audio.NewMic()
-			initErrChan <- err
-		}()
-
-		go func() {
-			var err error
-			speaker, err = audio.NewSpeaker()
-			initErrChan <- err
-		}()
-
-		// wait for all 3 to finish
-		for i := 0; i < 3; i++ {
-			if err := <-initErrChan; err != nil {
-				fmt.Fprintf(os.Stderr, "fatal: startup component failure: %v\n", err)
-				return
+		if isDaemon {
+			if err := runDaemon(ctx, shutdownObs); err != nil {
+				slog.Error("daemon crashed", "error", err)
 			}
-		}
-
-		defer store.Close()
-		defer mic.Close()
-		defer speaker.Close()
-
-		// initialize tracker and daemon
-		eye, err := tracker.New()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fatal: could not initialize tracker: %v\n", err)
 			return
 		}
 
-		apiKey := os.Getenv("GEMINI_API_KEY")
-
-		// initialize compiler
-		summarizer, err := memory.NewGeminiSummarizer(apiKey)
-		if err != nil {
-			slog.Warn("failed to initialize summarizer, semantic memory disabled", "error", err)
-		}
-		compiler := memory.NewCompiler(summarizer, store)
-
-		eventChan := make(chan tracker.Activity, 100)
-		daemon := tracker.NewDaemon(eye, 2*time.Second, eventChan)
-
-		// starts daemon in the background!!!
-		go daemon.Start(ctx)
-
-		go func() {
-			for ev := range eventChan {
-				// temp integration of compiler
-				store.LogActivity(ctx, ev.App, ev.Title)
-				if compiler != nil {
-					compiler.Ingest(ctx, ev)
+		// get-or-create daemon.
+		// using short per-request timeout without it http.Get hangs if the TCP port is bound but nobody has called Accept yet
+		var daemonStatus string
+		if pingDaemon() {
+			slog.Info("connected to existing daemon")
+			daemonStatus = "connected"
+		} else {
+			slog.Info("daemon not found, spawning background process")
+			if spawnErr := spawnHiddenDaemon(); spawnErr != nil {
+				slog.Error("failed to spawn background daemon", "error", spawnErr)
+				daemonStatus = "daemon spawn failed: " + spawnErr.Error()
+			} else {
+				// 300ms timeout, i.e. no blocking
+				// poll until daemon is ready, max 10s, 100ms sleep b/w attempts
+				deadline := time.Now().Add(10 * time.Second)
+				daemonStatus = "daemon spawn failed: timed out"
+				for time.Now().Before(deadline) {
+					time.Sleep(100 * time.Millisecond)
+					if pingDaemon() {
+						daemonStatus = "started"
+						break
+					}
 				}
 			}
-		}()
-
-		// inject dependencies
-		orchestrator := agent.NewAgent(mic, speaker, store, compiler, apiKey)
-		orchestrator.SetModel(config.VoiceModel)
-
-		// voice loop starts in bg
-		go func() {
-			if err := orchestrator.Connect(ctx); err != nil {
-				// if tui is running, we might not want to print to stdout directly
-				// but for now this is fine for debugging crashes
-				slog.Error("agent connection crashed", "error", err)
-			}
-		}()
-
-		// starts TUI
-		if err := ui.Run(orchestrator); err != nil {
-			fmt.Printf("UI Error: %v\n", err)
-			return
 		}
 
+		// start tui
+		if err := runClient(ctx, shutdownObs, daemonStatus); err != nil {
+			slog.Error("Client crashed", "error", err)
+		}
 	},
 	// root command is supposed to startup the CLI and other tools - db, memory companion, tui, et cetera.
 }
@@ -149,5 +91,18 @@ func Execute() {
 }
 
 func init() {
-	// Root flags can be added here
+	rootCmd.PersistentFlags().Bool("daemon", false, "Run as background daemon")
+}
+
+// pingDaemon sends a single /ping with a short timeout.
+// Returns true only if the daemon responds 200 OK.
+var daemonPingClient = &http.Client{Timeout: 300 * time.Millisecond}
+
+func pingDaemon() bool {
+	resp, err := daemonPingClient.Get("http://127.0.0.1:" + DaemonPort + "/ping")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
