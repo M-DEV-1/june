@@ -32,7 +32,6 @@ type model struct {
 	textarea      textarea.Model
 	styles        Styles
 	messages      []Message
-	lastSender    string
 	lastUpdate    time.Time
 	micWave       *Waveform
 	speakerWave   *Waveform
@@ -439,7 +438,6 @@ func (m *model) streamLine(sender, content string) {
 
 		if content != "" {
 			m.messages = append(m.messages, Message{Sender: sender, Content: content, IsThought: m.isThinking})
-			m.lastSender = ""
 		}
 	} else if len(m.messages) > 0 && m.messages[len(m.messages)-1].Sender == sender && m.messages[len(m.messages)-1].IsThought == m.isThinking && !m.messages[len(m.messages)-1].IsTool {
 		// append to the last message if it's the same sender and state
@@ -447,7 +445,6 @@ func (m *model) streamLine(sender, content string) {
 	} else {
 		// start a new message block
 		m.messages = append(m.messages, Message{Sender: sender, Content: content, IsThought: m.isThinking})
-		m.lastSender = sender
 	}
 
 	// throttle viewport updates so it doesn't flicker too much
