@@ -2,104 +2,98 @@ package ui
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
-func TestWaveform_Logic(t *testing.T) {
-	width := 10
-	w := NewWaveform(width)
-
-	if len(w.history) != width {
-		t.Errorf("expected width %d, got %d", width, len(w.history))
+func TestWaveform_InitialisedToZero(t *testing.T) {
+	w := NewWaveform(10)
+	if w.smoothed != 0 {
+		t.Errorf("expected smoothed=0, got %f", w.smoothed)
 	}
-
-	for i := 0; i < width; i++ {
-		w.Update(float64(i) / 10.0)
+	if w.width != 10 || len(w.variation) != 10 {
+		t.Errorf("expected width=10 variation=10, got width=%d variation=%d", w.width, len(w.variation))
 	}
+}
 
-	if w.history[width-1] != 0.9 {
-		t.Errorf("expected latest value 0.9, got %f", w.history[width-1])
-	}
-
-	// update once more and check scroll
+func TestWaveform_RisesFast(t *testing.T) {
+	w := NewWaveform(10)
 	w.Update(1.0)
-	if w.history[0] != 0.1 {
-		t.Errorf("expected scroll: first value should be 0.1, got %f", w.history[0])
+	if w.smoothed < 0.5 {
+		t.Errorf("expected fast rise toward 1.0, got %f", w.smoothed)
+	}
+}
+
+func TestWaveform_FallingEdgeIsSmoothed(t *testing.T) {
+	w := NewWaveform(10)
+	// drive up
+	for range 5 {
+		w.Update(1.0)
+	}
+	high := w.smoothed
+	if high < 0.5 {
+		t.Fatalf("expected high amplitude after repeated Update(1.0), got %f", high)
+	}
+	// single zero tick should not drop to zero
+	w.Update(0.0)
+	if w.smoothed == 0 {
+		t.Error("expected smoothed fall, not instant drop to 0")
+	}
+	if w.smoothed >= high {
+		t.Errorf("expected decay below peak %f, got %f", high, w.smoothed)
+	}
+}
+
+func TestWaveform_VariationNonZero(t *testing.T) {
+	w := NewWaveform(20)
+	for i, v := range w.variation {
+		if v <= 0 || v > 1.0 {
+			t.Errorf("variation[%d]=%f out of (0,1] range", i, v)
+		}
+	}
+}
+
+func TestWaveform_SetWidth(t *testing.T) {
+	w := NewWaveform(20)
+	w.SetWidth(40)
+	if w.width != 40 || len(w.variation) != 40 {
+		t.Errorf("expected width=40, got width=%d variation=%d", w.width, len(w.variation))
+	}
+	w.SetWidth(0) // invalid — no-op
+	if w.width != 40 {
+		t.Errorf("SetWidth(0) should be no-op, got %d", w.width)
+	}
+}
+
+func TestWaveform_RenderContainsLabel(t *testing.T) {
+	w := NewWaveform(20)
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#AF87FF"))
+	out := w.Render(style, "MICROPHONE")
+	if !strings.Contains(out, "MICROPHONE") {
+		t.Error("Render missing label")
 	}
 }
 
 func TestWaveform_VisualDemo(t *testing.T) {
-	/*
-		NOTE
-		This test is intended for manual visual verification
-		Run with: go test -v ./internal/ui
-	*/
-	width := 60
-	w := NewWaveform(width)
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#AF87FF"))
+	w := NewWaveform(40)
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#10b981"))
 
-	fmt.Println("\n--- Waveform Visual Test (Sine Wave) ---")
+	fmt.Println("\n--- silent ---")
+	fmt.Println(w.Render(style, "SILENT"))
 
-	// a simple sine wave pattern
-	for i := 0; i < width; i++ {
-		amp := 0.5 + 0.5*math.Sin(float64(i)*0.3)
-		w.Update(amp)
+	// drive amplitude up
+	for _, a := range []float64{0.1, 0.3, 0.6, 0.9, 1.0, 0.8, 0.5, 0.3, 0.1, 0} {
+		w.Update(a)
 	}
+	fmt.Println("\n--- speaking ---")
+	fmt.Println(w.Render(style, "SPEAKING"))
 
-	output := w.Render(style, "SINE TEST")
-	fmt.Println(output)
-	fmt.Println("----------------------------------------")
-
-	if !strings.Contains(output, "SINE TEST") {
-		t.Error("Render output missing label")
+	// let it decay
+	for range 10 {
+		w.Update(0)
 	}
-}
-
-func TestWaveform_Resize(t *testing.T) {
-	/*
-		NOTE
-		This test is intended for manual visual verification
-		Run with: go test -v ./internal/ui
-	*/
-
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#7D7D7D"))
-
-	fmt.Println("\n--- Waveform Resize Test ---")
-
-	w := NewWaveform(30)
-	// ramp up
-	for i := 0; i < 30; i++ {
-		w.Update(float64(i) / 30.0)
-	}
-	fmt.Println("Original (Width 30):")
-	fmt.Println(w.Render(style, "WIDTH 30"))
-
-	// expand the pattern
-	w.SetWidth(60)
-	fmt.Println("\nExpanded (Width 60 - Pattern should be on the right):")
-	fmt.Println(w.Render(style, "WIDTH 60"))
-
-	if len(w.history) != 60 {
-		t.Errorf("expected width 60, got %d", len(w.history))
-	}
-	if w.history[59] < 0.9 {
-		t.Error("Resize (expand) lost history data at the end")
-	}
-
-	// shrink the pattern
-	w.SetWidth(15)
-	fmt.Println("\nShrunk (Width 15 - Only the latest ramp should be visible):")
-	fmt.Println(w.Render(style, "WIDTH 15"))
-
-	if len(w.history) != 15 {
-		t.Errorf("expected width 15, got %d", len(w.history))
-	}
-	if w.history[14] < 0.9 {
-		t.Error("Resize (shrink) lost history data at the end")
-	}
-	fmt.Println("----------------------------")
+	fmt.Println("\n--- after decay ---")
+	fmt.Println(w.Render(style, "DECAYED"))
 }
