@@ -109,26 +109,27 @@ func DefaultStyles() Styles {
 		Padding(0, 1)
 
 	// chat block prefixes and colors
-	s.PrefixSystem = lipgloss.NewStyle().Foreground(s.Muted).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
-	s.TextSystem = lipgloss.NewStyle().Foreground(s.Muted)
+	s.PrefixSystem = lipgloss.NewStyle().Foreground(s.Muted).Background(s.BgViewport).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.TextSystem = lipgloss.NewStyle().Foreground(s.Muted).Background(s.BgViewport)
 
-	s.PrefixThought = lipgloss.NewStyle().Foreground(lipgloss.Color("#a78bfa")).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.PrefixThought = lipgloss.NewStyle().Foreground(lipgloss.Color("#a78bfa")).Background(s.BgViewport).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
 	s.TextThought = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#c4b5fd")).
+		Background(s.BgThought).
 		Italic(true).
 		Border(lipgloss.NormalBorder(), false, false, false, true).
 		BorderForeground(lipgloss.Color("#363650")).
 		PaddingLeft(1)
 	s.BgThought = lipgloss.Color("#13131a") // slightly lighter Zinc/Navy for thoughts
 
-	s.PrefixYou = lipgloss.NewStyle().Foreground(s.Green).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
-	s.TextYou = lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635"))
+	s.PrefixYou = lipgloss.NewStyle().Foreground(s.Green).Background(s.BgViewport).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.TextYou = lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635")).Background(s.BgViewport)
 
-	s.PrefixOra = lipgloss.NewStyle().Foreground(s.Purple).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
-	s.TextOra = lipgloss.NewStyle().Foreground(s.White)
+	s.PrefixOra = lipgloss.NewStyle().Foreground(s.Purple).Background(s.BgViewport).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.TextOra = lipgloss.NewStyle().Foreground(s.White).Background(s.BgViewport)
 
-	s.ToolDot = lipgloss.NewStyle().Foreground(s.Purple)
-	s.ToolText = lipgloss.NewStyle().Foreground(s.Gray).Italic(true)
+	s.ToolDot = lipgloss.NewStyle().Foreground(s.Purple).Background(s.BgViewport)
+	s.ToolText = lipgloss.NewStyle().Foreground(s.Gray).Background(s.BgViewport).Italic(true)
 
 	// keyboard hints and input styling - locking to BgInput
 	s.InputPrefix = lipgloss.NewStyle().

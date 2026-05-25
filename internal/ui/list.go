@@ -74,11 +74,29 @@ func newCommandList(s Styles) list.Model {
 	l.SetShowHelp(false)
 
 	// Styles for pagination
-	l.Styles.PaginationStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(s.Muted)
+	l.Styles.PaginationStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(s.Muted).Background(s.BgInput)
 
 	return l
 }
 
+func newHitlList(s Styles) list.Model {
+	items := []list.Item{
+		commandItem{title: "Allow once", desc: "Execute this command and return the result"},
+		commandItem{title: "Allow for session", desc: "Always execute this command without asking"},
+		commandItem{title: "Reject", desc: "Cancel execution and notify the agent"},
+		commandItem{title: "Suggest changes", desc: "Edit the command before running"},
+	}
+
+	l := list.New(items, commandDelegate{styles: s}, DefaultListWidth, DefaultListHeight)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
+	l.SetShowHelp(false)
+
+	l.Styles.PaginationStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(s.Muted).Background(s.BgInput)
+
+	return l
+}
 func FilterCommands(l *list.Model, query string) {
 	allCommands := []list.Item{
 		commandItem{title: "voice", desc: "Switch to Voice-Only mode"},

@@ -1,0 +1,60 @@
+package config
+
+import (
+	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+type OraConfig struct {
+	Tracker TrackerConfig `json:"tracker"`
+}
+
+type TrackerConfig struct {
+	Blocklist []string      `json:"blocklist"`
+	DwellTime time.Duration `json:"dwell_time_ms"`
+}
+
+// currently windows only
+var DefaultBlocklist = []string{
+	"1Password.exe",
+	"Bitwarden.exe",
+	"Taskmgr.exe",
+	"LockApp.exe",
+}
+
+// get or create
+func LoadConfig() OraConfig {
+	cfg := OraConfig{
+		Tracker: TrackerConfig{
+			Blocklist: DefaultBlocklist,
+			DwellTime: 3000,
+		},
+	}
+
+	configPath := filepath.Join("ora-db", "ora-config.json")
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		slog.Info("Creating default config file", "path", configPath)
+		if err := os.MkdirAll("ora-db", 0755); err == nil {
+			data, _ := json.MarshalIndent(cfg, "", "  ")
+			os.WriteFile(configPath, data, 0644)
+		}
+		return cfg
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		slog.Error("Failed to read config file, using defaults", "error", err)
+		return cfg
+	}
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		slog.Error("Failed to parse config file, using defaults", "error", err)
+		return cfg
+	}
+
+	return cfg
+}
