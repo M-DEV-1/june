@@ -57,6 +57,67 @@ func TestStore_ActivityLifeCycle(t *testing.T) {
 	t.Logf("Successfully retrieved branch: %+v", branch)
 }
 
+func TestStore_Notes_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.LogNote(ctx, "user prefers coffee over tea", "preference")
+	if err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected non-zero note id")
+	}
+
+	notes, err := store.GetNotes(ctx)
+	if err != nil {
+		t.Fatalf("GetNotes: %v", err)
+	}
+
+	if len(notes) != 1 {
+		t.Fatalf("want 1 note, got %d", len(notes))
+	}
+	if notes[0].Content != "user prefers coffee over tea" {
+		t.Errorf("unexpected content: %s", notes[0].Content)
+	}
+	if notes[0].Kind != "preference" {
+		t.Errorf("unexpected kind: %s", notes[0].Kind)
+	}
+}
+
+func TestStore_Notes_DeleteAndDedupe(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	id, _ := store.LogNote(ctx, "user works at Acme ESG", "fact")
+
+	// re-logging same content + kind is a no-op (idempotent)
+	id2, err := store.LogNote(ctx, "user works at Acme ESG", "fact")
+	if err != nil {
+		t.Fatalf("LogNote dedupe: %v", err)
+	}
+	if id2 != id {
+		t.Errorf("expected idempotent insert to return same id, got %d != %d", id2, id)
+	}
+
+	if err := store.DeleteNote(ctx, id); err != nil {
+		t.Fatalf("DeleteNote: %v", err)
+	}
+
+	notes, _ := store.GetNotes(ctx)
+	if len(notes) != 0 {
+		t.Fatalf("want 0 notes after delete, got %d", len(notes))
+	}
+}
+
 func TestStore_InitCreatesDirectory(t *testing.T) {
 	path := "test_dir/test.db"
 	defer os.RemoveAll("test_dir")

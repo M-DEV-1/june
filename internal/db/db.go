@@ -100,11 +100,99 @@ func (s *Store) createSchema() error {
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_unique ON nodes(IFNULL(parent_id, 0), type, content);
 	CREATE INDEX IF NOT EXISTS idx_parent_id ON nodes(parent_id);
+
+	-- notes: explicit user-stated facts. always-on, small, forever.
+	-- separate from nodes/tree because they're not temporal events.
+	CREATE TABLE IF NOT EXISTS notes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		content TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'fact',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
 	// TODO: salience score to prioritize important activities and not track menial activities
 	// i.e. what do we choose to remember
 	_, err := s.db.Exec(query)
+	return err
+}
+
+// Note is a stable, user-stated fact. Always-on in implicit context.
+type Note struct {
+	ID        int64
+	Content   string
+	Kind      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// LogNote inserts a note. Idempotent on (content, kind) — returns existing id.
+func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.LogNote")
+	defer span.End()
+
+	if kind == "" {
+		kind = "fact"
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO notes (content, kind) VALUES (?, ?)`,
+		content, kind); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("insert note: %w", err)
+	}
+
+	var id int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM notes WHERE content = ? AND kind = ?`,
+		content, kind).Scan(&id); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("read note id: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.note_id", id))
+	return id, nil
+}
+
+// GetNotes returns all notes ordered newest first.
+func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.GetNotes")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, kind, created_at, updated_at FROM notes ORDER BY id DESC`)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query notes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Note
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Content, &n.Kind, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan note: %w", err)
+		}
+		out = append(out, n)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
+}
+
+// DeleteNote removes a note by id.
+func (s *Store) DeleteNote(ctx context.Context, id int64) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.DeleteNote")
+	defer span.End()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM notes WHERE id = ?`, id)
+	if err != nil {
+		span.RecordError(err)
+	}
 	return err
 }
 
