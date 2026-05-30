@@ -133,6 +133,50 @@ func TestStore_InitCreatesDirectory(t *testing.T) {
 	}
 }
 
+func TestStore_SearchMemory_FTS5(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// seed a summary and a note
+	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "Voice Pipeline",
+		Summary:  "Debugging WebSocket reconnect loop in Gemini Live session",
+	})
+	_, _ = store.LogNote(ctx, "user works at Acme ESG as an intern", "fact")
+
+	// FTS5 should find the summary by a tokenized word
+	hits, err := store.SearchMemory(ctx, "WebSocket")
+	if err != nil {
+		t.Fatalf("SearchMemory: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("FTS5 returned no hits for 'WebSocket'")
+	}
+	if !strings.Contains(hits[0].Content, "WebSocket") {
+		t.Errorf("expected hit to mention WebSocket: %s", hits[0].Content)
+	}
+	if hits[0].Source != "summary" {
+		t.Errorf("expected source=summary, got %s", hits[0].Source)
+	}
+
+	// FTS5 should also surface notes
+	noteHits, err := store.SearchMemory(ctx, "Acme")
+	if err != nil {
+		t.Fatalf("SearchMemory notes: %v", err)
+	}
+	if len(noteHits) == 0 {
+		t.Fatal("FTS5 returned no hits for 'Acme'")
+	}
+	if noteHits[0].Source != "note" {
+		t.Errorf("expected source=note, got %s", noteHits[0].Source)
+	}
+}
+
 func TestStore_QueryMemory(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.New(":memory:")

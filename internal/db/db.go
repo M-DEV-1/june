@@ -8,6 +8,7 @@ import (
 	"ora/internal/memory"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,6 +112,31 @@ func (s *Store) createSchema() error {
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
+
+	-- FTS5 over summary content + note content.
+	-- triggers below keep it in sync. tokenizer 'unicode61' is FTS5 default.
+	CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+		content,
+		source UNINDEXED,
+		ref_id UNINDEXED,
+		tokenize = 'unicode61'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS nodes_ai_summary AFTER INSERT ON nodes
+	WHEN NEW.type = 'summary'
+	BEGIN
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'summary', NEW.id);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes
+	BEGIN
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'note', NEW.id);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes
+	BEGIN
+		DELETE FROM memory_fts WHERE source = 'note' AND ref_id = OLD.id;
+	END;
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
 	// TODO: salience score to prioritize important activities and not track menial activities
@@ -183,7 +209,56 @@ func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
 	return out, nil
 }
 
-// DeleteNote removes a note by id.
+// MemoryHit is one FTS5 row — either a summary or a note.
+type MemoryHit struct {
+	Content string
+	Source  string // "summary" | "note"
+	RefID   int64
+}
+
+// SearchMemory runs FTS5 over summaries + notes. Returns top 10 by rank.
+// Empty query -> empty result, no error.
+func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.SearchMemory")
+	defer span.End()
+
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+
+	// MATCH wants tokens, not raw user text. quote it so special chars
+	// don't break the FTS5 parser; FTS5 phrase search is fine for v1.
+	safe := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT content, source, ref_id
+		FROM memory_fts
+		WHERE memory_fts MATCH ?
+		ORDER BY rank
+		LIMIT 10
+	`, safe)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("fts5 search: %w", err)
+	}
+	defer rows.Close()
+
+	var out []MemoryHit
+	for rows.Next() {
+		var h MemoryHit
+		if err := rows.Scan(&h.Content, &h.Source, &h.RefID); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan fts5 row: %w", err)
+		}
+		out = append(out, h)
+	}
+	span.SetAttributes(attribute.Int("db.search_results", len(out)))
+	return out, nil
+}
+
+// DeleteNote removes a note by id. FTS5 mirror is dropped via trigger.
 func (s *Store) DeleteNote(ctx context.Context, id int64) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.DeleteNote")
