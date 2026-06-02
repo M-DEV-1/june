@@ -118,6 +118,36 @@ func TestStore_Notes_DeleteAndDedupe(t *testing.T) {
 	}
 }
 
+func TestStore_GetImplicitContext_IncludesNotes(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	_, _ = store.LogNote(ctx, "user is a Go developer", "fact")
+	_, _ = store.LogNote(ctx, "user prefers terse responses", "preference")
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+
+	var foundFact, foundPref bool
+	for _, b := range branch {
+		if strings.Contains(b, "user is a Go developer") {
+			foundFact = true
+		}
+		if strings.Contains(b, "user prefers terse responses") {
+			foundPref = true
+		}
+	}
+	if !foundFact || !foundPref {
+		t.Errorf("notes missing from implicit context: %+v", branch)
+	}
+}
+
 func TestStore_InitCreatesDirectory(t *testing.T) {
 	path := "test_dir/test.db"
 	defer os.RemoveAll("test_dir")
