@@ -379,6 +379,18 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	parentID := s.currentParentID
 	s.mu.RUnlock()
 
+	var branch []string
+
+	// notes go first — they're "who is this user" context, always on top.
+	// fetch BEFORE opening CTE rows; sqlite `:memory:` per-connection
+	// isolation means an interleaved query would see an empty schema.
+	notes, nerr := s.GetNotes(ctx)
+	if nerr == nil {
+		for _, n := range notes {
+			branch = append(branch, fmt.Sprintf("[note:%s] %s", n.Kind, n.Content))
+		}
+	}
+
 	rows, err := s.db.QueryContext(ctx, query, parentID)
 
 	if err != nil {
@@ -387,8 +399,6 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	}
 
 	defer rows.Close()
-
-	var branch []string
 
 	for rows.Next() {
 		var nodeType, content string
@@ -407,8 +417,6 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
-	// some db specific metadata
-	// this span will return exact no of nodes returned for a specific request
 	span.SetAttributes(attribute.Int("db.node_count", len(branch)))
 	return branch, nil
 }
