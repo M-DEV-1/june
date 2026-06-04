@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"ora/internal/audio"
+	"ora/internal/db"
 	"ora/internal/memory"
 	"sync"
 	"sync/atomic"
@@ -11,10 +12,15 @@ import (
 // atomic is well, really cool
 // lighter lock-free primitives but only work per-variable and mutex protects blocks but is heavier
 
-// read-only interface to sqlite db
+// brain interface. notes ops live here too so the TUI can save
+// user-stated facts via the agent handle.
 type ContextReader interface {
 	GetImplicitContext(ctx context.Context) ([]string, error)
 	QueryMemory(ctx context.Context, query string) ([]string, error)
+	SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error)
+	LogNote(ctx context.Context, content, kind string) (int64, error)
+	GetNotes(ctx context.Context) ([]db.Note, error)
+	DeleteNote(ctx context.Context, id int64) error
 }
 
 type ToolRequest struct {

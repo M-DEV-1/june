@@ -63,6 +63,8 @@ func newCommandList(s Styles) list.Model {
 		commandItem{title: "both", desc: "Switch to Voice + Text mode"},
 		commandItem{title: "mute", desc: "Toggle microphone mute state globally"},
 		commandItem{title: "context", desc: "View recent semantic memory"},
+		commandItem{title: "note", desc: "Save a stable fact: /note <text>"},
+		commandItem{title: "notes", desc: "List saved notes"},
 		commandItem{title: "help", desc: "Show all available commands"},
 		commandItem{title: "clear", desc: "Clear the screen"},
 	}
@@ -104,6 +106,8 @@ func FilterCommands(l *list.Model, query string) {
 		commandItem{title: "both", desc: "Switch to Voice + Text mode"},
 		commandItem{title: "mute", desc: "Toggle microphone mute state globally"},
 		commandItem{title: "context", desc: "View recent semantic memory"},
+		commandItem{title: "note", desc: "Save a stable fact: /note <text>"},
+		commandItem{title: "notes", desc: "List saved notes"},
 		commandItem{title: "help", desc: "Show all available commands"},
 		commandItem{title: "clear", desc: "Clear the screen"},
 	}
