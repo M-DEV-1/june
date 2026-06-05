@@ -68,6 +68,25 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 		// tracker loop entry point
 		go daemon.Start(ctx)
 
+		// drop raw activity rows older than 72 h every 6 hours
+		go func() {
+			t := time.NewTicker(6 * time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					n, err := store.CullRawActivities(ctx, 72*time.Hour)
+					if err != nil {
+						slog.Error("activity cull failed", "error", err)
+					} else {
+						slog.Info("activity cull complete", "deleted_rows", n)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
 		go func() {
 			for ev := range eventChan {
 				store.LogActivity(ctx, ev.App, ev.Title)
