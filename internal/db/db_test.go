@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // t param is test controller. object to provide methods to control the flow of the test + reporting
@@ -204,6 +205,66 @@ func TestStore_SearchMemory_FTS5(t *testing.T) {
 	}
 	if noteHits[0].Source != "note" {
 		t.Errorf("expected source=note, got %s", noteHits[0].Source)
+	}
+}
+
+func TestStore_CullRawActivities(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// seed a summary so we can confirm it survives the cull
+	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "Cull Test Task",
+		Summary:  "Summary that must survive",
+	})
+
+	// log 3 recent activities (created_at = now)
+	_ = store.LogActivity(ctx, "App1", "Title1")
+	_ = store.LogActivity(ctx, "App2", "Title2")
+	_ = store.LogActivity(ctx, "App3", "Title3")
+
+	// direct-insert one activity backdated 100 hours
+	_, err = store.DB().ExecContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content, created_at)
+		 VALUES ((SELECT id FROM nodes WHERE type = 'session' LIMIT 1),
+		         'activity', 'old-activity', datetime('now', '-100 hours'))`,
+	)
+	if err != nil {
+		t.Fatalf("backdated insert: %v", err)
+	}
+
+	// cull anything older than 72 hours — only the backdated row qualifies
+	culled, err := store.CullRawActivities(ctx, 72*time.Hour)
+	if err != nil {
+		t.Fatalf("CullRawActivities: %v", err)
+	}
+	if culled != 1 {
+		t.Errorf("expected 1 row culled, got %d", culled)
+	}
+
+	// the 3 recent activities must still exist
+	var actCount int
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM nodes WHERE type = 'activity'`).Scan(&actCount); err != nil {
+		t.Fatalf("count activities: %v", err)
+	}
+	if actCount != 3 {
+		t.Errorf("expected 3 recent activities to remain, got %d", actCount)
+	}
+
+	// summary must be untouched
+	var sumCount int
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM nodes WHERE type = 'summary'`).Scan(&sumCount); err != nil {
+		t.Fatalf("count summaries: %v", err)
+	}
+	if sumCount == 0 {
+		t.Error("summary was deleted; cull must only touch 'activity' nodes")
 	}
 }
 

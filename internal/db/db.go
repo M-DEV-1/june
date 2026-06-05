@@ -461,6 +461,35 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 	return nil
 }
 
+// DB exposes the underlying connection for test-only raw queries.
+func (s *Store) DB() *sql.DB { return s.db }
+
+// CullRawActivities deletes activity nodes older than olderThan. Summaries,
+// tasks, sessions, days, users, and notes are never touched.
+// Returns the number of rows deleted.
+func (s *Store) CullRawActivities(ctx context.Context, olderThan time.Duration) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.CullRawActivities")
+	defer span.End()
+
+	secs := int64(olderThan.Seconds())
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM nodes WHERE type = 'activity' AND created_at < datetime('now', '-' || ? || ' seconds')`,
+		secs,
+	)
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("cull activities: %w", err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.culled_rows", n))
+	return n, nil
+}
+
 // searches historic summaries
 func (s *Store) QueryMemory(ctx context.Context, query string) ([]string, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
