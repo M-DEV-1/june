@@ -3,8 +3,9 @@ package tracker
 import "strings"
 
 type Activity struct {
-	App   string
-	Title string
+	App        string
+	Title      string
+	ScreenText string
 }
 
 // defines standard interface for all os implementations
