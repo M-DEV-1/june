@@ -43,6 +43,7 @@ func TestDaemon_DwellTimeAndBlocklist(t *testing.T) {
 
 	// poll every 50ms, Dwell time requires 2 ticks (100ms)
 	daemon := tracker.NewDaemon(mockEye, 50*time.Millisecond, 100*time.Millisecond, []string{"1Password.exe", "Taskmgr.exe"}, eventChan)
+	daemon.SetCapturer(func() string { return "" }) // no-op: avoid real OCR in unit tests
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go daemon.Start(ctx)
