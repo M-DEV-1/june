@@ -68,6 +68,22 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 		// tracker loop entry point
 		go daemon.Start(ctx)
 
+		// hourly safety-net flush: catches long idle sessions where no new activities fire
+		go func() {
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					if compiler != nil {
+						compiler.ForceFlush(ctx)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
 		// drop raw activity rows older than 72 h every 6 hours
 		go func() {
 			t := time.NewTicker(6 * time.Hour)
