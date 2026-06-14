@@ -488,13 +488,15 @@ func (m *model) executeCommand(input string) {
 		m.messages = []Message{}
 	case "/help":
 		helpText := `Available Commands:
-  /voice   - Switch to Voice-Only mode
-  /text    - Switch to Text-Only mode
-  /both    - Switch to Voice + Text mode
-  /mute    - Toggle global microphone mute
-  /context - View the semantic memory currently loaded
-  /clear   - Clear the chat screen
-  /help    - Show this help menu`
+  /voice       - Switch to Voice-Only mode
+  /text        - Switch to Text-Only mode
+  /both        - Switch to Voice + Text mode
+  /mute        - Toggle global microphone mute
+  /context     - View the semantic memory currently loaded
+  /note <txt>  - Save a stable user-stated fact
+  /notes       - List saved notes
+  /clear       - Clear the chat screen
+  /help        - Show this help menu`
 		m.messages = append(m.messages, Message{Sender: "system", Content: helpText})
 	case "/context":
 		importCtx, err := m.agent.GetBrain().GetImplicitContext(context.Background())
@@ -503,8 +505,38 @@ func (m *model) executeCommand(input string) {
 		} else {
 			m.messages = append(m.messages, Message{Sender: "system", Content: "Active Context Window:\n" + strings.Join(importCtx, "\n")})
 		}
+	case "/notes":
+		notes, err := m.agent.GetBrain().GetNotes(context.Background())
+		if err != nil {
+			m.messages = append(m.messages, Message{Sender: "system", Content: "Failed to fetch notes: " + err.Error()})
+		} else if len(notes) == 0 {
+			m.messages = append(m.messages, Message{Sender: "system", Content: "No notes yet. Save one with /note <text>."})
+		} else {
+			lines := make([]string, 0, len(notes))
+			for _, n := range notes {
+				lines = append(lines, fmt.Sprintf("  [%s] %s", n.Kind, n.Content))
+			}
+			m.messages = append(m.messages, Message{Sender: "system", Content: "Saved Notes:\n" + strings.Join(lines, "\n")})
+		}
 	default:
-		m.messages = append(m.messages, Message{Sender: "system", Content: "Unknown command: " + input + ". Type /help for available commands."})
+		// /note <text>  -- handled here so the trailing text isn't lost
+		if strings.HasPrefix(input, "/note ") {
+			content := strings.TrimSpace(strings.TrimPrefix(input, "/note "))
+			if content == "" {
+				m.messages = append(m.messages, Message{Sender: "system", Content: "Usage: /note <text>"})
+			} else {
+				_, err := m.agent.GetBrain().LogNote(context.Background(), content, "fact")
+				if err != nil {
+					m.messages = append(m.messages, Message{Sender: "system", Content: "Failed to save note: " + err.Error()})
+				} else {
+					m.messages = append(m.messages, Message{Sender: "system", Content: "Note saved: " + content})
+				}
+			}
+		} else if input == "/note" {
+			m.messages = append(m.messages, Message{Sender: "system", Content: "Usage: /note <text>"})
+		} else {
+			m.messages = append(m.messages, Message{Sender: "system", Content: "Unknown command: " + input + ". Type /help for available commands."})
+		}
 	}
 	m.updateViewport()
 }

@@ -30,7 +30,8 @@ func LoadConfig() OraConfig {
 	cfg := OraConfig{
 		Tracker: TrackerConfig{
 			Blocklist: DefaultBlocklist,
-			DwellTime: 3000,
+			// 3s is too less to be a dwell time, so 15s sounded better. honestly, it has to be tab switching + dwell, and im not sure what the right number is?
+			DwellTime: 15000,
 		},
 	}
 

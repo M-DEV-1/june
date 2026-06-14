@@ -8,14 +8,16 @@ import (
 	"ora/internal/obs"
 	"ora/internal/tracker"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 )
 
 type TaskSummary struct {
-	SameTask bool   `json:"same_task"`
-	TaskName string `json:"task_name"`
-	Summary  string `json:"summary"`
+	SameTask bool     `json:"same_task"`
+	TaskName string   `json:"task_name"`
+	Summary  string   `json:"summary"`
+	Notes    []string `json:"notes,omitempty"`
 }
 
 type Summarizer interface {
@@ -49,16 +51,24 @@ func (g *GeminiSummarizer) Summarize(ctx context.Context, activities []tracker.A
 
 	var activityList []string
 	for _, a := range activities {
-		activityList = append(activityList, fmt.Sprintf("- %s: %s", a.App, a.Title))
+		entry := fmt.Sprintf("- %s: %s", a.App, a.Title)
+		if a.ScreenText != "" {
+			entry += fmt.Sprintf("\n  screen: %s", a.ScreenText)
+		}
+		activityList = append(activityList, entry)
 	}
 
 	// temp prompt
 	prompt := fmt.Sprintf(`
-	You are the memory compiler for an OS agent. 
+	You are the memory compiler for an OS agent.
 		Given these recent window activities and the current task name, determine:
 		1. Is the user still on the same task?
-		2. What is a one-short  semantic summary of what they did?
+		2. What is a one-shot semantic summary of what they did?
 		3. What is a concise name for this task?
+		4. Any stable facts about the USER worth remembering across sessions?
+		   notes rules: durable only ("user prefers terse replies", "user is debugging the React PR").
+		   skip ephemeral state ("user is typing in VSCode") — that's already in the summary.
+		   skip activity logs ("user opened browser"). empty array if nothing note-worthy.
 
 		Current task: "%s"
 		Recent activities:
@@ -68,8 +78,9 @@ func (g *GeminiSummarizer) Summarize(ctx context.Context, activities []tracker.A
 	{
 		"same_task": true/false,
 		"task_name": "string",
-		"summary": "string"
-	s}`,
+		"summary": "string",
+		"notes": []
+	}`,
 		currentTask, strings.Join(activityList, "\n"))
 
 	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent")
@@ -98,30 +109,62 @@ func (g *GeminiSummarizer) Summarize(ctx context.Context, activities []tracker.A
 
 type Storage interface {
 	LogSemanticNode(ctx context.Context, summary TaskSummary) error
+	LogNote(ctx context.Context, content, kind string) (int64, error)
 }
 
+const wordFlushLimit = 1500
+
 type Compiler struct {
-	llm    Summarizer
-	store  Storage
-	buffer []tracker.Activity
+	llm       Summarizer
+	store     Storage
+	buffer    []tracker.Activity
+	wordCount int
+	lastFlush time.Time
 }
 
 func NewCompiler(llm Summarizer, store Storage) *Compiler {
 	return &Compiler{
-		llm:    llm,
-		store:  store,
-		buffer: make([]tracker.Activity, 0),
+		llm:       llm,
+		store:     store,
+		buffer:    make([]tracker.Activity, 0),
+		lastFlush: time.Now(),
 	}
 }
 
 func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
+	incoming := countWords(act.ScreenText)
+
 	if len(c.buffer) > 0 {
 		last := c.buffer[len(c.buffer)-1]
-		if last.App != act.App || len(c.buffer) >= 10 {
+		appChanged := last.App != act.App
+		wordLimitHit := c.wordCount+incoming >= wordFlushLimit
+		hourElapsed := len(c.buffer) > 0 && time.Since(c.lastFlush) >= time.Hour
+
+		if appChanged || wordLimitHit || hourElapsed {
 			c.flush(ctx)
 		}
 	}
+
+	c.wordCount += incoming
 	c.buffer = append(c.buffer, act)
+}
+
+func countWords(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	inWord := false
+	for _, c := range s {
+		isSpace := c == ' ' || c == '\n' || c == '\r' || c == '\t'
+		if !isSpace && !inWord {
+			n++
+			inWord = true
+		} else if isSpace {
+			inWord = false
+		}
+	}
+	return n
 }
 
 func (c *Compiler) flush(ctx context.Context) {
@@ -138,7 +181,11 @@ func (c *Compiler) flush(ctx context.Context) {
 		// log raw activities if LLM fails
 		var fallbackText strings.Builder
 		for _, act := range c.buffer {
-			fallbackText.WriteString(act.App + " | " + act.Title + "\n")
+			line := act.App + " | " + act.Title
+			if act.ScreenText != "" {
+				line += " | " + act.ScreenText
+			}
+			fallbackText.WriteString(line + "\n")
 		}
 		fallbackSummary := TaskSummary{
 			SameTask: false,
@@ -148,13 +195,25 @@ func (c *Compiler) flush(ctx context.Context) {
 		_ = c.store.LogSemanticNode(ctx, fallbackSummary)
 	} else {
 		_ = c.store.LogSemanticNode(ctx, *summary)
+		for _, n := range summary.Notes {
+			if _, err := c.store.LogNote(ctx, n, "fact"); err != nil {
+				// best-effort
+				_ = err
+			}
+		}
 	}
 
 	c.buffer = make([]tracker.Activity, 0)
+	c.wordCount = 0
+	c.lastFlush = time.Now()
 }
 
 func (c *Compiler) BufferSize() int {
 	return len(c.buffer)
+}
+
+func (c *Compiler) ForceFlush(ctx context.Context) {
+	c.flush(ctx)
 }
 
 func (c *Compiler) GetCurrentBuffer() []tracker.Activity {

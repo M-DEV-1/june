@@ -8,6 +8,7 @@ import (
 	"ora/internal/memory"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,11 +101,173 @@ func (s *Store) createSchema() error {
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_unique ON nodes(IFNULL(parent_id, 0), type, content);
 	CREATE INDEX IF NOT EXISTS idx_parent_id ON nodes(parent_id);
+
+	-- notes: explicit user-stated facts. always-on, small, forever.
+	-- separate from nodes/tree because they're not temporal events.
+	CREATE TABLE IF NOT EXISTS notes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		content TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'fact',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
+
+	-- FTS5 over summary content + note content.
+	-- triggers below keep it in sync. tokenizer 'unicode61' is FTS5 default.
+	CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+		content,
+		source UNINDEXED,
+		ref_id UNINDEXED,
+		tokenize = 'unicode61'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS nodes_ai_summary AFTER INSERT ON nodes
+	WHEN NEW.type = 'summary'
+	BEGIN
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'summary', NEW.id);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes
+	BEGIN
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'note', NEW.id);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes
+	BEGIN
+		DELETE FROM memory_fts WHERE source = 'note' AND ref_id = OLD.id;
+	END;
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
 	// TODO: salience score to prioritize important activities and not track menial activities
 	// i.e. what do we choose to remember
 	_, err := s.db.Exec(query)
+	return err
+}
+
+// Note is a stable, user-stated fact. Always-on in implicit context.
+type Note struct {
+	ID        int64
+	Content   string
+	Kind      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// LogNote inserts a note. Idempotent on (content, kind) — returns existing id.
+func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.LogNote")
+	defer span.End()
+
+	if kind == "" {
+		kind = "fact"
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO notes (content, kind) VALUES (?, ?)`,
+		content, kind); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("insert note: %w", err)
+	}
+
+	var id int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM notes WHERE content = ? AND kind = ?`,
+		content, kind).Scan(&id); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("read note id: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.note_id", id))
+	return id, nil
+}
+
+// GetNotes returns all notes ordered newest first.
+func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.GetNotes")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, kind, created_at, updated_at FROM notes ORDER BY id DESC`)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query notes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Note
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Content, &n.Kind, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan note: %w", err)
+		}
+		out = append(out, n)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
+}
+
+// MemoryHit is one FTS5 row — either a summary or a note.
+type MemoryHit struct {
+	Content string
+	Source  string // "summary" | "note"
+	RefID   int64
+}
+
+// SearchMemory runs FTS5 over summaries + notes. Returns top 10 by rank.
+// Empty query -> empty result, no error.
+func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.SearchMemory")
+	defer span.End()
+
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+
+	// MATCH wants tokens, not raw user text. quote it so special chars
+	// don't break the FTS5 parser; FTS5 phrase search is fine for v1.
+	safe := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT content, source, ref_id
+		FROM memory_fts
+		WHERE memory_fts MATCH ?
+		ORDER BY rank
+		LIMIT 10
+	`, safe)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("fts5 search: %w", err)
+	}
+	defer rows.Close()
+
+	var out []MemoryHit
+	for rows.Next() {
+		var h MemoryHit
+		if err := rows.Scan(&h.Content, &h.Source, &h.RefID); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan fts5 row: %w", err)
+		}
+		out = append(out, h)
+	}
+	span.SetAttributes(attribute.Int("db.search_results", len(out)))
+	return out, nil
+}
+
+// DeleteNote removes a note by id. FTS5 mirror is dropped via trigger.
+func (s *Store) DeleteNote(ctx context.Context, id int64) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.DeleteNote")
+	defer span.End()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM notes WHERE id = ?`, id)
+	if err != nil {
+		span.RecordError(err)
+	}
 	return err
 }
 
@@ -216,6 +379,18 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	parentID := s.currentParentID
 	s.mu.RUnlock()
 
+	var branch []string
+
+	// notes go first — they're "who is this user" context, always on top.
+	// fetch BEFORE opening CTE rows; sqlite `:memory:` per-connection
+	// isolation means an interleaved query would see an empty schema.
+	notes, nerr := s.GetNotes(ctx)
+	if nerr == nil {
+		for _, n := range notes {
+			branch = append(branch, fmt.Sprintf("[note:%s] %s", n.Kind, n.Content))
+		}
+	}
+
 	rows, err := s.db.QueryContext(ctx, query, parentID)
 
 	if err != nil {
@@ -224,8 +399,6 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	}
 
 	defer rows.Close()
-
-	var branch []string
 
 	for rows.Next() {
 		var nodeType, content string
@@ -244,8 +417,6 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
-	// some db specific metadata
-	// this span will return exact no of nodes returned for a specific request
 	span.SetAttributes(attribute.Int("db.node_count", len(branch)))
 	return branch, nil
 }
@@ -288,6 +459,35 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 	)
 
 	return nil
+}
+
+// DB exposes the underlying connection for test-only raw queries.
+func (s *Store) DB() *sql.DB { return s.db }
+
+// CullRawActivities deletes activity nodes older than olderThan. Summaries,
+// tasks, sessions, days, users, and notes are never touched.
+// Returns the number of rows deleted.
+func (s *Store) CullRawActivities(ctx context.Context, olderThan time.Duration) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.CullRawActivities")
+	defer span.End()
+
+	secs := int64(olderThan.Seconds())
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM nodes WHERE type = 'activity' AND created_at < datetime('now', '-' || ? || ' seconds')`,
+		secs,
+	)
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("cull activities: %w", err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.culled_rows", n))
+	return n, nil
 }
 
 // searches historic summaries
