@@ -11,12 +11,20 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+const recaptureInterval = 5 * time.Minute
+
 type Daemon struct {
 	eye       Tracker
 	interval  time.Duration
 	dwellTime time.Duration
 	blocklist []string
 	eventChan chan Activity
+	capturer  func() string // injectable for tests; nil = real OCR
+}
+
+// SetCapturer replaces the screen capture function. Used in tests to avoid real OCR.
+func (d *Daemon) SetCapturer(fn func() string) {
+	d.capturer = fn
 }
 
 func NewDaemon(eye Tracker, interval time.Duration, dwellTime time.Duration, blocklist []string, eventChan chan Activity) *Daemon {
@@ -27,7 +35,7 @@ func NewDaemon(eye Tracker, interval time.Duration, dwellTime time.Duration, blo
 		dwellTime = 3 * time.Second // default dwell time
 	}
 
-	return &Daemon{eye, interval, dwellTime, blocklist, eventChan}
+	return &Daemon{eye: eye, interval: interval, dwellTime: dwellTime, blocklist: blocklist, eventChan: eventChan}
 }
 
 func (d *Daemon) Start(ctx context.Context) {
@@ -38,6 +46,16 @@ func (d *Daemon) Start(ctx context.Context) {
 	var pendingActivity *Activity
 	var pendingSince time.Time
 	var emittedCurrent bool
+	var lastCaptureTime time.Time
+
+	// use injected capturer or default to real OCR with diff tracking
+	capturer := d.capturer
+	if capturer == nil {
+		var lastScreenText string
+		capturer = func() string {
+			return captureOCRDiff(&lastScreenText, &lastCaptureTime)
+		}
+	}
 
 	tracer := obs.GetTracer(ctx, "ora.tracker")
 
@@ -46,9 +64,6 @@ func (d *Daemon) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// this traces every single poll
-			// not event drive, as i cant be bothered with windows api anymore
-			// so i polled, since that is easier, and simpler plus very cheap on cpu
 			_, span := tracer.Start(ctx, "Tracker.PollActiveWindow")
 
 			activity, err := d.eye.GetActiveWindow()
@@ -74,7 +89,6 @@ func (d *Daemon) Start(ctx context.Context) {
 				continue
 			}
 
-			// updates at every logged window change or 10 min heartbeat
 			changed := lastActivity == nil || activity.App != lastActivity.App || activity.Title != lastActivity.Title
 
 			if changed {
@@ -88,21 +102,23 @@ func (d *Daemon) Start(ctx context.Context) {
 					attribute.String("tracker.state", "pending"),
 				)
 			} else if pendingActivity != nil && !emittedCurrent {
-				// window hasn't changed, check if it met dwell time
 				if time.Since(pendingSince) >= d.dwellTime {
 					span.SetAttributes(
 						attribute.Bool("tracker.changed", false),
 						attribute.String("tracker.state", "emitted"),
 					)
 
-					slog.Info("activity tracked", "app", pendingActivity.App, "title", pendingActivity.Title)
+					ev := *pendingActivity
+					ev.ScreenText = capturer()
+
+					slog.Info("activity tracked", "app", ev.App, "title", ev.Title)
 
 					select {
-					case d.eventChan <- *pendingActivity: // successfully pushed
+					case d.eventChan <- ev:
 						emittedCurrent = true
 					case <-ctx.Done():
 						span.End()
-						return // user exit + pipe full // safe exit
+						return
 					}
 				} else {
 					span.SetAttributes(
@@ -110,6 +126,25 @@ func (d *Daemon) Start(ctx context.Context) {
 						attribute.String("tracker.state", "dwelling"),
 					)
 				}
+			} else if emittedCurrent && d.capturer == nil && time.Since(lastCaptureTime) >= recaptureInterval {
+				// periodic re-capture: same window, 5 min elapsed
+				text := capturer()
+				if text != "" {
+					ev := *lastActivity
+					ev.ScreenText = text
+					select {
+					case d.eventChan <- ev:
+					case <-ctx.Done():
+						span.End()
+						return
+					default:
+						// drop if channel full — next tick will retry
+					}
+				}
+				span.SetAttributes(
+					attribute.Bool("tracker.changed", false),
+					attribute.String("tracker.state", "idle"),
+				)
 			} else {
 				span.SetAttributes(
 					attribute.Bool("tracker.changed", false),
@@ -120,4 +155,21 @@ func (d *Daemon) Start(ctx context.Context) {
 			span.End()
 		}
 	}
+}
+
+// captureOCRDiff extracts screen text via UIA and returns it only if it changed since last capture.
+// Updates lastText and lastCaptureTime in place.
+func captureOCRDiff(lastText *string, lastCaptureTime *time.Time) string {
+	text, err := extractText()
+	if err != nil {
+		return ""
+	}
+
+	*lastCaptureTime = time.Now()
+
+	if text == *lastText {
+		return "" // idle — same screen content
+	}
+	*lastText = text
+	return text
 }

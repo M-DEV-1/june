@@ -213,14 +213,18 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 		}
 		slog.Info("querying long-term memory", "query", query)
 
-		results, err := a.brain.QueryMemory(context.Background(), query)
+		hits, err := a.brain.SearchMemory(context.Background(), query)
 		if err != nil {
 			return fmt.Sprintf("error querying memory: %v", err)
 		}
-		if len(results) == 0 {
-			return "No memories found matching that query."
+		if len(hits) == 0 {
+			return "no memory matches"
 		}
-		return "Found memories:\n" + strings.Join(results, "\n")
+		lines := make([]string, len(hits))
+		for i, h := range hits {
+			lines[i] = fmt.Sprintf("[%s] %s", h.Source, h.Content)
+		}
+		return strings.Join(lines, "\n")
 
 	default:
 		return fmt.Sprintf("unknown tool: %s", name)

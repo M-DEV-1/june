@@ -9,6 +9,7 @@ require (
 	github.com/ebitengine/oto/v3 v3.4.0
 	github.com/getlantern/systray v1.2.2
 	github.com/go-ole/go-ole v1.3.0
+	github.com/jezek/xgb v1.1.1
 	github.com/joho/godotenv v1.5.1
 	github.com/moutend/go-wca v0.3.0
 	github.com/spf13/cobra v1.10.2
@@ -75,6 +76,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	golang.org/x/crypto v0.49.0 // indirect
+	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
