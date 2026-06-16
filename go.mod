@@ -9,7 +9,9 @@ require (
 	github.com/ebitengine/oto/v3 v3.4.0
 	github.com/getlantern/systray v1.2.2
 	github.com/go-ole/go-ole v1.3.0
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/jezek/xgb v1.1.1
+	github.com/jfreymuth/pulse v0.1.1
 	github.com/joho/godotenv v1.5.1
 	github.com/moutend/go-wca v0.3.0
 	github.com/spf13/cobra v1.10.2
