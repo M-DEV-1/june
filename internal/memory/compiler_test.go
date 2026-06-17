@@ -60,7 +60,9 @@ func TestCompiler_FlushesOnAppChange(t *testing.T) {
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	// Use enough screen text to exceed minFlushWords so the flush is not discarded.
+	richText := strings.Repeat("word ", 30)
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
 	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"})
 
 	if llm.callCount != 1 {
@@ -123,14 +125,16 @@ func TestCompiler_PassesScreenTextToSummarizer(t *testing.T) {
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: "func validateToken"})
+	// Pad screen text to exceed minFlushWords so the flush is not discarded.
+	screenText := "func validateToken " + strings.Repeat("word ", 30)
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: screenText})
 	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"}) // triggers flush on app change
 
 	if len(llm.received) == 0 {
 		t.Fatal("summarizer was not called")
 	}
-	if llm.received[0].ScreenText != "func validateToken" {
-		t.Errorf("expected ScreenText passed to summarizer, got %q", llm.received[0].ScreenText)
+	if !strings.HasPrefix(llm.received[0].ScreenText, "func validateToken") {
+		t.Errorf("expected ScreenText passed to summarizer to start with 'func validateToken', got %q", llm.received[0].ScreenText)
 	}
 }
 
@@ -162,7 +166,9 @@ func TestCompiler_FallbackIncludesScreenText(t *testing.T) {
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: "func validateToken"})
+	// Pad screen text to exceed minFlushWords so the flush is not discarded.
+	screenText := "func validateToken " + strings.Repeat("word ", 30)
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: screenText})
 	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"})
 
 	if store.stored.Summary == "" {
@@ -180,7 +186,9 @@ func TestCompiler_FallbackOnAPIFailure(t *testing.T) {
 
 	ctx := context.Background()
 
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	// Use enough screen text to exceed minFlushWords so the flush is not discarded.
+	richText := strings.Repeat("word ", 30)
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
 	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "StackOverflow"})
 
 	if store.callCount != 1 {
@@ -204,7 +212,7 @@ func (n *notesSummarizer) Summarize(ctx context.Context, activities []tracker.Ac
 }
 
 type notesStorage struct {
-	mu        sync.Mutex
+	mu         sync.Mutex
 	nodesCalls []memory.TaskSummary
 	noteCalls  []struct{ content, kind string }
 }
@@ -229,7 +237,9 @@ func TestCompiler_AutoExtractsNotes(t *testing.T) {
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	// Use enough screen text to exceed minFlushWords so the flush is not discarded.
+	richText := strings.Repeat("word ", 30)
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
 	compiler.ForceFlush(ctx)
 
 	store.mu.Lock()
@@ -251,5 +261,136 @@ func TestCompiler_AutoExtractsNotes(t *testing.T) {
 		if c.kind != "fact" {
 			t.Errorf("expected kind 'fact', got %q", c.kind)
 		}
+	}
+}
+
+// --- Salience gate tests ---
+
+func TestIsSalient(t *testing.T) {
+	cases := []struct {
+		name     string
+		act      tracker.Activity
+		wantSalient bool
+	}{
+		{
+			name:        "empty title and empty screen text",
+			act:         tracker.Activity{App: "Explorer", Title: "", ScreenText: ""},
+			wantSalient: false,
+		},
+		{
+			name:        "whitespace-only title and empty screen text",
+			act:         tracker.Activity{App: "Explorer", Title: "   ", ScreenText: ""},
+			wantSalient: false,
+		},
+		{
+			name:        "new tab lowercase",
+			act:         tracker.Activity{App: "Chrome", Title: "new tab", ScreenText: ""},
+			wantSalient: false,
+		},
+		{
+			name:        "New Tab mixed case",
+			act:         tracker.Activity{App: "Chrome", Title: "New Tab", ScreenText: ""},
+			wantSalient: false,
+		},
+		{
+			name:        "untitled",
+			act:         tracker.Activity{App: "Notepad", Title: "Untitled", ScreenText: ""},
+			wantSalient: false,
+		},
+		{
+			name:        "desktop",
+			act:         tracker.Activity{App: "Explorer", Title: "Desktop", ScreenText: ""},
+			wantSalient: false,
+		},
+		{
+			name:        "trivial title but non-trivial screen text",
+			act:         tracker.Activity{App: "Chrome", Title: "New Tab", ScreenText: "package main\n\nfunc main() {}"},
+			wantSalient: true,
+		},
+		{
+			name:        "real title",
+			act:         tracker.Activity{App: "VSCode", Title: "compiler.go", ScreenText: ""},
+			wantSalient: true,
+		},
+		{
+			name:        "real title and screen text",
+			act:         tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: "func validateToken(tok string) bool"},
+			wantSalient: true,
+		},
+		{
+			name:        "empty title but has screen text",
+			act:         tracker.Activity{App: "Terminal", Title: "", ScreenText: "go build ./..."},
+			wantSalient: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := memory.IsSalient(tc.act)
+			if got != tc.wantSalient {
+				t.Errorf("IsSalient(%+v) = %v, want %v", tc.act, got, tc.wantSalient)
+			}
+		})
+	}
+}
+
+func TestCompiler_NonSalientActivitiesNotBuffered(t *testing.T) {
+	llm := &mockSummarizer{}
+	store := &mockStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "New Tab", ScreenText: ""})
+	compiler.Ingest(ctx, tracker.Activity{App: "Explorer", Title: "Desktop", ScreenText: ""})
+	compiler.Ingest(ctx, tracker.Activity{App: "Notepad", Title: "Untitled", ScreenText: ""})
+
+	if compiler.BufferSize() != 0 {
+		t.Errorf("expected buffer size 0 for non-salient activities, got %d", compiler.BufferSize())
+	}
+	if llm.callCount != 0 {
+		t.Errorf("expected 0 LLM calls for non-salient activities, got %d", llm.callCount)
+	}
+	if store.callCount != 0 {
+		t.Errorf("expected 0 store calls for non-salient activities, got %d", store.callCount)
+	}
+}
+
+func TestCompiler_FlushBelowMinWordsSkipsSummarize(t *testing.T) {
+	llm := &mockSummarizer{}
+	store := &mockStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	// Salient but very sparse: real title, no screen text (0 words of signal).
+	// Force a flush via app change — VSCode → Chrome.
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: ""})
+	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "GitHub", ScreenText: ""})
+
+	// The first activity flushed: title "main.go" is salient but 0 screen words → below minFlushWords.
+	// Summarize must NOT have been called; nothing stored.
+	if llm.callCount != 0 {
+		t.Errorf("expected 0 LLM calls for sub-minFlushWords flush, got %d", llm.callCount)
+	}
+	if store.callCount != 0 {
+		t.Errorf("expected 0 store calls for sub-minFlushWords flush, got %d", store.callCount)
+	}
+}
+
+func TestCompiler_SufficientWordsBothCallsHappen(t *testing.T) {
+	llm := &mockSummarizer{}
+	store := &mockStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	// Give enough screen text to exceed minFlushWords, then trigger flush via app change.
+	richText := strings.Repeat("word ", 30) // 30 words — above minFlushWords (25)
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
+	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "GitHub", ScreenText: ""})
+
+	if llm.callCount != 1 {
+		t.Errorf("expected 1 LLM call for sufficient-words flush, got %d", llm.callCount)
+	}
+	if store.callCount != 1 {
+		t.Errorf("expected 1 store call for sufficient-words flush, got %d", store.callCount)
 	}
 }
