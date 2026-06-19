@@ -95,6 +95,86 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 	}()
 
+	// roll up fine-grained summaries older than 7 days into daily digests every 12 h.
+	// skipped when no API key is available (summarizer == nil).
+	if summarizer != nil {
+		compactor := memory.NewCompactor(summarizer, store)
+		go func() {
+			t := time.NewTicker(12 * time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					if err := compactor.Compact(ctx, 7*24*time.Hour); err != nil {
+						slog.Error("episodic compaction failed", "error", err)
+					} else {
+						slog.Info("episodic compaction complete")
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		// consolidate the notes table every 6 h: merge near-duplicates and drop
+		// transient task detail that leaked in as "facts."
+		noteCompactor := memory.NewNoteCompactor(summarizer, store)
+		go func() {
+			t := time.NewTicker(6 * time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					if err := noteCompactor.Compact(ctx); err != nil {
+						slog.Error("note consolidation failed", "error", err)
+					} else {
+						slog.Info("note consolidation complete")
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		// recompute the working-state cache every 5 minutes from recent summaries +
+		// notes. cost guard: skip the LLM call when no new summaries have arrived.
+		go func() {
+			t := time.NewTicker(5 * time.Minute)
+			defer t.Stop()
+			var lastDerive time.Time
+			for {
+				select {
+				case <-t.C:
+					if !lastDerive.IsZero() {
+						n, _ := store.CountSummariesSince(ctx, lastDerive)
+						if n == 0 {
+							continue
+						}
+					}
+					recent, _ := store.RecentSummaries(ctx, 10)
+					notes, _ := store.GetNotes(ctx)
+					noteStrings := make([]string, len(notes))
+					for i, n := range notes {
+						noteStrings[i] = n.Content
+					}
+					state, err := summarizer.DeriveState(ctx, recent, noteStrings)
+					if err != nil {
+						slog.Warn("working-state derive failed", "error", err)
+						continue
+					}
+					if state != "" {
+						if err := store.SetWorkingState(ctx, state); err != nil {
+							slog.Error("set working state failed", "error", err)
+						}
+					}
+					lastDerive = time.Now()
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
 	// drop raw activity rows older than 72 h every 6 hours
 	go func() {
 		t := time.NewTicker(6 * time.Hour)
