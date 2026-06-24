@@ -113,6 +113,14 @@ func (s *Store) createSchema() error {
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
 
+	-- single-row cache: synthesized "what is the user doing right now" summary.
+	-- recomputed on a cadence by the daemon, disposable, replaced in full each time.
+	CREATE TABLE IF NOT EXISTS working_state (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		content TEXT NOT NULL,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
 	-- FTS5 over summary content + note content.
 	-- triggers below keep it in sync. tokenizer 'unicode61' is FTS5 default.
 	CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -122,10 +130,18 @@ func (s *Store) createSchema() error {
 		tokenize = 'unicode61'
 	);
 
+	-- Drop the old trigger so existing dev DBs pick up the updated WHEN clause.
+	DROP TRIGGER IF EXISTS nodes_ai_summary;
 	CREATE TRIGGER IF NOT EXISTS nodes_ai_summary AFTER INSERT ON nodes
-	WHEN NEW.type = 'summary'
+	WHEN NEW.type IN ('summary','digest')
 	BEGIN
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'summary', NEW.id);
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, NEW.type, NEW.id);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS nodes_ad_summary AFTER DELETE ON nodes
+	WHEN OLD.type IN ('summary','digest')
+	BEGIN
+		DELETE FROM memory_fts WHERE source IN ('summary','digest') AND ref_id = OLD.id;
 	END;
 
 	CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes
@@ -136,6 +152,12 @@ func (s *Store) createSchema() error {
 	CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes
 	BEGIN
 		DELETE FROM memory_fts WHERE source = 'note' AND ref_id = OLD.id;
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes
+	BEGIN
+		DELETE FROM memory_fts WHERE source = 'note' AND ref_id = OLD.id;
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'note', NEW.id);
 	END;
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
@@ -209,6 +231,105 @@ func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
 	return out, nil
 }
 
+// SetWorkingState upserts the single-row working-state cache.
+// Content is synthesized by the daemon's state deriver; it is
+// overwritten in full each cadence tick — no history is kept.
+func (s *Store) SetWorkingState(ctx context.Context, content string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.SetWorkingState")
+	defer span.End()
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO working_state(id, content, updated_at) VALUES(1, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(id) DO UPDATE SET content = excluded.content, updated_at = CURRENT_TIMESTAMP`,
+		content)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("set working state: %w", err)
+	}
+	return nil
+}
+
+// GetWorkingState returns the cached working-state content, or ("", nil)
+// when no row has been written yet.
+func (s *Store) GetWorkingState(ctx context.Context) (string, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.GetWorkingState")
+	defer span.End()
+
+	var content string
+	err := s.db.QueryRowContext(ctx, `SELECT content FROM working_state WHERE id = 1`).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		span.RecordError(err)
+		return "", fmt.Errorf("get working state: %w", err)
+	}
+	return content, nil
+}
+
+// RecentSummaries returns the content of the most recent summary and digest
+// nodes, newest-first, up to limit rows. Used by the state deriver to build
+// the synthesis prompt without walking the full ancestor tree.
+func (s *Store) RecentSummaries(ctx context.Context, limit int) ([]string, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.RecentSummaries")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT content FROM nodes WHERE type IN ('summary','digest') ORDER BY id DESC LIMIT ?`,
+		limit)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("recent summaries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan recent summary: %w", err)
+		}
+		out = append(out, content)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate recent summaries: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.recent_count", len(out)))
+	return out, nil
+}
+
+// CountSummariesSince returns the number of summary and digest nodes created
+// after since. Used as a cost guard so the state deriver skips recomputation
+// when nothing new has been written.
+// since is formatted as UTC "2006-01-02 15:04:05" to match SQLite's
+// CURRENT_TIMESTAMP storage format, which has no sub-second component.
+func (s *Store) CountSummariesSince(ctx context.Context, since time.Time) (int, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.CountSummariesSince")
+	defer span.End()
+
+	// Truncate to second precision and use >= so rows inserted within the
+	// same clock-second as since are included. Production callers set since
+	// from time.Now() right after a derive run; >= is safe because those rows
+	// were written in the same tick and should trigger a re-derive.
+	sinceStr := since.UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM nodes WHERE type IN ('summary','digest') AND created_at >= ?`,
+		sinceStr).Scan(&n)
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("count summaries since: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.count", n))
+	return n, nil
+}
+
 // MemoryHit is one FTS5 row — either a summary or a note.
 type MemoryHit struct {
 	Content string
@@ -269,6 +390,97 @@ func (s *Store) DeleteNote(ctx context.Context, id int64) error {
 		span.RecordError(err)
 	}
 	return err
+}
+
+// UpdateNote overwrites the content of an existing note. FTS5 mirror is kept in
+// sync via the notes_au trigger. updated_at is refreshed atomically.
+func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.UpdateNote")
+	defer span.End()
+
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE notes SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		content, id)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("update note: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.note_id", id))
+	return nil
+}
+
+// ExistingNotes returns id+content for every stored note. Used by the memory
+// compiler to feed the reconciliation LLM call.
+func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.ExistingNotes")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content FROM notes ORDER BY id ASC`)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query existing notes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []memory.NoteRef
+	for rows.Next() {
+		var n memory.NoteRef
+		if err := rows.Scan(&n.ID, &n.Content); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan note ref: %w", err)
+		}
+		out = append(out, n)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
+}
+
+// ReplaceAllNotes atomically swaps the entire notes table for a curated set,
+// used by periodic note consolidation. All notes are rewritten as kind "fact".
+// FTS5 mirror stays in sync via the per-row notes_ad / notes_ai triggers.
+// The caller must guarantee contents is non-empty — an empty swap would wipe
+// the table — but we defend against it here too.
+func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.ReplaceAllNotes")
+	defer span.End()
+
+	if len(contents) == 0 {
+		return fmt.Errorf("replace all notes: refusing to wipe table with empty set")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck — no-op after a successful Commit
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM notes`); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: clear: %w", err)
+	}
+
+	for _, c := range contents {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO notes (content, kind) VALUES (?, 'fact')`, c); err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("replace notes: insert: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: commit: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(contents)))
+	return nil
 }
 
 // get or create
@@ -391,6 +603,16 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	// working-state cache: when present it replaces the raw summary dump.
+	// the daemon recomputes this on a cadence from recent summaries + notes,
+	// giving a crisp synthesized state instead of 5 raw JSON blobs.
+	state, serr := s.GetWorkingState(ctx)
+	if serr == nil && state != "" {
+		branch = append(branch, fmt.Sprintf("[state] %s", state))
+		span.SetAttributes(attribute.Int("db.node_count", len(branch)))
+		return branch, nil
+	}
+
 	rows, err := s.db.QueryContext(ctx, query, parentID)
 
 	if err != nil {
@@ -419,6 +641,117 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 
 	span.SetAttributes(attribute.Int("db.node_count", len(branch)))
 	return branch, nil
+}
+
+// OldSummaryGroups returns summary nodes older than olderThan, grouped by
+// their ancestor DAY node. Used by the compaction job to decide which days
+// are ready to roll up.
+func (s *Store) OldSummaryGroups(ctx context.Context, olderThan time.Duration) ([]memory.SummaryGroup, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.OldSummaryGroups")
+	defer span.End()
+
+	secs := int64(olderThan.Seconds())
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT day.id, day.content, sm.id, sm.content
+		FROM nodes sm
+		JOIN nodes task ON sm.parent_id = task.id AND task.type = 'task'
+		JOIN nodes sess ON task.parent_id = sess.id AND sess.type = 'session'
+		JOIN nodes day  ON sess.parent_id = day.id  AND day.type = 'day'
+		WHERE sm.type = 'summary'
+		  AND sm.created_at < datetime('now', '-' || ? || ' seconds')
+		ORDER BY day.id, sm.id
+	`, secs)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("old summary groups query: %w", err)
+	}
+	defer rows.Close()
+
+	// build groups in insertion order while preserving day grouping
+	var groups []memory.SummaryGroup
+	index := make(map[int64]int) // dayID → index into groups slice
+
+	for rows.Next() {
+		var dayID int64
+		var dayContent string
+		var smID int64
+		var smContent string
+		if err := rows.Scan(&dayID, &dayContent, &smID, &smContent); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan summary group row: %w", err)
+		}
+
+		idx, seen := index[dayID]
+		if !seen {
+			groups = append(groups, memory.SummaryGroup{DayID: dayID, Day: dayContent})
+			idx = len(groups) - 1
+			index[dayID] = idx
+		}
+		groups[idx].Summaries = append(groups[idx].Summaries, memory.NodeRef{ID: smID, Content: smContent})
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate summary group rows: %w", err)
+	}
+
+	span.SetAttributes(attribute.Int("db.group_count", len(groups)))
+	return groups, nil
+}
+
+// ReplaceSummariesWithDigest writes a digest node under dayID and deletes the
+// constituent summary nodes in a single transaction. FTS5 stays correct via the
+// nodes_ai_summary (insert) and nodes_ad_summary (delete) triggers.
+// If the insert fails the deletes never happen — summaries are never lost.
+func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, summaryIDs []int64, digest string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.ReplaceSummariesWithDigest")
+	defer span.End()
+
+	if len(summaryIDs) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("begin replace tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// insert digest node — triggers nodes_ai_summary which indexes into FTS5
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?, 'digest', ?)`,
+		dayID, digest); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("insert digest node: %w", err)
+	}
+
+	// delete summaries — triggers nodes_ad_summary which removes from FTS5.
+	// Build a parameterized IN clause manually; the driver does not support
+	// []int64 expansion, so we construct the placeholders as a string.
+	placeholders := make([]string, len(summaryIDs))
+	args := make([]any, len(summaryIDs))
+	for i, id := range summaryIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	deleteSQL := "DELETE FROM nodes WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+	if _, err := tx.ExecContext(ctx, deleteSQL, args...); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("delete summary nodes: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("commit replace tx: %w", err)
+	}
+
+	span.SetAttributes(
+		attribute.Int64("db.day_id", dayID),
+		attribute.Int("db.summaries_replaced", len(summaryIDs)),
+	)
+	return nil
 }
 
 func (s *Store) Close() error {
