@@ -23,6 +23,14 @@ func (m *mockSummarizer) Summarize(ctx context.Context, activities []tracker.Act
 	}, nil
 }
 
+func (m *mockSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
+	ops := make([]memory.NoteOp, len(candidates))
+	for i, c := range candidates {
+		ops[i] = memory.NoteOp{Action: "add", Content: c}
+	}
+	return ops, nil
+}
+
 type mockStorage struct {
 	callCount int
 }
@@ -34,6 +42,14 @@ func (m *mockStorage) LogSemanticNode(ctx context.Context, summary memory.TaskSu
 
 func (m *mockStorage) LogNote(ctx context.Context, content, kind string) (int64, error) {
 	return 0, nil
+}
+
+func (m *mockStorage) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
+	return nil, nil
+}
+
+func (m *mockStorage) UpdateNote(ctx context.Context, id int64, content string) error {
+	return nil
 }
 
 func TestCompiler_BuffersWithoutFlushing(t *testing.T) {
@@ -60,9 +76,7 @@ func TestCompiler_FlushesOnAppChange(t *testing.T) {
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	// Use enough screen text to exceed minFlushWords so the flush is not discarded.
-	richText := strings.Repeat("word ", 30)
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
 	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"})
 
 	if llm.callCount != 1 {
@@ -119,6 +133,10 @@ func (m *capturingSummarizer) Summarize(ctx context.Context, activities []tracke
 	return &memory.TaskSummary{SameTask: true, TaskName: "t", Summary: "s"}, nil
 }
 
+func (m *capturingSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
+	return nil, nil
+}
+
 func TestCompiler_PassesScreenTextToSummarizer(t *testing.T) {
 	llm := &capturingSummarizer{}
 	store := &mockStorage{}
@@ -147,6 +165,10 @@ func (m *errorSummarizer) Summarize(ctx context.Context, activities []tracker.Ac
 	return nil, fmt.Errorf("api rate limit reached")
 }
 
+func (m *errorSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
+	return nil, nil
+}
+
 type capturingStorage struct {
 	stored memory.TaskSummary
 }
@@ -158,6 +180,14 @@ func (m *capturingStorage) LogSemanticNode(ctx context.Context, summary memory.T
 
 func (m *capturingStorage) LogNote(ctx context.Context, content, kind string) (int64, error) {
 	return 0, nil
+}
+
+func (m *capturingStorage) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
+	return nil, nil
+}
+
+func (m *capturingStorage) UpdateNote(ctx context.Context, id int64, content string) error {
+	return nil
 }
 
 func TestCompiler_FallbackIncludesScreenText(t *testing.T) {
@@ -186,9 +216,7 @@ func TestCompiler_FallbackOnAPIFailure(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Use enough screen text to exceed minFlushWords so the flush is not discarded.
-	richText := strings.Repeat("word ", 30)
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
 	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "StackOverflow"})
 
 	if store.callCount != 1 {
@@ -200,7 +228,10 @@ func TestCompiler_FallbackOnAPIFailure(t *testing.T) {
 	}
 }
 
-type notesSummarizer struct{}
+type notesSummarizer struct {
+	reconcileOps []memory.NoteOp
+	reconcileErr error
+}
 
 func (n *notesSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*memory.TaskSummary, error) {
 	return &memory.TaskSummary{
@@ -211,10 +242,29 @@ func (n *notesSummarizer) Summarize(ctx context.Context, activities []tracker.Ac
 	}, nil
 }
 
+func (n *notesSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
+	if n.reconcileErr != nil {
+		return nil, n.reconcileErr
+	}
+	if n.reconcileOps != nil {
+		return n.reconcileOps, nil
+	}
+	ops := make([]memory.NoteOp, len(candidates))
+	for i, c := range candidates {
+		ops[i] = memory.NoteOp{Action: "add", Content: c}
+	}
+	return ops, nil
+}
+
 type notesStorage struct {
-	mu         sync.Mutex
-	nodesCalls []memory.TaskSummary
-	noteCalls  []struct{ content, kind string }
+	mu          sync.Mutex
+	nodesCalls  []memory.TaskSummary
+	noteCalls   []struct{ content, kind string }
+	updateCalls []struct {
+		id      int64
+		content string
+	}
+	existingNotes []memory.NoteRef
 }
 
 func (s *notesStorage) LogSemanticNode(ctx context.Context, summary memory.TaskSummary) error {
@@ -231,15 +281,29 @@ func (s *notesStorage) LogNote(ctx context.Context, content, kind string) (int64
 	return int64(len(s.noteCalls)), nil
 }
 
+func (s *notesStorage) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.existingNotes, nil
+}
+
+func (s *notesStorage) UpdateNote(ctx context.Context, id int64, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateCalls = append(s.updateCalls, struct {
+		id      int64
+		content string
+	}{id, content})
+	return nil
+}
+
 func TestCompiler_AutoExtractsNotes(t *testing.T) {
 	llm := &notesSummarizer{}
 	store := &notesStorage{}
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	// Use enough screen text to exceed minFlushWords so the flush is not discarded.
-	richText := strings.Repeat("word ", 30)
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
 	compiler.ForceFlush(ctx)
 
 	store.mu.Lock()
@@ -261,6 +325,94 @@ func TestCompiler_AutoExtractsNotes(t *testing.T) {
 		if c.kind != "fact" {
 			t.Errorf("expected kind 'fact', got %q", c.kind)
 		}
+	}
+}
+
+func TestCompiler_ReconcileUpdate(t *testing.T) {
+	llm := &notesSummarizer{
+		reconcileOps: []memory.NoteOp{
+			{Action: "update", ID: 7, Content: "user prefers terse and concise responses"},
+			{Action: "skip"},
+		},
+	}
+	store := &notesStorage{
+		existingNotes: []memory.NoteRef{{ID: 7, Content: "user prefers terse responses"}},
+	}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	compiler.ForceFlush(ctx)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if len(store.noteCalls) != 0 {
+		t.Errorf("expected 0 LogNote calls for update/skip ops, got %d", len(store.noteCalls))
+	}
+	if len(store.updateCalls) != 1 {
+		t.Fatalf("expected 1 UpdateNote call, got %d", len(store.updateCalls))
+	}
+	if store.updateCalls[0].id != 7 {
+		t.Errorf("expected UpdateNote id=7, got %d", store.updateCalls[0].id)
+	}
+	if store.updateCalls[0].content != "user prefers terse and concise responses" {
+		t.Errorf("unexpected UpdateNote content: %q", store.updateCalls[0].content)
+	}
+}
+
+func TestCompiler_ReconcileAdd(t *testing.T) {
+	llm := &notesSummarizer{
+		reconcileOps: []memory.NoteOp{
+			{Action: "add", Content: "user works in Go"},
+		},
+	}
+	store := &notesStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	compiler.ForceFlush(ctx)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if len(store.noteCalls) != 1 {
+		t.Fatalf("expected 1 LogNote call for add op, got %d", len(store.noteCalls))
+	}
+	if store.noteCalls[0].content != "user works in Go" {
+		t.Errorf("unexpected note content: %q", store.noteCalls[0].content)
+	}
+	if len(store.updateCalls) != 0 {
+		t.Errorf("expected 0 UpdateNote calls for add op, got %d", len(store.updateCalls))
+	}
+}
+
+func TestCompiler_ReconcileErrorFallback(t *testing.T) {
+	llm := &notesSummarizer{
+		reconcileErr: fmt.Errorf("llm timeout"),
+	}
+	store := &notesStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	compiler.ForceFlush(ctx)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if len(store.noteCalls) != 2 {
+		t.Fatalf("expected 2 LogNote calls on fallback, got %d", len(store.noteCalls))
+	}
+	if store.noteCalls[0].content != "user prefers terse responses" {
+		t.Errorf("unexpected first fallback note: %q", store.noteCalls[0].content)
+	}
+	if store.noteCalls[1].content != "user is debugging the React PR" {
+		t.Errorf("unexpected second fallback note: %q", store.noteCalls[1].content)
+	}
+	if len(store.updateCalls) != 0 {
+		t.Errorf("expected 0 UpdateNote calls on fallback, got %d", len(store.updateCalls))
 	}
 }
 
@@ -355,42 +507,39 @@ func TestCompiler_NonSalientActivitiesNotBuffered(t *testing.T) {
 	}
 }
 
-func TestCompiler_FlushBelowMinWordsSkipsSummarize(t *testing.T) {
+// TestCompiler_ThinTitleActivityFlushes verifies that a salient activity with
+// only a window title (no screen text) is summarized — social/gaming/meeting
+// sessions produce sparse screen content but are still worth remembering.
+func TestCompiler_ThinTitleActivityFlushes(t *testing.T) {
 	llm := &mockSummarizer{}
 	store := &mockStorage{}
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	// Salient but very sparse: real title, no screen text (0 words of signal).
-	// Force a flush via app change — VSCode → Chrome.
+	compiler.Ingest(ctx, tracker.Activity{App: "Discord", Title: "General (voice)", ScreenText: ""})
 	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: ""})
-	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "GitHub", ScreenText: ""})
 
-	// The first activity flushed: title "main.go" is salient but 0 screen words → below minFlushWords.
-	// Summarize must NOT have been called; nothing stored.
-	if llm.callCount != 0 {
-		t.Errorf("expected 0 LLM calls for sub-minFlushWords flush, got %d", llm.callCount)
+	if llm.callCount != 1 {
+		t.Errorf("expected 1 LLM call for thin-title flush, got %d", llm.callCount)
 	}
-	if store.callCount != 0 {
-		t.Errorf("expected 0 store calls for sub-minFlushWords flush, got %d", store.callCount)
+	if store.callCount != 1 {
+		t.Errorf("expected 1 store call for thin-title flush, got %d", store.callCount)
 	}
 }
 
-func TestCompiler_SufficientWordsBothCallsHappen(t *testing.T) {
+func TestCompiler_SalientTitleAndScreenTextBothFlush(t *testing.T) {
 	llm := &mockSummarizer{}
 	store := &mockStorage{}
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	// Give enough screen text to exceed minFlushWords, then trigger flush via app change.
-	richText := strings.Repeat("word ", 30) // 30 words — above minFlushWords (25)
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: richText})
-	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "GitHub", ScreenText: ""})
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: "func main() {}"})
+	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "GitHub"})
 
 	if llm.callCount != 1 {
-		t.Errorf("expected 1 LLM call for sufficient-words flush, got %d", llm.callCount)
+		t.Errorf("expected 1 LLM call, got %d", llm.callCount)
 	}
 	if store.callCount != 1 {
-		t.Errorf("expected 1 store call for sufficient-words flush, got %d", store.callCount)
+		t.Errorf("expected 1 store call, got %d", store.callCount)
 	}
 }
