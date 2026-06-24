@@ -3,12 +3,14 @@
 package tracker
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"time"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
@@ -19,22 +21,63 @@ type linuxTracker struct {
 	xconn     *xgb.Conn
 }
 
+// backend identifies the active-window detection strategy chosen for this session.
+type backend int
+
+const (
+	backendNone backend = iota
+	backendSway
+	backendHypr
+	backendATSPI
+	backendX11
+)
+
+// selectBackend picks a strategy from session capabilities. AT-SPI takes
+// priority over X11 on Wayland because XWayland's _NET_ACTIVE_WINDOW is blind to
+// native Wayland windows (it reports 0x0), making the X11 path useless on
+// GNOME/KDE Wayland. On native X11, the X11 backend is preferred.
+func selectBackend(haveSway, haveHypr, wayland, haveX11 bool) backend {
+	switch {
+	case haveSway:
+		return backendSway
+	case haveHypr:
+		return backendHypr
+	case wayland:
+		return backendATSPI
+	case haveX11:
+		return backendX11
+	default:
+		return backendNone
+	}
+}
+
 func New() (Tracker, error) {
 	t := &linuxTracker{}
 
+	// Coax GTK3/Qt/VTE apps into exposing their accessibility trees.
+	enableATSPI()
+
+	haveSway := false
 	if sock := os.Getenv("SWAYSOCK"); sock != "" {
 		if _, err := os.Stat(sock); err == nil {
-			t.getActive = t.swayWindow
-			return t, nil
+			haveSway = true
 		}
 	}
+	haveHypr := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE") != ""
+	wayland := os.Getenv("XDG_SESSION_TYPE") == "wayland" || os.Getenv("WAYLAND_DISPLAY") != ""
+	haveX11 := os.Getenv("XDG_SESSION_TYPE") == "x11" || os.Getenv("DISPLAY") != ""
 
-	if sig := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE"); sig != "" {
+	switch selectBackend(haveSway, haveHypr, wayland, haveX11) {
+	case backendSway:
+		t.getActive = t.swayWindow
+		return t, nil
+	case backendHypr:
 		t.getActive = t.hyprWindow
 		return t, nil
-	}
-
-	if os.Getenv("XDG_SESSION_TYPE") == "x11" || os.Getenv("DISPLAY") != "" {
+	case backendATSPI:
+		t.getActive = t.atspiWindow
+		return t, nil
+	case backendX11:
 		conn, err := xgb.NewConn()
 		if err == nil {
 			t.xconn = conn
@@ -48,6 +91,20 @@ func New() (Tracker, error) {
 		return Normalize("Unknown", "Unknown"), nil
 	}
 	return t, nil
+}
+
+// atspiWindow reports the focused window via AT-SPI over D-Bus — the only
+// pure-Go path that sees native Wayland windows on GNOME/KDE. Falls back to
+// "Unknown" when the accessibility bus is unavailable.
+func (t *linuxTracker) atspiWindow() (*Activity, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+
+	app, title := atspiActiveWindow(ctx)
+	if app == "" && title == "" {
+		return Normalize("Unknown", "Unknown"), nil
+	}
+	return Normalize(app, title), nil
 }
 
 func (t *linuxTracker) GetActiveWindow() (*Activity, error) {

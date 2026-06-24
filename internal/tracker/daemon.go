@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ora/internal/obs"
@@ -13,18 +14,45 @@ import (
 
 const recaptureInterval = 5 * time.Minute
 
+// Tiered-capture tuning. AT-SPI/UIA text is free and tried first; the vision
+// tier (screenshot -> LLM) only fires when accessibility comes up nearly empty
+// (browsers, movies, games, canvas) and no more often than minVisionInterval to
+// keep token/compute cost bounded.
+const (
+	thinTextThreshold = 200              // runes; below this, accessibility is treated as blind
+	minVisionInterval = 90 * time.Second // floor between vision calls
+)
+
 type Daemon struct {
 	eye       Tracker
 	interval  time.Duration
 	dwellTime time.Duration
 	blocklist []string
 	eventChan chan Activity
-	capturer  func() string // injectable for tests; nil = real OCR
+	capturer  func() string // injectable for tests; nil = real capture
+	visionFn  func(ctx context.Context, png []byte) string
+	paused    atomic.Bool
 }
 
-// SetCapturer replaces the screen capture function. Used in tests to avoid real OCR.
+// Pause suspends activity emission. The polling loop still runs so Resume takes effect promptly.
+func (d *Daemon) Pause() { d.paused.Store(true) }
+
+// Resume re-enables activity emission after a Pause.
+func (d *Daemon) Resume() { d.paused.Store(false) }
+
+// IsPaused reports whether tracking is currently paused.
+func (d *Daemon) IsPaused() bool { return d.paused.Load() }
+
+// SetCapturer replaces the screen capture function. Used in tests to avoid real capture.
 func (d *Daemon) SetCapturer(fn func() string) {
 	d.capturer = fn
+}
+
+// SetVisionFn injects the vision describer (image -> text). When set, the tiered
+// capturer falls back to a screenshot + this function whenever accessibility text
+// is too thin to be useful. nil disables the vision tier (text-only).
+func (d *Daemon) SetVisionFn(fn func(ctx context.Context, png []byte) string) {
+	d.visionFn = fn
 }
 
 func NewDaemon(eye Tracker, interval time.Duration, dwellTime time.Duration, blocklist []string, eventChan chan Activity) *Daemon {
@@ -48,13 +76,16 @@ func (d *Daemon) Start(ctx context.Context) {
 	var emittedCurrent bool
 	var lastCaptureTime time.Time
 
-	// use injected capturer or default to real OCR with diff tracking
-	capturer := d.capturer
-	if capturer == nil {
-		var lastScreenText string
-		capturer = func() string {
-			return captureOCRDiff(&lastScreenText, &lastCaptureTime)
+	// use injected capturer (tests) or default to tiered capture with diff tracking.
+	// the default path needs the current activity so the vision tier can skip the
+	// bare desktop; the injected test capturer ignores it.
+	var lastScreenText string
+	var lastVisionTime time.Time
+	capture := func(act Activity) string {
+		if d.capturer != nil {
+			return d.capturer()
 		}
+		return d.tieredCapture(ctx, act, &lastScreenText, &lastCaptureTime, &lastVisionTime)
 	}
 
 	tracer := obs.GetTracer(ctx, "ora.tracker")
@@ -64,6 +95,10 @@ func (d *Daemon) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if d.paused.Load() {
+				continue
+			}
+
 			_, span := tracer.Start(ctx, "Tracker.PollActiveWindow")
 
 			activity, err := d.eye.GetActiveWindow()
@@ -109,7 +144,7 @@ func (d *Daemon) Start(ctx context.Context) {
 					)
 
 					ev := *pendingActivity
-					ev.ScreenText = capturer()
+					ev.ScreenText = capture(*pendingActivity)
 
 					slog.Info("activity tracked", "app", ev.App, "title", ev.Title)
 
@@ -128,7 +163,7 @@ func (d *Daemon) Start(ctx context.Context) {
 				}
 			} else if emittedCurrent && d.capturer == nil && time.Since(lastCaptureTime) >= recaptureInterval {
 				// periodic re-capture: same window, 5 min elapsed
-				text := capturer()
+				text := capture(*lastActivity)
 				if text != "" {
 					ev := *lastActivity
 					ev.ScreenText = text
@@ -157,19 +192,80 @@ func (d *Daemon) Start(ctx context.Context) {
 	}
 }
 
-// captureOCRDiff extracts screen text via UIA and returns it only if it changed since last capture.
-// Updates lastText and lastCaptureTime in place.
-func captureOCRDiff(lastText *string, lastCaptureTime *time.Time) string {
+// tieredCapture reads accessibility text first (free) and only escalates to the
+// vision tier (screenshot -> LLM) when that text is too thin to describe what's
+// on screen. Returns "" when content is unchanged since the last capture, so
+// callers never re-emit or re-summarize the same screen.
+//
+// Cost guards: vision is gated behind thinTextThreshold AND minVisionInterval,
+// and the diff check below means a static thin screen is summarized at most once.
+func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *string, lastCaptureTime, lastVisionTime *time.Time) string {
 	text, err := extractText()
 	if err != nil {
-		return ""
+		text = ""
 	}
-
 	*lastCaptureTime = time.Now()
 
-	if text == *lastText {
-		return "" // idle — same screen content
+	// vision only escalates for a real foreground app — never the bare desktop,
+	// or we'd snap and describe the wallpaper on a loop while the user is idle.
+	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
+	if !shouldUseVision(len([]rune(text)), visionEnabled, time.Since(*lastVisionTime)) {
+		return diff(lastText, text)
 	}
-	*lastText = text
+
+	png, err := grabScreen(ctx)
+	if err != nil || len(png) == 0 {
+		return diff(lastText, text)
+	}
+	*lastVisionTime = time.Now()
+
+	vtext := d.visionFn(ctx, png)
+	combined := strings.TrimSpace(strings.TrimSpace(text) + "\n" + strings.TrimSpace(vtext))
+	return diff(lastText, combined)
+}
+
+// nonWindowApps are the desktop/compositor/shell identifiers that mean "no real
+// application is focused" — the bare desktop. extractText is thin for these, so
+// without this gate the vision tier would screenshot and describe the wallpaper
+// on every idle tick. Normalize() maps an empty app to "Unknown".
+var nonWindowApps = map[string]struct{}{
+	"":                {},
+	"unknown":         {},
+	"gnome-shell":     {},
+	"org.gnome.shell": {},
+	"gjs":             {},
+	"mutter":          {},
+	"plasmashell":     {},
+	"kwin":            {},
+	"desktop":         {},
+}
+
+// isVisionWorthy reports whether the focused window is a real application worth
+// describing with the vision tier (vs. the bare desktop / compositor shell).
+func isVisionWorthy(act Activity) bool {
+	app := strings.ToLower(strings.TrimSpace(act.App))
+	_, isShell := nonWindowApps[app]
+	return !isShell
+}
+
+// shouldUseVision decides whether to escalate to the (expensive) vision tier:
+// only when vision is enabled, accessibility text is thin, and enough time has
+// passed since the last vision call. This is the cost guard.
+func shouldUseVision(textLen int, visionEnabled bool, sinceLastVision time.Duration) bool {
+	if !visionEnabled {
+		return false
+	}
+	if textLen >= thinTextThreshold {
+		return false
+	}
+	return sinceLastVision >= minVisionInterval
+}
+
+// diff returns text only when it differs from *last, updating *last in place.
+func diff(last *string, text string) string {
+	if text == "" || text == *last {
+		return ""
+	}
+	*last = text
 	return text
 }
