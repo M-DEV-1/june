@@ -208,6 +208,35 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 	}()
 
+	// age out old, low-importance episode raw text every 24 hours. This is the
+	// pre-vector tiering step for the episode substrate: episodes older than
+	// keepRawFor whose importance is below importanceFloor have screen_text
+	// cleared (row kept, not deleted) to reclaim space. Recent or important
+	// episodes are left untouched. keepRawFor/importanceFloor/ticker interval
+	// are tunable. This is independent of the activity cull above, which
+	// operates on the thin activity nodes rather than the episode rows.
+	go func() {
+		const (
+			keepRawFor      = 10 * 24 * time.Hour
+			importanceFloor = 0.3
+		)
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				n, err := store.AgeEpisodes(ctx, keepRawFor, importanceFloor)
+				if err != nil {
+					slog.Error("episode aging failed", "error", err)
+				} else {
+					slog.Info("episode aging complete", "aged_rows", n)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	go func() {
 		for ev := range eventChan {
 			store.LogActivity(ctx, ev.App, ev.Title)
