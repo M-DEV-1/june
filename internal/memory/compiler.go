@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"ora/internal/config"
 	"ora/internal/obs"
 	"ora/internal/tracker"
@@ -482,7 +483,10 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 
 	// attribute the buffer onto ongoing threads. existing threads seed the call
 	// so the model can reuse ids and keep the same throughline stable over time.
-	existingThreads, _ := c.store.ThreadsForAttribution(ctx, 40)
+	existingThreads, taErr := c.store.ThreadsForAttribution(ctx, 40)
+	if taErr != nil {
+		slog.Error("flush: ThreadsForAttribution failed", "err", taErr)
+	}
 	attr, err := c.llm.AttributeThreads(ctx, buf, existingThreads)
 	if err != nil || attr == nil || len(attr.Threads) == 0 {
 		// log raw activities if LLM fails or produces no usable attribution
@@ -499,14 +503,20 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 			TaskName: "Raw Activity Log",
 			Summary:  strings.TrimSpace(fallbackText.String()),
 		}
-		_ = c.store.LogSemanticNode(ctx, fallbackSummary)
+		if err := c.store.LogSemanticNode(ctx, fallbackSummary); err != nil {
+			slog.Error("flush: LogSemanticNode (fallback) failed", "err", err)
+		}
 	} else {
 		// one update per concurrent thread: refresh the thread's current state
 		// and log an episodic summary node so history, FTS, and compaction all
 		// keep working unchanged.
 		for _, u := range attr.Threads {
-			_, _ = c.store.UpsertThread(ctx, u)
-			_ = c.store.LogSemanticNode(ctx, TaskSummary{SameTask: u.ID != 0, TaskName: u.Subject, Summary: u.Summary})
+			if _, err := c.store.UpsertThread(ctx, u); err != nil {
+				slog.Error("flush: UpsertThread failed", "subject", u.Subject, "err", err)
+			}
+			if err := c.store.LogSemanticNode(ctx, TaskSummary{SameTask: u.ID != 0, TaskName: u.Subject, Summary: u.Summary}); err != nil {
+				slog.Error("flush: LogSemanticNode failed", "subject", u.Subject, "err", err)
+			}
 		}
 
 		// identity: durable PERSON facts only, reconciled against existing notes
@@ -521,16 +531,23 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 			}()
 
 			if recErr != nil {
+				slog.Error("flush: note reconciliation failed, logging raw identity facts", "err", recErr)
 				for _, n := range attr.Identity {
-					_, _ = c.store.LogNote(ctx, n, "fact")
+					if _, err := c.store.LogNote(ctx, n, "fact"); err != nil {
+						slog.Error("flush: LogNote (raw identity) failed", "err", err)
+					}
 				}
 			} else {
 				for _, op := range ops {
 					switch op.Action {
 					case "add":
-						_, _ = c.store.LogNote(ctx, op.Content, "fact")
+						if _, err := c.store.LogNote(ctx, op.Content, "fact"); err != nil {
+							slog.Error("flush: LogNote (add) failed", "err", err)
+						}
 					case "update":
-						_ = c.store.UpdateNote(ctx, op.ID, op.Content)
+						if err := c.store.UpdateNote(ctx, op.ID, op.Content); err != nil {
+							slog.Error("flush: UpdateNote failed", "id", op.ID, "err", err)
+						}
 					}
 				}
 			}

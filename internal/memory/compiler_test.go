@@ -1,8 +1,10 @@
 package memory_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"ora/internal/memory"
 	"ora/internal/tracker"
 	"strings"
@@ -972,4 +974,48 @@ func TestCompiler_ConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// failingStorage returns errors from the durable-write methods so we can assert
+// the compiler surfaces store failures (logs them) instead of silently
+// swallowing them with `_ =`, which would lose memory with zero visibility.
+type failingStorage struct{}
+
+func (failingStorage) LogSemanticNode(context.Context, memory.TaskSummary) error {
+	return fmt.Errorf("boom: LogSemanticNode")
+}
+func (failingStorage) LogNote(context.Context, string, string) (int64, error) {
+	return 0, fmt.Errorf("boom: LogNote")
+}
+func (failingStorage) ExistingNotes(context.Context) ([]memory.NoteRef, error) { return nil, nil }
+func (failingStorage) UpdateNote(context.Context, int64, string) error {
+	return fmt.Errorf("boom: UpdateNote")
+}
+func (failingStorage) UpsertThread(context.Context, memory.ThreadUpdate) (int64, error) {
+	return 0, fmt.Errorf("boom: UpsertThread")
+}
+func (failingStorage) ThreadsForAttribution(context.Context, int) ([]memory.Thread, error) {
+	return nil, nil
+}
+
+// TestCompiler_FlushLogsStoreErrors pins Slice-0 observability: when a durable
+// store write fails during flush, the failure must be logged at ERROR level, not
+// silently discarded. Without this we are blind to memory loss (the exact "I
+// can't see the failures" problem).
+func TestCompiler_FlushLogsStoreErrors(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	c := memory.NewCompiler(&mockSummarizer{}, failingStorage{})
+	ctx := context.Background()
+
+	// one salient activity, then force the (synchronous) flush → store writes fail
+	c.Ingest(ctx, tracker.Activity{App: "terminal", Title: "debugging", ScreenText: "stack trace here"})
+	c.ForceFlush(ctx)
+
+	if out := logBuf.String(); !strings.Contains(out, "level=ERROR") {
+		t.Errorf("expected an ERROR log when a store write fails during flush, got: %q", out)
+	}
 }
