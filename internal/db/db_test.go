@@ -1699,3 +1699,228 @@ func TestStore_AgeEpisodes_DropsOnlyOldLowImportance(t *testing.T) {
 		}
 	}
 }
+
+// ─── Consolidation retrieval (Cycle 1: temporal walk) ─────────────────────────
+
+// TestStore_EpisodesInWindow_ChronologicalAndBounded seeds episodes at
+// controlled timestamps spanning a day, plus one episode clearly outside the
+// window, and verifies EpisodesInWindow returns only the in-window rows,
+// ordered oldest-first (chronological, i.e. the "day arc"), and honors limit.
+func TestStore_EpisodesInWindow_ChronologicalAndBounded(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+	raw := store.DB()
+
+	morningID, err := store.LogEpisode(ctx, "Mail", "Inbox", "reading morning emails")
+	if err != nil {
+		t.Fatalf("LogEpisode (morning): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET created_at = '2026-07-04 08:00:00' WHERE id = ?`, morningID); err != nil {
+		t.Fatalf("backdate morning: %v", err)
+	}
+
+	noonID, err := store.LogEpisode(ctx, "VSCode", "main.go", "writing the consolidation layer")
+	if err != nil {
+		t.Fatalf("LogEpisode (noon): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET created_at = '2026-07-04 12:00:00' WHERE id = ?`, noonID); err != nil {
+		t.Fatalf("backdate noon: %v", err)
+	}
+
+	eveningID, err := store.LogEpisode(ctx, "Firefox", "News", "reading the evening news")
+	if err != nil {
+		t.Fatalf("LogEpisode (evening): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET created_at = '2026-07-04 20:00:00' WHERE id = ?`, eveningID); err != nil {
+		t.Fatalf("backdate evening: %v", err)
+	}
+
+	// clearly outside the window: the day before
+	outsideID, err := store.LogEpisode(ctx, "Notes", "old memo", "yesterday's note")
+	if err != nil {
+		t.Fatalf("LogEpisode (outside): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET created_at = '2026-07-03 20:00:00' WHERE id = ?`, outsideID); err != nil {
+		t.Fatalf("backdate outside: %v", err)
+	}
+
+	since := time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 7, 4, 23, 59, 59, 0, time.UTC)
+
+	episodes, err := store.EpisodesInWindow(ctx, since, until, 10)
+	if err != nil {
+		t.Fatalf("EpisodesInWindow: %v", err)
+	}
+	if len(episodes) != 3 {
+		t.Fatalf("expected 3 in-window episodes, got %d: %+v", len(episodes), episodes)
+	}
+
+	// chronological order: morning, noon, evening
+	if episodes[0].ID != morningID || episodes[1].ID != noonID || episodes[2].ID != eveningID {
+		t.Errorf("expected chronological order [morning,noon,evening], got ids [%d,%d,%d]",
+			episodes[0].ID, episodes[1].ID, episodes[2].ID)
+	}
+
+	for _, e := range episodes {
+		if e.ID == outsideID {
+			t.Errorf("episode outside window must be excluded, got: %+v", e)
+		}
+	}
+
+	// limit is honored
+	limited, err := store.EpisodesInWindow(ctx, since, until, 2)
+	if err != nil {
+		t.Fatalf("EpisodesInWindow (limit=2): %v", err)
+	}
+	if len(limited) != 2 {
+		t.Errorf("expected exactly 2 episodes with limit=2, got %d", len(limited))
+	}
+	if limited[0].ID != morningID || limited[1].ID != noonID {
+		t.Errorf("expected limit to keep the earliest 2 in chronological order, got ids [%d,%d]", limited[0].ID, limited[1].ID)
+	}
+}
+
+// ─── Consolidation retrieval (Cycle 2: MMR diversity) ─────────────────────────
+
+// TestStore_DiverseEpisodes_AvoidsNearDuplicateCluster seeds 5 near-identical
+// episodes (same app+title, near-identical screen_text, all matching the
+// focus term) plus 2 clearly-distinct episodes that also match the focus. A
+// plain top-N (RankedEpisodes) would return ~3 near-duplicates since they all
+// score similarly high; DiverseEpisodes must instead spread across the
+// distinct content via MMR, returning at most 1-2 from the duplicate cluster
+// and at least one of the distinct episodes.
+func TestStore_DiverseEpisodes_AvoidsNearDuplicateCluster(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	dupTexts := []string{
+		"reviewing the DeepSeek post-training paper section on RLHF",
+		"reviewing the DeepSeek post-training paper section on RLHF again",
+		"reviewing the DeepSeek post-training paper section on RLHF once more",
+		"still reviewing the DeepSeek post-training paper section on RLHF",
+		"reviewing the DeepSeek post-training paper section on RLHF one more time",
+	}
+	dupIDs := make(map[int64]bool)
+	for _, text := range dupTexts {
+		id, err := store.LogEpisode(ctx, "Firefox", "DeepSeek Paper", text)
+		if err != nil {
+			t.Fatalf("LogEpisode (dup): %v", err)
+		}
+		dupIDs[id] = true
+	}
+
+	distinct1ID, err := store.LogEpisode(ctx, "Terminal", "training run", "kicking off a DeepSeek fine-tune job on the cluster")
+	if err != nil {
+		t.Fatalf("LogEpisode (distinct1): %v", err)
+	}
+	distinct2ID, err := store.LogEpisode(ctx, "Slack", "#research", "discussing DeepSeek benchmark results with the team")
+	if err != nil {
+		t.Fatalf("LogEpisode (distinct2): %v", err)
+	}
+
+	results, err := store.DiverseEpisodes(ctx, "DeepSeek", 3)
+	if err != nil {
+		t.Fatalf("DiverseEpisodes: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected some diverse episode results")
+	}
+
+	dupCount := 0
+	foundDistinct := false
+	for _, r := range results {
+		if dupIDs[r.RefID] {
+			dupCount++
+		}
+		if r.RefID == distinct1ID || r.RefID == distinct2ID {
+			foundDistinct = true
+		}
+	}
+	if dupCount > 2 {
+		t.Errorf("expected at most 2 results from the near-duplicate cluster, got %d: %+v", dupCount, results)
+	}
+	if !foundDistinct {
+		t.Errorf("expected at least one distinct episode in diverse results: %+v", results)
+	}
+}
+
+// ─── Consolidation retrieval (Cycle 3: thread fusion) ─────────────────────────
+
+// TestStore_RecallSubject_FusesThreadAndEpisodes seeds a live thread for
+// subject "DeepSeek" plus several DeepSeek episodes, and verifies
+// RecallSubject returns the thread's arc as a "[thread] ..." line followed by
+// episode specifics as "[episode] ..." lines — the arc first, then the
+// details, so a caller can narrate "you've been doing X, specifically Y, Z".
+func TestStore_RecallSubject_FusesThreadAndEpisodes(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "DeepSeek",
+		Kind:    "learning",
+		State:   "studying post-training",
+	}); err != nil {
+		t.Fatalf("UpsertThread: %v", err)
+	}
+
+	episodeTexts := []string{
+		"reading the DeepSeek post-training paper introduction",
+		"skimming the DeepSeek RLHF section",
+		"taking notes on the DeepSeek reward model design",
+	}
+	for _, text := range episodeTexts {
+		if _, err := store.LogEpisode(ctx, "Firefox", "DeepSeek Paper", text); err != nil {
+			t.Fatalf("LogEpisode: %v", err)
+		}
+	}
+
+	lines, err := store.RecallSubject(ctx, "DeepSeek", 4)
+	if err != nil {
+		t.Fatalf("RecallSubject: %v", err)
+	}
+	if len(lines) == 0 {
+		t.Fatal("expected some lines from RecallSubject")
+	}
+
+	var foundThread, foundEpisode bool
+	threadIdx, episodeIdx := -1, -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "[thread] ") && strings.Contains(l, "DeepSeek") {
+			foundThread = true
+			if threadIdx == -1 {
+				threadIdx = i
+			}
+		}
+		if strings.HasPrefix(l, "[episode] ") {
+			foundEpisode = true
+			if episodeIdx == -1 {
+				episodeIdx = i
+			}
+		}
+	}
+	if !foundThread {
+		t.Errorf("expected a [thread] line in RecallSubject results: %+v", lines)
+	}
+	if !foundEpisode {
+		t.Errorf("expected [episode] lines in RecallSubject results: %+v", lines)
+	}
+	if foundThread && foundEpisode && threadIdx > episodeIdx {
+		t.Errorf("expected thread (arc) before episodes (specifics), got thread at %d, episode at %d: %+v", threadIdx, episodeIdx, lines)
+	}
+}
