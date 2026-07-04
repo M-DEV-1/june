@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type mockSummarizer struct {
@@ -31,6 +32,13 @@ func (m *mockSummarizer) ReconcileNotes(ctx context.Context, existing []memory.N
 	return ops, nil
 }
 
+func (m *mockSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []memory.Thread) (*memory.ThreadAttribution, error) {
+	m.callCount++
+	return &memory.ThreadAttribution{
+		Threads: []memory.ThreadUpdate{{Subject: "mock task", Kind: "work", State: "mock state", Summary: "mock summary"}},
+	}, nil
+}
+
 type mockStorage struct {
 	callCount int
 }
@@ -50,6 +58,14 @@ func (m *mockStorage) ExistingNotes(ctx context.Context) ([]memory.NoteRef, erro
 
 func (m *mockStorage) UpdateNote(ctx context.Context, id int64, content string) error {
 	return nil
+}
+
+func (m *mockStorage) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStorage) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.Thread, error) {
+	return nil, nil
 }
 
 func TestCompiler_BuffersWithoutFlushing(t *testing.T) {
@@ -137,6 +153,13 @@ func (m *capturingSummarizer) ReconcileNotes(ctx context.Context, existing []mem
 	return nil, nil
 }
 
+func (m *capturingSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []memory.Thread) (*memory.ThreadAttribution, error) {
+	m.received = activities
+	return &memory.ThreadAttribution{
+		Threads: []memory.ThreadUpdate{{Subject: "t", Kind: "work", State: "s", Summary: "s"}},
+	}, nil
+}
+
 func TestCompiler_PassesScreenTextToSummarizer(t *testing.T) {
 	llm := &capturingSummarizer{}
 	store := &mockStorage{}
@@ -169,6 +192,11 @@ func (m *errorSummarizer) ReconcileNotes(ctx context.Context, existing []memory.
 	return nil, nil
 }
 
+func (m *errorSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []memory.Thread) (*memory.ThreadAttribution, error) {
+	m.callCount++
+	return nil, fmt.Errorf("api rate limit reached")
+}
+
 type capturingStorage struct {
 	stored memory.TaskSummary
 }
@@ -188,6 +216,14 @@ func (m *capturingStorage) ExistingNotes(ctx context.Context) ([]memory.NoteRef,
 
 func (m *capturingStorage) UpdateNote(ctx context.Context, id int64, content string) error {
 	return nil
+}
+
+func (m *capturingStorage) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64, error) {
+	return 0, nil
+}
+
+func (m *capturingStorage) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.Thread, error) {
+	return nil, nil
 }
 
 func TestCompiler_FallbackIncludesScreenText(t *testing.T) {
@@ -256,6 +292,15 @@ func (n *notesSummarizer) ReconcileNotes(ctx context.Context, existing []memory.
 	return ops, nil
 }
 
+// AttributeThreads emits a single thread plus identity facts so the note
+// reconciliation path (which now operates on attr.Identity) is exercised.
+func (n *notesSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []memory.Thread) (*memory.ThreadAttribution, error) {
+	return &memory.ThreadAttribution{
+		Threads:  []memory.ThreadUpdate{{Subject: "notes task", Kind: "work", State: "did stuff", Summary: "did stuff"}},
+		Identity: []string{"user prefers terse responses", "user is debugging the React PR"},
+	}, nil
+}
+
 type notesStorage struct {
 	mu          sync.Mutex
 	nodesCalls  []memory.TaskSummary
@@ -295,6 +340,14 @@ func (s *notesStorage) UpdateNote(ctx context.Context, id int64, content string)
 		content string
 	}{id, content})
 	return nil
+}
+
+func (s *notesStorage) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64, error) {
+	return 0, nil
+}
+
+func (s *notesStorage) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.Thread, error) {
+	return nil, nil
 }
 
 func TestCompiler_AutoExtractsNotes(t *testing.T) {
@@ -542,4 +595,381 @@ func TestCompiler_SalientTitleAndScreenTextBothFlush(t *testing.T) {
 	if store.callCount != 1 {
 		t.Errorf("expected 1 store call, got %d", store.callCount)
 	}
+}
+
+// ─── Thread attribution + flush recording fakes ───────────────────────────────
+
+// flushRecordingStorage records every Storage method call so tests can assert
+// exactly what flush writes and the order it does it in.
+type flushRecordingStorage struct {
+	mu             sync.Mutex
+	semanticCalls  []memory.TaskSummary
+	upsertCalls    []memory.ThreadUpdate
+	noteCalls      []struct{ content, kind string }
+	updateCalls    []struct {
+		id      int64
+		content string
+	}
+	existingCalled int
+}
+
+func (s *flushRecordingStorage) LogSemanticNode(_ context.Context, summary memory.TaskSummary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.semanticCalls = append(s.semanticCalls, summary)
+	return nil
+}
+
+func (s *flushRecordingStorage) LogNote(_ context.Context, content, kind string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noteCalls = append(s.noteCalls, struct{ content, kind string }{content, kind})
+	return int64(len(s.noteCalls)), nil
+}
+
+func (s *flushRecordingStorage) ExistingNotes(_ context.Context) ([]memory.NoteRef, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.existingCalled++
+	return nil, nil
+}
+
+func (s *flushRecordingStorage) UpdateNote(_ context.Context, id int64, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateCalls = append(s.updateCalls, struct {
+		id      int64
+		content string
+	}{id, content})
+	return nil
+}
+
+func (s *flushRecordingStorage) UpsertThread(_ context.Context, u memory.ThreadUpdate) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upsertCalls = append(s.upsertCalls, u)
+	return u.ID, nil // return provided ID (0 is fine — compiler ignores the return value)
+}
+
+func (s *flushRecordingStorage) ThreadsForAttribution(_ context.Context, _ int) ([]memory.Thread, error) {
+	return nil, nil
+}
+
+// fixedAttribSummarizer returns a caller-configured ThreadAttribution (or error).
+// Summarize and ReconcileNotes are stubs that are never invoked by flush.
+type fixedAttribSummarizer struct {
+	attr *memory.ThreadAttribution
+	err  error
+}
+
+func (s *fixedAttribSummarizer) Summarize(_ context.Context, _ []tracker.Activity, _ string) (*memory.TaskSummary, error) {
+	return nil, nil
+}
+
+func (s *fixedAttribSummarizer) ReconcileNotes(_ context.Context, _ []memory.NoteRef, _ []string) ([]memory.NoteOp, error) {
+	return nil, nil
+}
+
+func (s *fixedAttribSummarizer) AttributeThreads(_ context.Context, _ []tracker.Activity, _ []memory.Thread) (*memory.ThreadAttribution, error) {
+	return s.attr, s.err
+}
+
+// identityTrackingSummarizer is a Summarizer that records ReconcileNotes calls
+// and returns a configurable identity list from AttributeThreads.
+type identityTrackingSummarizer struct {
+	identity        []string
+	reconcileCalled int
+}
+
+func (s *identityTrackingSummarizer) Summarize(_ context.Context, _ []tracker.Activity, _ string) (*memory.TaskSummary, error) {
+	return nil, nil
+}
+
+func (s *identityTrackingSummarizer) ReconcileNotes(_ context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
+	s.reconcileCalled++
+	ops := make([]memory.NoteOp, len(candidates))
+	for i, c := range candidates {
+		ops[i] = memory.NoteOp{Action: "add", Content: c}
+	}
+	return ops, nil
+}
+
+func (s *identityTrackingSummarizer) AttributeThreads(_ context.Context, _ []tracker.Activity, _ []memory.Thread) (*memory.ThreadAttribution, error) {
+	return &memory.ThreadAttribution{
+		Threads:  []memory.ThreadUpdate{{Subject: "test task", Kind: "work", State: "s", Summary: "s"}},
+		Identity: s.identity,
+	}, nil
+}
+
+// ─── Thread attribution tests ─────────────────────────────────────────────────
+
+// TestCompiler_SuccessfulAttribution verifies that when AttributeThreads returns
+// two concurrent threads (entertainment id=0, work id=5), flush calls UpsertThread
+// twice and LogSemanticNode twice, with SameTask = (u.ID != 0) for each, and
+// TaskNames matching the thread subjects.
+func TestCompiler_SuccessfulAttribution(t *testing.T) {
+	twoThreads := &memory.ThreadAttribution{
+		Threads: []memory.ThreadUpdate{
+			{ID: 0, Subject: "Suits", Kind: "entertainment", State: "s1e3", Summary: "watched ep 3", Novel: true},
+			{ID: 5, Subject: "ORA project", Kind: "work", State: "writing tests", Summary: "added thread tests"},
+		},
+	}
+	llm := &fixedAttribSummarizer{attr: twoThreads}
+	store := &flushRecordingStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	compiler.Ingest(ctx, tracker.Activity{App: "Netflix", Title: "Suits"})
+	compiler.ForceFlush(ctx)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if len(store.upsertCalls) != 2 {
+		t.Fatalf("expected 2 UpsertThread calls, got %d", len(store.upsertCalls))
+	}
+	if len(store.semanticCalls) != 2 {
+		t.Fatalf("expected 2 LogSemanticNode calls, got %d", len(store.semanticCalls))
+	}
+
+	// thread[0]: ID=0 → SameTask should be false
+	if store.semanticCalls[0].SameTask {
+		t.Errorf("thread id=0: SameTask should be false, got true")
+	}
+	if store.semanticCalls[0].TaskName != "Suits" {
+		t.Errorf("thread id=0: TaskName should be 'Suits', got %q", store.semanticCalls[0].TaskName)
+	}
+
+	// thread[1]: ID=5 → SameTask should be true
+	if !store.semanticCalls[1].SameTask {
+		t.Errorf("thread id=5: SameTask should be true, got false")
+	}
+	if store.semanticCalls[1].TaskName != "ORA project" {
+		t.Errorf("thread id=5: TaskName should be 'ORA project', got %q", store.semanticCalls[1].TaskName)
+	}
+}
+
+// TestCompiler_IdentityReconciliation_NonEmpty verifies that when
+// ThreadAttribution.Identity is non-empty, ExistingNotes and ReconcileNotes are
+// both called.
+func TestCompiler_IdentityReconciliation_NonEmpty(t *testing.T) {
+	llm := &identityTrackingSummarizer{
+		identity: []string{"user prefers Go"},
+	}
+	store := &flushRecordingStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	compiler.ForceFlush(ctx)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if store.existingCalled == 0 {
+		t.Error("ExistingNotes should be called when Identity is non-empty")
+	}
+	if llm.reconcileCalled == 0 {
+		t.Error("ReconcileNotes should be called when Identity is non-empty")
+	}
+}
+
+// TestCompiler_IdentityReconciliation_Empty verifies that when
+// ThreadAttribution.Identity is empty (nil or zero-length), ExistingNotes and
+// ReconcileNotes are NOT called.
+func TestCompiler_IdentityReconciliation_Empty(t *testing.T) {
+	llm := &identityTrackingSummarizer{
+		identity: nil, // empty / unset
+	}
+	store := &flushRecordingStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	compiler.ForceFlush(ctx)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if store.existingCalled > 0 {
+		t.Errorf("ExistingNotes must NOT be called when Identity is empty, got %d call(s)", store.existingCalled)
+	}
+	if llm.reconcileCalled > 0 {
+		t.Errorf("ReconcileNotes must NOT be called when Identity is empty, got %d call(s)", llm.reconcileCalled)
+	}
+}
+
+// TestCompiler_FallbackOnAttributionFailure verifies that when AttributeThreads
+// returns an error, nil, or an empty Threads list, flush writes a "Raw Activity
+// Log" TaskSummary via LogSemanticNode and does NOT call UpsertThread.
+func TestCompiler_FallbackOnAttributionFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		llm  *fixedAttribSummarizer
+	}{
+		{
+			name: "error from AttributeThreads",
+			llm:  &fixedAttribSummarizer{err: fmt.Errorf("api rate limit")},
+		},
+		{
+			name: "nil attr from AttributeThreads",
+			llm:  &fixedAttribSummarizer{attr: nil, err: nil},
+		},
+		{
+			name: "empty Threads slice from AttributeThreads",
+			llm: &fixedAttribSummarizer{
+				attr: &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{}},
+				err:  nil,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &flushRecordingStorage{}
+			compiler := memory.NewCompiler(tc.llm, store)
+			ctx := context.Background()
+
+			compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+			compiler.ForceFlush(ctx)
+
+			store.mu.Lock()
+			defer store.mu.Unlock()
+
+			if len(store.upsertCalls) != 0 {
+				t.Errorf("UpsertThread must not be called on attribution failure, got %d call(s)", len(store.upsertCalls))
+			}
+			if len(store.semanticCalls) != 1 {
+				t.Fatalf("expected 1 fallback LogSemanticNode call, got %d", len(store.semanticCalls))
+			}
+			if store.semanticCalls[0].TaskName != "Raw Activity Log" {
+				t.Errorf("expected fallback TaskName 'Raw Activity Log', got %q", store.semanticCalls[0].TaskName)
+			}
+			if store.semanticCalls[0].SameTask {
+				t.Error("fallback SameTask must be false")
+			}
+		})
+	}
+}
+
+// ─── Concurrency safety ────────────────────────────────────────────────────
+
+// raceSafeSummarizer/raceSafeStorage are mutex-protected mocks so that any
+// data race caught by `go test -race` in the tests below can only originate
+// from the Compiler itself (buffer/wordCount/lastFlush), not from the mocks.
+type raceSafeSummarizer struct {
+	mu sync.Mutex
+}
+
+func (m *raceSafeSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*memory.TaskSummary, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &memory.TaskSummary{SameTask: true, TaskName: "t", Summary: "s"}, nil
+}
+
+func (m *raceSafeSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
+	return nil, nil
+}
+
+func (m *raceSafeSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []memory.Thread) (*memory.ThreadAttribution, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &memory.ThreadAttribution{
+		Threads: []memory.ThreadUpdate{{Subject: "t", Kind: "work", State: "s", Summary: "s"}},
+	}, nil
+}
+
+type raceSafeStorage struct {
+	mu sync.Mutex
+}
+
+func (s *raceSafeStorage) LogSemanticNode(ctx context.Context, summary memory.TaskSummary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return nil
+}
+
+func (s *raceSafeStorage) LogNote(ctx context.Context, content, kind string) (int64, error) {
+	return 0, nil
+}
+
+func (s *raceSafeStorage) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
+	return nil, nil
+}
+
+func (s *raceSafeStorage) UpdateNote(ctx context.Context, id int64, content string) error {
+	return nil
+}
+
+func (s *raceSafeStorage) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return 0, nil
+}
+
+func (s *raceSafeStorage) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.Thread, error) {
+	return nil, nil
+}
+
+// TestCompiler_ConcurrentAccess drives Ingest, GetCurrentBuffer, and ForceFlush
+// from many goroutines simultaneously, mirroring real daemon usage: the ingest
+// loop (cmd/daemon.go ~211-217) calls Ingest, an hourly ticker (~84-97) calls
+// ForceFlush, and both the /buffer HTTP handler (~231-239) and Agent.Connect
+// (internal/agent/connect.go ~56-57) call GetCurrentBuffer. None of these
+// serialize access to Compiler's internal buffer/wordCount/lastFlush fields,
+// so this must fail under `go test -race`.
+func TestCompiler_ConcurrentAccess(t *testing.T) {
+	llm := &raceSafeSummarizer{}
+	store := &raceSafeStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	apps := []string{"VSCode", "Chrome", "Discord", "Terminal"}
+
+	var wg sync.WaitGroup
+
+	// concurrent ingest, simulating the daemon's event-channel consumer loop
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				compiler.Ingest(ctx, tracker.Activity{
+					App:   apps[(i+j)%len(apps)],
+					Title: fmt.Sprintf("title-%d-%d", i, j),
+				})
+			}
+		}(i)
+	}
+
+	// concurrent reads of the live buffer, simulating the /buffer HTTP handler
+	// and Agent.Connect
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				buf := compiler.GetCurrentBuffer()
+				// touch the returned slice the way callers do (range over it),
+				// which is exactly what races against a concurrent append.
+				for _, act := range buf {
+					_ = act.App
+				}
+			}
+		}()
+	}
+
+	// concurrent forced flush, simulating the hourly safety-net ticker
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				compiler.ForceFlush(ctx)
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+
+	wg.Wait()
 }

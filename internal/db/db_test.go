@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"context"
+	"fmt"
 	"ora/internal/db"
 	"ora/internal/memory"
 	"os"
@@ -119,7 +120,12 @@ func TestStore_Notes_DeleteAndDedupe(t *testing.T) {
 	}
 }
 
-func TestStore_GetImplicitContext_IncludesNotes(t *testing.T) {
+// TestStore_GetImplicitContext_GatesIrrelevantNotes pins the Slice-0 behavior:
+// implicit context must NOT dump identity notes unconditionally. A note unrelated
+// to what the user is doing now stays out; the live thread that matches the
+// current focus is what surfaces. This is the fix for "bombarding notes with no
+// point → agent spews bullshit with no context."
+func TestStore_GetImplicitContext_GatesIrrelevantNotes(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.New(":memory:")
 	if err != nil {
@@ -127,25 +133,36 @@ func TestStore_GetImplicitContext_IncludesNotes(t *testing.T) {
 	}
 	defer store.Close()
 
-	_, _ = store.LogNote(ctx, "user is a Go developer", "fact")
-	_, _ = store.LogNote(ctx, "user prefers terse responses", "preference")
+	// current focus: debugging the ESG portal
+	if err := store.SetWorkingState(ctx, "debugging the ESG Benchmarking Portal backend"); err != nil {
+		t.Fatalf("SetWorkingState: %v", err)
+	}
+	// a live thread that matches what the user is doing now
+	if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "ESG Benchmarking Portal",
+		Kind:    "work",
+		State:   "Monitoring CRD dashboard while debugging backend",
+	}); err != nil {
+		t.Fatalf("UpsertThread: %v", err)
+	}
+	// a durable identity note with nothing to do with the current focus
+	if _, err := store.LogNote(ctx, "user has an interest in Pune real estate", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
 
 	branch, err := store.GetImplicitContext(ctx)
 	if err != nil {
 		t.Fatalf("GetImplicitContext: %v", err)
 	}
+	joined := strings.Join(branch, "\n")
 
-	var foundFact, foundPref bool
-	for _, b := range branch {
-		if strings.Contains(b, "user is a Go developer") {
-			foundFact = true
-		}
-		if strings.Contains(b, "user prefers terse responses") {
-			foundPref = true
-		}
+	// the live thread must surface — that's the useful recall
+	if !strings.Contains(joined, "ESG Benchmarking Portal") {
+		t.Errorf("expected live thread in context, got: %+v", branch)
 	}
-	if !foundFact || !foundPref {
-		t.Errorf("notes missing from implicit context: %+v", branch)
+	// the irrelevant identity note must NOT be dumped in unconditionally
+	if strings.Contains(joined, "Pune real estate") {
+		t.Errorf("irrelevant note leaked into context (unconditional note dump): %+v", branch)
 	}
 }
 
@@ -343,40 +360,6 @@ func TestStore_ExistingNotes(t *testing.T) {
 	}
 }
 
-func TestStore_QueryMemory(t *testing.T) {
-	ctx := context.Background()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-	defer store.Close()
-
-	// semantic summaries
-	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "Debugging UI",
-		Summary:  "Fixing lipgloss layout issues",
-	})
-	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "Research",
-		Summary:  "Reading StackOverflow about websockets",
-	})
-
-	// Search for 'StackOverflow'
-	results, err := store.QueryMemory(ctx, "StackOverflow")
-	if err != nil {
-		t.Fatalf("QueryMemory failed: %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Fatalf("Expected 1 result, got %d", len(results))
-	}
-	if !strings.Contains(results[0], "StackOverflow") {
-		t.Errorf("Expected result to contain 'StackOverflow', got: %s", results[0])
-	}
-}
-
 // seedOldTree inserts user→day→session→task→summary nodes using explicit old
 // timestamps so OldSummaryGroups can find them. Returns the day node id.
 func seedOldTree(t *testing.T, ctx context.Context, store *db.Store, dayContent string, summaries []string) int64 {
@@ -529,34 +512,25 @@ func TestStore_GetImplicitContext_WithWorkingState(t *testing.T) {
 	}
 	defer store.Close()
 
-	// seed a summary so fallback has something to return
+	// seed a summary so the tree has raw material
 	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
 		SameTask: false,
 		TaskName: "Baseline Task",
 		Summary:  "Writing baseline summary for context test",
 	})
-	_, _ = store.LogNote(ctx, "user is a Go developer", "fact")
 
-	// without working state → fallback returns raw summary nodes; note must still appear
+	// before working state is set, there must be no [now] line
 	branch, err := store.GetImplicitContext(ctx)
 	if err != nil {
 		t.Fatalf("GetImplicitContext (no state): %v", err)
 	}
-
-	var hasNote bool
 	for _, line := range branch {
-		if strings.Contains(line, "user is a Go developer") {
-			hasNote = true
+		if strings.Contains(line, "[now]") {
+			t.Errorf("did not expect [now] line before working state is set: %s", line)
 		}
-		if strings.Contains(line, "[state]") {
-			t.Errorf("did not expect [state] line before working state is set: %s", line)
-		}
-	}
-	if !hasNote {
-		t.Errorf("note missing from context without working state: %+v", branch)
 	}
 
-	// now set working state
+	// once set, working state appears as [now] and REPLACES the raw summary dump
 	const state = "user is actively debugging the Linux audio pipeline and writing TDD tests"
 	if err := store.SetWorkingState(ctx, state); err != nil {
 		t.Fatalf("SetWorkingState: %v", err)
@@ -567,45 +541,20 @@ func TestStore_GetImplicitContext_WithWorkingState(t *testing.T) {
 		t.Fatalf("GetImplicitContext (with state): %v", err)
 	}
 
-	var foundNote, foundState bool
-	var hasRawSummary bool
+	var foundState, hasRawSummary bool
 	for _, line := range branch2 {
-		if strings.Contains(line, "user is a Go developer") {
-			foundNote = true
-		}
-		if strings.Contains(line, "[state]") && strings.Contains(line, state) {
+		if strings.Contains(line, "[now]") && strings.Contains(line, state) {
 			foundState = true
 		}
 		if strings.Contains(line, "Writing baseline summary") {
 			hasRawSummary = true
 		}
 	}
-
-	if !foundNote {
-		t.Errorf("note missing from context with working state: %+v", branch2)
-	}
 	if !foundState {
-		t.Errorf("[state] line missing from context: %+v", branch2)
+		t.Errorf("[now] line missing from context: %+v", branch2)
 	}
 	if hasRawSummary {
 		t.Errorf("raw summary content must NOT appear when working state is set: %+v", branch2)
-	}
-
-	// note must come before [state] line
-	var noteIdx, stateIdx int = -1, -1
-	for i, line := range branch2 {
-		if strings.Contains(line, "user is a Go developer") {
-			noteIdx = i
-		}
-		if strings.Contains(line, "[state]") {
-			stateIdx = i
-		}
-	}
-	if noteIdx == -1 || stateIdx == -1 {
-		t.Fatalf("could not find note (%d) or state (%d) in branch: %+v", noteIdx, stateIdx, branch2)
-	}
-	if noteIdx >= stateIdx {
-		t.Errorf("expected note (idx %d) to appear before [state] (idx %d)", noteIdx, stateIdx)
 	}
 }
 
@@ -617,34 +566,28 @@ func TestStore_GetImplicitContext_FallbackWhenNoState(t *testing.T) {
 	}
 	defer store.Close()
 
-	// seed summaries and a note
+	// seed a summary only. with no identity notes, no live threads, and no
+	// working state, GetImplicitContext falls back to the recursive summary walk.
 	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
 		SameTask: false,
 		TaskName: "Fallback Task",
 		Summary:  "Checking fallback behavior works correctly",
 	})
-	_, _ = store.LogNote(ctx, "user prefers terse responses", "preference")
 
-	// no working state set → fallback path: should include summaries + note
+	// cold start: nothing synthesized → fallback path returns the summary tree
 	branch, err := store.GetImplicitContext(ctx)
 	if err != nil {
 		t.Fatalf("GetImplicitContext fallback: %v", err)
 	}
 
-	var hasSummary, hasNote bool
+	var hasSummary bool
 	for _, line := range branch {
 		if strings.Contains(line, "Checking fallback behavior") {
 			hasSummary = true
 		}
-		if strings.Contains(line, "user prefers terse responses") {
-			hasNote = true
-		}
 	}
 	if !hasSummary {
 		t.Errorf("expected summary in fallback context: %+v", branch)
-	}
-	if !hasNote {
-		t.Errorf("expected note in fallback context: %+v", branch)
 	}
 }
 
@@ -835,5 +778,585 @@ func TestStore_ReplaceSummariesWithDigest_TransactionAndFTS(t *testing.T) {
 	}
 	if len(oldHits2) != 0 {
 		t.Errorf("FTS still returns deleted summary term 'uniquetoken2' — delete trigger not firing")
+	}
+}
+
+// ─── Thread tests ─────────────────────────────────────────────────────────────
+
+// TestStore_UpsertThread_NewThread verifies that a zero-ID upsert creates a new
+// row with the right initial salience (0.5 when Novel=false, 0.6 when Novel=true),
+// times_seen=1, and status='active'.
+func TestStore_UpsertThread_NewThread(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	cases := []struct {
+		novel       bool
+		wantSalience float64
+	}{
+		{novel: false, wantSalience: 0.5},
+		{novel: true, wantSalience: 0.6},
+	}
+
+	for _, tc := range cases {
+		subject := fmt.Sprintf("project-novel-%v", tc.novel)
+		id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: subject,
+			Kind:    "work",
+			State:   "working on it",
+			Novel:   tc.novel,
+		})
+		if err != nil {
+			t.Fatalf("UpsertThread (novel=%v): %v", tc.novel, err)
+		}
+		if id == 0 {
+			t.Fatalf("novel=%v: expected non-zero id", tc.novel)
+		}
+
+		var sal float64
+		var timesSeen int
+		var status string
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT salience, times_seen, status FROM threads WHERE id = ?`, id).
+			Scan(&sal, &timesSeen, &status); err != nil {
+			t.Fatalf("query thread (novel=%v): %v", tc.novel, err)
+		}
+		if sal != tc.wantSalience {
+			t.Errorf("novel=%v: want salience %v, got %v", tc.novel, tc.wantSalience, sal)
+		}
+		if timesSeen != 1 {
+			t.Errorf("novel=%v: want times_seen=1, got %d", tc.novel, timesSeen)
+		}
+		if status != "active" {
+			t.Errorf("novel=%v: want status='active', got %q", tc.novel, status)
+		}
+	}
+}
+
+// TestStore_UpsertThread_Conflict verifies that a second zero-ID upsert with the
+// same (subject, kind) updates state, bumps times_seen to 2, raises salience by
+// ~0.05 (capped at ≤1.0), and returns the same id with exactly one row.
+func TestStore_UpsertThread_Conflict(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	id1, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "ORA project",
+		Kind:    "work",
+		State:   "initial state",
+		Novel:   false,
+	})
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	var sal1 float64
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT salience FROM threads WHERE id = ?`, id1).Scan(&sal1); err != nil {
+		t.Fatalf("query salience before conflict: %v", err)
+	}
+
+	// second upsert with same subject+kind, different state
+	id2, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "ORA project",
+		Kind:    "work",
+		State:   "writing more tests",
+		Novel:   false,
+	})
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if id2 != id1 {
+		t.Errorf("conflict must return same id: got %d, want %d", id2, id1)
+	}
+
+	var sal2 float64
+	var timesSeen int
+	var state string
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT salience, times_seen, state FROM threads WHERE id = ?`, id1).
+		Scan(&sal2, &timesSeen, &state); err != nil {
+		t.Fatalf("query after conflict: %v", err)
+	}
+	if sal2 <= sal1 {
+		t.Errorf("salience should increase on conflict: before=%v after=%v", sal1, sal2)
+	}
+	if sal2 > 1.0 {
+		t.Errorf("salience must not exceed 1.0, got %v", sal2)
+	}
+	if timesSeen != 2 {
+		t.Errorf("times_seen should be 2 after conflict, got %d", timesSeen)
+	}
+	if state != "writing more tests" {
+		t.Errorf("state should be updated to new value, got %q", state)
+	}
+
+	// must stay at exactly one row
+	var count int
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM threads WHERE subject = 'ORA project' AND kind = 'work'`).Scan(&count); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("conflict must keep single row, got %d rows", count)
+	}
+}
+
+// TestStore_UpsertThread_SalienceCap verifies that salience never exceeds 1.0
+// regardless of how many times the same thread is upserted.
+func TestStore_UpsertThread_SalienceCap(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	for i := 0; i < 30; i++ {
+		if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: "recurring thread",
+			Kind:    "work",
+			State:   fmt.Sprintf("iteration %d", i),
+			Novel:   true,
+		}); err != nil {
+			t.Fatalf("upsert iter %d: %v", i, err)
+		}
+	}
+
+	var sal float64
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT salience FROM threads WHERE subject = 'recurring thread' AND kind = 'work'`).Scan(&sal); err != nil {
+		t.Fatalf("query salience: %v", err)
+	}
+	if sal > 1.0 {
+		t.Errorf("salience must not exceed 1.0 after many upserts, got %v", sal)
+	}
+}
+
+// TestStore_UpsertThread_ExplicitID verifies the ID>0 update path: state is
+// replaced, times_seen is incremented, and the same id is returned.
+func TestStore_UpsertThread_ExplicitID(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "ORA project",
+		Kind:    "work",
+		State:   "initial",
+		Novel:   false,
+	})
+	if err != nil {
+		t.Fatalf("initial insert: %v", err)
+	}
+
+	var timesSeen1 int
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT times_seen FROM threads WHERE id = ?`, id).Scan(&timesSeen1); err != nil {
+		t.Fatalf("query times_seen before explicit upsert: %v", err)
+	}
+
+	returnedID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		ID:    id,
+		State: "explicit-state-update",
+	})
+	if err != nil {
+		t.Fatalf("explicit-id upsert: %v", err)
+	}
+	if returnedID != id {
+		t.Errorf("explicit-id upsert must return same id: got %d, want %d", returnedID, id)
+	}
+
+	var state string
+	var timesSeen2 int
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT state, times_seen FROM threads WHERE id = ?`, id).
+		Scan(&state, &timesSeen2); err != nil {
+		t.Fatalf("query after explicit upsert: %v", err)
+	}
+	if state != "explicit-state-update" {
+		t.Errorf("state should be replaced: got %q", state)
+	}
+	if timesSeen2 != timesSeen1+1 {
+		t.Errorf("times_seen should increment: got %d, want %d", timesSeen2, timesSeen1+1)
+	}
+}
+
+// TestStore_GetLiveThreads_RecencyWindow verifies the 2-day cutoff: a thread
+// last_seen within 2 days is returned; one older than 2 days is not. Also checks
+// newest-first ordering and that the limit parameter is honored.
+func TestStore_GetLiveThreads_RecencyWindow(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	// recent thread (last_seen = now)
+	recentID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "recent-work",
+		Kind:    "work",
+		State:   "in progress",
+	})
+	if err != nil {
+		t.Fatalf("insert recent thread: %v", err)
+	}
+
+	// day-old thread (still within 2-day window)
+	dayOldID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "day-old-work",
+		Kind:    "work",
+		State:   "ongoing",
+	})
+	if err != nil {
+		t.Fatalf("insert day-old thread: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE threads SET last_seen_at = datetime('now', '-1 day') WHERE id = ?`, dayOldID); err != nil {
+		t.Fatalf("backdate day-old thread: %v", err)
+	}
+
+	// thread older than 2 days (must NOT appear)
+	oldID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "old-work",
+		Kind:    "work",
+		State:   "stale",
+	})
+	if err != nil {
+		t.Fatalf("insert old thread: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE threads SET last_seen_at = datetime('now', '-3 days') WHERE id = ?`, oldID); err != nil {
+		t.Fatalf("backdate old thread: %v", err)
+	}
+
+	threads, err := store.GetLiveThreads(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetLiveThreads: %v", err)
+	}
+
+	byID := make(map[int64]int) // id → index in result
+	for i, th := range threads {
+		byID[th.ID] = i
+	}
+	if _, ok := byID[recentID]; !ok {
+		t.Error("recent thread should appear in live threads")
+	}
+	if _, ok := byID[dayOldID]; !ok {
+		t.Error("1-day-old thread should appear in live threads (within 2-day window)")
+	}
+	if _, ok := byID[oldID]; ok {
+		t.Error("3-day-old thread must NOT appear in live threads")
+	}
+
+	// ordering: newest-first; recent must precede day-old
+	recentIdx, dayOldIdx := byID[recentID], byID[dayOldID]
+	if recentIdx > dayOldIdx {
+		t.Errorf("recent thread (idx %d) should come before day-old thread (idx %d)", recentIdx, dayOldIdx)
+	}
+
+	// limit is honored
+	limited, err := store.GetLiveThreads(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetLiveThreads (limit=1): %v", err)
+	}
+	if len(limited) != 1 {
+		t.Errorf("limit=1 should return exactly 1 thread, got %d", len(limited))
+	}
+}
+
+// TestStore_ThreadsForAttribution_Window verifies the 14-day cutoff. Threads
+// touched 3 days ago appear here (but not in GetLiveThreads); threads touched
+// 15 days ago appear in neither.
+func TestStore_ThreadsForAttribution_Window(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	recentID, _ := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "recent", Kind: "work", State: "s"})
+
+	mid3dID, _ := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "mid-3d", Kind: "work", State: "s"})
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE threads SET last_seen_at = datetime('now', '-3 days') WHERE id = ?`, mid3dID); err != nil {
+		t.Fatalf("backdate 3d thread: %v", err)
+	}
+
+	tooOldID, _ := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "too-old", Kind: "work", State: "s"})
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE threads SET last_seen_at = datetime('now', '-15 days') WHERE id = ?`, tooOldID); err != nil {
+		t.Fatalf("backdate 15d thread: %v", err)
+	}
+
+	attrThreads, err := store.ThreadsForAttribution(ctx, 50)
+	if err != nil {
+		t.Fatalf("ThreadsForAttribution: %v", err)
+	}
+
+	attrByID := make(map[int64]bool)
+	for _, th := range attrThreads {
+		attrByID[th.ID] = true
+	}
+	if !attrByID[recentID] {
+		t.Error("recent thread should appear in 14-day attribution window")
+	}
+	if !attrByID[mid3dID] {
+		t.Error("3-day-old thread should appear in 14-day attribution window")
+	}
+	if attrByID[tooOldID] {
+		t.Error("15-day-old thread must NOT appear in 14-day attribution window")
+	}
+
+	// confirm 3-day-old is outside the 2-day live window
+	live, err := store.GetLiveThreads(ctx, 50)
+	if err != nil {
+		t.Fatalf("GetLiveThreads: %v", err)
+	}
+	liveByID := make(map[int64]bool)
+	for _, th := range live {
+		liveByID[th.ID] = true
+	}
+	if liveByID[mid3dID] {
+		t.Error("3-day-old thread must NOT appear in 2-day live window")
+	}
+}
+
+// TestStore_GetImplicitContext_ThreadFormat verifies that GetImplicitContext
+// emits [about] lines for identity notes (capped at 8), [thread:kind] subject — state
+// for threads with a state, [thread:kind] subject for threads without a state,
+// and [now] for working_state.
+func TestStore_GetImplicitContext_ThreadFormat(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	// seed 10 notes — none should be dumped as [about] lines anymore (relevance-gated)
+	for i := 0; i < 10; i++ {
+		_, _ = store.LogNote(ctx, fmt.Sprintf("identity fact %d", i), "fact")
+	}
+
+	// thread with state
+	_, _ = store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "Suits",
+		Kind:    "entertainment",
+		State:   "season 1 episode 3",
+	})
+
+	// thread without state (empty string)
+	_, _ = store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "ORA project",
+		Kind:    "work",
+		State:   "",
+	})
+
+	_ = store.SetWorkingState(ctx, "debugging the audio pipeline")
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+
+	var aboutCount int
+	var foundThreadWithState, foundThreadNoState, foundNow bool
+	for _, line := range branch {
+		if strings.HasPrefix(line, "[about] ") {
+			aboutCount++
+		}
+		// [thread:entertainment] Suits — season 1 episode 3
+		if line == "[thread:entertainment] Suits — season 1 episode 3" {
+			foundThreadWithState = true
+		}
+		// [thread:work] ORA project (no state → no em dash suffix)
+		if line == "[thread:work] ORA project" {
+			foundThreadNoState = true
+		}
+		if strings.HasPrefix(line, "[now] ") {
+			foundNow = true
+		}
+	}
+
+	if aboutCount != 0 {
+		t.Errorf("identity notes must no longer be dumped as [about] lines (relevance-gated now), got %d", aboutCount)
+	}
+	if !foundThreadWithState {
+		t.Errorf("[thread:entertainment] Suits — state line not found in: %v", branch)
+	}
+	if !foundThreadNoState {
+		t.Errorf("[thread:work] ORA project (no-state) line not found in: %v", branch)
+	}
+	if !foundNow {
+		t.Errorf("[now] line not found in: %v", branch)
+	}
+}
+
+// TestStore_SearchMemory_FindsThread verifies that after UpsertThread, SearchMemory
+// returns a hit whose Source is "thread".
+func TestStore_SearchMemory_FindsThread(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	_, err = store.UpsertThread(ctx, memory.ThreadUpdate{
+		Subject: "quuxzap project",
+		Kind:    "work",
+		State:   "writing integration tests",
+	})
+	if err != nil {
+		t.Fatalf("UpsertThread: %v", err)
+	}
+
+	hits, err := store.SearchMemory(ctx, "quuxzap")
+	if err != nil {
+		t.Fatalf("SearchMemory: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("SearchMemory returned no hits for thread subject word 'quuxzap'")
+	}
+	if hits[0].Source != "thread" {
+		t.Errorf("expected source='thread', got %q", hits[0].Source)
+	}
+}
+
+// ─── Relevance retrieval tests (B2) ───────────────────────────────────────────
+
+func TestStore_RetrieveRelevant_Basic(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// seed a note and a summary that will match via FTS
+	_, _ = store.LogNote(ctx, "user prefers dark mode for coding", "preference")
+	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "UI work",
+		Summary:  "Fixing layout in dark mode editor",
+	})
+
+	// basic call with focus should surface matching items
+	results, err := store.RetrieveRelevant(ctx, "dark mode", 10)
+	if err != nil {
+		t.Fatalf("RetrieveRelevant: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected some relevant results for 'dark mode'")
+	}
+	foundNote, foundSummary := false, false
+	for _, r := range results {
+		if strings.Contains(r, "dark mode") {
+			if strings.Contains(r, "[note]") {
+				foundNote = true
+			} else if strings.Contains(r, "[summary]") {
+				foundSummary = true
+			}
+		}
+	}
+	if !foundNote {
+		t.Errorf("expected note in RetrieveRelevant results: %+v", results)
+	}
+	if !foundSummary {
+		t.Errorf("expected summary in RetrieveRelevant results: %+v", results)
+	}
+}
+
+// TestStore_GetImplicitContext_WiresRelevanceRetrieval verifies that the
+// working-state focus drives the relevance-retrieval layer, surfacing a matching
+// item as a [note] line (distinct from the always-on [about] identity dump).
+// Exclusion of unrelated items is covered by the dedicated RetrieveRelevant tests.
+func TestStore_GetImplicitContext_WiresRelevanceRetrieval(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// a relevant note; no summaries/tasks so the focus signal stays clean
+	_, _ = store.LogNote(ctx, "debugging Linux audio pipeline crackle", "fact")
+
+	const state = "debugging Linux audio"
+	if err := store.SetWorkingState(ctx, state); err != nil {
+		t.Fatalf("SetWorkingState: %v", err)
+	}
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+
+	var hasRelevanceLine bool
+	for _, b := range branch {
+		if strings.HasPrefix(b, "[note]") && strings.Contains(b, "Linux audio pipeline") {
+			hasRelevanceLine = true
+		}
+	}
+	if !hasRelevanceLine {
+		t.Errorf("expected a [note] relevance line driven by working-state focus: %+v", branch)
+	}
+}
+
+func TestStore_RetrieverInterface(t *testing.T) {
+	var _ db.Retriever = (*db.Store)(nil)
+}
+
+func TestStore_RetrieveRelevant_FocusAffectsResults(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	_, _ = store.LogNote(ctx, "user works with Go and SQLite", "fact")
+	_, _ = store.LogNote(ctx, "user likes hiking in mountains", "fact")
+
+	// focus on Go should return Go note
+	goResults, _ := store.RetrieveRelevant(ctx, "Go and SQLite", 5)
+	foundGo := false
+	for _, r := range goResults {
+		if strings.Contains(r, "Go and SQLite") {
+			foundGo = true
+		}
+	}
+	if !foundGo {
+		t.Errorf("focus 'Go' should surface Go note, got: %+v", goResults)
+	}
+
+	// different focus should not surface unrelated
+	hikeResults, _ := store.RetrieveRelevant(ctx, "hiking in mountains", 5)
+	foundHikeInGoFocus := false
+	for _, r := range goResults {
+		if strings.Contains(r, "hiking") {
+			foundHikeInGoFocus = true
+		}
+	}
+	if foundHikeInGoFocus {
+		t.Errorf("focus on Go should not surface hike note: %+v", goResults)
+	}
+	// check that different focus returns different sets
+	if len(goResults) > 0 && len(hikeResults) > 0 && goResults[0] == hikeResults[0] {
+		t.Errorf("different focus should return different result sets, got: %+v vs %+v", goResults, hikeResults)
 	}
 }

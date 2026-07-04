@@ -50,11 +50,29 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		contextParts = append(contextParts, "  "+node)
 	}
 
-	// current uncompiled buffer (immediate ctx)
+	// current uncompiled buffer (immediate ctx); derive a simple focus string
+	// from [working] items (app+title keywords) and use it as a better signal
+	// for relevance via SearchMemory when the compiler buffer is available.
 	if a.compiler != nil {
 		buffer := a.compiler.GetCurrentBuffer()
+		var focusParts []string
 		for _, act := range buffer {
 			contextParts = append(contextParts, fmt.Sprintf("  [working] %s: %s", act.App, act.Title))
+			focusParts = append(focusParts, act.App, act.Title)
+		}
+		if focus := strings.Join(focusParts, " "); focus != "" {
+			if hits, err := a.brain.SearchMemory(handshakeCtx, focus); err == nil {
+				for i, h := range hits {
+					if i >= 2 {
+						break
+					}
+					if h.Source == "note" {
+						contextParts = append(contextParts, "  [note] "+h.Content)
+					} else {
+						contextParts = append(contextParts, fmt.Sprintf("  [%s] %s", h.Source, h.Content))
+					}
+				}
+			}
 		}
 	}
 
@@ -83,7 +101,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 			Role: "system",
 			Parts: []*genai.Part{
 				{
-					Text: fmt.Sprintf("You are Ora, an ambient AI agent and private memory companion. You act as a 'Temporal Brain,' maintaining a high-fidelity understanding of the user's workspace to provide seamless, context-aware assistance.\n\nSystem Environment:\n  OS: %s\n  Arch: %s\n  Shell: %s\n\nThe user's current session context is derived from their local activity tree (historical tasks + current windows):\n%s\n\nUse this state to offer precise, technically-grounded help, acknowledging their current focus without being intrusive. Keep responses concise and conversational unless the user asks for detail, optimized for real-time audio interaction. Avoid long lists or markdown formatting.\n\nYou have access to %d tools. Use shell_exec to run commands when the user asks. Use the correct shell syntax for the user's OS (powershell for windows, sh for linux/mac). Always confirm destructive operations first.", runtime.GOOS, runtime.GOARCH, shellName(), contextStr, toolsCount),
+					Text: fmt.Sprintf("You are Ora. You've been alongside the user through their day — you notice what they're working on, you remember what came before, and you carry it so they never have to re-explain themselves. You're easy to talk to and genuinely invested in how things are going for them, and you're also the one who quietly gets things done when asked.\n\nVoice and manner:\n- Everything you say is spoken out loud. NEVER open with a meta-acknowledgement — no 'acknowledged', 'understood', 'got it', 'sure', 'okay', 'noted' — and never narrate what you're about to do. There is no instruction to confirm; just say the actual thing, the way a person would.\n- Talk like someone who knows them, not an assistant reading a status report. Speak WITH them, never ABOUT them — no 'here is what this person did.'\n- Keep it short and natural; this is real-time voice. No markdown, no bullet lists, no rattling off long enumerations.\n- Surface what you remember the way a person would — woven in, in passing — not recited back.\n\nThe context below is the user's own record of their own day, on their own machine, kept for them. It's there so you can actually be useful. If they ask what they're doing, watching, working on, or did earlier, just answer — that's the whole point of it. Never fall back on privacy to dodge a question about their own day; refusing to remember it would be a strange thing for you to do. If something genuinely isn't in there, say so and offer to dig — don't guess. And when something stands out, it's fine to ask after it naturally ('how'd that meeting end up going?').\n\nSystem: %s / %s, shell %s.\n\nWhere things stand with them right now, from memory:\n%s\n\nYou have %d tools. Use shell_exec to run things when asked, with the right shell for the OS (powershell on windows, sh on linux/mac). Check before anything destructive.", runtime.GOOS, runtime.GOARCH, shellName(), contextStr, toolsCount),
 				},
 			},
 		},
@@ -117,7 +135,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 			{
 				Role: "user",
 				Parts: []*genai.Part{
-					{Text: "Hello Ora. You are online. Greet me briefly and acknowledge what I'm working on right now."},
+					{Text: "(You've just come online and the user is here.) Lead with the greeting itself, spoken aloud — warm and brief, the way a friend who's been around all day would say hi. No preamble, no 'acknowledged', no narrating what you'll do — just the hello. Mention something real from their day only if it lands naturally."},
 					// experiment prompt
 				},
 			},
@@ -307,7 +325,11 @@ func (a *Agent) textSendLoop(ctx context.Context, session *genai.Session) {
 			a.speaker.Flush()
 			slog.Debug("sending text to model", "text", text)
 
+			recalls, _ := a.brain.RetrieveRelevant(ctx, text, 2)
 			a.writeMu.Lock()
+			if len(recalls) > 0 {
+				_ = session.SendClientContent(genai.LiveSendClientContentParameters{Turns: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "[recall] " + strings.Join(recalls, " ")}}}}})
+			}
 			err := session.SendClientContent(genai.LiveSendClientContentParameters{
 				Turns: []*genai.Content{
 					{

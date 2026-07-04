@@ -26,8 +26,10 @@ func (s *mockSpeaker) CurrentAmplitude() float64 { return 0 }
 type mockBrain struct{}
 
 func (b *mockBrain) GetImplicitContext(ctx context.Context) ([]string, error)               { return nil, nil }
-func (b *mockBrain) QueryMemory(ctx context.Context, query string) ([]string, error)        { return nil, nil }
 func (b *mockBrain) SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error) { return nil, nil }
+func (b *mockBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
+	return nil, nil
+}
 func (b *mockBrain) LogNote(ctx context.Context, content, kind string) (int64, error)       { return 0, nil }
 func (b *mockBrain) GetNotes(ctx context.Context) ([]db.Note, error)                        { return nil, nil }
 func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                         { return nil }
