@@ -55,6 +55,37 @@ func (d *Daemon) SetVisionFn(fn func(ctx context.Context, png []byte) string) {
 	d.visionFn = fn
 }
 
+// MatchesBlocklist reports whether app should be blocked from tracking. It
+// normalizes both the activity's app name and each blocklist entry (lowercase,
+// trim whitespace, strip a trailing ".exe") and matches by substring, so a
+// single blocklist entry works across platforms: Windows app names carry a
+// ".exe" suffix ("1Password.exe"), while Linux app identifiers from AT-SPI/
+// X11/Wayland never do and often take reverse-DNS or lowercase-binary forms
+// ("1Password", "1password", "org.keepassxc.KeePassXC", "com.bitwarden.desktop").
+// An exact-match-only comparison against a Windows-only default list would
+// silently never block these on Linux.
+func MatchesBlocklist(app string, blocklist []string) bool {
+	normalizedApp := normalizeAppIdentifier(app)
+	if normalizedApp == "" {
+		return false
+	}
+	for _, entry := range blocklist {
+		normalizedEntry := normalizeAppIdentifier(entry)
+		if normalizedEntry != "" && strings.Contains(normalizedApp, normalizedEntry) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeAppIdentifier lowercases, trims whitespace, and strips a trailing
+// ".exe" so Windows and Linux app-name forms can be compared uniformly.
+func normalizeAppIdentifier(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimSuffix(s, ".exe")
+	return s
+}
+
 func NewDaemon(eye Tracker, interval time.Duration, dwellTime time.Duration, blocklist []string, eventChan chan Activity) *Daemon {
 	if interval <= 0 {
 		interval = 2 * time.Second // default polling
@@ -109,13 +140,7 @@ func (d *Daemon) Start(ctx context.Context) {
 				continue
 			}
 
-			blocked := false
-			for _, blockedApp := range d.blocklist {
-				if strings.EqualFold(activity.App, blockedApp) {
-					blocked = true
-					break
-				}
-			}
+			blocked := MatchesBlocklist(activity.App, d.blocklist)
 
 			if blocked {
 				span.SetAttributes(attribute.Bool("tracker.blocked", true))

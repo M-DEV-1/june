@@ -17,12 +17,30 @@ type TrackerConfig struct {
 	DwellTime time.Duration `json:"dwell_time_ms"`
 }
 
-// currently windows only
+// DefaultBlocklist is matched via tracker.MatchesBlocklist, a case-insensitive,
+// ".exe"-stripped SUBSTRING match, so entries here work across platforms
+// without needing every possible app-id spelling: Windows app names carry a
+// ".exe" suffix ("1Password.exe"), while Linux app identifiers from AT-SPI/
+// X11/Wayland never do and often take lowercase-binary or reverse-DNS forms
+// (e.g. "1password", "org.keepassxc.KeePassXC", "com.bitwarden.desktop") — all
+// of which contain the lowercase entries below.
 var DefaultBlocklist = []string{
+	// Windows
 	"1Password.exe",
 	"Bitwarden.exe",
 	"Taskmgr.exe",
 	"LockApp.exe",
+	// Linux / cross-platform password managers and secret stores
+	"1password",
+	"bitwarden",
+	"keepassxc",
+	"keepass",
+	"proton pass",
+	"lastpass",
+	"dashlane",
+	"enpass",
+	"gnome-keyring",
+	"seahorse",
 }
 
 // get or create
