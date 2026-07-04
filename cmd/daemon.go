@@ -211,6 +211,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	go func() {
 		for ev := range eventChan {
 			store.LogActivity(ctx, ev.App, ev.Title)
+			// episode substrate: append-only capture of the raw screen_text,
+			// which LogActivity above throws away. Additive — does not replace
+			// LogActivity/Ingest.
+			if _, err := store.LogEpisode(ctx, ev.App, ev.Title, ev.ScreenText); err != nil {
+				slog.Error("log episode failed", "error", err)
+			}
 			if compiler != nil {
 				compiler.Ingest(ctx, ev)
 			}
