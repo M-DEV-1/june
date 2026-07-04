@@ -1057,6 +1057,250 @@ func (s *Store) LogEpisode(ctx context.Context, app, title, screenText string) (
 	return id, nil
 }
 
+// Episode is one row of the episodes time series, exported for retrieval
+// layers (the consolidation package) that need the full struct rather than
+// just the MemoryHit projection.
+type Episode struct {
+	ID         int64
+	CreatedAt  time.Time
+	App        string
+	Title      string
+	ScreenText string
+	Importance float64
+}
+
+// EpisodesInWindow returns episodes with created_at in [since, until],
+// ordered chronologically (created_at ASC) — this is the "day arc" walk: it
+// lets a caller narrate what happened in the order it happened, unlike
+// RankedEpisodes/SearchEpisodes which are relevance-ordered. Capped at limit.
+func (s *Store) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]Episode, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.EpisodesInWindow")
+	defer span.End()
+
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, created_at, app, title, screen_text, importance
+		FROM episodes
+		WHERE created_at >= ? AND created_at <= ?
+		ORDER BY created_at ASC
+		LIMIT ?
+	`, since.UTC().Format("2006-01-02 15:04:05"), until.UTC().Format("2006-01-02 15:04:05"), limit)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("episodes in window: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Episode
+	for rows.Next() {
+		var e Episode
+		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.App, &e.Title, &e.ScreenText, &e.Importance); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan episode in window: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate episodes in window: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.episodes_in_window", len(out)))
+	return out, nil
+}
+
+// mmrLambda trades off relevance vs. diversity in DiverseEpisodes' MMR-lite
+// selection: score = mmrLambda*rel - (1-mmrLambda)*maxSimToChosen. Closer to
+// 1.0 favors relevance (plain top-N); closer to 0 favors spread. 0.7 leans
+// relevant but still lets a near-duplicate be passed over for something
+// distinct.
+const mmrLambda = 0.7
+
+// mmrCandidatePoolSize bounds how many RankedEpisodes candidates feed the MMR
+// selection in DiverseEpisodes.
+const mmrCandidatePoolSize = 30
+
+// mmrSameSubjectBump is the similarity score assigned when two candidates
+// share the same (app,title) — treated as near-duplicate "the same visit"
+// regardless of exact text, since repeat visits to the same window are the
+// dominant source of redundancy in the episode stream.
+const mmrSameSubjectBump = 0.9
+
+// diverseEpisodeCandidate holds the per-candidate signals needed for MMR
+// selection: the underlying hit, its (app,title) for the same-subject
+// similarity bump, its pre-tokenized screen_text for Jaccard similarity, and
+// its relevance score normalized from RankedEpisodes' rank position.
+type diverseEpisodeCandidate struct {
+	hit    MemoryHit
+	app    string
+	title  string
+	tokens map[string]struct{}
+	rel    float64
+}
+
+// tokenSet splits s on whitespace into a lowercased token set, for Jaccard
+// similarity — no embeddings available, so this is the cheap substitute.
+func tokenSet(s string) map[string]struct{} {
+	fields := strings.Fields(strings.ToLower(s))
+	set := make(map[string]struct{}, len(fields))
+	for _, f := range fields {
+		set[f] = struct{}{}
+	}
+	return set
+}
+
+// jaccardSimilarity returns |a∩b| / |a∪b| over token sets, 0 when both are empty.
+func jaccardSimilarity(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for tok := range a {
+		if _, ok := b[tok]; ok {
+			inter++
+		}
+	}
+	union := len(a) + len(b) - inter
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
+}
+
+// diverseSimilarity is the similarity(a,b) used by DiverseEpisodes' MMR
+// selection: a strong same-(app,title) bump (same visit/subject, near-certain
+// duplicate) or else token Jaccard over screen_text.
+func diverseSimilarity(a, b diverseEpisodeCandidate) float64 {
+	if a.app != "" && a.app == b.app && a.title == b.title {
+		return mmrSameSubjectBump
+	}
+	return jaccardSimilarity(a.tokens, b.tokens)
+}
+
+// DiverseEpisodes selects up to limit episodes matching focus via MMR-lite
+// (maximal marginal relevance): pull a candidate pool from RankedEpisodes,
+// then iteratively pick the argmax of mmrLambda*rel - (1-mmrLambda)*maxSim,
+// where rel is the candidate's normalized rank position and maxSim is its
+// highest similarity (diverseSimilarity) to any already-chosen result. This
+// avoids the near-duplicate pile-up a plain top-N would produce (e.g. 5
+// visits to the same app+title with near-identical text all scoring high).
+func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([]MemoryHit, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.DiverseEpisodes")
+	defer span.End()
+
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	pool, err := s.RankedEpisodes(ctx, focus, mmrCandidatePoolSize)
+	if err != nil {
+		return nil, err
+	}
+	if len(pool) == 0 {
+		return nil, nil
+	}
+
+	candidates := make([]diverseEpisodeCandidate, len(pool))
+	for i, h := range pool {
+		var app, title string
+		// best-effort: if the lookup fails, app/title stay empty and the
+		// same-subject bump simply never fires for this candidate.
+		_ = s.db.QueryRowContext(ctx, `SELECT app, title FROM episodes WHERE id = ?`, h.RefID).Scan(&app, &title)
+		candidates[i] = diverseEpisodeCandidate{
+			hit:    h,
+			app:    app,
+			title:  title,
+			tokens: tokenSet(h.Content),
+			// rank position score: best-ranked candidate (i=0) scores highest.
+			rel: float64(len(pool)-i) / float64(len(pool)),
+		}
+	}
+
+	var selected []diverseEpisodeCandidate
+	remaining := make([]int, len(candidates))
+	for i := range remaining {
+		remaining[i] = i
+	}
+
+	for len(selected) < limit && len(remaining) > 0 {
+		bestRemPos, bestIdx := -1, -1
+		bestScore := math.Inf(-1)
+		for pos, ci := range remaining {
+			c := candidates[ci]
+			maxSim := 0.0
+			for _, sel := range selected {
+				if sim := diverseSimilarity(c, sel); sim > maxSim {
+					maxSim = sim
+				}
+			}
+			score := mmrLambda*c.rel - (1-mmrLambda)*maxSim
+			if score > bestScore {
+				bestScore = score
+				bestIdx = ci
+				bestRemPos = pos
+			}
+		}
+		selected = append(selected, candidates[bestIdx])
+		remaining = append(remaining[:bestRemPos], remaining[bestRemPos+1:]...)
+	}
+
+	out := make([]MemoryHit, len(selected))
+	for i, c := range selected {
+		out[i] = c.hit
+	}
+	span.SetAttributes(attribute.Int("db.diverse_episode_count", len(out)))
+	return out, nil
+}
+
+// RecallSubject fuses a thread's arc with episode specifics for "what do you
+// know about X" recall: (a) matching thread(s) for subject via SearchMemory
+// filtered to Source=="thread", formatted "[thread] <content>"; then (b) a
+// diverse spread of matching episodes via DiverseEpisodes, formatted
+// "[episode] <excerpt≤200 runes>". Threads (the throughline) come first,
+// episodes (the specifics) after — narration should say "you've been doing
+// X" before "specifically, Y and Z".
+func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.RecallSubject")
+	defer span.End()
+
+	subject = strings.TrimSpace(subject)
+	if subject == "" || limit <= 0 {
+		return nil, nil
+	}
+
+	hits, err := s.SearchMemory(ctx, subject)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []string
+	for _, h := range hits {
+		if h.Source == "thread" {
+			out = append(out, fmt.Sprintf("[thread] %s", h.Content))
+		}
+	}
+
+	episodes, err := s.DiverseEpisodes(ctx, subject, limit)
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range episodes {
+		excerpt := h.Content
+		if runes := []rune(excerpt); len(runes) > maxEpisodeExcerpt {
+			excerpt = string(runes[:maxEpisodeExcerpt])
+		}
+		out = append(out, fmt.Sprintf("[episode] %s", excerpt))
+	}
+
+	span.SetAttributes(attribute.Int("db.recall_subject_lines", len(out)))
+	return out, nil
+}
+
 // SearchEpisodes runs FTS5 MATCH over episodes_fts, returning the matching
 // episodes' screen_text as MemoryHit.Content (Source="episode"), ordered by
 // rank. Empty query -> empty result, no error, mirroring SearchMemory.
