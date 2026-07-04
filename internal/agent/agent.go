@@ -17,6 +17,7 @@ import (
 type ContextReader interface {
 	GetImplicitContext(ctx context.Context) ([]string, error)
 	SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error)
+	RankedEpisodes(ctx context.Context, focus string, limit int) ([]db.MemoryHit, error)
 	RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	GetNotes(ctx context.Context) ([]db.Note, error)

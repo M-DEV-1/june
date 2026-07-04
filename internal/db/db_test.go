@@ -1423,7 +1423,10 @@ func TestStore_LogEpisode_AppendOnly_NoDedupe(t *testing.T) {
 
 // TestStore_RetrieveRelevant_IncludesEpisodes verifies that RetrieveRelevant
 // merges episode hits alongside note/summary/thread hits, formatted as
-// "[episode] <screen_text excerpt>".
+// "[episode] <screen_text excerpt>", and that those hits are ordered by the
+// RankedEpisodes weighted score (recency+importance+relevance) rather than
+// plain FTS rank: a recent, important episode must be surfaced before a
+// stale, trivial-importance one that matches the same focus term.
 func TestStore_RetrieveRelevant_IncludesEpisodes(t *testing.T) {
 	ctx := context.Background()
 	store, err := db.New(":memory:")
@@ -1432,8 +1435,22 @@ func TestStore_RetrieveRelevant_IncludesEpisodes(t *testing.T) {
 	}
 	defer store.Close()
 
-	if _, err := store.LogEpisode(ctx, "Firefox", "Gotham News", "Breaking: Commissioner Gordon holds press conference about the Riddler's latest scheme downtown"); err != nil {
-		t.Fatalf("LogEpisode: %v", err)
+	richID, err := store.LogEpisode(ctx, "Firefox", "Gotham News", "Breaking: Commissioner Gordon holds press conference about the Riddler's latest scheme downtown")
+	if err != nil {
+		t.Fatalf("LogEpisode (rich/recent): %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE episodes SET importance = 0.95, created_at = datetime('now') WHERE id = ?`, richID); err != nil {
+		t.Fatalf("backdate rich episode: %v", err)
+	}
+
+	staleID, err := store.LogEpisode(ctx, "Notes", "old memo", "Riddler Riddler Riddler mentioned once in a stale note")
+	if err != nil {
+		t.Fatalf("LogEpisode (stale/trivial): %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE episodes SET importance = 0.05, created_at = datetime('now', '-720 hours') WHERE id = ?`, staleID); err != nil {
+		t.Fatalf("backdate stale episode: %v", err)
 	}
 
 	results, err := store.RetrieveRelevant(ctx, "Riddler", 10)
@@ -1442,13 +1459,29 @@ func TestStore_RetrieveRelevant_IncludesEpisodes(t *testing.T) {
 	}
 
 	var foundEpisode bool
-	for _, r := range results {
+	richIdx, staleIdx := -1, -1
+	for i, r := range results {
 		if strings.HasPrefix(r, "[episode] ") && strings.Contains(r, "Riddler") {
 			foundEpisode = true
+		}
+		if strings.Contains(r, "press conference") {
+			richIdx = i
+		}
+		if strings.Contains(r, "stale note") {
+			staleIdx = i
 		}
 	}
 	if !foundEpisode {
 		t.Errorf("expected a [episode] line matching focus in RetrieveRelevant results: %+v", results)
+	}
+	if richIdx == -1 {
+		t.Fatalf("expected rich/recent episode in results: %+v", results)
+	}
+	if staleIdx == -1 {
+		t.Fatalf("expected stale/trivial episode in results: %+v", results)
+	}
+	if richIdx > staleIdx {
+		t.Errorf("expected recent+important episode (idx %d) to rank before stale low-importance one (idx %d), i.e. RetrieveRelevant should use RankedEpisodes not plain FTS: %+v", richIdx, staleIdx, results)
 	}
 }
 
