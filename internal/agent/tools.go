@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -85,8 +86,54 @@ func toolDefinitions() []*genai.Tool {
 					Required: []string{"query"},
 				},
 			},
+			{
+				Name:        "recall",
+				Description: "Recall your timeline for a period, or what you know about a subject, from your raw episode history.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"subject": {Type: genai.TypeString, Description: "Optional. A subject/topic to recall (fuses the matching thread's arc with diverse episode specifics). Takes priority over window."},
+						"window":  {Type: genai.TypeString, Description: "Optional. A time period to recall as a chronological timeline: one of today|morning|afternoon|evening|week. Defaults to today."},
+					},
+				},
+			},
 		},
 	}}
+}
+
+// recallSubjectLimit bounds how many lines RecallSubject contributes to the
+// "recall" tool's subject path.
+const recallSubjectLimit = 6
+
+// recallExcerpt caps how much of an episode's screen_text is surfaced per
+// line in the "recall" tool's window (timeline) path — shorter than
+// maxEpisodeExcerpt since a whole day's timeline is many lines at once.
+const recallExcerpt = 160
+
+// recallWindowBounds computes [since, until] for the "recall" tool's window
+// arg, relative to now:
+//   - today: midnight -> now
+//   - morning: 05:00 -> 12:00 (today)
+//   - afternoon: 12:00 -> 17:00 (today)
+//   - evening: 17:00 -> 23:59:59 (today)
+//   - week: now-7d -> now
+//   - anything else (including ""): defaults to today
+func recallWindowBounds(window string, now time.Time) (time.Time, time.Time) {
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	switch window {
+	case "morning":
+		return dayStart.Add(5 * time.Hour), dayStart.Add(12 * time.Hour)
+	case "afternoon":
+		return dayStart.Add(12 * time.Hour), dayStart.Add(17 * time.Hour)
+	case "evening":
+		return dayStart.Add(17 * time.Hour), dayStart.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+	case "week":
+		return now.AddDate(0, 0, -7), now
+	case "today":
+		fallthrough
+	default:
+		return dayStart, now
+	}
 }
 
 func RunShellCommand(command string) string {
@@ -234,6 +281,40 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 		}
 		for _, h := range episodeHits {
 			lines = append(lines, fmt.Sprintf("[episode] %s", h.Content))
+		}
+		return strings.Join(lines, "\n")
+
+	case "recall":
+		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
+			slog.Info("recalling subject", "subject", subject)
+			lines, err := a.brain.RecallSubject(context.Background(), subject, recallSubjectLimit)
+			if err != nil {
+				return fmt.Sprintf("error recalling subject: %v", err)
+			}
+			if len(lines) == 0 {
+				return "no memory of that subject"
+			}
+			return strings.Join(lines, "\n")
+		}
+
+		window, _ := args["window"].(string)
+		since, until := recallWindowBounds(window, time.Now())
+		slog.Info("recalling timeline window", "window", window, "since", since, "until", until)
+
+		episodes, err := a.brain.EpisodesInWindow(context.Background(), since, until, 50)
+		if err != nil {
+			return fmt.Sprintf("error recalling timeline: %v", err)
+		}
+		if len(episodes) == 0 {
+			return "no episodes in that window"
+		}
+		lines := make([]string, 0, len(episodes))
+		for _, e := range episodes {
+			excerpt := e.ScreenText
+			if runes := []rune(excerpt); len(runes) > recallExcerpt {
+				excerpt = string(runes[:recallExcerpt])
+			}
+			lines = append(lines, fmt.Sprintf("[%s] %s — %s: %s", e.CreatedAt.Format("15:04"), e.App, e.Title, excerpt))
 		}
 		return strings.Join(lines, "\n")
 

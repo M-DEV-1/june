@@ -7,6 +7,7 @@ import (
 	"ora/internal/memory"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // atomic is well, really cool
@@ -22,6 +23,8 @@ type ContextReader interface {
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	GetNotes(ctx context.Context) ([]db.Note, error)
 	DeleteNote(ctx context.Context, id int64) error
+	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
+	RecallSubject(ctx context.Context, subject string, limit int) ([]string, error)
 }
 
 type ToolRequest struct {
