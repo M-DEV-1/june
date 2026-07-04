@@ -634,10 +634,10 @@ func minMaxNormalize(vals []float64) []float64 {
 }
 
 // RetrieveRelevant returns up to maxItems relevance-ranked strings (notes/summaries/
-// threads/episodes) by calling SearchMemory (FTS5) and SearchEpisodes with
-// sanitized focus (or fallback "recent context"). Formats as
-// [note]/[summary]/[episode]/[<source>]. Satisfies Retriever.
-// If maxItems <= 0 all hits (up to Search limit) are returned.
+// threads/episodes) by calling SearchMemory (FTS5) and RankedEpisodes (recency+
+// importance+relevance blend, not plain FTS) with sanitized focus (or fallback
+// "recent context"). Formats as [note]/[summary]/[episode]/[<source>]. Satisfies
+// Retriever. If maxItems <= 0 all hits (up to Search limit) are returned.
 func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
 	focus = strings.TrimSpace(focus)
 	if focus == "" {
@@ -647,7 +647,7 @@ func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int
 	if err != nil {
 		return nil, err
 	}
-	episodeHits, err := s.SearchEpisodes(ctx, focus)
+	episodeHits, err := s.RankedEpisodes(ctx, focus, 10)
 	if err != nil {
 		return nil, err
 	}

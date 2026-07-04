@@ -217,12 +217,23 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 		if err != nil {
 			return fmt.Sprintf("error querying memory: %v", err)
 		}
-		if len(hits) == 0 {
+		// Episodes are raw screen-capture history and aren't covered by
+		// SearchMemory (notes/summaries/threads), so the model couldn't
+		// search for episode specifics until now. Merge in ranked episode
+		// hits (recency+importance+relevance), clearly labeled.
+		episodeHits, err := a.brain.RankedEpisodes(context.Background(), query, 5)
+		if err != nil {
+			return fmt.Sprintf("error querying memory: %v", err)
+		}
+		if len(hits) == 0 && len(episodeHits) == 0 {
 			return "no memory matches"
 		}
-		lines := make([]string, len(hits))
-		for i, h := range hits {
-			lines[i] = fmt.Sprintf("[%s] %s", h.Source, h.Content)
+		lines := make([]string, 0, len(hits)+len(episodeHits))
+		for _, h := range hits {
+			lines = append(lines, fmt.Sprintf("[%s] %s", h.Source, h.Content))
+		}
+		for _, h := range episodeHits {
+			lines = append(lines, fmt.Sprintf("[episode] %s", h.Content))
 		}
 		return strings.Join(lines, "\n")
 
