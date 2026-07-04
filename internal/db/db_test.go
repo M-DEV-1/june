@@ -795,7 +795,7 @@ func TestStore_UpsertThread_NewThread(t *testing.T) {
 	defer store.Close()
 
 	cases := []struct {
-		novel       bool
+		novel        bool
 		wantSalience float64
 	}{
 		{novel: false, wantSalience: 0.5},
@@ -1358,5 +1358,311 @@ func TestStore_RetrieveRelevant_FocusAffectsResults(t *testing.T) {
 	// check that different focus returns different sets
 	if len(goResults) > 0 && len(hikeResults) > 0 && goResults[0] == hikeResults[0] {
 		t.Errorf("different focus should return different result sets, got: %+v vs %+v", goResults, hikeResults)
+	}
+}
+
+// ─── Episode tests (Cycle 1: append-only episode storage) ────────────────────
+
+// TestStore_LogEpisode_AppendOnly_NoDedupe verifies episodes are NOT deduped
+// like nodes/notes are: logging the same app+title twice with different
+// screen_text must persist as two distinct rows. This is the whole point of a
+// dedicated episodes table instead of reusing the nodes tree (whose unique
+// index on (parent_id,type,content) would wrongly collapse repeat visits).
+// It also verifies SearchEpisodes finds a distinctive word via FTS5.
+func TestStore_LogEpisode_AppendOnly_NoDedupe(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	id1, err := store.LogEpisode(ctx, "Firefox", "Batman Wiki", "Reading about the Riddler's origin story")
+	if err != nil {
+		t.Fatalf("LogEpisode (1): %v", err)
+	}
+	if id1 == 0 {
+		t.Fatal("expected non-zero episode id")
+	}
+
+	id2, err := store.LogEpisode(ctx, "Firefox", "Batman Wiki", "Now reading about Two-Face instead")
+	if err != nil {
+		t.Fatalf("LogEpisode (2): %v", err)
+	}
+	if id2 == 0 {
+		t.Fatal("expected non-zero episode id")
+	}
+	if id2 == id1 {
+		t.Errorf("expected distinct ids for repeat app+title visits, got same id %d twice", id1)
+	}
+
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM episodes`).Scan(&count); err != nil {
+		t.Fatalf("count episodes: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 distinct episode rows (no dedupe), got %d", count)
+	}
+
+	hits, err := store.SearchEpisodes(ctx, "Riddler")
+	if err != nil {
+		t.Fatalf("SearchEpisodes: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("SearchEpisodes returned no hits for 'Riddler'")
+	}
+	if !strings.Contains(hits[0].Content, "Riddler") {
+		t.Errorf("expected hit content to contain 'Riddler', got: %s", hits[0].Content)
+	}
+	if hits[0].Source != "episode" {
+		t.Errorf("expected source='episode', got %q", hits[0].Source)
+	}
+}
+
+// ─── Episode tests (Cycle 2: retrieval surfaces episodes) ────────────────────
+
+// TestStore_RetrieveRelevant_IncludesEpisodes verifies that RetrieveRelevant
+// merges episode hits alongside note/summary/thread hits, formatted as
+// "[episode] <screen_text excerpt>".
+func TestStore_RetrieveRelevant_IncludesEpisodes(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.LogEpisode(ctx, "Firefox", "Gotham News", "Breaking: Commissioner Gordon holds press conference about the Riddler's latest scheme downtown"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	results, err := store.RetrieveRelevant(ctx, "Riddler", 10)
+	if err != nil {
+		t.Fatalf("RetrieveRelevant: %v", err)
+	}
+
+	var foundEpisode bool
+	for _, r := range results {
+		if strings.HasPrefix(r, "[episode] ") && strings.Contains(r, "Riddler") {
+			foundEpisode = true
+		}
+	}
+	if !foundEpisode {
+		t.Errorf("expected a [episode] line matching focus in RetrieveRelevant results: %+v", results)
+	}
+}
+
+// ─── Episode tests (Cycle 3: importance heuristic) ────────────────────────────
+
+// TestStore_LogEpisode_ImportanceHeuristic verifies the stored importance score
+// reflects both signals: richer screen_text and revisitation (a prior episode
+// with the same app+title) should score higher than a sparse, first-visit one.
+func TestStore_LogEpisode_ImportanceHeuristic(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// first-visit, trivial screen_text -> low importance
+	trivialID, err := store.LogEpisode(ctx, "Notepad", "untitled.txt", "hi")
+	if err != nil {
+		t.Fatalf("LogEpisode (trivial): %v", err)
+	}
+
+	// prior visit to the same app+title, so the next visit counts as a revisit
+	if _, err := store.LogEpisode(ctx, "VSCode", "main.go — ora", "package main\n\nfunc main() {}"); err != nil {
+		t.Fatalf("LogEpisode (seed revisit): %v", err)
+	}
+	richID, err := store.LogEpisode(ctx, "VSCode", "main.go — ora", strings.Repeat("word ", 300))
+	if err != nil {
+		t.Fatalf("LogEpisode (rich revisit): %v", err)
+	}
+
+	var trivialImportance, richImportance float64
+	if err := store.DB().QueryRowContext(ctx, `SELECT importance FROM episodes WHERE id = ?`, trivialID).Scan(&trivialImportance); err != nil {
+		t.Fatalf("query trivial importance: %v", err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT importance FROM episodes WHERE id = ?`, richID).Scan(&richImportance); err != nil {
+		t.Fatalf("query rich importance: %v", err)
+	}
+
+	if richImportance <= trivialImportance {
+		t.Errorf("expected rich+revisited episode importance (%v) > trivial first-visit importance (%v)", richImportance, trivialImportance)
+	}
+	if richImportance < 0 || richImportance > 1 {
+		t.Errorf("importance must be in [0,1], got %v", richImportance)
+	}
+	if trivialImportance < 0 || trivialImportance > 1 {
+		t.Errorf("importance must be in [0,1], got %v", trivialImportance)
+	}
+}
+
+// ─── Episode tests (Cycle 4: ranking) ─────────────────────────────────────────
+
+// TestStore_RankedEpisodes_WeightedOrdering constructs three episodes where
+// recency/importance/relevance pull in different directions and asserts that
+// a slightly-less-relevant but far-more-important+recent episode outranks a
+// stale, barely-relevant one, per the documented weighted formula.
+func TestStore_RankedEpisodes_WeightedOrdering(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	raw := store.DB()
+
+	// Winner: recent, high importance, decent (but not perfect) relevance.
+	winnerID, err := store.LogEpisode(ctx, "VSCode", "compiler.go", "refactoring the memory compiler ranking logic today")
+	if err != nil {
+		t.Fatalf("LogEpisode (winner): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET importance = 0.95, created_at = datetime('now') WHERE id = ?`, winnerID); err != nil {
+		t.Fatalf("backdate winner: %v", err)
+	}
+
+	// Loser: stale (30 days old), low importance, but a slightly more literal
+	// relevance match on the focus term.
+	loserID, err := store.LogEpisode(ctx, "Notes", "old memo", "ranking ranking ranking notes from a month ago")
+	if err != nil {
+		t.Fatalf("LogEpisode (loser): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET importance = 0.05, created_at = datetime('now', '-720 hours') WHERE id = ?`, loserID); err != nil {
+		t.Fatalf("backdate loser: %v", err)
+	}
+
+	results, err := store.RankedEpisodes(ctx, "ranking", 10)
+	if err != nil {
+		t.Fatalf("RankedEpisodes: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 ranked episodes, got %d: %+v", len(results), results)
+	}
+
+	winnerIdx, loserIdx := -1, -1
+	for i, r := range results {
+		if strings.Contains(r.Content, "refactoring the memory compiler") {
+			winnerIdx = i
+		}
+		if strings.Contains(r.Content, "old memo") || strings.Contains(r.Content, "month ago") {
+			loserIdx = i
+		}
+	}
+	if winnerIdx == -1 {
+		t.Fatalf("winner episode not found in results: %+v", results)
+	}
+	if loserIdx == -1 {
+		t.Fatalf("loser episode not found in results: %+v", results)
+	}
+	if winnerIdx > loserIdx {
+		t.Errorf("expected recent+important episode (idx %d) to outrank stale low-importance episode (idx %d): %+v", winnerIdx, loserIdx, results)
+	}
+
+	// limit is honored
+	limited, err := store.RankedEpisodes(ctx, "ranking", 1)
+	if err != nil {
+		t.Fatalf("RankedEpisodes (limit=1): %v", err)
+	}
+	if len(limited) != 1 {
+		t.Errorf("expected exactly 1 result with limit=1, got %d", len(limited))
+	}
+}
+
+// ─── Episode tests (Cycle 5: culling / aging) ─────────────────────────────────
+
+// TestStore_AgeEpisodes_DropsOnlyOldLowImportance seeds an old low-importance
+// episode, an old high-importance episode, and a recent one, and verifies
+// AgeEpisodes empties screen_text only for the old low-importance row while
+// keeping the row itself (ts/app/title/importance intact) — the other two
+// keep their screen_text untouched.
+func TestStore_AgeEpisodes_DropsOnlyOldLowImportance(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+	raw := store.DB()
+
+	oldLowID, err := store.LogEpisode(ctx, "Notes", "old low", "trivial old content")
+	if err != nil {
+		t.Fatalf("LogEpisode (old low): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET importance = 0.1, created_at = datetime('now', '-720 hours') WHERE id = ?`, oldLowID); err != nil {
+		t.Fatalf("backdate old low: %v", err)
+	}
+
+	oldHighID, err := store.LogEpisode(ctx, "VSCode", "old high", "important old content about the core architecture")
+	if err != nil {
+		t.Fatalf("LogEpisode (old high): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET importance = 0.9, created_at = datetime('now', '-720 hours') WHERE id = ?`, oldHighID); err != nil {
+		t.Fatalf("backdate old high: %v", err)
+	}
+
+	recentID, err := store.LogEpisode(ctx, "Notes", "recent low", "trivial recent content")
+	if err != nil {
+		t.Fatalf("LogEpisode (recent): %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE episodes SET importance = 0.1 WHERE id = ?`, recentID); err != nil {
+		t.Fatalf("set recent importance: %v", err)
+	}
+
+	aged, err := store.AgeEpisodes(ctx, 168*time.Hour, 0.5)
+	if err != nil {
+		t.Fatalf("AgeEpisodes: %v", err)
+	}
+	if aged != 1 {
+		t.Errorf("expected exactly 1 episode aged, got %d", aged)
+	}
+
+	var oldLowText, oldHighText, recentText string
+	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, oldLowID).Scan(&oldLowText); err != nil {
+		t.Fatalf("query old low text: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, oldHighID).Scan(&oldHighText); err != nil {
+		t.Fatalf("query old high text: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, recentID).Scan(&recentText); err != nil {
+		t.Fatalf("query recent text: %v", err)
+	}
+
+	if oldLowText != "" {
+		t.Errorf("expected old low-importance episode's screen_text to be emptied, got %q", oldLowText)
+	}
+	if oldHighText != "important old content about the core architecture" {
+		t.Errorf("old high-importance episode's screen_text must survive, got %q", oldHighText)
+	}
+	if recentText != "trivial recent content" {
+		t.Errorf("recent episode's screen_text must survive, got %q", recentText)
+	}
+
+	// rows must still exist (never deleted)
+	var count int
+	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes`).Scan(&count); err != nil {
+		t.Fatalf("count episodes: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected all 3 episode rows to survive aging, got %d", count)
+	}
+
+	// FTS mirror must not keep surfacing the cleared content (external-content
+	// fts5 requires the update trigger to purge the stale index entry).
+	staleHits, err := store.SearchEpisodes(ctx, "trivial old content")
+	if err != nil {
+		t.Fatalf("SearchEpisodes after aging: %v", err)
+	}
+	for _, h := range staleHits {
+		if strings.Contains(h.Content, "trivial old content") {
+			t.Errorf("aged episode's old content still searchable via FTS: %+v", staleHits)
+		}
 	}
 }

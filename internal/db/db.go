@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"ora/internal/memory"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -187,6 +189,52 @@ func (s *Store) createSchema() error {
 	CREATE TRIGGER IF NOT EXISTS threads_au AFTER UPDATE ON threads BEGIN
 		DELETE FROM memory_fts WHERE source='thread' AND ref_id = OLD.id;
 		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.subject || ' — ' || IFNULL(NEW.state,''), 'thread', NEW.id);
+	END;
+
+	-- episodes: append-only, NON-deduped time series of dwell-confirmed
+	-- captures. Deliberately NOT part of the nodes tree: nodes' unique index
+	-- on (parent_id,type,content) would collapse repeat visits to the same
+	-- app|title into one row, which is exactly wrong here — the whole point
+	-- is to keep every visit, including its (possibly different) screen_text.
+	CREATE TABLE IF NOT EXISTS episodes (
+		id INTEGER PRIMARY KEY,
+		created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+		app TEXT NOT NULL,
+		title TEXT NOT NULL,
+		screen_text TEXT NOT NULL DEFAULT '',
+		importance REAL NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_episodes_created_at ON episodes(created_at);
+	CREATE INDEX IF NOT EXISTS idx_episodes_app_title ON episodes(app, title);
+
+	-- separate FTS5 index (not memory_fts) so raw screen captures don't dilute
+	-- summary/note/thread relevance ranking; SearchEpisodes queries it directly.
+	CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
+		screen_text,
+		content = 'episodes',
+		content_rowid = 'id',
+		tokenize = 'unicode61'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
+		INSERT INTO episodes_fts(rowid, screen_text) VALUES (NEW.id, NEW.screen_text);
+	END;
+
+	-- episodes_fts is an EXTERNAL CONTENT fts5 table (content='episodes'): it
+	-- has no content of its own, only the index. Removing/updating an index
+	-- entry therefore requires the special 'delete' command with the OLD
+	-- column values passed explicitly — a plain DELETE FROM episodes_fts
+	-- WHERE rowid=? silently fails to update the postings list, leaving
+	-- stale content searchable. See https://sqlite.org/fts5.html#the_delete_command.
+	CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
+		INSERT INTO episodes_fts(episodes_fts, rowid, screen_text) VALUES ('delete', OLD.id, OLD.screen_text);
+	END;
+
+	-- AgeEpisodes (Cycle 5) updates screen_text in place to reclaim space; this
+	-- trigger keeps the FTS mirror from continuing to surface the cleared text.
+	CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
+		INSERT INTO episodes_fts(episodes_fts, rowid, screen_text) VALUES ('delete', OLD.id, OLD.screen_text);
+		INSERT INTO episodes_fts(rowid, screen_text) VALUES (NEW.id, NEW.screen_text);
 	END;
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
@@ -415,9 +463,180 @@ func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, er
 	return out, nil
 }
 
+// maxEpisodeExcerpt caps how much of an episode's screen_text is surfaced in
+// RetrieveRelevant output — screen captures can be long, and this is context
+// meant to orient the model, not a full transcript.
+const maxEpisodeExcerpt = 200
+
+// Ranking weights for RankedEpisodes. All three terms are min-max normalized
+// to [0,1] across the candidate set before weighting, so these are directly
+// comparable "how much each signal counts" knobs. Equal by default (1.0 each,
+// so the combined score ranges [0,3]) — tune here if one signal should
+// dominate.
+const (
+	rankWeightRecency    = 1.0
+	rankWeightImportance = 1.0
+	rankWeightRelevance  = 1.0
+)
+
+// recencyHalfLifeFactor is the per-hour exponential decay base for recency
+// scoring: recency = recencyHalfLifeFactor^hoursSinceCreated. Closer to 1.0
+// means slower decay (0.995 ≈ ~half over ~138 hours / ~5.75 days).
+const recencyHalfLifeFactor = 0.995
+
+// rankCandidatePoolSize bounds how many FTS matches are pulled from
+// episodes_fts before re-ranking in Go. Wider than the final `limit` so the
+// weighted formula (not raw FTS rank alone) decides the final order.
+const rankCandidatePoolSize = 50
+
+// rankedEpisodeCandidate holds the raw per-episode signals needed to compute
+// a combined ranking score before normalization.
+type rankedEpisodeCandidate struct {
+	id         int64
+	content    string
+	createdAt  time.Time
+	importance float64
+	bm25       float64 // raw FTS5 bm25 score; more negative = better match
+}
+
+// RankedEpisodes scores episodes matching focus by a weighted blend of
+// recency, importance, and FTS relevance, and returns the top `limit` as
+// MemoryHit (Source="episode"). Each term is min-max normalized to [0,1]
+// across the candidate pool before weighting:
+//
+//	score = rankWeightRecency*recency + rankWeightImportance*importance + rankWeightRelevance*relevance
+//
+// where recency = recencyHalfLifeFactor^hoursSinceCreated (exponential decay,
+// higher = more recent), importance is the stored episodes.importance column,
+// and relevance is the FTS5 bm25 score inverted (bm25 is "lower is better") and
+// min-max normalized so the best match in the pool scores 1.0.
+func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]MemoryHit, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.RankedEpisodes")
+	defer span.End()
+
+	focus = strings.TrimSpace(focus)
+	if focus == "" || limit <= 0 {
+		return nil, nil
+	}
+	safe := `"` + strings.ReplaceAll(focus, `"`, `""`) + `"`
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT episodes.id, episodes.screen_text, episodes.created_at, episodes.importance, bm25(episodes_fts)
+		FROM episodes_fts
+		JOIN episodes ON episodes.id = episodes_fts.rowid
+		WHERE episodes_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, safe, rankCandidatePoolSize)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("fts5 ranked episode candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []rankedEpisodeCandidate
+	for rows.Next() {
+		var c rankedEpisodeCandidate
+		if err := rows.Scan(&c.id, &c.content, &c.createdAt, &c.importance, &c.bm25); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan ranked episode candidate: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate ranked episode candidates: %w", err)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now()
+	recencyRaw := make([]float64, len(candidates))
+	relevanceRaw := make([]float64, len(candidates))
+	for i, c := range candidates {
+		hours := now.Sub(c.createdAt).Hours()
+		if hours < 0 {
+			hours = 0
+		}
+		recencyRaw[i] = math.Pow(recencyHalfLifeFactor, hours)
+		relevanceRaw[i] = -c.bm25 // invert: higher = more relevant
+	}
+
+	recencyNorm := minMaxNormalize(recencyRaw)
+	relevanceNorm := minMaxNormalize(relevanceRaw)
+	importanceRaw := make([]float64, len(candidates))
+	for i, c := range candidates {
+		importanceRaw[i] = c.importance
+	}
+	importanceNorm := minMaxNormalize(importanceRaw)
+
+	type scored struct {
+		hit   MemoryHit
+		score float64
+	}
+	results := make([]scored, len(candidates))
+	for i, c := range candidates {
+		results[i] = scored{
+			hit: MemoryHit{
+				Content: c.content,
+				Source:  "episode",
+				RefID:   c.id,
+			},
+			score: rankWeightRecency*recencyNorm[i] + rankWeightImportance*importanceNorm[i] + rankWeightRelevance*relevanceNorm[i],
+		}
+	}
+
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].score > results[j].score
+	})
+
+	if limit < len(results) {
+		results = results[:limit]
+	}
+
+	out := make([]MemoryHit, len(results))
+	for i, r := range results {
+		out[i] = r.hit
+	}
+	span.SetAttributes(attribute.Int("db.ranked_episode_count", len(out)))
+	return out, nil
+}
+
+// minMaxNormalize scales vals to [0,1]. When all values are equal (max==min),
+// every element normalizes to 1.0 so that term contributes its full weight
+// uniformly rather than collapsing the whole score to 0.
+func minMaxNormalize(vals []float64) []float64 {
+	out := make([]float64, len(vals))
+	if len(vals) == 0 {
+		return out
+	}
+	min, max := vals[0], vals[0]
+	for _, v := range vals {
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
+	}
+	if max == min {
+		for i := range out {
+			out[i] = 1.0
+		}
+		return out
+	}
+	for i, v := range vals {
+		out[i] = (v - min) / (max - min)
+	}
+	return out
+}
+
 // RetrieveRelevant returns up to maxItems relevance-ranked strings (notes/summaries/
-// threads) by calling SearchMemory (FTS5) with sanitized focus (or fallback "recent
-// context"). Formats as [note]/[summary]/[<source>]. Satisfies Retriever.
+// threads/episodes) by calling SearchMemory (FTS5) and SearchEpisodes with
+// sanitized focus (or fallback "recent context"). Formats as
+// [note]/[summary]/[episode]/[<source>]. Satisfies Retriever.
 // If maxItems <= 0 all hits (up to Search limit) are returned.
 func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
 	focus = strings.TrimSpace(focus)
@@ -428,12 +647,16 @@ func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int
 	if err != nil {
 		return nil, err
 	}
-	if len(hits) == 0 {
+	episodeHits, err := s.SearchEpisodes(ctx, focus)
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) == 0 && len(episodeHits) == 0 {
 		return nil, nil
 	}
 	var out []string
-	for i, h := range hits {
-		if maxItems > 0 && i >= maxItems {
+	for _, h := range hits {
+		if maxItems > 0 && len(out) >= maxItems {
 			break
 		}
 		if h.Source == "note" {
@@ -441,6 +664,16 @@ func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int
 		} else {
 			out = append(out, fmt.Sprintf("[%s] %s", h.Source, h.Content))
 		}
+	}
+	for _, h := range episodeHits {
+		if maxItems > 0 && len(out) >= maxItems {
+			break
+		}
+		excerpt := h.Content
+		if runes := []rune(excerpt); len(runes) > maxEpisodeExcerpt {
+			excerpt = string(runes[:maxEpisodeExcerpt])
+		}
+		out = append(out, fmt.Sprintf("[episode] %s", excerpt))
 	}
 	return out, nil
 }
@@ -716,6 +949,189 @@ func (s *Store) LogActivity(ctx context.Context, app, title string) error {
 	}
 
 	return err
+}
+
+// richnessWordCap is the word count at which screen_text richness saturates
+// to 1.0 in computeImportance — beyond this point more words don't add signal.
+const richnessWordCap = 150
+
+// revisitLookbackWindow bounds how far back computeImportance looks for prior
+// visits to the same app+title when scoring revisitation.
+const revisitLookbackWindow = 7 * 24 * time.Hour
+
+// revisitSaturationCount is the number of recent same-app+title episodes at
+// which the revisitation term saturates to 1.0.
+const revisitSaturationCount = 5
+
+// computeImportance scores a new episode in [0,1] from two cheap, write-time
+// signals, weighted equally (0.5 each):
+//   - richness: word count of screen_text, normalized against richnessWordCap
+//     (capped at 1.0) — a fuller capture carries more information than a
+//     near-empty one.
+//   - revisitation: how many of the last revisitSaturationCount episodes with
+//     the same app+title already exist within revisitLookbackWindow,
+//     normalized against revisitSaturationCount (capped at 1.0) — a place the
+//     user keeps coming back to is more likely to matter later.
+func (s *Store) computeImportance(ctx context.Context, app, title, screenText string) (float64, error) {
+	richness := float64(countWords(screenText)) / float64(richnessWordCap)
+	if richness > 1 {
+		richness = 1
+	}
+
+	var priorVisits int
+	secs := int64(revisitLookbackWindow.Seconds())
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM episodes WHERE app = ? AND title = ? AND created_at >= datetime('now', '-' || ? || ' seconds')`,
+		app, title, secs).Scan(&priorVisits)
+	if err != nil {
+		return 0, fmt.Errorf("count prior visits: %w", err)
+	}
+	revisitation := float64(priorVisits) / float64(revisitSaturationCount)
+	if revisitation > 1 {
+		revisitation = 1
+	}
+
+	return 0.5*richness + 0.5*revisitation, nil
+}
+
+// countWords counts whitespace-separated tokens in s. Mirrors
+// memory.countWords (unexported there; duplicated here to avoid an import
+// cycle since memory imports db-adjacent types via the Storage interface).
+func countWords(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	inWord := false
+	for _, c := range s {
+		isSpace := c == ' ' || c == '\n' || c == '\r' || c == '\t'
+		if !isSpace && !inWord {
+			n++
+			inWord = true
+		} else if isSpace {
+			inWord = false
+		}
+	}
+	return n
+}
+
+// LogEpisode appends one dwell-confirmed capture to the episodes time series.
+// Unlike LogActivity (INSERT OR IGNORE into the deduped nodes tree), this is a
+// plain append: repeat visits to the same app+title MUST create distinct rows
+// because screen_text differs between visits and is the whole point of
+// capturing it. importance is computed at write time via computeImportance.
+// Returns the new row's id.
+func (s *Store) LogEpisode(ctx context.Context, app, title, screenText string) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.LogEpisode")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("db.app", app),
+		attribute.String("db.window_title", title),
+	)
+
+	importance, err := s.computeImportance(ctx, app, title, screenText)
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("compute importance: %w", err)
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO episodes (app, title, screen_text, importance) VALUES (?, ?, ?, ?)`,
+		app, title, screenText, importance)
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("insert episode: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("episode last insert id: %w", err)
+	}
+	span.SetAttributes(
+		attribute.Int64("db.episode_id", id),
+		attribute.Float64("db.episode_importance", importance),
+	)
+	return id, nil
+}
+
+// SearchEpisodes runs FTS5 MATCH over episodes_fts, returning the matching
+// episodes' screen_text as MemoryHit.Content (Source="episode"), ordered by
+// rank. Empty query -> empty result, no error, mirroring SearchMemory.
+func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.SearchEpisodes")
+	defer span.End()
+
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+
+	safe := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT episodes.screen_text, episodes.id
+		FROM episodes_fts
+		JOIN episodes ON episodes.id = episodes_fts.rowid
+		WHERE episodes_fts MATCH ?
+		ORDER BY rank
+		LIMIT 10
+	`, safe)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("fts5 episode search: %w", err)
+	}
+	defer rows.Close()
+
+	var out []MemoryHit
+	for rows.Next() {
+		var h MemoryHit
+		if err := rows.Scan(&h.Content, &h.RefID); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan episode fts5 row: %w", err)
+		}
+		h.Source = "episode"
+		out = append(out, h)
+	}
+	span.SetAttributes(attribute.Int("db.episode_search_results", len(out)))
+	return out, nil
+}
+
+// AgeEpisodes is the pre-vector tiering step for the episode substrate: for
+// episodes older than keepRawFor whose importance is below importanceFloor,
+// screen_text is emptied to reclaim space while the row itself (ts/app/title/
+// importance) is kept — this is a thin record, not a deletion. Recent or
+// high-importance episodes are left untouched. Returns the number of rows
+// aged. Rows are NEVER deleted; only screen_text is cleared, and only once
+// (already-empty rows aren't recounted meaningfully but re-clearing is a
+// no-op).
+func (s *Store) AgeEpisodes(ctx context.Context, keepRawFor time.Duration, importanceFloor float64) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.AgeEpisodes")
+	defer span.End()
+
+	secs := int64(keepRawFor.Seconds())
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE episodes SET screen_text = ''
+		 WHERE created_at < datetime('now', '-' || ? || ' seconds')
+		   AND importance < ?
+		   AND screen_text != ''`,
+		secs, importanceFloor)
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("age episodes: %w", err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("age episodes rows affected: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.aged_rows", n))
+	return n, nil
 }
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
