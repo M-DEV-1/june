@@ -15,6 +15,7 @@ import (
 	"ora/internal/obs"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	_ "modernc.org/sqlite" // blank import
 )
 
@@ -158,6 +159,34 @@ func (s *Store) createSchema() error {
 	BEGIN
 		DELETE FROM memory_fts WHERE source = 'note' AND ref_id = OLD.id;
 		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'note', NEW.id);
+	END;
+
+	-- threads: ongoing throughlines in the user's life (a show, a project, a
+	-- person), each with a current state = where the user is *within* it.
+	-- concurrent threads coexist; they are never collapsed into one another.
+	CREATE TABLE IF NOT EXISTS threads (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		subject TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'work',
+		state TEXT,
+		salience REAL NOT NULL DEFAULT 0.5,
+		times_seen INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		status TEXT NOT NULL DEFAULT 'active'
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_subject ON threads(subject, kind);
+	CREATE INDEX IF NOT EXISTS idx_threads_last_seen ON threads(last_seen_at);
+
+	CREATE TRIGGER IF NOT EXISTS threads_ai AFTER INSERT ON threads BEGIN
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.subject || ' — ' || IFNULL(NEW.state,''), 'thread', NEW.id);
+	END;
+	CREATE TRIGGER IF NOT EXISTS threads_ad AFTER DELETE ON threads BEGIN
+		DELETE FROM memory_fts WHERE source='thread' AND ref_id = OLD.id;
+	END;
+	CREATE TRIGGER IF NOT EXISTS threads_au AFTER UPDATE ON threads BEGIN
+		DELETE FROM memory_fts WHERE source='thread' AND ref_id = OLD.id;
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.subject || ' — ' || IFNULL(NEW.state,''), 'thread', NEW.id);
 	END;
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
@@ -337,6 +366,13 @@ type MemoryHit struct {
 	RefID   int64
 }
 
+// Retriever defines a minimal interface for relevance-based memory retrieval.
+// FTS5 (via SearchMemory) backs it now; vector stores can implement later
+// without changing callers like GetImplicitContext.
+type Retriever interface {
+	RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error)
+}
+
 // SearchMemory runs FTS5 over summaries + notes. Returns top 10 by rank.
 // Empty query -> empty result, no error.
 func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, error) {
@@ -376,6 +412,36 @@ func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, er
 		out = append(out, h)
 	}
 	span.SetAttributes(attribute.Int("db.search_results", len(out)))
+	return out, nil
+}
+
+// RetrieveRelevant returns up to maxItems relevance-ranked strings (notes/summaries/
+// threads) by calling SearchMemory (FTS5) with sanitized focus (or fallback "recent
+// context"). Formats as [note]/[summary]/[<source>]. Satisfies Retriever.
+// If maxItems <= 0 all hits (up to Search limit) are returned.
+func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
+	focus = strings.TrimSpace(focus)
+	if focus == "" {
+		focus = "recent context"
+	}
+	hits, err := s.SearchMemory(ctx, focus)
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) == 0 {
+		return nil, nil
+	}
+	var out []string
+	for i, h := range hits {
+		if maxItems > 0 && i >= maxItems {
+			break
+		}
+		if h.Source == "note" {
+			out = append(out, fmt.Sprintf("[note] %s", h.Content))
+		} else {
+			out = append(out, fmt.Sprintf("[%s] %s", h.Source, h.Content))
+		}
+	}
 	return out, nil
 }
 
@@ -434,6 +500,102 @@ func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
 		out = append(out, n)
 	}
 	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
+}
+
+// UpsertThread creates or refreshes a thread, returning its id. For an existing
+// id it bumps salience/recency in place; for a new one it upserts on
+// (subject, kind) so the same throughline is recognized over time.
+func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.UpsertThread")
+	defer span.End()
+
+	if u.ID > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE threads SET state=?, last_seen_at=CURRENT_TIMESTAMP, times_seen=times_seen+1, salience=MIN(1.0, salience+0.05), status='active' WHERE id=?`,
+			u.State, u.ID); err != nil {
+			span.RecordError(err)
+			return 0, fmt.Errorf("update thread: %w", err)
+		}
+		span.SetAttributes(attribute.Int64("db.thread_id", u.ID))
+		return u.ID, nil
+	}
+
+	// new throughline: bias salience up slightly when the model flags it novel.
+	salience := 0.5
+	if u.Novel {
+		salience = 0.6
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO threads(subject,kind,state,salience,times_seen) VALUES(?,?,?,?,1)
+		 ON CONFLICT(subject,kind) DO UPDATE SET state=excluded.state, last_seen_at=CURRENT_TIMESTAMP, times_seen=threads.times_seen+1, salience=MIN(1.0, threads.salience+0.05), status='active'`,
+		u.Subject, u.Kind, u.State, salience); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("insert thread: %w", err)
+	}
+
+	var id int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM threads WHERE subject=? AND kind=?`,
+		u.Subject, u.Kind).Scan(&id); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("read thread id: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.thread_id", id))
+	return id, nil
+}
+
+// GetLiveThreads returns threads touched in the last 2 days, newest-first. This
+// is the "what's going on in their life right now" view; concurrent threads
+// coexist here.
+func (s *Store) GetLiveThreads(ctx context.Context, limit int) ([]memory.Thread, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.GetLiveThreads")
+	defer span.End()
+
+	return s.queryThreads(ctx, span,
+		`SELECT id,subject,kind,IFNULL(state,''),salience,times_seen,last_seen_at,status FROM threads WHERE last_seen_at >= datetime('now','-2 days') ORDER BY last_seen_at DESC LIMIT ?`,
+		limit)
+}
+
+// ThreadsForAttribution returns threads touched in the last 14 days, newest-first.
+// Wider window than GetLiveThreads so the compiler can reattach to a throughline
+// the user picked back up after a few days away.
+func (s *Store) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.Thread, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.ThreadsForAttribution")
+	defer span.End()
+
+	return s.queryThreads(ctx, span,
+		`SELECT id,subject,kind,IFNULL(state,''),salience,times_seen,last_seen_at,status FROM threads WHERE last_seen_at >= datetime('now','-14 days') ORDER BY last_seen_at DESC LIMIT ?`,
+		limit)
+}
+
+// queryThreads runs a thread SELECT and scans rows. last_seen_at scans into a
+// time.Time, matching how GetNotes scans Note.CreatedAt.
+func (s *Store) queryThreads(ctx context.Context, span trace.Span, query string, limit int) ([]memory.Thread, error) {
+	rows, err := s.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query threads: %w", err)
+	}
+	defer rows.Close()
+
+	var out []memory.Thread
+	for rows.Next() {
+		var t memory.Thread
+		if err := rows.Scan(&t.ID, &t.Subject, &t.Kind, &t.State, &t.Salience, &t.TimesSeen, &t.LastSeen, &t.Status); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan thread: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate threads: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.thread_count", len(out)))
 	return out, nil
 }
 
@@ -592,27 +754,55 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	s.mu.RUnlock()
 
 	var branch []string
-
-	// notes go first — they're "who is this user" context, always on top.
-	// fetch BEFORE opening CTE rows; sqlite `:memory:` per-connection
-	// isolation means an interleaved query would see an empty schema.
-	notes, nerr := s.GetNotes(ctx)
-	if nerr == nil {
-		for _, n := range notes {
-			branch = append(branch, fmt.Sprintf("[note:%s] %s", n.Kind, n.Content))
+	// NOTE: identity notes are NOT dumped unconditionally anymore. A wall of
+	// generic "[about] user likes X" facts buried the useful live threads and
+	// poisoned the model's context. Notes now surface only through the relevance
+	// path below (RetrieveRelevant), gated by what the user is actually doing now.
+	//
+	// relevance-filtered retrieval: rather than dumping every summary, build a
+	// focus signal from working state + recent task nodes and surface only the
+	// notes/summaries/threads that actually match what the user is doing now.
+	focusSignal := "recent context"
+	if st, serr := s.GetWorkingState(ctx); serr == nil && st != "" {
+		focusSignal = st
+	}
+	if trows, err := s.db.QueryContext(ctx, `SELECT content FROM nodes WHERE type='task' ORDER BY id DESC LIMIT 2`); err == nil && trows != nil {
+		for trows.Next() {
+			var tsk string
+			_ = trows.Scan(&tsk)
+			if tsk != "" {
+				focusSignal += " " + tsk
+			}
+		}
+		trows.Close()
+	}
+	const maxRel = 6
+	if rel, rerr := s.RetrieveRelevant(ctx, focusSignal, maxRel); rerr == nil {
+		branch = append(branch, rel...)
+	}
+	// live threads: what's going on in their life right now (recency = relevance).
+	// concurrent threads coexist here — watching + coding both surface.
+	threads, terr := s.GetLiveThreads(ctx, 6)
+	if terr == nil {
+		for _, t := range threads {
+			if t.State != "" {
+				branch = append(branch, fmt.Sprintf("[thread:%s] %s — %s", t.Kind, t.Subject, t.State))
+			} else {
+				branch = append(branch, fmt.Sprintf("[thread:%s] %s", t.Kind, t.Subject))
+			}
 		}
 	}
-
-	// working-state cache: when present it replaces the raw summary dump.
-	// the daemon recomputes this on a cadence from recent summaries + notes,
-	// giving a crisp synthesized state instead of 5 raw JSON blobs.
+	// synthesized "right now".
 	state, serr := s.GetWorkingState(ctx)
 	if serr == nil && state != "" {
-		branch = append(branch, fmt.Sprintf("[state] %s", state))
+		branch = append(branch, fmt.Sprintf("[now] %s", state))
+	}
+	if len(branch) > 0 {
 		span.SetAttributes(attribute.Int("db.node_count", len(branch)))
 		return branch, nil
 	}
 
+	// fallback (cold start, nothing synthesized yet): existing recursive summary walk.
 	rows, err := s.db.QueryContext(ctx, query, parentID)
 
 	if err != nil {
@@ -821,41 +1011,4 @@ func (s *Store) CullRawActivities(ctx context.Context, olderThan time.Duration) 
 	}
 	span.SetAttributes(attribute.Int64("db.culled_rows", n))
 	return n, nil
-}
-
-// searches historic summaries
-func (s *Store) QueryMemory(ctx context.Context, query string) ([]string, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
-	ctx, span := tracer.Start(ctx, "QueryMemory")
-	defer span.End()
-
-	// simple LIKE query on summary nodes
-	sqlQuery := `
-		SELECT content 
-		FROM nodes 
-		WHERE type = 'summary' AND content LIKE ?
-		ORDER BY id DESC 
-		LIMIT 10
-	`
-
-	rows, err := s.db.QueryContext(ctx, sqlQuery, "%"+query+"%")
-	// wildcard search i.e. "any length"
-	if err != nil {
-		span.RecordError(err)
-		return nil, fmt.Errorf("failed to search memory: %w", err)
-	}
-	defer rows.Close()
-
-	var results []string
-	for rows.Next() {
-		var content string
-		if err := rows.Scan(&content); err != nil {
-			span.RecordError(err)
-			return nil, fmt.Errorf("failed to scan row: %w", err)
-		}
-		results = append(results, content)
-	}
-
-	span.SetAttributes(attribute.Int("db.search_results", len(results)))
-	return results, nil
 }

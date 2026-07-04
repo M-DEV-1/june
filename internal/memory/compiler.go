@@ -8,6 +8,7 @@ import (
 	"ora/internal/obs"
 	"ora/internal/tracker"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
@@ -34,12 +35,45 @@ type NoteOp struct {
 	Content string // for "add"/"update": the text to store
 }
 
+// Thread is an ongoing throughline in the user's life, with a current state
+// describing where the user is *within* it.
+type Thread struct {
+	ID        int64
+	Subject   string
+	Kind      string // work | project | entertainment | learning | routine | person
+	State     string // where they are within it right now
+	Salience  float64
+	TimesSeen int
+	LastSeen  time.Time
+	Status    string
+}
+
+// ThreadUpdate is the compiler's attribution of a buffer slice to one thread.
+type ThreadUpdate struct {
+	ID      int64  `json:"id"`      // 0 = new thread
+	Subject string `json:"subject"`
+	Kind    string `json:"kind"`
+	State   string `json:"state"`
+	Summary string `json:"summary"` // episodic: what happened in this slice
+	Novel   bool   `json:"novel"`
+}
+
+// ThreadAttribution is the full result of attributing one flushed buffer.
+type ThreadAttribution struct {
+	Threads  []ThreadUpdate `json:"threads"`
+	Identity []string       `json:"identity"` // durable PERSON facts only
+}
+
 type Summarizer interface {
 	Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*TaskSummary, error)
 	// ReconcileNotes decides, for each candidate fact, whether to add, update
 	// (refines/supersedes an existing note), or skip (already-known duplicate).
 	// Returns nil,nil immediately when candidates is empty.
 	ReconcileNotes(ctx context.Context, existing []NoteRef, candidates []string) ([]NoteOp, error)
+	// AttributeThreads maps a flushed buffer onto ongoing threads — durable
+	// throughlines in the user's life — emitting one update per concurrent
+	// thread plus any durable PERSON facts.
+	AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error)
 }
 
 // GeminiSummarizer is for the genai sdk, will have other summarizers for provided model support
@@ -196,6 +230,75 @@ Be deterministic. Do not invent facts. Merge wording when updating.`,
 	return ops, nil
 }
 
+// AttributeThreads maps recent screen activity onto ongoing threads. It emits
+// one update per concurrent throughline (so watching + coding never collapse
+// into a single thread) and the SPECIFIC state within each, plus any durable
+// PERSON facts as identity. Mirrors Summarize's structure: build the activity
+// list, call the text model with JSON output, unmarshal.
+func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error) {
+	tracer := obs.GetTracer(ctx, "ora.memory")
+	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AttributeThreads")
+	defer span.End()
+
+	var activityList []string
+	for _, a := range activities {
+		entry := fmt.Sprintf("- %s: %s", a.App, a.Title)
+		if a.ScreenText != "" {
+			entry += fmt.Sprintf("\n  screen: %s", a.ScreenText)
+		}
+		activityList = append(activityList, entry)
+	}
+
+	var existingLines []string
+	for _, t := range existing {
+		existingLines = append(existingLines, fmt.Sprintf("id=%d [%s] %s :: %s", t.ID, t.Kind, t.Subject, t.State))
+	}
+
+	prompt := fmt.Sprintf(`You are the memory compiler for an ambient OS companion. The user often does several things AT ONCE (e.g. watching a show while coding). Attribute the recent screen activity to ongoing "threads" — durable throughlines in the user's life — and say where they currently are within each.
+
+You are given EXISTING THREADS (id, kind, subject :: current state) and RECENT ACTIVITIES (app, window title, and any screen text/description).
+
+Rules:
+- Reuse an existing thread id when the activity continues that throughline; use 0 only for a genuinely new one.
+- Emit MULTIPLE threads when concurrent activities are present. NEVER collapse entertainment into a work thread or vice-versa.
+- "state" is the whole point: capture the SPECIFIC position within the thread from screen content — the exact scene/plot point of a show, the chapter/section of an article, the file or feature being worked on. Not just the app.
+- Keep "subject" short and stable so the same thread is recognized over time ("Suits", not "watching Suits season 1 episode 10").
+- "novel" is true only if this throughline appears genuinely new to the user.
+- "identity" holds ONLY durable facts about the PERSON (identity, lasting preferences, skills, relationships). Ongoing projects and shows are threads, NOT identity. Usually an empty array.
+
+EXISTING THREADS:
+%s
+
+RECENT ACTIVITIES:
+%s
+
+Respond strictly as JSON:
+{"threads":[{"id":0,"subject":"","kind":"work|project|entertainment|learning|routine|person","state":"","summary":"","novel":false}],"identity":[]}`,
+		strings.Join(existingLines, "\n"),
+		strings.Join(activityList, "\n"))
+
+	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent.AttributeThreads")
+	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), &genai.GenerateContentConfig{
+		ResponseMIMEType: "application/json",
+	})
+	if err != nil {
+		genSpan.RecordError(err)
+		genSpan.End()
+		return nil, fmt.Errorf("attribute threads llm call: %w", err)
+	}
+	genSpan.End()
+
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		return nil, fmt.Errorf("empty attribution response from model")
+	}
+
+	var attr ThreadAttribution
+	if err := json.Unmarshal([]byte(resp.Candidates[0].Content.Parts[0].Text), &attr); err != nil {
+		return nil, fmt.Errorf("parse thread attribution: %w", err)
+	}
+	return &attr, nil
+}
+
 // DescribeScreen sends a screenshot to the multimodal model and returns a concise
 // description for memory. Used as the vision tier when accessibility text is blind
 // (browsers, video, games, canvas apps). Returns "" on any failure so the caller
@@ -233,6 +336,10 @@ type Storage interface {
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	ExistingNotes(ctx context.Context) ([]NoteRef, error)
 	UpdateNote(ctx context.Context, id int64, content string) error
+	// UpsertThread creates or refreshes a thread, returning its id.
+	UpsertThread(ctx context.Context, u ThreadUpdate) (int64, error)
+	// ThreadsForAttribution returns recent threads to seed the attribution call.
+	ThreadsForAttribution(ctx context.Context, limit int) ([]Thread, error)
 }
 
 const wordFlushLimit = 1500
@@ -263,8 +370,10 @@ func IsSalient(act tracker.Activity) bool {
 }
 
 type Compiler struct {
-	llm       Summarizer
-	store     Storage
+	llm   Summarizer
+	store Storage
+
+	mu        sync.Mutex
 	buffer    []tracker.Activity
 	wordCount int
 	lastFlush time.Time
@@ -286,19 +395,41 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 
 	incoming := countWords(act.ScreenText)
 
+	// Snapshot-and-reset happens under the lock; the (potentially slow) LLM/store
+	// work in processFlush runs afterward against the local copy, never while
+	// holding c.mu, so it can't block concurrent Ingest/GetCurrentBuffer/ForceFlush
+	// calls and can't re-enter the lock.
+	c.mu.Lock()
+	var flushedBuf []tracker.Activity
 	if len(c.buffer) > 0 {
 		last := c.buffer[len(c.buffer)-1]
 		appChanged := last.App != act.App
 		wordLimitHit := c.wordCount+incoming >= wordFlushLimit
-		hourElapsed := len(c.buffer) > 0 && time.Since(c.lastFlush) >= time.Hour
+		hourElapsed := time.Since(c.lastFlush) >= time.Hour
 
 		if appChanged || wordLimitHit || hourElapsed {
-			c.flush(ctx)
+			flushedBuf = c.resetBufferLocked()
 		}
 	}
 
 	c.wordCount += incoming
 	c.buffer = append(c.buffer, act)
+	c.mu.Unlock()
+
+	if flushedBuf != nil {
+		c.processFlush(ctx, flushedBuf)
+	}
+}
+
+// resetBufferLocked takes ownership of the current buffer (returning it for the
+// caller to process) and resets the compiler's buffered state. Callers must hold
+// c.mu.
+func (c *Compiler) resetBufferLocked() []tracker.Activity {
+	buf := c.buffer
+	c.buffer = make([]tracker.Activity, 0)
+	c.wordCount = 0
+	c.lastFlush = time.Now()
+	return buf
 }
 
 func countWords(s string) int {
@@ -319,8 +450,12 @@ func countWords(s string) int {
 	return n
 }
 
-func (c *Compiler) flush(ctx context.Context) {
-	if len(c.buffer) == 0 {
+// processFlush does the (potentially slow) LLM/store work for a flushed
+// buffer. It operates purely on the local buf snapshot and must NOT touch
+// c.buffer/c.wordCount/c.lastFlush — those are already reset by whoever
+// captured buf via resetBufferLocked. Never called while holding c.mu.
+func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
+	if len(buf) == 0 {
 		return
 	}
 
@@ -331,16 +466,13 @@ func (c *Compiler) flush(ctx context.Context) {
 	// sessions produce real titles but sparse screen text, and word count is
 	// a poor proxy for "worth remembering."
 	hasSignal := false
-	for _, act := range c.buffer {
+	for _, act := range buf {
 		if strings.TrimSpace(act.Title) != "" || act.ScreenText != "" {
 			hasSignal = true
 			break
 		}
 	}
 	if !hasSignal {
-		c.buffer = make([]tracker.Activity, 0)
-		c.wordCount = 0
-		c.lastFlush = time.Now()
 		return
 	}
 
@@ -348,11 +480,14 @@ func (c *Compiler) flush(ctx context.Context) {
 	ctx, span := tracer.Start(ctx, "Compiler.FlushBuffer")
 	defer span.End()
 
-	summary, err := c.llm.Summarize(ctx, c.buffer, "")
-	if err != nil || summary == nil {
-		// log raw activities if LLM fails
+	// attribute the buffer onto ongoing threads. existing threads seed the call
+	// so the model can reuse ids and keep the same throughline stable over time.
+	existingThreads, _ := c.store.ThreadsForAttribution(ctx, 40)
+	attr, err := c.llm.AttributeThreads(ctx, buf, existingThreads)
+	if err != nil || attr == nil || len(attr.Threads) == 0 {
+		// log raw activities if LLM fails or produces no usable attribution
 		var fallbackText strings.Builder
-		for _, act := range c.buffer {
+		for _, act := range buf {
 			line := act.App + " | " + act.Title
 			if act.ScreenText != "" {
 				line += " | " + act.ScreenText
@@ -366,18 +501,27 @@ func (c *Compiler) flush(ctx context.Context) {
 		}
 		_ = c.store.LogSemanticNode(ctx, fallbackSummary)
 	} else {
-		_ = c.store.LogSemanticNode(ctx, *summary)
-		if len(summary.Notes) > 0 {
+		// one update per concurrent thread: refresh the thread's current state
+		// and log an episodic summary node so history, FTS, and compaction all
+		// keep working unchanged.
+		for _, u := range attr.Threads {
+			_, _ = c.store.UpsertThread(ctx, u)
+			_ = c.store.LogSemanticNode(ctx, TaskSummary{SameTask: u.ID != 0, TaskName: u.Subject, Summary: u.Summary})
+		}
+
+		// identity: durable PERSON facts only, reconciled against existing notes
+		// exactly as before. usually empty.
+		if len(attr.Identity) > 0 {
 			existing, exErr := c.store.ExistingNotes(ctx)
 			ops, recErr := func() ([]NoteOp, error) {
 				if exErr != nil {
 					return nil, exErr
 				}
-				return c.llm.ReconcileNotes(ctx, existing, summary.Notes)
+				return c.llm.ReconcileNotes(ctx, existing, attr.Identity)
 			}()
 
 			if recErr != nil {
-				for _, n := range summary.Notes {
+				for _, n := range attr.Identity {
 					_, _ = c.store.LogNote(ctx, n, "fact")
 				}
 			} else {
@@ -392,20 +536,33 @@ func (c *Compiler) flush(ctx context.Context) {
 			}
 		}
 	}
-
-	c.buffer = make([]tracker.Activity, 0)
-	c.wordCount = 0
-	c.lastFlush = time.Now()
 }
 
 func (c *Compiler) BufferSize() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return len(c.buffer)
 }
 
 func (c *Compiler) ForceFlush(ctx context.Context) {
-	c.flush(ctx)
+	c.mu.Lock()
+	if len(c.buffer) == 0 {
+		c.mu.Unlock()
+		return
+	}
+	buf := c.resetBufferLocked()
+	c.mu.Unlock()
+
+	c.processFlush(ctx, buf)
 }
 
+// GetCurrentBuffer returns a copy of the live buffer so callers (the /buffer
+// HTTP handler, Agent.Connect) never read a slice that Ingest/flush may be
+// mutating concurrently.
 func (c *Compiler) GetCurrentBuffer() []tracker.Activity {
-	return c.buffer
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	buf := make([]tracker.Activity, len(c.buffer))
+	copy(buf, c.buffer)
+	return buf
 }

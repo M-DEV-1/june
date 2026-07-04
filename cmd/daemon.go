@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -152,6 +153,19 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 						}
 					}
 					recent, _ := store.RecentSummaries(ctx, 10)
+					// prepend concurrent live threads so the synthesized working
+					// state reflects everything in flight at once (watching +
+					// coding), not just the latest summary stream.
+					liveThreads, _ := store.GetLiveThreads(ctx, 6)
+					threadLines := make([]string, 0, len(liveThreads))
+					for _, t := range liveThreads {
+						if t.State != "" {
+							threadLines = append(threadLines, fmt.Sprintf("Ongoing %s — %s: %s", t.Kind, t.Subject, t.State))
+						} else {
+							threadLines = append(threadLines, fmt.Sprintf("Ongoing %s — %s", t.Kind, t.Subject))
+						}
+					}
+					recent = append(threadLines, recent...)
 					notes, _ := store.GetNotes(ctx)
 					noteStrings := make([]string, len(notes))
 					for i, n := range notes {

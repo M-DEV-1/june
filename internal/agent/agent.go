@@ -16,8 +16,8 @@ import (
 // user-stated facts via the agent handle.
 type ContextReader interface {
 	GetImplicitContext(ctx context.Context) ([]string, error)
-	QueryMemory(ctx context.Context, query string) ([]string, error)
 	SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error)
+	RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	GetNotes(ctx context.Context) ([]db.Note, error)
 	DeleteNote(ctx context.Context, id int64) error
