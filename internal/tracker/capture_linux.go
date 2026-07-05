@@ -123,9 +123,19 @@ func atspiExtract(ctx context.Context) (string, error) {
 			if !hasState(ctx, conn, win, stateActive) {
 				continue
 			}
-			// Found the focused top-level window — walk its subtree.
+			// Found the focused top-level window — walk its subtree, then
+			// apply the role-aware content rule (documentText): browser
+			// chrome lives outside any DOCUMENT_WEB node, so when one is
+			// present only its text is kept; native apps have no
+			// DOCUMENT_WEB node and fall back to the full tree unchanged.
 			visited := 0
-			dfsText(ctx, conn, win, 0, visited, seen, &parts)
+			tree := buildA11yTree(ctx, conn, win, 0, &visited)
+			if t := strings.TrimSpace(documentText(tree)); t != "" {
+				if _, dup := seen[t]; !dup {
+					seen[t] = struct{}{}
+					parts = append(parts, t)
+				}
+			}
 			break
 		}
 	}
@@ -259,38 +269,49 @@ func getText(ctx context.Context, conn *dbus.Conn, ref aref) string {
 	return text
 }
 
-// dfsText walks the accessible subtree from ref, collecting text from every
-// node that implements org.a11y.atspi.Text. Bounded by maxDepth, maxNodes, and
-// the context deadline.
-func dfsText(ctx context.Context, conn *dbus.Conn, ref aref, depth, visited int, seen map[string]struct{}, parts *[]string) int {
-	if depth > maxDepth || visited >= maxNodes || ctx.Err() != nil {
-		return visited
+// getRoleName reads the canonical (untranslated) AT-SPI role name of an
+// accessible — e.g. "document web", "tool bar", "push button". This is the
+// string form of the ATSPI_ROLE_* enum (GetRole returns the same information
+// as a uint32; GetRoleName is used here since it is self-describing and
+// needs no numeric constant table). Best-effort: any error yields "".
+func getRoleName(ctx context.Context, conn *dbus.Conn, ref aref) string {
+	obj := conn.Object(ref.Name, ref.Path)
+	var role string
+	obj.CallWithContext(ctx, "org.a11y.atspi.Accessible.GetRoleName", 0).Store(&role) //nolint:errcheck
+	return role
+}
+
+// buildA11yTree walks the accessible subtree from ref into an in-memory
+// a11yNode tree — role, own text (if the node implements org.a11y.atspi.Text),
+// and children — so the pure, unit-tested documentText rule can decide what
+// to keep (see document_text.go). Bounded by maxDepth, maxNodes (via the
+// visited counter), and the context deadline, mirroring the walk's previous
+// flat-collection bounds.
+func buildA11yTree(ctx context.Context, conn *dbus.Conn, ref aref, depth int, visited *int) a11yNode {
+	if depth > maxDepth || *visited >= maxNodes || ctx.Err() != nil {
+		return a11yNode{}
 	}
-	visited++
+	*visited++
+
+	node := a11yNode{Role: getRoleName(ctx, conn, ref)}
 
 	ifaces := getInterfaces(ctx, conn, ref)
 	for _, iface := range ifaces {
 		if iface == "org.a11y.atspi.Text" {
-			t := strings.TrimSpace(getText(ctx, conn, ref))
-			if t != "" {
-				if _, dup := seen[t]; !dup {
-					seen[t] = struct{}{}
-					*parts = append(*parts, t)
-				}
-			}
+			node.Text = strings.TrimSpace(getText(ctx, conn, ref))
 			break
 		}
 	}
 
 	children, err := getChildren(ctx, conn, ref)
 	if err != nil {
-		return visited
+		return node
 	}
 	for _, child := range children {
-		visited = dfsText(ctx, conn, child, depth+1, visited, seen, parts)
-		if visited >= maxNodes || ctx.Err() != nil {
+		if *visited >= maxNodes || ctx.Err() != nil {
 			break
 		}
+		node.Children = append(node.Children, buildA11yTree(ctx, conn, child, depth+1, visited))
 	}
-	return visited
+	return node
 }
