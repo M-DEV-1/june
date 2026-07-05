@@ -3,7 +3,7 @@
 
   <p align="center">
     <img alt="Go Version" src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go">
-    <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square">
+    <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20|%20Windows-0078D6?style=flat-square">
     <img alt="License" src="https://img.shields.io/badge/license-MIT-white?style=flat-square">
   </p>
 
@@ -73,7 +73,11 @@ If Jaeger is running locally, traces will automatically appear at http://localho
 ## Features
 
 - voice-first terminal interaction
-- local workspace activity tracking
+- switchable voice persona (`/voice list`, `/voice preview <name>`)
+- local workspace activity tracking (Linux AT-SPI · Windows UIA)
+- tiered capture: accessibility text first, screenshot + vision only when blind
+- media-aware capture (MPRIS), sees you're watching or in a call, not just the chrome
+- episodic memory, i.e. raw captures are preserved, then recalled ("walk me through my day" and other stuff like this)
 - OpenTelemetry tracing support
 - TUI interface
 - persistent lightweight context tracking
@@ -87,6 +91,7 @@ Most of the complexity comes from process synchronization, audio pipes, and keep
 
 ## Plans?
 
-- [ ] Linux tracker support
+- [x] Linux tracker support
 - [ ] Local model support
+- [ ] Lightweight vector recall (hnsw), only when i feel like it's TRULY required tho (my belief is that a good harness solves most problems that one can face)
 - [ ] Sandboxed automation runtime
