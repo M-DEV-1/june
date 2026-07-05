@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ora/internal/agent"
+	"ora/internal/config"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -488,15 +489,18 @@ func (m *model) executeCommand(input string) {
 		m.messages = []Message{}
 	case "/help":
 		helpText := `Available Commands:
-  /voice       - Switch to Voice-Only mode
-  /text        - Switch to Text-Only mode
-  /both        - Switch to Voice + Text mode
-  /mute        - Toggle global microphone mute
-  /context     - View the semantic memory currently loaded
-  /note <txt>  - Save a stable user-stated fact
-  /notes       - List saved notes
-  /clear       - Clear the chat screen
-  /help        - Show this help menu`
+  /voice          - Switch to Voice-Only mode
+  /voice list     - List available TTS voices and show the current one
+  /voice preview <name> - Hear a sample of a voice without changing it
+  /voice <name>   - Change Ora's speaking voice (e.g. /voice Kore)
+  /text           - Switch to Text-Only mode
+  /both           - Switch to Voice + Text mode
+  /mute           - Toggle global microphone mute
+  /context        - View the semantic memory currently loaded
+  /note <txt>     - Save a stable user-stated fact
+  /notes          - List saved notes
+  /clear          - Clear the chat screen
+  /help           - Show this help menu`
 		m.messages = append(m.messages, Message{Sender: "system", Content: helpText})
 	case "/context":
 		importCtx, err := m.agent.GetBrain().GetImplicitContext(context.Background())
@@ -519,8 +523,12 @@ func (m *model) executeCommand(input string) {
 			m.messages = append(m.messages, Message{Sender: "system", Content: "Saved Notes:\n" + strings.Join(lines, "\n")})
 		}
 	default:
-		// /note <text>  -- handled here so the trailing text isn't lost
-		if strings.HasPrefix(input, "/note ") {
+		// /voice list | /voice <name>  -- bare "/voice" above keeps its existing
+		// meaning (switch to Voice-Only mode); anything after it is voice
+		// selection instead.
+		if strings.HasPrefix(input, "/voice ") {
+			m.handleVoiceCommand(strings.TrimPrefix(input, "/voice "))
+		} else if strings.HasPrefix(input, "/note ") {
 			content := strings.TrimSpace(strings.TrimPrefix(input, "/note "))
 			if content == "" {
 				m.messages = append(m.messages, Message{Sender: "system", Content: "Usage: /note <text>"})
@@ -539,6 +547,56 @@ func (m *model) executeCommand(input string) {
 		}
 	}
 	m.updateViewport()
+}
+
+// handleVoiceCommand implements "/voice list" and "/voice <name>". Bare
+// "/voice" never reaches here — it's handled above as the Voice-Only mode
+// switch, matching its long-standing behavior.
+func (m *model) handleVoiceCommand(arg string) {
+	action, name := parseVoiceCommand(arg)
+
+	current := m.agent.GetVoice()
+	if current == "" {
+		current = config.DefaultVoice
+	}
+
+	if action == voiceActionList {
+		m.messages = append(m.messages, Message{Sender: "system", Content: voiceListMessage(current)})
+		return
+	}
+
+	if action == voiceActionPreview {
+		if name == "" {
+			m.messages = append(m.messages, Message{Sender: "system", Content: voicePreviewUsageMessage()})
+			return
+		}
+		canonical, ok := config.NormalizeVoice(name)
+		if !ok {
+			m.messages = append(m.messages, Message{Sender: "system", Content: voiceUnknownMessage(name)})
+			return
+		}
+		m.messages = append(m.messages, Message{Sender: "system", Content: voicePreviewStartMessage(canonical)})
+		if err := m.agent.PreviewVoice(context.Background(), canonical); err != nil {
+			m.messages = append(m.messages, Message{Sender: "system", Content: voicePreviewErrorMessage(canonical, err)})
+		}
+		return
+	}
+
+	canonical, ok := config.NormalizeVoice(name)
+	if !ok {
+		m.messages = append(m.messages, Message{Sender: "system", Content: voiceUnknownMessage(name)})
+		return
+	}
+
+	cfg := config.LoadConfig()
+	if err := cfg.SetVoice(canonical); err != nil {
+		m.messages = append(m.messages, Message{Sender: "system", Content: "Failed to save voice: " + err.Error()})
+		return
+	}
+
+	m.agent.SetVoice(canonical)
+	m.agent.TriggerReconnect()
+	m.messages = append(m.messages, Message{Sender: "system", Content: voiceSetMessage(canonical)})
 }
 
 func (m model) View() string {

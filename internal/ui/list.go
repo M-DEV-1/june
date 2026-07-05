@@ -59,6 +59,8 @@ func (d commandDelegate) Render(w io.Writer, m list.Model, index int, listItem l
 func newCommandList(s Styles) list.Model {
 	items := []list.Item{
 		commandItem{title: "voice", desc: "Switch to Voice-Only mode"},
+		commandItem{title: "voice list", desc: "List TTS voices / show current"},
+		commandItem{title: "voice preview ", desc: "Hear a sample of a voice: /voice preview <name>"},
 		commandItem{title: "text", desc: "Switch to Text-Only mode"},
 		commandItem{title: "both", desc: "Switch to Voice + Text mode"},
 		commandItem{title: "mute", desc: "Toggle microphone mute state globally"},
@@ -102,6 +104,8 @@ func newHitlList(s Styles) list.Model {
 func FilterCommands(l *list.Model, query string) {
 	allCommands := []list.Item{
 		commandItem{title: "voice", desc: "Switch to Voice-Only mode"},
+		commandItem{title: "voice list", desc: "List TTS voices / show current"},
+		commandItem{title: "voice preview ", desc: "Hear a sample of a voice: /voice preview <name>"},
 		commandItem{title: "text", desc: "Switch to Text-Only mode"},
 		commandItem{title: "both", desc: "Switch to Voice + Text mode"},
 		commandItem{title: "mute", desc: "Toggle microphone mute state globally"},

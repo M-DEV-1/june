@@ -39,6 +39,7 @@ type Agent struct {
 	compiler         *memory.Compiler
 	apiKey           string
 	model            atomic.Value
+	voice            atomic.Value
 	isMuted          atomic.Bool
 	writeMu          sync.Mutex  // protects websocket writes
 	TextChan         chan string // this is for tui text input
@@ -46,6 +47,11 @@ type Agent struct {
 	ErrorChan        chan error  // websocket connection crashes
 	ToolApprovalChan chan ToolRequest
 	AllowedCmds      sync.Map // session allowlist for shell commands
+	// ReconnectChan lets callers (e.g. the /voice command) force the live
+	// session to drop and re-dial, so a config change like the TTS voice
+	// (fixed at handshake) takes effect promptly instead of on next launch.
+	// Buffered 1 + non-blocking send: a redundant trigger is a no-op.
+	ReconnectChan chan struct{}
 }
 
 // initializer and orchestrates all hardware (2) and memory (1) moduels
@@ -87,6 +93,32 @@ func (a *Agent) GetModel() string {
 	return val.(string)
 }
 
+// SetVoice sets the Gemini Live prebuilt voice name to use on the next
+// (re)connect. Does not itself trigger a reconnect — call TriggerReconnect
+// (or let the next natural reconnect pick it up).
+func (a *Agent) SetVoice(name string) {
+	a.voice.Store(name)
+}
+
+// GetVoice returns the currently configured voice name, or "" if unset.
+func (a *Agent) GetVoice() string {
+	val := a.voice.Load()
+	if val == nil {
+		return ""
+	}
+	return val.(string)
+}
+
+// TriggerReconnect asks the running Connect session to drop and re-dial, so a
+// voice change applies immediately rather than on the next natural reconnect.
+// Non-blocking: if a reconnect is already pending, this is a no-op.
+func (a *Agent) TriggerReconnect() {
+	select {
+	case a.ReconnectChan <- struct{}{}:
+	default:
+	}
+}
+
 func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, compiler *memory.Compiler, apiKey string) *Agent {
 	a := &Agent{
 		mic:              mic,
@@ -98,6 +130,7 @@ func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, 
 		TextResponseChan: make(chan string, 100),
 		ErrorChan:        make(chan error, 10),
 		ToolApprovalChan: make(chan ToolRequest, 1),
+		ReconnectChan:    make(chan struct{}, 1),
 	}
 	return a
 }
