@@ -85,14 +85,19 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	}
 
 	// config
-	// TODO: add more voices, with pre-view to main app
+	// Voice is configurable via /voice in the TUI (see config.AvailableVoices);
+	// falls back to config.DefaultVoice if unset or invalid.
+	voiceName := a.GetVoice()
+	if voiceName == "" || !config.IsValidVoice(voiceName) {
+		voiceName = config.DefaultVoice
+	}
+	span.SetAttributes(attribute.String("agent.voice", voiceName))
 	cfg := &genai.LiveConnectConfig{
 		ResponseModalities: []genai.Modality{genai.ModalityAudio},
 		SpeechConfig: &genai.SpeechConfig{
 			VoiceConfig: &genai.VoiceConfig{
 				PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-					// aoede, puck, fenrir, charon, kore
-					VoiceName: "Iapetus",
+					VoiceName: voiceName,
 				},
 			},
 		},
@@ -163,6 +168,11 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		return err
 	case <-sessCtx.Done():
 		return sessCtx.Err()
+	case <-a.ReconnectChan:
+		// e.g. /voice changed — the Live session's voice is fixed at handshake,
+		// so the only way to apply it is to drop and let the caller's reconnect
+		// loop redial with the new config.
+		return fmt.Errorf("reconnecting to apply updated settings")
 	}
 }
 
