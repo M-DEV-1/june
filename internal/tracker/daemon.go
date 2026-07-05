@@ -234,7 +234,8 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	// vision only escalates for a real foreground app — never the bare desktop,
 	// or we'd snap and describe the wallpaper on a loop while the user is idle.
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
-	if !shouldUseVision(len([]rune(text)), visionEnabled, time.Since(*lastVisionTime)) {
+	mediaActive := mediaPlaying(ctx)
+	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
 		return diff(lastText, text)
 	}
 
@@ -274,13 +275,19 @@ func isVisionWorthy(act Activity) bool {
 }
 
 // shouldUseVision decides whether to escalate to the (expensive) vision tier:
-// only when vision is enabled, accessibility text is thin, and enough time has
-// passed since the last vision call. This is the cost guard.
-func shouldUseVision(textLen int, visionEnabled bool, sinceLastVision time.Duration) bool {
+// only when vision is enabled and enough time has passed since the last
+// vision call (the cost guard, non-negotiable). Accessibility text length
+// normally gates it too — thin text means accessibility can't describe the
+// screen — but mediaActive (an MPRIS player actively "Playing", e.g. a video
+// or a call) bypasses that gate: a browser tab playing video can return
+// thousands of runes of surrounding chrome text while describing nothing
+// about the video itself, so text length alone is not a reliable signal
+// there.
+func shouldUseVision(textLen int, visionEnabled bool, mediaActive bool, sinceLastVision time.Duration) bool {
 	if !visionEnabled {
 		return false
 	}
-	if textLen >= thinTextThreshold {
+	if !mediaActive && textLen >= thinTextThreshold {
 		return false
 	}
 	return sinceLastVision >= minVisionInterval
