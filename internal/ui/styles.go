@@ -45,6 +45,12 @@ type Styles struct {
 	ToolDot  lipgloss.Style
 	ToolText lipgloss.Style
 
+	ToolLogDot        lipgloss.Style
+	ToolLogText       lipgloss.Style
+	ToolLogFailedDot  lipgloss.Style
+	ToolLogFailedText lipgloss.Style
+	StatusLine        lipgloss.Style
+
 	WaveUser lipgloss.Style
 	WaveOra  lipgloss.Style
 
@@ -130,6 +136,17 @@ func DefaultStyles() Styles {
 
 	s.ToolDot = lipgloss.NewStyle().Foreground(s.Purple).Background(s.BgViewport)
 	s.ToolText = lipgloss.NewStyle().Foreground(s.Gray).Background(s.BgViewport).Italic(true)
+
+	// Collapsed "tool ran" transcript entries — a step dimmer than the HITL prompt above, since it's a passive record, not a request.
+	s.ToolLogDot = lipgloss.NewStyle().Foreground(s.Purple).Background(s.BgViewport)
+	s.ToolLogText = lipgloss.NewStyle().Foreground(s.Gray).Background(s.BgViewport)
+
+	// Failed tool calls get their own color (red-500, same family/lightness as the emerald/amber pills elsewhere) so they don't read as a normal completed call.
+	s.ToolLogFailedDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#ef4444")).Background(s.BgViewport)
+	s.ToolLogFailedText = lipgloss.NewStyle().Foreground(lipgloss.Color("#ef4444")).Background(s.BgViewport)
+
+	// Live "agent is doing something" status line, rendered above the input — dim like the kbd hints it visually replaces while active.
+	s.StatusLine = lipgloss.NewStyle().Foreground(s.Gray).Background(s.BgInput)
 
 	// keyboard hints and input styling - locking to BgInput
 	s.InputPrefix = lipgloss.NewStyle().

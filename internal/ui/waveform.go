@@ -35,20 +35,20 @@ const fallAlpha = 0.26
 // row0Levels: braille masks for top char (row0), filling from center upward.
 // Index = number of dot-rows filled (0=empty, 4=full block).
 var row0Levels = [5]rune{
-	0x2800,                      // 0: empty
-	0x2800 | 0x40 | 0x80,       // 1: dots 7,8  (bottom of top char = center)
+	0x2800,                             // 0: empty
+	0x2800 | 0x40 | 0x80,               // 1: dots 7,8  (bottom of top char = center)
 	0x2800 | 0x40 | 0x80 | 0x04 | 0x20, // 2: + dots 3,6
 	0x2800 | 0x40 | 0x80 | 0x04 | 0x20 | 0x02 | 0x10, // 3: + dots 2,5
-	0x28FF,                      // 4: all dots
+	0x28FF, // 4: all dots
 }
 
 // row1Levels: braille masks for bottom char (row1), filling from center downward.
 var row1Levels = [5]rune{
-	0x2800,                      // 0: empty
-	0x2800 | 0x01 | 0x08,       // 1: dots 1,4  (top of bottom char = center)
+	0x2800,                             // 0: empty
+	0x2800 | 0x01 | 0x08,               // 1: dots 1,4  (top of bottom char = center)
 	0x2800 | 0x01 | 0x08 | 0x02 | 0x10, // 2: + dots 2,5
 	0x2800 | 0x01 | 0x08 | 0x02 | 0x10 | 0x04 | 0x20, // 3: + dots 3,6
-	0x28FF,                      // 4: all dots
+	0x28FF, // 4: all dots
 }
 
 func NewWaveform(width int) *Waveform {
@@ -61,8 +61,7 @@ func NewWaveform(width int) *Waveform {
 	}
 }
 
-// buildVariation generates per-column multipliers (0.35–1.0) using overlapping
-// sine waves so adjacent columns have correlated but irregular heights.
+// buildVariation generates per-column multipliers (0.35-1.0) using overlapping sine waves so adjacent columns have correlated but irregular heights.
 func buildVariation(width int) []float64 {
 	v := make([]float64, width)
 	for i := range v {
