@@ -22,10 +22,7 @@ func TestShouldUseVision(t *testing.T) {
 		{"exactly at threshold -> no vision", thinTextThreshold, true, false, time.Hour, false},
 		{"just below threshold -> vision", thinTextThreshold - 1, true, false, time.Hour, true},
 
-		// mediaActive (MPRIS "Playing") bypasses the text-length gate: a
-		// browser tab playing video/a call returns lots of chrome text but
-		// describes nothing about what's on screen, so length is not a
-		// reliable signal while media is playing.
+		// mediaActive (MPRIS "Playing") bypasses the text-length gate: a browser tab playing video/a call returns lots of chrome text but describes nothing about what's on screen.
 		{"media playing, rich chrome text, ready -> vision fires anyway", 5000, true, true, time.Hour, true},
 		{"media not playing, rich text -> still no vision", 5000, true, false, time.Hour, false},
 		{"media playing, thin text, ready -> vision", 10, true, true, time.Hour, true},

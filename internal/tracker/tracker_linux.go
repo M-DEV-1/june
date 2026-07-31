@@ -32,10 +32,7 @@ const (
 	backendX11
 )
 
-// selectBackend picks a strategy from session capabilities. AT-SPI takes
-// priority over X11 on Wayland because XWayland's _NET_ACTIVE_WINDOW is blind to
-// native Wayland windows (it reports 0x0), making the X11 path useless on
-// GNOME/KDE Wayland. On native X11, the X11 backend is preferred.
+// selectBackend picks a strategy from session capabilities. AT-SPI takes priority over X11 on Wayland because XWayland's _NET_ACTIVE_WINDOW reports 0x0 for native Wayland windows, making X11 useless there. On native X11, X11 is preferred.
 func selectBackend(haveSway, haveHypr, wayland, haveX11 bool) backend {
 	switch {
 	case haveSway:
@@ -93,9 +90,7 @@ func New() (Tracker, error) {
 	return t, nil
 }
 
-// atspiWindow reports the focused window via AT-SPI over D-Bus — the only
-// pure-Go path that sees native Wayland windows on GNOME/KDE. Falls back to
-// "Unknown" when the accessibility bus is unavailable.
+// atspiWindow reports the focused window via AT-SPI over D-Bus — the only pure-Go path that sees native Wayland windows on GNOME/KDE. Falls back to "Unknown" when the accessibility bus is unavailable.
 func (t *linuxTracker) atspiWindow() (*Activity, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()

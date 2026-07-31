@@ -19,8 +19,7 @@ func captureScreen() ([]byte, error) {
 	return nil, nil
 }
 
-// grabScreen is not yet implemented on Windows — UIA text capture covers most
-// cases; a BitBlt-based visual tier can be added later.
+// grabScreen is not yet implemented on Windows — UIA text capture covers most cases; a BitBlt-based visual tier can be added later.
 func grabScreen(_ context.Context) ([]byte, error) {
 	return nil, errors.New("screenshot not implemented on windows")
 }
@@ -28,8 +27,7 @@ func grabScreen(_ context.Context) ([]byte, error) {
 // extractText reads structured text from the focused window via UI Automation.
 // Returns empty string (not error) when the focused element is null or unreadable.
 func extractText() (string, error) {
-	// write the embedded script to a temp file so PowerShell can run it with -File
-	// this avoids any path interpolation inside the script itself
+	// write the embedded script to a temp file so PowerShell can run it with -File — this avoids any path interpolation inside the script itself
 	scriptFile, err := os.CreateTemp("", "ora-uia-*.ps1")
 	if err != nil {
 		return "", err
@@ -43,9 +41,7 @@ func extractText() (string, error) {
 	}
 	scriptFile.Close()
 
-	// TODO: powershell.exe cold start is ~200-400ms per call. eventually swap to
-	// a persistent host (stdin pipe, send paths, read stdout) if recapture
-	// cadence tightens.
+	// TODO: powershell.exe cold start is ~200-400ms per call. eventually swap to a persistent host (stdin pipe, send paths, read stdout) if recapture cadence tightens.
 	cmd := exec.Command(
 		"powershell.exe", "-NoProfile", "-NonInteractive",
 		"-File", scriptPath,
