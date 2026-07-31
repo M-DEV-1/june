@@ -85,3 +85,45 @@ func TestDocumentText_EmptyWebDocument_DoesNotFallBackToChrome(t *testing.T) {
 		t.Errorf("documentText = %q, want empty (must not fall back to chrome just because doc is empty)", got)
 	}
 }
+
+// reproduces a real production bug: AT-SPI's Text interface on a container node (e.g. a link) returns its descendants' aggregated text, doubling every link/label on a captured page ("LEARN MORE LEARN MORE").
+func TestDocumentText_DedupesParentChildTextAggregation(t *testing.T) {
+	tree := a11yNode{
+		Role: roleDocumentWeb,
+		Children: []a11yNode{
+			{
+				Role: "link",
+				Text: "LEARN MORE", // container's GetText aggregates its child's text
+				Children: []a11yNode{
+					{Role: "static text", Text: "LEARN MORE"},
+				},
+			},
+			{Role: "paragraph", Text: "the actual article text"},
+		},
+	}
+
+	got := documentText(tree)
+	want := "LEARN MORE\nthe actual article text"
+	if got != want {
+		t.Errorf("documentText = %q, want %q (parent/child duplicate text must be collapsed)", got, want)
+	}
+}
+
+// ensures the dedup above is scoped to parent/child aggregation, not "one occurrence per page" — two unrelated links sharing a label must both survive.
+func TestDocumentText_KeepsDistinctRepeatedLabels(t *testing.T) {
+	tree := a11yNode{
+		Role: roleDocumentWeb,
+		Children: []a11yNode{
+			{Role: "link", Text: "LEARN MORE"},
+			{Role: "paragraph", Text: "Product A"},
+			{Role: "link", Text: "LEARN MORE"},
+			{Role: "paragraph", Text: "Product B"},
+		},
+	}
+
+	got := documentText(tree)
+	want := "LEARN MORE\nProduct A\nLEARN MORE\nProduct B"
+	if got != want {
+		t.Errorf("documentText = %q, want %q (distinct sibling nodes with the same label must not be deduped away)", got, want)
+	}
+}

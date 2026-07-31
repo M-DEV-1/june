@@ -9,18 +9,11 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// mprisPrefix is the well-known bus name prefix every MPRIS-compliant media
-// player registers under (browsers playing video/audio, Spotify, VLC, mpv
-// with the mpris plugin, video-call clients, etc).
+// mprisPrefix is the well-known bus name prefix every MPRIS-compliant media player registers under (browsers, Spotify, VLC, mpv, video-call clients, etc).
 const mprisPrefix = "org.mpris.MediaPlayer2."
 
-// mediaPlaying reports whether any MPRIS media player on the session bus is
-// currently in the "Playing" state. Used to force the vision tier even when
-// AT-SPI text looks "rich" — a browser tab playing a video, or a meeting
-// call, has plenty of accessibility text (the surrounding chrome) but none
-// of it describes what's actually on screen. Best-effort: any D-Bus error
-// (no session bus, no players, a player that doesn't expose the interface)
-// yields false rather than propagating — this must never fail a capture tick.
+// mediaPlaying reports whether any MPRIS media player on the session bus is currently "Playing". Used to force the vision tier even when AT-SPI text looks rich — a video or call tab has plenty of chrome text but none of it describes the screen.
+// Best-effort: any D-Bus error yields false rather than propagating — this must never fail a capture tick.
 func mediaPlaying(ctx context.Context) bool {
 	conn, err := dbus.SessionBus()
 	if err != nil {
@@ -46,8 +39,7 @@ func mediaPlaying(ctx context.Context) bool {
 	return false
 }
 
-// playerIsPlaying reads the PlaybackStatus property of a single MPRIS player
-// object and reports whether it equals "Playing".
+// playerIsPlaying reads the PlaybackStatus property of a single MPRIS player object and reports whether it equals "Playing".
 func playerIsPlaying(ctx context.Context, conn *dbus.Conn, busName string) bool {
 	obj := conn.Object(busName, "/org/mpris/MediaPlayer2")
 	var status dbus.Variant
