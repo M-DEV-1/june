@@ -68,8 +68,8 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	appConfig := config.LoadConfig()
 	orchestrator.SetVoice(appConfig.Voice)
 
-	// Reconnect loop: if the Gemini session drops (idle timeout, network blip,
-	// session limit), restart automatically. Mic stays running throughout.
+	// Reconnect loop: if the Gemini session drops (idle timeout, network blip, session limit), restart automatically.
+	// Mic stays running throughout.
 	go func() {
 		for {
 			if err := orchestrator.Connect(ctx, micChan); err != nil {
