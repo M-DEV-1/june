@@ -67,6 +67,14 @@ func (m *model) renderSignalField() string {
 	return m.styles.SignalField.Width(m.width).Align(lipgloss.Center).Render(waves)
 }
 
+// renderStatusLine renders the spinner + label for "agent is doing something" (an in-flight tool call, or "thinking" while waiting for the first response chunk). Returns "" when nothing is active, which renderInput treats as omit-this-row rather than a blank line.
+func (m *model) renderStatusLine() string {
+	if m.activity == nil {
+		return ""
+	}
+	return m.styles.StatusLine.Render(m.spinner.View() + " " + m.activity.label)
+}
+
 func (m *model) renderInput() string {
 	inpRow := lipgloss.JoinHorizontal(lipgloss.Center,
 		m.styles.InputPrefix.Render("❯"),
@@ -96,26 +104,30 @@ func (m *model) renderInput() string {
 		m.styles.KbdKey.Render("ram"), ramHint,
 	)
 
+	// Built as a slice so the status row only adds a line when present — an unconditional empty string would still add a blank row via JoinVertical's join, breaking recalcViewportHeight's count.
+	rows := []string{}
+	if line := m.renderStatusLine(); line != "" {
+		rows = append(rows, line)
+	}
+	rows = append(rows, inpRow)
+
 	// 1. Render the menu depending on state
-	var inputDeck string
 	if m.mode == ModeToolConfirm {
 		menu := lipgloss.NewStyle().
 			Background(m.styles.BgInput).
 			PaddingTop(1).
 			Render(m.hitlList.View())
-
-		inputDeck = lipgloss.JoinVertical(lipgloss.Left, inpRow, menu)
+		rows = append(rows, menu)
 	} else if m.showCmdList {
 		menu := lipgloss.NewStyle().
 			Background(m.styles.BgInput).
 			PaddingTop(1).
 			Render(m.cmdList.View())
-
-		// Show menu below the input
-		inputDeck = lipgloss.JoinVertical(lipgloss.Left, inpRow, menu)
+		rows = append(rows, menu) // shown below the input
 	} else {
-		inputDeck = lipgloss.JoinVertical(lipgloss.Left, inpRow, lipgloss.NewStyle().Background(m.styles.BgInput).PaddingTop(1).Render(hints))
+		rows = append(rows, lipgloss.NewStyle().Background(m.styles.BgInput).PaddingTop(1).Render(hints))
 	}
 
+	inputDeck := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	return m.styles.InputWrap.Width(m.width).Render(inputDeck)
 }
