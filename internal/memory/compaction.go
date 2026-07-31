@@ -18,8 +18,7 @@ type NodeRef struct {
 	Content string
 }
 
-// SummaryGroup is one day's worth of old summary nodes, returned by
-// CompactStore.OldSummaryGroups and consumed by Compactor.Compact.
+// SummaryGroup is one day's worth of old summary nodes, returned by CompactStore.OldSummaryGroups and consumed by Compactor.Compact.
 type SummaryGroup struct {
 	DayID     int64
 	Day       string
@@ -38,8 +37,7 @@ type CompactStore interface {
 	ReplaceSummariesWithDigest(ctx context.Context, dayID int64, summaryIDs []int64, digest string) error
 }
 
-// Compactor rolls up old fine-grained summaries into a single daily digest
-// per day, mirroring the LSM-tree "compact older levels" pattern.
+// Compactor rolls old fine-grained summaries up into one daily digest per day, mirroring the LSM-tree "compact older levels" pattern.
 type Compactor struct {
 	llm   Digester
 	store CompactStore
@@ -49,12 +47,8 @@ func NewCompactor(llm Digester, store CompactStore) *Compactor {
 	return &Compactor{llm: llm, store: store}
 }
 
-// Compact fetches all summary groups older than olderThan, and for each day
-// with at least two summaries: calls llm.Digest, writes a digest node, and
-// deletes the constituent summaries atomically (via the store).
-// Groups with a single summary are left alone — nothing to merge yet.
-// Per-group errors are logged but do not abort the entire run; the caller
-// gets a nil error as long as the store lookup itself succeeded.
+// Compact digests and replaces each day's summary group (2+ summaries) with one merged digest node.
+// Single-summary days are left alone. A failed group is logged and skipped, not fatal — Compact only returns an error if the initial store lookup fails.
 func (c *Compactor) Compact(ctx context.Context, olderThan time.Duration) error {
 	groups, err := c.store.OldSummaryGroups(ctx, olderThan)
 	if err != nil {
@@ -96,9 +90,8 @@ func (c *Compactor) Compact(ctx context.Context, olderThan time.Duration) error 
 	return nil
 }
 
-// Digest implements Digester on GeminiSummarizer. It merges the provided
-// summary texts into one coarse prose description of what the user did that day.
-// Plain text out — no JSON needed, so we skip structured output here.
+// Digest implements Digester on GeminiSummarizer, merging the summary texts into one coarse prose description of what the user did that day.
+// Plain text out, no JSON needed.
 func (g *GeminiSummarizer) Digest(ctx context.Context, summaries []string) (string, error) {
 	if len(summaries) == 0 {
 		return "", nil
