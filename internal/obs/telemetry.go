@@ -33,8 +33,7 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
 
-	// setup slog
-	// so instead of one big setup, i decided to make it seperated, also created a custom slog Handler. extracts trace, span from context for every log and injects as json
+	// custom slog Handler pulls trace/span out of ctx and injects them into every json log line
 	options := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}
@@ -49,11 +48,8 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 		return noop, nil
 	}
 
-	// setup otlp trace exporter (for any collector)
-	// otlptracegrpc localhost:4317
-	// data moves to 4317 and then to any collector (whatever is setup)
-	// but now, we only enable OTLP exporter if endpoint is explicitly configured
-	// mosts won't have Jaeger running; blocking on gRPC dial added 3-5s startup cost
+	// otlp trace exporter, defaults to localhost:4317 for any collector (jaeger etc).
+	// only enabled when OTEL_EXPORTER_OTLP_ENDPOINT is set -- most won't have a collector running, and blocking on the gRPC dial added 3-5s startup cost.
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if endpoint == "" {
 		slog.Info("tracing disabled (set OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 to enable)")
@@ -109,7 +105,7 @@ func GetTracer(ctx context.Context, name string) trace.Tracer {
 // apparently this is a one time setup file?
 // counter for how many times i changed this file: 3
 
-// handler struct to wrap another handler which is the basis of this tracer middleware tbh (json)
+// TraceHandler wraps another slog.Handler and injects trace_id/span_id into every log record.
 type TraceHandler struct {
 	handler slog.Handler
 }
