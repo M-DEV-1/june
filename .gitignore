@@ -3,9 +3,11 @@ bin/
 dist/
 *.exe
 *.exe~
+*.exe.old
 *.dll
 *.so
 *.dylib
+/ora
 
 # Test coverage
 *.out
