@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"ora/internal/memory"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"ora/internal/obs"
 
@@ -27,18 +29,21 @@ type Store struct {
 	mu              sync.RWMutex
 	currentParentID int64 // bookmark for session
 	currentTaskID   int64 // bookmark for task
+
+	// embedder/vectorIndex back HybridSearch's semantic half (see hybrid.go). Both nilable, wired via SetEmbedder/SetVectorIndex — a Store with neither set runs lexical-only.
+	embedder    embedder
+	vectorIndex vectorIndex
 }
 
 // constructor, return pointer to struct and err
 func New(path string) (*Store, error) {
-	// write-ahead logging (multi tasking)
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)" // data source name
-	// filenames multi-os needs to be managed
+	// WAL lets multiple connections read/write concurrently (daemon LogEpisode + tool HybridSearch); busy_timeout makes them wait instead of erroring SQLITE_BUSY immediately.
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 
 	if path != ":memory:" {
 		dir := filepath.Dir(path)
 
-		// 0755 is octal for 755 chmod with owner 421 full access, group 401 read and enter only, others 401
+		// 0755: owner rwx, group/other rx
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create directory: %w", err)
 		}
@@ -100,7 +105,8 @@ func (s *Store) createSchema() error {
 		parent_id INTEGER REFERENCES nodes(id),
 		type TEXT NOT NULL,
 		content TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		domain TEXT NOT NULL DEFAULT ''
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_unique ON nodes(IFNULL(parent_id, 0), type, content);
 	CREATE INDEX IF NOT EXISTS idx_parent_id ON nodes(parent_id);
@@ -115,6 +121,20 @@ func (s *Store) createSchema() error {
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
+
+	-- folds: a branch() subtask's result that couldn't be delivered into the
+	-- live session that requested it. Staged here to surface at the next
+	-- session's handshake instead of being silently dropped. Deliberately
+	-- separate from notes -- a fold is a one-off task result, not a durable
+	-- user fact, and belongs nowhere near ReconcileNotes' identity-fact
+	-- reconciliation pass.
+	CREATE TABLE IF NOT EXISTS folds (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		task TEXT NOT NULL,
+		result TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		consumed_at DATETIME
+	);
 
 	-- single-row cache: synthesized "what is the user doing right now" summary.
 	-- recomputed on a cadence by the daemon, disposable, replaced in full each time.
@@ -202,7 +222,8 @@ func (s *Store) createSchema() error {
 		app TEXT NOT NULL,
 		title TEXT NOT NULL,
 		screen_text TEXT NOT NULL DEFAULT '',
-		importance REAL NOT NULL DEFAULT 0
+		importance REAL NOT NULL DEFAULT 0,
+		domain TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_episodes_created_at ON episodes(created_at);
 	CREATE INDEX IF NOT EXISTS idx_episodes_app_title ON episodes(app, title);
@@ -240,8 +261,48 @@ func (s *Store) createSchema() error {
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
 	// TODO: salience score to prioritize important activities and not track menial activities
 	// i.e. what do we choose to remember
-	_, err := s.db.Exec(query)
-	return err
+	if _, err := s.db.Exec(query); err != nil {
+		return err
+	}
+
+	// Migration for pre-existing DBs from before the domain column existed. modernc.org/sqlite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS (confirmed empirically — syntax error, not a no-op), so ensureColumn checks via PRAGMA table_info instead. Safe to run on every startup, including brand-new DBs where CREATE TABLE already added the column.
+	if err := s.ensureColumn("nodes", "domain", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("episodes", "domain", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureColumn adds column to table (with the given SQL type/constraint) if it doesn't already exist, checked via PRAGMA table_info since modernc.org/sqlite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS.
+func (s *Store) ensureColumn(table, column, coldef string) error {
+	rows, err := s.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return fmt.Errorf("ensure column %s.%s: pragma table_info: %w", table, column, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return fmt.Errorf("ensure column %s.%s: scan pragma row: %w", table, column, err)
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("ensure column %s.%s: iterate pragma rows: %w", table, column, err)
+	}
+
+	if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, coldef)); err != nil {
+		return fmt.Errorf("ensure column %s.%s: alter table: %w", table, column, err)
+	}
+	return nil
 }
 
 // Note is a stable, user-stated fact. Always-on in implicit context.
@@ -253,7 +314,17 @@ type Note struct {
 	UpdatedAt time.Time
 }
 
+// normalizeNoteContent trims, collapses internal whitespace to single spaces, and lowercases — used by LogNote's dedup check to catch paraphrased restatements.
+// Does not strip punctuation, so "user likes go" and "user likes go." still stay distinct rows.
+func normalizeNoteContent(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
 // LogNote inserts a note. Idempotent on (content, kind) — returns existing id.
+// Also dedupes paraphrased restatements: existing notes of the same kind are compared via normalizeNoteContent, so "User likes Go" and "user likes go" collapse to one row without needing a semantic/embedding index.
+// Storage keeps the original casing/whitespace though — the first-ever version of a fact wins and is what every later paraphrase resolves back to (GetNotes/ExistingNotes/RetrieveRelevant all depend on this original casing surviving).
+//
+// The exact-match (content, kind) unique index still backs the INSERT OR IGNORE path below for byte-identical restatements and is what actually guards concurrent identical inserts — the normalized-comparison scan above is an application-level, non-atomic check and doesn't itself prevent a race between two differently-cased paraphrases.
 func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.LogNote")
@@ -261,6 +332,15 @@ func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error
 
 	if kind == "" {
 		kind = "fact"
+	}
+
+	normalized := normalizeNoteContent(content)
+	if id, found, err := s.findNoteByNormalizedContent(ctx, normalized, kind); err != nil {
+		span.RecordError(err)
+		return 0, err
+	} else if found {
+		span.SetAttributes(attribute.Int64("db.note_id", id))
+		return id, nil
 	}
 
 	if _, err := s.db.ExecContext(ctx,
@@ -278,7 +358,56 @@ func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error
 		return 0, fmt.Errorf("read note id: %w", err)
 	}
 	span.SetAttributes(attribute.Int64("db.note_id", id))
+
+	// Async, best-effort embedding — same non-blocking pattern as LogEpisode (own context; see its doc comment for why). notes.domain doesn't exist as a column, so metadata just omits the "domain" key rather than sending it empty.
+	s.mu.RLock()
+	emb, vidx := s.embedder, s.vectorIndex
+	s.mu.RUnlock()
+	if emb != nil && vidx != nil && strings.TrimSpace(content) != "" {
+		go func(id int64, text string) {
+			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			vec, err := emb.Embed(embedCtx, "RETRIEVAL_DOCUMENT", text)
+			if err != nil {
+				slog.Error("async note embed failed", "note_id", id, "error", err)
+				return
+			}
+			meta := map[string]string{
+				"source":     "note",
+				"kind":       string(memory.KindFact),
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := vidx.Add(embedCtx, fmt.Sprintf("note:%d", id), text, vec, meta); err != nil {
+				slog.Error("async note vector index add failed", "note_id", id, "error", err)
+			}
+		}(id, content)
+	}
 	return id, nil
+}
+
+// findNoteByNormalizedContent scans existing notes of kind for one whose content normalizes to the same value as normalized. Used by LogNote to catch paraphrased restatements that the exact-match (content, kind) unique index would not.
+func (s *Store) findNoteByNormalizedContent(ctx context.Context, normalized, kind string) (int64, bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content FROM notes WHERE kind = ?`, kind)
+	if err != nil {
+		return 0, false, fmt.Errorf("scan existing notes for dedup: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var existingContent string
+		if err := rows.Scan(&id, &existingContent); err != nil {
+			return 0, false, fmt.Errorf("scan existing note row: %w", err)
+		}
+		if normalizeNoteContent(existingContent) == normalized {
+			return id, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, fmt.Errorf("iterate existing notes: %w", err)
+	}
+	return 0, false, nil
 }
 
 // GetNotes returns all notes ordered newest first.
@@ -308,9 +437,7 @@ func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
 	return out, nil
 }
 
-// SetWorkingState upserts the single-row working-state cache.
-// Content is synthesized by the daemon's state deriver; it is
-// overwritten in full each cadence tick — no history is kept.
+// SetWorkingState upserts the single-row working-state cache. Content is synthesized by the daemon's state deriver and overwritten in full each cadence tick — no history is kept.
 func (s *Store) SetWorkingState(ctx context.Context, content string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SetWorkingState")
@@ -327,8 +454,7 @@ func (s *Store) SetWorkingState(ctx context.Context, content string) error {
 	return nil
 }
 
-// GetWorkingState returns the cached working-state content, or ("", nil)
-// when no row has been written yet.
+// GetWorkingState returns the cached working-state content, or ("", nil) when no row has been written yet.
 func (s *Store) GetWorkingState(ctx context.Context) (string, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.GetWorkingState")
@@ -346,9 +472,7 @@ func (s *Store) GetWorkingState(ctx context.Context) (string, error) {
 	return content, nil
 }
 
-// RecentSummaries returns the content of the most recent summary and digest
-// nodes, newest-first, up to limit rows. Used by the state deriver to build
-// the synthesis prompt without walking the full ancestor tree.
+// RecentSummaries returns the content of the most recent summary and digest nodes, newest-first, up to limit rows. Used by the state deriver to build the synthesis prompt without walking the full ancestor tree.
 func (s *Store) RecentSummaries(ctx context.Context, limit int) ([]string, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.RecentSummaries")
@@ -380,20 +504,14 @@ func (s *Store) RecentSummaries(ctx context.Context, limit int) ([]string, error
 	return out, nil
 }
 
-// CountSummariesSince returns the number of summary and digest nodes created
-// after since. Used as a cost guard so the state deriver skips recomputation
-// when nothing new has been written.
-// since is formatted as UTC "2006-01-02 15:04:05" to match SQLite's
-// CURRENT_TIMESTAMP storage format, which has no sub-second component.
+// CountSummariesSince returns the number of summary and digest nodes created after since. Used as a cost guard so the state deriver skips recomputation when nothing new has been written.
+// since is formatted as UTC "2006-01-02 15:04:05" to match SQLite's CURRENT_TIMESTAMP storage format, which has no sub-second component.
 func (s *Store) CountSummariesSince(ctx context.Context, since time.Time) (int, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.CountSummariesSince")
 	defer span.End()
 
-	// Truncate to second precision and use >= so rows inserted within the
-	// same clock-second as since are included. Production callers set since
-	// from time.Now() right after a derive run; >= is safe because those rows
-	// were written in the same tick and should trigger a re-derive.
+	// Truncate to second precision and use >= so rows inserted within the same clock-second as since are included — safe because production callers set since right after a derive run, so those rows should trigger a re-derive anyway.
 	sinceStr := since.UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")
 	var n int
 	err := s.db.QueryRowContext(ctx,
@@ -409,16 +527,75 @@ func (s *Store) CountSummariesSince(ctx context.Context, since time.Time) (int, 
 
 // MemoryHit is one FTS5 row — either a summary or a note.
 type MemoryHit struct {
-	Content string
-	Source  string // "summary" | "note"
-	RefID   int64
+	Content   string
+	Source    string // "episode" | "summary" | "digest" | "note" | "thread"
+	RefID     int64
+	Domain    string    // work | personal | "" — set when known
+	CreatedAt time.Time // zero if unknown
+	App       string    // episode framing; empty for non-episodes
+	Title     string
 }
 
-// Retriever defines a minimal interface for relevance-based memory retrieval.
-// FTS5 (via SearchMemory) backs it now; vector stores can implement later
-// without changing callers like GetImplicitContext.
-type Retriever interface {
-	RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error)
+// FormatHit renders a hit for the model in the established tool/inject shape:
+//
+//	[note] …
+//	[summary] …
+//	[episode] …
+//
+// Source labels stay as stored (episode/note/summary/…) — kind-aware ranking happens in HybridSearch/RankedEpisodes, not in the prefix.
+// Content is excerpted for inject budget; full content still lives in the DB.
+func FormatHit(h MemoryHit, maxRunes int) string {
+	if maxRunes <= 0 {
+		maxRunes = maxEpisodeExcerpt
+	}
+	content := h.Content
+	if runes := []rune(content); len(runes) > maxRunes {
+		content = string(runes[:maxRunes])
+	}
+	if h.Source == "note" {
+		return fmt.Sprintf("[note] %s", content)
+	}
+	src := h.Source
+	if src == "" {
+		src = "unknown"
+	}
+	return fmt.Sprintf("[%s] %s", src, content)
+}
+
+// ftsStopwords are short function words dropped when tokenizing a query for buildFTSMatch — they carry no retrieval signal and just add noise to the OR-matched term set.
+var ftsStopwords = map[string]bool{
+	"a": true, "an": true, "the": true, "is": true, "are": true, "was": true,
+	"were": true, "what": true, "when": true, "where": true, "did": true,
+	"do": true, "does": true, "i": true, "you": true, "my": true, "your": true,
+	"it": true, "its": true, "and": true, "or": true, "of": true, "to": true,
+	"in": true, "on": true, "for": true, "that": true, "this": true,
+}
+
+// ftsQuotePhrase wraps a single FTS5 phrase in quotes, doubling any embedded quotes so it can't break out of the phrase.
+func ftsQuotePhrase(phrase string) string {
+	return `"` + strings.ReplaceAll(phrase, `"`, `""`) + `"`
+}
+
+// buildFTSMatch tokenizes query into significant terms (split on whitespace/punctuation, lowercased, stopwords dropped) and joins them into an FTS5 OR-of-terms MATCH expression (e.g. `"foo" OR "bar"`). Natural-language questions rarely share a verbatim contiguous phrase with stored prose, so matching on any significant term recalls far better than treating the whole query as one phrase.
+// Falls back to the original whole-query phrase when tokenization leaves no terms (e.g. an all-stopword query), so the call never MATCHes on an empty/invalid expression.
+func buildFTSMatch(query string) string {
+	terms := strings.FieldsFunc(query, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	seen := make(map[string]bool, len(terms))
+	var parts []string
+	for _, term := range terms {
+		term = strings.ToLower(term)
+		if term == "" || ftsStopwords[term] || seen[term] {
+			continue
+		}
+		seen[term] = true
+		parts = append(parts, ftsQuotePhrase(term))
+	}
+	if len(parts) == 0 {
+		return ftsQuotePhrase(query)
+	}
+	return strings.Join(parts, " OR ")
 }
 
 // SearchMemory runs FTS5 over summaries + notes. Returns top 10 by rank.
@@ -433,9 +610,8 @@ func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, er
 		return nil, nil
 	}
 
-	// MATCH wants tokens, not raw user text. quote it so special chars
-	// don't break the FTS5 parser; FTS5 phrase search is fine for v1.
-	safe := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+	// MATCH wants tokens, not one whole-query phrase; OR the significant terms.
+	safe := buildFTSMatch(query)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT content, source, ref_id
@@ -463,34 +639,26 @@ func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, er
 	return out, nil
 }
 
-// maxEpisodeExcerpt caps how much of an episode's screen_text is surfaced in
-// RetrieveRelevant output — screen captures can be long, and this is context
-// meant to orient the model, not a full transcript.
+// maxEpisodeExcerpt caps how much of an episode's screen_text is surfaced in RetrieveRelevant output — this is context meant to orient the model, not a full transcript.
 const maxEpisodeExcerpt = 200
 
-// Ranking weights for RankedEpisodes. All three terms are min-max normalized
-// to [0,1] across the candidate set before weighting, so these are directly
-// comparable "how much each signal counts" knobs. Equal by default (1.0 each,
-// so the combined score ranges [0,3]) — tune here if one signal should
-// dominate.
+// recentTaskWindow bounds how far back GetImplicitContext looks when folding recent task names into its focus signal. Without a time bound, "last 2 tasks by id" in a lightly-used store can still be a stale task from days ago that self-matches its own summary back into context regardless of relevance.
+const recentTaskWindow = 2 * time.Hour
+
+// Ranking weights for RankedEpisodes. All three terms are min-max normalized to [0,1] across the candidate set before weighting, so these are directly comparable "how much each signal counts" knobs. Equal by default (combined score ranges [0,3]) — tune here if one signal should dominate.
 const (
 	rankWeightRecency    = 1.0
 	rankWeightImportance = 1.0
 	rankWeightRelevance  = 1.0
 )
 
-// recencyHalfLifeFactor is the per-hour exponential decay base for recency
-// scoring: recency = recencyHalfLifeFactor^hoursSinceCreated. Closer to 1.0
-// means slower decay (0.995 ≈ ~half over ~138 hours / ~5.75 days).
+// recencyHalfLifeFactor is the per-hour exponential decay base for recency scoring: recency = recencyHalfLifeFactor^hoursSinceCreated. Closer to 1.0 means slower decay (0.995 ≈ half over ~138 hours / ~5.75 days).
 const recencyHalfLifeFactor = 0.995
 
-// rankCandidatePoolSize bounds how many FTS matches are pulled from
-// episodes_fts before re-ranking in Go. Wider than the final `limit` so the
-// weighted formula (not raw FTS rank alone) decides the final order.
+// rankCandidatePoolSize bounds how many FTS matches are pulled from episodes_fts before re-ranking in Go — wider than the final `limit` so the weighted formula, not raw FTS rank alone, decides the final order.
 const rankCandidatePoolSize = 50
 
-// rankedEpisodeCandidate holds the raw per-episode signals needed to compute
-// a combined ranking score before normalization.
+// rankedEpisodeCandidate holds the raw per-episode signals needed to compute a combined ranking score before normalization.
 type rankedEpisodeCandidate struct {
 	id         int64
 	content    string
@@ -499,17 +667,11 @@ type rankedEpisodeCandidate struct {
 	bm25       float64 // raw FTS5 bm25 score; more negative = better match
 }
 
-// RankedEpisodes scores episodes matching focus by a weighted blend of
-// recency, importance, and FTS relevance, and returns the top `limit` as
-// MemoryHit (Source="episode"). Each term is min-max normalized to [0,1]
-// across the candidate pool before weighting:
+// RankedEpisodes scores episodes matching focus by a weighted blend of recency, importance, and FTS relevance, and returns the top `limit` as MemoryHit (Source="episode"). Each term is min-max normalized to [0,1] across the candidate pool before weighting:
 //
 //	score = rankWeightRecency*recency + rankWeightImportance*importance + rankWeightRelevance*relevance
 //
-// where recency = recencyHalfLifeFactor^hoursSinceCreated (exponential decay,
-// higher = more recent), importance is the stored episodes.importance column,
-// and relevance is the FTS5 bm25 score inverted (bm25 is "lower is better") and
-// min-max normalized so the best match in the pool scores 1.0.
+// recency = recencyHalfLifeFactor^hoursSinceCreated (higher = more recent), importance is the stored episodes.importance column, and relevance is the FTS5 bm25 score inverted (bm25 is "lower is better") then normalized so the best match in the pool scores 1.0.
 func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.RankedEpisodes")
@@ -522,7 +684,8 @@ func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]
 	safe := `"` + strings.ReplaceAll(focus, `"`, `""`) + `"`
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT episodes.id, episodes.screen_text, episodes.created_at, episodes.importance, bm25(episodes_fts)
+		SELECT episodes.id, episodes.screen_text, episodes.created_at, episodes.importance,
+		       episodes.app, episodes.title, episodes.domain, bm25(episodes_fts)
 		FROM episodes_fts
 		JOIN episodes ON episodes.id = episodes_fts.rowid
 		WHERE episodes_fts MATCH ?
@@ -535,10 +698,14 @@ func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]
 	}
 	defer rows.Close()
 
-	var candidates []rankedEpisodeCandidate
+	type rankedRow struct {
+		rankedEpisodeCandidate
+		app, title, domain string
+	}
+	var candidates []rankedRow
 	for rows.Next() {
-		var c rankedEpisodeCandidate
-		if err := rows.Scan(&c.id, &c.content, &c.createdAt, &c.importance, &c.bm25); err != nil {
+		var c rankedRow
+		if err := rows.Scan(&c.id, &c.content, &c.createdAt, &c.importance, &c.app, &c.title, &c.domain, &c.bm25); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("scan ranked episode candidate: %w", err)
 		}
@@ -580,9 +747,13 @@ func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]
 	for i, c := range candidates {
 		results[i] = scored{
 			hit: MemoryHit{
-				Content: c.content,
-				Source:  "episode",
-				RefID:   c.id,
+				Content:   c.content,
+				Source:    "episode",
+				RefID:     c.id,
+				App:       c.app,
+				Title:     c.title,
+				Domain:    c.domain,
+				CreatedAt: c.createdAt,
 			},
 			score: rankWeightRecency*recencyNorm[i] + rankWeightImportance*importanceNorm[i] + rankWeightRelevance*relevanceNorm[i],
 		}
@@ -604,9 +775,7 @@ func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]
 	return out, nil
 }
 
-// minMaxNormalize scales vals to [0,1]. When all values are equal (max==min),
-// every element normalizes to 1.0 so that term contributes its full weight
-// uniformly rather than collapsing the whole score to 0.
+// minMaxNormalize scales vals to [0,1]. When all values are equal (max==min), every element normalizes to 1.0 so that term contributes its full weight uniformly rather than collapsing the whole score to 0.
 func minMaxNormalize(vals []float64) []float64 {
 	out := make([]float64, len(vals))
 	if len(vals) == 0 {
@@ -633,12 +802,32 @@ func minMaxNormalize(vals []float64) []float64 {
 	return out
 }
 
-// RetrieveRelevant returns up to maxItems relevance-ranked strings (notes/summaries/
-// threads/episodes) by calling SearchMemory (FTS5) and RankedEpisodes (recency+
-// importance+relevance blend, not plain FTS) with sanitized focus (or fallback
-// "recent context"). Formats as [note]/[summary]/[episode]/[<source>]. Satisfies
-// Retriever. If maxItems <= 0 all hits (up to Search limit) are returned.
+// RetrieveRelevant returns up to maxItems relevance-ranked lines for unsolicited inject. Uses HybridSearch so moments get recency decay, facts/periods do not, and every line is FormatHit (content + context).
+// If maxItems <= 0, defaults to 4 (stingy inject budget).
 func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
+	focus = strings.TrimSpace(focus)
+	if focus == "" {
+		focus = "recent context"
+	}
+	if maxItems <= 0 {
+		maxItems = 4
+	}
+	hits, err := s.HybridSearch(ctx, focus, "", maxItems)
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, FormatHit(h, maxEpisodeExcerpt))
+	}
+	return out, nil
+}
+
+// RelevantNotes returns up to limit note contents relevant to focus, instead of the full notes table — same relevance-gated shape RetrieveRelevant/GetImplicitContext already use, applied to the plain fact strings DeriveState expects (no "[note]" prefix). Empty focus falls back to "recent context" like RetrieveRelevant does.
+func (s *Store) RelevantNotes(ctx context.Context, focus string, limit int) ([]string, error) {
 	focus = strings.TrimSpace(focus)
 	if focus == "" {
 		focus = "recent context"
@@ -647,33 +836,15 @@ func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int
 	if err != nil {
 		return nil, err
 	}
-	episodeHits, err := s.RankedEpisodes(ctx, focus, 10)
-	if err != nil {
-		return nil, err
-	}
-	if len(hits) == 0 && len(episodeHits) == 0 {
-		return nil, nil
-	}
 	var out []string
 	for _, h := range hits {
-		if maxItems > 0 && len(out) >= maxItems {
+		if h.Source != "note" {
+			continue
+		}
+		if limit > 0 && len(out) >= limit {
 			break
 		}
-		if h.Source == "note" {
-			out = append(out, fmt.Sprintf("[note] %s", h.Content))
-		} else {
-			out = append(out, fmt.Sprintf("[%s] %s", h.Source, h.Content))
-		}
-	}
-	for _, h := range episodeHits {
-		if maxItems > 0 && len(out) >= maxItems {
-			break
-		}
-		excerpt := h.Content
-		if runes := []rune(excerpt); len(runes) > maxEpisodeExcerpt {
-			excerpt = string(runes[:maxEpisodeExcerpt])
-		}
-		out = append(out, fmt.Sprintf("[episode] %s", excerpt))
+		out = append(out, h.Content)
 	}
 	return out, nil
 }
@@ -691,8 +862,7 @@ func (s *Store) DeleteNote(ctx context.Context, id int64) error {
 	return err
 }
 
-// UpdateNote overwrites the content of an existing note. FTS5 mirror is kept in
-// sync via the notes_au trigger. updated_at is refreshed atomically.
+// UpdateNote overwrites the content of an existing note. FTS5 mirror is kept in sync via the notes_au trigger, and updated_at is refreshed atomically.
 func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.UpdateNote")
@@ -709,8 +879,7 @@ func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error 
 	return nil
 }
 
-// ExistingNotes returns id+content for every stored note. Used by the memory
-// compiler to feed the reconciliation LLM call.
+// ExistingNotes returns id+content for every stored note. Used by the memory compiler to feed the reconciliation LLM call.
 func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.ExistingNotes")
@@ -736,9 +905,7 @@ func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
 	return out, nil
 }
 
-// UpsertThread creates or refreshes a thread, returning its id. For an existing
-// id it bumps salience/recency in place; for a new one it upserts on
-// (subject, kind) so the same throughline is recognized over time.
+// UpsertThread creates or refreshes a thread, returning its id. For an existing id it bumps salience/recency in place; for a new one it upserts on (subject, kind) so the same throughline is recognized over time.
 func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.UpsertThread")
@@ -779,9 +946,7 @@ func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64,
 	return id, nil
 }
 
-// GetLiveThreads returns threads touched in the last 2 days, newest-first. This
-// is the "what's going on in their life right now" view; concurrent threads
-// coexist here.
+// GetLiveThreads returns threads touched in the last 2 days, newest-first. This is the "what's going on in their life right now" view; concurrent threads coexist here.
 func (s *Store) GetLiveThreads(ctx context.Context, limit int) ([]memory.Thread, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.GetLiveThreads")
@@ -792,9 +957,7 @@ func (s *Store) GetLiveThreads(ctx context.Context, limit int) ([]memory.Thread,
 		limit)
 }
 
-// ThreadsForAttribution returns threads touched in the last 14 days, newest-first.
-// Wider window than GetLiveThreads so the compiler can reattach to a throughline
-// the user picked back up after a few days away.
+// ThreadsForAttribution returns threads touched in the last 14 days, newest-first. Wider window than GetLiveThreads so the compiler can reattach to a throughline the user picked back up after a few days away.
 func (s *Store) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.Thread, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.ThreadsForAttribution")
@@ -805,8 +968,7 @@ func (s *Store) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.
 		limit)
 }
 
-// queryThreads runs a thread SELECT and scans rows. last_seen_at scans into a
-// time.Time, matching how GetNotes scans Note.CreatedAt.
+// queryThreads runs a thread SELECT and scans rows. last_seen_at scans into a time.Time, matching how GetNotes scans Note.CreatedAt.
 func (s *Store) queryThreads(ctx context.Context, span trace.Span, query string, limit int) ([]memory.Thread, error) {
 	rows, err := s.db.QueryContext(ctx, query, limit)
 	if err != nil {
@@ -832,11 +994,8 @@ func (s *Store) queryThreads(ctx context.Context, span trace.Span, query string,
 	return out, nil
 }
 
-// ReplaceAllNotes atomically swaps the entire notes table for a curated set,
-// used by periodic note consolidation. All notes are rewritten as kind "fact".
-// FTS5 mirror stays in sync via the per-row notes_ad / notes_ai triggers.
-// The caller must guarantee contents is non-empty — an empty swap would wipe
-// the table — but we defend against it here too.
+// ReplaceAllNotes atomically swaps the entire notes table for a curated set, used by periodic note consolidation. All notes are rewritten as kind "fact"; FTS5 mirror stays in sync via the per-row notes_ad / notes_ai triggers.
+// The caller must guarantee contents is non-empty — an empty swap would wipe the table — but we defend against it here too.
 func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.ReplaceAllNotes")
@@ -951,29 +1110,20 @@ func (s *Store) LogActivity(ctx context.Context, app, title string) error {
 	return err
 }
 
-// richnessWordCap is the word count at which screen_text richness saturates
-// to 1.0 in computeImportance — beyond this point more words don't add signal.
+// richnessWordCap is the word count at which screen_text richness saturates to 1.0 in computeImportance — beyond this point more words don't add signal.
 const richnessWordCap = 150
 
-// revisitLookbackWindow bounds how far back computeImportance looks for prior
-// visits to the same app+title when scoring revisitation.
+// revisitLookbackWindow bounds how far back computeImportance looks for prior visits to the same app+title when scoring revisitation.
 const revisitLookbackWindow = 7 * 24 * time.Hour
 
-// revisitSaturationCount is the number of recent same-app+title episodes at
-// which the revisitation term saturates to 1.0.
+// revisitSaturationCount is the number of recent same-app+title episodes at which the revisitation term saturates to 1.0.
 const revisitSaturationCount = 5
 
-// computeImportance scores a new episode in [0,1] from two cheap, write-time
-// signals, weighted equally (0.5 each):
-//   - richness: word count of screen_text, normalized against richnessWordCap
-//     (capped at 1.0) — a fuller capture carries more information than a
-//     near-empty one.
-//   - revisitation: how many of the last revisitSaturationCount episodes with
-//     the same app+title already exist within revisitLookbackWindow,
-//     normalized against revisitSaturationCount (capped at 1.0) — a place the
-//     user keeps coming back to is more likely to matter later.
+// computeImportance scores a new episode in [0,1] from two cheap, write-time signals, weighted equally (0.5 each):
+//   - richness: word count of screen_text, normalized against richnessWordCap (capped at 1.0) — a fuller capture carries more information than a near-empty one.
+//   - revisitation: how many of the last revisitSaturationCount episodes with the same app+title already exist within revisitLookbackWindow, normalized against revisitSaturationCount (capped at 1.0) — a place the user keeps coming back to is more likely to matter later.
 func (s *Store) computeImportance(ctx context.Context, app, title, screenText string) (float64, error) {
-	richness := float64(countWords(screenText)) / float64(richnessWordCap)
+	richness := float64(memory.CountWords(screenText)) / float64(richnessWordCap)
 	if richness > 1 {
 		richness = 1
 	}
@@ -994,52 +1144,38 @@ func (s *Store) computeImportance(ctx context.Context, app, title, screenText st
 	return 0.5*richness + 0.5*revisitation, nil
 }
 
-// countWords counts whitespace-separated tokens in s. Mirrors
-// memory.countWords (unexported there; duplicated here to avoid an import
-// cycle since memory imports db-adjacent types via the Storage interface).
-func countWords(s string) int {
-	if s == "" {
-		return 0
-	}
-	n := 0
-	inWord := false
-	for _, c := range s {
-		isSpace := c == ' ' || c == '\n' || c == '\r' || c == '\t'
-		if !isSpace && !inWord {
-			n++
-			inWord = true
-		} else if isSpace {
-			inWord = false
-		}
-	}
-	return n
-}
-
-// LogEpisode appends one dwell-confirmed capture to the episodes time series.
-// Unlike LogActivity (INSERT OR IGNORE into the deduped nodes tree), this is a
-// plain append: repeat visits to the same app+title MUST create distinct rows
-// because screen_text differs between visits and is the whole point of
-// capturing it. importance is computed at write time via computeImportance.
-// Returns the new row's id.
+// LogEpisode appends one dwell-confirmed capture to the episodes time series. Unlike LogActivity (INSERT OR IGNORE into the deduped nodes tree), this is a plain append: repeat visits to the same app+title MUST create distinct rows because screen_text differs between visits and is the whole point of capturing it.
+//
+// Context (app, title, domain) is stored in columns. Content is normalized (chrome stripped, capped) into screen_text so FTS/tools see substance, not TUI dumps — clean input is preserved byte-for-byte after normalize. The embedding document is Observation.Document() (content framed by context). importance is computed at write time via computeImportance. Returns the new row's id.
 func (s *Store) LogEpisode(ctx context.Context, app, title, screenText string) (int64, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.LogEpisode")
 	defer span.End()
 
+	obs := memory.Normalize(app, title, screenText)
+	// Prefer normalized content; if normalize emptied a non-empty raw capture of only chrome, fall back to raw so we never invent empty rows that tests and AgeEpisodes still treat as real observations.
+	content := obs.Content
+	if content == "" && strings.TrimSpace(screenText) != "" {
+		content = screenText
+	}
+
 	span.SetAttributes(
-		attribute.String("db.app", app),
-		attribute.String("db.window_title", title),
+		attribute.String("db.app", obs.Context.App),
+		attribute.String("db.window_title", obs.Context.Title),
+		attribute.String("db.signal_kind", string(obs.Context.SignalKind)),
 	)
 
-	importance, err := s.computeImportance(ctx, app, title, screenText)
+	importance, err := s.computeImportance(ctx, obs.Context.App, obs.Context.Title, content)
 	if err != nil {
 		span.RecordError(err)
 		return 0, fmt.Errorf("compute importance: %w", err)
 	}
 
+	domain := obs.Context.Domain
+
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO episodes (app, title, screen_text, importance) VALUES (?, ?, ?, ?)`,
-		app, title, screenText, importance)
+		`INSERT INTO episodes (app, title, screen_text, importance, domain) VALUES (?, ?, ?, ?, ?)`,
+		obs.Context.App, obs.Context.Title, content, importance, string(domain))
 	if err != nil {
 		span.RecordError(err)
 		return 0, fmt.Errorf("insert episode: %w", err)
@@ -1053,13 +1189,44 @@ func (s *Store) LogEpisode(ctx context.Context, app, title, screenText string) (
 	span.SetAttributes(
 		attribute.Int64("db.episode_id", id),
 		attribute.Float64("db.episode_importance", importance),
+		attribute.String("db.episode_domain", string(domain)),
 	)
+
+	// Async, best-effort embedding: LogEpisode must return immediately after the synchronous INSERT above (see TestLogEpisode_DoesNotBlockOnSlowEmbedder in db_test.go). The real network call happens inside this goroutine, so it deliberately uses its own context (30s timeout) instead of the caller's ctx — ctx may already be canceled by the time this goroutine runs, and canceling the embed with it would permanently lose that episode's vector-searchability.
+	// Embed content+context (Document) even though screen_text is content-only.
+	embedText := obs.Document()
+	if strings.TrimSpace(embedText) == "" {
+		embedText = content
+	}
+	s.mu.RLock()
+	emb, vidx := s.embedder, s.vectorIndex
+	s.mu.RUnlock()
+	if emb != nil && vidx != nil && strings.TrimSpace(embedText) != "" {
+		go func(id int64, text string, domain memory.Domain) {
+			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			vec, err := emb.Embed(embedCtx, "RETRIEVAL_DOCUMENT", text)
+			if err != nil {
+				slog.Error("async episode embed failed", "episode_id", id, "error", err)
+				return
+			}
+			meta := map[string]string{
+				"domain":     string(domain),
+				"source":     "episode",
+				"kind":       string(memory.KindMoment),
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := vidx.Add(embedCtx, fmt.Sprintf("episode:%d", id), text, vec, meta); err != nil {
+				slog.Error("async episode vector index add failed", "episode_id", id, "error", err)
+			}
+		}(id, embedText, domain)
+	}
+
 	return id, nil
 }
 
-// Episode is one row of the episodes time series, exported for retrieval
-// layers (the consolidation package) that need the full struct rather than
-// just the MemoryHit projection.
+// Episode is one row of the episodes time series, exported for retrieval layers (the consolidation package) that need the full struct rather than just the MemoryHit projection.
 type Episode struct {
 	ID         int64
 	CreatedAt  time.Time
@@ -1067,12 +1234,10 @@ type Episode struct {
 	Title      string
 	ScreenText string
 	Importance float64
+	Domain     string
 }
 
-// EpisodesInWindow returns episodes with created_at in [since, until],
-// ordered chronologically (created_at ASC) — this is the "day arc" walk: it
-// lets a caller narrate what happened in the order it happened, unlike
-// RankedEpisodes/SearchEpisodes which are relevance-ordered. Capped at limit.
+// EpisodesInWindow returns episodes with created_at in [since, until], ordered chronologically (created_at ASC) — this is the "day arc" walk, letting a caller narrate what happened in the order it happened, unlike RankedEpisodes/SearchEpisodes which are relevance-ordered. Capped at limit.
 func (s *Store) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]Episode, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.EpisodesInWindow")
@@ -1083,7 +1248,7 @@ func (s *Store) EpisodesInWindow(ctx context.Context, since, until time.Time, li
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, created_at, app, title, screen_text, importance
+		SELECT id, created_at, app, title, screen_text, importance, domain
 		FROM episodes
 		WHERE created_at >= ? AND created_at <= ?
 		ORDER BY created_at ASC
@@ -1098,7 +1263,7 @@ func (s *Store) EpisodesInWindow(ctx context.Context, since, until time.Time, li
 	var out []Episode
 	for rows.Next() {
 		var e Episode
-		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.App, &e.Title, &e.ScreenText, &e.Importance); err != nil {
+		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.App, &e.Title, &e.ScreenText, &e.Importance, &e.Domain); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("scan episode in window: %w", err)
 		}
@@ -1112,27 +1277,16 @@ func (s *Store) EpisodesInWindow(ctx context.Context, since, until time.Time, li
 	return out, nil
 }
 
-// mmrLambda trades off relevance vs. diversity in DiverseEpisodes' MMR-lite
-// selection: score = mmrLambda*rel - (1-mmrLambda)*maxSimToChosen. Closer to
-// 1.0 favors relevance (plain top-N); closer to 0 favors spread. 0.7 leans
-// relevant but still lets a near-duplicate be passed over for something
-// distinct.
+// mmrLambda trades off relevance vs. diversity in DiverseEpisodes' MMR-lite selection: score = mmrLambda*rel - (1-mmrLambda)*maxSimToChosen. Closer to 1.0 favors relevance (plain top-N); closer to 0 favors spread. 0.7 leans relevant but still lets a near-duplicate be passed over for something distinct.
 const mmrLambda = 0.7
 
-// mmrCandidatePoolSize bounds how many RankedEpisodes candidates feed the MMR
-// selection in DiverseEpisodes.
+// mmrCandidatePoolSize bounds how many RankedEpisodes candidates feed the MMR selection in DiverseEpisodes.
 const mmrCandidatePoolSize = 30
 
-// mmrSameSubjectBump is the similarity score assigned when two candidates
-// share the same (app,title) — treated as near-duplicate "the same visit"
-// regardless of exact text, since repeat visits to the same window are the
-// dominant source of redundancy in the episode stream.
+// mmrSameSubjectBump is the similarity score assigned when two candidates share the same (app,title) — treated as near-duplicate "the same visit" regardless of exact text, since repeat visits to the same window are the dominant source of redundancy in the episode stream.
 const mmrSameSubjectBump = 0.9
 
-// diverseEpisodeCandidate holds the per-candidate signals needed for MMR
-// selection: the underlying hit, its (app,title) for the same-subject
-// similarity bump, its pre-tokenized screen_text for Jaccard similarity, and
-// its relevance score normalized from RankedEpisodes' rank position.
+// diverseEpisodeCandidate holds the per-candidate signals needed for MMR selection: the underlying hit, its (app,title) for the same-subject similarity bump, its pre-tokenized screen_text for Jaccard similarity, and its relevance score normalized from RankedEpisodes' rank position.
 type diverseEpisodeCandidate struct {
 	hit    MemoryHit
 	app    string
@@ -1141,8 +1295,7 @@ type diverseEpisodeCandidate struct {
 	rel    float64
 }
 
-// tokenSet splits s on whitespace into a lowercased token set, for Jaccard
-// similarity — no embeddings available, so this is the cheap substitute.
+// tokenSet splits s on whitespace into a lowercased token set, for Jaccard similarity — no embeddings available, so this is the cheap substitute.
 func tokenSet(s string) map[string]struct{} {
 	fields := strings.Fields(strings.ToLower(s))
 	set := make(map[string]struct{}, len(fields))
@@ -1170,9 +1323,7 @@ func jaccardSimilarity(a, b map[string]struct{}) float64 {
 	return float64(inter) / float64(union)
 }
 
-// diverseSimilarity is the similarity(a,b) used by DiverseEpisodes' MMR
-// selection: a strong same-(app,title) bump (same visit/subject, near-certain
-// duplicate) or else token Jaccard over screen_text.
+// diverseSimilarity is the similarity(a,b) used by DiverseEpisodes' MMR selection: a strong same-(app,title) bump (same visit/subject, near-certain duplicate) or else token Jaccard over screen_text.
 func diverseSimilarity(a, b diverseEpisodeCandidate) float64 {
 	if a.app != "" && a.app == b.app && a.title == b.title {
 		return mmrSameSubjectBump
@@ -1180,13 +1331,7 @@ func diverseSimilarity(a, b diverseEpisodeCandidate) float64 {
 	return jaccardSimilarity(a.tokens, b.tokens)
 }
 
-// DiverseEpisodes selects up to limit episodes matching focus via MMR-lite
-// (maximal marginal relevance): pull a candidate pool from RankedEpisodes,
-// then iteratively pick the argmax of mmrLambda*rel - (1-mmrLambda)*maxSim,
-// where rel is the candidate's normalized rank position and maxSim is its
-// highest similarity (diverseSimilarity) to any already-chosen result. This
-// avoids the near-duplicate pile-up a plain top-N would produce (e.g. 5
-// visits to the same app+title with near-identical text all scoring high).
+// DiverseEpisodes selects up to limit episodes matching focus via MMR-lite (maximal marginal relevance): pull a candidate pool from RankedEpisodes, then iteratively pick the argmax of mmrLambda*rel - (1-mmrLambda)*maxSim, where rel is the candidate's normalized rank position and maxSim is its highest similarity (diverseSimilarity) to any already-chosen result. This avoids the near-duplicate pile-up a plain top-N would produce (e.g. 5 visits to the same app+title with near-identical text all scoring high).
 func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.DiverseEpisodes")
@@ -1206,10 +1351,11 @@ func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([
 
 	candidates := make([]diverseEpisodeCandidate, len(pool))
 	for i, h := range pool {
-		var app, title string
-		// best-effort: if the lookup fails, app/title stay empty and the
-		// same-subject bump simply never fires for this candidate.
-		_ = s.db.QueryRowContext(ctx, `SELECT app, title FROM episodes WHERE id = ?`, h.RefID).Scan(&app, &title)
+		app, title := h.App, h.Title
+		if app == "" && title == "" {
+			// best-effort: if the lookup fails, app/title stay empty and the same-subject bump simply never fires for this candidate.
+			_ = s.db.QueryRowContext(ctx, `SELECT app, title FROM episodes WHERE id = ?`, h.RefID).Scan(&app, &title)
+		}
 		candidates[i] = diverseEpisodeCandidate{
 			hit:    h,
 			app:    app,
@@ -1225,12 +1371,19 @@ func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([
 	for i := range remaining {
 		remaining[i] = i
 	}
+	// Cap how many near-identical (app,title) moments may appear — document framing repeats title tokens so BM25 over-clusters revisits; without a hard cap, MMR alone can still fill the budget with one subject.
+	const maxPerSubject = 1
+	subjectCount := map[string]int{}
 
 	for len(selected) < limit && len(remaining) > 0 {
 		bestRemPos, bestIdx := -1, -1
 		bestScore := math.Inf(-1)
 		for pos, ci := range remaining {
 			c := candidates[ci]
+			subj := c.app + "\x00" + c.title
+			if c.app != "" && subjectCount[subj] >= maxPerSubject {
+				continue
+			}
 			maxSim := 0.0
 			for _, sel := range selected {
 				if sim := diverseSimilarity(c, sel); sim > maxSim {
@@ -1244,7 +1397,14 @@ func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([
 				bestRemPos = pos
 			}
 		}
+		if bestIdx < 0 {
+			break // only over-quota subjects left
+		}
 		selected = append(selected, candidates[bestIdx])
+		subj := candidates[bestIdx].app + "\x00" + candidates[bestIdx].title
+		if candidates[bestIdx].app != "" {
+			subjectCount[subj]++
+		}
 		remaining = append(remaining[:bestRemPos], remaining[bestRemPos+1:]...)
 	}
 
@@ -1256,13 +1416,7 @@ func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([
 	return out, nil
 }
 
-// RecallSubject fuses a thread's arc with episode specifics for "what do you
-// know about X" recall: (a) matching thread(s) for subject via SearchMemory
-// filtered to Source=="thread", formatted "[thread] <content>"; then (b) a
-// diverse spread of matching episodes via DiverseEpisodes, formatted
-// "[episode] <excerpt≤200 runes>". Threads (the throughline) come first,
-// episodes (the specifics) after — narration should say "you've been doing
-// X" before "specifically, Y and Z".
+// RecallSubject fuses a thread's arc with episode specifics for "what do you know about X" recall: (a) matching thread(s) for subject via SearchMemory filtered to Source=="thread", formatted "[thread] <content>"; then (b) a diverse spread of matching episodes via DiverseEpisodes, formatted "[episode] <excerpt≤200 runes>". Threads (the throughline) come first, episodes (the specifics) after — narration should say "you've been doing X" before "specifically, Y and Z".
 func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.RecallSubject")
@@ -1301,9 +1455,7 @@ func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([
 	return out, nil
 }
 
-// SearchEpisodes runs FTS5 MATCH over episodes_fts, returning the matching
-// episodes' screen_text as MemoryHit.Content (Source="episode"), ordered by
-// rank. Empty query -> empty result, no error, mirroring SearchMemory.
+// SearchEpisodes runs FTS5 MATCH over episodes_fts, returning the matching episodes' screen_text as MemoryHit.Content (Source="episode"), ordered by rank. Empty query -> empty result, no error, mirroring SearchMemory.
 func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SearchEpisodes")
@@ -1314,10 +1466,11 @@ func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, 
 		return nil, nil
 	}
 
-	safe := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+	safe := buildFTSMatch(query)
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT episodes.screen_text, episodes.id
+		SELECT episodes.screen_text, episodes.id, episodes.app, episodes.title,
+		       episodes.domain, episodes.created_at
 		FROM episodes_fts
 		JOIN episodes ON episodes.id = episodes_fts.rowid
 		WHERE episodes_fts MATCH ?
@@ -1333,25 +1486,43 @@ func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, 
 	var out []MemoryHit
 	for rows.Next() {
 		var h MemoryHit
-		if err := rows.Scan(&h.Content, &h.RefID); err != nil {
+		var created string
+		if err := rows.Scan(&h.Content, &h.RefID, &h.App, &h.Title, &h.Domain, &created); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("scan episode fts5 row: %w", err)
 		}
 		h.Source = "episode"
+		h.CreatedAt = parseSQLiteTime(created)
 		out = append(out, h)
 	}
 	span.SetAttributes(attribute.Int("db.episode_search_results", len(out)))
 	return out, nil
 }
 
-// AgeEpisodes is the pre-vector tiering step for the episode substrate: for
-// episodes older than keepRawFor whose importance is below importanceFloor,
-// screen_text is emptied to reclaim space while the row itself (ts/app/title/
-// importance) is kept — this is a thin record, not a deletion. Recent or
-// high-importance episodes are left untouched. Returns the number of rows
-// aged. Rows are NEVER deleted; only screen_text is cleared, and only once
-// (already-empty rows aren't recounted meaningfully but re-clearing is a
-// no-op).
+// parseSQLiteTime accepts formats SQLite datetime('now') and RFC3339 commonly produce for episodes.created_at. Zero time on failure.
+func parseSQLiteTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// AgeEpisodes is the pre-vector tiering step for the episode substrate: for episodes older than keepRawFor whose importance is below importanceFloor, screen_text is emptied to reclaim space while the row itself (ts/app/title/importance) is kept — a thin record, not a deletion. Recent or high-importance episodes are left untouched. Rows are NEVER deleted; only screen_text is cleared (re-clearing an already-empty row is just a no-op). Returns the number of rows aged.
 func (s *Store) AgeEpisodes(ctx context.Context, keepRawFor time.Duration, importanceFloor float64) (int64, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.AgeEpisodes")
@@ -1375,6 +1546,36 @@ func (s *Store) AgeEpisodes(ctx context.Context, keepRawFor time.Duration, impor
 		return 0, fmt.Errorf("age episodes rows affected: %w", err)
 	}
 	span.SetAttributes(attribute.Int64("db.aged_rows", n))
+	return n, nil
+}
+
+// PruneAncientEpisodes is the coarse, long-horizon cap AgeEpisodes doesn't provide: AgeEpisodes only ever empties screen_text, so the episodes table's row count grows forever even once the expensive column is thinned. This deletes the row itself for episodes older than olderThan, but ONLY if screen_text is already empty — i.e. only rows that already went through AgeEpisodes (or were logged empty). Rows that still carry raw screen_text are never deleted here regardless of age, so this can never destroy text that hasn't already been through the aging pass.
+//
+// episodes_fts stays in sync via the existing episodes_ad AFTER DELETE trigger — no separate FTS cleanup needed here, since an already-thinned row's index entry was already collapsed to empty when AgeEpisodes ran.
+//
+// Returns the number of rows deleted.
+func (s *Store) PruneAncientEpisodes(ctx context.Context, olderThan time.Duration) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.PruneAncientEpisodes")
+	defer span.End()
+
+	secs := int64(olderThan.Seconds())
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM episodes
+		 WHERE created_at < datetime('now', '-' || ? || ' seconds')
+		   AND screen_text = ''`,
+		secs)
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("prune ancient episodes: %w", err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("prune ancient episodes rows affected: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.pruned_rows", n))
 	return n, nil
 }
 
@@ -1414,19 +1615,15 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	s.mu.RUnlock()
 
 	var branch []string
-	// NOTE: identity notes are NOT dumped unconditionally anymore. A wall of
-	// generic "[about] user likes X" facts buried the useful live threads and
-	// poisoned the model's context. Notes now surface only through the relevance
-	// path below (RetrieveRelevant), gated by what the user is actually doing now.
-	//
-	// relevance-filtered retrieval: rather than dumping every summary, build a
-	// focus signal from working state + recent task nodes and surface only the
-	// notes/summaries/threads that actually match what the user is doing now.
+	// Identity notes are NOT dumped unconditionally anymore — a wall of generic "[about] user likes X" facts buried the useful live threads. Notes now surface only through relevance retrieval below, gated by what the user is actually doing now: build a focus signal from working state + recent task nodes, then surface only the notes/summaries/threads that match it.
+	workingState, workingStateErr := s.GetWorkingState(ctx)
 	focusSignal := "recent context"
-	if st, serr := s.GetWorkingState(ctx); serr == nil && st != "" {
-		focusSignal = st
+	if workingStateErr == nil && workingState != "" {
+		focusSignal = workingState
 	}
-	if trows, err := s.db.QueryContext(ctx, `SELECT content FROM nodes WHERE type='task' ORDER BY id DESC LIMIT 2`); err == nil && trows != nil {
+	// Bounded by recency, not just by id: an old task is still "last 2 by id" in a lightly-used store, and folding its name into focusSignal would self-match its own summary back into context indefinitely regardless of whether it's actually current.
+	recentSince := time.Now().Add(-recentTaskWindow).UTC().Format("2006-01-02 15:04:05")
+	if trows, err := s.db.QueryContext(ctx, `SELECT content FROM nodes WHERE type='task' AND created_at >= ? ORDER BY id DESC LIMIT 2`, recentSince); err == nil && trows != nil {
 		for trows.Next() {
 			var tsk string
 			_ = trows.Scan(&tsk)
@@ -1440,8 +1637,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	if rel, rerr := s.RetrieveRelevant(ctx, focusSignal, maxRel); rerr == nil {
 		branch = append(branch, rel...)
 	}
-	// live threads: what's going on in their life right now (recency = relevance).
-	// concurrent threads coexist here — watching + coding both surface.
+	// live threads: what's going on in their life right now (recency = relevance). Concurrent threads coexist here — watching + coding both surface.
 	threads, terr := s.GetLiveThreads(ctx, 6)
 	if terr == nil {
 		for _, t := range threads {
@@ -1452,10 +1648,9 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
-	// synthesized "right now".
-	state, serr := s.GetWorkingState(ctx)
-	if serr == nil && state != "" {
-		branch = append(branch, fmt.Sprintf("[now] %s", state))
+	// synthesized "right now" (reuses the working-state fetched above for focusSignal — nothing between there and here mutates it).
+	if workingStateErr == nil && workingState != "" {
+		branch = append(branch, fmt.Sprintf("[now] %s", workingState))
 	}
 	if len(branch) > 0 {
 		span.SetAttributes(attribute.Int("db.node_count", len(branch)))
@@ -1493,9 +1688,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	return branch, nil
 }
 
-// OldSummaryGroups returns summary nodes older than olderThan, grouped by
-// their ancestor DAY node. Used by the compaction job to decide which days
-// are ready to roll up.
+// OldSummaryGroups returns summary nodes older than olderThan, grouped by their ancestor DAY node. Used by the compaction job to decide which days are ready to roll up.
 func (s *Store) OldSummaryGroups(ctx context.Context, olderThan time.Duration) ([]memory.SummaryGroup, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.OldSummaryGroups")
@@ -1549,9 +1742,7 @@ func (s *Store) OldSummaryGroups(ctx context.Context, olderThan time.Duration) (
 	return groups, nil
 }
 
-// ReplaceSummariesWithDigest writes a digest node under dayID and deletes the
-// constituent summary nodes in a single transaction. FTS5 stays correct via the
-// nodes_ai_summary (insert) and nodes_ad_summary (delete) triggers.
+// ReplaceSummariesWithDigest writes a digest node under dayID and deletes the constituent summary nodes in a single transaction. FTS5 stays correct via the nodes_ai_summary (insert) and nodes_ad_summary (delete) triggers.
 // If the insert fails the deletes never happen — summaries are never lost.
 func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, summaryIDs []int64, digest string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
@@ -1578,8 +1769,7 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 	}
 
 	// delete summaries — triggers nodes_ad_summary which removes from FTS5.
-	// Build a parameterized IN clause manually; the driver does not support
-	// []int64 expansion, so we construct the placeholders as a string.
+	// Build a parameterized IN clause manually since the driver doesn't support []int64 expansion.
 	placeholders := make([]string, len(summaryIDs))
 	args := make([]any, len(summaryIDs))
 	for i, id := range summaryIDs {
@@ -1608,8 +1798,7 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// implements the memory.Storage interface.
-// It creates task nodes and summary leaf nodes in the temporal tree.
+// LogSemanticNode implements the memory.Storage interface: it creates task nodes and summary leaf nodes in the temporal tree.
 func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "LogSemanticNode")
@@ -1630,16 +1819,60 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 
 	// log summary as child to task node
 	payload, _ := json.Marshal(summary)
-	_, err := s.ensureNode(ctx, s.currentTaskID, "summary", string(payload))
+	nodeID, err := s.ensureNode(ctx, s.currentTaskID, "summary", string(payload))
 	if err != nil {
 		span.RecordError(err)
 		return err
 	}
 
+	// Domain: majority vote over episodes logged since the current task started (task.created_at), not a single Classify(app,title) call — a task can span many app switches, so "the domain of this task" is whichever domain dominated the episodes that fed it. Ties broken by domain string for determinism.
+	var domain string
+	if derr := s.db.QueryRowContext(ctx, `
+		SELECT domain FROM episodes
+		WHERE created_at >= (SELECT created_at FROM nodes WHERE id = ?)
+		GROUP BY domain
+		ORDER BY COUNT(*) DESC, domain
+		LIMIT 1
+	`, s.currentTaskID).Scan(&domain); derr != nil && derr != sql.ErrNoRows {
+		span.RecordError(derr)
+		// non-fatal: domain tagging is best-effort, the summary node itself is already committed above.
+	}
+	if domain != "" {
+		if _, err := s.db.ExecContext(ctx, `UPDATE nodes SET domain = ? WHERE id = ?`, domain, nodeID); err != nil {
+			span.RecordError(err)
+		}
+	}
+
 	span.SetAttributes(
 		attribute.String("db.task_name", summary.TaskName),
 		attribute.Bool("db.same_task", summary.SameTask),
+		attribute.String("db.summary_domain", domain),
 	)
+
+	// Async, best-effort embedding of the summary text (same non-blocking pattern as LogEpisode — see its doc comment for why this goroutine owns its own context rather than reusing ctx).
+	// Snapshot under the write lock already held above — do NOT RLock again (sync.RWMutex isn't reentrant; nested RLock while holding Lock deadlocks).
+	emb, vidx := s.embedder, s.vectorIndex
+	if emb != nil && vidx != nil && strings.TrimSpace(summary.Summary) != "" {
+		go func(id int64, text string, domain string) {
+			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			vec, err := emb.Embed(embedCtx, "RETRIEVAL_DOCUMENT", text)
+			if err != nil {
+				slog.Error("async summary embed failed", "node_id", id, "error", err)
+				return
+			}
+			meta := map[string]string{
+				"domain":     domain,
+				"source":     "summary",
+				"kind":       string(memory.KindPeriod),
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := vidx.Add(embedCtx, fmt.Sprintf("summary:%d", id), text, vec, meta); err != nil {
+				slog.Error("async summary vector index add failed", "node_id", id, "error", err)
+			}
+		}(nodeID, summary.Summary, domain)
+	}
 
 	return nil
 }
@@ -1647,9 +1880,7 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 // DB exposes the underlying connection for test-only raw queries.
 func (s *Store) DB() *sql.DB { return s.db }
 
-// CullRawActivities deletes activity nodes older than olderThan. Summaries,
-// tasks, sessions, days, users, and notes are never touched.
-// Returns the number of rows deleted.
+// CullRawActivities deletes activity nodes older than olderThan. Summaries, tasks, sessions, days, users, and notes are never touched. Returns the number of rows deleted.
 func (s *Store) CullRawActivities(ctx context.Context, olderThan time.Duration) (int64, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.CullRawActivities")
