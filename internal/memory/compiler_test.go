@@ -17,15 +17,6 @@ type mockSummarizer struct {
 	callCount int
 }
 
-func (m *mockSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*memory.TaskSummary, error) {
-	m.callCount++
-	return &memory.TaskSummary{
-		SameTask: true,
-		TaskName: "mock task",
-		Summary:  "mock summary",
-	}, nil
-}
-
 func (m *mockSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
 	ops := make([]memory.NoteOp, len(candidates))
 	for i, c := range candidates {
@@ -146,11 +137,6 @@ type capturingSummarizer struct {
 	received []tracker.Activity
 }
 
-func (m *capturingSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*memory.TaskSummary, error) {
-	m.received = activities
-	return &memory.TaskSummary{SameTask: true, TaskName: "t", Summary: "s"}, nil
-}
-
 func (m *capturingSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
 	return nil, nil
 }
@@ -183,11 +169,6 @@ func TestCompiler_PassesScreenTextToSummarizer(t *testing.T) {
 
 type errorSummarizer struct {
 	callCount int
-}
-
-func (m *errorSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*memory.TaskSummary, error) {
-	m.callCount++
-	return nil, fmt.Errorf("api rate limit reached")
 }
 
 func (m *errorSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
@@ -271,15 +252,6 @@ type notesSummarizer struct {
 	reconcileErr error
 }
 
-func (n *notesSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*memory.TaskSummary, error) {
-	return &memory.TaskSummary{
-		SameTask: true,
-		TaskName: "notes task",
-		Summary:  "did stuff",
-		Notes:    []string{"user prefers terse responses", "user is debugging the React PR"},
-	}, nil
-}
-
 func (n *notesSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
 	if n.reconcileErr != nil {
 		return nil, n.reconcileErr
@@ -294,8 +266,7 @@ func (n *notesSummarizer) ReconcileNotes(ctx context.Context, existing []memory.
 	return ops, nil
 }
 
-// AttributeThreads emits a single thread plus identity facts so the note
-// reconciliation path (which now operates on attr.Identity) is exercised.
+// AttributeThreads emits a single thread plus identity facts so the note reconciliation path (which operates on attr.Identity) is exercised.
 func (n *notesSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []memory.Thread) (*memory.ThreadAttribution, error) {
 	return &memory.ThreadAttribution{
 		Threads:  []memory.ThreadUpdate{{Subject: "notes task", Kind: "work", State: "did stuff", Summary: "did stuff"}},
@@ -475,8 +446,8 @@ func TestCompiler_ReconcileErrorFallback(t *testing.T) {
 
 func TestIsSalient(t *testing.T) {
 	cases := []struct {
-		name     string
-		act      tracker.Activity
+		name        string
+		act         tracker.Activity
 		wantSalient bool
 	}{
 		{
@@ -562,9 +533,7 @@ func TestCompiler_NonSalientActivitiesNotBuffered(t *testing.T) {
 	}
 }
 
-// TestCompiler_ThinTitleActivityFlushes verifies that a salient activity with
-// only a window title (no screen text) is summarized — social/gaming/meeting
-// sessions produce sparse screen content but are still worth remembering.
+// TestCompiler_ThinTitleActivityFlushes checks that a salient activity with only a window title (no screen text) is summarized — social/gaming/meeting sessions produce sparse screen content but are still worth remembering.
 func TestCompiler_ThinTitleActivityFlushes(t *testing.T) {
 	llm := &mockSummarizer{}
 	store := &mockStorage{}
@@ -601,14 +570,13 @@ func TestCompiler_SalientTitleAndScreenTextBothFlush(t *testing.T) {
 
 // ─── Thread attribution + flush recording fakes ───────────────────────────────
 
-// flushRecordingStorage records every Storage method call so tests can assert
-// exactly what flush writes and the order it does it in.
+// flushRecordingStorage records every Storage method call so tests can assert exactly what flush writes and the order it does it in.
 type flushRecordingStorage struct {
-	mu             sync.Mutex
-	semanticCalls  []memory.TaskSummary
-	upsertCalls    []memory.ThreadUpdate
-	noteCalls      []struct{ content, kind string }
-	updateCalls    []struct {
+	mu            sync.Mutex
+	semanticCalls []memory.TaskSummary
+	upsertCalls   []memory.ThreadUpdate
+	noteCalls     []struct{ content, kind string }
+	updateCalls   []struct {
 		id      int64
 		content string
 	}
@@ -658,14 +626,10 @@ func (s *flushRecordingStorage) ThreadsForAttribution(_ context.Context, _ int) 
 }
 
 // fixedAttribSummarizer returns a caller-configured ThreadAttribution (or error).
-// Summarize and ReconcileNotes are stubs that are never invoked by flush.
+// ReconcileNotes is a stub that's never invoked by flush.
 type fixedAttribSummarizer struct {
 	attr *memory.ThreadAttribution
 	err  error
-}
-
-func (s *fixedAttribSummarizer) Summarize(_ context.Context, _ []tracker.Activity, _ string) (*memory.TaskSummary, error) {
-	return nil, nil
 }
 
 func (s *fixedAttribSummarizer) ReconcileNotes(_ context.Context, _ []memory.NoteRef, _ []string) ([]memory.NoteOp, error) {
@@ -676,15 +640,10 @@ func (s *fixedAttribSummarizer) AttributeThreads(_ context.Context, _ []tracker.
 	return s.attr, s.err
 }
 
-// identityTrackingSummarizer is a Summarizer that records ReconcileNotes calls
-// and returns a configurable identity list from AttributeThreads.
+// identityTrackingSummarizer is a Summarizer that records ReconcileNotes calls and returns a configurable identity list from AttributeThreads.
 type identityTrackingSummarizer struct {
 	identity        []string
 	reconcileCalled int
-}
-
-func (s *identityTrackingSummarizer) Summarize(_ context.Context, _ []tracker.Activity, _ string) (*memory.TaskSummary, error) {
-	return nil, nil
 }
 
 func (s *identityTrackingSummarizer) ReconcileNotes(_ context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
@@ -705,10 +664,7 @@ func (s *identityTrackingSummarizer) AttributeThreads(_ context.Context, _ []tra
 
 // ─── Thread attribution tests ─────────────────────────────────────────────────
 
-// TestCompiler_SuccessfulAttribution verifies that when AttributeThreads returns
-// two concurrent threads (entertainment id=0, work id=5), flush calls UpsertThread
-// twice and LogSemanticNode twice, with SameTask = (u.ID != 0) for each, and
-// TaskNames matching the thread subjects.
+// TestCompiler_SuccessfulAttribution checks that when AttributeThreads returns two concurrent threads (entertainment id=0, work id=5), flush calls UpsertThread twice and LogSemanticNode twice, with SameTask = (u.ID != 0) for each and TaskNames matching the thread subjects.
 func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	twoThreads := &memory.ThreadAttribution{
 		Threads: []memory.ThreadUpdate{
@@ -751,9 +707,7 @@ func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	}
 }
 
-// TestCompiler_IdentityReconciliation_NonEmpty verifies that when
-// ThreadAttribution.Identity is non-empty, ExistingNotes and ReconcileNotes are
-// both called.
+// TestCompiler_IdentityReconciliation_NonEmpty checks that ExistingNotes and ReconcileNotes are both called when ThreadAttribution.Identity is non-empty.
 func TestCompiler_IdentityReconciliation_NonEmpty(t *testing.T) {
 	llm := &identityTrackingSummarizer{
 		identity: []string{"user prefers Go"},
@@ -776,9 +730,7 @@ func TestCompiler_IdentityReconciliation_NonEmpty(t *testing.T) {
 	}
 }
 
-// TestCompiler_IdentityReconciliation_Empty verifies that when
-// ThreadAttribution.Identity is empty (nil or zero-length), ExistingNotes and
-// ReconcileNotes are NOT called.
+// TestCompiler_IdentityReconciliation_Empty checks that ExistingNotes and ReconcileNotes are NOT called when ThreadAttribution.Identity is empty (nil or zero-length).
 func TestCompiler_IdentityReconciliation_Empty(t *testing.T) {
 	llm := &identityTrackingSummarizer{
 		identity: nil, // empty / unset
@@ -801,9 +753,7 @@ func TestCompiler_IdentityReconciliation_Empty(t *testing.T) {
 	}
 }
 
-// TestCompiler_FallbackOnAttributionFailure verifies that when AttributeThreads
-// returns an error, nil, or an empty Threads list, flush writes a "Raw Activity
-// Log" TaskSummary via LogSemanticNode and does NOT call UpsertThread.
+// TestCompiler_FallbackOnAttributionFailure checks that when AttributeThreads returns an error, nil, or an empty Threads list, flush writes a "Raw Activity Log" TaskSummary via LogSemanticNode and does NOT call UpsertThread.
 func TestCompiler_FallbackOnAttributionFailure(t *testing.T) {
 	cases := []struct {
 		name string
@@ -856,17 +806,9 @@ func TestCompiler_FallbackOnAttributionFailure(t *testing.T) {
 
 // ─── Concurrency safety ────────────────────────────────────────────────────
 
-// raceSafeSummarizer/raceSafeStorage are mutex-protected mocks so that any
-// data race caught by `go test -race` in the tests below can only originate
-// from the Compiler itself (buffer/wordCount/lastFlush), not from the mocks.
+// raceSafeSummarizer/raceSafeStorage are mutex-protected mocks so any data race caught by `go test -race` below can only originate from the Compiler itself (buffer/wordCount/lastFlush), not the mocks.
 type raceSafeSummarizer struct {
 	mu sync.Mutex
-}
-
-func (m *raceSafeSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*memory.TaskSummary, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return &memory.TaskSummary{SameTask: true, TaskName: "t", Summary: "s"}, nil
 }
 
 func (m *raceSafeSummarizer) ReconcileNotes(ctx context.Context, existing []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
@@ -913,13 +855,7 @@ func (s *raceSafeStorage) ThreadsForAttribution(ctx context.Context, limit int) 
 	return nil, nil
 }
 
-// TestCompiler_ConcurrentAccess drives Ingest, GetCurrentBuffer, and ForceFlush
-// from many goroutines simultaneously, mirroring real daemon usage: the ingest
-// loop (cmd/daemon.go ~211-217) calls Ingest, an hourly ticker (~84-97) calls
-// ForceFlush, and both the /buffer HTTP handler (~231-239) and Agent.Connect
-// (internal/agent/connect.go ~56-57) call GetCurrentBuffer. None of these
-// serialize access to Compiler's internal buffer/wordCount/lastFlush fields,
-// so this must fail under `go test -race`.
+// TestCompiler_ConcurrentAccess drives Ingest, GetCurrentBuffer, and ForceFlush from many goroutines at once, mirroring daemon usage (ingest loop, hourly ticker, /buffer HTTP handler, Agent.Connect) — none of which serialize access to Compiler's buffer/wordCount/lastFlush, so this must pass under `go test -race`.
 func TestCompiler_ConcurrentAccess(t *testing.T) {
 	llm := &raceSafeSummarizer{}
 	store := &raceSafeStorage{}
@@ -944,16 +880,14 @@ func TestCompiler_ConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 
-	// concurrent reads of the live buffer, simulating the /buffer HTTP handler
-	// and Agent.Connect
+	// concurrent reads of the live buffer, simulating the /buffer HTTP handler and Agent.Connect
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				buf := compiler.GetCurrentBuffer()
-				// touch the returned slice the way callers do (range over it),
-				// which is exactly what races against a concurrent append.
+				// touch the returned slice the way callers do (range over it) — exactly what races against a concurrent append.
 				for _, act := range buf {
 					_ = act.App
 				}
@@ -976,9 +910,7 @@ func TestCompiler_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// failingStorage returns errors from the durable-write methods so we can assert
-// the compiler surfaces store failures (logs them) instead of silently
-// swallowing them with `_ =`, which would lose memory with zero visibility.
+// failingStorage returns errors from every durable-write method, so tests can assert the compiler logs store failures instead of swallowing them silently.
 type failingStorage struct{}
 
 func (failingStorage) LogSemanticNode(context.Context, memory.TaskSummary) error {
@@ -998,10 +930,7 @@ func (failingStorage) ThreadsForAttribution(context.Context, int) ([]memory.Thre
 	return nil, nil
 }
 
-// TestCompiler_FlushLogsStoreErrors pins Slice-0 observability: when a durable
-// store write fails during flush, the failure must be logged at ERROR level, not
-// silently discarded. Without this we are blind to memory loss (the exact "I
-// can't see the failures" problem).
+// TestCompiler_FlushLogsStoreErrors checks that a failed durable store write during flush gets logged at ERROR level, not silently dropped.
 func TestCompiler_FlushLogsStoreErrors(t *testing.T) {
 	var logBuf bytes.Buffer
 	prev := slog.Default()
