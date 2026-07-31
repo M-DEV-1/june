@@ -8,9 +8,7 @@ import (
 	"testing"
 )
 
-// The status row uses a rendered, anti-aliased colored dot (Docker-style), not
-// an emoji glyph: a square PNG with an opaque colored center and transparent
-// corners, distinct per state.
+// The status row uses a rendered, anti-aliased colored dot (Docker-style), not an emoji glyph: a square PNG with an opaque colored center and transparent corners, distinct per state.
 func TestStatusDotPNG(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -50,8 +48,7 @@ func TestStatusDotPNG(t *testing.T) {
 	}
 }
 
-// The watcher drops all items when it restarts and re-announces itself with a
-// new owner. We must re-register on its return — but NOT when it disappears.
+// The watcher drops all items when it restarts and re-announces itself with a new owner. We must re-register on its return — but NOT when it disappears.
 func TestShouldReregister_CoreDistinction(t *testing.T) {
 	const sig = "org.freedesktop.DBus.NameOwnerChanged"
 	const watcher = "org.kde.StatusNotifierWatcher"
@@ -86,8 +83,7 @@ func TestShouldReregister_Guards(t *testing.T) {
 	}
 }
 
-// The Linux tray must advertise the ORA logo as an icon pixmap, not a theme
-// icon name. SNI pixmaps are ARGB32 in network byte order (A,R,G,B per pixel).
+// The Linux tray must advertise the ORA logo as an icon pixmap, not a theme icon name. SNI pixmaps are ARGB32 in network byte order (A,R,G,B per pixel).
 func TestTrayIconPixmap(t *testing.T) {
 	pixmaps, err := trayIconPixmaps()
 	if err != nil {
