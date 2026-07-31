@@ -1,0 +1,99 @@
+[
+  {
+    "id": "brave-a11y",
+    "source_session": "061ee907-58f3-4c86-b4ae-ef0575833fb4",
+    "kind": "note",
+    "content": "Brave (snap) needs --force-renderer-accessibility flag or all browser capture returns 0 AT-SPI runes; fixed via a permanent .desktop override.",
+    "probes": [
+      { "query": "brave accessibility flag", "expect_contains": ["force-renderer-accessibility"] },
+      { "query": "why does browser capture return 0 runes", "expect_contains": ["force-renderer-accessibility"] }
+    ]
+  },
+  {
+    "id": "commit-style",
+    "source_session": "5439a8a3-f21e-4bcd-a1fb-ec489632b402",
+    "kind": "note",
+    "content": "User wants commit messages as subject line only, no body, using git commit -s -m.",
+    "probes": [
+      { "query": "commit message style preference", "expect_contains": ["subject"] },
+      { "query": "how should git commits be written", "expect_contains": ["subject"] }
+    ]
+  },
+  {
+    "id": "prefer-prs",
+    "source_session": "061ee907-58f3-4c86-b4ae-ef0575833fb4",
+    "kind": "note",
+    "content": "User prefers landing branch work via a pull request by default, not a direct merge to main.",
+    "probes": [
+      { "query": "how to land a finished branch", "expect_contains": ["pull request"] },
+      { "query": "merge to main directly or PR", "expect_contains": ["pull request"] }
+    ]
+  },
+  {
+    "id": "tdd-only",
+    "source_session": "061ee907-58f3-4c86-b4ae-ef0575833fb4",
+    "kind": "note",
+    "content": "All ORA implementation work goes through red-green-refactor TDD, no exceptions.",
+    "probes": [
+      { "query": "how should new ORA features be implemented", "expect_contains": ["TDD", "red-green-refactor"] }
+    ]
+  },
+  {
+    "id": "sonnet-subagents",
+    "source_session": "061ee907-58f3-4c86-b4ae-ef0575833fb4",
+    "kind": "note",
+    "content": "User is on the $20 plan; prefer sonnet subagents for scoped parallelizable execution to save tokens.",
+    "probes": [
+      { "query": "which model should scoped execution tasks use", "expect_contains": ["sonnet"] }
+    ]
+  },
+  {
+    "id": "no-screenreader",
+    "source_session": "8826ab7f-395c-49b6-9456-4598ac574d8e",
+    "kind": "note",
+    "content": "Never enable ScreenReaderEnabled for accessibility capture, only IsEnabled; ScreenReaderEnabled narrates every keystroke aloud via Orca.",
+    "probes": [
+      { "query": "accessibility flag that speaks keystrokes aloud", "expect_contains": ["ScreenReaderEnabled"] },
+      { "query": "which a11y flag is safe to enable", "expect_contains": ["IsEnabled"] }
+    ]
+  },
+  {
+    "id": "xwayland-blind",
+    "source_session": "8826ab7f-395c-49b6-9456-4598ac574d8e",
+    "kind": "thread",
+    "content": "Linux Wayland capture — XWayland _NET_ACTIVE_WINDOW returns 0x0 on GNOME Wayland, AT-SPI is used instead for active window detection.",
+    "probes": [
+      { "query": "why does active window detection fail on wayland", "expect_contains": ["AT-SPI"] }
+    ]
+  },
+  {
+    "id": "north-star",
+    "source_session": "8826ab7f-395c-49b6-9456-4598ac574d8e",
+    "kind": "thread",
+    "content": "ORA north star — an ambient OS companion for personal Linux machines that sees everything and remembers a structured world model, not an append-only log.",
+    "probes": [
+      { "query": "what is ORA's north star", "expect_contains": ["ambient"] },
+      { "query": "what should ORA's memory avoid becoming", "expect_contains": ["append-only"] }
+    ]
+  },
+  {
+    "id": "retrieval-bottleneck",
+    "source_session": "061ee907-58f3-4c86-b4ae-ef0575833fb4",
+    "kind": "note",
+    "content": "ORA's real failure mode is last-mile retrieval and context assembly, not capture; the unconditional note-dump in GetImplicitContext poisons context with vague notes.",
+    "probes": [
+      { "query": "why does ORA give bad answers despite good capture", "expect_contains": ["retrieval"] },
+      { "query": "what poisons ORA's context window", "expect_contains": ["note-dump", "notes"] }
+    ]
+  },
+  {
+    "id": "context-rot",
+    "source_session": "8826ab7f-395c-49b6-9456-4598ac574d8e",
+    "kind": "note",
+    "content": "ORA's continuous note-taking causes context rot; memory needs a maintained 3-layer world model (working state, episodic rollup, semantic facts) instead of an ever-growing log.",
+    "probes": [
+      { "query": "what is context rot in ORA's memory", "expect_contains": ["context rot"] },
+      { "query": "how many layers should ORA's memory model have", "expect_contains": ["3", "three"] }
+    ]
+  }
+]
