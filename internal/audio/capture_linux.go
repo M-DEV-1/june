@@ -54,8 +54,7 @@ func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.micChan = micChan
 	m.mu.Unlock()
 
-	// RecordLatency is required: PipeWire's pulse server delivers no data to a
-	// record stream that leaves buffer attributes unset (fragment/latency).
+	// RecordLatency is required: PipeWire's pulse server delivers no data to a record stream that leaves buffer attributes unset (fragment/latency).
 	stream, err := c.NewRecord(
 		pulse.Int16Writer(m.writeFn),
 		pulse.RecordSampleRate(24000),

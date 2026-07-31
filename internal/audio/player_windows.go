@@ -15,21 +15,15 @@ import (
 
 // number of hours spent here: 4
 
+// oto is a cross-platform, low-level playback lib
 type otoPlayer struct {
-	ctx *oto.Context
-	// oto is a low-level os-agnostic audio lib (speaker)
-	// we store WCA handles here if later needed for cleanup
-
-	// Windows Core Audio 2006, lowest audio level possible, allows contains a share mode for multi-active-window mic capturing
+	ctx      *oto.Context
 	player   *oto.Player
 	streamer *audioStreamer
 }
 
 func NewSpeaker() (Speaker, error) {
-	// initialize oto for speaker
-	/* llm api infodump
-	- gemini live api requires 24kHz Mono 16-bit
-	*/
+	// initialize oto for speaker; gemini live api requires 24kHz mono 16-bit
 	op := &oto.NewContextOptions{
 		SampleRate:   24000,
 		ChannelCount: 1,
@@ -60,10 +54,7 @@ func NewSpeaker() (Speaker, error) {
 }
 
 func (p *otoPlayer) Play(pcm []byte) error {
-	// drop the audio chunk here, and read() should pick it up
-	// the backpressure is required in streaming media. natural backpressure forces the llm to wait for real time playback?
-	// i think im right but i'll see? update:
-	// a non-blocking send to ensure the agent never deadlocks if the audio buffer is full as dropping a chunk is better than hanging the whole process ig
+	// non-blocking send — read() picks it up; drop the chunk rather than deadlock if the buffer's full
 	select {
 	case p.streamer.chunks <- pcm:
 	default:
@@ -121,9 +112,7 @@ func (s *audioStreamer) Read(p []byte) (n int, err error) {
 			s.buffer = chunk
 			s.mu.Unlock()
 		default:
-			// this should run when no audio is ready
-			// returning silence for some time so that hardware doesn't deadlock
-			// we fill the entire buffer p to maintain clock sync
+			// no audio ready — fill p with silence so hardware doesn't deadlock and clock sync holds
 			for i := range p {
 				p[i] = 0
 			}

@@ -48,8 +48,7 @@ func NewSpeaker() (Speaker, error) {
 }
 
 // readFn is called by the pulse library to pull samples for playback.
-// It drains the internal buffer first, then tries to refill from chunks without
-// blocking — silence fills any gap so the stream stays alive (mirrors audioStreamer.Read).
+// It drains the internal buffer first, then tries to refill from chunks without blocking — silence fills any gap so the stream stays alive (mirrors audioStreamer.Read).
 func (s *pulseSpeaker) readFn(out []int16) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
