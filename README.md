@@ -4,7 +4,7 @@
   <p align="center">
     <img alt="Go Version" src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go">
     <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20|%20Windows-0078D6?style=flat-square">
-    <img alt="License" src="https://img.shields.io/badge/license-MIT-white?style=flat-square">
+    <img alt="License" src="https://img.shields.io/badge/license-GPLv3-white?style=flat-square">
   </p>
 
 # ORA
@@ -78,6 +78,7 @@ If Jaeger is running locally, traces will automatically appear at http://localho
 - tiered capture: accessibility text first, screenshot + vision only when blind
 - media-aware capture (MPRIS), sees you're watching or in a call, not just the chrome
 - episodic memory, i.e. raw captures are preserved, then recalled ("walk me through my day" and other stuff like this)
+- hybrid retrieval (FTS5 + vector search over local embeddings), memory is fully CRUD so a misheard/wrong fact can be corrected in the same conversation instead of sticking around forever
 - OpenTelemetry tracing support
 - TUI interface
 - persistent lightweight context tracking
@@ -92,6 +93,6 @@ Most of the complexity comes from process synchronization, audio pipes, and keep
 ## Plans?
 
 - [x] Linux tracker support
+- [x] Lightweight vector recall (went with chromem + Gemini embeddings, fused with FTS5 instead of hnsw)
 - [ ] Local model support
-- [ ] Lightweight vector recall (hnsw), only when i feel like it's TRULY required tho (my belief is that a good harness solves most problems that one can face)
 - [ ] Sandboxed automation runtime
