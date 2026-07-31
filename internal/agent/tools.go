@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -76,64 +77,154 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
-				Name:        "query_memory",
-				Description: "Search the user's historical semantic memory tasks. Use this when the user asks about something they did in the past that is not in the immediate context window.",
+				Name: "query_memory",
+				Description: "Topical search over memory (moments, facts, arcs, period summaries). " +
+					"Moments (screen observations) rank with recency; facts/notes do not expire. " +
+					"For pure day/timeline questions use recall with since/until instead.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
-						"query": {Type: genai.TypeString, Description: "The keyword or phrase to search for in historical task summaries."},
+						"query":  {Type: genai.TypeString, Description: "What to search for — topic, project, show, person, etc."},
+						"domain": {Type: genai.TypeString, Description: "Optional. Restrict to 'work' or 'personal' memories only. Omit to search everything, weighted toward whichever domain you're currently in."},
 					},
 					Required: []string{"query"},
 				},
 			},
 			{
-				Name:        "recall",
-				Description: "Recall your timeline for a period, or what you know about a subject, from your raw episode history.",
+				Name: "recall",
+				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
+					"Use subject for an ongoing arc. Returns short content+context lines, not raw screen dumps.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
-						"subject": {Type: genai.TypeString, Description: "Optional. A subject/topic to recall (fuses the matching thread's arc with diverse episode specifics). Takes priority over window."},
-						"window":  {Type: genai.TypeString, Description: "Optional. A time period to recall as a chronological timeline: one of today|morning|afternoon|evening|week. Defaults to today."},
+						"subject": {Type: genai.TypeString, Description: "Optional. A subject/topic to recall (fuses the matching thread's arc with diverse episode specifics). Takes priority over the timeline."},
+						"since":   {Type: genai.TypeString, Description: "Optional. Start of the timeline window as an ISO-8601 timestamp (2026-07-05T00:00:00Z) or bare date (2026-07-05). You know the current date/time — convert phrases like 'yesterday', 'July 5th', or 'last week' into a concrete date yourself. Defaults to the start of today."},
+						"until":   {Type: genai.TypeString, Description: "Optional. End of the timeline window (same formats as 'since'). A bare date covers the whole day. Defaults to now. For a single day, set since and until to that same date."},
 					},
+				},
+			},
+			{
+				Name: "branch",
+				Description: "Resolve one open-ended question or research task that needs cross-referencing " +
+					"several searches to build a complete answer (e.g. \"catch me up on everything about the " +
+					"Riddler project\", or a question spanning multiple topics/timeframes) — instead of calling " +
+					"query_memory/recall repeatedly yourself. Runs an internal multi-step search in the " +
+					"background and returns only the final synthesized answer; you will not see, and must not " +
+					"need, its intermediate steps. Prefer query_memory/recall directly for a single simple lookup.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"task": {Type: genai.TypeString, Description: "The open-ended question or research task to resolve."},
+					},
+					Required: []string{"task"},
+				},
+			},
+			{
+				Name: "save_note",
+				Description: "Save a durable fact the user tells you directly in conversation — identity, " +
+					"preferences, plans, relationships, ongoing projects. Use this the moment they say something " +
+					"worth remembering long-term (\"remember I have a dentist appointment Friday\", \"I prefer " +
+					"terse replies\"). This is the ONLY way something said in conversation reaches long-term " +
+					"memory — screen activity is captured separately and automatically, but nothing spoken or " +
+					"typed to you here is remembered unless you save it. Don't use it for transient task chatter.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"content": {Type: genai.TypeString, Description: "The fact to remember, written as a durable statement, not a command to you."},
+					},
+					Required: []string{"content"},
+				},
+			},
+			{
+				Name: "update_note",
+				Description: "Correct a previously saved note whose content was wrong (misheard, misunderstood, " +
+					"or the user says it's outdated) — look the note up first with query_memory to get its id " +
+					"from the \"[note#N]\" prefix, then call this with the corrected content. Use this instead of " +
+					"just apologizing out loud and leaving the wrong fact in memory.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"id":      {Type: genai.TypeInteger, Description: "The note's id, from a \"[note#N]\" query_memory result."},
+						"content": {Type: genai.TypeString, Description: "The corrected fact, written as a durable statement."},
+					},
+					Required: []string{"id", "content"},
+				},
+			},
+			{
+				Name: "delete_note",
+				Description: "Permanently remove a previously saved note the user says is wrong, irrelevant, or " +
+					"should be forgotten — look the note up first with query_memory to get its id from the " +
+					"\"[note#N]\" prefix, then call this. Use this instead of just apologizing out loud and " +
+					"leaving the wrong fact in memory.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"id": {Type: genai.TypeInteger, Description: "The note's id, from a \"[note#N]\" query_memory result."},
+					},
+					Required: []string{"id"},
 				},
 			},
 		},
 	}}
 }
 
-// recallSubjectLimit bounds how many lines RecallSubject contributes to the
-// "recall" tool's subject path.
+// liveTools returns every tool exposed to the Live API session: ORA's own FunctionDeclarations (shell_exec, query_memory, save_note, etc.) plus Gemini's native GoogleSearch grounding tool, so Ora can look something up instead of guessing from memory.
+// Verified live (2026-07-25) that both tool types work together on config.VoiceModel (gemini-2.5-flash-native-audio-preview-12-2025) — not guaranteed on every Gemini model/endpoint.
+// GoogleSearch calls are grounded server-side by Gemini and never surface as a ToolCall, so they don't show up in the TUI's live tool status line the way the FunctionDeclarations tools do.
+func liveTools() []*genai.Tool {
+	tools := toolDefinitions()
+	tools = append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
+	return tools
+}
+
+// recallSubjectLimit bounds how many lines RecallSubject contributes to the "recall" tool's subject path.
 const recallSubjectLimit = 6
 
-// recallExcerpt caps how much of an episode's screen_text is surfaced per
-// line in the "recall" tool's window (timeline) path — shorter than
-// maxEpisodeExcerpt since a whole day's timeline is many lines at once.
+// recallExcerpt caps how much of an episode's screen_text is surfaced per line in the "recall" tool's window (timeline) path — shorter than maxEpisodeExcerpt since a whole day's timeline is many lines at once.
 const recallExcerpt = 160
 
-// recallWindowBounds computes [since, until] for the "recall" tool's window
-// arg, relative to now:
-//   - today: midnight -> now
-//   - morning: 05:00 -> 12:00 (today)
-//   - afternoon: 12:00 -> 17:00 (today)
-//   - evening: 17:00 -> 23:59:59 (today)
-//   - week: now-7d -> now
-//   - anything else (including ""): defaults to today
-func recallWindowBounds(window string, now time.Time) (time.Time, time.Time) {
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	switch window {
-	case "morning":
-		return dayStart.Add(5 * time.Hour), dayStart.Add(12 * time.Hour)
-	case "afternoon":
-		return dayStart.Add(12 * time.Hour), dayStart.Add(17 * time.Hour)
-	case "evening":
-		return dayStart.Add(17 * time.Hour), dayStart.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
-	case "week":
-		return now.AddDate(0, 0, -7), now
-	case "today":
-		fallthrough
-	default:
-		return dayStart, now
+// recallBounds resolves the "recall" tool's since/until args into a concrete [since, until] range.
+// The model, knowing the current date/time, converts any human phrase ("yesterday", "July 5th", "last week") into ISO-8601 bounds and passes them here — so this carries no hardcoded time vocabulary of its own.
+func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Time, error) {
+	since := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if strings.TrimSpace(sinceStr) != "" {
+		parsed, err := parseInstant(sinceStr, now.Location(), false)
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+		since = parsed
 	}
+	until := now
+	if strings.TrimSpace(untilStr) != "" {
+		parsed, err := parseInstant(untilStr, now.Location(), true)
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+		until = parsed
+	}
+	if since.After(until) {
+		return time.Time{}, time.Time{}, errSinceAfterUntil
+	}
+	return since, until, nil
+}
+
+// errSinceAfterUntil is a sentinel so callers can distinguish "the range is backwards" from "the timestamp didn't parse" — leading a reversed-range error with the ISO-8601 format hint would be misleading when the format was fine.
+var errSinceAfterUntil = errors.New("since must not be after until")
+
+// parseInstant parses a full RFC3339 timestamp, or a bare calendar date (2006-01-02).
+// A bare date anchors to the start of that day, or its end (23:59:59) when endOfDay is set — so a bare until date is inclusive of the whole day rather than a zero-width midnight instant.
+func parseInstant(s string, loc *time.Location, endOfDay bool) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	d, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(s), loc)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if endOfDay {
+		return time.Date(d.Year(), d.Month(), d.Day(), 23, 59, 59, 0, loc), nil
+	}
+	return d, nil
 }
 
 func RunShellCommand(command string) string {
@@ -155,9 +246,14 @@ func RunShellCommand(command string) string {
 	return result
 }
 
+// ExecuteTool is just executeTool but exported, so eval tests outside this package can call the real tool (query_memory, recall, etc) the same way the model does.
+func (a *Agent) ExecuteTool(ctx context.Context, name string, args map[string]any) string {
+	return a.executeTool(ctx, name, args)
+}
+
 // executeTool runs a tool and returns the result as a string
 // maybe this can be seperated into /agent/tools altogether later and be compiled with OS specific code?
-func (a *Agent) executeTool(name string, args map[string]any) string {
+func (a *Agent) executeTool(ctx context.Context, name string, args map[string]any) string {
 	switch name {
 	case "shell_exec":
 		command, ok := args["command"].(string)
@@ -181,7 +277,14 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 			return "error: approval queue busy, command rejected"
 		}
 
-		return <-resChan
+		// ctx is cancelled when the live session ends (Connect's sessCancel, via receiveLoop -> runToolCall). Without this select, a HITL approval that never arrived left this goroutine leaking forever after the session was gone.
+		select {
+		case res := <-resChan:
+			return res
+		case <-ctx.Done():
+			slog.Warn("HITL approval abandoned: session ended before user responded", "command", command)
+			return "error: session ended before command was approved"
+		}
 
 	case "read_clipboard":
 		var cmd *exec.Cmd
@@ -258,36 +361,33 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 		if !ok {
 			return "error: query argument is required"
 		}
-		slog.Info("querying long-term memory", "query", query)
+		// domain is optional: a missing or wrong-typed arg silently becomes "" (search everything, weighted toward the current domain) rather than erroring — since/until below are stricter since that's a different tool.
+		domain, _ := args["domain"].(string)
+		slog.Info("querying long-term memory", "query", query, "domain", domain)
 
-		hits, err := a.brain.SearchMemory(context.Background(), query)
+		// HybridSearch (FTS5 + vector, fused via reciprocal rank fusion) replaces the old two-call SearchMemory + RankedEpisodes merge — it covers episodes/summaries/notes/threads in one fused, domain-aware ranking.
+		hits, err := a.brain.HybridSearch(ctx, query, domain, 10)
 		if err != nil {
 			return fmt.Sprintf("error querying memory: %v", err)
 		}
-		// Episodes are raw screen-capture history and aren't covered by
-		// SearchMemory (notes/summaries/threads), so the model couldn't
-		// search for episode specifics until now. Merge in ranked episode
-		// hits (recency+importance+relevance), clearly labeled.
-		episodeHits, err := a.brain.RankedEpisodes(context.Background(), query, 5)
-		if err != nil {
-			return fmt.Sprintf("error querying memory: %v", err)
-		}
-		if len(hits) == 0 && len(episodeHits) == 0 {
+		if len(hits) == 0 {
 			return "no memory matches"
 		}
-		lines := make([]string, 0, len(hits)+len(episodeHits))
+		lines := make([]string, 0, len(hits))
 		for _, h := range hits {
-			lines = append(lines, fmt.Sprintf("[%s] %s", h.Source, h.Content))
-		}
-		for _, h := range episodeHits {
-			lines = append(lines, fmt.Sprintf("[episode] %s", h.Content))
+			// Notes are the only source with an update_note/delete_note follow-up tool, so they're the only hits that carry their ref_id — the model needs it in hand to act on a correction.
+			if h.Source == "note" {
+				lines = append(lines, fmt.Sprintf("[note#%d] %s", h.RefID, h.Content))
+			} else {
+				lines = append(lines, fmt.Sprintf("[%s] %s", h.Source, h.Content))
+			}
 		}
 		return strings.Join(lines, "\n")
 
 	case "recall":
 		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
 			slog.Info("recalling subject", "subject", subject)
-			lines, err := a.brain.RecallSubject(context.Background(), subject, recallSubjectLimit)
+			lines, err := a.brain.RecallSubject(ctx, subject, recallSubjectLimit)
 			if err != nil {
 				return fmt.Sprintf("error recalling subject: %v", err)
 			}
@@ -297,11 +397,31 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 			return strings.Join(lines, "\n")
 		}
 
-		window, _ := args["window"].(string)
-		since, until := recallWindowBounds(window, time.Now())
-		slog.Info("recalling timeline window", "window", window, "since", since, "until", until)
+		var sinceStr, untilStr string
+		if v, present := args["since"]; present {
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Sprintf("error: since/until must be ISO-8601 timestamps (e.g. 2026-07-05T00:00:00Z or 2026-07-05): since must be a string, got %T", v)
+			}
+			sinceStr = s
+		}
+		if v, present := args["until"]; present {
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Sprintf("error: since/until must be ISO-8601 timestamps (e.g. 2026-07-05T00:00:00Z or 2026-07-05): until must be a string, got %T", v)
+			}
+			untilStr = s
+		}
+		since, until, err := recallBounds(sinceStr, untilStr, time.Now())
+		if errors.Is(err, errSinceAfterUntil) {
+			return "error: since must not be after until"
+		}
+		if err != nil {
+			return fmt.Sprintf("error: since/until must be ISO-8601 timestamps (e.g. 2026-07-05T00:00:00Z or 2026-07-05): %v", err)
+		}
+		slog.Info("recalling timeline window", "since", since, "until", until)
 
-		episodes, err := a.brain.EpisodesInWindow(context.Background(), since, until, 50)
+		episodes, err := a.brain.EpisodesInWindow(ctx, since, until, 50)
 		if err != nil {
 			return fmt.Sprintf("error recalling timeline: %v", err)
 		}
@@ -314,11 +434,144 @@ func (a *Agent) executeTool(name string, args map[string]any) string {
 			if runes := []rune(excerpt); len(runes) > recallExcerpt {
 				excerpt = string(runes[:recallExcerpt])
 			}
-			lines = append(lines, fmt.Sprintf("[%s] %s — %s: %s", e.CreatedAt.Format("15:04"), e.App, e.Title, excerpt))
+			// Established timeline shape: "[Jan 2 15:04] app — title: …" (uses the timestamp's own location, so UTC fixtures stay UTC).
+			lines = append(lines, fmt.Sprintf("[%s] %s — %s: %s",
+				e.CreatedAt.Format("Jan 2 15:04"), e.App, e.Title, excerpt))
 		}
 		return strings.Join(lines, "\n")
+
+	case "branch":
+		task, ok := args["task"].(string)
+		if !ok || strings.TrimSpace(task) == "" {
+			return "error: task argument is required"
+		}
+		if !a.tryReserveBranchSlot() {
+			return fmt.Sprintf("error: branch call limit (%d) reached for this session", maxBranchesPerSession)
+		}
+		model, err := a.subtaskModelFactory()
+		if err != nil {
+			return fmt.Sprintf("error: branch failed to start: %v", err)
+		}
+		result, err := a.runSubtask(ctx, model, task)
+		if err != nil {
+			return fmt.Sprintf("error: branch failed: %v", err)
+		}
+		return result
+
+	case "save_note":
+		content, ok := args["content"].(string)
+		if !ok || strings.TrimSpace(content) == "" {
+			return "error: content argument is required"
+		}
+		if _, err := a.brain.LogNote(ctx, content, "fact"); err != nil {
+			return fmt.Sprintf("error saving note: %v", err)
+		}
+		return "saved"
+
+	case "update_note":
+		idFloat, ok := args["id"].(float64)
+		if !ok {
+			return "error: id argument is required (get it from a [note#N] query_memory result)"
+		}
+		content, ok := args["content"].(string)
+		if !ok || strings.TrimSpace(content) == "" {
+			return "error: content argument is required"
+		}
+		if err := a.brain.UpdateNote(ctx, int64(idFloat), content); err != nil {
+			return fmt.Sprintf("error updating note: %v", err)
+		}
+		return "updated"
+
+	case "delete_note":
+		idFloat, ok := args["id"].(float64)
+		if !ok {
+			return "error: id argument is required (get it from a [note#N] query_memory result)"
+		}
+		if err := a.brain.DeleteNote(ctx, int64(idFloat)); err != nil {
+			return fmt.Sprintf("error deleting note: %v", err)
+		}
+		return "deleted"
 
 	default:
 		return fmt.Sprintf("unknown tool: %s", name)
 	}
+}
+
+// toolActivitySummary pre-formats a tool call's primary argument into a short display literal for the UI (e.g. `"Riddler puzzles"` for query_memory), so the UI never needs to know each tool's arg-shape — that knowledge already lives here, next to executeTool/toolDefinitions.
+// Unknown tools and no-arg tools (read_clipboard) summarize to "".
+func toolActivitySummary(name string, args map[string]any) string {
+	switch name {
+	case "query_memory":
+		if q, ok := args["query"].(string); ok {
+			return fmt.Sprintf("%q", q)
+		}
+	case "recall":
+		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
+			return fmt.Sprintf("%q", subject)
+		}
+		since, _ := args["since"].(string)
+		until, _ := args["until"].(string)
+		switch {
+		case since != "" && until != "":
+			return fmt.Sprintf("since %s until %s", since, until)
+		case since != "":
+			return fmt.Sprintf("since %s", since)
+		case until != "":
+			return fmt.Sprintf("until %s", until)
+		}
+	case "shell_exec":
+		if cmd, ok := args["command"].(string); ok {
+			return fmt.Sprintf("%q", cmd)
+		}
+	case "read_file":
+		if path, ok := args["path"].(string); ok {
+			return fmt.Sprintf("%q", path)
+		}
+	case "list_files":
+		if path, ok := args["path"].(string); ok && path != "" {
+			return fmt.Sprintf("%q", path)
+		}
+	case "open_url":
+		if url, ok := args["url"].(string); ok {
+			return fmt.Sprintf("%q", url)
+		}
+	case "save_note":
+		if content, ok := args["content"].(string); ok {
+			return fmt.Sprintf("%q", content)
+		}
+	case "update_note":
+		if content, ok := args["content"].(string); ok {
+			return fmt.Sprintf("%q", content)
+		}
+	case "delete_note":
+		if id, ok := args["id"].(float64); ok {
+			return fmt.Sprintf("#%d", int64(id))
+		}
+	case "branch":
+		if task, ok := args["task"].(string); ok {
+			return fmt.Sprintf("%q", task)
+		}
+	}
+	return ""
+}
+
+// resultSummary condenses a tool's raw result string into a short status word for the UI's transcript log line — "N hits" for the search-shaped tools, "failed" on any error result (executeTool always prefixes errors with "error"), "0 hits" for the known empty-result sentinels, "done" for any other success.
+func resultSummary(name, result string) string {
+	if strings.HasPrefix(result, "error") {
+		return "failed"
+	}
+	switch result {
+	case "no memory matches", "no memory of that subject", "no episodes in that window":
+		return "0 hits"
+	case "saved":
+		return "saved"
+	case "updated":
+		return "updated"
+	case "deleted":
+		return "deleted"
+	}
+	if name == "query_memory" || name == "recall" {
+		return fmt.Sprintf("%d hits", strings.Count(result, "\n")+1)
+	}
+	return "done"
 }

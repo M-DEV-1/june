@@ -10,19 +10,13 @@ import (
 	"google.golang.org/genai"
 )
 
-// previewPhrase is spoken back for every /voice preview -- short and fixed,
-// so the one-shot TTS call stays cheap and the user hears the same line
-// regardless of which voice they're trying.
+// previewPhrase is spoken back for every /voice preview -- short and fixed, so the one-shot TTS call stays cheap and the user hears the same line regardless of which voice they're trying.
 const previewPhrase = "Hi, I'm Ora. This is how I sound."
 
-// PreviewVoice synthesizes previewPhrase with voiceName via a one-shot
-// (non-live) Gemini TTS call and plays it straight through the speaker. It
-// never touches the agent's configured/persisted voice (SetVoice/GetVoice)
-// or the Live session -- purely a "let me hear it first" side effect.
+// PreviewVoice synthesizes previewPhrase with voiceName via a one-shot (non-live) Gemini TTS call and plays it straight through the speaker.
+// It never touches the agent's configured/persisted voice (SetVoice/GetVoice) or the Live session -- purely a "let me hear it first" side effect.
 //
-// Gemini TTS returns 24kHz mono 16-bit PCM (see config.TTSModel), the exact
-// format audio.Speaker already expects from the Live API, so the bytes are
-// played as-is with no conversion.
+// Gemini TTS returns 24kHz mono 16-bit PCM (see config.TTSModel), the same format audio.Speaker already expects from the Live API, so the bytes play as-is with no conversion.
 func (a *Agent) PreviewVoice(ctx context.Context, voiceName string) error {
 	canonical, ok := config.NormalizeVoice(voiceName)
 	if !ok {
