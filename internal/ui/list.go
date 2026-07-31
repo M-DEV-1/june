@@ -22,8 +22,8 @@ type commandDelegate struct {
 	styles Styles
 }
 
-func (d commandDelegate) Height() int                             { return 1 }
-func (d commandDelegate) Spacing() int                            { return 0 }
+func (d commandDelegate) Height() int                               { return 1 }
+func (d commandDelegate) Spacing() int                              { return 0 }
 func (d commandDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
 func (d commandDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
 	i, ok := listItem.(commandItem)
@@ -56,22 +56,23 @@ func (d commandDelegate) Render(w io.Writer, m list.Model, index int, listItem l
 	fmt.Fprint(w, fn(""))
 }
 
-func newCommandList(s Styles) list.Model {
-	items := []list.Item{
-		commandItem{title: "voice", desc: "Switch to Voice-Only mode"},
-		commandItem{title: "voice list", desc: "List TTS voices / show current"},
-		commandItem{title: "voice preview ", desc: "Hear a sample of a voice: /voice preview <name>"},
-		commandItem{title: "text", desc: "Switch to Text-Only mode"},
-		commandItem{title: "both", desc: "Switch to Voice + Text mode"},
-		commandItem{title: "mute", desc: "Toggle microphone mute state globally"},
-		commandItem{title: "context", desc: "View recent semantic memory"},
-		commandItem{title: "note", desc: "Save a stable fact: /note <text>"},
-		commandItem{title: "notes", desc: "List saved notes"},
-		commandItem{title: "help", desc: "Show all available commands"},
-		commandItem{title: "clear", desc: "Clear the screen"},
-	}
+// commandItems is the single source of truth for the "/" command list, shared by newCommandList (unfiltered) and FilterCommands (prefix-filtered).
+var commandItems = []list.Item{
+	commandItem{title: "voice", desc: "Switch to Voice-Only mode"},
+	commandItem{title: "voice list", desc: "List TTS voices / show current"},
+	commandItem{title: "voice preview ", desc: "Hear a sample of a voice: /voice preview <name>"},
+	commandItem{title: "text", desc: "Switch to Text-Only mode"},
+	commandItem{title: "both", desc: "Switch to Voice + Text mode"},
+	commandItem{title: "mute", desc: "Toggle microphone mute state globally"},
+	commandItem{title: "context", desc: "View recent semantic memory"},
+	commandItem{title: "note", desc: "Save a stable fact: /note <text>"},
+	commandItem{title: "notes", desc: "List saved notes"},
+	commandItem{title: "help", desc: "Show all available commands"},
+	commandItem{title: "clear", desc: "Clear the screen"},
+}
 
-	l := list.New(items, commandDelegate{styles: s}, DefaultListWidth, DefaultListHeight)
+func newCommandList(s Styles) list.Model {
+	l := list.New(commandItems, commandDelegate{styles: s}, DefaultListWidth, DefaultListHeight)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false) // We handle filtering via the textarea
@@ -102,21 +103,8 @@ func newHitlList(s Styles) list.Model {
 	return l
 }
 func FilterCommands(l *list.Model, query string) {
-	allCommands := []list.Item{
-		commandItem{title: "voice", desc: "Switch to Voice-Only mode"},
-		commandItem{title: "voice list", desc: "List TTS voices / show current"},
-		commandItem{title: "voice preview ", desc: "Hear a sample of a voice: /voice preview <name>"},
-		commandItem{title: "text", desc: "Switch to Text-Only mode"},
-		commandItem{title: "both", desc: "Switch to Voice + Text mode"},
-		commandItem{title: "mute", desc: "Toggle microphone mute state globally"},
-		commandItem{title: "context", desc: "View recent semantic memory"},
-		commandItem{title: "note", desc: "Save a stable fact: /note <text>"},
-		commandItem{title: "notes", desc: "List saved notes"},
-		commandItem{title: "help", desc: "Show all available commands"},
-		commandItem{title: "clear", desc: "Clear the screen"},
-	}
 	var filtered []list.Item
-	for _, item := range allCommands {
+	for _, item := range commandItems {
 		ci := item.(commandItem)
 		if strings.HasPrefix(ci.title, query) {
 			filtered = append(filtered, item)
