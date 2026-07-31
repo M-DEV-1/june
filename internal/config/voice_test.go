@@ -86,8 +86,7 @@ func TestSetVoice_RejectsInvalid(t *testing.T) {
 func TestLoadConfig_RejectsBadPersistedVoice(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	// write a config with an invalid voice directly, simulating a hand-edited
-	// or stale ora-config.json
+	// write a config with an invalid voice directly, simulating a hand-edited or stale ora-config.json
 	cfg := LoadConfig()
 	cfg.Voice = "TotallyMadeUp"
 	if err := SaveConfig(cfg); err != nil {
