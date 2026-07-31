@@ -4,15 +4,13 @@ package tracker
 
 import "testing"
 
-// On GNOME Wayland, XWayland's _NET_ACTIVE_WINDOW reports 0x0 for native
-// Wayland windows, so the X11 backend is blind. AT-SPI must take priority on
-// Wayland. On native X11 the X11 backend is preferred (faster, no a11y dep).
+// On GNOME Wayland, XWayland's _NET_ACTIVE_WINDOW reports 0x0 for native Wayland windows, so the X11 backend is blind there and AT-SPI must take priority. On native X11 the X11 backend wins instead (faster, no a11y dep).
 func TestSelectBackend(t *testing.T) {
 	cases := []struct {
-		name                          string
-		haveSway, haveHypr            bool
-		wayland, haveX11              bool
-		want                          backend
+		name               string
+		haveSway, haveHypr bool
+		wayland, haveX11   bool
+		want               backend
 	}{
 		{"sway wins over everything", true, true, true, true, backendSway},
 		{"hypr before atspi/x11", false, true, true, true, backendHypr},

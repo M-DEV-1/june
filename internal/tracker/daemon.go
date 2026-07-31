@@ -14,10 +14,7 @@ import (
 
 const recaptureInterval = 5 * time.Minute
 
-// Tiered-capture tuning. AT-SPI/UIA text is free and tried first; the vision
-// tier (screenshot -> LLM) only fires when accessibility comes up nearly empty
-// (browsers, movies, games, canvas) and no more often than minVisionInterval to
-// keep token/compute cost bounded.
+// Tiered-capture tuning. AT-SPI/UIA text is tried first (free); vision (screenshot -> LLM) only fires when that text comes up nearly empty, and no more often than minVisionInterval.
 const (
 	thinTextThreshold = 200              // runes; below this, accessibility is treated as blind
 	minVisionInterval = 90 * time.Second // floor between vision calls
@@ -48,22 +45,12 @@ func (d *Daemon) SetCapturer(fn func() string) {
 	d.capturer = fn
 }
 
-// SetVisionFn injects the vision describer (image -> text). When set, the tiered
-// capturer falls back to a screenshot + this function whenever accessibility text
-// is too thin to be useful. nil disables the vision tier (text-only).
+// SetVisionFn injects the vision describer (image -> text). When set, the tiered capturer falls back to a screenshot + this function whenever accessibility text is too thin to be useful. nil disables the vision tier (text-only).
 func (d *Daemon) SetVisionFn(fn func(ctx context.Context, png []byte) string) {
 	d.visionFn = fn
 }
 
-// MatchesBlocklist reports whether app should be blocked from tracking. It
-// normalizes both the activity's app name and each blocklist entry (lowercase,
-// trim whitespace, strip a trailing ".exe") and matches by substring, so a
-// single blocklist entry works across platforms: Windows app names carry a
-// ".exe" suffix ("1Password.exe"), while Linux app identifiers from AT-SPI/
-// X11/Wayland never do and often take reverse-DNS or lowercase-binary forms
-// ("1Password", "1password", "org.keepassxc.KeePassXC", "com.bitwarden.desktop").
-// An exact-match-only comparison against a Windows-only default list would
-// silently never block these on Linux.
+// MatchesBlocklist reports whether app should be blocked from tracking. Normalizes both sides (lowercase, trim, strip trailing ".exe") and matches by substring, so one blocklist entry works across platforms — Windows names carry ".exe", Linux names (AT-SPI/X11/Wayland) never do and often show up reverse-DNS or lowercase ("org.keepassxc.KeePassXC", "1password").
 func MatchesBlocklist(app string, blocklist []string) bool {
 	normalizedApp := normalizeAppIdentifier(app)
 	if normalizedApp == "" {
@@ -78,8 +65,7 @@ func MatchesBlocklist(app string, blocklist []string) bool {
 	return false
 }
 
-// normalizeAppIdentifier lowercases, trims whitespace, and strips a trailing
-// ".exe" so Windows and Linux app-name forms can be compared uniformly.
+// normalizeAppIdentifier lowercases, trims whitespace, and strips a trailing ".exe" so Windows and Linux app-name forms can be compared uniformly.
 func normalizeAppIdentifier(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.TrimSuffix(s, ".exe")
@@ -107,9 +93,7 @@ func (d *Daemon) Start(ctx context.Context) {
 	var emittedCurrent bool
 	var lastCaptureTime time.Time
 
-	// use injected capturer (tests) or default to tiered capture with diff tracking.
-	// the default path needs the current activity so the vision tier can skip the
-	// bare desktop; the injected test capturer ignores it.
+	// use injected capturer (tests) or default to tiered capture with diff tracking. The default path needs the current activity so vision can skip the bare desktop; the test capturer ignores it.
 	var lastScreenText string
 	var lastVisionTime time.Time
 	capture := func(act Activity) string {
@@ -217,13 +201,8 @@ func (d *Daemon) Start(ctx context.Context) {
 	}
 }
 
-// tieredCapture reads accessibility text first (free) and only escalates to the
-// vision tier (screenshot -> LLM) when that text is too thin to describe what's
-// on screen. Returns "" when content is unchanged since the last capture, so
-// callers never re-emit or re-summarize the same screen.
-//
-// Cost guards: vision is gated behind thinTextThreshold AND minVisionInterval,
-// and the diff check below means a static thin screen is summarized at most once.
+// tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen.
+// Returns "" when content is unchanged since the last capture, so callers never re-emit the same screen. Vision is gated behind thinTextThreshold and minVisionInterval to keep cost down.
 func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *string, lastCaptureTime, lastVisionTime *time.Time) string {
 	text, err := extractText()
 	if err != nil {
@@ -231,8 +210,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	}
 	*lastCaptureTime = time.Now()
 
-	// vision only escalates for a real foreground app — never the bare desktop,
-	// or we'd snap and describe the wallpaper on a loop while the user is idle.
+	// vision only escalates for a real foreground app, never the bare desktop — or we'd snap and describe the wallpaper on a loop while the user is idle.
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
 	mediaActive := mediaPlaying(ctx)
 	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
@@ -250,10 +228,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	return diff(lastText, combined)
 }
 
-// nonWindowApps are the desktop/compositor/shell identifiers that mean "no real
-// application is focused" — the bare desktop. extractText is thin for these, so
-// without this gate the vision tier would screenshot and describe the wallpaper
-// on every idle tick. Normalize() maps an empty app to "Unknown".
+// nonWindowApps are the desktop/compositor/shell identifiers that mean no real app is focused. Without this gate the vision tier would screenshot and describe the wallpaper on every idle tick.
 var nonWindowApps = map[string]struct{}{
 	"":                {},
 	"unknown":         {},
@@ -266,23 +241,15 @@ var nonWindowApps = map[string]struct{}{
 	"desktop":         {},
 }
 
-// isVisionWorthy reports whether the focused window is a real application worth
-// describing with the vision tier (vs. the bare desktop / compositor shell).
+// isVisionWorthy reports whether the focused window is a real application worth describing with the vision tier (vs. the bare desktop / compositor shell).
 func isVisionWorthy(act Activity) bool {
 	app := strings.ToLower(strings.TrimSpace(act.App))
 	_, isShell := nonWindowApps[app]
 	return !isShell
 }
 
-// shouldUseVision decides whether to escalate to the (expensive) vision tier:
-// only when vision is enabled and enough time has passed since the last
-// vision call (the cost guard, non-negotiable). Accessibility text length
-// normally gates it too — thin text means accessibility can't describe the
-// screen — but mediaActive (an MPRIS player actively "Playing", e.g. a video
-// or a call) bypasses that gate: a browser tab playing video can return
-// thousands of runes of surrounding chrome text while describing nothing
-// about the video itself, so text length alone is not a reliable signal
-// there.
+// shouldUseVision decides whether to escalate to the (expensive) vision tier: needs vision enabled and the rate limit cleared.
+// Text length normally gates it too (thin text = accessibility can't describe the screen), but mediaActive (an MPRIS player "Playing") bypasses that — a browser tab playing video returns plenty of chrome text while describing nothing about the video itself.
 func shouldUseVision(textLen int, visionEnabled bool, mediaActive bool, sinceLastVision time.Duration) bool {
 	if !visionEnabled {
 		return false
