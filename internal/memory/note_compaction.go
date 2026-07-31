@@ -10,13 +10,11 @@ import (
 	"google.golang.org/genai"
 )
 
-// minNotesToConsolidate is the floor below which the notes table is small enough
-// that periodic consolidation is not worth an LLM call.
+// minNotesToConsolidate is the floor below which the notes table is small enough that periodic consolidation isn't worth an LLM call.
 const minNotesToConsolidate = 20
 
-// NoteConsolidator collapses the full notes set into a deduplicated, durable-only
-// canonical list. It is the curation counterpart to per-flush ReconcileNotes:
-// reconciliation guards the front door, consolidation cleans the whole room.
+// NoteConsolidator collapses the full notes set into a deduplicated, durable-only canonical list.
+// It's the curation counterpart to per-flush ReconcileNotes: reconciliation guards the front door, consolidation cleans the whole room.
 type NoteConsolidator interface {
 	ConsolidateNotes(ctx context.Context, notes []string) ([]string, error)
 }
@@ -27,10 +25,8 @@ type NoteStore interface {
 	ReplaceAllNotes(ctx context.Context, contents []string) error
 }
 
-// NoteCompactor periodically rewrites the notes table into a smaller canonical
-// set: merging near-duplicates and dropping ephemeral task config that leaked in
-// as "facts." This is the structural defence against notes-layer context rot —
-// per-flush reconciliation under-merges over time, so the whole set is curated.
+// NoteCompactor periodically rewrites the notes table into a smaller canonical set, merging near-duplicates and dropping ephemeral task config that leaked in as "facts."
+// This is the defence against notes-layer context rot — per-flush reconciliation under-merges over time, so the whole set gets curated.
 type NoteCompactor struct {
 	llm   NoteConsolidator
 	store NoteStore
@@ -40,8 +36,7 @@ func NewNoteCompactor(llm NoteConsolidator, store NoteStore) *NoteCompactor {
 	return &NoteCompactor{llm: llm, store: store}
 }
 
-// Compact loads every note, asks the model for the canonical set, and rewrites the
-// table — but only when doing so is safe and useful. Guards:
+// Compact loads every note, asks the model for the canonical set, and rewrites the table — but only when doing so is safe and useful. Guards:
 //   - below minNotesToConsolidate: skip (table is small).
 //   - empty model result: skip (never wipe the table on a bad response).
 //   - no reduction in count: skip (not worth churning rows).
@@ -64,8 +59,7 @@ func (nc *NoteCompactor) Compact(ctx context.Context) error {
 		return fmt.Errorf("note consolidation: llm call: %w", err)
 	}
 
-	// Safety: never wipe the table on an empty/garbage response, and don't churn
-	// rows when the model failed to actually reduce the set.
+	// Safety: never wipe the table on an empty/garbage response, and don't churn rows when the model failed to actually reduce the set.
 	if len(merged) == 0 || len(merged) >= len(existing) {
 		return nil
 	}

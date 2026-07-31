@@ -10,18 +10,9 @@ import (
 	"google.golang.org/genai"
 )
 
-// StateDeriver synthesizes a short present-tense working-state summary from
-// recent episodic summaries and stable notes. The result is stored as a
-// single-row cache (working_state) and injected into GetImplicitContext,
-// replacing the raw summary dump.
-type StateDeriver interface {
-	DeriveState(ctx context.Context, recentSummaries []string, notes []string) (string, error)
-}
-
-// DeriveState implements StateDeriver on GeminiSummarizer.
-// It returns a plain-text, present-tense synthesis (<= ~120 words) of the
-// user's active project, current focus, recent activity, and open loops.
-// Returns "",nil immediately when both inputs are empty — no API call is made.
+// DeriveState synthesizes a short present-tense working-state summary (<= ~120 words: active project, current focus, recent activity, open loops) from recent episodic summaries and stable notes.
+// The result is stored as a single-row cache (working_state) and injected into GetImplicitContext in place of the raw summary dump.
+// Returns "", nil immediately when both inputs are empty — no API call made.
 func (g *GeminiSummarizer) DeriveState(ctx context.Context, recentSummaries []string, notes []string) (string, error) {
 	if len(recentSummaries) == 0 && len(notes) == 0 {
 		return "", nil
