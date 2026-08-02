@@ -15,9 +15,7 @@ func captureScreen() ([]byte, error) {
 	return nil, nil
 }
 
-// extractText returns the text content of the focused window via AT-SPI over D-Bus.
-// Returns ("", nil) when the accessibility bus is unavailable, no window is focused,
-// or any other error occurs — callers must never see a non-nil error from this function.
+// extractText returns the text content of the focused window via AT-SPI over D-Bus. Returns ("", nil) on any failure (no bus, no focused window, etc) — callers never see a non-nil error here.
 //
 // Per-app requirements:
 //   - GTK3: set toolkit-accessibility=true in ~/.config/gtk-3.0/settings.ini, or use
@@ -33,10 +31,7 @@ func extractText() (string, error) {
 	return text, nil
 }
 
-// Walk bounds. Deep enough to reach text inside IDEs, terminals, and rich
-// native apps (their a11y trees nest far below the old depth-6 cap) while still
-// bounded so a pathological tree can't hang capture. captureTimeout is the hard
-// ceiling regardless of these.
+// Walk bounds — deep enough to reach text in IDEs/terminals/rich native apps, but bounded so a pathological tree can't hang capture. captureTimeout is the hard ceiling regardless.
 const (
 	captureTimeout = 2500 * time.Millisecond
 	maxDepth       = 14
@@ -44,13 +39,9 @@ const (
 	maxTextLen     = 100000
 )
 
-// enableATSPI makes GTK3/Qt/VTE apps build and expose their accessibility trees
-// by setting only org.a11y.Status.IsEnabled. It deliberately does NOT touch
-// ScreenReaderEnabled — that flag activates a talking screen reader (Orca), which
-// narrates keystrokes aloud. We want to read trees silently, not announce them.
-// Best-effort: any failure is ignored. Chromium browsers still need
-// --force-renderer-accessibility at launch, so this does not cover in-page
-// browser content (the vision tier handles those).
+// enableATSPI makes GTK3/Qt/VTE apps build and expose their accessibility trees, by setting org.a11y.Status.IsEnabled only.
+// Does NOT touch ScreenReaderEnabled — that flag turns on Orca and narrates keystrokes aloud, we just want the trees. Best-effort, failures ignored.
+// Chromium still needs --force-renderer-accessibility at launch, so in-page browser content isn't covered here (vision tier handles that).
 func enableATSPI() {
 	sess, err := dbus.SessionBus()
 	if err != nil {
@@ -67,8 +58,7 @@ type aref struct {
 	Path dbus.ObjectPath
 }
 
-// atspiExtract does the real work so we can return errors internally without
-// leaking them to the caller.
+// atspiExtract does the real work so we can return errors internally without leaking them to the caller.
 func atspiExtract(ctx context.Context) (string, error) {
 	// Step 1: get the a11y bus address from the session bus.
 	sess, err := dbus.SessionBus()
@@ -123,11 +113,7 @@ func atspiExtract(ctx context.Context) (string, error) {
 			if !hasState(ctx, conn, win, stateActive) {
 				continue
 			}
-			// Found the focused top-level window — walk its subtree, then
-			// apply the role-aware content rule (documentText): browser
-			// chrome lives outside any DOCUMENT_WEB node, so when one is
-			// present only its text is kept; native apps have no
-			// DOCUMENT_WEB node and fall back to the full tree unchanged.
+			// found the focused window — walk its subtree, then apply documentText's role-aware rule: browser chrome lives outside any DOCUMENT_WEB node, so keep only that when present; native apps have none and fall back to the full tree.
 			visited := 0
 			tree := buildA11yTree(ctx, conn, win, 0, &visited)
 			if t := strings.TrimSpace(documentText(tree)); t != "" {
@@ -151,10 +137,8 @@ func atspiExtract(ctx context.Context) (string, error) {
 	return strings.TrimSpace(result), nil
 }
 
-// atspiActiveWindow returns (app, title) of the focused top-level window via
-// AT-SPI. It walks the same registry tree as atspiExtract but reads accessible
-// Names instead of text. Returns ("", "") on any failure — the caller maps that
-// to Unknown.
+// atspiActiveWindow returns (app, title) of the focused window via AT-SPI, walking the same registry tree as atspiExtract but reading Names instead of text.
+// Returns ("", "") on any failure — the caller maps that to Unknown.
 func atspiActiveWindow(ctx context.Context) (string, string) {
 	sess, err := dbus.SessionBus()
 	if err != nil {
@@ -269,11 +253,7 @@ func getText(ctx context.Context, conn *dbus.Conn, ref aref) string {
 	return text
 }
 
-// getRoleName reads the canonical (untranslated) AT-SPI role name of an
-// accessible — e.g. "document web", "tool bar", "push button". This is the
-// string form of the ATSPI_ROLE_* enum (GetRole returns the same information
-// as a uint32; GetRoleName is used here since it is self-describing and
-// needs no numeric constant table). Best-effort: any error yields "".
+// getRoleName reads the canonical AT-SPI role name of an accessible — e.g. "document web", "tool bar", "push button". Using the string form (vs. GetRole's uint32) avoids needing a numeric constant table. Best-effort: any error yields "".
 func getRoleName(ctx context.Context, conn *dbus.Conn, ref aref) string {
 	obj := conn.Object(ref.Name, ref.Path)
 	var role string
@@ -281,12 +261,8 @@ func getRoleName(ctx context.Context, conn *dbus.Conn, ref aref) string {
 	return role
 }
 
-// buildA11yTree walks the accessible subtree from ref into an in-memory
-// a11yNode tree — role, own text (if the node implements org.a11y.atspi.Text),
-// and children — so the pure, unit-tested documentText rule can decide what
-// to keep (see document_text.go). Bounded by maxDepth, maxNodes (via the
-// visited counter), and the context deadline, mirroring the walk's previous
-// flat-collection bounds.
+// buildA11yTree walks the accessible subtree from ref into an in-memory a11yNode tree (role, own text if it implements org.a11y.atspi.Text, and children), so documentText (document_text.go) can decide what to keep.
+// Bounded by maxDepth, maxNodes (via the visited counter), and the context deadline.
 func buildA11yTree(ctx context.Context, conn *dbus.Conn, ref aref, depth int, visited *int) a11yNode {
 	if depth > maxDepth || *visited >= maxNodes || ctx.Err() != nil {
 		return a11yNode{}

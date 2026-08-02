@@ -6,12 +6,7 @@ import (
 	"testing"
 )
 
-// TestMatchesBlocklist_LinuxAppNames demonstrates that sensitive apps (password
-// managers) MUST be blocked from tracking regardless of platform. AT-SPI/X11/
-// Wayland never produce ".exe"-suffixed app names on Linux (see
-// internal/tracker/tracker_linux.go: Normalize() on WM_CLASS / app_id / AT-SPI
-// Name), so an exact-match-only matcher against a Windows-only default
-// blocklist silently never blocks them on Linux — the user's actual platform.
+// Sensitive apps (password managers) must stay blocked on Linux too, but AT-SPI/X11/Wayland app names never carry Windows' ".exe" suffix — an exact-match-only matcher against the Windows-only default blocklist would silently never block them here.
 func TestMatchesBlocklist_LinuxAppNames(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -19,8 +14,7 @@ func TestMatchesBlocklist_LinuxAppNames(t *testing.T) {
 		blocklist []string
 		want      bool
 	}{
-		// realistic Linux app-name forms for sensitive apps, matched against
-		// the (fixed) DefaultBlocklist.
+		// realistic Linux app-name forms for sensitive apps, matched against the (fixed) DefaultBlocklist.
 		{
 			name:      "1Password native Linux binary (X11 WM_CLASS / app_id)",
 			app:       "1Password",

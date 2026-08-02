@@ -15,8 +15,7 @@ import (
 
 var screenshotSeq atomic.Uint64
 
-// xdg-desktop-portal PermissionStore: where the compositor records the user's
-// screenshot allow/deny decision. Unsandboxed binaries (us) get the empty app-id.
+// xdg-desktop-portal PermissionStore: where the compositor records the user's screenshot allow/deny decision. Unsandboxed binaries (us) get the empty app-id.
 const (
 	permStoreService = "org.freedesktop.impl.portal.PermissionStore"
 	permStorePath    = "/org/freedesktop/impl/portal/PermissionStore"
@@ -25,12 +24,10 @@ const (
 	screenshotID     = "screenshot"
 )
 
-// screenshotApps are the app-ids a stored screenshot decision can land under for
-// us: "" because we run unsandboxed, plus our own name as a defensive fallback.
+// screenshotApps are the app-ids a stored screenshot decision can land under for us: "" because we run unsandboxed, plus our own name as a defensive fallback.
 var screenshotApps = []string{"", "ora"}
 
-// screenshotGranted reports whether the stored permissions already allow
-// screenshots, so warm-up can skip prompting. Portal stores ["yes"] for allow.
+// screenshotGranted reports whether the stored permissions already allow screenshots, so warm-up can skip prompting. Portal stores ["yes"] for allow.
 func screenshotGranted(perms map[string][]string) bool {
 	for _, app := range screenshotApps {
 		for _, p := range perms[app] {
@@ -42,8 +39,7 @@ func screenshotGranted(perms map[string][]string) bool {
 	return false
 }
 
-// screenshotDenied reports a stored ["no"] — a stale deny silently auto-rejects
-// future calls and suppresses the consent dialog, so warm-up clears it first.
+// screenshotDenied reports a stored ["no"] — a stale deny silently auto-rejects future calls and suppresses the consent dialog, so warm-up clears it first.
 func screenshotDenied(perms map[string][]string) bool {
 	for _, app := range screenshotApps {
 		for _, p := range perms[app] {
@@ -55,11 +51,8 @@ func screenshotDenied(perms map[string][]string) bool {
 	return false
 }
 
-// WarmUpScreenshotPermission triggers the screenshot consent dialog at daemon
-// startup so the user grants permission up front, instead of the first vision
-// capture silently failing minutes later. If permission is already granted it
-// does nothing; a stale deny is cleared first so the portal prompts again rather
-// than auto-rejecting. Blocks on the dialog, so callers run it in a goroutine.
+// WarmUpScreenshotPermission triggers the screenshot consent dialog at daemon startup, so the user grants permission up front instead of the first vision capture silently failing later.
+// No-op if already granted; a stale deny is cleared first so the portal prompts again instead of auto-rejecting. Blocks on the dialog, so callers run it in a goroutine.
 func WarmUpScreenshotPermission(ctx context.Context) {
 	conn, err := dbus.SessionBus()
 	if err != nil {
@@ -95,13 +88,8 @@ func grabScreen(ctx context.Context) ([]byte, error) {
 	return screenshotPortal(ctx)
 }
 
-// screenshotPortal captures the whole screen via xdg-desktop-portal and returns
-// the PNG bytes. The first call on GNOME prompts the user for permission; once
-// granted the compositor remembers it for the app. interactive=false so no
-// region picker appears.
-//
-// Portal flow: call Screenshot -> get a Request object path -> wait for its
-// Response signal -> read the returned file:// URI.
+// screenshotPortal captures the whole screen via xdg-desktop-portal and returns the PNG bytes. First call on GNOME prompts for permission; once granted the compositor remembers it. interactive=false so no region picker appears.
+// Portal flow: call Screenshot -> get a Request object path -> wait for its Response signal -> read the returned file:// URI.
 func screenshotPortal(ctx context.Context) ([]byte, error) {
 	conn, err := dbus.SessionBus()
 	if err != nil {
@@ -165,8 +153,7 @@ func screenshotPortal(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// responseURI parses a portal Request.Response signal body: (u code, a{sv} results).
-// code 0 = success; results["uri"] holds the screenshot file URI.
+// responseURI parses a portal Request.Response signal body: (u code, a{sv} results). code 0 = success; results["uri"] holds the screenshot file URI.
 func responseURI(body []interface{}) (string, error) {
 	if len(body) != 2 {
 		return "", fmt.Errorf("unexpected response body len %d", len(body))
@@ -190,8 +177,7 @@ func responseURI(body []interface{}) (string, error) {
 	return uri, nil
 }
 
-// readFileURI reads the bytes behind a file:// URI and removes the temp file the
-// portal created.
+// readFileURI reads the bytes behind a file:// URI and removes the temp file the portal created.
 func readFileURI(uri string) ([]byte, error) {
 	path := strings.TrimPrefix(uri, "file://")
 	data, err := os.ReadFile(path)

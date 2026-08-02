@@ -36,8 +36,7 @@ type NoteOp struct {
 	Content string // for "add"/"update": the text to store
 }
 
-// Thread is an ongoing throughline in the user's life, with a current state
-// describing where the user is *within* it.
+// Thread is an ongoing throughline in the user's life, with a current state describing where the user is *within* it.
 type Thread struct {
 	ID        int64
 	Subject   string
@@ -51,7 +50,7 @@ type Thread struct {
 
 // ThreadUpdate is the compiler's attribution of a buffer slice to one thread.
 type ThreadUpdate struct {
-	ID      int64  `json:"id"`      // 0 = new thread
+	ID      int64  `json:"id"` // 0 = new thread
 	Subject string `json:"subject"`
 	Kind    string `json:"kind"`
 	State   string `json:"state"`
@@ -66,18 +65,13 @@ type ThreadAttribution struct {
 }
 
 type Summarizer interface {
-	Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*TaskSummary, error)
-	// ReconcileNotes decides, for each candidate fact, whether to add, update
-	// (refines/supersedes an existing note), or skip (already-known duplicate).
-	// Returns nil,nil immediately when candidates is empty.
+	// ReconcileNotes decides, per candidate fact, whether to add, update (refines/supersedes an existing note), or skip (already known). Returns nil, nil when candidates is empty.
 	ReconcileNotes(ctx context.Context, existing []NoteRef, candidates []string) ([]NoteOp, error)
-	// AttributeThreads maps a flushed buffer onto ongoing threads — durable
-	// throughlines in the user's life — emitting one update per concurrent
-	// thread plus any durable PERSON facts.
+	// AttributeThreads maps a flushed buffer onto ongoing threads, emitting one update per concurrent thread plus any durable PERSON facts.
 	AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error)
 }
 
-// GeminiSummarizer is for the genai sdk, will have other summarizers for provided model support
+// GeminiSummarizer implements Summarizer via the genai SDK. Other providers can implement the same interface later.
 type GeminiSummarizer struct {
 	client *genai.Client
 }
@@ -97,85 +91,7 @@ func NewGeminiSummarizer(apiKey string) (*GeminiSummarizer, error) {
 	}, nil
 }
 
-func (g *GeminiSummarizer) Summarize(ctx context.Context, activities []tracker.Activity, currentTask string) (*TaskSummary, error) {
-	tracer := obs.GetTracer(ctx, "ora.memory")
-	ctx, span := tracer.Start(ctx, "GeminiSummarizer.Summarize")
-	defer span.End()
-
-	var activityList []string
-	for _, a := range activities {
-		entry := fmt.Sprintf("- %s: %s", a.App, a.Title)
-		if a.ScreenText != "" {
-			entry += fmt.Sprintf("\n  screen: %s", a.ScreenText)
-		}
-		activityList = append(activityList, entry)
-	}
-
-	prompt := fmt.Sprintf(`You are the memory compiler for an ambient OS companion.
-Given the recent window activities below, produce a JSON object with four fields.
-
-1. same_task (bool): true if the user is still on the same task as "%s".
-
-2. task_name (string): a short label for what the user was doing.
-   For work: the feature/bug/document name.
-   For social/gaming/entertainment: the activity ("Playing Blackjack on Discord",
-   "Video call with team", "Watching YouTube — cooking video").
-   For browsing: the topic or site ("Reading about Rust async runtimes on MDN").
-
-3. summary (string): a factual, specific sentence or two capturing WHAT HAPPENED.
-   This is episodic memory — describe the actual activity, not just the app.
-   Be specific: name the game, topic, people (if visible), or meeting context.
-   Even if screen text is sparse, use the app + window title as the primary signal.
-   Examples of good summaries:
-     "User spent ~45 min on Discord in a voice channel with friends; game sounds
-      and a Blackjack interface were visible on screen."
-     "User was in a Zoom meeting titled 'Sprint Planning'; screen showed a shared
-      Jira board."
-     "User read an MDN article on Rust async runtimes and then browsed Hacker News."
-   This field answers future questions like "what did I do last night?" or
-   "was I in a meeting on Tuesday?"
-
-4. notes (array of strings): ONLY durable facts about the PERSON — identity,
-   lasting preferences, skills, relationships, ongoing projects.
-   ("user prefers terse replies", "user is building the ORA companion").
-   DO NOT store task-specific or session detail: commands, file paths, version
-   numbers, what they did today. That belongs in summary, not notes.
-   When in doubt, omit. Empty array is correct most of the time.
-
-Current task: "%s"
-Recent activities:
-%s
-
-Respond strictly in JSON:
-{"same_task": bool, "task_name": "string", "summary": "string", "notes": []}`,
-		currentTask, currentTask, strings.Join(activityList, "\n"))
-
-	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent")
-	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), &genai.GenerateContentConfig{
-		ResponseMIMEType: "application/json",
-	})
-	if err != nil {
-		genSpan.RecordError(err)
-		genSpan.End()
-		return nil, err
-	}
-	genSpan.End()
-
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("empty response from model")
-	}
-
-	var summary TaskSummary
-	err = json.Unmarshal([]byte(resp.Candidates[0].Content.Parts[0].Text), &summary)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse model response: %w", err)
-	}
-
-	return &summary, nil
-}
-
-// ReconcileNotes calls TextModel with structured JSON output to decide, for each
-// candidate, whether to add, update, or skip relative to existing notes.
+// ReconcileNotes calls TextModel with structured JSON output to decide, per candidate, whether to add, update, or skip relative to existing notes.
 func (g *GeminiSummarizer) ReconcileNotes(ctx context.Context, existing []NoteRef, candidates []string) ([]NoteOp, error) {
 	if len(candidates) == 0 {
 		return nil, nil
@@ -231,11 +147,7 @@ Be deterministic. Do not invent facts. Merge wording when updating.`,
 	return ops, nil
 }
 
-// AttributeThreads maps recent screen activity onto ongoing threads. It emits
-// one update per concurrent throughline (so watching + coding never collapse
-// into a single thread) and the SPECIFIC state within each, plus any durable
-// PERSON facts as identity. Mirrors Summarize's structure: build the activity
-// list, call the text model with JSON output, unmarshal.
+// AttributeThreads maps recent screen activity onto ongoing threads, one update per concurrent throughline (so watching + coding never collapse into one thread) with the SPECIFIC state within each, plus any durable PERSON facts as identity.
 func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error) {
 	tracer := obs.GetTracer(ctx, "ora.memory")
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AttributeThreads")
@@ -300,10 +212,9 @@ Respond strictly as JSON:
 	return &attr, nil
 }
 
-// DescribeScreen sends a screenshot to the multimodal model and returns a concise
-// description for memory. Used as the vision tier when accessibility text is blind
-// (browsers, video, games, canvas apps). Returns "" on any failure so the caller
-// can fall back to whatever thin text it already has.
+// DescribeScreen sends a screenshot to the multimodal model and returns a concise description for memory.
+// Used as the vision tier when accessibility text is blind (browsers, video, games, canvas apps).
+// Returns "" on any failure so the caller can fall back to whatever thin text it already has.
 func (g *GeminiSummarizer) DescribeScreen(ctx context.Context, png []byte) string {
 	if len(png) == 0 {
 		return ""
@@ -352,12 +263,11 @@ var trivialTitles = map[string]struct{}{
 	"desktop":  {},
 }
 
-// IsSalient returns false for activities that are obviously noise and should
-// never enter the buffer. Conservative by design — only drop what is clearly
-// meaningless, so real work is never silently discarded.
+// IsSalient returns false for activities that are obviously noise and should never enter the buffer.
+// Conservative by design: only drop what is clearly meaningless, so real work never gets silently discarded.
 func IsSalient(act tracker.Activity) bool {
 	title := strings.TrimSpace(act.Title)
-	screenWords := countWords(act.ScreenText)
+	screenWords := CountWords(act.ScreenText)
 
 	if title == "" && screenWords == 0 {
 		return false
@@ -394,12 +304,9 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 		return
 	}
 
-	incoming := countWords(act.ScreenText)
+	incoming := CountWords(act.ScreenText)
 
-	// Snapshot-and-reset happens under the lock; the (potentially slow) LLM/store
-	// work in processFlush runs afterward against the local copy, never while
-	// holding c.mu, so it can't block concurrent Ingest/GetCurrentBuffer/ForceFlush
-	// calls and can't re-enter the lock.
+	// snapshot-and-reset happens under the lock; processFlush runs after, on the local copy, without holding c.mu — so slow LLM/store calls never block concurrent Ingest/GetCurrentBuffer/ForceFlush.
 	c.mu.Lock()
 	var flushedBuf []tracker.Activity
 	if len(c.buffer) > 0 {
@@ -422,9 +329,7 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 	}
 }
 
-// resetBufferLocked takes ownership of the current buffer (returning it for the
-// caller to process) and resets the compiler's buffered state. Callers must hold
-// c.mu.
+// resetBufferLocked hands the current buffer to the caller and resets the compiler's buffered state. Caller must hold c.mu.
 func (c *Compiler) resetBufferLocked() []tracker.Activity {
 	buf := c.buffer
 	c.buffer = make([]tracker.Activity, 0)
@@ -433,7 +338,8 @@ func (c *Compiler) resetBufferLocked() []tracker.Activity {
 	return buf
 }
 
-func countWords(s string) int {
+// CountWords counts whitespace-separated tokens in s.
+func CountWords(s string) int {
 	if s == "" {
 		return 0
 	}
@@ -451,21 +357,14 @@ func countWords(s string) int {
 	return n
 }
 
-// processFlush does the (potentially slow) LLM/store work for a flushed
-// buffer. It operates purely on the local buf snapshot and must NOT touch
-// c.buffer/c.wordCount/c.lastFlush — those are already reset by whoever
-// captured buf via resetBufferLocked. Never called while holding c.mu.
+// processFlush does the slow LLM/store work for a flushed buffer. Operates only on the local buf snapshot — never touches c.buffer/c.wordCount/c.lastFlush, which are already reset by resetBufferLocked. Never called while holding c.mu.
 func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 	if len(buf) == 0 {
 		return
 	}
 
-	// Drop only if every buffered activity has no title and no screen text —
-	// i.e. the buffer carries zero signal. IsSalient already strips noise at
-	// ingestion; this is the last-resort guard for pathological empty flushes.
-	// Word-count minimums are intentionally gone: social/gaming/meeting
-	// sessions produce real titles but sparse screen text, and word count is
-	// a poor proxy for "worth remembering."
+	// Drop only if the whole buffer has no title and no screen text — IsSalient already strips noise at ingestion, this is just the last-resort guard for empty flushes.
+	// No word-count minimum: social/gaming/meeting sessions have real titles but thin screen text, and word count is a poor proxy for "worth remembering."
 	hasSignal := false
 	for _, act := range buf {
 		if strings.TrimSpace(act.Title) != "" || act.ScreenText != "" {
@@ -481,8 +380,7 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 	ctx, span := tracer.Start(ctx, "Compiler.FlushBuffer")
 	defer span.End()
 
-	// attribute the buffer onto ongoing threads. existing threads seed the call
-	// so the model can reuse ids and keep the same throughline stable over time.
+	// attribute the buffer onto ongoing threads; existing threads seed the call so the model can reuse ids and keep the throughline stable over time.
 	existingThreads, taErr := c.store.ThreadsForAttribution(ctx, 40)
 	if taErr != nil {
 		slog.Error("flush: ThreadsForAttribution failed", "err", taErr)
@@ -507,9 +405,7 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 			slog.Error("flush: LogSemanticNode (fallback) failed", "err", err)
 		}
 	} else {
-		// one update per concurrent thread: refresh the thread's current state
-		// and log an episodic summary node so history, FTS, and compaction all
-		// keep working unchanged.
+		// one update per concurrent thread: refresh its state and log an episodic summary node so history, FTS, and compaction keep working unchanged.
 		for _, u := range attr.Threads {
 			if _, err := c.store.UpsertThread(ctx, u); err != nil {
 				slog.Error("flush: UpsertThread failed", "subject", u.Subject, "err", err)
@@ -519,8 +415,7 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 			}
 		}
 
-		// identity: durable PERSON facts only, reconciled against existing notes
-		// exactly as before. usually empty.
+		// identity: durable PERSON facts only, reconciled against existing notes as before — usually empty.
 		if len(attr.Identity) > 0 {
 			existing, exErr := c.store.ExistingNotes(ctx)
 			ops, recErr := func() ([]NoteOp, error) {
@@ -573,9 +468,7 @@ func (c *Compiler) ForceFlush(ctx context.Context) {
 	c.processFlush(ctx, buf)
 }
 
-// GetCurrentBuffer returns a copy of the live buffer so callers (the /buffer
-// HTTP handler, Agent.Connect) never read a slice that Ingest/flush may be
-// mutating concurrently.
+// GetCurrentBuffer returns a copy so callers (the /buffer HTTP handler, Agent.Connect) never read a slice that Ingest/flush might be mutating concurrently.
 func (c *Compiler) GetCurrentBuffer() []tracker.Activity {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -27,9 +27,7 @@ var trayIconPNG []byte
 // statusDotSize is the side length of the rendered status indicator (px).
 const statusDotSize = 16
 
-// statusDotPNG renders an anti-aliased filled circle of colour c on a
-// transparent square — a Docker-style status dot for a dbusmenu item's
-// icon-data property, rather than an emoji glyph in the label text.
+// statusDotPNG renders an anti-aliased filled circle of colour c on a transparent square — a Docker-style status dot for a dbusmenu item's icon-data property, rather than an emoji glyph in the label text.
 func statusDotPNG(c color.RGBA) []byte {
 	const ss = 4 // supersampling factor for smooth edges
 	img := image.NewRGBA(image.Rect(0, 0, statusDotSize, statusDotSize))
@@ -152,8 +150,7 @@ func (m *dbusMenu) statusLabel() string {
 	return "Ora is tracking"
 }
 
-// statusIcon returns the rendered status dot (PNG bytes) matching the current
-// tracking state, for the menu item's icon-data property.
+// statusIcon returns the rendered status dot (PNG bytes) matching the current tracking state, for the menu item's icon-data property.
 func (m *dbusMenu) statusIcon() []byte {
 	if m.paused.Load() {
 		return dotPaused
@@ -310,8 +307,7 @@ type dbusMenuItemProps struct {
 	Properties map[string]dbus.Variant
 }
 
-// runDaemonSupervisor on Linux registers an SNI tray icon via D-Bus and provides
-// menu items: Open Ora, Pause/Resume Tracking, and Quit Ora.
+// runDaemonSupervisor on Linux registers an SNI tray icon via D-Bus and provides menu items: Open Ora, Pause/Resume Tracking, and Quit Ora.
 // If SNI registration fails it falls back to headless mode.
 func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
 	stop, _, err := startDaemonServices(ctx, listener)
@@ -344,9 +340,8 @@ func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
 	stop()
 }
 
-// registerSNI exports the StatusNotifierItem and dbusmenu objects and registers
-// with the StatusNotifierWatcher. Returns an error if any step fails so the
-// caller can fall back to headless operation.
+// registerSNI exports the StatusNotifierItem and dbusmenu objects and registers with the StatusNotifierWatcher.
+// Returns an error if any step fails so the caller can fall back to headless operation.
 func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
@@ -434,9 +429,8 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 		return fmt.Errorf("register with StatusNotifierWatcher: %w", err)
 	}
 
-	// Self-heal: the watcher (e.g. gnome-shell) drops all items when it
-	// restarts and re-announces itself with a new bus owner. Watch for that and
-	// re-register so the tray icon survives a shell restart.
+	// Self-heal: the watcher (e.g. gnome-shell) drops all items when it restarts and re-announces itself with a new bus owner.
+	// Watch for that and re-register so the tray icon survives a shell restart.
 	if err := conn.AddMatchSignal(
 		dbus.WithMatchInterface("org.freedesktop.DBus"),
 		dbus.WithMatchMember("NameOwnerChanged"),
@@ -476,8 +470,7 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	return nil
 }
 
-// registerWithWatcher (re)registers this process's StatusNotifierItem with the
-// org.kde.StatusNotifierWatcher under our unique bus name.
+// registerWithWatcher (re)registers this process's StatusNotifierItem with the org.kde.StatusNotifierWatcher under our unique bus name.
 func registerWithWatcher(conn *dbus.Conn) error {
 	watcher := conn.Object(
 		"org.kde.StatusNotifierWatcher",
@@ -490,10 +483,8 @@ func registerWithWatcher(conn *dbus.Conn) error {
 	).Err
 }
 
-// shouldReregister reports whether a D-Bus signal indicates the
-// StatusNotifierWatcher has reappeared with a new owner (i.e. restarted), which
-// means our item was dropped and must be registered again. It must NOT fire when
-// the watcher merely disappears (empty new owner).
+// shouldReregister reports whether a D-Bus signal indicates the StatusNotifierWatcher has reappeared with a new owner (i.e. restarted), meaning our item was dropped and must be registered again.
+// Must NOT fire when the watcher merely disappears (empty new owner).
 func shouldReregister(signalName string, body []interface{}) bool {
 	if signalName != "org.freedesktop.DBus.NameOwnerChanged" {
 		return false
