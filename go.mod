@@ -14,6 +14,7 @@ require (
 	github.com/jfreymuth/pulse v0.1.1
 	github.com/joho/godotenv v1.5.1
 	github.com/moutend/go-wca v0.3.0
+	github.com/philippgille/chromem-go v0.7.0
 	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.43.0

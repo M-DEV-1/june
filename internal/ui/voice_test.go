@@ -84,10 +84,7 @@ func TestParseVoiceCommand_PreviewWithNoNameIsEmpty(t *testing.T) {
 }
 
 func TestParseVoiceCommand_NameStartingWithPreviewIsNotMisparsed(t *testing.T) {
-	// A voice name that merely starts with "preview" (none currently exist,
-	// but guard the parser logic) must not be treated as the preview keyword
-	// unless followed by a word boundary. "previewer" has no boundary after
-	// "preview", so it should fall through to voiceActionSet.
+	// A name that merely starts with "preview" (none exist yet, but guard the parser) must not be treated as the keyword unless followed by a word boundary — "previewer" has no boundary, so it falls through to voiceActionSet.
 	action, name := parseVoiceCommand("previewer")
 	if action != voiceActionSet {
 		t.Errorf("expected voiceActionSet for 'previewer', got %v", action)

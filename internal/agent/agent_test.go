@@ -25,23 +25,32 @@ func (s *mockSpeaker) CurrentAmplitude() float64 { return 0 }
 
 type mockBrain struct{}
 
-func (b *mockBrain) GetImplicitContext(ctx context.Context) ([]string, error)               { return nil, nil }
-func (b *mockBrain) SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error) { return nil, nil }
+func (b *mockBrain) GetImplicitContext(ctx context.Context) ([]string, error) { return nil, nil }
+func (b *mockBrain) SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error) {
+	return nil, nil
+}
 func (b *mockBrain) RankedEpisodes(ctx context.Context, focus string, limit int) ([]db.MemoryHit, error) {
 	return nil, nil
 }
 func (b *mockBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
 	return nil, nil
 }
-func (b *mockBrain) LogNote(ctx context.Context, content, kind string) (int64, error)       { return 0, nil }
-func (b *mockBrain) GetNotes(ctx context.Context) ([]db.Note, error)                        { return nil, nil }
-func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                         { return nil }
+func (b *mockBrain) LogNote(ctx context.Context, content, kind string) (int64, error) { return 0, nil }
+func (b *mockBrain) GetNotes(ctx context.Context) ([]db.Note, error)                  { return nil, nil }
+func (b *mockBrain) UpdateNote(ctx context.Context, id int64, content string) error   { return nil }
+func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                   { return nil }
 func (b *mockBrain) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
 	return nil, nil
 }
 func (b *mockBrain) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
 	return nil, nil
 }
+func (b *mockBrain) HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error) {
+	return nil, nil
+}
+func (b *mockBrain) SaveFold(ctx context.Context, task, result string) (int64, error) { return 0, nil }
+func (b *mockBrain) UnconsumedFolds(ctx context.Context) ([]db.Fold, error)           { return nil, nil }
+func (b *mockBrain) ConsumeFold(ctx context.Context, id int64) error                  { return nil }
 
 // behavior
 

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"runtime"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"ora/internal/config"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -48,11 +50,49 @@ type model struct {
 	activeToolReq *agent.ToolRequest
 	cachedRAM     string
 	lastRAMCheck  time.Time
+	spinner       spinner.Model
+	// activity is the shared live-status indicator — covers both "thinking" (sent text, no response yet) and an in-flight tool call, distinguished by kind. nil means nothing active and the status line is hidden.
+	activity *liveStatus
 }
+
+type liveStatusKind int
+
+const (
+	statusThinking liveStatusKind = iota
+	statusTool
+)
+
+type liveStatus struct {
+	kind    liveStatusKind
+	id      string // matches agent.ToolActivity.ID when kind==statusTool; "" for statusThinking
+	label   string // precomputed text rendered next to the spinner glyph
+	started time.Time
+}
+
+// staleActivityTimeout is a safety valve, not a normal-path timer — real tool calls finish in well under this. ToolActivityChan's non-blocking send (sendToolActivity in connect.go) can drop a Finished event under a burst of concurrent tool calls (buffer is 20, 10 calls' worth of Started+Finished pairs), which would otherwise leave the spinner stuck forever.
+const staleActivityTimeout = 30 * time.Second
 
 type responseMsg string
 type tickMsg time.Time
 type errorMsg error
+type daemonPollMsg time.Time
+type daemonStatusMsg bool
+
+// daemonStatusURL/daemonPollClient duplicate cmd/root.go's pingDaemon pattern instead of importing cmd, since cmd/client.go already imports internal/ui and the reverse import would cycle. Keep the port in sync with cmd.DaemonPort (cmd/daemon.go) if it ever changes.
+const daemonPort = "6942"
+const daemonStatusURL = "http://127.0.0.1:" + daemonPort + "/status"
+
+var daemonPollClient = &http.Client{Timeout: 300 * time.Millisecond}
+
+// pollDaemonHTTP is a GET-and-check-200 helper. Takes client/URL as params instead of reading the package-level ones directly, so tests can point it at an httptest.Server instead of the real daemon port.
+func pollDaemonHTTP(client *http.Client, url string) bool {
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
 
 func NewModel(a *agent.Agent, daemonStatus string) model {
 	s := DefaultStyles()
@@ -105,6 +145,9 @@ func NewModel(a *agent.Agent, daemonStatus string) model {
 
 	daemonOK := daemonStatus == "connected" || daemonStatus == "started"
 
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	sp.Style = s.StatusLine
+
 	return model{
 		agent:       a,
 		styles:      s,
@@ -118,6 +161,7 @@ func NewModel(a *agent.Agent, daemonStatus string) model {
 		hitlList:    newHitlList(s),
 		isConnected: true,
 		daemonOK:    daemonOK,
+		spinner:     sp,
 	}
 }
 
@@ -127,7 +171,9 @@ func (m model) Init() tea.Cmd {
 		m.waitForResponse(),
 		m.waitForError(),
 		m.waitForToolRequest(),
+		m.waitForToolActivity(),
 		m.doTick(),
+		m.daemonPollTick(),
 	)
 }
 
@@ -136,6 +182,19 @@ func (m model) doTick() tea.Cmd {
 	return tea.Tick(time.Millisecond*50, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// daemonPollTick arms the next daemon-status check on its own ticker rather than piggybacking on doTick's 50ms heartbeat, which is already dense with waveform/RAM/textarea work every 20th of a second.
+func (m model) daemonPollTick() tea.Cmd {
+	return tea.Tick(DaemonPollInterval, func(t time.Time) tea.Msg {
+		return daemonPollMsg(t)
+	})
+}
+
+func (m model) pollDaemonStatus() tea.Cmd {
+	return func() tea.Msg {
+		return daemonStatusMsg(pollDaemonHTTP(daemonPollClient, daemonStatusURL))
+	}
 }
 
 func (m model) waitForError() tea.Cmd {
@@ -168,6 +227,16 @@ func (m model) waitForToolRequest() tea.Cmd {
 	}
 }
 
+func (m model) waitForToolActivity() tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-m.agent.ToolActivityChan
+		if !ok {
+			return nil
+		}
+		return ev
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd tea.Cmd
@@ -181,7 +250,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = ModeToolConfirm
 		m.messages = append(m.messages, Message{Sender: "tool", Content: "Ora wants to execute:\n  " + msg.Command, IsTool: true})
 		m.updateViewport()
+		// The approval menu already says "paused, waiting on you" — a spinner behind it would misleadingly read as "still running".
+		m.activity = nil
+		m.recalcViewportHeight()
 		return m, m.waitForToolRequest()
+
+	case agent.ToolActivity:
+		if msg.Phase == agent.ToolStarted {
+			m.activity = &liveStatus{kind: statusTool, id: msg.ID, label: msg.Name + "(" + msg.ArgsSummary + ")", started: time.Now()}
+			m.recalcViewportHeight()
+			return m, tea.Batch(m.waitForToolActivity(), m.spinner.Tick)
+		}
+
+		// Finished: always append the transcript line even if a concurrent call has since taken over the live-status slot (see the StaleID test) — every call still gets its own permanent record.
+		m.messages = append(m.messages, Message{
+			Sender:        "tool",
+			Content:       msg.Name + "(" + msg.ArgsSummary + ") → " + msg.ResultSummary,
+			IsToolLog:     true,
+			ToolLogFailed: msg.Err,
+		})
+		m.updateViewport()
+		if m.activity != nil && m.activity.id == msg.ID {
+			m.activity = &liveStatus{kind: statusThinking, label: "thinking", started: time.Now()}
+			m.recalcViewportHeight()
+		}
+		return m, m.waitForToolActivity()
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		if m.activity != nil {
+			return m, cmd
+		}
+		// Nothing active: don't return the spinner's self-re-arming cmd, or it would keep ticking forever in the background.
+		return m, nil
 
 	case tea.MouseMsg:
 		if m.mode == ModeToolConfirm {
@@ -304,6 +406,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.agent.TextChan <- input
 					m.streamLine("you", input)
 					m.textarea.Reset()
+					m.activity = &liveStatus{kind: statusThinking, label: "thinking", started: time.Now()}
+					m.recalcViewportHeight()
+					return m, m.spinner.Tick
 				}
 				return m, nil
 			}
@@ -323,14 +428,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case responseMsg:
 		m.isConnected = true
+		m.activity = nil
+		m.recalcViewportHeight()
 		m.streamLine("ora", string(msg))
 		return m, m.waitForResponse()
 	case errorMsg:
 		m.isConnected = false
+		m.activity = nil
+		m.recalcViewportHeight()
 		m.streamLine("system", "CONNECTION CRITICAL: "+msg.Error())
 		return m, m.waitForError()
 
+	case daemonPollMsg:
+		return m, tea.Batch(m.daemonPollTick(), m.pollDaemonStatus())
+	case daemonStatusMsg:
+		m.daemonOK = bool(msg)
+		return m, nil
+
 	case tickMsg:
+		// Safety valve — see staleActivityTimeout's doc comment. Only a dropped Finished event under a tool-call burst reaches this.
+		if m.activity != nil && time.Since(m.activity.started) > staleActivityTimeout {
+			m.activity = nil
+			m.recalcViewportHeight()
+		}
+
 		// update waves from the live audio buffers
 		if m.agent.GetMic() != nil {
 			m.micWave.Update(m.agent.GetMic().CurrentAmplitude())
@@ -369,12 +490,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			taHeight := max(1, min(MaxTextareaHeight, lines))
 			if taHeight != m.textarea.Height() {
 				m.textarea.SetHeight(taHeight)
-
-				signalHeight := SignalFieldHeight
-				if m.mode == ModeText {
-					signalHeight = 0
-				}
-				m.viewport.Height = max(MinViewportHeight, m.height-taHeight-signalHeight-LayoutPadding)
+				m.recalcViewportHeight()
 			}
 		}
 
@@ -385,7 +501,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 		// recalculate textarea height for sizing
-		var taHeight int
 		{
 			val := m.textarea.Value()
 			taWidth := msg.Width - GutterWidth
@@ -400,16 +515,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				lines += (len(line) + taWidth - 1) / taWidth
 			}
-			taHeight = max(1, min(MaxTextareaHeight, lines))
+			taHeight := max(1, min(MaxTextareaHeight, lines))
 			m.textarea.SetHeight(taHeight)
 		}
 
-		signalHeight := SignalFieldHeight
-		if m.mode == ModeText {
-			signalHeight = 0
-		}
 		m.viewport.Width = msg.Width
-		m.viewport.Height = max(MinViewportHeight, msg.Height-taHeight-signalHeight-LayoutPadding)
+		m.recalcViewportHeight()
 		m.textarea.SetWidth(msg.Width - GutterWidth)
 
 		// split the width between the two waveforms
@@ -423,11 +534,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
+// recalcViewportHeight is the single source of truth for viewport height: textarea height, signal field (0 in ModeText), and the status line (1 line when m.activity is set). Shared by WindowSizeMsg, tickMsg's textarea-grow branch, and every m.activity mutation site below, so the status line never overlaps the input row or lags a tick behind.
+func (m *model) recalcViewportHeight() {
+	signalHeight := SignalFieldHeight
+	if m.mode == ModeText {
+		signalHeight = 0
+	}
+	statusLineHeight := 0
+	if m.activity != nil {
+		statusLineHeight = 1
+	}
+	m.viewport.Height = max(MinViewportHeight, m.height-m.textarea.Height()-signalHeight-statusLineHeight-LayoutPadding)
+}
+
 // handles the real-time streaming logic, keeps the viewport updated
 func (m *model) streamLine(sender, content string) {
-	// In voice mode, Ora's audio plays through the speaker — drop text responses
-	// from the viewport (they'd be incomplete fragments anyway). Keep thoughts,
-	// system messages, and tool messages always visible.
+	// In voice mode, Ora's audio plays through the speaker, so drop text responses from the viewport — they'd be incomplete fragments anyway. Thoughts, system, and tool messages stay visible.
 	if m.mode == ModeVoice && sender == "ora" && !m.isThinking {
 		return
 	}
@@ -523,9 +645,7 @@ func (m *model) executeCommand(input string) {
 			m.messages = append(m.messages, Message{Sender: "system", Content: "Saved Notes:\n" + strings.Join(lines, "\n")})
 		}
 	default:
-		// /voice list | /voice <name>  -- bare "/voice" above keeps its existing
-		// meaning (switch to Voice-Only mode); anything after it is voice
-		// selection instead.
+		// /voice list | /voice <name> — bare "/voice" above keeps its own meaning (switch to Voice-Only); anything after it is voice selection instead.
 		if strings.HasPrefix(input, "/voice ") {
 			m.handleVoiceCommand(strings.TrimPrefix(input, "/voice "))
 		} else if strings.HasPrefix(input, "/note ") {
@@ -549,9 +669,7 @@ func (m *model) executeCommand(input string) {
 	m.updateViewport()
 }
 
-// handleVoiceCommand implements "/voice list" and "/voice <name>". Bare
-// "/voice" never reaches here — it's handled above as the Voice-Only mode
-// switch, matching its long-standing behavior.
+// handleVoiceCommand implements "/voice list" and "/voice <name>". Bare "/voice" never reaches here — it's handled above as the Voice-Only mode switch.
 func (m *model) handleVoiceCommand(arg string) {
 	action, name := parseVoiceCommand(arg)
 

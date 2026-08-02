@@ -80,9 +80,7 @@ func TestLinuxTracker_Hyprland(t *testing.T) {
 }
 
 func TestLinuxTracker_Generic(t *testing.T) {
-	// Generic fallback fires when no compositor env vars are set.
-	// We can test it indirectly by calling New() — it will pick whatever
-	// strategy fits the current env, and GetActiveWindow must not panic.
+	// Generic fallback fires when no compositor env vars are set — test it indirectly by calling New() and checking GetActiveWindow doesn't panic.
 	tr, err := tracker.New()
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)

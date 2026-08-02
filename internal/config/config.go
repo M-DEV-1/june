@@ -12,19 +12,15 @@ import (
 
 type OraConfig struct {
 	Tracker TrackerConfig `json:"tracker"`
-	// Voice is the Gemini Live prebuilt voice name used for the assistant's
-	// spoken output (see AvailableVoices). Defaults to DefaultVoice when unset.
+	// Voice is the Gemini Live prebuilt voice name used for the assistant's spoken output (see AvailableVoices).
+	// Defaults to DefaultVoice when unset.
 	Voice string `json:"voice"`
 }
 
-// DefaultVoice is used when the config has no voice set (fresh installs,
-// or configs written before /voice existed).
+// DefaultVoice is used when the config has no voice set (fresh installs, or configs written before /voice existed).
 const DefaultVoice = "Iapetus"
 
-// AvailableVoices are the Gemini Live API's prebuilt voice names, current as
-// of July 2026: https://ai.google.dev/gemini-api/docs/speech-generation#voices
-// (the Live API draws from the same TTS voice roster; see
-// https://ai.google.dev/gemini-api/docs/live-api/capabilities#change-voice-language).
+// AvailableVoices are the Gemini Live API's prebuilt voice names, current as of July 2026: https://ai.google.dev/gemini-api/docs/speech-generation#voices (Live API uses the same TTS voice roster).
 // Hardcoded rather than fetched at runtime, so update this list if Google adds more.
 var AvailableVoices = []string{
 	"Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
@@ -34,8 +30,8 @@ var AvailableVoices = []string{
 	"Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 }
 
-// NormalizeVoice case-insensitively matches name against AvailableVoices and
-// returns the canonical spelling. ok is false when name isn't a known voice.
+// NormalizeVoice case-insensitively matches name against AvailableVoices and returns the canonical spelling.
+// ok is false when name isn't a known voice.
 func NormalizeVoice(name string) (canonical string, ok bool) {
 	for _, v := range AvailableVoices {
 		if strings.EqualFold(v, name) {
@@ -56,13 +52,8 @@ type TrackerConfig struct {
 	DwellTime time.Duration `json:"dwell_time_ms"`
 }
 
-// DefaultBlocklist is matched via tracker.MatchesBlocklist, a case-insensitive,
-// ".exe"-stripped SUBSTRING match, so entries here work across platforms
-// without needing every possible app-id spelling: Windows app names carry a
-// ".exe" suffix ("1Password.exe"), while Linux app identifiers from AT-SPI/
-// X11/Wayland never do and often take lowercase-binary or reverse-DNS forms
-// (e.g. "1password", "org.keepassxc.KeePassXC", "com.bitwarden.desktop") — all
-// of which contain the lowercase entries below.
+// DefaultBlocklist is matched via tracker.MatchesBlocklist, a case-insensitive, ".exe"-stripped substring match, so one entry covers both platforms.
+// Windows app names carry a ".exe" suffix ("1Password.exe"); Linux app IDs don't and are often lowercase or reverse-DNS ("org.keepassxc.KeePassXC").
 var DefaultBlocklist = []string{
 	// Windows
 	"1Password.exe",
@@ -142,9 +133,8 @@ func SaveConfig(cfg OraConfig) error {
 	return nil
 }
 
-// SetVoice validates name against AvailableVoices, updates cfg in place with
-// the canonical spelling, and persists the change to disk. Invalid names are
-// rejected and leave cfg/disk untouched.
+// SetVoice validates name against AvailableVoices, updates cfg in place with the canonical spelling, and persists the change to disk.
+// Invalid names are rejected and leave cfg/disk untouched.
 func (cfg *OraConfig) SetVoice(name string) error {
 	canonical, ok := NormalizeVoice(name)
 	if !ok {
