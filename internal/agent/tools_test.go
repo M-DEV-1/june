@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"ora/internal/db"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -18,9 +20,20 @@ type toolTestBrain struct {
 	windowEpisodes []db.Episode
 	subjectRecall  []string
 
+	// searchMemoryResult/searchMemoryCalledFocus back SearchMemory — used by buildHandshakeContext's tests (F2) to verify the [working]-buffer focus signal actually drives a SearchMemory call.
+	searchMemoryResult      []db.MemoryHit
+	searchMemoryCalledFocus string
+
 	// hybridHits/capturedDomain back HybridSearch: configurable return value plus a capture of the domainFilter arg, same field-per-method style as the rest of this mock.
 	hybridHits     []db.MemoryHit
 	capturedDomain string
+
+	// retrieveRelevantResult/capturedRetrieveFocus back RetrieveRelevant. retrieveRelevantCalled, if non-nil, receives the focus arg right when RetrieveRelevant is invoked — lets a test synchronize on "the async voice-recall retrieval actually happened" (from receiveLoop's goroutine) without racing on capturedRetrieveFocus directly, same pattern as foldSaved below.
+	retrieveRelevantResult []string
+	capturedRetrieveFocus  string
+	retrieveRelevantCalled chan string
+	// retrieveRelevantBlocksOnCtx makes RetrieveRelevant hang until its ctx is done instead of returning immediately — simulates a slow/hung embed call for textSendLoop's per-call timeout test (W3).
+	retrieveRelevantBlocksOnCtx bool
 
 	// loggedNoteContent/loggedNoteKind capture LogNote's args for the save_note tool's tests; logNoteErr lets a test force LogNote to fail.
 	loggedNoteContent string
@@ -48,13 +61,22 @@ type toolTestBrain struct {
 
 func (b *toolTestBrain) GetImplicitContext(ctx context.Context) ([]string, error) { return nil, nil }
 func (b *toolTestBrain) SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error) {
-	return nil, nil
+	b.searchMemoryCalledFocus = query
+	return b.searchMemoryResult, nil
 }
 func (b *toolTestBrain) RankedEpisodes(ctx context.Context, focus string, limit int) ([]db.MemoryHit, error) {
 	return b.episodeHits, nil
 }
 func (b *toolTestBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
-	return nil, nil
+	b.capturedRetrieveFocus = focus
+	if b.retrieveRelevantCalled != nil {
+		b.retrieveRelevantCalled <- focus
+	}
+	if b.retrieveRelevantBlocksOnCtx {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return b.retrieveRelevantResult, nil
 }
 func (b *toolTestBrain) LogNote(ctx context.Context, content, kind string) (int64, error) {
 	b.loggedNoteContent = content
@@ -76,6 +98,19 @@ func (b *toolTestBrain) DeleteNote(ctx context.Context, id int64) error {
 }
 func (b *toolTestBrain) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
 	return b.windowEpisodes, nil
+}
+func (b *toolTestBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error) {
+	var out []db.Episode
+	for _, e := range b.windowEpisodes {
+		if q.App != "" && !strings.Contains(strings.ToLower(e.App), strings.ToLower(q.App)) {
+			continue
+		}
+		out = append(out, e)
+	}
+	if q.Limit > 0 && len(out) > q.Limit {
+		out = out[:q.Limit]
+	}
+	return out, nil
 }
 func (b *toolTestBrain) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
 	return b.subjectRecall, nil
@@ -229,6 +264,57 @@ func TestExecuteTool_QueryMemory_SurfacesEpisodeHit(t *testing.T) {
 
 	if !strings.Contains(result, "[episode] saw the Riddler press conference") {
 		t.Errorf("expected query_memory result to surface episode hit, got: %q", result)
+	}
+}
+
+func TestExecuteTool_QueryMemory_FiltersByApp(t *testing.T) {
+	brain := &toolTestBrain{
+		hybridHits: []db.MemoryHit{
+			{Source: "episode", App: "Slack", Title: "ora", Content: "retrieval thread"},
+			{Source: "episode", App: "Firefox", Title: "Suits", Content: "watching"},
+			{Source: "note", Content: "user likes go"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything", "app": "slack"})
+	if !strings.Contains(result, "Slack") || strings.Contains(result, "Firefox") || strings.Contains(result, "user likes go") {
+		t.Fatalf("app filter leaked: %q", result)
+	}
+}
+
+func TestExecuteTool_GetRecent(t *testing.T) {
+	now := time.Date(2026, 8, 18, 15, 4, 0, 0, time.UTC)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{App: "Slack", Title: "ora", ScreenText: "reviewing PR", UserActivity: "reviewing a pull request", CreatedAt: now, ImagePath: "frames/2.jpg"},
+			{App: "Firefox", Title: "Suits", ScreenText: "watching", CreatedAt: now.Add(-time.Hour)},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+	result := a.executeTool(context.Background(), "get_recent", map[string]any{"limit": float64(5)})
+	if !strings.Contains(result, "Slack") || !strings.Contains(result, "[img]") {
+		t.Fatalf("get_recent: %q", result)
+	}
+	onlySlack := a.executeTool(context.Background(), "get_recent", map[string]any{"app": "firefox"})
+	if !strings.Contains(onlySlack, "Firefox") || strings.Contains(onlySlack, "Slack") {
+		t.Fatalf("get_recent app: %q", onlySlack)
+	}
+}
+
+func TestExecuteTool_Recall_TimelineHonorsApp(t *testing.T) {
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{App: "Slack", Title: "ora", ScreenText: "thread", CreatedAt: now},
+			{App: "Code", Title: "main.go", ScreenText: "editing", CreatedAt: now},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+	result := a.executeTool(context.Background(), "recall", map[string]any{
+		"since": "2026-08-18", "until": "2026-08-18", "app": "code",
+	})
+	if !strings.Contains(result, "Code") || strings.Contains(result, "Slack") {
+		t.Fatalf("recall app: %q", result)
 	}
 }
 
@@ -478,6 +564,26 @@ func TestExecuteTool_QueryMemory_FormatsNoteHitWithRefID(t *testing.T) {
 	}
 }
 
+// TestExecuteTool_QueryMemory_TruncatesOverlongHitContent verifies query_memory formats hits through db.FormatHit like every other read path — a hit whose content exceeds the excerpt budget must come back truncated, not injected raw. Raw Activity Log summaries in production run tens of KB; an uncapped hit here can consume the entire tool-result byte budget by itself.
+func TestExecuteTool_QueryMemory_TruncatesOverlongHitContent(t *testing.T) {
+	overlong := strings.Repeat("x", 500) // well past db.maxEpisodeExcerpt (200 runes)
+	brain := &toolTestBrain{
+		hybridHits: []db.MemoryHit{
+			{Source: "summary", Content: overlong},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything"})
+
+	if strings.Contains(result, overlong) {
+		t.Fatalf("expected overlong hit content to be truncated, got full %d-char content in result", len(overlong))
+	}
+	if len(result) >= len(overlong) {
+		t.Errorf("expected result shorter than the untruncated content (%d chars), got %d chars", len(overlong), len(result))
+	}
+}
+
 // TestExecuteTool_QueryMemory_ZeroHits_ReturnsNoMatchesString verifies that zero hits from HybridSearch still returns a sensible "no memory matches"-style string rather than an empty string or a panic.
 func TestExecuteTool_QueryMemory_ZeroHits_ReturnsNoMatchesString(t *testing.T) {
 	brain := &toolTestBrain{hybridHits: nil}
@@ -669,5 +775,146 @@ func TestExecuteTool_DeleteNote_BrainFails_ReturnsError(t *testing.T) {
 
 	if !strings.HasPrefix(result, "error") {
 		t.Errorf("expected an error result when DeleteNote fails, got %q", result)
+	}
+}
+
+// --- exfiltration gap: read_file / read_clipboard HITL gating (F1b) ---
+
+// TestIsSensitivePath is table-driven over the patterns read_file gates on: SSH/GPG/AWS credential dirs, .env, private key files (id_rsa/id_ed25519/*.pem/*.key), "credentials", "shadow", and ora's own IPC token — versus ordinary paths that should stay frictionless.
+func TestIsSensitivePath(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/home/user/.ssh/id_rsa", true},
+		{"~/.ssh/config", true},
+		{"/home/user/.gnupg/secring.gpg", true},
+		{"/home/user/.aws/credentials", true},
+		{"/home/user/project/.env", true},
+		{"id_rsa", true},
+		{"/home/user/.ssh/id_ed25519", true},
+		{"/home/user/certs/server.pem", true},
+		{"/home/user/keys/api.key", true},
+		{"/etc/shadow", true},
+		{"ora-db/ipc-token", true},
+		{"/some/path/credentials.json", true},
+		{"main.go", false},
+		{"README.md", false},
+		{"internal/agent/tools.go", false},
+		{"/home/user/Documents/notes.txt", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := isSensitivePath(tc.path); got != tc.want {
+				t.Errorf("isSensitivePath(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval verifies a sensitive path blocks on ToolApprovalChan instead of shipping its content straight to the model.
+func TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	tmpFile := filepath.Join(t.TempDir(), ".ssh", "id_rsa")
+	if err := os.MkdirAll(filepath.Dir(tmpFile), 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(tmpFile, []byte("-----BEGIN PRIVATE KEY-----"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	done := make(chan string, 1)
+	go func() {
+		done <- a.executeTool(context.Background(), "read_file", map[string]any{"path": tmpFile})
+	}()
+
+	var req ToolRequest
+	select {
+	case req = <-a.ToolApprovalChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the sensitive read_file HITL approval request")
+	}
+	if !strings.Contains(req.Description, tmpFile) {
+		t.Errorf("expected the approval description to mention the path, got %q", req.Description)
+	}
+	req.ResultChan <- "approved content"
+
+	select {
+	case got := <-done:
+		if got != "approved content" {
+			t.Errorf("expected the approved result to flow through, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for executeTool to return after approval")
+	}
+}
+
+// TestExecuteTool_ReadFile_NonSensitivePath_NoApproval verifies an ordinary path returns its content directly without ever touching ToolApprovalChan.
+func TestExecuteTool_ReadFile_NonSensitivePath_NoApproval(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	tmpFile := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(tmpFile, []byte("just some notes"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	result := a.executeTool(context.Background(), "read_file", map[string]any{"path": tmpFile})
+
+	if result != "just some notes" {
+		t.Errorf("expected the file content returned directly, got %q", result)
+	}
+	select {
+	case req := <-a.ToolApprovalChan:
+		t.Fatalf("expected no HITL approval request for a non-sensitive path, got %+v", req)
+	default:
+	}
+}
+
+// TestExecuteTool_ReadClipboard_BlocksOnApproval verifies read_clipboard always requires approval, regardless of content — the clipboard can carry secrets a password manager just copied.
+func TestExecuteTool_ReadClipboard_BlocksOnApproval(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+
+	done := make(chan string, 1)
+	go func() {
+		done <- a.executeTool(context.Background(), "read_clipboard", map[string]any{})
+	}()
+
+	var req ToolRequest
+	select {
+	case req = <-a.ToolApprovalChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the read_clipboard HITL approval request")
+	}
+	if req.AllowKey != "read_clipboard" {
+		t.Errorf("expected AllowKey %q, got %q", "read_clipboard", req.AllowKey)
+	}
+	req.ResultChan <- "clipboard was approved"
+
+	select {
+	case got := <-done:
+		if got != "clipboard was approved" {
+			t.Errorf("expected the approved result to flow through, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for executeTool to return after approval")
+	}
+}
+
+// TestExecuteTool_ReadClipboard_SessionAllowed_SkipsApproval verifies "Allow for session" (AllowedCmds keyed "read_clipboard") skips the HITL prompt on later calls within the same session.
+func TestExecuteTool_ReadClipboard_SessionAllowed_SkipsApproval(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	a.AllowedCmds.Store("read_clipboard", true)
+
+	done := make(chan string, 1)
+	go func() {
+		done <- a.executeTool(context.Background(), "read_clipboard", map[string]any{})
+	}()
+
+	select {
+	case req := <-a.ToolApprovalChan:
+		t.Fatalf("expected no HITL approval request once session-allowed, got %+v", req)
+	case <-done:
+		// executeTool returned without ever touching ToolApprovalChan — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for executeTool to return")
 	}
 }
