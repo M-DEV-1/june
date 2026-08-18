@@ -27,7 +27,7 @@ type Daemon struct {
 	blocklist []string
 	eventChan chan Activity
 	capturer  func() string // injectable for tests; nil = real capture
-	visionFn  func(ctx context.Context, png []byte) string
+	visionFn  func(ctx context.Context, png []byte) Sight
 	paused    atomic.Bool
 }
 
@@ -45,8 +45,8 @@ func (d *Daemon) SetCapturer(fn func() string) {
 	d.capturer = fn
 }
 
-// SetVisionFn injects the vision describer (image -> text). When set, the tiered capturer falls back to a screenshot + this function whenever accessibility text is too thin to be useful. nil disables the vision tier (text-only).
-func (d *Daemon) SetVisionFn(fn func(ctx context.Context, png []byte) string) {
+// SetVisionFn injects the vision describer (image -> structured sight). When set, the tiered capturer falls back to a screenshot + this function whenever accessibility text is too thin to be useful. nil disables the vision tier (text-only).
+func (d *Daemon) SetVisionFn(fn func(ctx context.Context, png []byte) Sight) {
 	d.visionFn = fn
 }
 
@@ -96,9 +96,9 @@ func (d *Daemon) Start(ctx context.Context) {
 	// use injected capturer (tests) or default to tiered capture with diff tracking. The default path needs the current activity so vision can skip the bare desktop; the test capturer ignores it.
 	var lastScreenText string
 	var lastVisionTime time.Time
-	capture := func(act Activity) string {
+	capture := func(act Activity) captureOut {
 		if d.capturer != nil {
-			return d.capturer()
+			return captureOut{text: d.capturer()}
 		}
 		return d.tieredCapture(ctx, act, &lastScreenText, &lastCaptureTime, &lastVisionTime)
 	}
@@ -153,7 +153,7 @@ func (d *Daemon) Start(ctx context.Context) {
 					)
 
 					ev := *pendingActivity
-					ev.ScreenText = capture(*pendingActivity)
+					applyCapture(&ev, capture(*pendingActivity))
 
 					slog.Info("activity tracked", "app", ev.App, "title", ev.Title)
 
@@ -172,10 +172,10 @@ func (d *Daemon) Start(ctx context.Context) {
 				}
 			} else if emittedCurrent && d.capturer == nil && time.Since(lastCaptureTime) >= recaptureInterval {
 				// periodic re-capture: same window, 5 min elapsed
-				text := capture(*lastActivity)
-				if text != "" {
+				out := capture(*lastActivity)
+				if out.text != "" {
 					ev := *lastActivity
-					ev.ScreenText = text
+					applyCapture(&ev, out)
 					select {
 					case d.eventChan <- ev:
 					case <-ctx.Done():
@@ -201,9 +201,22 @@ func (d *Daemon) Start(ctx context.Context) {
 	}
 }
 
+type captureOut struct {
+	text  string
+	sight Sight
+	jpeg  []byte
+}
+
+func applyCapture(ev *Activity, out captureOut) {
+	ev.ScreenText = out.text
+	ev.UserActivity = out.sight.UserActivity
+	ev.VisibleText = out.sight.VisibleText
+	ev.ImageJPEG = out.jpeg
+}
+
 // tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen.
-// Returns "" when content is unchanged since the last capture, so callers never re-emit the same screen. Vision is gated behind thinTextThreshold and minVisionInterval to keep cost down.
-func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *string, lastCaptureTime, lastVisionTime *time.Time) string {
+// Returns empty text when content is unchanged since the last capture, so callers never re-emit the same screen. Vision is gated behind thinTextThreshold and minVisionInterval to keep cost down.
+func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *string, lastCaptureTime, lastVisionTime *time.Time) captureOut {
 	text, err := extractText()
 	if err != nil {
 		text = ""
@@ -214,18 +227,27 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
 	mediaActive := mediaPlaying(ctx)
 	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
-		return diff(lastText, text)
+		return captureOut{text: diff(lastText, text)}
 	}
 
 	png, err := grabScreen(ctx)
 	if err != nil || len(png) == 0 {
-		return diff(lastText, text)
+		return captureOut{text: diff(lastText, text)}
 	}
 	*lastVisionTime = time.Now()
 
-	vtext := d.visionFn(ctx, png)
-	combined := strings.TrimSpace(strings.TrimSpace(text) + "\n" + strings.TrimSpace(vtext))
-	return diff(lastText, combined)
+	sight := d.visionFn(ctx, png)
+	// Vision capture: drop a11y entirely. Browser/TUI chrome is why screenshots of Ora itself polluted memory.
+	// Searchable text is only the model's structured description (or the window title if the model returned nothing).
+	desc := sight.Text()
+	if desc == "" {
+		desc = strings.TrimSpace(act.Title)
+	}
+	shown := diff(lastText, desc)
+	if shown == "" {
+		return captureOut{}
+	}
+	return captureOut{text: shown, sight: sight, jpeg: encodeJPEG(png)}
 }
 
 // nonWindowApps are the desktop/compositor/shell identifiers that mean no real app is focused. Without this gate the vision tier would screenshot and describe the wallpaper on every idle tick.

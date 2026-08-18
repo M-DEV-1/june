@@ -27,6 +27,7 @@ type subtaskModel interface {
 var subtaskAllowedTools = map[string]bool{
 	"query_memory": true,
 	"recall":       true,
+	"get_recent":   true,
 }
 
 // subtaskTools filters toolDefinitions() (the single source of truth for every tool's schema) down to subtaskAllowedTools, so the subtask model is only ever offered — not just guarded against calling — the safe subset.
