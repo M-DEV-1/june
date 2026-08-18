@@ -42,6 +42,9 @@ func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error             
 func (b *mockBrain) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
 	return nil, nil
 }
+func (b *mockBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error) {
+	return nil, nil
+}
 func (b *mockBrain) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
 	return nil, nil
 }
