@@ -3,9 +3,32 @@ package tracker
 import "strings"
 
 type Activity struct {
-	App        string
-	Title      string
-	ScreenText string
+	App          string
+	Title        string
+	ScreenText   string
+	UserActivity string
+	VisibleText  []string
+	ImageJPEG    []byte
+}
+
+// Sight is the structured vision extract for one capture.
+type Sight struct {
+	UserActivity string
+	VisibleText  []string
+	Summary      string
+}
+
+// Text is the searchable description for a vision capture: activity, then visible chunks, then summary. Never accessibility chrome — if vision ran, a11y is discarded.
+func (s Sight) Text() string {
+	var parts []string
+	if s.UserActivity != "" {
+		parts = append(parts, s.UserActivity)
+	}
+	parts = append(parts, s.VisibleText...)
+	if s.Summary != "" && !strings.Contains(strings.Join(parts, "\n"), s.Summary) {
+		parts = append(parts, s.Summary)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 // defines standard interface for all os implementations
