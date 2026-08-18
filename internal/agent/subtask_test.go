@@ -249,7 +249,7 @@ func TestRunSubtask_OffersOnlyQueryMemoryAndRecallToTheModel(t *testing.T) {
 			gotNames = append(gotNames, decl.Name)
 		}
 	}
-	want := map[string]bool{"query_memory": true, "recall": true}
+	want := map[string]bool{"query_memory": true, "recall": true, "get_recent": true}
 	if len(gotNames) != len(want) {
 		t.Fatalf("offered tools = %v, want exactly %v", gotNames, want)
 	}

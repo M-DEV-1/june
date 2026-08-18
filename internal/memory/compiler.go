@@ -212,35 +212,48 @@ Respond strictly as JSON:
 	return &attr, nil
 }
 
-// DescribeScreen sends a screenshot to the multimodal model and returns a concise description for memory.
-// Used as the vision tier when accessibility text is blind (browsers, video, games, canvas apps).
-// Returns "" on any failure so the caller can fall back to whatever thin text it already has.
-func (g *GeminiSummarizer) DescribeScreen(ctx context.Context, png []byte) string {
+const screenSightPrompt = `You are the eyes of an ambient OS companion. Extract what is on this screen as JSON so it can be searched later.
+Be factual and concise. Present tense. Do not invent.
+
+- user_activity: one short phrase for what the user is doing (editing a file, watching a scene, reading an article).
+- visible_text: the meaningful visible strings as separate items — messages as "Name: text", terminal errors, headings, code symbols. Not chrome (tabs, buttons, cookies).
+- summary: one sentence backup if the lists are thin.
+
+{"user_activity":"","visible_text":[],"summary":""}`
+
+// AnalyzeScreen sends a screenshot to the multimodal model and returns a structured moment (activity + visible chunks). Zero value on any failure so the caller can fall back to accessibility text.
+func (g *GeminiSummarizer) AnalyzeScreen(ctx context.Context, png []byte) ScreenSight {
 	if len(png) == 0 {
-		return ""
+		return ScreenSight{}
 	}
 
 	tracer := obs.GetTracer(ctx, "ora.memory")
-	ctx, span := tracer.Start(ctx, "GeminiSummarizer.DescribeScreen")
+	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AnalyzeScreen")
 	defer span.End()
 
-	const prompt = `You are the eyes of an ambient OS companion. Describe what is on this screen so the agent can remember it later. State the application, what the user is doing, and any meaningful visible content — terminal errors and their cause, the article or page being read, the video or game on screen. Be factual and concise, present tense, no preamble. Max 100 words.`
-
 	parts := []*genai.Part{
-		genai.NewPartFromText(prompt),
+		genai.NewPartFromText(screenSightPrompt),
 		genai.NewPartFromBytes(png, "image/png"),
 	}
 	contents := []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}
 
-	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, contents, nil)
+	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, contents, &genai.GenerateContentConfig{
+		ResponseMIMEType: "application/json",
+	})
 	if err != nil {
 		span.RecordError(err)
-		return ""
+		return ScreenSight{}
 	}
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return ""
+		return ScreenSight{}
 	}
-	return strings.TrimSpace(resp.Candidates[0].Content.Parts[0].Text)
+	return ParseScreenSight(resp.Candidates[0].Content.Parts[0].Text)
+}
+
+// DescribeScreen is AnalyzeScreen flattened to one string. Kept for callers that only need text.
+func (g *GeminiSummarizer) DescribeScreen(ctx context.Context, png []byte) string {
+	s := g.AnalyzeScreen(ctx, png)
+	return ComposeMoment(s.UserActivity, s.VisibleText, s.Summary)
 }
 
 type Storage interface {
@@ -357,6 +370,9 @@ func CountWords(s string) int {
 	return n
 }
 
+// fallbackSummaryMaxRunes caps processFlush's LLM-failure fallback ("Raw Activity Log") — this path stores raw app|title lines with no summarization, so an unbounded buffer (or a burst of long titles) would otherwise create a node the same size class as the tens-of-KB junk rows excerptContent/truncateUTF8 exist to defend against reading back.
+const fallbackSummaryMaxRunes = 2000
+
 // processFlush does the slow LLM/store work for a flushed buffer. Operates only on the local buf snapshot — never touches c.buffer/c.wordCount/c.lastFlush, which are already reset by resetBufferLocked. Never called while holding c.mu.
 func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 	if len(buf) == 0 {
@@ -388,18 +404,15 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 	attr, err := c.llm.AttributeThreads(ctx, buf, existingThreads)
 	if err != nil || attr == nil || len(attr.Threads) == 0 {
 		// log raw activities if LLM fails or produces no usable attribution
+		// app | title lines only — no ScreenText. This fallback fires when the LLM call itself failed, so there's no summarization happening at all; dumping every activity's full raw capture here would create exactly the tens-of-KB junk row other code (truncateUTF8, excerptContent) already defends against reading back out.
 		var fallbackText strings.Builder
 		for _, act := range buf {
-			line := act.App + " | " + act.Title
-			if act.ScreenText != "" {
-				line += " | " + act.ScreenText
-			}
-			fallbackText.WriteString(line + "\n")
+			fallbackText.WriteString(act.App + " | " + act.Title + "\n")
 		}
 		fallbackSummary := TaskSummary{
 			SameTask: false,
 			TaskName: "Raw Activity Log",
-			Summary:  strings.TrimSpace(fallbackText.String()),
+			Summary:  truncateRunes(strings.TrimSpace(fallbackText.String()), fallbackSummaryMaxRunes),
 		}
 		if err := c.store.LogSemanticNode(ctx, fallbackSummary); err != nil {
 			slog.Error("flush: LogSemanticNode (fallback) failed", "err", err)
