@@ -5,6 +5,7 @@ import (
 	"ora/internal/audio"
 	"ora/internal/db"
 	"ora/internal/memory"
+	"ora/internal/tracker"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,7 +20,6 @@ import (
 type ContextReader interface {
 	GetImplicitContext(ctx context.Context) ([]string, error)
 	SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error)
-	RankedEpisodes(ctx context.Context, focus string, limit int) ([]db.MemoryHit, error)
 	RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	GetNotes(ctx context.Context) ([]db.Note, error)
@@ -27,6 +27,7 @@ type ContextReader interface {
 	UpdateNote(ctx context.Context, id int64, content string) error
 	DeleteNote(ctx context.Context, id int64) error
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
+	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
 	RecallSubject(ctx context.Context, subject string, limit int) ([]string, error)
 	// HybridSearch fuses lexical (FTS5) and vector search via reciprocal rank fusion, optionally filtered to domainFilter ("work" | "personal" | "" for none). Backs query_memory's "domain" param.
 	HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error)
@@ -36,9 +37,32 @@ type ContextReader interface {
 	ConsumeFold(ctx context.Context, id int64) error
 }
 
+// ResponseChunk is one piece of text bound for the UI transcript: model output (ora), a finished voice utterance (you), or a system notice. Carries genai's own Part.Thought bit end to end so the UI never has to infer which kind of text it received.
+type ResponseChunk struct {
+	Text      string
+	IsThought bool
+	// Sender routes the chunk to the right transcript speaker: "" (zero value) is ora, or one of SenderYou/SenderSystem below.
+	Sender string
+	// TurnBoundary marks the end of one model turn (Text is empty on this chunk) — the UI closes the current ora message block on receipt so the next ora chunk starts a fresh one instead of merging into whatever came before.
+	TurnBoundary bool
+}
+
+const (
+	SenderYou    = "you"
+	SenderSystem = "system"
+)
+
+// ToolRequest is a generic HITL approval request — not shell-specific, so tools beyond shell_exec (read_file on a sensitive path, read_clipboard) can gate through the same TUI approve/reject/edit flow instead of shipping their result to the model with zero user involvement.
 type ToolRequest struct {
-	Command    string
+	// Description is shown in the approval prompt, e.g. "shell: ls -la" or "read file: ~/.ssh/id_rsa".
+	Description string
+	// Execute runs the approved action and returns its result — called by the TUI on "Allow once"/"Allow for session", never on reject.
+	Execute    func() string
 	ResultChan chan<- string
+	// AllowKey, if non-empty, is what "Allow for session" stores into AllowedCmds so a repeat request for the same resource skips approval for the rest of the session. Callers check AllowedCmds themselves before sending a request; this only tells the TUI what to store on approval.
+	AllowKey string
+	// EditableCommand, if non-empty, is the raw command text "Suggest changes" pre-fills into the textarea for editing — only shell-backed requests support this; other tools have no command text to edit.
+	EditableCommand string
 }
 
 // ToolPhase is where a tool call is in its started->finished lifecycle.
@@ -63,18 +87,19 @@ type ToolActivity struct {
 }
 
 type Agent struct {
-	mic              audio.Microphone
-	speaker          audio.Speaker
-	brain            ContextReader
-	compiler         *memory.Compiler
+	mic     audio.Microphone
+	speaker audio.Speaker
+	brain   ContextReader
+	// bufferProvider is the source of the handshake's "[working]" current-activity context — nil means skip that part of the handshake entirely. NewAgent seeds it from a non-nil compiler (in-process use); the client process (which never has a compiler) wires its own via SetBufferProvider — see cmd/client.go's IPC-backed provider.
+	bufferProvider   func() []tracker.Activity
 	apiKey           string
 	model            atomic.Value
 	voice            atomic.Value
 	isMuted          atomic.Bool
-	writeMu          sync.Mutex  // protects websocket writes
-	TextChan         chan string // this is for tui text input
-	TextResponseChan chan string // results for tui text resp
-	ErrorChan        chan error  // websocket connection crashes
+	writeMu          sync.Mutex         // protects websocket writes
+	TextChan         chan string        // this is for tui text input
+	TextResponseChan chan ResponseChunk // results for tui text resp — tagged with IsThought so the UI never infers it from content
+	ErrorChan        chan error         // websocket connection crashes
 	ToolApprovalChan chan ToolRequest
 	// ToolActivityChan carries a Started/Finished pair for every tool call, so a UI can show live "tool running" status. Buffered 20 to absorb a burst of concurrent tool calls in one turn; sends are non-blocking like every other Agent channel — a missed event is cosmetic, never a correctness issue.
 	ToolActivityChan chan ToolActivity
@@ -171,20 +196,28 @@ func (a *Agent) TriggerReconnect() {
 	}
 }
 
+// NewAgent keeps the compiler param for signature compatibility — a non-nil compiler seeds bufferProvider for any in-process caller (the client process has no compiler and never did; it wires its own provider afterward via SetBufferProvider — see cmd/client.go's IPC-backed one).
 func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, compiler *memory.Compiler, apiKey string) *Agent {
 	a := &Agent{
 		mic:              mic,
 		speaker:          speaker,
 		brain:            brain,
-		compiler:         compiler,
 		apiKey:           apiKey,
 		TextChan:         make(chan string, 100),
-		TextResponseChan: make(chan string, 100),
+		TextResponseChan: make(chan ResponseChunk, 100),
 		ErrorChan:        make(chan error, 10),
 		ToolApprovalChan: make(chan ToolRequest, 1),
 		ToolActivityChan: make(chan ToolActivity, 20),
 		ReconnectChan:    make(chan struct{}, 1),
 	}
+	if compiler != nil {
+		a.bufferProvider = compiler.GetCurrentBuffer
+	}
 	a.subtaskModelFactory = a.defaultSubtaskModel
 	return a
+}
+
+// SetBufferProvider wires the source of the handshake's "[working]" current-activity context — the client process (which has no in-process compiler) uses this to plug in an IPC-backed provider instead. nil (the default when no compiler was passed to NewAgent either) skips that part of the handshake entirely.
+func (a *Agent) SetBufferProvider(p func() []tracker.Activity) {
+	a.bufferProvider = p
 }

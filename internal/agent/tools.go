@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"ora/internal/db"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,12 +81,14 @@ func toolDefinitions() []*genai.Tool {
 				Name: "query_memory",
 				Description: "Topical search over memory (moments, facts, arcs, period summaries). " +
 					"Moments (screen observations) rank with recency; facts/notes do not expire. " +
-					"For pure day/timeline questions use recall with since/until instead.",
+					"Use app to restrict to one application (Slack, Firefox, Code). " +
+					"For pure day/timeline questions use recall. For 'what was I just doing' use get_recent.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
 						"query":  {Type: genai.TypeString, Description: "What to search for — topic, project, show, person, etc."},
 						"domain": {Type: genai.TypeString, Description: "Optional. Restrict to 'work' or 'personal' memories only. Omit to search everything, weighted toward whichever domain you're currently in."},
+						"app":    {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring, e.g. slack, firefox, code)."},
 					},
 					Required: []string{"query"},
 				},
@@ -93,13 +96,26 @@ func toolDefinitions() []*genai.Tool {
 			{
 				Name: "recall",
 				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
-					"Use subject for an ongoing arc. Returns short content+context lines, not raw screen dumps.",
+					"Use subject for an ongoing arc. Use app to keep only that application's moments. " +
+					"Returns short content+context lines, not raw screen dumps.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
 						"subject": {Type: genai.TypeString, Description: "Optional. A subject/topic to recall (fuses the matching thread's arc with diverse episode specifics). Takes priority over the timeline."},
 						"since":   {Type: genai.TypeString, Description: "Optional. Start of the timeline window as an ISO-8601 timestamp (2026-07-05T00:00:00Z) or bare date (2026-07-05). You know the current date/time — convert phrases like 'yesterday', 'July 5th', or 'last week' into a concrete date yourself. Defaults to the start of today."},
 						"until":   {Type: genai.TypeString, Description: "Optional. End of the timeline window (same formats as 'since'). A bare date covers the whole day. Defaults to now. For a single day, set since and until to that same date."},
+						"app":     {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring)."},
+					},
+				},
+			},
+			{
+				Name:        "get_recent",
+				Description: "The most recent screen moments, newest first. Use for 'what was I just doing', 'what have I been looking at', or the last few captures in an app. Not a topical search.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"limit": {Type: genai.TypeInteger, Description: "How many moments to return (default 10, max 50)."},
+						"app":   {Type: genai.TypeString, Description: "Optional. Restrict to this application name (case-insensitive substring)."},
 					},
 				},
 			},
@@ -227,6 +243,46 @@ func parseInstant(s string, loc *time.Location, endOfDay bool) (time.Time, error
 	return d, nil
 }
 
+// sensitivePathSubstrings/sensitivePathSuffixes gate read_file behind HITL approval — credentials, SSH/GPG/cloud keys, and ora's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
+var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "ora-db/ipc-token"}
+var sensitivePathSuffixes = []string{".pem", ".key"}
+
+// isSensitivePath reports whether path matches one of the patterns above.
+func isSensitivePath(path string) bool {
+	candidates := []string{path}
+	if abs, err := filepath.Abs(path); err == nil {
+		candidates = append(candidates, filepath.Clean(abs))
+	}
+	for _, c := range candidates {
+		for _, sub := range sensitivePathSubstrings {
+			if strings.Contains(c, sub) {
+				return true
+			}
+		}
+		for _, suffix := range sensitivePathSuffixes {
+			if strings.HasSuffix(c, suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// readClipboard reads the system clipboard. Extracted so it can be passed as a ToolRequest.Execute closure — read_clipboard always requires HITL approval (see executeTool), since a password manager routinely puts secrets there.
+func readClipboard() string {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("powershell", "-Command", "Get-Clipboard")
+	} else {
+		cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("error reading clipboard: %v", err)
+	}
+	return string(output)
+}
+
 func RunShellCommand(command string) string {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -244,6 +300,32 @@ func RunShellCommand(command string) string {
 		result = result[:2000] + "\n... (truncated)"
 	}
 	return result
+}
+
+// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the TUI's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the TUI to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
+func (a *Agent) requestApproval(ctx context.Context, allowKey, description string, execute func() string, editableCommand string) string {
+	resChan := make(chan string, 1)
+	req := ToolRequest{
+		Description:     description,
+		Execute:         execute,
+		ResultChan:      resChan,
+		AllowKey:        allowKey,
+		EditableCommand: editableCommand,
+	}
+	select {
+	case a.ToolApprovalChan <- req:
+	default:
+		// TUI approval queue full — another tool is pending. Reject to unblock.
+		return "error: approval queue busy, request rejected"
+	}
+
+	select {
+	case res := <-resChan:
+		return res
+	case <-ctx.Done():
+		slog.Warn("HITL approval abandoned: session ended before user responded", "description", description)
+		return "error: session ended before request was approved"
+	}
 }
 
 // ExecuteTool is just executeTool but exported, so eval tests outside this package can call the real tool (query_memory, recall, etc) the same way the model does.
@@ -268,51 +350,41 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 
 		slog.Warn("intercepting shell command for HITL", "command", command)
-
-		resChan := make(chan string, 1)
-		select {
-		case a.ToolApprovalChan <- ToolRequest{Command: command, ResultChan: resChan}:
-		default:
-			// TUI approval queue full — another tool is pending. Reject to unblock.
-			return "error: approval queue busy, command rejected"
-		}
-
-		// ctx is cancelled when the live session ends (Connect's sessCancel, via receiveLoop -> runToolCall). Without this select, a HITL approval that never arrived left this goroutine leaking forever after the session was gone.
-		select {
-		case res := <-resChan:
-			return res
-		case <-ctx.Done():
-			slog.Warn("HITL approval abandoned: session ended before user responded", "command", command)
-			return "error: session ended before command was approved"
-		}
+		return a.requestApproval(ctx, command, "shell: "+command, func() string { return RunShellCommand(command) }, command)
 
 	case "read_clipboard":
-		var cmd *exec.Cmd
-		if runtime.GOOS == "windows" {
-			cmd = exec.Command("powershell", "-Command", "Get-Clipboard")
-		} else {
-			cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
+		// Always gated — a password manager routinely leaves a secret sitting in the clipboard, and there's no way to distinguish that from a benign copy ahead of time.
+		if _, allowed := a.AllowedCmds.Load("read_clipboard"); allowed {
+			return readClipboard()
 		}
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Sprintf("error reading clipboard: %v", err)
-		}
-		return string(output)
+		slog.Warn("intercepting clipboard read for HITL")
+		return a.requestApproval(ctx, "read_clipboard", "read the clipboard", readClipboard, "")
 
 	case "read_file":
 		path, ok := args["path"].(string)
 		if !ok {
 			return "error: path argument is required"
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Sprintf("error reading file: %v", err)
+		execute := func() string {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Sprintf("error reading file: %v", err)
+			}
+			result := string(data)
+			if len(result) > 4000 {
+				result = result[:4000] + "\n... (truncated, file too large)"
+			}
+			return result
 		}
-		result := string(data)
-		if len(result) > 4000 {
-			result = result[:4000] + "\n... (truncated, file too large)"
+		if !isSensitivePath(path) {
+			return execute()
 		}
-		return result
+		allowKey := "read_file:" + path
+		if _, allowed := a.AllowedCmds.Load(allowKey); allowed {
+			return execute()
+		}
+		slog.Warn("intercepting sensitive file read for HITL", "path", path)
+		return a.requestApproval(ctx, allowKey, "read file: "+path, execute, "")
 
 	case "list_files":
 		path, _ := args["path"].(string)
@@ -370,16 +442,20 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if err != nil {
 			return fmt.Sprintf("error querying memory: %v", err)
 		}
+		if app, _ := args["app"].(string); strings.TrimSpace(app) != "" {
+			hits = filterHitsByApp(hits, app)
+		}
 		if len(hits) == 0 {
 			return "no memory matches"
 		}
 		lines := make([]string, 0, len(hits))
 		for _, h := range hits {
-			// Notes are the only source with an update_note/delete_note follow-up tool, so they're the only hits that carry their ref_id — the model needs it in hand to act on a correction.
+			// Content is excerpted via db.FormatHit/FormatNoteHit like every other read path — an unformatted hit can inject tens of KB from a single oversized row (see RetrieveRelevant/RecallSubject, which already do this).
+			// Notes are the only source with an update_note/delete_note follow-up tool, so they're the only hits that carry their ref_id in the surfaced line — the model needs it in hand to act on a correction.
 			if h.Source == "note" {
-				lines = append(lines, fmt.Sprintf("[note#%d] %s", h.RefID, h.Content))
+				lines = append(lines, db.FormatNoteHit(h, 0))
 			} else {
-				lines = append(lines, fmt.Sprintf("[%s] %s", h.Source, h.Content))
+				lines = append(lines, db.FormatHit(h, 0))
 			}
 		}
 		return strings.Join(lines, "\n")
@@ -419,9 +495,10 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if err != nil {
 			return fmt.Sprintf("error: since/until must be ISO-8601 timestamps (e.g. 2026-07-05T00:00:00Z or 2026-07-05): %v", err)
 		}
-		slog.Info("recalling timeline window", "since", since, "until", until)
+		app, _ := args["app"].(string)
+		slog.Info("recalling timeline window", "since", since, "until", until, "app", app)
 
-		episodes, err := a.brain.EpisodesInWindow(ctx, since, until, 50)
+		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{Since: since, Until: until, App: app, Limit: 50})
 		if err != nil {
 			return fmt.Sprintf("error recalling timeline: %v", err)
 		}
@@ -437,6 +514,44 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			// Established timeline shape: "[Jan 2 15:04] app — title: …" (uses the timestamp's own location, so UTC fixtures stay UTC).
 			lines = append(lines, fmt.Sprintf("[%s] %s — %s: %s",
 				e.CreatedAt.Format("Jan 2 15:04"), e.App, e.Title, excerpt))
+		}
+		return strings.Join(lines, "\n")
+
+	case "get_recent":
+		limit := 10
+		if v, ok := args["limit"].(float64); ok && v > 0 {
+			limit = int(v)
+		}
+		if limit > 50 {
+			limit = 50
+		}
+		app, _ := args["app"].(string)
+		slog.Info("recalling recent moments", "limit", limit, "app", app)
+		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{App: app, Limit: limit, NewestFirst: true})
+		if err != nil {
+			return fmt.Sprintf("error getting recent moments: %v", err)
+		}
+		if len(episodes) == 0 {
+			return "no recent episodes"
+		}
+		lines := make([]string, 0, len(episodes))
+		for _, e := range episodes {
+			excerpt := e.ScreenText
+			if e.UserActivity != "" {
+				excerpt = e.UserActivity
+				if e.ScreenText != "" && e.ScreenText != e.UserActivity {
+					excerpt = e.UserActivity + " — " + e.ScreenText
+				}
+			}
+			if runes := []rune(excerpt); len(runes) > recallExcerpt {
+				excerpt = string(runes[:recallExcerpt])
+			}
+			line := fmt.Sprintf("[%s] %s — %s: %s",
+				e.CreatedAt.Format("Jan 2 15:04"), e.App, e.Title, excerpt)
+			if e.ImagePath != "" {
+				line += " [img]"
+			}
+			lines = append(lines, line)
 		}
 		return strings.Join(lines, "\n")
 
@@ -505,6 +620,11 @@ func toolActivitySummary(name string, args map[string]any) string {
 		if q, ok := args["query"].(string); ok {
 			return fmt.Sprintf("%q", q)
 		}
+	case "get_recent":
+		if app, ok := args["app"].(string); ok && strings.TrimSpace(app) != "" {
+			return fmt.Sprintf("%q", app)
+		}
+		return "recent"
 	case "recall":
 		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
 			return fmt.Sprintf("%q", subject)
@@ -561,7 +681,7 @@ func resultSummary(name, result string) string {
 		return "failed"
 	}
 	switch result {
-	case "no memory matches", "no memory of that subject", "no episodes in that window":
+	case "no memory matches", "no memory of that subject", "no episodes in that window", "no recent episodes":
 		return "0 hits"
 	case "saved":
 		return "saved"
@@ -570,8 +690,26 @@ func resultSummary(name, result string) string {
 	case "deleted":
 		return "deleted"
 	}
-	if name == "query_memory" || name == "recall" {
+	if name == "query_memory" || name == "recall" || name == "get_recent" {
 		return fmt.Sprintf("%d hits", strings.Count(result, "\n")+1)
 	}
 	return "done"
+}
+
+// filterHitsByApp keeps episode hits whose App contains filter (case-insensitive) and drops other sources. A missing App on an episode hit is dropped rather than guessed.
+func filterHitsByApp(hits []db.MemoryHit, app string) []db.MemoryHit {
+	app = strings.ToLower(strings.TrimSpace(app))
+	if app == "" {
+		return hits
+	}
+	out := hits[:0:0]
+	for _, h := range hits {
+		if h.Source != "episode" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(h.App), app) {
+			out = append(out, h)
+		}
+	}
+	return out
 }

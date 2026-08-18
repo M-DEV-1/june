@@ -19,6 +19,8 @@ func TestToolActivitySummary(t *testing.T) {
 	}{
 		{"query_memory", map[string]any{"query": "Riddler puzzles"}, `"Riddler puzzles"`},
 		{"query_memory", map[string]any{"query": "cuda", "domain": "work"}, `"cuda"`},
+		{"get_recent", map[string]any{}, "recent"},
+		{"get_recent", map[string]any{"app": "Slack"}, `"Slack"`},
 		{"recall", map[string]any{"subject": "DeepSeek"}, `"DeepSeek"`},
 		{"recall", map[string]any{"since": "2026-07-05", "until": "2026-07-06"}, `since 2026-07-05 until 2026-07-06`},
 		{"recall", map[string]any{}, ""},
@@ -48,6 +50,7 @@ func TestResultSummary(t *testing.T) {
 		{"query_memory", "no memory matches", "0 hits"},
 		{"recall", "no memory of that subject", "0 hits"},
 		{"recall", "no episodes in that window", "0 hits"},
+		{"get_recent", "no recent episodes", "0 hits"},
 		{"query_memory", "[episode] foo\n[note] bar\n[summary] baz", "3 hits"},
 		{"recall", "[Jan 2 15:04] Chrome — reddit: something", "1 hits"},
 		{"shell_exec", "total 0\ndrwxr-xr-x", "done"},
