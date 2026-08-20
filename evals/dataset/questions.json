@@ -1,0 +1,93 @@
+[
+  {
+    "id": "current-work",
+    "kind": "current",
+    "ask": "What am I working on right now?",
+    "expect": ["climate", "ASRS", "Opal"],
+    "source": "working_state"
+  },
+  {
+    "id": "tingira",
+    "kind": "specific",
+    "ask": "What's the climate risk work on Tingira Hills about?",
+    "expect": ["Tingira"],
+    "source": "thread:166"
+  },
+  {
+    "id": "catch-up-climate",
+    "kind": "synthesis",
+    "ask": "Catch me up on the climate risk statement work — what's the current focus and what's still open?",
+    "expect": ["ASRS", "Opal"],
+    "source": "working_state"
+  },
+  {
+    "id": "just-now",
+    "kind": "timeline",
+    "ask": "What was I just looking at in the browser?",
+    "expect": ["Opal"],
+    "source": "episode:recent"
+  },
+  {
+    "id": "tdd",
+    "kind": "identity",
+    "ask": "How do I like new work to get implemented?",
+    "expect": ["TDD"],
+    "source": "note:93"
+  },
+  {
+    "id": "pune",
+    "kind": "identity",
+    "ask": "Which Pune neighborhoods am I looking at for real estate?",
+    "expect": ["Hadapsar", "Mundhwa"],
+    "source": "note:103"
+  },
+  {
+    "id": "nietzsche",
+    "kind": "identity",
+    "ask": "What philosophical interests do I have?",
+    "expect": ["Nietzsche"],
+    "source": "note:104"
+  },
+  {
+    "id": "voice-first",
+    "kind": "identity",
+    "ask": "How do I prefer to talk to AI?",
+    "expect": ["voice"],
+    "source": "note:97"
+  },
+  {
+    "id": "tui",
+    "kind": "identity",
+    "ask": "Do I prefer GUIs or terminal workflows?",
+    "expect": ["TUI"],
+    "source": "note:91"
+  },
+  {
+    "id": "stack",
+    "kind": "identity",
+    "ask": "What languages and stacks do I actually use day to day?",
+    "expect": ["Go"],
+    "source": "note:92"
+  },
+  {
+    "id": "scrapped-pet",
+    "kind": "negative",
+    "ask": "Is the desktop pet assistant project still a thing?",
+    "expect": ["scrap"],
+    "source": "note:106"
+  },
+  {
+    "id": "suits",
+    "kind": "thread",
+    "ask": "Where did I leave off on Suits?",
+    "expect": ["Tiny Violin"],
+    "source": "thread:24"
+  },
+  {
+    "id": "zugzwang",
+    "kind": "thread",
+    "ask": "What was I doing on Zugzwang recently?",
+    "expect": ["zugzwang"],
+    "source": "thread:137"
+  }
+]

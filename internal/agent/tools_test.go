@@ -28,6 +28,9 @@ type toolTestBrain struct {
 	hybridHits     []db.MemoryHit
 	capturedDomain string
 
+	// implicitContext backs GetImplicitContext — used by HandshakePrompt tests so the frozen handshake string can be asserted without a real sqlite store.
+	implicitContext []string
+
 	// retrieveRelevantResult/capturedRetrieveFocus back RetrieveRelevant. retrieveRelevantCalled, if non-nil, receives the focus arg right when RetrieveRelevant is invoked — lets a test synchronize on "the async voice-recall retrieval actually happened" (from receiveLoop's goroutine) without racing on capturedRetrieveFocus directly, same pattern as foldSaved below.
 	retrieveRelevantResult []string
 	capturedRetrieveFocus  string
@@ -59,7 +62,9 @@ type toolTestBrain struct {
 	foldSaved chan struct{}
 }
 
-func (b *toolTestBrain) GetImplicitContext(ctx context.Context) ([]string, error) { return nil, nil }
+func (b *toolTestBrain) GetImplicitContext(ctx context.Context) ([]string, error) {
+	return b.implicitContext, nil
+}
 func (b *toolTestBrain) SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error) {
 	b.searchMemoryCalledFocus = query
 	return b.searchMemoryResult, nil
