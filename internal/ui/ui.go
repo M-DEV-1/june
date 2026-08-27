@@ -292,9 +292,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Finished: always append the transcript line even if a concurrent call has since taken over the live-status slot (see the StaleID test) — every call still gets its own permanent record.
+		// The duration turns the log into a record of how slow the call actually was, which is the only place that survives once the live status row is gone. A zero Started can only come from a synthetic event, so it renders no duration rather than one measured from year 1.
+		line := msg.Name + "(" + msg.ArgsSummary + ") → " + msg.ResultSummary
+		if !msg.Started.IsZero() {
+			line += " · " + formatElapsed(time.Since(msg.Started))
+		}
 		m.messages = append(m.messages, Message{
 			Sender:        "tool",
-			Content:       msg.Name + "(" + msg.ArgsSummary + ") → " + msg.ResultSummary,
+			Content:       line,
 			IsToolLog:     true,
 			ToolLogFailed: msg.Err,
 		})

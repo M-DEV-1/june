@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"strconv"
+	"time"
+
 	"ora/internal/config"
 
 	"github.com/charmbracelet/lipgloss"
@@ -26,12 +29,25 @@ func (m *model) renderSignalField() string {
 	return m.styles.SignalField.Width(m.width).Align(lipgloss.Center).Render(waves)
 }
 
-// renderStatusLine renders the spinner + label for "agent is doing something" (an in-flight tool call, or "thinking" while waiting for the first response chunk). Returns "" when nothing is active, which renderInput treats as omit-this-row rather than a blank line.
+// renderStatusLine renders the spinner + label + elapsed time for "agent is doing something" (an in-flight tool call, or "thinking" while waiting for the first response chunk). Returns "" when nothing is active, which renderInput treats as omit-this-row rather than a blank line.
+// The elapsed counter is what tells a slow call apart from a hung one: the spinner spins either way, the number only moves while the call is really open.
 func (m *model) renderStatusLine() string {
 	if m.activity == nil {
 		return ""
 	}
-	return m.styles.StatusLine.Render(m.spinner.View() + " " + m.activity.label)
+	return m.styles.StatusLine.Render(m.spinner.View() + " " + m.activity.label + " · " + formatElapsed(time.Since(m.activity.started)))
+}
+
+// formatElapsed renders a duration for the tool lines: tenths of a second under ten seconds, whole seconds above that.
+// Input: a duration. Output: e.g. "0.8s" or "12s".
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < 10*time.Second {
+		return strconv.FormatFloat(d.Seconds(), 'f', 1, 64) + "s"
+	}
+	return strconv.Itoa(int(d.Seconds())) + "s"
 }
 
 // hintsText returns the contextual shortcut text for the current state — the hint row reflects what's actually available right now instead of always showing the same static set. quitConfirmArmed takes priority over every other state since Ctrl+C's confirmation applies regardless of mode or menu.
