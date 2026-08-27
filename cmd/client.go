@@ -65,20 +65,11 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	appConfig := config.LoadConfig()
 
 	// Wire the client's own store for hybrid search: an embedder built locally (same recipe the daemon uses) plus a vector index reached over the daemon's /vector/* IPC instead of opening chromem directly — chromem must stay exclusive to the daemon process. Without this the client-side store (which is what the live agent's query_memory/RetrieveRelevant/GetImplicitContext actually run against) was lexical-only in production, and client-side note saves never got embedded at all. HybridSearch already degrades to lexical-only if the daemon is unreachable (see internal/db/hybrid.go).
-	// With a local embedder configured the client does not build one of its own: the daemon owns the llama-server child process and its port, so embeds go over the same IPC the vector index already uses. Otherwise the client builds its own Gemini embedder as before.
-	if appConfig.Embed.LocalEnabled() {
-		store.SetEmbedder(&embedderAdapter{inner: newHTTPEmbedder()})
-		store.SetVectorIndex(newHTTPVectorIndex())
-		// The client runs its own HybridSearch against the daemon's index, so it needs the same embedder-matched cosine floor the daemon uses.
-		store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
-	} else if apiKey != "" {
-		if embedder, err := newSharedGeminiEmbedder(ctx, apiKey); err != nil {
-			slog.Warn("failed to init genai client for embeddings, hybrid search degrades to lexical-only", "error", err)
-		} else {
-			store.SetEmbedder(&embedderAdapter{inner: embedder})
-			store.SetVectorIndex(newHTTPVectorIndex())
-		}
-	}
+	// The client never builds an embedder of its own: the daemon owns the llama-server child process and its port, so embeds go over the same IPC the vector index already uses. If the daemon has no embedding engine, /embed answers 503 and HybridSearch degrades to lexical-only.
+	store.SetEmbedder(&embedderAdapter{inner: newHTTPEmbedder()})
+	store.SetVectorIndex(newHTTPVectorIndex())
+	// The client runs its own HybridSearch against the daemon's index, so it needs the same embedder-matched cosine floor the daemon uses.
+	store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
 
 	orchestrator := agent.NewAgent(mic, speaker, store, nil, apiKey)
 	// The client process has no in-process compiler (that only exists in the daemon), so the handshake's "[working]" current-activity context was always dead here — wire it over the daemon's /buffer IPC instead (F2).
