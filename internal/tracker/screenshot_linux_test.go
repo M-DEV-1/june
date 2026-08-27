@@ -3,6 +3,9 @@
 package tracker
 
 import (
+	"bytes"
+	"context"
+	png_ "image/png"
 	"testing"
 
 	"github.com/godbus/dbus/v5"
@@ -58,4 +61,24 @@ func TestScreenshotGrantedDenied(t *testing.T) {
 			t.Errorf("%s: screenshotDenied=%v want %v", c.name, got, c.wantDeny)
 		}
 	}
+}
+
+// TestScreenshotShell captures for real through gnome-shell and checks a PNG comes back. Skips anywhere the silent path is not available (no session bus, non-GNOME, org.gnome.Screenshot taken) — that is exactly the case where grabScreen falls back to the portal.
+// Run on a live GNOME session: go test -run TestScreenshotShell ./internal/tracker/...
+func TestScreenshotShell(t *testing.T) {
+	png, err := screenshotShell(context.Background())
+	if err != nil {
+		t.Skipf("gnome-shell screenshot unavailable: %v", err)
+	}
+	if !bytes.HasPrefix(png, []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatalf("not a PNG: first bytes %q", png[:min(8, len(png))])
+	}
+	cfg, err := png_.DecodeConfig(bytes.NewReader(png))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.Width == 0 || cfg.Height == 0 {
+		t.Fatalf("empty image %dx%d", cfg.Width, cfg.Height)
+	}
+	t.Logf("captured %dx%d, %d bytes", cfg.Width, cfg.Height, len(png))
 }
