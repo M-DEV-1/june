@@ -832,6 +832,62 @@ func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testin
 	}
 }
 
+// TestReplaceSummariesWithDigest_AddsVectorForDigest verifies rolling summaries up into a digest also embeds and adds a vector for the new digest node — otherwise the day becomes FTS-only and invisible to the semantic half of HybridSearch, exactly the case digests exist to answer.
+func TestReplaceSummariesWithDigest_AddsVectorForDigest(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1), addedIDs: make(chan string, 1)}
+	store.SetVectorIndex(vidx)
+
+	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+	if err != nil {
+		t.Fatalf("ensureNode(day): %v", err)
+	}
+	summaryID, err := store.ensureNode(ctx, dayID, "summary", "worked on the compiler")
+	if err != nil {
+		t.Fatalf("ensureNode(summary): %v", err)
+	}
+
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{summaryID}, "digest of the day"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
+	}
+
+	var digestID int64
+	if err := store.db.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type = 'digest'`).Scan(&digestID); err != nil {
+		t.Fatalf("select digest id: %v", err)
+	}
+
+	select {
+	case got := <-vidx.addedIDs:
+		want := fmt.Sprintf("digest:%d", digestID)
+		if got != want {
+			t.Errorf("expected Add(%q), got Add(%q)", want, got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the digest's vector Add call")
+	}
+
+	rec := vidx.addRecordFor(fmt.Sprintf("digest:%d", digestID))
+	if rec == nil {
+		t.Fatal("expected an Add call for the digest")
+	}
+	if rec.content != "digest of the day" {
+		t.Errorf("expected embedded content to be the digest text, got %q", rec.content)
+	}
+	if rec.metadata["source"] != "digest" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
+		t.Errorf("expected source/kind/created_at metadata matching the sibling write paths, got %+v", rec.metadata)
+	}
+	if _, ok := rec.metadata["domain"]; !ok {
+		t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+	}
+}
+
 // TestReplaceAllNotes_DeletesVectorsForOldNotes verifies note consolidation (which renumbers every note) deletes the old notes' vectors — otherwise every note vector becomes an orphan after a single consolidation cycle, since the new rows get new ids.
 func TestReplaceAllNotes_DeletesVectorsForOldNotes(t *testing.T) {
 	ctx := context.Background()
@@ -1195,6 +1251,44 @@ func TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata(t 
 	}
 }
 
+// TestReconcileVectors_BackfillsDigest verifies the reconciliation sweep backfills a digest node that has no vector yet — this is what heals a digest written before the digest-embed fix existed, or one whose async embed goroutine failed.
+func TestReconcileVectors_BackfillsDigest(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+	if err != nil {
+		t.Fatalf("ensureNode(day): %v", err)
+	}
+	digestID, err := store.ensureNode(ctx, dayID, "digest", "rolled-up digest of the day")
+	if err != nil {
+		t.Fatalf("ensureNode(digest): %v", err)
+	}
+
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{}
+	store.SetVectorIndex(vidx)
+
+	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+
+	rec := vidx.addRecordFor(fmt.Sprintf("digest:%d", digestID))
+	if rec == nil {
+		t.Fatal("expected an Add call for the digest")
+	}
+	if rec.content != "rolled-up digest of the day" {
+		t.Errorf("expected the embedded content to be the digest text, got %q", rec.content)
+	}
+	if rec.metadata["source"] != "digest" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
+		t.Errorf("expected source/kind/created_at metadata matching the digest write path, got %+v", rec.metadata)
+	}
+}
+
 // TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata verifies episode backfill embeds the same app/title-framed Document() text LogEpisode embeds (not bare screen_text) with domain/source/kind/created_at all set — a missing domain in particular would silently exclude the backfilled vector from every domain-filtered search (chromem's exact-match where fails on a missing key).
 func TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata(t *testing.T) {
 	ctx := context.Background()
@@ -1232,5 +1326,88 @@ func TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata(t *te
 	}
 	if _, ok := rec.metadata["domain"]; !ok {
 		t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+	}
+}
+
+// TestHybridSearch_LexicalNoteHit_CarriesCreatedAt verifies HybridSearch keeps the timestamp SearchMemory already resolved for summary/note/thread hits. The episode loop below it sets createdAt; the memHits loop used to omit it, so every fact/arc/period reached FormatHit with a zero time and rendered undated.
+func TestHybridSearch_LexicalNoteHit_CarriesCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.LogNote(ctx, "the user works with docker containers", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	hits, err := store.HybridSearch(ctx, "docker containers", "", 10)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatalf("expected a lexical note hit")
+	}
+	if hits[0].CreatedAt.IsZero() {
+		t.Errorf("expected the note hit to carry its created_at through fusion, got the zero time: %+v", hits[0])
+	}
+}
+
+// TestUpdateNote_MissingID_ErrorsAndSkipsVectorDelete verifies updating a note id that doesn't exist reports the failure instead of silently succeeding, and does not fire the async vector Delete for that id. A hallucinated id used to be "updated" successfully — the user's correction was dropped and the bogus "note:N" Delete still ran, which can evict a real note's vector.
+func TestUpdateNote_MissingID_ErrorsAndSkipsVectorDelete(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2), addedIDs: make(chan string, 2)}
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	store.SetVectorIndex(vidx)
+
+	err = store.UpdateNote(ctx, 4242, "a correction aimed at a note that was never written")
+	if err == nil {
+		t.Fatal("expected an error updating a nonexistent note id, got nil")
+	}
+	if !strings.Contains(err.Error(), "4242") {
+		t.Errorf("expected the error to name the missing id, got %q", err)
+	}
+
+	select {
+	case got := <-vidx.deletedCalled:
+		t.Errorf("expected no vector Delete for a note that doesn't exist, got Delete(%q)", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest verifies the similarity floor is relative to the best hit, not just the absolute minVectorSimilarity. Real cosine similarities on this store cluster in a narrow band (~0.58-0.69), so an absolute 0.55 floor lets a junk episode through alongside a genuine match.
+func TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	store.SetVectorIndex(&fakeHybridVectorIndex{
+		results: []Result{
+			{ID: "episode:1", Content: "the genuine match", Similarity: 0.69},
+			{ID: "episode:2", Content: "junk that clears the absolute floor", Similarity: 0.58},
+		},
+	})
+
+	hits, err := store.HybridSearch(ctx, "the genuine match", "", 10)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	var kept []string
+	for _, h := range hits {
+		kept = append(kept, h.Content)
+	}
+	if len(kept) != 1 || kept[0] != "the genuine match" {
+		t.Errorf("expected only the top vector hit to survive the relative floor, got %v", kept)
 	}
 }

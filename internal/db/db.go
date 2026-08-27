@@ -707,8 +707,14 @@ func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, er
 	// MATCH wants tokens, not one whole-query phrase; OR the significant terms.
 	safe := buildFTSMatch(query)
 
+	// Summary rows carry the whole marshalled TaskSummary in content (see LogSemanticNode), so the plain summary text is pulled back out here — the model reads a hit's Content verbatim and a raw JSON blob is unreadable. Digest rows and any summary whose content isn't JSON fall through unchanged.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT content, source, ref_id
+		SELECT
+			CASE WHEN source IN ('summary','digest') AND json_valid(content)
+				THEN IFNULL(NULLIF(json_extract(content, '$.summary'), ''), content)
+				ELSE content
+			END,
+			source, ref_id
 		FROM memory_fts
 		WHERE memory_fts MATCH ?
 		ORDER BY rank
@@ -1001,7 +1007,7 @@ func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error 
 	ctx, span := tracer.Start(ctx, "DB.UpdateNote")
 	defer span.End()
 
-	_, err := s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE notes SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		content, id)
 	if err != nil {
@@ -1009,6 +1015,16 @@ func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error 
 		return fmt.Errorf("update note: %w", err)
 	}
 	span.SetAttributes(attribute.Int64("db.note_id", id))
+
+	// A no-op UPDATE is not success: the model can hand us an id it invented, and reporting "updated" throws the user's correction away. Returning before the vector work below also stops the "note:<id>" Delete from firing on an id that may belong to some other real note.
+	if n, rerr := res.RowsAffected(); rerr != nil {
+		span.RecordError(rerr)
+		return fmt.Errorf("update note: %w", rerr)
+	} else if n == 0 {
+		err := fmt.Errorf("no note with id %d", id)
+		span.RecordError(err)
+		return err
+	}
 
 	s.mu.RLock()
 	emb, vidx := s.embedder, s.vectorIndex
@@ -1338,10 +1354,10 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 	defer span.End()
 
 	obs := memory.Normalize(w.App, w.Title, w.ScreenText)
-	// Prefer normalized content; if normalize emptied a non-empty raw capture of only chrome, fall back to raw so we never invent empty rows that tests and AgeEpisodes still treat as real observations.
+	// Prefer normalized content; if normalize emptied a non-empty raw capture of only chrome, fall back to raw so we never invent empty rows that tests and AgeEpisodes still treat as real observations. The fallback passes through StripObjectChars so a titleless capture of pure U+FFFC placeholders cannot smuggle uncleaned text into storage.
 	content := obs.Content
-	if content == "" && strings.TrimSpace(w.ScreenText) != "" {
-		content = w.ScreenText
+	if content == "" {
+		content = memory.StripObjectChars(w.ScreenText)
 	}
 	if structured := memory.ComposeMoment(w.UserActivity, w.VisibleText, ""); structured != "" {
 		content = structured
@@ -2159,11 +2175,17 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 	defer tx.Rollback()
 
 	// insert digest node — triggers nodes_ai_summary which indexes into FTS5
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO nodes (parent_id, type, content) VALUES (?, 'digest', ?)`,
-		dayID, digest); err != nil {
+		dayID, digest)
+	if err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("insert digest node: %w", err)
+	}
+	digestID, err := res.LastInsertId()
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("digest node id: %w", err)
 	}
 
 	// delete summaries — triggers nodes_ad_summary which removes from FTS5.
@@ -2191,7 +2213,7 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 	)
 
 	s.mu.RLock()
-	vidx := s.vectorIndex
+	emb, vidx := s.embedder, s.vectorIndex
 	s.mu.RUnlock()
 	if vidx != nil {
 		go func(ids []int64) {
@@ -2203,6 +2225,29 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 				}
 			}
 		}(summaryIDs)
+	}
+
+	// Async, best-effort embedding of the new digest, same non-blocking pattern as LogSemanticNode's summary embed goroutine. Without this the digest is FTS-only forever — the whole point of a digest is to still answer "what did I do that day" through the semantic half of HybridSearch.
+	if emb != nil && vidx != nil && strings.TrimSpace(digest) != "" {
+		go func(id int64, text string) {
+			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			vec, err := emb.Embed(embedCtx, "RETRIEVAL_DOCUMENT", text)
+			if err != nil {
+				slog.Error("async digest embed failed", "digest_id", id, "error", err)
+				return
+			}
+			meta := map[string]string{
+				"domain":     "", // digest nodes don't carry a domain today; key stays present so chromem's exact-match where doesn't drop this vector from domain-filtered searches
+				"source":     "digest",
+				"kind":       string(memory.KindPeriod),
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := vidx.Add(embedCtx, fmt.Sprintf("digest:%d", id), text, vec, meta); err != nil {
+				slog.Error("async digest vector index add failed", "digest_id", id, "error", err)
+			}
+		}(digestID, digest)
 	}
 	return nil
 }
