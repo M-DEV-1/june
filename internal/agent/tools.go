@@ -803,22 +803,34 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 	}
 }
 
+// toolArgSummaryRunes bounds how much of an argument the UI's tool line shows. A shell command or a note body runs arbitrarily long, and the live status row is a single line.
+const toolArgSummaryRunes = 48
+
+// quoteArg renders an argument value as a quoted display literal, cut to toolArgSummaryRunes with an ellipsis when it is longer.
+// Input: the raw argument string. Output: the quoted, possibly-truncated literal, e.g. `"ls -la"`.
+func quoteArg(s string) string {
+	if r := []rune(s); len(r) > toolArgSummaryRunes {
+		s = string(r[:toolArgSummaryRunes]) + "\u2026"
+	}
+	return fmt.Sprintf("%q", s)
+}
+
 // toolActivitySummary pre-formats a tool call's primary argument into a short display literal for the UI (e.g. `"Riddler puzzles"` for query_memory), so the UI never needs to know each tool's arg-shape — that knowledge already lives here, next to executeTool/toolDefinitions.
 // Unknown tools and no-arg tools (read_clipboard) summarize to "".
 func toolActivitySummary(name string, args map[string]any) string {
 	switch name {
 	case "query_memory":
 		if q, ok := args["query"].(string); ok {
-			return fmt.Sprintf("%q", q)
+			return quoteArg(q)
 		}
 	case "get_recent":
 		if app, ok := args["app"].(string); ok && strings.TrimSpace(app) != "" {
-			return fmt.Sprintf("%q", app)
+			return quoteArg(app)
 		}
 		return "recent"
 	case "recall":
 		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
-			return fmt.Sprintf("%q", subject)
+			return quoteArg(subject)
 		}
 		since, _ := args["since"].(string)
 		until, _ := args["until"].(string)
@@ -832,27 +844,27 @@ func toolActivitySummary(name string, args map[string]any) string {
 		}
 	case "shell_exec":
 		if cmd, ok := args["command"].(string); ok {
-			return fmt.Sprintf("%q", cmd)
+			return quoteArg(cmd)
 		}
 	case "read_file":
 		if path, ok := args["path"].(string); ok {
-			return fmt.Sprintf("%q", path)
+			return quoteArg(path)
 		}
 	case "list_files":
 		if path, ok := args["path"].(string); ok && path != "" {
-			return fmt.Sprintf("%q", path)
+			return quoteArg(path)
 		}
 	case "open_url":
 		if url, ok := args["url"].(string); ok {
-			return fmt.Sprintf("%q", url)
+			return quoteArg(url)
 		}
 	case "save_note":
 		if content, ok := args["content"].(string); ok {
-			return fmt.Sprintf("%q", content)
+			return quoteArg(content)
 		}
 	case "update_note":
 		if content, ok := args["content"].(string); ok {
-			return fmt.Sprintf("%q", content)
+			return quoteArg(content)
 		}
 	case "delete_note":
 		if id, ok := args["id"].(float64); ok {
@@ -860,7 +872,7 @@ func toolActivitySummary(name string, args map[string]any) string {
 		}
 	case "branch":
 		if task, ok := args["task"].(string); ok {
-			return fmt.Sprintf("%q", task)
+			return quoteArg(task)
 		}
 	}
 	return ""

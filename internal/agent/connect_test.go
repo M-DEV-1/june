@@ -7,6 +7,7 @@ import (
 	"ora/internal/tracker"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -520,11 +521,13 @@ func TestCompressionConfig_TriggerAboveTarget(t *testing.T) {
 	}
 }
 
-// fakeSpeaker is a no-op audio.Speaker for receiveLoop tests that exercise the barge-in (Interrupted) path, which calls Flush() on the real speaker — a nil speaker panics there.
-type fakeSpeaker struct{}
+// fakeSpeaker is a no-op audio.Speaker for receiveLoop tests that exercise the barge-in (Interrupted) path, which calls Flush() on the real speaker — a nil speaker panics there. It counts Flush calls so a test can assert that a tool-delivery interrupt does NOT throw away the audio Ora is in the middle of playing.
+type fakeSpeaker struct {
+	flushes atomic.Int32
+}
 
 func (s *fakeSpeaker) Play(pcm []byte) error     { return nil }
-func (s *fakeSpeaker) Flush()                    {}
+func (s *fakeSpeaker) Flush()                    { s.flushes.Add(1) }
 func (s *fakeSpeaker) Close() error              { return nil }
 func (s *fakeSpeaker) CurrentAmplitude() float64 { return 0 }
 
@@ -956,5 +959,177 @@ func TestReceiveLoop_TurnBoundary_ClearsTypedTurn(t *testing.T) {
 	}
 	if a.typedTurnActive.Load() {
 		t.Error("expected the typed-turn flag cleared at the turn boundary")
+	}
+}
+
+// --- tool-delivery interrupts vs. real barge-ins ---
+
+// TestReceiveLoop_InterruptAfterToolResponse_IsNotABargeIn is the voice bug from the 2026-08-28 03:01-03:06 session: every FunctionResponse Ora sent was followed 72-80ms later by "barge-in detected". Sending a tool result with INTERRUPT scheduling asks the Live server to interrupt its own generation to fold the result in, and the server reports that with the same ServerContent.Interrupted flag a user barge-in uses. Treating it as a barge-in flushed the audio Ora was still speaking and wrote "[ora stopped]" into the transcript, so the user heard the preamble and then nothing.
+func TestReceiveLoop_InterruptAfterToolResponse_IsNotABargeIn(t *testing.T) {
+	sp := &fakeSpeaker{}
+	a := NewAgent(nil, sp, nil, nil, "")
+
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 2),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-1", Name: "list_files", Args: map[string]any{"path": "."}},
+		},
+	}}
+
+	select {
+	case <-fs.responses:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the tool response to be sent")
+	}
+
+	// The server's own interruption, arriving right after the delivery, with no user speech in flight.
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	// A message the loop must still process, so "no stop notice" can be told apart from "not read yet".
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+
+	for {
+		select {
+		case chunk := <-a.TextResponseChan:
+			if chunk.Sender == SenderSystem {
+				t.Fatalf("a tool-delivery interrupt must not write a stop notice into the transcript, got %+v", chunk)
+			}
+			if chunk.TurnBoundary {
+				if got := sp.flushes.Load(); got != 0 {
+					t.Errorf("a tool-delivery interrupt must not flush the speaker, got %d Flush calls", got)
+				}
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the turn boundary chunk")
+		}
+	}
+}
+
+// TestReceiveLoop_InterruptWithSpeechAfterToolResponse_IsStillABargeIn is the other half: the user really can cut in while a tool result is being folded in, and that must still stop playback. The signal that separates the two is whether any speech is being transcribed at the moment the interrupt lands.
+func TestReceiveLoop_InterruptWithSpeechAfterToolResponse_IsStillABargeIn(t *testing.T) {
+	sp := &fakeSpeaker{}
+	a := NewAgent(nil, sp, nil, nil, "")
+
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 2),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-1", Name: "list_files", Args: map[string]any{"path": "."}},
+		},
+	}}
+	select {
+	case <-fs.responses:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the tool response to be sent")
+	}
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		InputTranscription: &genai.Transcription{Text: "wait, hang on"},
+	}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+
+	var sawNotice bool
+	for !sawNotice {
+		select {
+		case chunk := <-a.TextResponseChan:
+			if chunk.Sender == SenderSystem && strings.Contains(chunk.Text, "ora stopped") {
+				sawNotice = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a real barge-in during a tool exchange must still stop the turn")
+		}
+	}
+	if got := sp.flushes.Load(); got == 0 {
+		t.Error("a real barge-in must still flush the speaker")
+	}
+}
+
+// TestConsumeToolDeliveryInterrupt_WindowAndSingleUse pins the attribution rule: only the first interrupt within toolInterruptWindow of a FunctionResponse send is credited to that send, and a later one is a genuine barge-in again.
+func TestConsumeToolDeliveryInterrupt_WindowAndSingleUse(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	sent := time.Now()
+
+	if a.consumeToolDeliveryInterrupt(sent) {
+		t.Error("no tool response has been sent yet, nothing to attribute")
+	}
+
+	a.markToolResponseSent(sent)
+	if !a.consumeToolDeliveryInterrupt(sent.Add(80 * time.Millisecond)) {
+		t.Error("an interrupt 80ms after the send is the server folding the result in")
+	}
+	if a.consumeToolDeliveryInterrupt(sent.Add(90 * time.Millisecond)) {
+		t.Error("one send accounts for one interrupt; the second is a real barge-in")
+	}
+
+	a.markToolResponseSent(sent)
+	if a.consumeToolDeliveryInterrupt(sent.Add(toolInterruptWindow + time.Millisecond)) {
+		t.Error("an interrupt past the window is a real barge-in")
+	}
+}
+
+// TestRunToolCall_SlowTool_SendsInterimProgressResponse covers the long-operation liveness case: a tool that runs past longRunNudgeDelay gets one interim FunctionResponse with WillContinue set, which is the generator form of a NON_BLOCKING call and the only turn-safe way to say anything mid-exchange. The final response still follows on the same call ID.
+func TestRunToolCall_SlowTool_SendsInterimProgressResponse(t *testing.T) {
+	orig := longRunNudgeDelay
+	longRunNudgeDelay = 50 * time.Millisecond
+	defer func() { longRunNudgeDelay = orig }()
+
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 4),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	// shell_exec with nothing draining ToolApprovalChan's result blocks on HITL approval, which is exactly the shape of a genuinely slow tool.
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-1", Name: "shell_exec", Args: map[string]any{"command": "sleep 60"}},
+		},
+	}}
+
+	select {
+	case resp := <-fs.responses:
+		fr := resp.FunctionResponses[0]
+		if fr.WillContinue == nil || !*fr.WillContinue {
+			t.Fatalf("expected an interim response with WillContinue set, got %+v", fr)
+		}
+		if fr.ID != "call-1" {
+			t.Errorf("interim response must carry the original call ID, got %q", fr.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the mid-tool progress response")
+	}
+}
+
+// TestSystemInstructionText_NeverEndsTurnSilentlyAfterATool is the prompt half of the silent-after-preamble bug: once a tool result comes back the model must speak the answer, or say plainly that it found nothing, instead of ending the turn on the "let me check" line. It also has to know what an interim "still running" result means, since a slow tool now sends one.
+func TestSystemInstructionText_NeverEndsTurnSilentlyAfterATool(t *testing.T) {
+	got := systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "some context", 5)
+
+	for _, want := range []string{
+		"the moment a tool result comes back",
+		"never end your turn",
+		"still running",
+	} {
+		if !strings.Contains(strings.ToLower(got), want) {
+			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
+		}
 	}
 }
