@@ -14,7 +14,7 @@ import (
 	"ora/internal/ui"
 )
 
-func runClient(ctx context.Context, shutdownObs func(context.Context) error, daemonStatus string) error {
+func runClient(ctx context.Context, shutdownObs func(context.Context) error, daemonStatus, buildMismatch string) error {
 	slog.Info("Starting Ora Client...")
 
 	// Parallel hardware & DB init
@@ -62,7 +62,19 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
 
+	// Wire the client's own store for hybrid search: an embedder built locally (same recipe the daemon uses) plus a vector index reached over the daemon's /vector/* IPC instead of opening chromem directly — chromem must stay exclusive to the daemon process. Without this the client-side store (which is what the live agent's query_memory/RetrieveRelevant/GetImplicitContext actually run against) was lexical-only in production, and client-side note saves never got embedded at all. HybridSearch already degrades to lexical-only if the daemon is unreachable (see internal/db/hybrid.go).
+	if apiKey != "" {
+		if embedder, err := newSharedGeminiEmbedder(ctx, apiKey); err != nil {
+			slog.Warn("failed to init genai client for embeddings, hybrid search degrades to lexical-only", "error", err)
+		} else {
+			store.SetEmbedder(&embedderAdapter{inner: embedder})
+			store.SetVectorIndex(newHTTPVectorIndex())
+		}
+	}
+
 	orchestrator := agent.NewAgent(mic, speaker, store, nil, apiKey)
+	// The client process has no in-process compiler (that only exists in the daemon), so the handshake's "[working]" current-activity context was always dead here — wire it over the daemon's /buffer IPC instead (F2).
+	orchestrator.SetBufferProvider(newBufferProvider().Get)
 	orchestrator.SetModel(config.VoiceModel)
 
 	appConfig := config.LoadConfig()
@@ -78,7 +90,7 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 				}
 				slog.Error("agent session lost, reconnecting in 2s", "error", err)
 				select {
-				case orchestrator.TextResponseChan <- "\n*[connection lost — reconnecting...]*\n":
+				case orchestrator.TextResponseChan <- agent.ResponseChunk{Text: "connection lost — reconnecting…", Sender: agent.SenderSystem}:
 				default:
 				}
 				select {
@@ -93,7 +105,7 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 		}
 	}()
 
-	if err := ui.Run(orchestrator, daemonStatus); err != nil {
+	if err := ui.Run(orchestrator, daemonStatus, buildMismatch); err != nil {
 		return fmt.Errorf("UI Error: %w", err)
 	}
 
