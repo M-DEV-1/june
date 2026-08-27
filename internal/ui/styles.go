@@ -20,7 +20,6 @@ type Styles struct {
 
 	// 3. Structural Layouts
 	AppFrame    lipgloss.Style
-	Header      lipgloss.Style
 	Viewport    lipgloss.Style
 	SignalField lipgloss.Style
 	InputWrap   lipgloss.Style
@@ -28,8 +27,6 @@ type Styles struct {
 	// 4. Component Identities
 	OraLogo    lipgloss.Style
 	HeaderPath lipgloss.Style
-	HeaderSep  lipgloss.Style
-	LivePill   lipgloss.Style
 
 	PrefixSystem  lipgloss.Style
 	PrefixYou     lipgloss.Style

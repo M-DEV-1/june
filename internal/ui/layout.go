@@ -2,50 +2,9 @@ package ui
 
 import (
 	"ora/internal/config"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
-
-func (m *model) renderHeader() string {
-	headerLeft := m.styles.OraLogo.Render("ORA")
-
-	var trackPill string
-	if m.daemonOK {
-		trackPill = lipgloss.NewStyle().
-			Foreground(m.styles.Green).
-			Background(m.styles.BgHeader).
-			Padding(0, 1).
-			Render("⊙ tracking")
-	} else {
-		trackPill = lipgloss.NewStyle().
-			Foreground(m.styles.Muted).
-			Background(m.styles.BgHeader).
-			Padding(0, 1).
-			Render("○ no tracker")
-	}
-
-	var connPill string
-	if m.isConnected {
-		connPill = m.styles.LivePill.Render("● live")
-	} else {
-		connPill = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#f59e0b")).
-			Background(lipgloss.Color("#16100a")).
-			Padding(0, 1).
-			Render("● reconnecting")
-	}
-
-	headerRight := lipgloss.JoinHorizontal(lipgloss.Center,
-		trackPill,
-		m.styles.HeaderSep.Render("·"),
-		connPill,
-	)
-
-	spacer := strings.Repeat(" ", max(0, m.width-lipgloss.Width(headerLeft)-lipgloss.Width(headerRight)-8))
-	header := lipgloss.JoinHorizontal(lipgloss.Center, headerLeft, spacer, headerRight)
-	return m.styles.Header.Width(m.width).Render(header)
-}
 
 // this field handles the microphone and speaker waveforms
 func (m *model) renderSignalField() string {
