@@ -20,6 +20,7 @@ type NoteConsolidator interface {
 }
 
 // NoteStore is the persistence side of note consolidation. db.Store implements it.
+// Both methods are scoped to notes of kind "fact": ExistingNotes returns only facts and ReplaceAllNotes replaces only facts. Consolidation asks a model to drop everything that is not a durable fact about the user, so notes of other kinds — meeting minutes, which are the only record of what was said in a call — must never be shown to it or rewritten by it.
 type NoteStore interface {
 	ExistingNotes(ctx context.Context) ([]NoteRef, error)
 	ReplaceAllNotes(ctx context.Context, contents []string) error
