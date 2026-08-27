@@ -25,6 +25,7 @@ type commandDelegate struct {
 func (d commandDelegate) Height() int                               { return 1 }
 func (d commandDelegate) Spacing() int                              { return 0 }
 func (d commandDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
+
 // commandDelegateTitleWidth and the "  " prefix commandDelegate.Render hardcodes are the two fixed-width columns eating into a row's available width before the description gets whatever's left.
 const commandDelegateTitleWidth = 18
 

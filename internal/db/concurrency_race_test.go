@@ -97,7 +97,6 @@ func (m *memIndex) IDs() []string {
 	return ids
 }
 
-
 // TestConcurrentLogEpisodeAndHybridSearch hammers write + search under -race. Catches unlocked embedder field access and map races in the vector half.
 func TestConcurrentLogEpisodeAndHybridSearch(t *testing.T) {
 	// File-backed DB (not :memory:): each pool connection must see the same schema under concurrent LogEpisode + HybridSearch. Plain :memory: is per-connection in database/sql + modernc/sqlite.

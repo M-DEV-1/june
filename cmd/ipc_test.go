@@ -1,11 +1,11 @@
 package cmd
 
 import (
-	"ora/internal/embed"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"ora/internal/embed"
 	"path/filepath"
 	"testing"
 
@@ -130,7 +130,7 @@ func TestBufferProvider_ParsesActivities(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b := &bufferProvider{baseURL: srv.URL, client: srv.Client()}
+	b := &bufferProvider{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	got := b.Get()
 
 	if len(got) != 1 || got[0].App != "Code" || got[0].Title != "main.go" {
@@ -145,7 +145,7 @@ func TestBufferProvider_NonOKStatus_ReturnsNil(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b := &bufferProvider{baseURL: srv.URL, client: srv.Client()}
+	b := &bufferProvider{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	if got := b.Get(); got != nil {
 		t.Errorf("expected nil for a non-200 response, got %+v", got)
 	}
@@ -157,7 +157,7 @@ func TestBufferProvider_Unreachable_ReturnsNil(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	b := &bufferProvider{baseURL: url, client: http.DefaultClient}
+	b := &bufferProvider{daemonClient{baseURL: url, client: http.DefaultClient}}
 	if got := b.Get(); got != nil {
 		t.Errorf("expected nil for an unreachable daemon, got %+v", got)
 	}
@@ -178,7 +178,7 @@ func TestBufferProvider_AttachesIPCToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b := &bufferProvider{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}
+	b := &bufferProvider{daemonClient{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}}
 	b.Get()
 
 	if gotToken != token {
@@ -197,7 +197,7 @@ func TestHTTPVectorIndex_Add_PostsExpectedPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpVectorIndex{baseURL: srv.URL, client: srv.Client()}
+	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	err := h.Add(context.Background(), "note:5", "hello", []float32{0.1, 0.2}, map[string]string{"source": "note"})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
@@ -217,7 +217,7 @@ func TestHTTPVectorIndex_Add_NonOKStatus_ReturnsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpVectorIndex{baseURL: srv.URL, client: srv.Client()}
+	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	if err := h.Add(context.Background(), "note:5", "hello", []float32{0.1}, nil); err == nil {
 		t.Error("expected an error for a non-200 daemon response, got nil")
 	}
@@ -238,7 +238,7 @@ func TestHTTPVectorIndex_Search_ParsesResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpVectorIndex{baseURL: srv.URL, client: srv.Client()}
+	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	results, err := h.Search(context.Background(), []float32{0.1, 0.2}, 10, nil)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -255,7 +255,7 @@ func TestHTTPVectorIndex_Search_ServerError_ReturnsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpVectorIndex{baseURL: srv.URL, client: srv.Client()}
+	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	if _, err := h.Search(context.Background(), []float32{0.1}, 10, nil); err == nil {
 		t.Error("expected an error for a 500 daemon response, got nil")
 	}
@@ -273,7 +273,7 @@ func TestHTTPVectorIndex_Delete_PostsID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpVectorIndex{baseURL: srv.URL, client: srv.Client()}
+	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	if err := h.Delete(context.Background(), "note:5"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestHTTPVectorIndex_AttachesIPCToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpVectorIndex{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}
+	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}}
 	if err := h.Add(context.Background(), "note:5", "hello", []float32{0.1}, nil); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestHTTPEmbedder_PostsTaskAndText(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpEmbedder{baseURL: srv.URL, client: srv.Client()}
+	h := &httpEmbedder{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	vec, err := h.Embed(context.Background(), embed.TaskRetrievalQuery, "what did i do today")
 	if err != nil {
 		t.Fatalf("Embed: %v", err)
@@ -340,7 +340,7 @@ func TestHTTPEmbedder_NonOKStatus_ReturnsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := &httpEmbedder{baseURL: srv.URL, client: srv.Client()}
+	h := &httpEmbedder{daemonClient{baseURL: srv.URL, client: srv.Client()}}
 	if _, err := h.Embed(context.Background(), embed.TaskRetrievalQuery, "hi"); err == nil {
 		t.Fatal("expected an error when the daemon has no local embedder")
 	}
