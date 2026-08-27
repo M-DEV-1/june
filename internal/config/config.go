@@ -20,6 +20,55 @@ type OraConfig struct {
 	// ProactiveAudio turns on the Gemini Live "proactive audio" feature, which lets the model stay silent when what the mic picked up wasn't addressed to it — a room conversation, a video, the user talking to someone else. Defaults to on; set it to false in ora-config.json to have the model answer everything it hears.
 	// A pointer, not a plain bool, so a config file written before this field existed (no key at all) is distinguishable from one where the user explicitly turned it off. Use ProactiveAudioEnabled rather than reading it directly.
 	ProactiveAudio *bool `json:"proactive_audio,omitempty"`
+	// Embed selects which embedding engine backs hybrid search. Zero value means the Gemini API, as before.
+	Embed EmbedConfig `json:"embed"`
+}
+
+// EmbedConfig points ORA at a local llama.cpp llama-server running EmbeddingGemma instead of the Gemini embeddings API. The daemon owns the server process: it spawns it on the first embed, reaps it after IdleTimeout with no embeds, and kills it on shutdown.
+type EmbedConfig struct {
+	// LlamaServer is the absolute path to the llama-server binary. Empty (or ModelPath empty) keeps ORA on the Gemini API.
+	LlamaServer string `json:"llama_server"`
+	// ModelPath is the absolute path to the EmbeddingGemma GGUF the server loads.
+	ModelPath string `json:"model_path"`
+	// Port is the loopback port llama-server binds. Defaults to DefaultEmbedPort.
+	Port int `json:"port"`
+	// IdleTimeout is how long the server may sit with no embed request before the daemon kills it to free its memory. Defaults to DefaultEmbedIdleTimeout. Milliseconds on disk, like TrackerConfig.DwellTime.
+	IdleTimeout time.Duration `json:"idle_timeout_ms"`
+	// SimilarityFloor is the cosine floor a vector hit must clear to enter hybrid search's fusion. Defaults to DefaultLocalSimilarityFloor; set it here to retune retrieval without a rebuild.
+	SimilarityFloor float64 `json:"similarity_floor"`
+}
+
+// DefaultLocalSimilarityFloor is the cosine floor for EmbeddingGemma, against internal/db's 0.55 default for Gemini. Measured by replaying thirteen real queries from the log against both indexes: the same genuinely-relevant documents that Gemini scored 0.55-0.79 EmbeddingGemma scores 0.43-0.81, so keeping 0.55 dropped every vector candidate on the open-ended questions ("what did i do today") and quietly reduced those searches to lexical-only.
+const DefaultLocalSimilarityFloor = 0.40
+
+// Floor is the cosine floor to hand db.Store.SetVectorSimilarityFloor, defaulting to DefaultLocalSimilarityFloor when the config names none.
+func (e EmbedConfig) Floor() float64 {
+	if e.SimilarityFloor > 0 {
+		return e.SimilarityFloor
+	}
+	return DefaultLocalSimilarityFloor
+}
+
+// DefaultEmbedPort continues the daemon's 6942 with the next port up. Bound to 127.0.0.1 only.
+const DefaultEmbedPort = 6943
+
+// LocalEmbedModel is the model name sent in each /v1/embeddings request. llama-server serves whatever GGUF it was started with and ignores this field, but OpenAI-compatible request bodies require it.
+const LocalEmbedModel = "embeddinggemma-300m"
+
+// LocalEmbedDim is the native output dimensionality of EmbeddingGemma-300M, against the Gemini path's 3072. Vectors of the two sizes cannot share a chromem collection, so switching engines means building a new vector index.
+const LocalEmbedDim = 768
+
+// DefaultEmbedIdleTimeout is how long the embedding server may idle before the daemon reaps it. Ten minutes: long enough to cover a conversation, short enough that a machine left alone gets its ~600 MB back. In milliseconds, matching the JSON field.
+const DefaultEmbedIdleTimeout = time.Duration(10 * 60 * 1000)
+
+// LocalEnabled reports whether the local embedder should be used. Both paths must be set — a half-written config stays on Gemini rather than taking embeddings down.
+func (e EmbedConfig) LocalEnabled() bool {
+	return e.LlamaServer != "" && e.ModelPath != ""
+}
+
+// BaseURL is the root the local embeddings server is reachable at, for embed.NewLocalEmbedder.
+func (e EmbedConfig) BaseURL() string {
+	return fmt.Sprintf("http://127.0.0.1:%d", e.Port)
 }
 
 // ProactiveAudioEnabled reports whether proactive audio should be requested at the next Live API handshake. Unset means on.
@@ -196,6 +245,10 @@ func LoadConfig() OraConfig {
 		},
 		Voice:     DefaultVoice,
 		Autostart: false,
+		Embed: EmbedConfig{
+			Port:        DefaultEmbedPort,
+			IdleTimeout: DefaultEmbedIdleTimeout,
+		},
 	}
 
 	configPath := ConfigPath()
@@ -222,6 +275,14 @@ func LoadConfig() OraConfig {
 	// configs written before /voice existed (or with a bad value) fall back to default
 	if cfg.Voice == "" || !IsValidVoice(cfg.Voice) {
 		cfg.Voice = DefaultVoice
+	}
+
+	// json.Unmarshal only overwrites keys the file actually carries, so a config with no "embed" block keeps the defaults set above. These two guards cover the case where the block exists but zeroes a field explicitly, which would otherwise mean binding port 0 or reaping the embedding server on every tick.
+	if cfg.Embed.Port <= 0 {
+		cfg.Embed.Port = DefaultEmbedPort
+	}
+	if cfg.Embed.IdleTimeout <= 0 {
+		cfg.Embed.IdleTimeout = DefaultEmbedIdleTimeout
 	}
 
 	return cfg
