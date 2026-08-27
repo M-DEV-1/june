@@ -290,9 +290,34 @@ func isChromeLine(line string) bool {
 	return false
 }
 
+// isObjectChar reports whether r is an object replacement (U+FFFC) or unknown replacement (U+FFFD) character. AT-SPI reports every image, video, and icon as U+FFFC, so a screenful of thumbnails captures as nothing but these \u2014 they carry no meaning, but they tokenize and embed as if they did.
+func isObjectChar(r rune) bool {
+	return r == '\uFFFC' || r == '\uFFFD'
+}
+
+// StripObjectChars removes object replacement characters and drops any line they leave empty, returning "" when nothing but them was there. Input with none is returned trimmed and otherwise unchanged.
+func StripObjectChars(s string) string {
+	if !strings.ContainsFunc(s, isObjectChar) {
+		return strings.TrimSpace(s)
+	}
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(strings.Map(func(r rune) rune {
+			if isObjectChar(r) {
+				return -1
+			}
+			return r
+		}, line))
+		if line != "" {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 func stripControls(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\uFFFC' || r == '\uFFFD' {
+		if isObjectChar(r) {
 			return -1
 		}
 		if r == '\n' || r == '\t' {

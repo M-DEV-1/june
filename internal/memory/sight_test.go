@@ -47,3 +47,24 @@ func TestComposeMoment_FallbackWhenEmpty(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestComposeMoment_StripsObjectReplacementChars verifies the structured-moment path drops U+FFFC. AT-SPI reports every image, video, and icon as an object replacement character, and ComposeMoment's output overrides the Normalize-cleaned text in db.WriteEpisode — so without stripping here, a screenful of thumbnails is stored and embedded as a run of U+FFFC that then outranks real memories.
+func TestComposeMoment_StripsObjectReplacementChars(t *testing.T) {
+	got := ComposeMoment("watching ￼ a video", []string{"￼￼￼", "the actual caption ￼"}, "")
+	if strings.ContainsRune(got, '￼') {
+		t.Errorf("expected no U+FFFC in composed moment, got %q", got)
+	}
+	if !strings.Contains(got, "the actual caption") {
+		t.Errorf("expected real text to survive stripping, got %q", got)
+	}
+	if strings.Contains(got, "\n\n") || strings.HasPrefix(got, "\n") {
+		t.Errorf("expected lines emptied by stripping to be dropped, got %q", got)
+	}
+}
+
+// TestComposeMoment_AllObjectReplacement_IsEmpty verifies a capture that is nothing but object replacement characters composes to "" rather than to a run of U+FFFC, so callers can tell there was no content.
+func TestComposeMoment_AllObjectReplacement_IsEmpty(t *testing.T) {
+	if got := ComposeMoment("￼￼", []string{"￼", "￼￼￼"}, ""); got != "" {
+		t.Errorf("expected empty composed moment, got %q", got)
+	}
+}
