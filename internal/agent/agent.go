@@ -119,6 +119,25 @@ type Agent struct {
 	branchCalls atomic.Int32
 	// typedTurnActive is true while the model is answering a message the user TYPED: set by textSendLoop on send, cleared at the next turn boundary. receiveLoop reads it to tell an ambient-room interruption of a typed answer apart from a real spoken barge-in, which are the same server event but mean opposite things to the user.
 	typedTurnActive atomic.Bool
+	// toolResponseAt is the wall-clock time (unix nanoseconds) of the most recent INTERRUPT-scheduled FunctionResponse send, or 0 when none is outstanding. The Live server interrupts its own generation to fold such a result in and reports that with the same ServerContent.Interrupted flag a user barge-in uses; receiveLoop consumes this to tell the two apart. See toolInterruptWindow in connect.go.
+	toolResponseAt atomic.Int64
+}
+
+// markToolResponseSent records that an INTERRUPT-scheduled tool result is being delivered right now, so the interrupt the server raises to fold it in isn't mistaken for the user cutting in.
+// Input: the moment of the send. Output: none.
+func (a *Agent) markToolResponseSent(now time.Time) {
+	a.toolResponseAt.Store(now.UnixNano())
+}
+
+// consumeToolDeliveryInterrupt reports whether an Interrupted event is the server folding in a tool result rather than a user barge-in, and clears the record so only the first interrupt after each send is attributed to it.
+// Input: the moment the Interrupted event arrived. Output: true when an INTERRUPT-scheduled tool response was sent within toolInterruptWindow of it.
+func (a *Agent) consumeToolDeliveryInterrupt(now time.Time) bool {
+	at := a.toolResponseAt.Load()
+	if at == 0 || now.Sub(time.Unix(0, at)) > toolInterruptWindow {
+		return false
+	}
+	a.toolResponseAt.Store(0)
+	return true
 }
 
 // markTypedTurn records that the turn now starting was initiated by typed text rather than speech.
