@@ -117,6 +117,13 @@ type Agent struct {
 	subtaskModelFactory func() (subtaskModel, error)
 	// branchCalls counts branch() invocations in the current live session — reset at the top of each Connect() call. maxBranchesPerSession (see subtask.go) bounds it.
 	branchCalls atomic.Int32
+	// typedTurnActive is true while the model is answering a message the user TYPED: set by textSendLoop on send, cleared at the next turn boundary. receiveLoop reads it to tell an ambient-room interruption of a typed answer apart from a real spoken barge-in, which are the same server event but mean opposite things to the user.
+	typedTurnActive atomic.Bool
+}
+
+// markTypedTurn records that the turn now starting was initiated by typed text rather than speech.
+func (a *Agent) markTypedTurn() {
+	a.typedTurnActive.Store(true)
 }
 
 // setResumeHandle stores the latest session-resumption handle reported by the server.
