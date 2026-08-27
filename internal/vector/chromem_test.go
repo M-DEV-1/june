@@ -4,6 +4,8 @@ package vector
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -209,6 +211,30 @@ func TestChromemIndex_IDs_ListsAllDocsAndReflectsDelete(t *testing.T) {
 	ids = idx.IDs()
 	if len(ids) != 1 || ids[0] != "note:2" {
 		t.Errorf("expected only note:2 to remain after delete, got %v", ids)
+	}
+}
+
+// TestNewChromemIndex_CorruptSidecar_DegradesInsteadOfFailing verifies a truncated/corrupt sidecar file (as a crash mid-write would leave behind) doesn't fail NewChromemIndex — the sidecar only tracks createdAt for eviction ordering, so losing it should degrade to an empty map, not permanently disable semantic search (cmd/daemon.go only logs a warning and leaves vecIndex nil on a construction error, with nothing to repair the file afterward). It also verifies a normal write survives that recovery and is readable back by a fresh loadSidecar.
+func TestNewChromemIndex_CorruptSidecar_DegradesInsteadOfFailing(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sidecarPath := filepath.Join(dir, "test-collection_meta.json")
+	if err := os.WriteFile(sidecarPath, []byte(`{"doc-1": "2026-08-1`), 0644); err != nil {
+		t.Fatalf("seed corrupt sidecar: %v", err)
+	}
+
+	idx, err := NewChromemIndex(dir, "test-collection", 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex should degrade past a corrupt sidecar, got error: %v", err)
+	}
+
+	if err := idx.Add(ctx, "doc-1", "content", []float32{1, 2, 3}, nil); err != nil {
+		t.Fatalf("Add after corrupt-sidecar recovery: %v", err)
+	}
+
+	reloaded := loadSidecar(sidecarPath)
+	if _, ok := reloaded["doc-1"]; !ok {
+		t.Errorf("expected doc-1 to be readable back from the sidecar after recovery, got %+v", reloaded)
 	}
 }
 

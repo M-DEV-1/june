@@ -48,7 +48,9 @@ type model struct {
 	showCmdList   bool
 	hitlList      list.Model
 	activeToolReq *agent.ToolRequest
-	spinner       spinner.Model
+	// pendingToolReqs holds ToolRequests that arrived while activeToolReq was still awaiting a user decision — see FINDING 3. One model turn can dispatch several concurrent tool calls (connect.go's runToolCall runs each in its own goroutine), so a second approval request can arrive mid-decision on the first; queueing instead of overwriting activeToolReq means every request eventually gets its result delivered, in arrival order.
+	pendingToolReqs []agent.ToolRequest
+	spinner         spinner.Model
 	// activity is the shared live-status indicator — covers both "thinking" (sent text, no response yet) and an in-flight tool call, distinguished by kind. nil means nothing active and the status line is hidden.
 	activity *liveStatus
 	// viewportDirty is set when streamLine's 80ms throttle skips a render, so the tickMsg handler can flush it later — otherwise a reply's last chunk can go permanently unrendered if no further chunk ever arrives to trigger the next render.
@@ -267,17 +269,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// all slash cmds, and tui updates
 	switch msg := msg.(type) {
 	case agent.ToolRequest:
-		m.activeToolReq = &msg
-		m.mode = ModeToolConfirm
-		items := hitlItems(msg.EditableCommand != "")
-		m.hitlList.SetItems(items)
-		// Sized to the actual item count (3-4), not list.New's DefaultListHeight=8 default — with title/status/help/filtering all disabled, the list renders exactly item-count rows, so the fixed default was reserving 4-5 rows nobody used and could overflow a short terminal (see the WP7 finding this fixes).
-		m.hitlList.SetHeight(len(items))
-		m.messages = append(m.messages, Message{Sender: "tool", Content: "Ora wants to:\n  " + msg.Description, IsTool: true})
-		m.updateViewport(false)
-		// The approval menu already says "paused, waiting on you" — a spinner behind it would misleadingly read as "still running".
-		m.activity = nil
-		m.recalcViewportHeight()
+		if m.activeToolReq != nil {
+			// A request is already awaiting a user decision — queue this one instead of overwriting
+			// activeToolReq (FINDING 3). It becomes active once the current one resolves.
+			m.pendingToolReqs = append(m.pendingToolReqs, msg)
+			return m, m.waitForToolRequest()
+		}
+		m.activateToolRequest(msg)
 		return m, m.waitForToolRequest()
 
 	case agent.ToolActivity:
@@ -342,6 +340,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeToolReq.ResultChan <- "User rejected this command."
 				m.mode = ModeBoth
 				m.activeToolReq = nil
+				m.popPendingToolReq()
 				m.updateViewport(false)
 				m.recalcViewportHeight()
 				return m, nil
@@ -379,6 +378,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// "Suggest changes" is the one entry that isn't terminal: it hands the request on to ModeToolEdit, which still needs it to deliver a result. The other three have already sent theirs, so clearing here is right for them and a nil-deref crash for it.
 					if m.mode != ModeToolEdit {
 						m.activeToolReq = nil
+						m.popPendingToolReq()
 					}
 					m.updateViewport(false)
 					m.recalcViewportHeight()
@@ -399,6 +399,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}(editedCmd, m.activeToolReq.ResultChan)
 				m.mode = ModeBoth
 				m.activeToolReq = nil
+				m.popPendingToolReq()
 				return m, nil
 			}
 			if msg.Type == tea.KeyEsc {
@@ -407,6 +408,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeToolReq.ResultChan <- "User rejected this command."
 				m.mode = ModeBoth
 				m.activeToolReq = nil
+				m.popPendingToolReq()
 				m.updateViewport(false)
 				return m, nil
 			}
@@ -649,6 +651,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
+// activateToolRequest makes req the pending approval the user is deciding on: opens the ModeToolConfirm
+// menu, appends the "Ora wants to:" transcript line, and clears any live-status spinner since the approval
+// menu already says "paused, waiting on you" — a spinner behind it would misleadingly read as "still running".
+func (m *model) activateToolRequest(req agent.ToolRequest) {
+	m.activeToolReq = &req
+	m.mode = ModeToolConfirm
+	items := hitlItems(req.EditableCommand != "")
+	m.hitlList.SetItems(items)
+	// Sized to the actual item count (3-4), not list.New's DefaultListHeight=8 default — with title/status/help/filtering all disabled, the list renders exactly item-count rows, so the fixed default was reserving 4-5 rows nobody used and could overflow a short terminal (see the WP7 finding this fixes).
+	m.hitlList.SetHeight(len(items))
+	m.messages = append(m.messages, Message{Sender: "tool", Content: "Ora wants to:\n  " + req.Description, IsTool: true})
+	m.updateViewport(false)
+	m.activity = nil
+	m.recalcViewportHeight()
+}
+
+// popPendingToolReq promotes the next queued ToolRequest (FINDING 3) to active, if one is waiting. Callers
+// invoke this every time they clear activeToolReq to nil, so a request queued behind a busy approval always
+// gets its turn instead of being silently dropped.
+func (m *model) popPendingToolReq() {
+	if len(m.pendingToolReqs) == 0 {
+		return
+	}
+	next := m.pendingToolReqs[0]
+	m.pendingToolReqs = m.pendingToolReqs[1:]
+	m.activateToolRequest(next)
+}
+
 // recalcViewportHeight is the single source of truth for viewport height: everything else on screen (signal field, input deck — status line, textarea, hints, and any open menu all included since they're all part of renderInput's own output) measured from an actual render rather than hand-maintained row-count constants, so it can't drift out of sync the way the old constant-based version silently did (a 7-row underestimate that pushed the input deck off-screen on any sufficiently tall transcript — see the WP5 bug report). Shared by WindowSizeMsg, tickMsg's textarea-grow branch, and every m.activity/showCmdList/ModeToolConfirm mutation site below, so the layout never overlaps or overflows a tick behind.
 //
 // The invariant View() height == m.height has NO exceptions (WP10) — bubbletea's renderer desyncs the moment it doesn't hold (see WP5/WP9). A menu open is the one case MinViewportHeight's normal floor can't guarantee that on a short terminal, so this drops the floor to 0 first and, if even that isn't enough, shrinks the open list itself as a last resort — the only two levers left once the viewport can't give any more.
@@ -671,12 +701,12 @@ func (m *model) recalcViewportHeight() {
 		chrome += lipgloss.Height(m.renderSignalField())
 	}
 
-	floor := MinViewportHeight
-	if menuOpen {
-		floor = 0
-	}
+	// The floor drops to 0 unconditionally, not just when a menu is open — MinViewportHeight is a nicety
+	// for the common case, but on a short terminal (see FINDING 8) it must never win over keeping the input
+	// prompt on screen. Since floor only matters when available is already below it, this changes nothing
+	// when there's ample room.
 	available := m.height - chrome - paddingRows
-	m.viewport.Height = max(floor, available)
+	m.viewport.Height = max(0, available)
 
 	// A rendered viewport is never actually 0 rows tall — bubbles' viewport.View() returns "" at Height=0, and lipgloss counts an empty string as 1 line same as any other — so the real practical minimum contribution is 1 content row, not 0.
 	deficit := chrome + paddingRows + max(1, m.viewport.Height) - m.height

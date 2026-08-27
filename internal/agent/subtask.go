@@ -112,7 +112,13 @@ func (a *Agent) runSubtask(ctx context.Context, model subtaskModel, task string)
 			if len(parts) == 0 {
 				return "", fmt.Errorf("subtask: model returned no text and no tool calls (iteration %d)", i)
 			}
-			return parts[0].Text, nil
+			// resp.Text() joins every non-thought text part — a plain parts[0].Text would
+			// return "" whenever thinking puts an empty THOUGHT part first.
+			text := resp.Text()
+			if text == "" {
+				return "", fmt.Errorf("subtask: model returned no usable text and no tool calls (iteration %d)", i)
+			}
+			return text, nil
 		}
 
 		var parts []*genai.Part

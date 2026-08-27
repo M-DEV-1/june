@@ -94,13 +94,15 @@ func (d *Daemon) Start(ctx context.Context) {
 	var lastCaptureTime time.Time
 
 	// use injected capturer (tests) or default to tiered capture with diff tracking. The default path needs the current activity so vision can skip the bare desktop; the test capturer ignores it.
-	var lastScreenText string
+	// lastA11yText/lastVisionText are tracked separately (not one shared "last text") so a tier switch on an
+	// unchanged screen doesn't compare one tier's text against the other's and falsely look like a change.
+	var lastA11yText, lastVisionText string
 	var lastVisionTime time.Time
 	capture := func(act Activity) captureOut {
 		if d.capturer != nil {
 			return captureOut{text: d.capturer()}
 		}
-		return d.tieredCapture(ctx, act, &lastScreenText, &lastCaptureTime, &lastVisionTime)
+		return d.tieredCapture(ctx, act, &lastA11yText, &lastVisionText, &lastCaptureTime, &lastVisionTime)
 	}
 
 	tracer := obs.GetTracer(ctx, "ora.tracker")
@@ -216,7 +218,7 @@ func applyCapture(ev *Activity, out captureOut) {
 
 // tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen.
 // Returns empty text when content is unchanged since the last capture, so callers never re-emit the same screen. Vision is gated behind thinTextThreshold and minVisionInterval to keep cost down.
-func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *string, lastCaptureTime, lastVisionTime *time.Time) captureOut {
+func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, lastVisionText *string, lastCaptureTime, lastVisionTime *time.Time) captureOut {
 	text, err := extractText()
 	if err != nil {
 		text = ""
@@ -227,12 +229,12 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
 	mediaActive := mediaPlaying(ctx)
 	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
-		return captureOut{text: diff(lastText, text)}
+		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
 	}
 
 	png, err := grabScreen(ctx)
 	if err != nil || len(png) == 0 {
-		return captureOut{text: diff(lastText, text)}
+		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
 	}
 	*lastVisionTime = time.Now()
 
@@ -243,11 +245,27 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	if desc == "" {
 		desc = strings.TrimSpace(act.Title)
 	}
-	shown := diff(lastText, desc)
+	return resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, encodeJPEG(png))
+}
+
+// resolveCapture decides what a capture emits and updates the right per-tier "last text" tracker.
+// The accessibility text is diffed against lastA11yText and that tracker is updated every call, regardless of
+// which tier ends up being used — accessibility text is read unconditionally by tieredCapture above, so this
+// keeps lastA11yText current even on a call where vision fires instead.
+// When useVision is set, the emitted text (and change decision) comes from diffing desc against
+// lastVisionText instead — a separate tracker, so a vision capture's stored description never gets compared
+// against the next accessibility-tier capture's raw a11y text of the same, unchanged screen (that mismatch
+// used to look like a change and cause a re-emit, even with nothing on screen actually different).
+func resolveCapture(lastA11yText, lastVisionText *string, a11yText string, useVision bool, desc string, sight Sight, jpeg []byte) captureOut {
+	a11yChanged := diff(lastA11yText, a11yText)
+	if !useVision {
+		return captureOut{text: a11yChanged}
+	}
+	shown := diff(lastVisionText, desc)
 	if shown == "" {
 		return captureOut{}
 	}
-	return captureOut{text: shown, sight: sight, jpeg: encodeJPEG(png)}
+	return captureOut{text: shown, sight: sight, jpeg: jpeg}
 }
 
 // nonWindowApps are the desktop/compositor/shell identifiers that mean no real app is focused. Without this gate the vision tier would screenshot and describe the wallpaper on every idle tick.
