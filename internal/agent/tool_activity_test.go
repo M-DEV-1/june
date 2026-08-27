@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,9 @@ func TestToolActivitySummary(t *testing.T) {
 		{"save_note", map[string]any{"content": "user has a dentist appointment Friday"}, `"user has a dentist appointment Friday"`},
 		{"branch", map[string]any{"task": "catch me up on Riddler"}, `"catch me up on Riddler"`},
 		{"unknown_tool", map[string]any{"foo": "bar"}, ""},
+		// A long argument is cut to a bounded length so one shell command or note body can't push the tool line off the status row.
+		{"shell_exec", map[string]any{"command": strings.Repeat("x", 200)}, `"` + strings.Repeat("x", toolArgSummaryRunes) + `…"`},
+		{"save_note", map[string]any{"content": strings.Repeat("y", 200)}, `"` + strings.Repeat("y", toolArgSummaryRunes) + `…"`},
 	}
 	for _, c := range cases {
 		got := toolActivitySummary(c.name, c.args)
