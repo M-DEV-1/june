@@ -1077,13 +1077,14 @@ func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error 
 	return nil
 }
 
-// ExistingNotes returns id+content for every stored note. Used by the memory compiler to feed the reconciliation LLM call.
+// ExistingNotes returns id+content for every stored note of kind "fact". Used by the memory compiler to feed the reconciliation LLM call and by note consolidation to feed the curation call.
+// Both of those calls hand the notes to a model whose job is to merge and drop entries, and both write the result back through ReplaceAllNotes, so only the kind they are allowed to rewrite is shown to them. Other kinds — meeting minutes above all, which are the only record of what was said in a call — are never offered up for curation.
 func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.ExistingNotes")
 	defer span.End()
 
-	rows, err := s.db.QueryContext(ctx, `SELECT id, content FROM notes ORDER BY id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content FROM notes WHERE kind = 'fact' ORDER BY id ASC`)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("query existing notes: %w", err)
@@ -1192,8 +1193,9 @@ func (s *Store) queryThreads(ctx context.Context, span trace.Span, query string,
 	return out, nil
 }
 
-// ReplaceAllNotes atomically swaps the entire notes table for a curated set, used by periodic note consolidation. All notes are rewritten as kind "fact"; FTS5 mirror stays in sync via the per-row notes_ad / notes_ai triggers.
-// The caller must guarantee contents is non-empty — an empty swap would wipe the table — but we defend against it here too.
+// ReplaceAllNotes atomically swaps every note of kind "fact" for a curated set, used by periodic note consolidation. The new notes are written as kind "fact" too; FTS5 mirror stays in sync via the per-row notes_ad / notes_ai triggers.
+// Notes of any other kind are left exactly as they are, rows and vectors both: meeting minutes live in this table under kind "meeting" and are the only record of what was said in a call, so consolidation must not be able to reach them.
+// The caller must guarantee contents is non-empty — an empty swap would wipe the facts — but we defend against it here too.
 func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.ReplaceAllNotes")
@@ -1210,9 +1212,9 @@ func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
 	}
 	defer tx.Rollback() //nolint:errcheck — no-op after a successful Commit
 
-	// Selected before the DELETE below so the old ids' vectors can be cleaned up — ReplaceAllNotes renumbers every note (new AUTOINCREMENT ids on re-insert), so every old note's vector would otherwise become a permanent orphan.
+	// Selected before the DELETE below so the old ids' vectors can be cleaned up — ReplaceAllNotes renumbers the facts it replaces (new AUTOINCREMENT ids on re-insert), so every replaced note's vector would otherwise become a permanent orphan. The kind filter matches the DELETE exactly: a vector is only deleted when its row is.
 	var oldIDs []int64
-	idRows, err := tx.QueryContext(ctx, `SELECT id FROM notes`)
+	idRows, err := tx.QueryContext(ctx, `SELECT id FROM notes WHERE kind = 'fact'`)
 	if err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("replace notes: select old ids: %w", err)
@@ -1232,7 +1234,7 @@ func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
 		return fmt.Errorf("replace notes: iterate old ids: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM notes`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM notes WHERE kind = 'fact'`); err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("replace notes: clear: %w", err)
 	}

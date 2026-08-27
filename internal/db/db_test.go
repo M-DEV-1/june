@@ -298,14 +298,18 @@ func TestStore_ExistingNotes(t *testing.T) {
 	defer store.Close()
 
 	id1, _ := store.LogNote(ctx, "user is a Go developer", "fact")
-	id2, _ := store.LogNote(ctx, "user prefers dark mode", "preference")
+	id2, _ := store.LogNote(ctx, "user prefers dark mode", "fact")
+	// Every caller of ExistingNotes feeds the result to a model that merges and drops entries, then writes the survivors back, so only facts may be handed over. A meeting note offered up here would be summarised away.
+	if _, err := store.LogNote(ctx, "# Meeting minutes\n\n- ship on friday", "meeting"); err != nil {
+		t.Fatalf("LogNote(meeting): %v", err)
+	}
 
 	refs, err := store.ExistingNotes(ctx)
 	if err != nil {
 		t.Fatalf("ExistingNotes: %v", err)
 	}
 	if len(refs) != 2 {
-		t.Fatalf("expected 2 refs, got %d", len(refs))
+		t.Fatalf("expected 2 refs (the facts only), got %d: %+v", len(refs), refs)
 	}
 	// ordered by id ASC
 	if refs[0].ID != id1 || refs[0].Content != "user is a Go developer" {
@@ -2516,5 +2520,126 @@ func TestLogSemanticNode_StripsObjectChars(t *testing.T) {
 	}
 	if strings.ContainsRune(content, '￼') {
 		t.Errorf("summary node content = %q, want no object replacement characters", content)
+	}
+}
+
+// deleteRecordingVectorIndex records the vector ids a store asks it to delete, so a test can prove which notes' vectors were left alone.
+type deleteRecordingVectorIndex struct {
+	mu      sync.Mutex
+	deleted []string
+}
+
+func (f *deleteRecordingVectorIndex) Add(ctx context.Context, id, content string, embedding []float32, metadata map[string]string) error {
+	return nil
+}
+
+func (f *deleteRecordingVectorIndex) Search(ctx context.Context, queryEmbedding []float32, n int, where map[string]string) ([]db.Result, error) {
+	return nil, nil
+}
+
+func (f *deleteRecordingVectorIndex) Delete(ctx context.Context, id string) error {
+	f.mu.Lock()
+	f.deleted = append(f.deleted, id)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *deleteRecordingVectorIndex) IDs() []string { return nil }
+
+func (f *deleteRecordingVectorIndex) deletedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.deleted...)
+}
+
+// fixedConsolidator is a NoteConsolidator that returns a canned canonical set and remembers what it was asked to consolidate.
+type fixedConsolidator struct {
+	out  []string
+	seen []string
+}
+
+func (c *fixedConsolidator) ConsolidateNotes(ctx context.Context, notes []string) ([]string, error) {
+	c.seen = notes
+	return c.out, nil
+}
+
+// Note consolidation curates the model's facts about the user. Meeting minutes are filed in the same table under a different kind, and they are the only copy of what was said in a meeting, so a consolidation cycle must not show them to the model, must not delete their row, and must not delete their vector.
+func TestNoteConsolidation_LeavesOtherKindsAlone(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	vidx := &deleteRecordingVectorIndex{}
+	store.SetVectorIndex(vidx)
+
+	// Twenty-five facts, so the compactor's "table is big enough to be worth curating" floor is cleared.
+	var factIDs []int64
+	for i := 0; i < 25; i++ {
+		id, err := store.LogNote(ctx, fmt.Sprintf("the user knows fact number %d", i), "fact")
+		if err != nil {
+			t.Fatalf("LogNote: %v", err)
+		}
+		factIDs = append(factIDs, id)
+	}
+	const minutes = "# Meeting minutes\n\n- ship on friday"
+	meetingID, err := store.LogNote(ctx, minutes, "meeting")
+	if err != nil {
+		t.Fatalf("LogNote(meeting): %v", err)
+	}
+
+	llm := &fixedConsolidator{out: []string{"the user knows a handful of things", "the user ships software"}}
+	if err := memory.NewNoteCompactor(llm, store).Compact(ctx); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	for _, seen := range llm.seen {
+		if seen == minutes {
+			t.Error("the meeting minutes were sent to the consolidation model, which is asked to drop non-facts")
+		}
+	}
+	if len(llm.seen) != len(factIDs) {
+		t.Errorf("the model saw %d notes, want the %d facts only", len(llm.seen), len(factIDs))
+	}
+
+	notes, err := store.GetNotes(ctx)
+	if err != nil {
+		t.Fatalf("GetNotes: %v", err)
+	}
+	var survived bool
+	for _, n := range notes {
+		if n.ID == meetingID {
+			survived = true
+			if n.Content != minutes {
+				t.Errorf("meeting note content = %q, want it byte-identical", n.Content)
+			}
+			if n.Kind != "meeting" {
+				t.Errorf("meeting note kind = %q, want %q", n.Kind, "meeting")
+			}
+		}
+	}
+	if !survived {
+		t.Fatalf("the meeting note (id %d) was deleted by consolidation; notes now: %+v", meetingID, notes)
+	}
+
+	// The old facts' vectors are deleted asynchronously, since consolidation renumbers them. Wait for that to finish before checking the meeting note's vector was spared.
+	want := fmt.Sprintf("note:%d", meetingID)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := vidx.deletedIDs()
+		if len(got) >= len(factIDs) || time.Now().After(deadline) {
+			for _, id := range got {
+				if id == want {
+					t.Fatalf("consolidation deleted the meeting note's vector (%s), orphaning its row", want)
+				}
+			}
+			if len(got) < len(factIDs) {
+				t.Errorf("only %d of %d replaced facts had their vectors deleted", len(got), len(factIDs))
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
