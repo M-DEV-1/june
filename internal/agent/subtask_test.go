@@ -70,6 +70,50 @@ func TestRunSubtask_ReturnsPlainTextWhenNoToolCallsNeeded(t *testing.T) {
 	}
 }
 
+// TestRunSubtask_SkipsThoughtPartAndReturnsRealAnswer verifies runSubtask does not blindly return parts[0].Text: with thinking enabled, Gemini routinely puts an empty THOUGHT part first, and the real answer in a later part. Returning parts[0].Text here would silently return "" as a successful answer.
+func TestRunSubtask_SkipsThoughtPartAndReturnsRealAnswer(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: genai.NewContentFromParts([]*genai.Part{
+				{Text: "", Thought: true},
+				{Text: "real answer"},
+			}, genai.RoleModel),
+		}},
+	}
+	model := &fakeSubtaskModel{responses: []*genai.GenerateContentResponse{resp}}
+
+	got, err := a.runSubtask(context.Background(), model, "what is the answer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "real answer" {
+		t.Errorf("runSubtask result = %q, want %q", got, "real answer")
+	}
+}
+
+// TestRunSubtask_JoinsMultiPartTextResponse verifies a response split across several non-thought text parts is joined in full, not truncated to the first part.
+func TestRunSubtask_JoinsMultiPartTextResponse(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: genai.NewContentFromParts([]*genai.Part{
+				{Text: "first half. "},
+				{Text: "second half."},
+			}, genai.RoleModel),
+		}},
+	}
+	model := &fakeSubtaskModel{responses: []*genai.GenerateContentResponse{resp}}
+
+	got, err := a.runSubtask(context.Background(), model, "what is the answer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "first half. second half." {
+		t.Errorf("runSubtask result = %q, want %q", got, "first half. second half.")
+	}
+}
+
 // TestRunSubtask_DispatchesFunctionCallThroughExecuteToolAndLoops verifies the core multi-hop behavior: when the model asks for a tool, runSubtask must actually run it (via the same executeTool dispatcher every other tool uses — proven here by asserting the brain's HybridSearch was really called) and feed the result back for a second round trip, rather than stopping or fabricating an answer.
 func TestRunSubtask_DispatchesFunctionCallThroughExecuteToolAndLoops(t *testing.T) {
 	brain := &toolTestBrain{

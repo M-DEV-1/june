@@ -375,6 +375,62 @@ func TestUpdate_ToolConfirm_AllowForSession_EmptyAllowKey_DoesNotStore(t *testin
 	}
 }
 
+// --- concurrent tool-request queueing (FINDING 3) ---
+
+// TestUpdate_ToolRequest_SecondArrivesWhileFirstPending_QueuesInsteadOfOverwriting verifies a second
+// agent.ToolRequest that arrives while the first is still awaiting a user decision does not clobber
+// m.activeToolReq — it queues, and only becomes active once the first request is resolved. Under the old
+// overwrite behaviour the first request's ResultChan never received a value because activeToolReq no longer
+// pointed at it, which wedges the agent goroutine blocked on that channel forever.
+func TestUpdate_ToolRequest_SecondArrivesWhileFirstPending_QueuesInsteadOfOverwriting(t *testing.T) {
+	m := newTestModel()
+	res1 := make(chan string, 1)
+	res2 := make(chan string, 1)
+
+	next, _ := m.Update(agent.ToolRequest{Description: "shell: ls -la", ResultChan: res1})
+	m = next.(model)
+
+	next, _ = m.Update(agent.ToolRequest{Description: "shell: rm -rf /tmp/x", ResultChan: res2})
+	m = next.(model)
+
+	if m.activeToolReq == nil || m.activeToolReq.Description != "shell: ls -la" {
+		t.Fatalf("expected the first request to stay active while the second queues, got %+v", m.activeToolReq)
+	}
+
+	// Resolve the first request (Esc rejects it, same as TestUpdate_Esc_InToolConfirm_RejectsCommand).
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+
+	select {
+	case got := <-res1:
+		if !strings.Contains(got, "rejected") {
+			t.Errorf("expected a rejection on the first request's ResultChan, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the first request's result")
+	}
+
+	if m.activeToolReq == nil || m.activeToolReq.Description != "shell: rm -rf /tmp/x" {
+		t.Fatalf("expected the queued second request to become active once the first resolved, got %+v", m.activeToolReq)
+	}
+	if m.mode != ModeToolConfirm {
+		t.Errorf("expected mode to stay ModeToolConfirm for the promoted request, got %q", m.mode)
+	}
+
+	// Resolve the second (now-active) request too, so both channels end up with a value.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+
+	select {
+	case got := <-res2:
+		if !strings.Contains(got, "rejected") {
+			t.Errorf("expected a rejection on the second request's ResultChan, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the second request's result")
+	}
+}
+
 func TestUpdate_ResponseMsg_ClearsActivity(t *testing.T) {
 	m := newTestModel()
 	started, _ := m.Update(agent.ToolActivity{ID: "call-1", Name: "query_memory", Phase: agent.ToolStarted})
@@ -1798,6 +1854,33 @@ func TestView_RenderedHeightMatchesModelHeight(t *testing.T) {
 				t.Error("expected the input prompt to still be present in View() output")
 			}
 		})
+	}
+}
+
+// TestView_ShortTerminal_NoMenuOpen_InputPromptStaysVisible is FINDING 8: recalcViewportHeight only relaxes
+// the viewport floor to 0 when a menu is open, so with no menu open on a short terminal the viewport stays
+// clamped at MinViewportHeight no matter how negative the available space goes — pushing the ❯ input prompt
+// off the bottom. This got easier to hit because renderInput adds a status-line row whenever a tool call or
+// the thinking spinner is active, plus "⚠ no tracker" / "⚠ reconnecting" warning chips, on top of the
+// ordinary input row and hint row. No menu is open here (mode stays ModeBoth) — only that extra chrome.
+func TestView_ShortTerminal_NoMenuOpen_InputPromptStaysVisible(t *testing.T) {
+	m := newTestModel()
+	// 24 rows is the exact height where the baseline chrome (no live status, no warning chips) already
+	// fits with nothing to spare — turning on the extra status-line row below is what tips it over.
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = next.(model)
+
+	m.activity = &liveStatus{kind: statusTool, label: `shell_exec("ls -la")`}
+	m.daemonOK = false
+	m.isConnected = false
+	m.recalcViewportHeight()
+
+	out := m.View()
+	if h := lipgloss.Height(out); h != m.height {
+		t.Errorf("View() rendered height %d, want exactly m.height %d", h, m.height)
+	}
+	if !strings.Contains(out, "❯") {
+		t.Error("expected the input prompt to still be present in View() output on a short terminal with no menu open")
 	}
 }
 

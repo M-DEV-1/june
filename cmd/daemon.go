@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"ora/internal/memory"
 	"ora/internal/tracker"
 	"ora/internal/vector"
+
+	"google.golang.org/genai"
 )
 
 const DaemonPort = "6942"
@@ -34,10 +38,10 @@ const maxDeriveStateNotes = 10
 // reconcileEmbedCap bounds how many backfill embeds one ReconcileVectors sweep performs, to protect API quota on a large dirty store — the sweep runs again on the next trigger (startup / note consolidation) and picks up where it left off.
 const reconcileEmbedCap = 200
 
-// embedderAdapter adapts *embed.GeminiEmbedder's Embed (which takes embed.TaskType) to the plain-string task param db.Store.SetEmbedder expects.
+// embedderAdapter adapts an embed.Embedder's Embed (which takes embed.TaskType) to the plain-string task param db.Store.SetEmbedder expects.
 // internal/db can't import internal/embed, so the adapter lives here instead.
 type embedderAdapter struct {
-	inner *embed.GeminiEmbedder
+	inner embed.Embedder
 }
 
 func (e *embedderAdapter) Embed(ctx context.Context, task string, text string) ([]float32, error) {
@@ -110,7 +114,7 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 // The returned stop func shuts down the server and closes the db — safe to call once.
 // The returned *tracker.Daemon allows the tray to pause/resume tracking.
 func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(), daemonOut *tracker.Daemon, err error) {
-	store, err := db.New("ora-db/db")
+	store, err := db.New(filepath.Join(config.DataDir(), "db"))
 	if err != nil {
 		slog.Error("failed to init db", "error", err)
 		return nil, nil, err
@@ -139,31 +143,45 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// vecIndex is nil unless the block below succeeds — declared here (not just inside the block) so the /vector/* IPC handlers further down can serve the client's hybrid search over the same index the daemon itself uses, instead of each opening chromem separately (two processes opening the same chromem dir risks torn reads/corruption).
 	var vecIndex *vector.ChromemIndex
 
-	// No API key means no genai client, so skip wiring the semantic half of hybrid search entirely.
-	// HybridSearch already falls back to lexical-only when Store has no embedder/vector index set.
-	if apiKey != "" {
-		embedder, err := newSharedGeminiEmbedder(ctx, apiKey)
+	// Pick the embedding engine: a local llama-server child process when one is configured, otherwise the Gemini API. embedEngine stays nil on the Gemini path and is what the shutdown path and the /embed IPC handler key off.
+	// Neither available means no semantic half at all — HybridSearch already falls back to lexical-only when Store has no embedder/vector index set.
+	var embedder embed.Embedder
+	embedEngine := newLocalEmbedEngine(appConfig.Embed)
+	if embedEngine != nil {
+		embedder = embedEngine
+	} else if apiKey != "" {
+		gemini, err := newSharedGeminiEmbedder(ctx, apiKey)
 		if err != nil {
 			slog.Warn("failed to init genai client for embeddings, hybrid search degrades to lexical-only", "error", err)
 		} else {
-			// 10000 = the deck's agreed pruning cap for the vector index.
-			vecIndex, err = vector.NewChromemIndex("ora-db/vectors", "memory", 10000)
-			if err != nil {
-				slog.Warn("failed to init vector index, hybrid search degrades to lexical-only", "error", err)
-			} else {
-				store.SetEmbedder(&embedderAdapter{inner: embedder})
-				store.SetVectorIndex(&vectorIndexAdapter{inner: vecIndex})
+			embedder = gemini
+		}
+	}
 
-				// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later (e.g. client-side note saves) that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
-				go func() {
-					report, err := store.ReconcileVectors(ctx, reconcileEmbedCap)
-					if err != nil {
-						slog.Error("startup vector reconciliation failed", "error", err)
-						return
-					}
-					slog.Info("startup vector reconciliation complete", "deleted", report.Deleted, "backfilled", report.Backfilled)
-				}()
+	if embedder != nil {
+		// 10000 = the deck's agreed pruning cap for the vector index.
+		index, err := vector.NewChromemIndex(filepath.Join(config.DataDir(), "vectors"), "memory", 10000)
+		if err != nil {
+			slog.Warn("failed to init vector index, hybrid search degrades to lexical-only", "error", err)
+		} else {
+			vecIndex = index
+			store.SetEmbedder(&embedderAdapter{inner: embedder})
+			// A local engine costs CPU rather than API calls, which is what lets reconciliation backfill episodes of any age instead of only the last ten days. Its cosine scale also differs from Gemini's, so the floor a vector hit must clear moves with it.
+			store.SetEmbedsAreFree(embedEngine != nil)
+			if embedEngine != nil {
+				store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
 			}
+			store.SetVectorIndex(&vectorIndexAdapter{inner: vecIndex})
+
+			// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later (e.g. client-side note saves) that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
+			go func() {
+				report, err := store.ReconcileVectors(ctx, reconcileEmbedCap)
+				if err != nil {
+					slog.Error("startup vector reconciliation failed", "error", err)
+					return
+				}
+				slog.Info("startup vector reconciliation complete", "deleted", report.Deleted, "backfilled", report.Backfilled)
+			}()
 		}
 	}
 
@@ -312,7 +330,22 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	if err != nil {
 		slog.Error("failed to generate IPC auth token, daemon IPC will be unreachable", "error", err)
 	}
-	auth := func(h http.HandlerFunc) http.HandlerFunc { return requireIPCToken(ipcToken, h) }
+	// Every authenticated request is by definition a live TUI client, so the auth wrapper doubles as the presence signal that pins the embedding server in memory. Warming happens on the first such request rather than on any embed, so the user's first question meets an already-loaded model. The daemon has no other notion of a client session, and adding one just for this would be more machinery than a timestamp.
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return requireIPCToken(ipcToken, func(w http.ResponseWriter, r *http.Request) {
+			if embedEngine != nil {
+				embedEngine.MarkClientPresence()
+				if !embedEngine.Running() {
+					go func() {
+						if err := embedEngine.Warm(ctx); err != nil {
+							slog.Warn("failed to warm the embedding server for a client", "error", err)
+						}
+					}()
+				}
+			}
+			h(w, r)
+		})
+	}
 
 	// local http for IPC between the tui and daemon
 	mux := http.NewServeMux()
@@ -417,6 +450,29 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	// /embed lets the client reach the daemon's embedding engine instead of running one of its own. Only the daemon may own the llama-server child (one process, one port), so this is the client's only route to a local vector. 503 with no body when the daemon is on the Gemini path or has no embedder at all, which the client's httpEmbedder reports as an error and HybridSearch degrades from.
+	mux.HandleFunc("/embed", auth(func(w http.ResponseWriter, r *http.Request) {
+		if embedEngine == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		var req struct {
+			Task string `json:"task"`
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		vec, err := embedEngine.Embed(r.Context(), embed.TaskType(req.Task), req.Text)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
+	}))
+
 	server := &http.Server{
 		Handler: mux,
 	}
@@ -431,8 +487,45 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		server.Shutdown(shutdownCtx)
+		// The embedding server is this process's child and must never outlive it — a stranded llama-server holds ~600 MB and the port the next daemon needs.
+		if embedEngine != nil {
+			embedEngine.Close()
+		}
 		store.Close()
 	}
 
 	return stop, daemon, nil
+}
+
+// newLocalEmbedEngine builds the daemon-owned local embedding engine from cfg, or returns nil when no local embedder is configured (in which case the caller falls back to the Gemini API). The engine spawns nothing until the first embed or client request.
+// The server binds loopback only. -c 8192 across --parallel 4 gives each slot 2048 tokens, matching EmbeddingGemma's training context, and the batch sizes must reach that same 2048 or the server rejects a full-length document instead of processing it.
+// -ngl 99 offloads every layer to the GPU, which puts the warm model in VRAM instead of system RAM. A build without GPU support ignores the flag and runs on the CPU, so the same arguments work either way.
+func newLocalEmbedEngine(cfg config.EmbedConfig) *embed.Engine {
+	if !cfg.LocalEnabled() {
+		return nil
+	}
+	args := []string{
+		"--embedding",
+		"-m", cfg.ModelPath,
+		"--host", "127.0.0.1",
+		"--port", strconv.Itoa(cfg.Port),
+		"-c", "8192",
+		"--parallel", "4",
+		"-b", "2048",
+		"-ub", "2048",
+		"-ngl", "99",
+	}
+	return embed.NewEngine(cfg.LlamaServer, args, cfg.BaseURL(), config.LocalEmbedModel, cfg.IdleTimeout*time.Millisecond)
+}
+
+// newSharedGeminiEmbedder builds the genai-backed embedder used to wire db.Store's semantic half — same construction recipe the daemon and the client both need (daemon wires it directly alongside its own vector index; the client wires it locally too, with vector search itself going over IPC to the daemon instead — see httpVectorIndex).
+func newSharedGeminiEmbedder(ctx context.Context, apiKey string) (*embed.GeminiEmbedder, error) {
+	embedClient, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init genai client for embeddings: %w", err)
+	}
+	return embed.NewGeminiEmbedder(embedClient.Models, config.EmbedModel, 3072), nil
 }

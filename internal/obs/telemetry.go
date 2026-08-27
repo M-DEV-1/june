@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+
+	"ora/internal/config"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -22,13 +25,13 @@ var (
 // global slog logger, otel traceprovider init
 // returns shutdown, must defer in main.go
 func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) error, error) {
-	// we create a log file to move all otel logs
-	logDir := "ora-db"
+	// The log goes in config.DataDir(), not a working-directory-relative "ora-db" — the daemon (launched by the autostart entry, cwd = the binary's directory) and a terminal-launched client would otherwise write to two different log files.
+	logDir := config.DataDir()
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFile, err := os.OpenFile(logDir+"/ora.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(filepath.Join(logDir, "ora.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}

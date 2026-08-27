@@ -9,6 +9,7 @@ import (
 	"ora/internal/obs"
 	"os"
 	"os/signal"
+	"runtime"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -38,12 +39,12 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().Bool("daemon", false, "Run as background daemon")
 	rootCmd.PersistentFlags().String("autostart", "", "Turn start-on-login on or off, persist it to the config, and exit (on|off)")
-	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because ORA resolves ora-db relative to the working directory and a session manager launches from an arbitrary one")
+	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because ORA loads .env relative to the working directory and a session manager launches from an arbitrary one")
 }
 
 // runRoot is the root command's behaviour: with no flags it starts the TUI against a get-or-create daemon, --daemon runs the background daemon itself, and --autostart flips start-on-login and returns.
 func runRoot(isDaemon bool, autostart, workdir string) {
-	// Must happen before anything reads a relative path (.env, ora-db).
+	// Must happen before anything reads a relative path (.env — every ora-db/data path now resolves through config.DataDir(), independent of cwd).
 	if workdir != "" {
 		if err := os.Chdir(workdir); err != nil {
 			fmt.Fprintf(os.Stderr, "fatal: could not change to %s: %v\n", workdir, err)
@@ -154,4 +155,40 @@ func checkDaemonBuildMismatch(client *http.Client, url string) string {
 		return ""
 	}
 	return "daemon is running an older build — quit it from the tray or `pkill ora`, then relaunch"
+}
+
+// secureEnvFile restricts path (the .env file, which holds the Gemini API key) to 0600 if it exists — it commonly defaults to whatever umask created it (often 0644, world-readable on a multi-user machine). Best-effort and silent on a missing file (env vars set directly, the common case) or on Windows, where these POSIX bits don't apply.
+func secureEnvFile(path string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		slog.Warn("failed to restrict .env file permissions", "error", err)
+		return
+	}
+	slog.Info("restricted .env file permissions to 0600")
+}
+
+// buildIdentity is computed once, here at package init, from the currently-running executable's own size+mtime — not lazily on every /ping call. A daemon process that's been running since before a rebuild must keep reporting the OLD binary's identity even after the file on disk has been overwritten with a new build; recomputing per-request would just report whatever's CURRENTLY on disk, indistinguishable from a fresh build and defeating the whole point (see cmd/root.go's checkDaemonBuildMismatch).
+var buildIdentity = computeBuildIdentity()
+
+// computeBuildIdentity resolves the path to the currently-running executable and fingerprints it. No build tooling changes (no injected version/ldflags) — just what's already on disk.
+func computeBuildIdentity() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "unknown"
+	}
+	return fileIdentity(exe)
+}
+
+// fileIdentity stats path and combines its size and modification time into a stable identity string, "unknown" if the stat fails. Extracted from computeBuildIdentity for testability — os.Executable() itself isn't something a test can point at a fixture file.
+func fileIdentity(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d-%d", info.Size(), info.ModTime().UnixNano())
 }

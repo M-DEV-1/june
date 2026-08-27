@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,34 +24,50 @@ type ChromemIndex struct {
 	createdAt   map[string]time.Time // id -> createdAt, for oldest-first eviction
 }
 
-// loadSidecar reads the sidecar file at path. A missing file just means a fresh index, so that's an empty map, not an error.
-func loadSidecar(path string) (map[string]time.Time, error) {
+// loadSidecar reads the sidecar file at path. A missing, unreadable, or corrupt file (e.g. truncated JSON left by a crash mid-write, before persistSidecar wrote atomically) just means starting from an empty map rather than failing — the sidecar only holds recoverable createdAt bookkeeping for eviction ordering, not the vectors themselves, so refusing to construct the index over it would silently and permanently disable semantic search instead (see FINDING 5: the caller only logs a warning and leaves the index nil, with nothing to repair the file afterward).
+func loadSidecar(path string) map[string]time.Time {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return make(map[string]time.Time), nil
+		if !os.IsNotExist(err) {
+			slog.Warn("chromem sidecar unreadable, starting from an empty createdAt map", "path", path, "error", err)
 		}
-		return nil, fmt.Errorf("read sidecar: %w", err)
+		return make(map[string]time.Time)
 	}
 	var out map[string]time.Time
 	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("unmarshal sidecar: %w", err)
+		slog.Warn("chromem sidecar corrupt, starting from an empty createdAt map", "path", path, "error", err)
+		return make(map[string]time.Time)
 	}
 	if out == nil {
 		out = make(map[string]time.Time)
 	}
-	return out, nil
+	return out
 }
 
-// persistSidecar rewrites the sidecar JSON file in full with the current
-// createdAt map.
+// persistSidecar rewrites the sidecar JSON file with the current createdAt map, atomically: written to a temp file in the same directory then renamed over the target, so a crash or power loss mid-write can never leave loadSidecar a truncated file to choke on.
+// ponytail: this is a full-map marshal+write under c.mu on every Add — O(n) in doc count, fine at the deck's 10k-doc cap; upgrade to an append-only log or drop the sidecar for a real KV store if profiling ever shows this mattering.
 func (c *ChromemIndex) persistSidecar() error {
 	data, err := json.Marshal(c.createdAt)
 	if err != nil {
 		return fmt.Errorf("marshal sidecar: %w", err)
 	}
-	if err := os.WriteFile(c.sidecarPath, data, 0644); err != nil {
-		return fmt.Errorf("write sidecar: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(c.sidecarPath), filepath.Base(c.sidecarPath)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create sidecar temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write sidecar temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close sidecar temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, c.sidecarPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename sidecar temp file: %w", err)
 	}
 	return nil
 }
@@ -72,10 +89,7 @@ func NewChromemIndex(dbPath, collectionName string, maxDocs int) (*ChromemIndex,
 	}
 
 	sidecarPath := filepath.Join(dbPath, collectionName+"_meta.json")
-	createdAt, err := loadSidecar(sidecarPath)
-	if err != nil {
-		return nil, fmt.Errorf("load chromem sidecar: %w", err)
-	}
+	createdAt := loadSidecar(sidecarPath)
 
 	return &ChromemIndex{
 		maxDocs:     maxDocs,
