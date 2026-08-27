@@ -26,6 +26,12 @@ const transcribeTimeout = 2 * time.Hour
 // episodeLimit caps how much of the desktop timeline goes into the summary prompt. The tracker writes an episode every couple of seconds, so a long meeting produces far more than a prompt needs.
 const episodeLimit = 200
 
+// noSpeechMarker is the file left in a recording directory whose transcription ran fine but produced no speech at all. It tells the user why the audio is still there, and it stops the startup sweep from transcribing that directory again on every daemon start.
+const noSpeechMarker = "no-speech.txt"
+
+// dirTimeLayout is how a recording directory is named, and therefore how its start time is read back when the sweep picks up an unfinished recording.
+const dirTimeLayout = "2006-01-02T15-04-05"
+
 // Store is the read-mostly slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, and somewhere to file the minutes.
 type Store interface {
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
@@ -53,6 +59,9 @@ type Recorder struct {
 	mu   sync.Mutex
 	live *session
 
+	// swept is closed once the startup sweep for unfinished recordings has finished. Only tests wait on it.
+	swept chan struct{}
+
 	// Seams, all set by New and replaced in tests: opening the sound streams, running whisper, finding the whisper binary, calling Gemini, and posting a desktop notification.
 	capture     func(mic, system io.Writer) (capturer, time.Time, time.Time, error)
 	whisper     func(ctx context.Context, bin, path, speaker string, offset time.Duration) ([]Segment, error)
@@ -75,7 +84,64 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	r.findWhisper = whisperBinary
 	r.minutes = r.geminiMinutes
 	r.notify = notifySend
+	r.swept = make(chan struct{})
+	started := time.Now()
+	go func() {
+		defer close(r.swept)
+		r.resumeOrphans(context.Background(), started)
+	}()
 	return r
+}
+
+// resumeOrphans finishes recordings that were never processed: a crash, or quitting the tray mid-recording, leaves WAVs with no transcript.md beside them and nothing else ever picks them up.
+// It runs once per Recorder, in the background, and is best-effort — a directory that fails is logged and the next one still gets its turn.
+// Only recordings that began before `before` are considered, so a recording this process starts while the sweep is still running is never mistaken for an abandoned one and transcribed out from under itself.
+func (r *Recorder) resumeOrphans(ctx context.Context, before time.Time) {
+	root := filepath.Join(r.dataDir, "recordings")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("could not scan for unfinished meeting recordings", "dir", root, "error", err)
+		}
+		return
+	}
+	// A directory is named to the second, so a recording started in the same second as the cutoff cannot be told apart from one started just after it. Truncating makes the ambiguous case skip: the worst outcome is that an abandoned recording waits for the next daemon start, against transcribing a live one out from under itself.
+	cutoff := before.Truncate(time.Second)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		s, ok := unfinished(dir)
+		if !ok || !s.startedAt.Before(cutoff) {
+			continue
+		}
+		slog.Info("resuming an unfinished meeting recording", "dir", dir)
+		if err := r.process(ctx, s); err != nil {
+			slog.Error("could not finish an unfinished meeting recording", "dir", dir, "error", err)
+		}
+	}
+}
+
+// unfinished reports whether dir holds a recording that still needs processing — both WAVs present, no transcript.md and no no-speech marker — and returns the session to run it as. The start time comes from the directory name and the stop time from the audio's last write, since the original session's clocks died with the process.
+func unfinished(dir string) (*session, bool) {
+	for _, name := range []string{"transcript.md", noSpeechMarker} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return nil, false
+		}
+	}
+	mic, err := os.Stat(filepath.Join(dir, "mic.wav"))
+	if err != nil {
+		return nil, false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "system.wav")); err != nil {
+		return nil, false
+	}
+	started, err := time.ParseInLocation(dirTimeLayout, filepath.Base(dir), time.Local)
+	if err != nil {
+		started = mic.ModTime()
+	}
+	return &session{dir: dir, startedAt: started, stoppedAt: mic.ModTime()}, true
 }
 
 // Active reports whether a recording is running, which is what the tray menu label keys off.
@@ -189,7 +255,17 @@ func (r *Recorder) process(ctx context.Context, s *session) error {
 		return fmt.Errorf("transcribe system audio: %w", err)
 	}
 
-	transcript := renderTranscript(append(mine, theirs...))
+	// Whisper exiting 0 with nothing to show for it is not a success: the meeting may have been silent, or this whisper build may print segments in a shape parseSegments does not recognise. Either way the WAVs are still the only copy of the meeting, so they stay put and the marker records why.
+	segs := append(mine, theirs...)
+	if len(segs) == 0 {
+		note := fmt.Sprintf("Transcription ran without error but found no speech in this recording, so the audio has been kept instead of deleted. Written %s.\n", time.Now().Format(time.RFC3339))
+		if err := os.WriteFile(filepath.Join(s.dir, noSpeechMarker), []byte(note), 0o644); err != nil {
+			slog.Warn("could not write the no-speech marker", "dir", s.dir, "error", err)
+		}
+		return fmt.Errorf("transcription found no speech; the audio is kept in %s", s.dir)
+	}
+
+	transcript := renderTranscript(segs)
 	if err := os.WriteFile(filepath.Join(s.dir, "transcript.md"), []byte(transcript), 0o644); err != nil {
 		return fmt.Errorf("write transcript: %w", err)
 	}

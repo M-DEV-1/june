@@ -96,9 +96,17 @@ func parseSegments(out, speaker string, offset time.Duration) []Segment {
 // nonSpeech matches whisper's markers for a stretch with no words in it — "[BLANK_AUDIO]", "(upbeat music)", "[SOUND]". A silent stream is otherwise nothing but these, and the microphone side of a call is silent most of the time.
 var nonSpeech = regexp.MustCompile(`^[\[(][^)\]]*[)\]]$`)
 
-func hmsToDuration(h, m, s, ms string) time.Duration {
+// hmsToDuration turns one whisper timestamp into a duration. frac is the fractional-seconds digits exactly as printed, so its length is its scale: "64" means 640ms, "640" means 640ms, and anything past three digits is finer than this cares about and is cut.
+func hmsToDuration(h, m, s, frac string) time.Duration {
 	n := func(v string) int { i, _ := strconv.Atoi(v); return i }
-	return time.Duration(n(h))*time.Hour + time.Duration(n(m))*time.Minute + time.Duration(n(s))*time.Second + time.Duration(n(ms))*time.Millisecond
+	if len(frac) > 3 {
+		frac = frac[:3]
+	}
+	ms := n(frac)
+	for i := len(frac); i < 3; i++ {
+		ms *= 10
+	}
+	return time.Duration(n(h))*time.Hour + time.Duration(n(m))*time.Minute + time.Duration(n(s))*time.Second + time.Duration(ms)*time.Millisecond
 }
 
 // renderTranscript sorts segments from both streams into one chronological conversation, one line per segment: "[MM:SS] [me] what was said".

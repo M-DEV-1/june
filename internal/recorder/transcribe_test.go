@@ -32,6 +32,20 @@ not a segment line
 	}
 }
 
+// The fractional part of a whisper timestamp is however many digits the build chose to print, so its length sets its scale: ".06" is 60ms, not 6ms, and ".5" is half a second, not half a millisecond.
+func TestParseSegments_FractionalSecondsScaleByDigitCount(t *testing.T) {
+	segs := parseSegments("[00:00:00.06 --> 00:00:01.5]   hello", speakerMe, 0)
+	if len(segs) != 1 {
+		t.Fatalf("got %d segments, want 1", len(segs))
+	}
+	if segs[0].Start != 60*time.Millisecond {
+		t.Errorf("start = %v, want 60ms", segs[0].Start)
+	}
+	if segs[0].End != 1500*time.Millisecond {
+		t.Errorf("end = %v, want 1.5s", segs[0].End)
+	}
+}
+
 // The two streams do not open at the same instant, so each stream's segments are shifted by how late that stream started relative to the recording as a whole.
 func TestParseSegments_AppliesStreamOffset(t *testing.T) {
 	segs := parseSegments("[00:00:01.000 --> 00:00:02.000]   hello", speakerCall, 500*time.Millisecond)
