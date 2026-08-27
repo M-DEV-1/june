@@ -24,10 +24,13 @@ func shellName() string {
 	return "sh"
 }
 
+// toolDefinitions returns ORA's own function declarations for the Live API.
+// Every declaration is NON_BLOCKING. An unset Behavior means BLOCKING, which tells the Live API to freeze the conversation for the whole duration of a tool call — the model stops speaking and stops listening until the result lands, so a two-second memory lookup becomes two seconds of dead air on a voice call. NON_BLOCKING keeps the model talking and listening while the call runs; the result is folded back in later, at the moment picked by toolResponseScheduling in connect.go. Ora's own tool execution was already off the receive loop (see runToolCall), so this changes nothing about the transport — only the model-level contract.
 func toolDefinitions() []*genai.Tool {
 	return []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
+				Behavior: genai.BehaviorNonBlocking,
 				// TODO: need an approve/suggest feature for these tools
 				Name:        "shell_exec",
 				Description: "Execute a shell command on the user's system. Use powershell syntax on windows, sh on linux/mac. ALWAYS ask for confirmation before running destructive commands (rm, del, format, etc).",
@@ -40,6 +43,7 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
+				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "read_clipboard",
 				Description: "Read the current contents of the user's clipboard",
 				Parameters: &genai.Schema{
@@ -47,6 +51,7 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
+				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "read_file",
 				Description: "Read the contents of a file on the user's filesystem. Use this to inspect code, configs, or any text file.",
 				Parameters: &genai.Schema{
@@ -58,6 +63,7 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
+				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "list_files",
 				Description: "List files and directories at a given path. Returns names with [dir] or [file] prefix.",
 				Parameters: &genai.Schema{
@@ -68,6 +74,7 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
+				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "open_url",
 				Description: "Open a URL in the user's default browser.",
 				Parameters: &genai.Schema{
@@ -79,7 +86,8 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
-				Name: "query_memory",
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "query_memory",
 				Description: "Topical search over memory (moments, facts, arcs, period summaries). " +
 					"Moments (screen observations) rank with recency; facts/notes do not expire. " +
 					"Use app to restrict to one application (Slack, Firefox, Code). " +
@@ -97,7 +105,8 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
-				Name: "recall",
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "recall",
 				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
 					"Use subject for an ongoing arc. Use app to keep only that application's moments. " +
 					"Returns short content+context lines, not raw screen dumps.",
@@ -112,6 +121,7 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
+				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "get_recent",
 				Description: "The most recent screen moments, newest first. Use for 'what was I just doing', 'what have I been looking at', or the last few captures in an app. Not a topical search.",
 				Parameters: &genai.Schema{
@@ -123,7 +133,8 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
-				Name: "branch",
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "branch",
 				Description: "Resolve one open-ended question or research task that needs cross-referencing " +
 					"several searches to build a complete answer (e.g. \"catch me up on everything about the " +
 					"Riddler project\", or a question spanning multiple topics/timeframes) — instead of calling " +
@@ -139,7 +150,8 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
-				Name: "save_note",
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "save_note",
 				Description: "Save a durable fact the user tells you directly in conversation — identity, " +
 					"preferences, plans, relationships, ongoing projects. Use this the moment they say something " +
 					"worth remembering long-term (\"remember I have a dentist appointment Friday\", \"I prefer " +
@@ -155,7 +167,8 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
-				Name: "update_note",
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "update_note",
 				Description: "Correct a previously saved note whose content was wrong (misheard, misunderstood, " +
 					"or the user says it's outdated) — look the note up first with query_memory to get its id " +
 					"from the \"[note#N]\" prefix, then call this with the corrected content. Use this instead of " +
@@ -170,7 +183,8 @@ func toolDefinitions() []*genai.Tool {
 				},
 			},
 			{
-				Name: "delete_note",
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "delete_note",
 				Description: "Permanently remove a previously saved note the user says is wrong, irrelevant, or " +
 					"should be forgotten — look the note up first with query_memory to get its id from the " +
 					"\"[note#N]\" prefix, then call this. Use this instead of just apologizing out loud and " +
