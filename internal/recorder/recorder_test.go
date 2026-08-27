@@ -177,6 +177,90 @@ func TestRecorder_PromptCarriesDesktopContext(t *testing.T) {
 	}
 }
 
+// Whisper can exit 0 and still yield nothing usable — a silent meeting, or a build whose output lines parseSegments does not recognise. That is not a success: the WAVs are still the only copy of the meeting, so they must survive, and nothing may be filed as minutes.
+func TestRecorder_KeepsAudioWhenTranscriptionYieldsNothing(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	r.whisper = func(ctx context.Context, bin, path, speaker string, offset time.Duration) ([]Segment, error) {
+		return nil, nil
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	sess, _ := r.stop()
+	if err := r.process(context.Background(), sess); err == nil {
+		t.Fatal("process must report that the transcription produced no speech")
+	}
+	for _, name := range []string{"mic.wav", "system.wav"} {
+		if _, err := os.Stat(filepath.Join(sess.dir, name)); err != nil {
+			t.Errorf("%s must survive a transcription that found no speech: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(sess.dir, noSpeechMarker)); err != nil {
+		t.Errorf("a marker naming the problem must be left in the recording dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sess.dir, "transcript.md")); !os.IsNotExist(err) {
+		t.Error("an empty transcript.md must not be written, it would look like a finished recording")
+	}
+	if len(store.notes) != 0 {
+		t.Errorf("nothing should be filed as minutes, got %v", store.notes)
+	}
+}
+
+// Quitting the tray or crashing mid-recording leaves WAVs with no transcript beside them. The next time the recorder is built, those directories get picked up and processed.
+func TestRecorder_ResumesOrphanedRecordings(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	<-r.swept // the sweep New starts has finished, so the fields below are ours alone
+
+	orphan := filepath.Join(r.dataDir, "recordings", "2026-08-27T09-30-00")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mic.wav", "system.wav"} {
+		if err := os.WriteFile(filepath.Join(orphan, name), make([]byte, 3200), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A directory that already has its transcript is finished and must be left alone.
+	done := filepath.Join(r.dataDir, "recordings", "2026-08-26T09-30-00")
+	if err := os.MkdirAll(done, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(done, "mic.wav"), make([]byte, 3200), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(done, "transcript.md"), []byte("[00:00:00] [me] already done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A recording that is running right now looks exactly like an abandoned one on disk, so the sweep must leave anything started at or after its cutoff alone.
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	live, err := r.stop()
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	r.resumeOrphans(context.Background(), time.Now())
+
+	if _, err := os.Stat(filepath.Join(live.dir, "transcript.md")); !os.IsNotExist(err) {
+		t.Error("the sweep transcribed a recording that started after its cutoff, which is how it would eat a live one")
+	}
+
+	if _, err := os.ReadFile(filepath.Join(orphan, "transcript.md")); err != nil {
+		t.Errorf("the orphaned recording should have been transcribed: %v", err)
+	}
+	if len(store.notes) != 1 {
+		t.Errorf("the orphaned recording should have filed exactly one set of minutes, got %v", store.notes)
+	}
+	if _, err := os.Stat(filepath.Join(done, "mic.wav")); err != nil {
+		t.Errorf("an already-transcribed recording must not be reprocessed: %v", err)
+	}
+}
+
 // A failed transcription must not destroy the recording — the WAVs are the only copy of what was said.
 func TestRecorder_KeepsAudioWhenTranscriptionFails(t *testing.T) {
 	r, _, _ := newTestRecorder(t, &fakeStore{})
