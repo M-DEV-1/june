@@ -124,6 +124,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	appConfig := config.LoadConfig()
+
+	// The config file is the switch for start-on-login: make the on-disk login entry agree with it on every daemon start, so a config edited by hand (or an entry left behind by an older build) is corrected here rather than drifting.
+	reconcileAutostart(appConfig.Autostart)
+
 	apiKey := os.Getenv("GEMINI_API_KEY")
 
 	summarizer, err := memory.NewGeminiSummarizer(apiKey)
