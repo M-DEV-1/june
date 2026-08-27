@@ -2279,6 +2279,10 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Every summary writer funnels through here, so strip object replacement characters once at the door: window titles carry U+FFFC into the compiler's raw-activity fallback and occasionally into LLM summaries.
+	summary.TaskName = memory.StripObjectChars(summary.TaskName)
+	summary.Summary = memory.StripObjectChars(summary.Summary)
+
 	// if new task, and no task id - create task node
 	if !summary.SameTask || s.currentTaskID == 0 {
 		taskID, err := s.ensureNode(ctx, s.currentParentID, "task", summary.TaskName)
