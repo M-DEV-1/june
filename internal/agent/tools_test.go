@@ -696,6 +696,17 @@ func TestLiveTools_IncludesFunctionDeclarationsAndGoogleSearch(t *testing.T) {
 	}
 }
 
+// TestToolDefinitions_AllNonBlocking verifies every function declaration is declared NON_BLOCKING. Left unset, the Live API treats a declaration as BLOCKING, which makes the model stop talking and stop listening for the whole duration of a tool call — a memory lookup that takes two seconds turns into two seconds of dead air on a voice call. NON_BLOCKING lets the model keep the conversation going while the result comes back out of band (see toolResponseScheduling for how the result is then folded in).
+func TestToolDefinitions_AllNonBlocking(t *testing.T) {
+	for _, tool := range toolDefinitions() {
+		for _, fd := range tool.FunctionDeclarations {
+			if fd.Behavior != genai.BehaviorNonBlocking {
+				t.Errorf("tool %q has Behavior %q, want %q", fd.Name, fd.Behavior, genai.BehaviorNonBlocking)
+			}
+		}
+	}
+}
+
 // --- save_note ---
 //
 // Nothing said IN CONVERSATION reached long-term memory before this tool existed: LogNote was only ever called from the TUI's /note slash command or the background screen-activity compiler, never from the live agent itself. save_note closes that gap.
