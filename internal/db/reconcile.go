@@ -52,7 +52,8 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 		return report, nil
 	}
 
-	for _, c := range s.reconcileBackfillCandidates(ctx) {
+	// The candidate builder already drops what the index has for the sources it bounds; this covers the rest, so nothing that already has a vector is embedded twice.
+	for _, c := range s.reconcileBackfillCandidates(ctx, existing, embedCap) {
 		if existing[c.id] {
 			continue
 		}
@@ -81,11 +82,14 @@ type reconcileCandidate struct {
 	metadata map[string]string
 }
 
+// reconcileCandidateBound is how many multiples of one sweep's embed cap the episode scan may collect before it stops. Above one so a sweep whose first candidates fail to embed still has others to fall back on, small enough that the list stays a few hundred rows rather than the whole capture history.
+const reconcileCandidateBound = 4
+
 // reconcileEpisodeWindow bounds how far back an episode is still eligible for vector backfill — matches the "recent" framing the rest of the memory system uses (e.g. RankedEpisodes' recency decay); re-embedding arbitrarily old raw captures indefinitely isn't worth the API cost.
 const reconcileEpisodeWindow = 10 * 24 * time.Hour
 
 // reconcileBackfillCandidates returns notes, live (non-digested) summary and digest nodes, threads, and episodes (within reconcileEpisodeWindow unless embeds are free) — every source whose vector lifecycle ReconcileVectors owns. Metadata and embed text are built to match each source's own write-path goroutine exactly (LogNote/LogSemanticNode/LogEpisode) — a backfilled vector missing e.g. domain would silently drop out of every domain-filtered search (chromem's exact-match where fails on a missing key), and a missing created_at defeats HybridSearch's moment recency decay for episodes. Query errors are logged and treated as "no candidates from this source" rather than failing the whole sweep.
-func (s *Store) reconcileBackfillCandidates(ctx context.Context) []reconcileCandidate {
+func (s *Store) reconcileBackfillCandidates(ctx context.Context, existing map[string]bool, embedCap int) []reconcileCandidate {
 	var out []reconcileCandidate
 
 	noteRows, err := s.db.QueryContext(ctx, `SELECT id, content, created_at FROM notes`)
@@ -184,15 +188,24 @@ func (s *Store) reconcileBackfillCandidates(ctx context.Context) []reconcileCand
 		episodeQuery = `SELECT id, app, title, screen_text, domain, created_at FROM episodes WHERE screen_text != ''`
 		args = nil
 	}
+	episodeCandidates := 0
 	episodeRows, err := s.db.QueryContext(ctx, episodeQuery, args...)
 	if err != nil {
 		slog.Error("reconcile: query episodes for backfill failed", "error", err)
 	} else {
 		for episodeRows.Next() {
+			// Episodes are the one unbounded source here: the store holds every capture ever taken, and with a free embedder there is no age window either, so reading them all in would materialise every screen capture's full text for a sweep that can only ever embed embedCap of them. Stopping the scan a few multiples past that cap keeps the memory proportional to the work.
+			// The already-indexed ids are skipped here rather than after the list is built, so the bounded budget goes to episodes that actually need a vector — and since the scan is in rowid order, each sweep resumes on the oldest ones still missing and the backlog drains instead of the same rows being rebuilt every time.
+			if episodeCandidates >= reconcileCandidateBound*embedCap {
+				break
+			}
 			var id int64
 			var app, title, screenText, domain, created string
 			if err := episodeRows.Scan(&id, &app, &title, &screenText, &domain, &created); err != nil {
 				slog.Error("reconcile: scan episode for backfill failed", "error", err)
+				continue
+			}
+			if existing[fmt.Sprintf("episode:%d", id)] {
 				continue
 			}
 			// Same context-framed document LogEpisode embeds (app/title header + content), not bare screen_text — Normalize re-running on already-clean stored text is safe (it's idempotent chrome-stripping/capping on content that's already clean).
@@ -200,6 +213,7 @@ func (s *Store) reconcileBackfillCandidates(ctx context.Context) []reconcileCand
 			if strings.TrimSpace(doc) == "" {
 				doc = screenText
 			}
+			episodeCandidates++
 			out = append(out, reconcileCandidate{
 				id:      fmt.Sprintf("episode:%d", id),
 				content: doc,
