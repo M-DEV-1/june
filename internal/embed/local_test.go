@@ -131,6 +131,45 @@ func TestLocalEmbedderErrorsOnEmptyData(t *testing.T) {
 	}
 }
 
+// TestLocalEmbedderDoesNotRetryAServerFailure verifies a failure that has nothing to do with the input's length (here a 503 from a server still loading its model) costs exactly one request. Halving and retrying that quadruples the load on a server that is already struggling, and shorter text would not have helped anyway.
+func TestLocalEmbedderDoesNotRetryAServerFailure(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "model not loaded", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	if _, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, strings.Repeat("b", 800)); err == nil {
+		t.Fatal("expected an error on a 503")
+	}
+	if requests != 1 {
+		t.Errorf("made %d requests for one unretryable failure, want 1", requests)
+	}
+}
+
+// TestInputTooLong covers the classifier the retry hangs off: only a rejection about the input's size is worth sending shorter text for. Transport failures, cancelled contexts and a server that is merely unwell are not.
+func TestInputTooLong(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"llama-server oversized input", http.StatusInternalServerError, "input is too large to process. increase the physical batch size", true},
+		{"exceeds context", http.StatusInternalServerError, "the request exceeds the available context size", true},
+		{"bad request", http.StatusBadRequest, "invalid input", true},
+		{"model still loading", http.StatusServiceUnavailable, "model not loaded", false},
+		{"plain server error", http.StatusInternalServerError, "unexpected failure", false},
+		{"no response at all", 0, "", false},
+	}
+	for _, c := range cases {
+		if got := inputTooLong(c.status, c.body); got != c.want {
+			t.Errorf("%s: inputTooLong(%d, %q) = %v, want %v", c.name, c.status, c.body, got, c.want)
+		}
+	}
+}
+
 func TestLocalEmbedderSatisfiesEmbedder(t *testing.T) {
 	var _ Embedder = NewLocalEmbedder("http://localhost:8080", "m")
 }

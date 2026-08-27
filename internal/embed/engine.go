@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,12 +26,21 @@ type Engine struct {
 	startupTimeout time.Duration
 	pollInterval   time.Duration
 
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	exited     chan struct{}
-	lastUse    time.Time
-	lastClient time.Time
-	closed     bool
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	exited  chan struct{}
+	start   *startState
+	lastUse time.Time
+	closed  bool
+
+	// lastClient is atomic rather than guarded by mu because MarkClientPresence runs on every authenticated IPC request, including ones with a 300ms budget, and must never wait behind a spawn, a model load, or a child being killed.
+	lastClient atomic.Int64
+}
+
+// startState is one in-flight spawn-and-load. err is written before done is closed, so every waiter that observes the close sees it.
+type startState struct {
+	done chan struct{}
+	err  error
 }
 
 // defaultPresenceWindow is how long after a client's last authenticated IPC request the embedding server stays pinned in memory. Three minutes: a user pausing mid-conversation should not pay a cold start for their next question.
@@ -52,11 +62,18 @@ func NewEngine(binary string, args []string, baseURL, model string, idle time.Du
 	}
 }
 
-// MarkClientPresence records that an authenticated client request just arrived. This is what pins the server in memory while a TUI is running; it is called from the daemon's IPC auth wrapper, so every client request counts.
+// MarkClientPresence records that an authenticated client request just arrived. This is what pins the server in memory while a TUI is running; it is called from the daemon's IPC auth wrapper, so every client request counts. Lock-free: it is on the critical path of every IPC request.
 func (e *Engine) MarkClientPresence() {
-	e.mu.Lock()
-	e.lastClient = time.Now()
-	e.mu.Unlock()
+	e.lastClient.Store(time.Now().UnixNano())
+}
+
+// sinceLastClient is how long ago the last authenticated client request arrived, or a very long time when there has never been one.
+func (e *Engine) sinceLastClient() time.Duration {
+	ns := e.lastClient.Load()
+	if ns == 0 {
+		return time.Duration(1<<62 - 1)
+	}
+	return time.Since(time.Unix(0, ns))
 }
 
 // Warm starts the server if it is not already up, without embedding anything — used when a client first appears, so the user's first question does not pay the cold start.
@@ -82,12 +99,13 @@ func (e *Engine) Running() bool {
 	return e.aliveLocked()
 }
 
-// Close kills the child and puts the Engine into a state where further embeds fail rather than resurrecting it. Called from the daemon's shutdown path so the server never outlives the daemon.
+// Close kills the child and puts the Engine into a state where further embeds fail rather than resurrecting it. Called from the daemon's shutdown path so the server never outlives the daemon. It waits for the child to actually die, but does that outside e.mu so nothing else blocks on it.
 func (e *Engine) Close() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.closed = true
-	e.stopLocked()
+	cmd, exited := e.detachLocked()
+	e.mu.Unlock()
+	killChild(cmd, exited)
 	return nil
 }
 
@@ -104,16 +122,33 @@ func (e *Engine) aliveLocked() bool {
 	}
 }
 
-// ensureUp spawns the child if it is not running and blocks until the server answers /health. Concurrent callers serialize on e.mu, so only one spawn ever happens.
+// ensureUp makes sure a loaded server is up, and returns only once one is (or the attempt failed, or ctx ran out). The spawn and the readiness wait happen on their own goroutine under a background context, so a caller giving up — its request context carries the client's few-second retrieve budget, far shorter than a model load — takes nothing down with it: the child keeps loading and the next caller joins the same wait.
 func (e *Engine) ensureUp(ctx context.Context) error {
+	start, err := e.beginStart()
+	if err != nil || start == nil {
+		return err
+	}
+	select {
+	case <-start.done:
+		return start.err
+	case <-ctx.Done():
+		return fmt.Errorf("embed engine: waiting for server: %w", ctx.Err())
+	}
+}
+
+// beginStart returns the in-flight (or newly launched) start to wait on, or nil when a loaded server is already up. Input: nothing. Output: the start to wait on, or an error if the Engine is closed or the child could not be spawned at all. e.mu is held only for the spawn itself, never for the readiness wait.
+func (e *Engine) beginStart() (*startState, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.closed {
-		return fmt.Errorf("embed engine: closed")
+		return nil, fmt.Errorf("embed engine: closed")
+	}
+	if e.start != nil {
+		return e.start, nil
 	}
 	if e.aliveLocked() {
-		return nil
+		return nil, nil
 	}
 
 	cmd := exec.Command(e.binary, e.args...)
@@ -122,7 +157,7 @@ func (e *Engine) ensureUp(ctx context.Context) error {
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = childProcAttr()
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("embed engine: start %s: %w", e.binary, err)
+		return nil, fmt.Errorf("embed engine: start %s: %w", e.binary, err)
 	}
 
 	exited := make(chan struct{})
@@ -134,25 +169,44 @@ func (e *Engine) ensureUp(ctx context.Context) error {
 	e.lastUse = time.Now()
 	slog.Info("embedding server started", "pid", cmd.Process.Pid, "url", e.baseURL)
 
-	if err := e.waitReady(ctx, exited); err != nil {
-		e.stopLocked()
-		return err
-	}
-
-	go e.reap(exited)
-	return nil
+	start := &startState{done: make(chan struct{})}
+	e.start = start
+	go e.finishStart(start, exited)
+	return start, nil
 }
 
-// waitReady polls the server's /health until it answers, the child exits, the caller's context is cancelled, or startupTimeout passes.
-func (e *Engine) waitReady(ctx context.Context, exited chan struct{}) error {
+// finishStart waits for the freshly spawned child to answer /health and publishes the outcome to everyone waiting on start. A child that never became ready is killed here — that is the only cancellation that may kill it, never a caller's.
+func (e *Engine) finishStart(start *startState, exited chan struct{}) {
+	err := e.waitReady(exited)
+
+	e.mu.Lock()
+	var cmd *exec.Cmd
+	var dead chan struct{}
+	if err != nil {
+		cmd, dead = e.detachLocked()
+	}
+	e.start = nil
+	e.mu.Unlock()
+
+	start.err = err
+	close(start.done)
+
+	if err != nil {
+		killChild(cmd, dead)
+		return
+	}
+	go e.reap(exited)
+}
+
+// waitReady polls the server's /health until it answers, the child exits, or startupTimeout passes. It deliberately takes no caller context: a model load outlives any single request's budget.
+func (e *Engine) waitReady(exited chan struct{}) error {
+	ctx := context.Background()
 	deadline := time.Now().Add(e.startupTimeout)
 	client := &http.Client{Timeout: 2 * time.Second}
 	for {
 		select {
 		case <-exited:
 			return fmt.Errorf("embed engine: server exited during startup")
-		case <-ctx.Done():
-			return fmt.Errorf("embed engine: waiting for server: %w", ctx.Err())
 		default:
 		}
 
@@ -195,24 +249,34 @@ func (e *Engine) reap(exited chan struct{}) {
 			return
 		}
 		// A client seen recently pins the server: the user is in a session and must not pay a cold start mid-conversation.
-		if time.Since(e.lastClient) < e.presenceWindow || time.Since(e.lastUse) < e.idle {
+		if e.sinceLastClient() < e.presenceWindow || time.Since(e.lastUse) < e.idle {
 			e.mu.Unlock()
 			continue
 		}
 		slog.Info("embedding server idle, shutting it down", "idle_for", time.Since(e.lastUse).Round(time.Second))
-		e.stopLocked()
+		cmd, dead := e.detachLocked()
 		e.mu.Unlock()
+		killChild(cmd, dead)
 		return
 	}
 }
 
-// stopLocked SIGTERMs the child and waits briefly for it to go, escalating to SIGKILL. Caller holds e.mu. A no-op when nothing is running.
-func (e *Engine) stopLocked() {
+// detachLocked hands the running child over to the caller and forgets it, so the Engine immediately reports as not running while the process is still dying. Caller holds e.mu. Returns nil when nothing is running.
+func (e *Engine) detachLocked() (*exec.Cmd, chan struct{}) {
 	if !e.aliveLocked() {
 		e.cmd = nil
-		return
+		return nil, nil
 	}
 	cmd, exited := e.cmd, e.exited
+	e.cmd = nil
+	return cmd, exited
+}
+
+// killChild SIGTERMs a detached child and waits for it to go, escalating to SIGKILL after five seconds. Called outside e.mu — nothing else may block on a dying process. A nil cmd is a no-op.
+func killChild(cmd *exec.Cmd, exited chan struct{}) {
+	if cmd == nil {
+		return
+	}
 	cmd.Process.Signal(os.Interrupt)
 	select {
 	case <-exited:
@@ -220,7 +284,6 @@ func (e *Engine) stopLocked() {
 		cmd.Process.Kill()
 		<-exited
 	}
-	e.cmd = nil
 }
 
 // pid returns the running child's process id, or 0 when nothing is running. Used by the tests to prove a respawn produced a genuinely new process.
