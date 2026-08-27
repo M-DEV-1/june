@@ -186,3 +186,14 @@ func (c *ChromemIndex) Count() int {
 	defer c.mu.Unlock()
 	return c.col.Count()
 }
+
+// IDs returns every doc id currently in the index — the sidecar map (already the source of truth for eviction) doubles as the id list, so this is a simple key dump rather than a chromem query. Used by the reconciliation sweep (internal/db) to find vectors whose backing SQL row is gone or that are missing a vector entirely.
+func (c *ChromemIndex) IDs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]string, 0, len(c.createdAt))
+	for id := range c.createdAt {
+		ids = append(ids, id)
+	}
+	return ids
+}

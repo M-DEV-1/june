@@ -16,5 +16,7 @@ type Index interface {
 	Add(ctx context.Context, id, content string, embedding []float32, metadata map[string]string) error
 	Search(ctx context.Context, queryEmbedding []float32, n int, where map[string]string) ([]Result, error)
 	Delete(ctx context.Context, id string) error
+	// IDs returns every doc id currently in the index — used by the reconciliation sweep (internal/db) to find orphaned or missing vectors.
+	IDs() []string
 	Count() int
 }

@@ -175,6 +175,43 @@ func TestChromemIndex_Delete_RemovesFromSearchAndCount(t *testing.T) {
 	}
 }
 
+// TestChromemIndex_IDs_ListsAllDocsAndReflectsDelete verifies IDs() reports every doc currently in the index and stops reporting one right after Delete — the reconciliation sweep (internal/db) walks this list to find orphaned/missing vectors, so it must reflect live state, not a stale snapshot.
+func TestChromemIndex_IDs_ListsAllDocsAndReflectsDelete(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	idx, err := NewChromemIndex(dir, "test-collection", 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex: %v", err)
+	}
+
+	if err := idx.Add(ctx, "note:1", "a", []float32{1, 0}, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := idx.Add(ctx, "note:2", "b", []float32{0, 1}, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	ids := idx.IDs()
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 ids, got %d: %v", len(ids), ids)
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if !seen["note:1"] || !seen["note:2"] {
+		t.Errorf("expected both note:1 and note:2, got %v", ids)
+	}
+
+	if err := idx.Delete(ctx, "note:1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	ids = idx.IDs()
+	if len(ids) != 1 || ids[0] != "note:2" {
+		t.Errorf("expected only note:2 to remain after delete, got %v", ids)
+	}
+}
+
 // TestChromemIndex_PersistenceAcrossRestart_RespectsMaxDocsCap verifies a second ChromemIndex opened on the same dbPath finds docs added by a first, discarded one (simulating a restart), and that the maxDocs sidecar survives too, not just chromem-go's own on-disk data.
 func TestChromemIndex_PersistenceAcrossRestart_RespectsMaxDocsCap(t *testing.T) {
 
