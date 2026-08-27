@@ -253,11 +253,16 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 		})
 	}
 
-	// Relevance floor for multi-term queries: buildFTSMatch ORs every significant term together, so FTS5 alone returns any row matching even one of them. A candidate matching only one of two-or-more query terms is coincidental noise, not a real match — this is what "10 junk rows for an absent-topic query" traces back to. Single-term queries have nothing to compare against, so they're left alone.
-	if queryTerms := tokenizeQuery(query); len(queryTerms) >= 2 {
+	// Relevance floor for multi-term queries: buildFTSMatch ORs every significant term together, so FTS5 alone returns any row matching even one of them. A candidate matching a small fraction of a long query is coincidental noise, not a real match — this is what "10 junk rows for an absent-topic query" traces back to.
+	// The floor is half the query's terms, capped at two, so it scales with the question instead of turning short queries into a strict AND: two-term queries need one term (unchanged from plain FTS5, since "ora daemon" must still find "the daemon crashed"), three or more need two.
+	if queryTerms := tokenizeQuery(query); len(queryTerms) >= 3 {
+		need := (len(queryTerms) + 1) / 2
+		if need > 2 {
+			need = 2
+		}
 		filtered := lexical[:0:0]
 		for _, c := range lexical {
-			if lexicalTermOverlap(c.content, queryTerms) >= 2 {
+			if lexicalTermOverlap(c.content, queryTerms) >= need {
 				filtered = append(filtered, c)
 			}
 		}
