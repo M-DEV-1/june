@@ -14,11 +14,6 @@ import (
 //go:embed uia.ps1
 var uiaScript string
 
-// captureScreen is a no-op — UIA reads live from the OS, no pixel capture needed.
-func captureScreen() ([]byte, error) {
-	return nil, nil
-}
-
 // grabScreen is not yet implemented on Windows — UIA text capture covers most cases; a BitBlt-based visual tier can be added later.
 func grabScreen(_ context.Context) ([]byte, error) {
 	return nil, errors.New("screenshot not implemented on windows")
