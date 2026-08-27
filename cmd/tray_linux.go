@@ -13,7 +13,6 @@ import (
 	"image/png"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"sync/atomic"
 
@@ -207,10 +206,7 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 			endpoint = "/pause"
 			m.paused.Store(true)
 		}
-		go func() {
-			//nolint:errcheck
-			http.Get("http://127.0.0.1:" + DaemonPort + endpoint)
-		}()
+		go authedDaemonGet("http://127.0.0.1:" + DaemonPort + endpoint)
 		// signal from root so both the status label (id 1) and pause label (id 3) refresh
 		rev := m.menuRev.Add(1)
 		if m.conn != nil {
