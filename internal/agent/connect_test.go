@@ -127,6 +127,88 @@ func TestSystemInstructionText_TreatsMemoryAsDataNotInstructions(t *testing.T) {
 	}
 }
 
+// TestSystemInstructionText_PreambleAndMemoryToolMandate covers the two prompt rules that make NON_BLOCKING tool calls survive on a voice call: the model must say a short spoken line before/while a tool runs so the call never goes silent, and any question about the user's own past activity must actually trigger a memory tool call rather than be answered from the frozen handshake context. The second rule is the whole voice-path retrieval mechanism — nothing else injects memory into a spoken turn.
+func TestSystemInstructionText_PreambleAndMemoryToolMandate(t *testing.T) {
+	now := time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC)
+
+	got := systemInstructionText(now, "linux", "amd64", "sh", "some context", 5)
+
+	for _, want := range []string{
+		"never go silent",
+		"one short line",
+		"MUST call",
+		"query_memory",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
+		}
+	}
+}
+
+// TestToolResponseScheduling covers the scheduling table for NON_BLOCKING tool results: a result the user is sitting there waiting for interrupts whatever the model is currently saying, everything else waits for a natural gap so it never talks over the user.
+func TestToolResponseScheduling(t *testing.T) {
+	for _, tc := range []struct {
+		tool string
+		want genai.FunctionResponseScheduling
+	}{
+		{"query_memory", genai.FunctionResponseSchedulingInterrupt},
+		{"recall", genai.FunctionResponseSchedulingInterrupt},
+		{"get_recent", genai.FunctionResponseSchedulingInterrupt},
+		{"branch", genai.FunctionResponseSchedulingInterrupt},
+		{"shell_exec", genai.FunctionResponseSchedulingInterrupt},
+		{"read_file", genai.FunctionResponseSchedulingInterrupt},
+		{"save_note", genai.FunctionResponseSchedulingWhenIdle},
+		{"update_note", genai.FunctionResponseSchedulingWhenIdle},
+		{"delete_note", genai.FunctionResponseSchedulingWhenIdle},
+		{"open_url", genai.FunctionResponseSchedulingWhenIdle},
+		{"totally_unknown_tool", genai.FunctionResponseSchedulingWhenIdle},
+	} {
+		if got := toolResponseScheduling(tc.tool); got != tc.want {
+			t.Errorf("toolResponseScheduling(%q) = %q, want %q", tc.tool, got, tc.want)
+		}
+	}
+}
+
+// TestRunToolCall_SendsScheduling proves the scheduling table is actually attached to the FunctionResponse that goes back over the wire, not just computed. Without it the Live API defaults every NON_BLOCKING result to WHEN_IDLE, so an answer the user asked for waits for a gap that may never come.
+func TestRunToolCall_SendsScheduling(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 2),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-1", Name: "query_memory", Args: map[string]any{"query": "riddler"}},
+		},
+	}}
+
+	select {
+	case resp := <-fs.responses:
+		fr := resp.FunctionResponses[0]
+		if fr.Scheduling != genai.FunctionResponseSchedulingInterrupt {
+			t.Errorf("expected query_memory's response to carry INTERRUPT scheduling, got %q", fr.Scheduling)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the tool response")
+	}
+}
+
+// TestProactivityConfig verifies the proactive-audio knob maps to the Live API config: on means the model may stay quiet when what it heard wasn't addressed to it, off means the field is omitted entirely so the API keeps its own default.
+func TestProactivityConfig(t *testing.T) {
+	if cfg := proactivityConfig(false); cfg != nil {
+		t.Errorf("expected nil config when disabled, got %+v", cfg)
+	}
+	cfg := proactivityConfig(true)
+	if cfg == nil || cfg.ProactiveAudio == nil || !*cfg.ProactiveAudio {
+		t.Errorf("expected ProactiveAudio true when enabled, got %+v", cfg)
+	}
+}
+
 // TestFormatFocusHits_TruncatesOverlongContent verifies the handshake's focus-lookup formatting excerpts content via db.FormatHit/FormatNoteHit like every other read path — this was the one site injecting SearchMemory hits raw and uncapped straight into the system instruction. Raw Activity Log summaries in production run tens of KB; an unformatted hit here can blow the system-prompt budget on a single row.
 func TestFormatFocusHits_TruncatesOverlongContent(t *testing.T) {
 	overlong := strings.Repeat("x", 500) // well past db's excerpt budget (200 runes)
