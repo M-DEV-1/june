@@ -2496,3 +2496,25 @@ func TestCreateSchema_RebuildsSummaryFTSContent(t *testing.T) {
 		t.Errorf("searching a JSON key returned %d hits, want 0: %+v", len(hits), hits)
 	}
 }
+
+func TestLogSemanticNode_StripsObjectChars(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	err = store.LogSemanticNode(ctx, memory.TaskSummary{SameTask: false, TaskName: "Photos ￼ review", Summary: "Browsing ￼￼ the gallery ￼"})
+	if err != nil {
+		t.Fatalf("LogSemanticNode: %v", err)
+	}
+
+	var content string
+	if err := store.DB().QueryRow(`SELECT content FROM nodes WHERE type = 'summary'`).Scan(&content); err != nil {
+		t.Fatalf("query summary node: %v", err)
+	}
+	if strings.ContainsRune(content, '￼') {
+		t.Errorf("summary node content = %q, want no object replacement characters", content)
+	}
+}
