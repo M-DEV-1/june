@@ -35,18 +35,19 @@ func ParseScreenSight(raw string) ScreenSight {
 }
 
 // ComposeMoment builds the searchable screen_text for a moment. Activity first, then visible chunks, else fallback (title or a11y). Capped at signalMaxWords so FTS/embeddings stay short.
+// Object replacement characters are stripped from every part and parts left empty by that are dropped: AT-SPI renders each image, video, and icon as U+FFFC, and this output overrides Normalize's cleaned text in db.WriteEpisode, so anything not stripped here is stored and embedded as-is.
 func ComposeMoment(activity string, visible []string, fallback string) string {
 	var parts []string
-	if a := strings.TrimSpace(activity); a != "" {
+	if a := StripObjectChars(activity); a != "" {
 		parts = append(parts, a)
 	}
 	for _, line := range visible {
-		if line = strings.TrimSpace(line); line != "" {
+		if line = StripObjectChars(line); line != "" {
 			parts = append(parts, line)
 		}
 	}
 	if len(parts) == 0 {
-		return strings.TrimSpace(fallback)
+		return StripObjectChars(fallback)
 	}
 	if wordCount(strings.Join(parts, " ")) <= signalMaxWords {
 		return strings.Join(parts, "\n")
