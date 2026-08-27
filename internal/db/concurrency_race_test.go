@@ -80,11 +80,23 @@ func (m *memIndex) Search(ctx context.Context, queryEmbedding []float32, n int, 
 	return out, nil
 }
 
-func (m *memIndex) Count() int {
+func (m *memIndex) Delete(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.docs)
+	delete(m.docs, id)
+	return nil
 }
+
+func (m *memIndex) IDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.docs))
+	for id := range m.docs {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 
 // TestConcurrentLogEpisodeAndHybridSearch hammers write + search under -race. Catches unlocked embedder field access and map races in the vector half.
 func TestConcurrentLogEpisodeAndHybridSearch(t *testing.T) {
