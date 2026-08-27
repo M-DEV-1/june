@@ -2112,3 +2112,52 @@ func TestUpdate_ToolConfirmResolved_RestoresPriorMode(t *testing.T) {
 		t.Errorf("expected the prior mode restored, got %v", m.mode)
 	}
 }
+
+// --- elapsed time on tool activity ---
+
+// TestRenderStatusLine_ShowsElapsedSeconds: a running tool must look obviously alive rather than hung, so the status row carries how long it has been going, ticking up while it runs.
+func TestRenderStatusLine_ShowsElapsedSeconds(t *testing.T) {
+	m := newTestModel()
+	m.activity = &liveStatus{kind: statusTool, id: "call-1", label: `recall("meeting notes")`, started: time.Now().Add(-3 * time.Second)}
+
+	got := m.renderStatusLine()
+
+	if !strings.Contains(got, "3.0s") {
+		t.Errorf("expected the elapsed time in the status line, got %q", got)
+	}
+	if !strings.Contains(got, `recall("meeting notes")`) {
+		t.Errorf("expected the tool label in the status line, got %q", got)
+	}
+}
+
+// TestUpdate_ToolActivityFinished_RecordsDuration: the finished transcript entry says how long the call took, so a slow tool is visible after the fact and not just while it runs.
+func TestUpdate_ToolActivityFinished_RecordsDuration(t *testing.T) {
+	m := newTestModel()
+	started := time.Now().Add(-800 * time.Millisecond)
+
+	next, _ := m.Update(agent.ToolActivity{
+		ID: "call-1", Name: "recall", ArgsSummary: `"meeting notes"`,
+		Phase: agent.ToolFinished, ResultSummary: "4 hits", Started: started,
+	})
+	nm := next.(model)
+
+	last := nm.messages[len(nm.messages)-1]
+	if !strings.Contains(last.Content, "0.8s") {
+		t.Errorf("expected the call duration in the finished tool line, got %q", last.Content)
+	}
+	if !strings.Contains(last.Content, "4 hits") {
+		t.Errorf("expected the result summary to survive, got %q", last.Content)
+	}
+}
+
+// TestUpdate_ToolActivityFinished_NoStartTime_OmitsDuration: a Finished event with no start time (only possible from a synthetic event) must not render a nonsense duration measured from the zero time.
+func TestUpdate_ToolActivityFinished_NoStartTime_OmitsDuration(t *testing.T) {
+	m := newTestModel()
+
+	next, _ := m.Update(agent.ToolActivity{ID: "call-1", Name: "list_files", Phase: agent.ToolFinished, ResultSummary: "done"})
+	nm := next.(model)
+
+	if last := nm.messages[len(nm.messages)-1]; last.Content != "list_files() → done" {
+		t.Errorf("expected no duration suffix without a start time, got %q", last.Content)
+	}
+}
