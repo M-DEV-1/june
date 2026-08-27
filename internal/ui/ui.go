@@ -84,9 +84,16 @@ const daemonStatusURL = "http://127.0.0.1:" + daemonPort + "/status"
 
 var daemonPollClient = &http.Client{Timeout: 300 * time.Millisecond}
 
-// pollDaemonHTTP is a GET-and-check-200 helper. Takes client/URL as params instead of reading the package-level ones directly, so tests can point it at an httptest.Server instead of the real daemon port.
-func pollDaemonHTTP(client *http.Client, url string) bool {
-	resp, err := client.Get(url)
+// pollDaemonHTTP is a GET-and-check-200 helper. Takes client/URL as params instead of reading the package-level ones directly, so tests can point it at an httptest.Server instead of the real daemon port. tokenPath points at the daemon's IPC auth token file (see internal/ipctoken) — /status now requires it like every other daemon IPC endpoint except /ping; a read failure just means the request goes out without the header and the daemon 401s it, same as any other unreachable-daemon case this already has to tolerate.
+func pollDaemonHTTP(client *http.Client, url, tokenPath string) bool {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	if token, err := ipctoken.Read(tokenPath); err == nil {
+		req.Header.Set(ipctoken.HeaderName, token)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -193,7 +200,7 @@ func (m model) daemonPollTick() tea.Cmd {
 
 func (m model) pollDaemonStatus() tea.Cmd {
 	return func() tea.Msg {
-		return daemonStatusMsg(pollDaemonHTTP(daemonPollClient, daemonStatusURL))
+		return daemonStatusMsg(pollDaemonHTTP(daemonPollClient, daemonStatusURL, ipctoken.DefaultPath))
 	}
 }
 
