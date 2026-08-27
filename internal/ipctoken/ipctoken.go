@@ -8,13 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"ora/internal/config"
 )
 
 // HeaderName is the HTTP header IPC clients must set to the token value.
 const HeaderName = "X-Ora-Token"
 
-// DefaultPath is where the daemon writes the token and where every IPC client (the TUI, httpVectorIndex, the tray) reads it from — relative to the process's working directory, same convention as "ora-db/db" and "ora-db/vectors".
-const DefaultPath = "ora-db/ipc-token"
+// DefaultPath is where the daemon writes the token and where every IPC client (the TUI, httpVectorIndex, the tray) reads it from — inside config.DataDir(), so it resolves to the same file regardless of the process's working directory (the daemon and a terminal-launched client otherwise disagree on cwd and silently open different token files).
+var DefaultPath = filepath.Join(config.DataDir(), "ipc-token")
 
 // tokenBytes is the random token length in bytes (32 → 64 hex chars) — comfortably beyond brute-force range for a same-machine, process-lifetime secret.
 const tokenBytes = 32

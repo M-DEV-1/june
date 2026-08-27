@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"ora/internal/agent"
@@ -28,7 +29,7 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 
 	go func() {
 		var err error
-		store, err = db.New("ora-db/db")
+		store, err = db.New(filepath.Join(config.DataDir(), "db"))
 		initErrChan <- err
 	}()
 
@@ -61,9 +62,16 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	}
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
+	appConfig := config.LoadConfig()
 
 	// Wire the client's own store for hybrid search: an embedder built locally (same recipe the daemon uses) plus a vector index reached over the daemon's /vector/* IPC instead of opening chromem directly — chromem must stay exclusive to the daemon process. Without this the client-side store (which is what the live agent's query_memory/RetrieveRelevant/GetImplicitContext actually run against) was lexical-only in production, and client-side note saves never got embedded at all. HybridSearch already degrades to lexical-only if the daemon is unreachable (see internal/db/hybrid.go).
-	if apiKey != "" {
+	// With a local embedder configured the client does not build one of its own: the daemon owns the llama-server child process and its port, so embeds go over the same IPC the vector index already uses. Otherwise the client builds its own Gemini embedder as before.
+	if appConfig.Embed.LocalEnabled() {
+		store.SetEmbedder(&embedderAdapter{inner: newHTTPEmbedder()})
+		store.SetVectorIndex(newHTTPVectorIndex())
+		// The client runs its own HybridSearch against the daemon's index, so it needs the same embedder-matched cosine floor the daemon uses.
+		store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
+	} else if apiKey != "" {
 		if embedder, err := newSharedGeminiEmbedder(ctx, apiKey); err != nil {
 			slog.Warn("failed to init genai client for embeddings, hybrid search degrades to lexical-only", "error", err)
 		} else {
@@ -77,7 +85,6 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	orchestrator.SetBufferProvider(newBufferProvider().Get)
 	orchestrator.SetModel(config.VoiceModel)
 
-	appConfig := config.LoadConfig()
 	orchestrator.SetVoice(appConfig.Voice)
 
 	// Reconnect loop: if the Gemini session drops (idle timeout, network blip, session limit), restart automatically.

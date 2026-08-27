@@ -48,6 +48,6 @@ func setAutostart(on bool) error {
 	if err != nil {
 		return err
 	}
-	// The Run key offers no working-directory setting the way an XDG .desktop entry's Path= does, and ORA resolves ora-db relative to the working directory, so the entry passes --workdir with the binary's own directory instead.
+	// The Run key offers no working-directory setting the way an XDG .desktop entry's Path= does, and ORA loads .env relative to the working directory, so the entry passes --workdir with the binary's own directory instead. (The database, vector index, config and IPC token no longer depend on cwd — see config.DataDir.)
 	return k.SetStringValue(autostartValueName, `"`+exe+`" --daemon --workdir "`+filepath.Dir(exe)+`"`)
 }

@@ -66,10 +66,27 @@ func TestSetAutostart_WritesAndRemovesDesktopEntry(t *testing.T) {
 	}
 }
 
+// TestDesktopEntry_EscapesSpecialCharacters verifies a path containing a space and a backslash is escaped per the Desktop Entry Specification's quoting rules (FINDING 11): Exec= is Go's strconv.Quote today, which is not Desktop Entry quoting, and Path= is emitted raw with no escaping at all — an install path with either character produces an entry a spec-compliant parser reads wrong or silently fails to launch.
+func TestDesktopEntry_EscapesSpecialCharacters(t *testing.T) {
+	exe := `/home/user/My Apps/back\slash/ora`
+	dir := filepath.Dir(exe)
+
+	entry := desktopEntry(exe, dir)
+
+	wantExec := `Exec="/home/user/My Apps/back\\slash/ora" --daemon`
+	if !strings.Contains(entry, wantExec) {
+		t.Errorf("expected entry to contain %q, got:\n%s", wantExec, entry)
+	}
+	wantPath := `Path=/home/user/My Apps/back\\slash`
+	if !strings.Contains(entry, wantPath) {
+		t.Errorf("expected entry to contain %q, got:\n%s", wantPath, entry)
+	}
+}
+
 // TestApplyAutostart_WritesConfigAndEntry checks the --autostart flag path: it persists the choice to ora-config.json and installs or removes the login entry to match, and rejects anything that isn't on or off.
 func TestApplyAutostart_WritesConfigAndEntry(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Chdir(t.TempDir())
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
 
 	if err := applyAutostart("off"); err != nil {
 		t.Fatalf("applyAutostart(off) returned unexpected error: %v", err)
