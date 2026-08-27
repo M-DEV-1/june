@@ -209,7 +209,8 @@ func (m *capturingStorage) ThreadsForAttribution(ctx context.Context, limit int)
 	return nil, nil
 }
 
-func TestCompiler_FallbackIncludesScreenText(t *testing.T) {
+// TestCompiler_FallbackOmitsScreenText_KeepsAppAndTitle verifies the LLM-failure fallback stores only "app | title" lines, never the raw ScreenText — dumping full raw captures into one node is exactly the tens-of-KB junk row shape other code (truncateUTF8, excerptContent) exists to defend against.
+func TestCompiler_FallbackOmitsScreenText_KeepsAppAndTitle(t *testing.T) {
 	llm := &errorSummarizer{}
 	store := &capturingStorage{}
 	compiler := memory.NewCompiler(llm, store)
@@ -223,8 +224,36 @@ func TestCompiler_FallbackIncludesScreenText(t *testing.T) {
 	if store.stored.Summary == "" {
 		t.Fatal("expected fallback summary to be stored")
 	}
-	if !strings.Contains(store.stored.Summary, "func validateToken") {
-		t.Errorf("fallback summary missing ScreenText, got: %q", store.stored.Summary)
+	if strings.Contains(store.stored.Summary, "func validateToken") {
+		t.Errorf("expected the fallback summary to omit ScreenText, got: %q", store.stored.Summary)
+	}
+	if !strings.Contains(store.stored.Summary, "VSCode | auth.go") {
+		t.Errorf("expected the fallback summary to keep the app | title line, got: %q", store.stored.Summary)
+	}
+}
+
+// TestCompiler_FallbackCapsTotalLength verifies the fallback summary is capped at roughly 2000 runes even with many activities in the buffer, instead of growing unbounded with the buffer size.
+func TestCompiler_FallbackCapsTotalLength(t *testing.T) {
+	llm := &errorSummarizer{}
+	store := &capturingStorage{}
+	compiler := memory.NewCompiler(llm, store)
+	ctx := context.Background()
+
+	// Enough long titles to exceed 2000 runes if uncapped: ~50 runes/line * 100 lines = ~5000 runes.
+	for i := 0; i < 100; i++ {
+		compiler.Ingest(ctx, tracker.Activity{
+			App:   "VSCode",
+			Title: fmt.Sprintf("a-fairly-long-file-name-number-%d.go", i),
+		})
+	}
+	compiler.ForceFlush(ctx)
+
+	if store.stored.Summary == "" {
+		t.Fatal("expected fallback summary to be stored")
+	}
+	// +1 tolerance: truncateRunes appends a trailing "…" marker after cutting to the cap.
+	if got := len([]rune(store.stored.Summary)); got > 2001 {
+		t.Errorf("expected the fallback summary capped at ~2000 runes, got %d", got)
 	}
 }
 
