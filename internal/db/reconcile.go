@@ -1,0 +1,202 @@
+package db
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"ora/internal/memory"
+)
+
+// ReconcileReport counts what one ReconcileVectors sweep did — logged by the caller (cmd/daemon.go), not returned as an error since a sweep is a maintenance pass, not a request that can fail outright.
+type ReconcileReport struct {
+	Deleted    int
+	Backfilled int
+}
+
+// ReconcileVectors walks every id currently in the vector index and deletes any whose backing SQL row is gone (or, for episodes, already thinned to empty screen_text) — this is what heals the orphaning left by consolidation (ReplaceAllNotes renumbering notes, ReplaceSummariesWithDigest dropping replaced summaries) for a store that predates targeted vector deletes, without a manual rebuild.
+// A Store with no vector index configured is a no-op (zero report, no error).
+func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileReport, error) {
+	var report ReconcileReport
+
+	s.mu.RLock()
+	vidx := s.vectorIndex
+	s.mu.RUnlock()
+	if vidx == nil {
+		return report, nil
+	}
+
+	existing := make(map[string]bool)
+	for _, id := range vidx.IDs() {
+		source, refID := splitCandidateID(id)
+		alive, thinned := s.vectorBackingAlive(ctx, source, refID)
+		if alive && !thinned {
+			existing[id] = true
+			continue
+		}
+		if err := vidx.Delete(ctx, id); err != nil {
+			slog.Error("reconcile: delete orphaned vector failed", "id", id, "error", err)
+			existing[id] = true // delete failed — still there, don't try to re-add over it below
+			continue
+		}
+		report.Deleted++
+	}
+
+	s.mu.RLock()
+	emb := s.embedder
+	s.mu.RUnlock()
+	if emb == nil || embedCap <= 0 {
+		return report, nil
+	}
+
+	for _, c := range s.reconcileBackfillCandidates(ctx) {
+		if existing[c.id] {
+			continue
+		}
+		if report.Backfilled >= embedCap {
+			break
+		}
+		vec, err := emb.Embed(ctx, "RETRIEVAL_DOCUMENT", c.content)
+		if err != nil {
+			slog.Error("reconcile: backfill embed failed", "id", c.id, "error", err)
+			continue
+		}
+		if err := vidx.Add(ctx, c.id, c.content, vec, c.metadata); err != nil {
+			slog.Error("reconcile: backfill add failed", "id", c.id, "error", err)
+			continue
+		}
+		report.Backfilled++
+	}
+
+	return report, nil
+}
+
+// reconcileCandidate is one item eligible to be backfilled into the vector index.
+type reconcileCandidate struct {
+	id       string
+	content  string
+	metadata map[string]string
+}
+
+// reconcileEpisodeWindow bounds how far back an episode is still eligible for vector backfill — matches the "recent" framing the rest of the memory system uses (e.g. RankedEpisodes' recency decay); re-embedding arbitrarily old raw captures indefinitely isn't worth the API cost.
+const reconcileEpisodeWindow = 10 * 24 * time.Hour
+
+// reconcileBackfillCandidates returns notes, live (non-digested) summary nodes, and episodes within reconcileEpisodeWindow — every source whose vector lifecycle ReconcileVectors owns. Metadata and embed text are built to match each source's own write-path goroutine exactly (LogNote/LogSemanticNode/LogEpisode) — a backfilled vector missing e.g. domain would silently drop out of every domain-filtered search (chromem's exact-match where fails on a missing key), and a missing created_at defeats HybridSearch's moment recency decay for episodes. Query errors are logged and treated as "no candidates from this source" rather than failing the whole sweep.
+func (s *Store) reconcileBackfillCandidates(ctx context.Context) []reconcileCandidate {
+	var out []reconcileCandidate
+
+	noteRows, err := s.db.QueryContext(ctx, `SELECT id, content, created_at FROM notes`)
+	if err != nil {
+		slog.Error("reconcile: query notes for backfill failed", "error", err)
+	} else {
+		for noteRows.Next() {
+			var id int64
+			var content, created string
+			if err := noteRows.Scan(&id, &content, &created); err != nil {
+				slog.Error("reconcile: scan note for backfill failed", "error", err)
+				continue
+			}
+			out = append(out, reconcileCandidate{
+				id:      fmt.Sprintf("note:%d", id),
+				content: content,
+				metadata: map[string]string{
+					"source":     "note",
+					"kind":       string(memory.KindFact),
+					"created_at": created,
+				},
+			})
+		}
+		noteRows.Close()
+	}
+
+	// nodes.content for a summary is the full JSON-marshaled TaskSummary (see LogSemanticNode), not the plain summary text — LogSemanticNode's own embed goroutine embeds only summary.Summary, so backfill must extract the same field rather than embedding the raw JSON blob.
+	summaryRows, err := s.db.QueryContext(ctx, `SELECT id, content, domain, created_at FROM nodes WHERE type = 'summary'`)
+	if err != nil {
+		slog.Error("reconcile: query summaries for backfill failed", "error", err)
+	} else {
+		for summaryRows.Next() {
+			var id int64
+			var payload, domain, created string
+			if err := summaryRows.Scan(&id, &payload, &domain, &created); err != nil {
+				slog.Error("reconcile: scan summary for backfill failed", "error", err)
+				continue
+			}
+			var ts memory.TaskSummary
+			text := payload
+			if err := json.Unmarshal([]byte(payload), &ts); err == nil && ts.Summary != "" {
+				text = ts.Summary
+			}
+			out = append(out, reconcileCandidate{
+				id:      fmt.Sprintf("summary:%d", id),
+				content: text,
+				metadata: map[string]string{
+					"domain":     domain,
+					"source":     "summary",
+					"kind":       string(memory.KindPeriod),
+					"created_at": created,
+				},
+			})
+		}
+		summaryRows.Close()
+	}
+
+	secs := int64(reconcileEpisodeWindow.Seconds())
+	episodeRows, err := s.db.QueryContext(ctx,
+		`SELECT id, app, title, screen_text, domain, created_at FROM episodes WHERE created_at >= datetime('now', '-' || ? || ' seconds') AND screen_text != ''`,
+		secs)
+	if err != nil {
+		slog.Error("reconcile: query episodes for backfill failed", "error", err)
+	} else {
+		for episodeRows.Next() {
+			var id int64
+			var app, title, screenText, domain, created string
+			if err := episodeRows.Scan(&id, &app, &title, &screenText, &domain, &created); err != nil {
+				slog.Error("reconcile: scan episode for backfill failed", "error", err)
+				continue
+			}
+			// Same context-framed document LogEpisode embeds (app/title header + content), not bare screen_text — Normalize re-running on already-clean stored text is safe (it's idempotent chrome-stripping/capping on content that's already clean).
+			doc := memory.Normalize(app, title, screenText).Document()
+			if strings.TrimSpace(doc) == "" {
+				doc = screenText
+			}
+			out = append(out, reconcileCandidate{
+				id:      fmt.Sprintf("episode:%d", id),
+				content: doc,
+				metadata: map[string]string{
+					"domain":     domain,
+					"source":     "episode",
+					"kind":       string(memory.KindMoment),
+					"created_at": created,
+				},
+			})
+		}
+		episodeRows.Close()
+	}
+
+	return out
+}
+
+// vectorBackingAlive reports whether refID's SQL row still exists for the given source, and — for episodes only — whether it's been thinned (screen_text cleared by AgeEpisodes) since that also means the vector should go even though the row itself remains. Unrecognized sources (e.g. "thread") report alive=true so ReconcileVectors leaves them untouched — vector lifecycle for those isn't in scope here.
+func (s *Store) vectorBackingAlive(ctx context.Context, source string, refID int64) (alive, thinned bool) {
+	switch source {
+	case "note":
+		var exists int
+		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM notes WHERE id = ?`, refID).Scan(&exists)
+		return exists == 1, false
+	case "summary", "digest":
+		var exists int
+		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id = ? AND type = ?`, refID, source).Scan(&exists)
+		return exists == 1, false
+	case "episode":
+		var screenText string
+		if err := s.db.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, refID).Scan(&screenText); err != nil {
+			return false, false
+		}
+		return true, screenText == ""
+	default:
+		return true, false
+	}
+}

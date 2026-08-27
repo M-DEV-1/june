@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -99,7 +100,8 @@ type embedder interface {
 type vectorIndex interface {
 	Add(ctx context.Context, id, content string, embedding []float32, metadata map[string]string) error
 	Search(ctx context.Context, queryEmbedding []float32, n int, where map[string]string) ([]Result, error)
-	Count() int
+	Delete(ctx context.Context, id string) error
+	IDs() []string
 }
 
 // Result mirrors internal/vector.Result — duplicated here rather than imported, same reason as embedder/vectorIndex above: internal/db must not gain an import-time dependency on internal/vector.
@@ -125,6 +127,9 @@ func (s *Store) SetVectorIndex(v vectorIndex) {
 
 // hybridVectorPoolSize bounds how many nearest-neighbor results are pulled from the vector index before fusion — wider than the final `limit` so RRF, not raw vector similarity alone, decides the final order.
 const hybridVectorPoolSize = 50
+
+// minVectorSimilarity is the cosine-similarity floor a vector hit must clear to enter fusion at all — chromem's Search always returns its n nearest neighbors regardless of how weakly related they actually are, so without a floor a query about a topic absent from the store still gets padded with barely-related rows. Unvalidated starting point; tune against real queries.
+const minVectorSimilarity = 0.55
 
 // splitCandidateID parses an rrfCandidate/vector-result id of the form "<source>:<refID>" (e.g. "episode:42", "note:3") into its parts. refID is 0 if the numeric suffix doesn't parse cleanly (e.g. a vector-only hit whose id shape doesn't map to a nodes/episodes row) — best effort, not an error, since MemoryHit.RefID is informational.
 func splitCandidateID(id string) (source string, refID int64) {
@@ -154,6 +159,18 @@ func (s *Store) currentDomain(ctx context.Context) string {
 	var domain string
 	_ = s.db.QueryRowContext(ctx, `SELECT domain FROM episodes ORDER BY id DESC LIMIT 1`).Scan(&domain)
 	return domain
+}
+
+// lexicalTermOverlap counts how many distinct queryTerms appear (case-insensitive substring match) in content — used by HybridSearch's multi-term relevance floor to distinguish a real match from a single-term FTS5 coincidence.
+func lexicalTermOverlap(content string, queryTerms []string) int {
+	lower := strings.ToLower(content)
+	n := 0
+	for _, term := range queryTerms {
+		if strings.Contains(lower, term) {
+			n++
+		}
+	}
+	return n
 }
 
 // HybridSearch fuses lexical (FTS5) and vector search over episodes, summaries, notes, and threads via reciprocalRankFusion, and returns the top `limit` as MemoryHit.
@@ -205,6 +222,17 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 		})
 	}
 
+	// Relevance floor for multi-term queries: buildFTSMatch ORs every significant term together, so FTS5 alone returns any row matching even one of them. A candidate matching only one of two-or-more query terms is coincidental noise, not a real match — this is what "10 junk rows for an absent-topic query" traces back to. Single-term queries have nothing to compare against, so they're left alone.
+	if queryTerms := tokenizeQuery(query); len(queryTerms) >= 2 {
+		filtered := lexical[:0:0]
+		for _, c := range lexical {
+			if lexicalTermOverlap(c.content, queryTerms) >= 2 {
+				filtered = append(filtered, c)
+			}
+		}
+		lexical = filtered
+	}
+
 	if domainFilter != "" {
 		filtered := lexical[:0:0]
 		for _, c := range lexical {
@@ -221,37 +249,44 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 	vidx := s.vectorIndex
 	s.mu.RUnlock()
 
+	// An embed or vector-search failure degrades to lexical-only fusion (logged, not returned) rather than failing the whole call — with the client depending on daemon IPC for the vector half, "daemon down" must not take query_memory down with it.
 	var vector []rrfCandidate
 	if emb != nil && vidx != nil {
 		queryVec, err := emb.Embed(ctx, "RETRIEVAL_QUERY", query)
 		if err != nil {
-			return nil, fmt.Errorf("embed query: %w", err)
+			slog.Warn("hybrid search: embed query failed, degrading to lexical-only", "error", err)
+			queryVec = nil
 		}
 
-		var where map[string]string
-		if domainFilter != "" {
-			where = map[string]string{"domain": domainFilter}
-		}
-
-		results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, where)
-		if err != nil {
-			return nil, fmt.Errorf("vector search: %w", err)
-		}
-
-		vector = make([]rrfCandidate, 0, len(results))
-		for _, r := range results {
-			source, _ := splitCandidateID(r.ID)
-			createdAt := time.Time{}
-			if ts := r.Metadata["created_at"]; ts != "" {
-				createdAt = parseSQLiteTime(ts)
+		if queryVec != nil {
+			var where map[string]string
+			if domainFilter != "" {
+				where = map[string]string{"domain": domainFilter}
 			}
-			vector = append(vector, rrfCandidate{
-				id:        r.ID,
-				content:   r.Content,
-				source:    source,
-				domain:    r.Metadata["domain"],
-				createdAt: createdAt,
-			})
+
+			results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, where)
+			if err != nil {
+				slog.Warn("hybrid search: vector search failed, degrading to lexical-only", "error", err)
+			} else {
+				vector = make([]rrfCandidate, 0, len(results))
+				for _, r := range results {
+					if r.Similarity < minVectorSimilarity {
+						continue
+					}
+					source, _ := splitCandidateID(r.ID)
+					createdAt := time.Time{}
+					if ts := r.Metadata["created_at"]; ts != "" {
+						createdAt = parseSQLiteTime(ts)
+					}
+					vector = append(vector, rrfCandidate{
+						id:        r.ID,
+						content:   r.Content,
+						source:    source,
+						domain:    r.Metadata["domain"],
+						createdAt: createdAt,
+					})
+				}
+			}
 		}
 	}
 
