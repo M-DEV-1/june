@@ -27,6 +27,11 @@ type toolTestBrain struct {
 	// hybridHits/capturedDomain back HybridSearch: configurable return value plus a capture of the domainFilter arg, same field-per-method style as the rest of this mock.
 	hybridHits     []db.MemoryHit
 	capturedDomain string
+	// capturedHybridLimit records the limit HybridSearch was asked for, so a test can assert query_memory over-fetches when it has a since/until window to post-filter with.
+	capturedHybridLimit int
+
+	// capturedEpisodeQuery records the last db.EpisodeQuery passed to ListEpisodes, so tests can assert on fields (e.g. NewestFirst) the tool is supposed to set without windowEpisodes itself needing to simulate real sort order.
+	capturedEpisodeQuery db.EpisodeQuery
 
 	// implicitContext backs GetImplicitContext — used by HandshakePrompt tests so the frozen handshake string can be asserted without a real sqlite store.
 	implicitContext []string
@@ -105,6 +110,7 @@ func (b *toolTestBrain) EpisodesInWindow(ctx context.Context, since, until time.
 	return b.windowEpisodes, nil
 }
 func (b *toolTestBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error) {
+	b.capturedEpisodeQuery = q
 	var out []db.Episode
 	for _, e := range b.windowEpisodes {
 		if q.App != "" && !strings.Contains(strings.ToLower(e.App), strings.ToLower(q.App)) {
@@ -124,6 +130,7 @@ func (b *toolTestBrain) RecallSubject(ctx context.Context, subject string, limit
 // HybridSearch returns the configured hybridHits and records the domainFilter it was called with, so tests can assert executeTool's "query_memory" case wires args["domain"] through correctly.
 func (b *toolTestBrain) HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error) {
 	b.capturedDomain = domainFilter
+	b.capturedHybridLimit = limit
 	return b.hybridHits, nil
 }
 
@@ -326,8 +333,12 @@ func TestExecuteTool_Recall_TimelineHonorsApp(t *testing.T) {
 // TestExecuteTool_Recall_TimelinePath verifies that calling the "recall" tool with since/until args (and no "subject") surfaces the brain's canned timeline (EpisodesInWindow), formatted chronologically as "[HH:MM] app — title: ...".
 // This is the flagship "walk me through July 4th" path: the model resolves the human phrase into ISO bounds and the tool honors them.
 func TestExecuteTool_Recall_TimelinePath(t *testing.T) {
-	morning := time.Date(2026, 7, 4, 8, 30, 0, 0, time.UTC)
-	noon := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	// Fixtures use time.Local explicitly (not time.UTC): recall now renders timestamps
+	// converted to the user's local zone, so a Local fixture round-trips through that
+	// conversion as a no-op and the asserted HH:MM below stays correct regardless of
+	// which zone the test machine runs in.
+	morning := time.Date(2026, 7, 4, 8, 30, 0, 0, time.Local)
+	noon := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local)
 	brain := &toolTestBrain{
 		windowEpisodes: []db.Episode{
 			{ID: 1, CreatedAt: morning, App: "Mail", Title: "Inbox", ScreenText: "reading morning emails"},
@@ -354,8 +365,9 @@ func TestExecuteTool_Recall_TimelinePath(t *testing.T) {
 
 // TestExecuteTool_Recall_MultiDayShowsDates verifies that a timeline spanning more than one day labels each episode with its date, not just HH:MM — now that since/until can cover a range like "last week", a bare time would be ambiguous across days.
 func TestExecuteTool_Recall_MultiDayShowsDates(t *testing.T) {
-	day1 := time.Date(2026, 7, 4, 8, 30, 0, 0, time.UTC)
-	day2 := time.Date(2026, 7, 5, 9, 15, 0, 0, time.UTC)
+	// time.Local (not time.UTC) so the local-time rendering conversion is a no-op here too — see TimelinePath's comment above.
+	day1 := time.Date(2026, 7, 4, 8, 30, 0, 0, time.Local)
+	day2 := time.Date(2026, 7, 5, 9, 15, 0, 0, time.Local)
 	brain := &toolTestBrain{
 		windowEpisodes: []db.Episode{
 			{ID: 1, CreatedAt: day1, App: "Mail", Title: "Inbox", ScreenText: "morning emails"},
@@ -371,6 +383,48 @@ func TestExecuteTool_Recall_MultiDayShowsDates(t *testing.T) {
 
 	if !strings.Contains(result, "Jul 4") || !strings.Contains(result, "Jul 5") {
 		t.Errorf("expected multi-day timeline to label each episode's date, got: %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_UsesNewestFirst verifies the "recall" tool's timeline path asks ListEpisodes for the newest episodes in the window, not the default oldest-first sort — a real day can exceed the 50-episode cap, and oldest-first would return only the start of the window and silently stop there.
+func TestExecuteTool_Recall_UsesNewestFirst(t *testing.T) {
+	brain := &toolTestBrain{}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	a.executeTool(context.Background(), "recall", map[string]any{
+		"since": "2026-07-04", "until": "2026-07-04",
+	})
+
+	if !brain.capturedEpisodeQuery.NewestFirst {
+		t.Error("expected recall's ListEpisodes call to set NewestFirst: true")
+	}
+}
+
+// TestExecuteTool_Recall_TimestampsRenderInLocalTime verifies the timeline path renders each episode's timestamp converted to the user's local zone, not left in whatever zone it happens to be stored in (UTC, in practice) — otherwise every time shown to the user is off by the UTC offset and can even show the wrong date.
+// The fixture uses a zone offset guaranteed to differ from the test machine's Local zone, so a bug that renders the stored zone verbatim shows up as the wrong wall-clock hour.
+func TestExecuteTool_Recall_TimestampsRenderInLocalTime(t *testing.T) {
+	_, localOffset := time.Now().Local().Zone()
+	fixedZone := time.FixedZone("FIXED", localOffset+3*3600)
+	created := time.Date(2026, 7, 4, 8, 30, 0, 0, fixedZone)
+
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: created, App: "Mail", Title: "Inbox", ScreenText: "reading morning emails"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{
+		"since": "2026-07-04", "until": "2026-07-04",
+	})
+
+	wantLocal := created.In(time.Local).Format("Jan 2 15:04")
+	wantStoredZone := created.Format("Jan 2 15:04")
+	if !strings.Contains(result, wantLocal) {
+		t.Errorf("expected recall to render the timestamp in local time (%s), got: %q", wantLocal, result)
+	}
+	if strings.Contains(result, wantStoredZone) {
+		t.Errorf("recall rendered the timestamp in its stored zone (%s) instead of local time, got: %q", wantStoredZone, result)
 	}
 }
 
@@ -467,6 +521,23 @@ func TestExecuteTool_Recall_SubjectPath(t *testing.T) {
 	}
 	if !strings.Contains(result, "[episode] reading the DeepSeek post-training paper introduction") {
 		t.Errorf("expected recall (subject) to surface episode line, got: %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_SubjectWithApp_ReturnsErrorInsteadOfSilentlyIgnoringIt verifies that combining "subject" with "app" does not silently return unfiltered results across every app — RecallSubject has no app-filtering parameter to honor, so the tool must say so rather than drop the filter without telling the model.
+func TestExecuteTool_Recall_SubjectWithApp_ReturnsErrorInsteadOfSilentlyIgnoringIt(t *testing.T) {
+	brain := &toolTestBrain{
+		subjectRecall: []string{"[thread] DeepSeek — studying post-training"},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"subject": "DeepSeek", "app": "slack"})
+
+	if !strings.HasPrefix(result, "error") {
+		t.Errorf(`expected an "error: ..." result when subject and app are combined, got %q`, result)
+	}
+	if strings.Contains(result, "[thread] DeepSeek") {
+		t.Errorf("expected no unfiltered subject results to leak through when app can't be honored, got %q", result)
 	}
 }
 
@@ -921,5 +992,190 @@ func TestExecuteTool_ReadClipboard_SessionAllowed_SkipsApproval(t *testing.T) {
 		// executeTool returned without ever touching ToolApprovalChan — correct.
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for executeTool to return")
+	}
+}
+
+// TestExecuteTool_GetRecent_TimestampsRenderInLocalTime verifies get_recent converts each episode's timestamp to the user's local zone, the same as the recall timeline path. Episodes are stored in UTC, so rendering the stored zone verbatim shows every time off by the UTC offset and can show the wrong date entirely.
+func TestExecuteTool_GetRecent_TimestampsRenderInLocalTime(t *testing.T) {
+	_, localOffset := time.Now().Local().Zone()
+	fixedZone := time.FixedZone("FIXED", localOffset+3*3600)
+	created := time.Date(2026, 7, 4, 8, 30, 0, 0, fixedZone)
+
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: created, App: "Mail", Title: "Inbox", ScreenText: "reading morning emails"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "get_recent", map[string]any{"limit": float64(5)})
+
+	wantLocal := created.In(time.Local).Format("Jan 2 15:04")
+	wantStoredZone := created.Format("Jan 2 15:04")
+	if !strings.Contains(result, wantLocal) {
+		t.Errorf("expected get_recent to render the timestamp in local time (%s), got: %q", wantLocal, result)
+	}
+	if strings.Contains(result, wantStoredZone) {
+		t.Errorf("get_recent rendered the timestamp in its stored zone (%s) instead of local time, got: %q", wantStoredZone, result)
+	}
+}
+
+// TestExecuteTool_Recall_UnknownArgument_ReturnsError verifies that an argument recall doesn't have (the real trace called recall with "query", a query_memory parameter) is rejected by name instead of falling through to the timeline branch, where since defaults to the start of today and the model gets a confidently wrong answer for a question that had nothing to do with today.
+func TestExecuteTool_Recall_UnknownArgument_ReturnsError(t *testing.T) {
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{{App: "Brave", Title: "YouTube", ScreenText: "unrelated", CreatedAt: time.Now()}},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"query": "Anime Platform Authentication"})
+
+	if !strings.HasPrefix(result, "error") {
+		t.Fatalf(`expected an "error: ..." result for an unknown recall argument, got %q`, result)
+	}
+	if !strings.Contains(result, "query") {
+		t.Errorf("expected the error to name the offending argument, got %q", result)
+	}
+	for _, valid := range []string{"subject", "since", "until", "app"} {
+		if !strings.Contains(result, valid) {
+			t.Errorf("expected the error to list valid argument %q so the model can self-correct, got %q", valid, result)
+		}
+	}
+	if strings.Contains(result, "YouTube") {
+		t.Errorf("expected no timeline results to leak through for a rejected call, got %q", result)
+	}
+}
+
+// TestExecuteTool_QueryMemory_UnknownArgument_ReturnsError verifies query_memory rejects invented parameters the same way recall does, rather than ignoring them.
+func TestExecuteTool_QueryMemory_UnknownArgument_ReturnsError(t *testing.T) {
+	brain := &toolTestBrain{hybridHits: []db.MemoryHit{{Source: "note", Content: "a note"}}}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "riddler", "subject": "riddler"})
+
+	if !strings.HasPrefix(result, "error") {
+		t.Fatalf(`expected an "error: ..." result for an unknown query_memory argument, got %q`, result)
+	}
+	if !strings.Contains(result, "subject") {
+		t.Errorf("expected the error to name the offending argument, got %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_SubjectWithDates_ReturnsError verifies that subject combined with since/until errors instead of silently dropping the date window — RecallSubject takes only a subject and a limit, so there is no way to honor the dates, and answering a "what about X last Tuesday" question with X across all time is a wrong answer with no signal that it is one.
+func TestExecuteTool_Recall_SubjectWithDates_ReturnsError(t *testing.T) {
+	brain := &toolTestBrain{subjectRecall: []string{"[thread] DeepSeek — studying post-training"}}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	for _, args := range []map[string]any{
+		{"subject": "DeepSeek", "since": "2026-08-20"},
+		{"subject": "DeepSeek", "until": "2026-08-20"},
+	} {
+		result := a.executeTool(context.Background(), "recall", args)
+		if !strings.HasPrefix(result, "error") {
+			t.Errorf(`expected an "error: ..." result for %v, got %q`, args, result)
+		}
+		if strings.Contains(result, "[thread] DeepSeek") {
+			t.Errorf("expected no date-unfiltered subject results to leak through for %v, got %q", args, result)
+		}
+	}
+}
+
+// TestParseInstant_ZonelessDateTime verifies a datetime with no zone offset ("2026-08-20T00:00:00", which the model emits often) parses as local time instead of erroring out of the whole recall call.
+func TestParseInstant_ZonelessDateTime(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.Local)
+	got, err := parseInstant("2026-08-20T14:30:00", now, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := time.Date(2026, 8, 20, 14, 30, 0, 0, time.Local)
+	if !got.Equal(want) {
+		t.Errorf("parseInstant = %v, want %v", got, want)
+	}
+}
+
+// TestParseInstant_TodayAndYesterday verifies the two temporal words the user actually says resolve against now, so "what did I do today" filters by date instead of lexically matching the word "today" (which is how "India Today" articles came back as the answer).
+func TestParseInstant_TodayAndYesterday(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.Local)
+	cases := []struct {
+		in       string
+		endOfDay bool
+		want     time.Time
+	}{
+		{"today", false, time.Date(2026, 8, 28, 0, 0, 0, 0, time.Local)},
+		{"today", true, time.Date(2026, 8, 28, 23, 59, 59, 0, time.Local)},
+		{"yesterday", false, time.Date(2026, 8, 27, 0, 0, 0, 0, time.Local)},
+		{"Yesterday", true, time.Date(2026, 8, 27, 23, 59, 59, 0, time.Local)},
+	}
+	for _, c := range cases {
+		got, err := parseInstant(c.in, now, c.endOfDay)
+		if err != nil {
+			t.Fatalf("parseInstant(%q, endOfDay=%v): unexpected error: %v", c.in, c.endOfDay, err)
+		}
+		if !got.Equal(c.want) {
+			t.Errorf("parseInstant(%q, endOfDay=%v) = %v, want %v", c.in, c.endOfDay, got, c.want)
+		}
+	}
+}
+
+// TestExecuteTool_QueryMemory_SinceFiltersHitsByCreatedAt verifies query_memory accepts a since/until window and drops hits outside it. Without this, "what did I read today" is a pure lexical search for the word "today" and an "India Today" article from last month outranks anything that actually happened today.
+func TestExecuteTool_QueryMemory_SinceFiltersHitsByCreatedAt(t *testing.T) {
+	now := time.Now()
+	brain := &toolTestBrain{hybridHits: []db.MemoryHit{
+		{Source: "episode", Content: "India Today front page", RefID: 1, CreatedAt: now.AddDate(0, 0, -30)},
+		{Source: "episode", Content: "reviewing the retrieval audit", RefID: 2, CreatedAt: now},
+	}}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "today", "since": "today"})
+
+	if strings.Contains(result, "India Today") {
+		t.Errorf("expected the month-old hit to be dropped by the since filter, got %q", result)
+	}
+	if !strings.Contains(result, "reviewing the retrieval audit") {
+		t.Errorf("expected today's hit to survive the since filter, got %q", result)
+	}
+}
+
+// TestExecuteTool_QueryMemory_TimeFilterOverfetches verifies a since/until window asks the store for more than the final 10 hits — the ranking that produces those 10 knows nothing about the time window, so filtering the top 10 after the fact would usually leave nothing.
+func TestExecuteTool_QueryMemory_TimeFilterOverfetches(t *testing.T) {
+	brain := &toolTestBrain{hybridHits: []db.MemoryHit{{Source: "episode", Content: "x", CreatedAt: time.Now()}}}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything", "since": "today"})
+	timed := brain.capturedHybridLimit
+	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything"})
+	untimed := brain.capturedHybridLimit
+
+	if timed <= untimed {
+		t.Errorf("expected a time-filtered query to over-fetch (got limit %d) versus the plain limit %d", timed, untimed)
+	}
+}
+
+// TestExecuteTool_QueryMemory_BadDate_ReturnsError verifies an unparseable since/until is reported instead of ignored.
+func TestExecuteTool_QueryMemory_BadDate_ReturnsError(t *testing.T) {
+	brain := &toolTestBrain{hybridHits: []db.MemoryHit{{Source: "note", Content: "a note"}}}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "riddler", "since": "last tuesdayish"})
+
+	if !strings.HasPrefix(result, "error") {
+		t.Errorf(`expected an "error: ..." result for an unparseable since, got %q`, result)
+	}
+}
+
+// TestExecuteTool_UpdateNote_StoreError_IsReportedNotSwallowed verifies update_note surfaces the store's error text (e.g. "no note with id 7") instead of answering "updated" — reporting a correction that never landed leaves the wrong fact in memory and tells the model the opposite.
+func TestExecuteTool_UpdateNote_StoreError_IsReportedNotSwallowed(t *testing.T) {
+	brain := &toolTestBrain{updateNoteErr: fmt.Errorf("no note with id 7")}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "update_note", map[string]any{"id": float64(7), "content": "the corrected fact"})
+
+	if result == "updated" {
+		t.Fatal(`expected update_note to report the store error, got "updated"`)
+	}
+	if !strings.HasPrefix(result, "error") {
+		t.Errorf(`expected an "error: ..." result, got %q`, result)
+	}
+	if !strings.Contains(result, "no note with id 7") {
+		t.Errorf("expected the store's error text to reach the model, got %q", result)
 	}
 }
