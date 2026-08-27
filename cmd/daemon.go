@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -148,7 +147,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	var vecIndex *vector.ChromemIndex
 
 	// The embedding engine is the local llama-server child process, and only that: there is no API-backed embedder any more. It stays nil when no local embedder is configured, which is what the shutdown path and the /embed IPC handler key off, and means no semantic half at all — HybridSearch already falls back to lexical-only when Store has no embedder/vector index set.
-	embedEngine := newLocalEmbedEngine(appConfig.Embed)
+	embedEngine := embed.NewEngine(appConfig.Embed)
 	if embedEngine == nil {
 		slog.Warn("no local embedder configured (embed.llama_server / embed.model_path), hybrid search degrades to lexical-only")
 	}
@@ -323,18 +322,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	if err != nil {
 		slog.Error("failed to generate IPC auth token, daemon IPC will be unreachable", "error", err)
 	}
-	// Every authenticated request is by definition a live TUI client, so the auth wrapper doubles as the presence signal that pins the embedding server in memory. Warming happens on the first such request rather than on any embed, so the user's first question meets an already-loaded model. The daemon has no other notion of a client session, and adding one just for this would be more machinery than a timestamp.
+	// Every authenticated request is by definition a live TUI client, so the auth wrapper doubles as the presence signal that pins the embedding server in memory and warms it. The daemon has no other notion of a client session, and adding one just for this would be more machinery than a timestamp.
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return requireIPCToken(ipcToken, func(w http.ResponseWriter, r *http.Request) {
 			if embedEngine != nil {
-				embedEngine.MarkClientPresence()
-				if !embedEngine.Running() {
-					go func() {
-						if err := embedEngine.Warm(ctx); err != nil {
-							slog.Warn("failed to warm the embedding server for a client", "error", err)
-						}
-					}()
-				}
+				embedEngine.MarkClientPresence(ctx)
 			}
 			h(w, r)
 		})
@@ -488,25 +480,4 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	return stop, daemon, nil
-}
-
-// newLocalEmbedEngine builds the daemon-owned local embedding engine from cfg, or returns nil when no local embedder is configured (in which case the caller falls back to the Gemini API). The engine spawns nothing until the first embed or client request.
-// The server binds loopback only. -c 8192 across --parallel 4 gives each slot 2048 tokens, matching EmbeddingGemma's training context, and the batch sizes must reach that same 2048 or the server rejects a full-length document instead of processing it.
-// -ngl 99 offloads every layer to the GPU, which puts the warm model in VRAM instead of system RAM. A build without GPU support ignores the flag and runs on the CPU, so the same arguments work either way.
-func newLocalEmbedEngine(cfg config.EmbedConfig) *embed.Engine {
-	if !cfg.LocalEnabled() {
-		return nil
-	}
-	args := []string{
-		"--embedding",
-		"-m", cfg.ModelPath,
-		"--host", "127.0.0.1",
-		"--port", strconv.Itoa(cfg.Port),
-		"-c", "8192",
-		"--parallel", "4",
-		"-b", "2048",
-		"-ub", "2048",
-		"-ngl", "99",
-	}
-	return embed.NewEngine(cfg.LlamaServer, args, cfg.BaseURL(), config.LocalEmbedModel, cfg.IdleTimeout*time.Millisecond)
 }

@@ -68,7 +68,7 @@ func newTestEngine(t *testing.T, idle, presence time.Duration) *Engine {
 func newTestEngineWithHealthDelay(t *testing.T, idle, presence, healthDelay time.Duration) *Engine {
 	t.Helper()
 	port := freePort(t)
-	e := NewEngine(os.Args[0], []string{"-test.run=TestEngineHelperProcess", "embed-helper", fmt.Sprint(port), fmt.Sprint(healthDelay.Milliseconds())},
+	e := newEngine(os.Args[0], []string{"-test.run=TestEngineHelperProcess", "embed-helper", fmt.Sprint(port), fmt.Sprint(healthDelay.Milliseconds())},
 		fmt.Sprintf("http://127.0.0.1:%d", port), "test-model", idle)
 	e.presenceWindow = presence
 	e.startupTimeout = 15 * time.Second
@@ -93,7 +93,7 @@ func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 func TestEngineSpawnsLazilyOnFirstEmbed(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 
-	if e.Running() {
+	if e.running() {
 		t.Fatal("engine spawned the child before any embed request")
 	}
 
@@ -104,7 +104,7 @@ func TestEngineSpawnsLazilyOnFirstEmbed(t *testing.T) {
 	if len(vec) != 2 {
 		t.Fatalf("got %d dimensions, want 2 from the helper", len(vec))
 	}
-	if !e.Running() {
+	if !e.running() {
 		t.Fatal("engine should be running after an embed")
 	}
 }
@@ -115,12 +115,12 @@ func TestEngineIdleShutdown(t *testing.T) {
 	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	waitFor(t, 5*time.Second, "the idle child to be reaped", func() bool { return !e.Running() })
+	waitFor(t, 5*time.Second, "the idle child to be reaped", func() bool { return !e.running() })
 }
 
 func TestEngineClientPresencePinsTheChild(t *testing.T) {
 	e := newTestEngine(t, 100*time.Millisecond, 10*time.Second)
-	e.MarkClientPresence()
+	e.MarkClientPresence(context.Background())
 
 	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err != nil {
 		t.Fatalf("Embed: %v", err)
@@ -128,19 +128,19 @@ func TestEngineClientPresencePinsTheChild(t *testing.T) {
 
 	// Well past the idle timeout: a client seen inside the presence window must keep the child alive anyway.
 	time.Sleep(600 * time.Millisecond)
-	if !e.Running() {
+	if !e.running() {
 		t.Fatal("child was reaped while a client was present")
 	}
 }
 
 func TestEngineWarmSpawnsWithoutAnEmbed(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
-	e.MarkClientPresence()
+	e.MarkClientPresence(context.Background())
 
-	if err := e.Warm(context.Background()); err != nil {
+	if err := e.ensureUp(context.Background()); err != nil {
 		t.Fatalf("Warm: %v", err)
 	}
-	if !e.Running() {
+	if !e.running() {
 		t.Fatal("Warm should have spawned the child")
 	}
 }
@@ -154,12 +154,12 @@ func TestEngineRespawnsAfterChildDies(t *testing.T) {
 	firstPID := e.pid()
 
 	e.killChildForTest()
-	waitFor(t, 5*time.Second, "the child to be seen as gone", func() bool { return !e.Running() })
+	waitFor(t, 5*time.Second, "the child to be seen as gone", func() bool { return !e.running() })
 
 	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello again"); err != nil {
 		t.Fatalf("Embed after the child died: %v", err)
 	}
-	if !e.Running() {
+	if !e.running() {
 		t.Fatal("engine did not respawn the child")
 	}
 	if e.pid() == firstPID {
@@ -176,7 +176,7 @@ func TestEngineCloseKillsTheChildAndRefusesFurtherEmbeds(t *testing.T) {
 	if err := e.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if e.Running() {
+	if e.running() {
 		t.Fatal("child still running after Close")
 	}
 	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err == nil {
@@ -190,16 +190,16 @@ func TestEngineColdStartSurvivesACallerDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	if err := e.Warm(ctx); err == nil {
+	if err := e.ensureUp(ctx); err == nil {
 		t.Fatal("Warm should have returned the caller's deadline error")
 	}
 
-	if !e.Running() {
+	if !e.running() {
 		t.Fatal("the loading child was killed by the caller's cancelled context")
 	}
 	pidWhileLoading := e.pid()
 
-	if err := e.Warm(context.Background()); err != nil {
+	if err := e.ensureUp(context.Background()); err != nil {
 		t.Fatalf("second Warm, with a patient context: %v", err)
 	}
 	if e.pid() != pidWhileLoading {
@@ -211,7 +211,7 @@ func TestEngineColdStartSurvivesACallerDeadline(t *testing.T) {
 func TestEngineColdStartDoesNotBlockPresenceOrRunning(t *testing.T) {
 	e := newTestEngineWithHealthDelay(t, time.Hour, time.Hour, 2*time.Second)
 
-	go e.Warm(context.Background())
+	go e.ensureUp(context.Background())
 	// Polled over HTTP rather than through e.pid(), which takes the same lock this test is about and would hide the stall.
 	waitFor(t, 5*time.Second, "the child's HTTP server to answer at all", func() bool {
 		resp, err := http.Get(e.baseURL + "/health")
@@ -223,13 +223,13 @@ func TestEngineColdStartDoesNotBlockPresenceOrRunning(t *testing.T) {
 	})
 
 	start := time.Now()
-	e.MarkClientPresence()
-	e.Running()
+	e.MarkClientPresence(context.Background())
+	e.running()
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("MarkClientPresence+Running blocked for %v during a cold start; every authenticated IPC request pays that", elapsed)
 	}
 }
 
 func TestEngineSatisfiesEmbedder(t *testing.T) {
-	var _ Embedder = NewEngine("/bin/true", nil, "http://127.0.0.1:6943", "m", time.Minute)
+	var _ Embedder = newEngine("/bin/true", nil, "http://127.0.0.1:6943", "m", time.Minute)
 }
