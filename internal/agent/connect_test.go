@@ -446,6 +446,63 @@ func (s *fakeSpeaker) Flush()                    {}
 func (s *fakeSpeaker) Close() error              { return nil }
 func (s *fakeSpeaker) CurrentAmplitude() float64 { return 0 }
 
+// budgetBrain records the remaining ctx budget RetrieveRelevant is handed, and returns recalls only when that budget covers minBudget. It stands in for the real RetrieveRelevant, whose Gemini embedContent round trip measures 2.3-2.8s against the live API — anything less than that and the semantic half of hybrid search never returns in time.
+type budgetBrain struct {
+	*toolTestBrain
+	minBudget time.Duration
+	budget    chan time.Duration
+}
+
+func (b *budgetBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		b.budget <- 0
+		return nil, errors.New("retrieve got a context with no deadline")
+	}
+	budget := time.Until(deadline)
+	b.budget <- budget
+	if budget < b.minBudget {
+		return nil, context.DeadlineExceeded
+	}
+	return []string{"kernel work on the retrieval path"}, nil
+}
+
+// TestTextSendLoop_RetrieveBudgetCoversEmbedRoundTrip verifies the deadline textSendLoop puts on RetrieveRelevant leaves room for a real embed round trip, so the recalls it fetches actually reach the turn. With a budget under the measured embed latency the semantic half of hybrid retrieval is cancelled on every typed turn and search silently degrades to lexical-only.
+func TestTextSendLoop_RetrieveBudgetCoversEmbedRoundTrip(t *testing.T) {
+	const measuredEmbedLatency = 2800 * time.Millisecond
+
+	brain := &budgetBrain{toolTestBrain: &toolTestBrain{}, minBudget: measuredEmbedLatency, budget: make(chan time.Duration, 1)}
+	a := NewAgent(nil, &fakeSpeaker{}, brain, nil, "")
+	fs := &fakeLiveSession{sentContent: make(chan genai.LiveSendClientContentParameters, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.textSendLoop(ctx, fs)
+
+	a.TextChan <- "what was I working on"
+
+	select {
+	case budget := <-brain.budget:
+		if budget < measuredEmbedLatency {
+			t.Errorf("RetrieveRelevant got %v of budget, too little for a %v embed round trip", budget, measuredEmbedLatency)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for RetrieveRelevant to be called")
+	}
+
+	select {
+	case sent := <-fs.sentContent:
+		if len(sent.Turns) != 1 || len(sent.Turns[0].Parts) != 2 {
+			t.Fatalf("expected one turn with two parts, got %+v", sent.Turns)
+		}
+		if !strings.Contains(sent.Turns[0].Parts[0].Text, "kernel work on the retrieval path") {
+			t.Errorf("expected the recall to reach the turn context, got %q", sent.Turns[0].Parts[0].Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SendClientContent")
+	}
+}
+
 // TestTextSendLoop_HungRetrieveRelevant_DoesNotDelaySend verifies a slow/hung RetrieveRelevant call (e.g. a client-side embed API call over IPC that never returns) doesn't hold up sending the user's typed turn — the per-call timeout must let the send proceed promptly with whatever recalls (if any) came back in time, same degrade-gracefully shape HybridSearch's own resilience already has.
 func TestTextSendLoop_HungRetrieveRelevant_DoesNotDelaySend(t *testing.T) {
 	brain := &toolTestBrain{retrieveRelevantBlocksOnCtx: true}
@@ -461,13 +518,13 @@ func TestTextSendLoop_HungRetrieveRelevant_DoesNotDelaySend(t *testing.T) {
 
 	select {
 	case sent := <-fs.sentContent:
-		if elapsed := time.Since(start); elapsed > 1*time.Second {
-			t.Errorf("expected the send to proceed promptly despite the hung RetrieveRelevant call, took %v", elapsed)
+		if elapsed := time.Since(start); elapsed > textSendLoopRetrieveTimeout+500*time.Millisecond {
+			t.Errorf("expected the send to proceed once the retrieve budget expired, took %v", elapsed)
 		}
 		if len(sent.Turns) != 1 || len(sent.Turns[0].Parts) != 2 || sent.Turns[0].Parts[1].Text != "what's the weather" {
 			t.Errorf("expected the turn to still carry the user's text, got %+v", sent.Turns)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(2 * textSendLoopRetrieveTimeout):
 		t.Fatal("timed out waiting for SendClientContent — the turn never got sent")
 	}
 }
