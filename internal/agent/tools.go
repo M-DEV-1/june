@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -86,9 +87,11 @@ func toolDefinitions() []*genai.Tool {
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
-						"query":  {Type: genai.TypeString, Description: "What to search for — topic, project, show, person, etc."},
+						"query":  {Type: genai.TypeString, Description: "What to search for — topic, project, show, person, etc. Never put a time word here ('today', 'yesterday', 'last week') — it will match text instead of dates; use since/until for that."},
 						"domain": {Type: genai.TypeString, Description: "Optional. Restrict to 'work' or 'personal' memories only. Omit to search everything, weighted toward whichever domain you're currently in."},
 						"app":    {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring, e.g. slack, firefox, code)."},
+						"since":  {Type: genai.TypeString, Description: "Optional. Keep only results from this time onward. 'today', 'yesterday', a bare date (2026-07-05), or a timestamp (2026-07-05T09:30:00). Omit for no time limit."},
+						"until":  {Type: genai.TypeString, Description: "Optional. Keep only results up to this time (same formats as 'since'; a bare date covers the whole day). Omit for no time limit."},
 					},
 					Required: []string{"query"},
 				},
@@ -101,8 +104,8 @@ func toolDefinitions() []*genai.Tool {
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
-						"subject": {Type: genai.TypeString, Description: "Optional. A subject/topic to recall (fuses the matching thread's arc with diverse episode specifics). Takes priority over the timeline."},
-						"since":   {Type: genai.TypeString, Description: "Optional. Start of the timeline window as an ISO-8601 timestamp (2026-07-05T00:00:00Z) or bare date (2026-07-05). You know the current date/time — convert phrases like 'yesterday', 'July 5th', or 'last week' into a concrete date yourself. Defaults to the start of today."},
+						"subject": {Type: genai.TypeString, Description: "Optional. A subject/topic to recall (fuses the matching thread's arc with diverse episode specifics). Cannot be combined with app, since, or until — use one or the other."},
+						"since":   {Type: genai.TypeString, Description: "Optional. Start of the timeline window: 'today', 'yesterday', a bare date (2026-07-05), or a timestamp (2026-07-05T00:00:00). You know the current date/time — convert other phrases like 'July 5th' or 'last week' into a concrete date yourself. Defaults to the start of today."},
 						"until":   {Type: genai.TypeString, Description: "Optional. End of the timeline window (same formats as 'since'). A bare date covers the whole day. Defaults to now. For a single day, set since and until to that same date."},
 						"app":     {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring)."},
 					},
@@ -200,11 +203,11 @@ const recallSubjectLimit = 6
 const recallExcerpt = 160
 
 // recallBounds resolves the "recall" tool's since/until args into a concrete [since, until] range.
-// The model, knowing the current date/time, converts any human phrase ("yesterday", "July 5th", "last week") into ISO-8601 bounds and passes them here — so this carries no hardcoded time vocabulary of its own.
+// The model, knowing the current date/time, converts any human phrase ("July 5th", "last week") into ISO-8601 bounds and passes them here; parseInstant additionally accepts the bare words "today" and "yesterday", which the model passes straight through often enough to be worth handling.
 func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Time, error) {
 	since := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	if strings.TrimSpace(sinceStr) != "" {
-		parsed, err := parseInstant(sinceStr, now.Location(), false)
+		parsed, err := parseInstant(sinceStr, now, false)
 		if err != nil {
 			return time.Time{}, time.Time{}, err
 		}
@@ -212,7 +215,7 @@ func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Tim
 	}
 	until := now
 	if strings.TrimSpace(untilStr) != "" {
-		parsed, err := parseInstant(untilStr, now.Location(), true)
+		parsed, err := parseInstant(untilStr, now, true)
 		if err != nil {
 			return time.Time{}, time.Time{}, err
 		}
@@ -227,21 +230,131 @@ func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Tim
 // errSinceAfterUntil is a sentinel so callers can distinguish "the range is backwards" from "the timestamp didn't parse" — leading a reversed-range error with the ISO-8601 format hint would be misleading when the format was fine.
 var errSinceAfterUntil = errors.New("since must not be after until")
 
-// parseInstant parses a full RFC3339 timestamp, or a bare calendar date (2006-01-02).
-// A bare date anchors to the start of that day, or its end (23:59:59) when endOfDay is set — so a bare until date is inclusive of the whole day rather than a zero-width midnight instant.
-func parseInstant(s string, loc *time.Location, endOfDay bool) (time.Time, error) {
+// parseInstant parses a full RFC3339 timestamp, a zoneless datetime (2006-01-02T15:04:05, read in now's zone), a bare calendar date (2006-01-02), or the words "today" and "yesterday" resolved against now.
+// A bare date or word anchors to the start of that day, or its end (23:59:59) when endOfDay is set — so a bare until date is inclusive of the whole day rather than a zero-width midnight instant.
+// The words are here because the user says them out loud and the model passes them straight through; without them the call errors, or worse, the word reaches the search as a search term and matches things like "India Today".
+func parseInstant(s string, now time.Time, endOfDay bool) (time.Time, error) {
+	loc := now.Location()
+	s = strings.TrimSpace(s)
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
-	d, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(s), loc)
+	// A zoneless datetime carries a time of day already, so endOfDay doesn't apply to it.
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, loc); err == nil {
+		return t, nil
+	}
+	d, err := time.ParseInLocation("2006-01-02", s, loc)
 	if err != nil {
-		return time.Time{}, err
+		switch strings.ToLower(s) {
+		case "today":
+			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		case "yesterday":
+			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -1)
+		default:
+			return time.Time{}, err
+		}
 	}
 	if endOfDay {
 		return time.Date(d.Year(), d.Month(), d.Day(), 23, 59, 59, 0, loc), nil
 	}
 	return d, nil
 }
+
+// dateFormatHint is the one error phrasing for a since/until that didn't parse, shared by recall and query_memory so the model gets the same list of accepted forms wherever it passes a date.
+const dateFormatHint = `since/until must be "today", "yesterday", a bare date (2026-07-05), or an ISO-8601 timestamp (2026-07-05T00:00:00 or 2026-07-05T00:00:00Z)`
+
+// hasArg reports whether name was supplied with a value that isn't an empty string. A non-string value counts as supplied — the model meant something by it, and treating it as absent is how a filter gets dropped without anyone noticing.
+func hasArg(args map[string]any, name string) bool {
+	v, present := args[name]
+	if !present {
+		return false
+	}
+	s, ok := v.(string)
+	return !ok || strings.TrimSpace(s) != ""
+}
+
+// stringArg returns args[name] as a string. A missing argument is "" with no error; one present but not a string is an error, since silently ignoring it is how a wrong-typed date turned into "the start of today".
+func stringArg(args map[string]any, name string) (string, error) {
+	v, present := args[name]
+	if !present {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string, got %T", name, v)
+	}
+	return s, nil
+}
+
+// checkArgs reports every argument name that isn't in valid, listing the valid ones so the model can correct itself on the next call.
+// This exists because the model invents parameters — a real trace called recall with query_memory's "query" argument, which the recall handler ignored, then answered from the timeline branch with since defaulted to the start of today.
+func checkArgs(args map[string]any, valid ...string) error {
+	var unknown []string
+	for name := range args {
+		if !slices.Contains(valid, name) {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	slices.Sort(unknown)
+	return fmt.Errorf("unknown argument(s) %s; valid arguments are %s",
+		strings.Join(unknown, ", "), strings.Join(valid, ", "))
+}
+
+// optionalWindow parses since/until when either is given, for tools where no dates means no time filter at all (unlike recall, whose timeline branch defaults to today — see recallBounds).
+// Output: the bounds, whether any filtering should happen, and a parse error. A zero bound means unbounded on that side.
+func optionalWindow(args map[string]any, now time.Time) (time.Time, time.Time, bool, error) {
+	sinceStr, sinceErr := stringArg(args, "since")
+	untilStr, untilErr := stringArg(args, "until")
+	if err := errors.Join(sinceErr, untilErr); err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	var since, until time.Time
+	var err error
+	if strings.TrimSpace(sinceStr) != "" {
+		if since, err = parseInstant(sinceStr, now, false); err != nil {
+			return time.Time{}, time.Time{}, false, err
+		}
+	}
+	if strings.TrimSpace(untilStr) != "" {
+		if until, err = parseInstant(untilStr, now, true); err != nil {
+			return time.Time{}, time.Time{}, false, err
+		}
+	}
+	if !since.IsZero() && !until.IsZero() && since.After(until) {
+		return time.Time{}, time.Time{}, false, errSinceAfterUntil
+	}
+	return since, until, !since.IsZero() || !until.IsZero(), nil
+}
+
+// filterHitsByTime keeps hits whose CreatedAt falls inside [since, until]; a zero bound is unbounded on that side.
+// A hit with no CreatedAt is kept: notes and summaries reach HybridSearch's lexical path without a timestamp, and dropping them would silently delete durable facts from every dated query.
+func filterHitsByTime(hits []db.MemoryHit, since, until time.Time) []db.MemoryHit {
+	out := hits[:0:0]
+	for _, h := range hits {
+		if h.CreatedAt.IsZero() {
+			out = append(out, h)
+			continue
+		}
+		if !since.IsZero() && h.CreatedAt.Before(since) {
+			continue
+		}
+		if !until.IsZero() && h.CreatedAt.After(until) {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// queryMemoryHits is how many hits query_memory shows the model, and queryMemoryOverfetch multiplies what it asks the store for when a since/until window is set.
+// The over-fetch is needed because HybridSearch ranks without any notion of the window: filtering its top 10 after the fact usually leaves nothing, since the whole point of a dated question is that the lexically best matches are from the wrong day.
+const (
+	queryMemoryHits      = 10
+	queryMemoryOverfetch = 5
+)
 
 // sensitivePathSubstrings/sensitivePathSuffixes gate read_file behind HITL approval — credentials, SSH/GPG/cloud keys, and ora's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
 var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "ora-db/ipc-token"}
@@ -429,21 +542,42 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		return fmt.Sprintf("opened %s in browser", url)
 
 	case "query_memory":
+		if err := checkArgs(args, "query", "domain", "app", "since", "until"); err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
 		query, ok := args["query"].(string)
 		if !ok {
 			return "error: query argument is required"
 		}
-		// domain is optional: a missing or wrong-typed arg silently becomes "" (search everything, weighted toward the current domain) rather than erroring — since/until below are stricter since that's a different tool.
+		// domain is optional: a missing or wrong-typed arg silently becomes "" (search everything, weighted toward the current domain) rather than erroring — since/until below are stricter since a mis-parsed date changes which day the answer comes from.
 		domain, _ := args["domain"].(string)
-		slog.Info("querying long-term memory", "query", query, "domain", domain)
+		since, until, timed, err := optionalWindow(args, time.Now())
+		if errors.Is(err, errSinceAfterUntil) {
+			return "error: since must not be after until"
+		}
+		if err != nil {
+			return fmt.Sprintf("error: %s: %v", dateFormatHint, err)
+		}
+		slog.Info("querying long-term memory", "query", query, "domain", domain, "since", since, "until", until)
 
 		// HybridSearch (FTS5 + vector, fused via reciprocal rank fusion) replaces the old two-call SearchMemory + RankedEpisodes merge — it covers episodes/summaries/notes/threads in one fused, domain-aware ranking.
-		hits, err := a.brain.HybridSearch(ctx, query, domain, 10)
+		limit := queryMemoryHits
+		if timed {
+			limit *= queryMemoryOverfetch
+		}
+		hits, err := a.brain.HybridSearch(ctx, query, domain, limit)
 		if err != nil {
 			return fmt.Sprintf("error querying memory: %v", err)
 		}
 		if app, _ := args["app"].(string); strings.TrimSpace(app) != "" {
 			hits = filterHitsByApp(hits, app)
+		}
+		// The store has no time-filtered search, so the window is applied here on the hits it returned — hence the over-fetch above.
+		if timed {
+			hits = filterHitsByTime(hits, since, until)
+			if len(hits) > queryMemoryHits {
+				hits = hits[:queryMemoryHits]
+			}
 		}
 		if len(hits) == 0 {
 			return "no memory matches"
@@ -461,7 +595,16 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		return strings.Join(lines, "\n")
 
 	case "recall":
+		if err := checkArgs(args, "subject", "since", "until", "app"); err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
 		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
+			// RecallSubject takes only a subject and a limit — it has no app filter and no date window — so
+			// combining subject with either can't be honored. Say so rather than answering across every app
+			// and all of time as if the filters had been applied.
+			if hasArg(args, "app") || hasArg(args, "since") || hasArg(args, "until") {
+				return "error: subject cannot be combined with app, since, or until; call recall with only subject, or drop subject and use since/until (with an optional app) for a time window"
+			}
 			slog.Info("recalling subject", "subject", subject)
 			lines, err := a.brain.RecallSubject(ctx, subject, recallSubjectLimit)
 			if err != nil {
@@ -473,32 +616,24 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return strings.Join(lines, "\n")
 		}
 
-		var sinceStr, untilStr string
-		if v, present := args["since"]; present {
-			s, ok := v.(string)
-			if !ok {
-				return fmt.Sprintf("error: since/until must be ISO-8601 timestamps (e.g. 2026-07-05T00:00:00Z or 2026-07-05): since must be a string, got %T", v)
-			}
-			sinceStr = s
-		}
-		if v, present := args["until"]; present {
-			s, ok := v.(string)
-			if !ok {
-				return fmt.Sprintf("error: since/until must be ISO-8601 timestamps (e.g. 2026-07-05T00:00:00Z or 2026-07-05): until must be a string, got %T", v)
-			}
-			untilStr = s
+		sinceStr, sinceErr := stringArg(args, "since")
+		untilStr, untilErr := stringArg(args, "until")
+		if err := errors.Join(sinceErr, untilErr); err != nil {
+			return fmt.Sprintf("error: %s: %v", dateFormatHint, err)
 		}
 		since, until, err := recallBounds(sinceStr, untilStr, time.Now())
 		if errors.Is(err, errSinceAfterUntil) {
 			return "error: since must not be after until"
 		}
 		if err != nil {
-			return fmt.Sprintf("error: since/until must be ISO-8601 timestamps (e.g. 2026-07-05T00:00:00Z or 2026-07-05): %v", err)
+			return fmt.Sprintf("error: %s: %v", dateFormatHint, err)
 		}
 		app, _ := args["app"].(string)
 		slog.Info("recalling timeline window", "since", since, "until", until, "app", app)
 
-		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{Since: since, Until: until, App: app, Limit: 50})
+		// NewestFirst: real days exceed the 50-episode cap, so without it this returns the oldest 50 —
+		// the start of the window — and silently stops there instead of covering the whole day.
+		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{Since: since, Until: until, App: app, Limit: 50, NewestFirst: true})
 		if err != nil {
 			return fmt.Sprintf("error recalling timeline: %v", err)
 		}
@@ -511,9 +646,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			if runes := []rune(excerpt); len(runes) > recallExcerpt {
 				excerpt = string(runes[:recallExcerpt])
 			}
-			// Established timeline shape: "[Jan 2 15:04] app — title: …" (uses the timestamp's own location, so UTC fixtures stay UTC).
+			// Established timeline shape: "[Jan 2 15:04] app — title: …", converted to the user's local zone (episodes are stored in UTC) so what's shown matches their wall clock.
 			lines = append(lines, fmt.Sprintf("[%s] %s — %s: %s",
-				e.CreatedAt.Format("Jan 2 15:04"), e.App, e.Title, excerpt))
+				e.CreatedAt.In(time.Local).Format("Jan 2 15:04"), e.App, e.Title, excerpt))
 		}
 		return strings.Join(lines, "\n")
 
@@ -547,7 +682,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 				excerpt = string(runes[:recallExcerpt])
 			}
 			line := fmt.Sprintf("[%s] %s — %s: %s",
-				e.CreatedAt.Format("Jan 2 15:04"), e.App, e.Title, excerpt)
+				e.CreatedAt.In(time.Local).Format("Jan 2 15:04"), e.App, e.Title, excerpt)
 			if e.ImagePath != "" {
 				line += " [img]"
 			}

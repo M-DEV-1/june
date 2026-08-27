@@ -561,8 +561,8 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 	}
 }
 
-// textSendLoopRetrieveTimeout bounds how long a typed turn waits on RetrieveRelevant before sending anyway — RetrieveRelevant's embed call (client-side, over daemon IPC as of hybrid search's IPC wiring) has no deadline of its own, so a slow/hung call would otherwise delay delivering the user's message to the live session by however long that takes. On expiry RetrieveRelevant's own ctx.Err() just means recalls comes back empty; HybridSearch already degrades the same way when its embed call fails.
-const textSendLoopRetrieveTimeout = 500 * time.Millisecond
+// textSendLoopRetrieveTimeout bounds how long a typed turn waits on RetrieveRelevant before sending anyway — RetrieveRelevant's embed call (a direct Gemini embedContent request from the client process — only the vector index behind it goes over daemon IPC) has no deadline of its own, so a slow/hung call would otherwise delay delivering the user's message to the live session by however long that takes. On expiry RetrieveRelevant's own ctx.Err() just means recalls comes back empty; HybridSearch already degrades the same way when its embed call fails. The budget covers a Gemini embedContent round trip, which measures 2.3-2.8s in production — a shorter one cancels the semantic half of hybrid retrieval on every typed turn and leaves search lexical-only.
+const textSendLoopRetrieveTimeout = 3 * time.Second
 
 func (a *Agent) textSendLoop(ctx context.Context, session liveSession) {
 	for {
