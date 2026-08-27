@@ -179,12 +179,17 @@ func (s *Store) createSchema() error {
 		tokenize = 'unicode61'
 	);
 
-	-- Drop the old trigger so existing dev DBs pick up the updated WHEN clause.
+	-- Drop the old trigger so existing dev DBs pick up the updated WHEN clause and the $.summary extraction below.
 	DROP TRIGGER IF EXISTS nodes_ai_summary;
+	-- A summary node's content is the whole marshalled TaskSummary (see LogSemanticNode), so indexing it verbatim made its JSON keys ('same_task', 'task_name') live search terms that matched every summary ever written. Index the summary prose instead. Digest nodes store plain prose and fall through unchanged, same expression SearchMemory uses on the read path.
 	CREATE TRIGGER IF NOT EXISTS nodes_ai_summary AFTER INSERT ON nodes
 	WHEN NEW.type IN ('summary','digest')
 	BEGIN
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, NEW.type, NEW.id);
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (
+			CASE WHEN json_valid(NEW.content)
+				THEN IFNULL(NULLIF(json_extract(NEW.content, '$.summary'), ''), NEW.content)
+				ELSE NEW.content
+			END, NEW.type, NEW.id);
 	END;
 
 	CREATE TRIGGER IF NOT EXISTS nodes_ad_summary AFTER DELETE ON nodes
@@ -309,6 +314,15 @@ func (s *Store) createSchema() error {
 	}
 	if err := s.ensureColumn("episodes", "image_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+
+	// Migration for DBs written before nodes_ai_summary extracted $.summary: their summary rows still hold the raw marshalled TaskSummary, so the JSON keys stay searchable until the text is rewritten. Idempotent — a rewritten row is no longer JSON, so the guard skips it on every later run.
+	if _, err := s.db.Exec(`
+		UPDATE memory_fts SET content = json_extract(content, '$.summary')
+		WHERE source IN ('summary','digest')
+			AND json_valid(content)
+			AND NULLIF(json_extract(content, '$.summary'), '') IS NOT NULL`); err != nil {
+		return fmt.Errorf("rebuild summary fts content: %w", err)
 	}
 	return nil
 }

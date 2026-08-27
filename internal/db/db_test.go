@@ -2425,3 +2425,74 @@ func TestLogEpisode_JunkOnlyRawFallbackIsStripped(t *testing.T) {
 		t.Errorf("screen_text = %q, want no object replacement characters", text)
 	}
 }
+
+// TestStore_SummaryFTS_IndexesSummaryTextNotJSONKeys proves that a summary node's FTS entry holds the plain summary prose, not the marshalled TaskSummary. Summary nodes store the whole struct as JSON in nodes.content, so indexing it verbatim made the JSON keys ("same_task", "task_name") live search terms that matched every summary ever written.
+func TestStore_SummaryFTS_IndexesSummaryTextNotJSONKeys(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	const summaryText = "Rolled the staging cluster to 1.30 and watched every pod drain cleanly."
+	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "Kubernetes upgrade", Summary: summaryText}); err != nil {
+		t.Fatalf("LogSemanticNode: %v", err)
+	}
+
+	if hits, err := store.SearchMemory(ctx, "same_task"); err != nil {
+		t.Fatalf("SearchMemory(same_task): %v", err)
+	} else if len(hits) != 0 {
+		t.Errorf("searching a JSON key returned %d hits, want 0: %+v", len(hits), hits)
+	}
+
+	hits, err := store.SearchMemory(ctx, "staging cluster")
+	if err != nil {
+		t.Fatalf("SearchMemory(staging cluster): %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("want 1 hit for the summary prose, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Content != summaryText {
+		t.Errorf("hit content = %q, want %q", hits[0].Content, summaryText)
+	}
+}
+
+// TestCreateSchema_RebuildsSummaryFTSContent checks the migration for DBs written before the trigger extracted $.summary: their memory_fts rows still hold raw TaskSummary JSON, so reopening the store must rewrite them to the summary text.
+func TestCreateSchema_RebuildsSummaryFTSContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db")
+
+	first, err := db.New(path)
+	if err != nil {
+		t.Fatalf("New (first open): %v", err)
+	}
+	// Write the FTS row the way the pre-fix trigger did: the whole marshalled struct.
+	const summaryText = "Reviewed the quarterly invoice reconciliation spreadsheet."
+	raw := `{"same_task":false,"task_name":"Invoices","summary":"` + summaryText + `"}`
+	if _, err := first.DB().Exec(`INSERT INTO memory_fts(content, source, ref_id) VALUES (?, 'summary', 4242)`, raw); err != nil {
+		t.Fatalf("seed legacy fts row: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	second, err := db.New(path)
+	if err != nil {
+		t.Fatalf("New (second open, migration re-run): %v", err)
+	}
+	defer second.Close()
+
+	var content string
+	if err := second.DB().QueryRow(`SELECT content FROM memory_fts WHERE ref_id = 4242`).Scan(&content); err != nil {
+		t.Fatalf("read migrated fts row: %v", err)
+	}
+	if content != summaryText {
+		t.Errorf("migrated content = %q, want %q", content, summaryText)
+	}
+	if hits, err := second.SearchMemory(context.Background(), "task_name"); err != nil {
+		t.Fatalf("SearchMemory(task_name): %v", err)
+	} else if len(hits) != 0 {
+		t.Errorf("searching a JSON key returned %d hits, want 0: %+v", len(hits), hits)
+	}
+}
