@@ -69,6 +69,7 @@ var commandItems = []list.Item{
 	commandItem{title: "notes", desc: "List saved notes"},
 	commandItem{title: "help", desc: "Show all available commands"},
 	commandItem{title: "clear", desc: "Clear the screen"},
+	commandItem{title: "quit", desc: "Quit immediately (no confirmation)"},
 }
 
 func newCommandList(s Styles) list.Model {
