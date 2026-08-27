@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -2011,5 +2012,103 @@ func TestUpdate_SuggestChanges_Esc_Rejects(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the rejection")
+	}
+}
+
+// TestStreamLine_OraChunkAfterInterleavedVoiceLine_MergesInPlace is bug 3: an ambient voice transcript (or any system notice) landing between two chunks of the same ora answer used to break the merge chain, so the partial text and the fuller text stacked as two separate transcript entries — "मैं पैसे नहीं" followed by "मैं पैसे नहीं दे सकता, लेकिन...". The answer must keep updating its own block no matter what else arrives alongside it.
+func TestStreamLine_OraChunkAfterInterleavedVoiceLine_MergesInPlace(t *testing.T) {
+	m := newTestModel()
+	m.streamLine("ora", "मैं पैसे नहीं", false)
+	oraIdx := len(m.messages) - 1
+	startBefore := len(m.messages)
+
+	m.streamLine("you", "[noise]", false)
+	m.streamLine("ora", "मैं पैसे नहीं दे सकता, लेकिन...", false)
+
+	if len(m.messages) != startBefore+1 {
+		t.Fatalf("expected only the voice line to be new, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
+	}
+	if got := m.messages[oraIdx].Content; got != "मैं पैसे नहीं दे सकता, लेकिन..." {
+		t.Errorf("expected the ora block updated in place, got %q", got)
+	}
+}
+
+// TestStreamLine_OraChunkAfterToolLogLine_MergesInPlace is the same defect on the tool path: a tool-log entry appended mid-answer must not split the answer into two blocks either.
+func TestStreamLine_OraChunkAfterToolLogLine_MergesInPlace(t *testing.T) {
+	m := newTestModel()
+	m.streamLine("ora", "let me check", false)
+	oraIdx := len(m.messages) - 1
+	m.messages = append(m.messages, Message{Sender: "tool", Content: "recall(...) → 12 lines", IsToolLog: true})
+	startBefore := len(m.messages)
+
+	m.streamLine("ora", " — you were on the spreadsheet.", false)
+
+	if len(m.messages) != startBefore {
+		t.Fatalf("expected no new message, got %d new: %+v", len(m.messages)-startBefore, m.messages)
+	}
+	if got := m.messages[oraIdx].Content; got != "let me check — you were on the spreadsheet." {
+		t.Errorf("expected the ora block updated in place, got %q", got)
+	}
+}
+
+// mutedTestMic is an audio.Microphone whose amplitude is always loud, so a test can tell "the UI stopped reading the mic" apart from "the room went quiet".
+type mutedTestMic struct{}
+
+func (mutedTestMic) StartCapture(ctx context.Context) (<-chan []byte, error) { return nil, nil }
+func (mutedTestMic) CurrentAmplitude() float64                               { return 1.0 }
+func (mutedTestMic) Close() error                                            { return nil }
+
+// TestUpdate_Tick_MutedMic_FlatlinesWaveform is bug 1's visible half: /text (and /mute) stop the mic being listened to, so the waveform must sit flat instead of dancing to a room the agent is no longer hearing.
+func TestUpdate_Tick_MutedMic_FlatlinesWaveform(t *testing.T) {
+	a := agent.NewAgent(mutedTestMic{}, nil, nil, nil, "")
+	m := NewModel(a, "connected", "")
+
+	next, _ := m.Update(tickMsg(time.Now()))
+	m = next.(model)
+	if m.micWave.smoothed == 0 {
+		t.Fatal("expected the unmuted mic to drive the waveform")
+	}
+
+	a.SetMute(true)
+	for i := 0; i < 40; i++ {
+		next, _ = m.Update(tickMsg(time.Now()))
+		m = next.(model)
+	}
+	if m.micWave.smoothed != 0 {
+		t.Errorf("expected a muted mic to flatline the waveform, got %v", m.micWave.smoothed)
+	}
+}
+
+// TestExecuteCommand_Text_MutesMic verifies /text actually stops the mic at the agent, not just the mode chip in the footer — the whole point of text-only mode.
+func TestExecuteCommand_Text_MutesMic(t *testing.T) {
+	m := newTestModel()
+
+	m.executeCommand("/text")
+	if !m.agent.IsMuted() {
+		t.Error("expected /text to mute the mic")
+	}
+
+	m.executeCommand("/both")
+	if m.agent.IsMuted() {
+		t.Error("expected /both to unmute the mic")
+	}
+}
+
+// TestUpdate_ToolConfirmResolved_RestoresPriorMode verifies approving a tool call returns to whatever mode the user was actually in. Forcing ModeBoth here silently left a text-only session showing "both" in the footer, and made the next /mute toggle the mic ON instead of off.
+func TestUpdate_ToolConfirmResolved_RestoresPriorMode(t *testing.T) {
+	m := newTestModel()
+	m.executeCommand("/text")
+
+	resCh := make(chan string, 1)
+	next, _ := m.Update(agent.ToolRequest{Description: "shell: ls", Execute: func() string { return "ok" }, ResultChan: resCh})
+	m = next.(model)
+	if m.mode != ModeToolConfirm {
+		t.Fatalf("expected ModeToolConfirm, got %v", m.mode)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if m.mode != ModeText {
+		t.Errorf("expected the prior mode restored, got %v", m.mode)
 	}
 }
