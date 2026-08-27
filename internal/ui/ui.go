@@ -376,7 +376,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.textarea.Focus()
 						m.mode = ModeToolEdit
 					}
-					m.activeToolReq = nil
+					// "Suggest changes" is the one entry that isn't terminal: it hands the request on to ModeToolEdit, which still needs it to deliver a result. The other three have already sent theirs, so clearing here is right for them and a nil-deref crash for it.
+					if m.mode != ModeToolEdit {
+						m.activeToolReq = nil
+					}
 					m.updateViewport(false)
 					m.recalcViewportHeight()
 					return m, nil

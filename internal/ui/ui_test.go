@@ -1840,3 +1840,93 @@ func TestUpdate_WindowSizeMsg_InputRowRendersAtFullWidth(t *testing.T) {
 	}
 }
 
+// selectHITLItem points the approval menu at the entry titled want, so a test doesn't depend on menu ordering.
+func selectHITLItem(t *testing.T, m *model, want string) {
+	t.Helper()
+	for i, it := range m.hitlList.Items() {
+		if ci, ok := it.(commandItem); ok && ci.title == want {
+			m.hitlList.Select(i)
+			return
+		}
+	}
+	t.Fatalf("no %q entry in the approval menu", want)
+}
+
+// openSuggestChanges drives the real flow a user takes to reach the edit prompt: a shell-backed tool request arrives, the approval menu opens, and "Suggest changes" is chosen. Returns the model in ModeToolEdit plus the channel the request's result is delivered on.
+// Setting mode/activeToolReq by hand instead would skip the menu step that clears activeToolReq, which is the bug these tests exist for.
+func openSuggestChanges(t *testing.T, cmd string) (model, chan string) {
+	t.Helper()
+	m := newTestModel()
+	res := make(chan string, 1)
+	req := agent.ToolRequest{
+		Description:     "shell: " + cmd,
+		Execute:         func() string { return "unedited ran" },
+		ResultChan:      res,
+		EditableCommand: cmd,
+	}
+
+	next, _ := m.Update(req)
+	m = next.(model)
+	if m.mode != ModeToolConfirm {
+		t.Fatalf("expected ModeToolConfirm after a tool request, got %q", m.mode)
+	}
+	selectHITLItem(t, &m, "Suggest changes")
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if m.mode != ModeToolEdit {
+		t.Fatalf("expected ModeToolEdit after Suggest changes, got %q", m.mode)
+	}
+	return m, res
+}
+
+// TestUpdate_SuggestChanges_KeepsActiveToolReq verifies "Suggest changes" does not clear activeToolReq. Unlike the other three menu entries it is not terminal — it hands off to ModeToolEdit, which still needs the request to deliver a result on.
+func TestUpdate_SuggestChanges_KeepsActiveToolReq(t *testing.T) {
+	m, _ := openSuggestChanges(t, "echo ora-test")
+
+	if m.activeToolReq == nil {
+		t.Fatal("activeToolReq was cleared by Suggest changes — the edit handler needs it to deliver a result")
+	}
+}
+
+// TestUpdate_SuggestChanges_PrefillsTextarea verifies the textarea is seeded with the original command so the user edits it rather than retyping it.
+func TestUpdate_SuggestChanges_PrefillsTextarea(t *testing.T) {
+	m, _ := openSuggestChanges(t, "echo ora-test")
+
+	if got := m.textarea.Value(); got != "echo ora-test" {
+		t.Errorf("expected the textarea prefilled with the original command, got %q", got)
+	}
+}
+
+// TestUpdate_SuggestChanges_Enter_RunsEditedCommand verifies submitting an edited command runs that command and delivers its output, rather than panicking on a nil activeToolReq.
+func TestUpdate_SuggestChanges_Enter_RunsEditedCommand(t *testing.T) {
+	m, res := openSuggestChanges(t, "echo ora-original")
+	m.textarea.SetValue("echo ora-edited")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	select {
+	case got := <-res:
+		if !strings.Contains(got, "ora-edited") {
+			t.Errorf("expected the edited command's output on ResultChan, got %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the edited command's result")
+	}
+}
+
+// TestUpdate_SuggestChanges_Esc_Rejects verifies cancelling an edit rejects the request, rather than panicking on a nil activeToolReq.
+func TestUpdate_SuggestChanges_Esc_Rejects(t *testing.T) {
+	m, res := openSuggestChanges(t, "echo ora-test")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	select {
+	case got := <-res:
+		if !strings.Contains(got, "rejected") {
+			t.Errorf("expected a rejection on ResultChan, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the rejection")
+	}
+}
