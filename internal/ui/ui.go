@@ -101,7 +101,7 @@ func pollDaemonHTTP(client *http.Client, url, tokenPath string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func NewModel(a *agent.Agent, daemonStatus string) model {
+func NewModel(a *agent.Agent, daemonStatus, buildMismatch string) model {
 	s := DefaultStyles()
 
 	ta := textarea.New()
@@ -143,6 +143,9 @@ func NewModel(a *agent.Agent, daemonStatus string) model {
 	introContent := "\n\n\n\n\n\n" + banner + "\n\nambient OS companion · v0.1.1-alpha · type /help for commands"
 	if daemonLine != "" {
 		introContent += "\n" + daemonLine
+	}
+	if buildMismatch != "" {
+		introContent += "\n⚠ " + buildMismatch
 	}
 
 	introMsg := Message{
