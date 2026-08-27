@@ -25,10 +25,6 @@ import (
 //go:embed tray_icon_linux.png
 var trayIconPNG []byte
 
-// meetingRecorder is the tray's handle on the meeting recorder. startDaemonServices (cmd/daemon.go) assigns it once the store exists, before registerSNI runs; it stays nil if the daemon never got that far, and every read of it is nil-safe.
-// ponytail: a package-level var because startDaemonServices' signature is owned elsewhere — pass the recorder through that return value if the daemon ever needs more than one.
-var meetingRecorder *recorder.Recorder
-
 // statusDotSize is the side length of the rendered status indicator (px).
 const statusDotSize = 16
 
