@@ -51,20 +51,50 @@ func authedDaemonGet(url string) {
 	resp.Body.Close()
 }
 
-// bufferProvider GETs the daemon's /buffer endpoint, which is how the client process's Agent.buildHandshakeContext sees current activity (the "[working]" lines) at all. Before this existed, Agent.Connect's compiler was always nil client-side and /buffer had no consumers.
-type bufferProvider struct {
+// daemonClient is the half every client-to-daemon caller in this file shares: where the daemon is, how long to wait for it, and which file holds the token that authenticates the request. The three callers below embed it and differ only in that timeout.
+type daemonClient struct {
 	baseURL   string
 	client    *http.Client
 	tokenPath string
 }
 
-// newBufferProvider builds a bufferProvider pointed at the daemon's IPC server. The 300ms client timeout is deliberate: this feeds the session handshake, and a dead or slow daemon must not delay the live session connecting.
-func newBufferProvider() *bufferProvider {
-	return &bufferProvider{
+// newDaemonClient points a daemonClient at the local daemon's IPC server, giving each request the supplied timeout.
+func newDaemonClient(timeout time.Duration) daemonClient {
+	return daemonClient{
 		baseURL:   "http://127.0.0.1:" + DaemonPort,
-		client:    &http.Client{Timeout: 300 * time.Millisecond},
+		client:    &http.Client{Timeout: timeout},
 		tokenPath: ipctoken.DefaultPath,
 	}
+}
+
+// post marshals payload as JSON, POSTs it to the daemon at path with the auth header attached, and refuses anything that isn't a 200. The caller must close the returned body. Input: request context, endpoint path, JSON-marshalable payload. Output: the 200 response, or an error naming which step failed.
+func (d daemonClient) post(ctx context.Context, path string, payload any) (*http.Response, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s request: %w", path, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build %s request: %w", path, err)
+	}
+	attachIPCToken(req, d.tokenPath)
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("%s: daemon returned %s", path, resp.Status)
+	}
+	return resp, nil
+}
+
+// bufferProvider GETs the daemon's /buffer endpoint, which is how the client process's Agent.buildHandshakeContext sees current activity (the "[working]" lines) at all. Before this existed, Agent.Connect's compiler was always nil client-side and /buffer had no consumers.
+type bufferProvider struct{ daemonClient }
+
+// newBufferProvider builds a bufferProvider pointed at the daemon's IPC server. The 300ms timeout is deliberate: this feeds the session handshake, and a dead or slow daemon must not delay the live session connecting.
+func newBufferProvider() *bufferProvider {
+	return &bufferProvider{newDaemonClient(300 * time.Millisecond)}
 }
 
 // Get returns the daemon's current activity buffer, or nil on any failure — unreachable daemon, timeout, non-200 or bad JSON. Agent.buildHandshakeContext treats nil as a no-op, so a dead daemon means the handshake proceeds without this context rather than blocking or erroring.
@@ -90,69 +120,24 @@ func (b *bufferProvider) Get() []tracker.Activity {
 }
 
 // httpVectorIndex satisfies db.Store's unexported vectorIndex interface (Add/Search/Delete/IDs) by calling the daemon's /vector/* endpoints instead of opening chromem directly. chromem must stay exclusive to the daemon process — two processes opening the same directory risks torn reads and corruption. This is what lets the client's query_memory, RetrieveRelevant and GetImplicitContext reach the semantic half of hybrid search instead of being lexical-only.
-type httpVectorIndex struct {
-	baseURL   string
-	client    *http.Client
-	tokenPath string
-}
+type httpVectorIndex struct{ daemonClient }
 
 // newHTTPVectorIndex builds an httpVectorIndex pointed at the daemon's IPC server.
 func newHTTPVectorIndex() *httpVectorIndex {
-	return &httpVectorIndex{
-		baseURL:   "http://127.0.0.1:" + DaemonPort,
-		client:    &http.Client{Timeout: 10 * time.Second},
-		tokenPath: ipctoken.DefaultPath,
-	}
-}
-
-// post marshals payload as JSON, POSTs it to the daemon at h.baseURL+path with the auth header attached, and returns the response for the caller to decode. The caller must close the body. Input: request context, endpoint path, JSON-marshalable payload. Output: the 200 response, or an error naming which step failed.
-func (h *httpVectorIndex) post(ctx context.Context, path string, payload any) (*http.Response, error) {
-	return daemonPost(ctx, h.client, h.tokenPath, h.baseURL, path, payload)
-}
-
-// daemonPost is the one authenticated client-to-daemon POST every IPC caller in this file uses: marshal, attach the token, refuse anything that isn't a 200. The caller must close the returned body.
-func daemonPost(ctx context.Context, client *http.Client, tokenPath, baseURL, path string, payload any) (*http.Response, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal %s request: %w", path, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build %s request: %w", path, err)
-	}
-	attachIPCToken(req, tokenPath)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("%s: daemon returned %s", path, resp.Status)
-	}
-	return resp, nil
+	return &httpVectorIndex{newDaemonClient(10 * time.Second)}
 }
 
 // httpEmbedder is the client's embed.Embedder: it forwards each embed to the daemon's /embed endpoint rather than talking to llama-server directly. The daemon owns the server process and its port, and routing through it means a client request also wakes a reaped engine and counts as presence, keeping it warm for the rest of the session.
-type httpEmbedder struct {
-	baseURL   string
-	client    *http.Client
-	tokenPath string
-}
+type httpEmbedder struct{ daemonClient }
 
 // newHTTPEmbedder builds an httpEmbedder pointed at the daemon's IPC server. The timeout covers a cold start: the daemon may have to spawn llama-server and load the model before it can answer.
 func newHTTPEmbedder() *httpEmbedder {
-	return &httpEmbedder{
-		baseURL:   "http://127.0.0.1:" + DaemonPort,
-		client:    &http.Client{Timeout: 60 * time.Second},
-		tokenPath: ipctoken.DefaultPath,
-	}
+	return &httpEmbedder{newDaemonClient(60 * time.Second)}
 }
 
 // Embed sends task and text to the daemon and returns the vector it produced. The EmbeddingGemma prefixes are applied daemon-side, so the text goes over the wire unmodified.
 func (h *httpEmbedder) Embed(ctx context.Context, task embed.TaskType, text string) ([]float32, error) {
-	resp, err := daemonPost(ctx, h.client, h.tokenPath, h.baseURL, "/embed", map[string]string{
-		"task": string(task), "text": text,
-	})
+	resp, err := h.post(ctx, "/embed", map[string]string{"task": string(task), "text": text})
 	if err != nil {
 		return nil, err
 	}
