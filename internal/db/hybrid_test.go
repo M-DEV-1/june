@@ -321,7 +321,7 @@ func TestHybridSearch_VectorCandidateBelowSimilarityFloor_Dropped(t *testing.T) 
 	}
 }
 
-// TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm verifies that for a query with 2+ significant terms, a lexical candidate matching only one of them (buildFTSMatch's OR-of-terms means FTS5 alone would return it) is dropped from fusion — without this floor, a query like "hiking docker" surfaces any row containing EITHER word, even ones about neither topic together.
+// TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm verifies that for a query with 3+ significant terms, a lexical candidate matching only one of them (buildFTSMatch's OR-of-terms means FTS5 alone would return it) is dropped from fusion — without this floor, a query like "hiking docker kubernetes" surfaces any row containing just one of those words, on neither of the other topics.
 func TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm(t *testing.T) {
 	ctx := context.Background()
 	store, err := New(":memory:")
@@ -337,12 +337,34 @@ func TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm(t *test
 		t.Fatalf("LogNote: %v", err)
 	}
 
-	hits, err := store.HybridSearch(ctx, "hiking docker", "", 10)
+	hits, err := store.HybridSearch(ctx, "hiking docker kubernetes", "", 10)
 	if err != nil {
 		t.Fatalf("HybridSearch: %v", err)
 	}
 	if len(hits) != 0 {
 		t.Errorf("expected both single-term-overlap notes to be dropped, got: %+v", hits)
+	}
+}
+
+// TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm is the other side of the floor: a two-word question is how people ask about one thing, not a demand that both words appear. Requiring both turned every two-term query into a strict AND, so "ora daemon" stopped matching "the daemon crashed at startup" — the floor has to scale with the query, not sit at a flat two terms.
+func TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.LogNote(ctx, "the daemon crashed at startup", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	hits, err := store.HybridSearch(ctx, "ora daemon", "", 10)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected the one-term note to survive a two-term query, got %d hits: %+v", len(hits), hits)
 	}
 }
 
@@ -1593,5 +1615,58 @@ func TestSetVectorSimilarityFloorIgnoresNonPositive(t *testing.T) {
 	store.SetVectorSimilarityFloor(0)
 	if got := store.vectorFloor(); got != minVectorSimilarity {
 		t.Errorf("floor = %v after SetVectorSimilarityFloor(0), want the %v default", got, float32(minVectorSimilarity))
+	}
+}
+
+// TestReconcileBackfillCandidates_BoundedByTheEmbedCap covers the sweep's memory cost: with a local embedder the episode query has neither an age window nor a limit, so it pulled every episode row — id plus the full capture text — into memory to hand ReconcileVectors a list it only ever reads the first embedCap entries of. The candidate list must stay proportional to what one sweep can actually embed.
+func TestReconcileBackfillCandidates_BoundedByTheEmbedCap(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	for i := 0; i < 300; i++ {
+		if _, err := store.LogEpisode(ctx, "Code", "main.go", fmt.Sprintf("capture %d", i)); err != nil {
+			t.Fatalf("LogEpisode %d: %v", i, err)
+		}
+	}
+	store.SetEmbedsAreFree(true)
+
+	const embedCap = 10
+	got := store.reconcileBackfillCandidates(ctx, nil, embedCap)
+	if len(got) > 4*embedCap {
+		t.Errorf("built %d candidates for an embed cap of %d, want no more than %d", len(got), embedCap, 4*embedCap)
+	}
+	if len(got) < embedCap {
+		t.Fatalf("built only %d candidates, too few to fill a sweep of %d", len(got), embedCap)
+	}
+}
+
+// TestReconcileBackfillCandidates_SkipsWhatTheIndexAlreadyHas verifies the already-indexed ids are dropped while the candidate list is being built, not after: with the list bounded, spending that budget on documents that already have vectors would starve the ones that don't.
+func TestReconcileBackfillCandidates_SkipsWhatTheIndexAlreadyHas(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		id, err := store.LogEpisode(ctx, "Code", "main.go", fmt.Sprintf("capture %d", i))
+		if err != nil {
+			t.Fatalf("LogEpisode %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	store.SetEmbedsAreFree(true)
+
+	existing := map[string]bool{fmt.Sprintf("episode:%d", ids[0]): true, fmt.Sprintf("episode:%d", ids[1]): true}
+	for _, c := range store.reconcileBackfillCandidates(ctx, existing, 100) {
+		if existing[c.id] {
+			t.Errorf("candidate %q is already in the index and should not have been built", c.id)
+		}
 	}
 }
