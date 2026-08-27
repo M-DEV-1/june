@@ -7,25 +7,39 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
 
 // TestEngineHelperProcess is not a real test — it is the child process Engine spawns in the tests below, standing in for llama-server. It serves the same two endpoints Engine depends on (/health for readiness, /v1/embeddings for the embed itself) and runs until it is killed, which is what makes the spawn/reap/respawn assertions real rather than mocked.
-// It exits immediately unless invoked with the "embed-helper <port>" arguments the tests pass, so `go test` running it as a normal test is a no-op.
+// It exits immediately unless invoked with the "embed-helper <port> [<healthDelayMs>]" arguments the tests pass, so `go test` running it as a normal test is a no-op. healthDelayMs stands in for a model load: /health answers 503 until that many milliseconds have passed since the process started.
 func TestEngineHelperProcess(t *testing.T) {
 	port := ""
+	healthDelay := time.Duration(0)
 	for i, a := range os.Args {
 		if a == "embed-helper" && i+1 < len(os.Args) {
 			port = os.Args[i+1]
+			if i+2 < len(os.Args) {
+				if ms, err := strconv.Atoi(os.Args[i+2]); err == nil {
+					healthDelay = time.Duration(ms) * time.Millisecond
+				}
+			}
 		}
 	}
 	if port == "" {
 		t.Skip("not running as the spawned helper")
 	}
 
+	started := time.Now()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if time.Since(started) < healthDelay {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{{"embedding": []float32{0.5, 0.5}, "index": 0}},
@@ -47,9 +61,14 @@ func freePort(t *testing.T) int {
 
 // newTestEngine builds an Engine that spawns the helper process above instead of llama-server, with the timers wound down so idle-shutdown tests finish in milliseconds.
 func newTestEngine(t *testing.T, idle, presence time.Duration) *Engine {
+	return newTestEngineWithHealthDelay(t, idle, presence, 0)
+}
+
+// newTestEngineWithHealthDelay is newTestEngine with a child that refuses readiness for healthDelay after it starts, standing in for llama-server loading a model.
+func newTestEngineWithHealthDelay(t *testing.T, idle, presence, healthDelay time.Duration) *Engine {
 	t.Helper()
 	port := freePort(t)
-	e := NewEngine(os.Args[0], []string{"-test.run=TestEngineHelperProcess", "embed-helper", fmt.Sprint(port)},
+	e := NewEngine(os.Args[0], []string{"-test.run=TestEngineHelperProcess", "embed-helper", fmt.Sprint(port), fmt.Sprint(healthDelay.Milliseconds())},
 		fmt.Sprintf("http://127.0.0.1:%d", port), "test-model", idle)
 	e.presenceWindow = presence
 	e.startupTimeout = 15 * time.Second
@@ -162,6 +181,52 @@ func TestEngineCloseKillsTheChildAndRefusesFurtherEmbeds(t *testing.T) {
 	}
 	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err == nil {
 		t.Fatal("Embed after Close should fail rather than resurrect the child")
+	}
+}
+
+// TestEngineColdStartSurvivesACallerDeadline is the /embed-under-a-3s-retrieve-budget case: the daemon passes the client's request context into Embed, so a cold start that takes longer than that budget must return the caller its deadline error while the child keeps loading — not kill the child, which turns every retry into another spawn-wait-kill cycle and never reaches a loaded model.
+func TestEngineColdStartSurvivesACallerDeadline(t *testing.T) {
+	e := newTestEngineWithHealthDelay(t, time.Hour, time.Hour, 1500*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := e.Warm(ctx); err == nil {
+		t.Fatal("Warm should have returned the caller's deadline error")
+	}
+
+	if !e.Running() {
+		t.Fatal("the loading child was killed by the caller's cancelled context")
+	}
+	pidWhileLoading := e.pid()
+
+	if err := e.Warm(context.Background()); err != nil {
+		t.Fatalf("second Warm, with a patient context: %v", err)
+	}
+	if e.pid() != pidWhileLoading {
+		t.Fatalf("engine respawned instead of adopting the still-loading child: %d then %d", pidWhileLoading, e.pid())
+	}
+}
+
+// TestEngineColdStartDoesNotBlockPresenceOrRunning covers the IPC-wide stall: MarkClientPresence and Running are called by the daemon's auth wrapper on every authenticated request, including /buffer with its 300ms client budget, so neither may wait on an in-flight spawn and model load.
+func TestEngineColdStartDoesNotBlockPresenceOrRunning(t *testing.T) {
+	e := newTestEngineWithHealthDelay(t, time.Hour, time.Hour, 2*time.Second)
+
+	go e.Warm(context.Background())
+	// Polled over HTTP rather than through e.pid(), which takes the same lock this test is about and would hide the stall.
+	waitFor(t, 5*time.Second, "the child's HTTP server to answer at all", func() bool {
+		resp, err := http.Get(e.baseURL + "/health")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return true
+	})
+
+	start := time.Now()
+	e.MarkClientPresence()
+	e.Running()
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("MarkClientPresence+Running blocked for %v during a cold start; every authenticated IPC request pays that", elapsed)
 	}
 }
 
