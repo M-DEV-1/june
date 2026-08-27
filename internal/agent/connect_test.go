@@ -830,3 +830,131 @@ func TestReceiveLoop_TurnComplete_EmitsTurnBoundaryChunk(t *testing.T) {
 		t.Fatal("timed out waiting for the turn boundary chunk on TextResponseChan")
 	}
 }
+
+// TestReceiveLoop_Muted_DropsVoiceTranscript is bug 1: /text mutes the mic, but the server can still deliver transcriptions of audio it already had (frames buffered before the mute, or its own in-flight recognition). Surfacing those as "you said" turns is what made text-only mode answer the room's conversation, so a muted mic must produce no voice turn at all.
+func TestReceiveLoop_Muted_DropsVoiceTranscript(t *testing.T) {
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	a.SetMute(true)
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		InputTranscription: &genai.Transcription{Text: "lend me ten thousand rupees", Finished: true},
+	}}
+	// A second message the loop must still process, so the test can tell "dropped" apart from "not read yet".
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+
+	select {
+	case chunk := <-a.TextResponseChan:
+		if chunk.Sender == SenderYou {
+			t.Fatalf("expected no voice turn while muted, got %+v", chunk)
+		}
+		if !chunk.TurnBoundary {
+			t.Fatalf("expected the turn boundary chunk, got %+v", chunk)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the turn boundary chunk")
+	}
+}
+
+// TestReceiveLoop_Muted_IgnoresBargeIn is bug 2's mic-off half: with the mic muted, a voice-activity interrupt can only be the room talking, so it must not flush the speaker or cut the answer short with a stop marker.
+func TestReceiveLoop_Muted_IgnoresBargeIn(t *testing.T) {
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	a.SetMute(true)
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+
+	select {
+	case chunk := <-a.TextResponseChan:
+		if !chunk.TurnBoundary {
+			t.Fatalf("expected the barge-in to be ignored while muted, got %+v", chunk)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the turn boundary chunk")
+	}
+}
+
+// TestReceiveLoop_TypedTurnInterrupted_SaysInterruptedByVoice is bug 2's mic-on half: the Live API cancels the generation server-side and it cannot be resumed, so the answer to a TYPED question just stops mid-sentence. The transcript must say why instead of showing the generic spoken-barge-in marker, which reads as "you interrupted Ora" when the user typed and never spoke.
+func TestReceiveLoop_TypedTurnInterrupted_SaysInterruptedByVoice(t *testing.T) {
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	a.markTypedTurn()
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 1),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+
+	select {
+	case chunk := <-a.TextResponseChan:
+		if chunk.Sender != SenderSystem || !strings.Contains(chunk.Text, "interrupted by voice input") {
+			t.Fatalf("expected an explicit voice-interruption notice, got %+v", chunk)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the interruption notice")
+	}
+}
+
+// TestTextSendLoop_MarksTypedTurn verifies a typed send is what arms the typed-turn flag receiveLoop reads — without it the flag would never be set in production and the notice above would never fire.
+func TestTextSendLoop_MarksTypedTurn(t *testing.T) {
+	a := NewAgent(nil, &fakeSpeaker{}, &toolTestBrain{}, nil, "")
+	fs := &fakeLiveSession{sentContent: make(chan genai.LiveSendClientContentParameters, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.textSendLoop(ctx, fs)
+
+	a.TextChan <- "what have I been working on"
+
+	select {
+	case <-fs.sentContent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the typed turn to be sent")
+	}
+	if !a.typedTurnActive.Load() {
+		t.Error("expected a typed send to mark the turn as typed")
+	}
+}
+
+// TestReceiveLoop_TurnBoundary_ClearsTypedTurn verifies the typed-turn flag is scoped to one turn: once the turn completes, a later spoken barge-in is a normal one again, not a typed answer being cut off.
+func TestReceiveLoop_TurnBoundary_ClearsTypedTurn(t *testing.T) {
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	a.markTypedTurn()
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 1),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+
+	select {
+	case <-a.TextResponseChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the turn boundary chunk")
+	}
+	if a.typedTurnActive.Load() {
+		t.Error("expected the typed-turn flag cleared at the turn boundary")
+	}
+}

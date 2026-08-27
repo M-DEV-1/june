@@ -328,6 +328,11 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		if utterance == "" {
 			return
 		}
+		// The mic is off (text-only mode, or /mute) — anything the server still transcribes is audio it already had in hand, or the room rather than the user. Dropping it here, at the one choke point every call site goes through, is what stops text-only mode from answering the conversation happening around the machine.
+		if a.isMuted.Load() {
+			slog.Debug("dropping voice transcript: mic is muted", "text", utterance)
+			return
+		}
 		slog.Info("user said (voice)", "text", utterance)
 		select {
 		case a.TextResponseChan <- ResponseChunk{Text: utterance, Sender: SenderYou}:
@@ -385,13 +390,21 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		// check for server-side barge-in (VAD)
 		if msg.ServerContent != nil && msg.ServerContent.Interrupted {
 			flushInputTranscript()
+			// Muted means no audio of ours reached the server, so a voice-activity interrupt can only be the room. Ignoring it keeps ambient noise from cutting Ora off mid-answer in text-only mode.
+			if a.isMuted.Load() {
+				slog.Debug("ignoring barge-in: mic is muted")
+				continue
+			}
 			slog.Info("barge-in detected: server interrupted model generation")
 			a.speaker.Flush()
 
-			// optional: send a visual cue to the UI
-			// TODO: remove in dev, or idk keep it
+			// The generation is already cancelled server-side and cannot be resumed, so the answer just stops mid-sentence. Whatever streamed stays in the transcript; this line says why it ends where it does. A typed turn gets the explicit wording — "you interrupted Ora" is the wrong story to tell someone who typed the question and never spoke.
+			notice := "[ora stopped]"
+			if a.typedTurnActive.Load() {
+				notice = "[interrupted by voice input — the answer above is cut short]"
+			}
 			select {
-			case a.TextResponseChan <- ResponseChunk{Text: "[ora stopped]", Sender: SenderSystem}:
+			case a.TextResponseChan <- ResponseChunk{Text: notice, Sender: SenderSystem}:
 			default:
 			}
 			continue
@@ -440,6 +453,8 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		// TurnComplete/GenerationComplete mark the end of one model turn — the boundary the UI needs so it stops merging this turn's ora chunks into whatever arrives for the NEXT turn (see streamLine's TurnBoundary handling). The SDK can signal either depending on realtime-playback timing, so both are checked; Interrupted (handled above) already breaks the merge chain on its own since it emits a system-sender chunk.
 		if msg.ServerContent != nil && (msg.ServerContent.TurnComplete || msg.ServerContent.GenerationComplete) {
 			flushInputTranscript()
+			// The typed turn (if this was one) is over — a later interruption belongs to whatever comes next.
+			a.typedTurnActive.Store(false)
 			select {
 			case a.TextResponseChan <- ResponseChunk{TurnBoundary: true}:
 			default:
@@ -621,6 +636,7 @@ func (a *Agent) textSendLoop(ctx context.Context, session liveSession) {
 			// this is voice haha
 			a.speaker.Flush()
 			slog.Debug("sending text to model", "text", text)
+			a.markTypedTurn()
 
 			recallCtx, cancel := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
 			recalls, err := a.brain.RetrieveRelevant(recallCtx, text, 2)

@@ -216,6 +216,30 @@ const recallSubjectLimit = 6
 // recallExcerpt caps how much of an episode's screen_text is surfaced per line in the "recall" tool's window (timeline) path — shorter than maxEpisodeExcerpt since a whole day's timeline is many lines at once.
 const recallExcerpt = 160
 
+// blankField reports whether an episode field carries no information. Empty counts, and so does the literal "Unknown" the tracker writes when it cannot read the focused window's app or title (see the "activity tracked" log lines) — the string is a placeholder, not a value.
+func blankField(s string) bool {
+	t := strings.TrimSpace(s)
+	return t == "" || strings.EqualFold(t, "unknown")
+}
+
+// idleEpisode reports whether an episode has nothing to say: no app, no title, no screen text and no described activity. A recall over a night at an idle machine returned 25 such rows out of 40, each rendering as "Unknown — Unknown: Unknown" and each costing tokens the real rows needed.
+func idleEpisode(e db.Episode) bool {
+	return blankField(e.App) && blankField(e.Title) && blankField(e.ScreenText) && blankField(e.UserActivity)
+}
+
+// appendOmitted adds one line accounting for a run of n consecutive idle episodes, so a mostly-empty window still reports that the time passed with nothing on screen instead of just returning fewer rows. n == 0 is a no-op.
+// Input: the lines so far and the run length. Output: the lines with the marker appended.
+func appendOmitted(lines []string, n int) []string {
+	switch {
+	case n <= 0:
+		return lines
+	case n == 1:
+		return append(lines, "(1 idle/empty capture omitted)")
+	default:
+		return append(lines, fmt.Sprintf("(%d idle/empty captures omitted)", n))
+	}
+}
+
 // recallBounds resolves the "recall" tool's since/until args into a concrete [since, until] range.
 // The model, knowing the current date/time, converts any human phrase ("July 5th", "last week") into ISO-8601 bounds and passes them here; parseInstant additionally accepts the bare words "today" and "yesterday", which the model passes straight through often enough to be worth handling.
 func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Time, error) {
@@ -655,7 +679,15 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return "no episodes in that window"
 		}
 		lines := make([]string, 0, len(episodes))
+		idleRun := 0
 		for _, e := range episodes {
+			// Idle captures are dropped, but counted: a run of them collapses to one line so the model still sees that the window had a quiet stretch.
+			if idleEpisode(e) {
+				idleRun++
+				continue
+			}
+			lines = appendOmitted(lines, idleRun)
+			idleRun = 0
 			excerpt := e.ScreenText
 			if runes := []rune(excerpt); len(runes) > recallExcerpt {
 				excerpt = string(runes[:recallExcerpt])
@@ -664,6 +696,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			lines = append(lines, fmt.Sprintf("[%s] %s — %s: %s",
 				e.CreatedAt.In(time.Local).Format("Jan 2 15:04"), e.App, e.Title, excerpt))
 		}
+		lines = appendOmitted(lines, idleRun)
 		return strings.Join(lines, "\n")
 
 	case "get_recent":
@@ -684,7 +717,15 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return "no recent episodes"
 		}
 		lines := make([]string, 0, len(episodes))
+		idleRun := 0
 		for _, e := range episodes {
+			// Same idle-capture skip as recall above — get_recent formats the identical line from the identical rows.
+			if idleEpisode(e) {
+				idleRun++
+				continue
+			}
+			lines = appendOmitted(lines, idleRun)
+			idleRun = 0
 			excerpt := e.ScreenText
 			if e.UserActivity != "" {
 				excerpt = e.UserActivity
@@ -702,6 +743,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			}
 			lines = append(lines, line)
 		}
+		lines = appendOmitted(lines, idleRun)
 		return strings.Join(lines, "\n")
 
 	case "branch":

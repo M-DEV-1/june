@@ -1190,3 +1190,71 @@ func TestExecuteTool_UpdateNote_StoreError_IsReportedNotSwallowed(t *testing.T) 
 		t.Errorf("expected the store's error text to reach the model, got %q", result)
 	}
 }
+
+// TestExecuteTool_Recall_SkipsIdleCaptures is bug 4: the tracker writes the literal string "Unknown" for an app and title it could not read, and a night of idle captures turned 25 of 40 recall rows into "Unknown — Unknown: Unknown". Those rows carry no information and crowd out the ones that do, so they are dropped and counted instead.
+func TestExecuteTool_Recall_SkipsIdleCaptures(t *testing.T) {
+	base := time.Date(2026, 8, 28, 1, 0, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: base, App: "Unknown", Title: "Unknown", ScreenText: "Unknown"},
+			{ID: 2, CreatedAt: base.Add(time.Minute), App: "Unknown", Title: "Unknown", ScreenText: ""},
+			{ID: 3, CreatedAt: base.Add(2 * time.Minute), App: "", Title: "", ScreenText: ""},
+			{ID: 4, CreatedAt: base.Add(3 * time.Minute), App: "LibreOffice Calc", Title: "portfolio.xlsx", ScreenText: "editing a spreadsheet"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
+
+	if strings.Contains(result, "Unknown — Unknown") {
+		t.Errorf("expected idle captures dropped from the timeline, got: %q", result)
+	}
+	if !strings.Contains(result, "portfolio.xlsx") {
+		t.Errorf("expected the real episode kept, got: %q", result)
+	}
+	if !strings.Contains(result, "3 idle/empty captures omitted") {
+		t.Errorf("expected one line accounting for the 3 dropped captures, got: %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_AllIdle_StillReportsTheGap verifies a window with nothing but idle captures says so once, rather than returning an empty string the model has to guess at.
+func TestExecuteTool_Recall_AllIdle_StillReportsTheGap(t *testing.T) {
+	base := time.Date(2026, 8, 28, 1, 0, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: base, App: "Unknown", Title: "Unknown", ScreenText: "Unknown"},
+			{ID: 2, CreatedAt: base.Add(time.Minute), App: "Unknown", Title: "Unknown", ScreenText: "Unknown"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
+
+	if !strings.Contains(result, "2 idle/empty captures omitted") {
+		t.Errorf("expected the all-idle window to report the omission once, got: %q", result)
+	}
+}
+
+// TestExecuteTool_GetRecent_SkipsIdleCaptures verifies get_recent drops the same dead rows — it formats the identical line shape from the identical episodes, so fixing only recall would leave "what was I just doing" answering with "Unknown — Unknown: Unknown".
+func TestExecuteTool_GetRecent_SkipsIdleCaptures(t *testing.T) {
+	base := time.Date(2026, 8, 28, 1, 0, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: base, App: "Unknown", Title: "Unknown", ScreenText: "Unknown"},
+			{ID: 2, CreatedAt: base.Add(time.Minute), App: "gnome-terminal-server", Title: "user@host", ScreenText: "go test ./..."},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "get_recent", map[string]any{})
+
+	if strings.Contains(result, "Unknown — Unknown") {
+		t.Errorf("expected idle captures dropped from get_recent, got: %q", result)
+	}
+	if !strings.Contains(result, "go test") {
+		t.Errorf("expected the real episode kept, got: %q", result)
+	}
+	if !strings.Contains(result, "1 idle/empty capture omitted") {
+		t.Errorf("expected the dropped capture accounted for, got: %q", result)
+	}
+}
