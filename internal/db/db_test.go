@@ -2183,6 +2183,60 @@ func TestSearchMemory_PopulatesCreatedAtForSummaryHit(t *testing.T) {
 	}
 }
 
+// TestSearchMemory_SummaryHitReturnsProseNotJSON verifies a summary hit's Content is the plain summary text, not the marshalled TaskSummary JSON that LogSemanticNode stores in nodes.content. The model sees this string verbatim, so a raw `{"same_task":false,...}` blob is both unreadable and wastes context.
+func TestSearchMemory_SummaryHitReturnsProseNotJSON(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.LogSemanticNode(ctx, memory.TaskSummary{SameTask: false, TaskName: "debugging session", Summary: "fixed the parser edge case"}); err != nil {
+		t.Fatalf("LogSemanticNode: %v", err)
+	}
+
+	hits, err := store.SearchMemory(ctx, "parser edge case")
+	if err != nil {
+		t.Fatalf("SearchMemory: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatalf("expected at least one hit")
+	}
+	if got := hits[0].Content; got != "fixed the parser edge case" {
+		t.Errorf("expected the extracted summary prose, got %q", got)
+	}
+}
+
+// TestSearchMemory_DigestHitReturnsPlainTextUnchanged guards the JSON-extraction above against digest nodes, whose content is plain prose (ReplaceAllNotes writes it directly) and must pass through untouched rather than tripping json_extract.
+func TestSearchMemory_DigestHitReturnsPlainTextUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	var dayID int64
+	if err := store.DB().QueryRowContext(ctx, `INSERT INTO nodes (parent_id, type, content) VALUES (NULL, 'day', '2026-08-28') RETURNING id`).Scan(&dayID); err != nil {
+		t.Fatalf("insert day node: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO nodes (parent_id, type, content) VALUES (?, 'digest', 'spent the day on the parser edge case')`, dayID); err != nil {
+		t.Fatalf("insert digest node: %v", err)
+	}
+
+	hits, err := store.SearchMemory(ctx, "parser edge case")
+	if err != nil {
+		t.Fatalf("SearchMemory: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatalf("expected at least one hit")
+	}
+	if got := hits[0].Content; got != "spent the day on the parser edge case" {
+		t.Errorf("expected the digest's plain text unchanged, got %q", got)
+	}
+}
+
 // TestFormatHit_NoteWithCreatedAt_StaysAgeless verifies notes never get an age suffix even when CreatedAt is populated — they're durable facts, not time-decaying observations.
 func TestFormatHit_NoteWithCreatedAt_StaysAgeless(t *testing.T) {
 	h := db.MemoryHit{Source: "note", Content: "the user's favorite color is blue", CreatedAt: time.Now().Add(-30 * 24 * time.Hour)}
@@ -2347,5 +2401,27 @@ func TestNew_RestrictsDirectoryAndFilePermissions(t *testing.T) {
 	}
 	if got := fileInfo.Mode().Perm(); got != 0600 {
 		t.Errorf("db file permissions = %o, want 0600", got)
+	}
+}
+
+func TestLogEpisode_JunkOnlyRawFallbackIsStripped(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.LogEpisode(ctx, "", "", "￼\n￼￼ ￼\n￼")
+	if err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	var text string
+	if err := store.DB().QueryRow(`SELECT screen_text FROM episodes WHERE id = ?`, id).Scan(&text); err != nil {
+		t.Fatalf("query episode screen_text: %v", err)
+	}
+	if strings.ContainsRune(text, '￼') {
+		t.Errorf("screen_text = %q, want no object replacement characters", text)
 	}
 }

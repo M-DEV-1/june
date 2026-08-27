@@ -131,6 +131,9 @@ const hybridVectorPoolSize = 50
 // minVectorSimilarity is the cosine-similarity floor a vector hit must clear to enter fusion at all — chromem's Search always returns its n nearest neighbors regardless of how weakly related they actually are, so without a floor a query about a topic absent from the store still gets padded with barely-related rows. Unvalidated starting point; tune against real queries.
 const minVectorSimilarity = 0.55
 
+// vectorSimilarityBand is how far below the best hit's cosine similarity a vector hit may sit and still enter fusion. Real similarities on this store span roughly 0.58-0.69, so the absolute minVectorSimilarity floor alone drops nothing and junk rides in alongside genuine matches; the effective floor is max(minVectorSimilarity, topSimilarity-vectorSimilarityBand). Tune against real queries.
+const vectorSimilarityBand = 0.06
+
 // splitCandidateID parses an rrfCandidate/vector-result id of the form "<source>:<refID>" (e.g. "episode:42", "note:3") into its parts. refID is 0 if the numeric suffix doesn't parse cleanly (e.g. a vector-only hit whose id shape doesn't map to a nodes/episodes row) — best effort, not an error, since MemoryHit.RefID is informational.
 func splitCandidateID(id string) (source string, refID int64) {
 	idx := strings.LastIndex(id, ":")
@@ -200,10 +203,11 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 			domain = s.candidateDomain(ctx, h.Source, h.RefID)
 		}
 		lexical = append(lexical, rrfCandidate{
-			id:      fmt.Sprintf("%s:%d", h.Source, h.RefID),
-			content: h.Content,
-			source:  h.Source,
-			domain:  domain,
+			id:        fmt.Sprintf("%s:%d", h.Source, h.RefID),
+			content:   h.Content,
+			source:    h.Source,
+			domain:    domain,
+			createdAt: h.CreatedAt,
 		})
 	}
 	for _, h := range episodeHits {
@@ -268,9 +272,17 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 			if err != nil {
 				slog.Warn("hybrid search: vector search failed, degrading to lexical-only", "error", err)
 			} else {
+				// The floor is relative to the best hit in this result set, with minVectorSimilarity as its lower bound. Computed from the results rather than assuming they arrive sorted.
+				floor := float32(minVectorSimilarity)
+				for _, r := range results {
+					if band := r.Similarity - vectorSimilarityBand; band > floor {
+						floor = band
+					}
+				}
+
 				vector = make([]rrfCandidate, 0, len(results))
 				for _, r := range results {
-					if r.Similarity < minVectorSimilarity {
+					if r.Similarity < floor {
 						continue
 					}
 					source, _ := splitCandidateID(r.ID)
