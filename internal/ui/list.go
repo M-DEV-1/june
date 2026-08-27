@@ -62,7 +62,7 @@ func (d commandDelegate) Render(w io.Writer, m list.Model, index int, listItem l
 	fmt.Fprint(w, fn(""))
 }
 
-// commandItems is the single source of truth for the "/" command list, shared by newCommandList (unfiltered) and FilterCommands (prefix-filtered).
+// commandItems is the single source of truth for the "/" command list, shared by newCommandList (unfiltered) and FilterCommands (substring-filtered).
 var commandItems = []list.Item{
 	commandItem{title: "voice", desc: "Switch to Voice-Only mode"},
 	commandItem{title: "voice list", desc: "List TTS voices / show current"},
@@ -84,38 +84,48 @@ func newCommandList(s Styles) list.Model {
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false) // We handle filtering via the textarea
 	l.SetShowHelp(false)
-
-	// Styles for pagination
-	l.Styles.PaginationStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(s.Muted).Background(s.BgInput)
+	// No pagination, ever — every command is always shown at once (FilterCommands keeps height matched to whatever's currently visible), so a paginator row would just be dead chrome.
+	l.SetShowPagination(false)
+	l.SetHeight(len(commandItems))
 
 	return l
 }
 
-func newHitlList(s Styles) list.Model {
+// hitlItems is the HITL approval menu's item set — editable controls whether "Suggest changes" is offered at all, since only shell-backed requests (agent.ToolRequest.EditableCommand != "") have command text to edit; a request to read the clipboard or a sensitive file has nothing to suggest changes to.
+func hitlItems(editable bool) []list.Item {
 	items := []list.Item{
 		commandItem{title: "Allow once", desc: "Execute this command and return the result"},
 		commandItem{title: "Allow for session", desc: "Always execute this command without asking"},
 		commandItem{title: "Reject", desc: "Cancel execution and notify the agent"},
-		commandItem{title: "Suggest changes", desc: "Edit the command before running"},
 	}
+	if editable {
+		items = append(items, commandItem{title: "Suggest changes", desc: "Edit the command before running"})
+	}
+	return items
+}
 
-	l := list.New(items, commandDelegate{styles: s}, DefaultListWidth, DefaultListHeight)
+func newHitlList(s Styles) list.Model {
+	l := list.New(hitlItems(true), commandDelegate{styles: s}, DefaultListWidth, DefaultListHeight)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
 	l.SetShowHelp(false)
-
-	l.Styles.PaginationStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(s.Muted).Background(s.BgInput)
+	// No pagination, ever — the ToolRequest case (ui.go) always calls SetHeight(len(items)) for the actual request's item count, same reasoning as newCommandList.
+	l.SetShowPagination(false)
+	l.SetHeight(len(hitlItems(true)))
 
 	return l
 }
+
+// FilterCommands matches query as a substring of the command title, not just a prefix — "otes" finds "notes" the same way "not" does. Resizes the list to the filtered count every call so a narrower filter shrinks the deck instead of leaving blank filler rows behind.
 func FilterCommands(l *list.Model, query string) {
 	var filtered []list.Item
 	for _, item := range commandItems {
 		ci := item.(commandItem)
-		if strings.HasPrefix(ci.title, query) {
+		if strings.Contains(ci.title, query) {
 			filtered = append(filtered, item)
 		}
 	}
 	l.SetItems(filtered)
+	l.SetHeight(len(filtered))
 }

@@ -34,34 +34,58 @@ func (m *model) renderStatusLine() string {
 	return m.styles.StatusLine.Render(m.spinner.View() + " " + m.activity.label)
 }
 
+// hintsText returns the contextual shortcut text for the current state — the hint row reflects what's actually available right now instead of always showing the same static set. quitConfirmArmed takes priority over every other state since Ctrl+C's confirmation applies regardless of mode or menu.
+func (m *model) hintsText() string {
+	switch {
+	case m.quitConfirmArmed:
+		return "press ctrl+c again to quit"
+	case m.mode == ModeToolConfirm:
+		return "↑↓ choose · ↵ confirm · esc reject"
+	case m.mode == ModeToolEdit:
+		return "↵ run · esc cancel"
+	case m.showCmdList:
+		return "↑↓ navigate · ↵ select · esc close"
+	default:
+		return "↵ send · ctrl+j newline · / commands · esc clear · pgup/pgdn scroll"
+	}
+}
+
 func (m *model) renderInput() string {
-	inpRow := lipgloss.JoinHorizontal(lipgloss.Center,
+	// Top, not Center: a multi-row textarea (Ctrl+J newlines, or wrapped long input) would otherwise vertically center the ❯ prompt against the whole block, floating it away from the cursor line instead of hugging the first input row.
+	inpRow := lipgloss.JoinHorizontal(lipgloss.Top,
 		m.styles.InputPrefix.Render("❯"),
 		m.textarea.View(),
 	)
 
-	// keyboard hints
-	sep := m.styles.KbdSep.Render("  ") // more space
+	hintLine := m.styles.KbdLabel.Render(m.hintsText())
 
-	var modeHint string
-	switch m.mode {
-	case ModeVoice:
-		modeHint = m.styles.KbdLabel.Render("voice: " + config.VoiceModel)
-	case ModeText:
-		modeHint = m.styles.KbdLabel.Render("text: " + config.TextModel)
-	default:
-		modeHint = m.styles.KbdLabel.Render("both: voice+text")
+	// Mode chip rides alongside the hint text only in the normal (no menu, not tool-confirm/edit) state — hintsText's own state check already covers exactly this "default" case, so the two conditions stay in lockstep.
+	if !m.quitConfirmArmed && m.mode != ModeToolConfirm && m.mode != ModeToolEdit && !m.showCmdList {
+		sep := m.styles.KbdSep.Render("  ") // more space
+
+		var modeHint string
+		switch m.mode {
+		case ModeVoice:
+			modeHint = m.styles.KbdLabel.Render("voice: " + config.VoiceModel)
+		case ModeText:
+			modeHint = m.styles.KbdLabel.Render("text: " + config.TextModel)
+		default:
+			modeHint = m.styles.KbdLabel.Render("both: voice+text")
+		}
+
+		chips := []string{hintLine, sep, m.styles.KbdKey.Render("mode"), modeHint}
+
+		// Quiet when healthy — these replace the old header row's always-visible "⊙ tracking"/"● live" pills. A connection loss is already announced as a transcript system line; a stale/absent daemon has no other signal, so it gets a chip here instead.
+		warnStyle := m.styles.KbdLabel.Foreground(lipgloss.Color("#f59e0b"))
+		if !m.daemonOK {
+			chips = append(chips, sep, warnStyle.Render("⚠ no tracker"))
+		}
+		if !m.isConnected {
+			chips = append(chips, sep, warnStyle.Render("⚠ reconnecting"))
+		}
+
+		hintLine = lipgloss.JoinHorizontal(lipgloss.Center, chips...)
 	}
-
-	ramHint := m.styles.KbdLabel.Render(m.cachedRAM)
-
-	hints := lipgloss.JoinHorizontal(lipgloss.Center,
-		m.styles.KbdKey.Render("↵"), m.styles.KbdLabel.Render("send"), sep,
-		m.styles.KbdKey.Render("/context"), m.styles.KbdLabel.Render("workspace"), sep,
-		m.styles.KbdKey.Render("/voice"), m.styles.KbdLabel.Render("toggle"), sep,
-		m.styles.KbdKey.Render("mode"), modeHint, sep,
-		m.styles.KbdKey.Render("ram"), ramHint,
-	)
 
 	// Built as a slice so the status row only adds a line when present — an unconditional empty string would still add a blank row via JoinVertical's join, breaking recalcViewportHeight's count.
 	rows := []string{}
@@ -69,22 +93,19 @@ func (m *model) renderInput() string {
 		rows = append(rows, line)
 	}
 	rows = append(rows, inpRow)
+	rows = append(rows, lipgloss.NewStyle().Background(m.styles.BgInput).PaddingTop(1).Render(hintLine))
 
-	// 1. Render the menu depending on state
+	// The selectable list, when one is open, renders below the (always-present) contextual hint line above.
 	if m.mode == ModeToolConfirm {
 		menu := lipgloss.NewStyle().
 			Background(m.styles.BgInput).
-			PaddingTop(1).
 			Render(m.hitlList.View())
 		rows = append(rows, menu)
 	} else if m.showCmdList {
 		menu := lipgloss.NewStyle().
 			Background(m.styles.BgInput).
-			PaddingTop(1).
 			Render(m.cmdList.View())
-		rows = append(rows, menu) // shown below the input
-	} else {
-		rows = append(rows, lipgloss.NewStyle().Background(m.styles.BgInput).PaddingTop(1).Render(hints))
+		rows = append(rows, menu)
 	}
 
 	inputDeck := lipgloss.JoinVertical(lipgloss.Left, rows...)
