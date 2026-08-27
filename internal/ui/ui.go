@@ -62,6 +62,10 @@ type model struct {
 	quitConfirmArmedAt time.Time
 	// closeOraBlock is set by a TurnBoundary chunk and consumed by the next ora chunk streamLine sees — it forces that chunk to start a fresh message block instead of merging into whatever the finished turn left behind.
 	closeOraBlock bool
+	// oraBlockIdx points at the ora message the current answer is streaming into, or -1 when no block is open. Tracked by index rather than "is the last message ora?" because a voice transcript, a system notice or a tool-log line can land in the middle of an answer — when that broke the merge chain, the next chunk started a new block and the same sentence appeared twice, once partial and once whole.
+	oraBlockIdx int
+	// preToolMode is the mode to return to once a HITL approval resolves. Dropping back to ModeBoth unconditionally put a text-only session back in voice+text in the footer while the mic stayed muted, and made the next /mute switch the mic ON.
+	preToolMode AgentMode
 }
 
 // quitConfirmWindow is how long a Ctrl+C press stays "armed" waiting for the confirming second press.
@@ -180,6 +184,8 @@ func NewModel(a *agent.Agent, daemonStatus, buildMismatch string) model {
 		micWave:     NewWaveform(40),
 		speakerWave: NewWaveform(40),
 		mode:        ModeBoth,
+		preToolMode: ModeBoth,
+		oraBlockIdx: -1,
 		cmdList:     newCommandList(s),
 		hitlList:    newHitlList(s),
 		isConnected: true,
@@ -338,7 +344,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEsc:
 				m.messages = append(m.messages, Message{Sender: "tool", Content: "Command rejected."})
 				m.activeToolReq.ResultChan <- "User rejected this command."
-				m.mode = ModeBoth
+				m.mode = m.preToolMode
 				m.activeToolReq = nil
 				m.popPendingToolReq()
 				m.updateViewport(false)
@@ -356,7 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						go func(execute func() string, c chan<- string) {
 							c <- execute()
 						}(m.activeToolReq.Execute, m.activeToolReq.ResultChan)
-						m.mode = ModeBoth
+						m.mode = m.preToolMode
 					case "Allow for session":
 						m.messages = append(m.messages, Message{Sender: "tool", Content: "Approved for session. Executing..."})
 						if m.activeToolReq.AllowKey != "" {
@@ -365,11 +371,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						go func(execute func() string, c chan<- string) {
 							c <- execute()
 						}(m.activeToolReq.Execute, m.activeToolReq.ResultChan)
-						m.mode = ModeBoth
+						m.mode = m.preToolMode
 					case "Reject":
 						m.messages = append(m.messages, Message{Sender: "tool", Content: "Command rejected."})
 						m.activeToolReq.ResultChan <- "User rejected this command."
-						m.mode = ModeBoth
+						m.mode = m.preToolMode
 					case "Suggest changes":
 						m.textarea.SetValue(m.activeToolReq.EditableCommand)
 						m.textarea.Focus()
@@ -397,7 +403,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				go func(cmd string, c chan<- string) {
 					c <- agent.RunShellCommand(cmd)
 				}(editedCmd, m.activeToolReq.ResultChan)
-				m.mode = ModeBoth
+				m.mode = m.preToolMode
 				m.activeToolReq = nil
 				m.popPendingToolReq()
 				return m, nil
@@ -406,7 +412,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textarea.Reset()
 				m.messages = append(m.messages, Message{Sender: "tool", Content: "Edit cancelled. Command rejected."})
 				m.activeToolReq.ResultChan <- "User rejected this command."
-				m.mode = ModeBoth
+				m.mode = m.preToolMode
 				m.activeToolReq = nil
 				m.popPendingToolReq()
 				m.updateViewport(false)
@@ -576,7 +582,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// update waves from the live audio buffers
 		if m.agent.GetMic() != nil {
-			m.micWave.Update(m.agent.GetMic().CurrentAmplitude())
+			// A muted mic reads 0 no matter how loud the room is — the hardware keeps capturing (nothing in audio.Microphone can pause it), so the waveform is the only place the user can see that nothing is being listened to.
+			amp := m.agent.GetMic().CurrentAmplitude()
+			if m.agent.IsMuted() {
+				amp = 0
+			}
+			m.micWave.Update(amp)
 		}
 		if m.agent.GetSpeaker() != nil {
 			m.speakerWave.Update(m.agent.GetSpeaker().CurrentAmplitude())
@@ -656,6 +667,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // menu already says "paused, waiting on you" — a spinner behind it would misleadingly read as "still running".
 func (m *model) activateToolRequest(req agent.ToolRequest) {
 	m.activeToolReq = &req
+	// Remembered before the switch so the decision can put the user back where they were — a queued second request activates from an already-restored mode, so this never captures ModeToolConfirm itself.
+	if m.mode != ModeToolConfirm && m.mode != ModeToolEdit {
+		m.preToolMode = m.mode
+	}
 	m.mode = ModeToolConfirm
 	items := hitlItems(req.EditableCommand != "")
 	m.hitlList.SetItems(items)
@@ -724,15 +739,18 @@ func (m *model) recalcViewportHeight() {
 // handles the real-time streaming logic, keeps the viewport updated. isThought comes straight from genai's own Part.Thought (via agent.ResponseChunk) — never inferred from content, since any real reply that happens to contain markdown bold would desync a content-sniffing heuristic permanently.
 func (m *model) streamLine(sender, content string, isThought bool) {
 	// Only ora's own text merges across calls (it's a token-by-token stream); "you" and "system" chunks are complete discrete units — merging them runs consecutive utterances/notices together with no separator. A pending closeOraBlock (a turn boundary since the last ora chunk) also forces a fresh block even though sender/thought-state match — see its own doc comment.
-	sameBlock := sender == "ora" && !m.closeOraBlock && len(m.messages) > 0 && m.messages[len(m.messages)-1].Sender == sender && m.messages[len(m.messages)-1].IsThought == isThought && !m.messages[len(m.messages)-1].IsTool
+	sameBlock := sender == "ora" && !m.closeOraBlock && m.oraBlockIdx >= 0 && m.oraBlockIdx < len(m.messages) && m.messages[m.oraBlockIdx].IsThought == isThought
 	if sameBlock && !isThought {
-		mergeOraChunk(&m.messages[len(m.messages)-1], content)
+		mergeOraChunk(&m.messages[m.oraBlockIdx], content)
 	} else if sameBlock {
-		// append to the last message if it's the same sender and thought-state
-		m.messages[len(m.messages)-1].Content += content
+		// append to the open block if it's the same thought-state
+		m.messages[m.oraBlockIdx].Content += content
 	} else {
 		// start a new message block
 		m.messages = append(m.messages, Message{Sender: sender, Content: content, IsThought: isThought})
+		if sender == "ora" {
+			m.oraBlockIdx = len(m.messages) - 1
+		}
 	}
 	if sender == "ora" {
 		m.closeOraBlock = false
@@ -783,6 +801,7 @@ func (m *model) executeCommand(input string) tea.Cmd {
 		}
 	case "/clear":
 		m.messages = []Message{}
+		m.oraBlockIdx = -1
 	case "/help":
 		helpText := `Available Commands:
   /voice          - Switch to Voice-Only mode
