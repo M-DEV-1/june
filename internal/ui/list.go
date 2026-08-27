@@ -25,6 +25,9 @@ type commandDelegate struct {
 func (d commandDelegate) Height() int                               { return 1 }
 func (d commandDelegate) Spacing() int                              { return 0 }
 func (d commandDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
+// commandDelegateTitleWidth and the "  " prefix commandDelegate.Render hardcodes are the two fixed-width columns eating into a row's available width before the description gets whatever's left.
+const commandDelegateTitleWidth = 18
+
 func (d commandDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
 	i, ok := listItem.(commandItem)
 	if !ok {
@@ -33,21 +36,24 @@ func (d commandDelegate) Render(w io.Writer, m list.Model, index int, listItem l
 
 	titleStr := i.Title()
 	descStr := i.Description()
+	// Clamped to fit one line, not wrapped: Height() declares 1 row per item, so a description long enough to wrap here would silently make the list taller than SetHeight(len(items)) callers assume (see WP7).
+	descWidth := max(0, m.Width()-2-commandDelegateTitleWidth)
 
 	var fn func(string) string
 	if index == m.Index() {
-		// Highlighted item
+		// Highlighted item. Every inner span carries its own explicit Background matching the row's — a nested lipgloss Render always emits its own trailing ANSI reset, which otherwise cuts the outer row's background short wherever it lands, showing the terminal's own default (black in most terminals) for the rest of the row (see WP9).
+		bg, fg := lipgloss.Color("#6d28d9"), lipgloss.Color("#ffffff")
 		fn = func(s string) string {
-			title := lipgloss.NewStyle().Width(18).Render(titleStr)
-			desc := lipgloss.NewStyle().Render(descStr)
+			title := lipgloss.NewStyle().Background(bg).Foreground(fg).Width(commandDelegateTitleWidth).Render(titleStr)
+			desc := lipgloss.NewStyle().Background(bg).Foreground(fg).MaxWidth(descWidth).Render(descStr)
 			row := "  " + title + desc
-			return lipgloss.NewStyle().Background(lipgloss.Color("#6d28d9")).Foreground(lipgloss.Color("#ffffff")).Width(m.Width()).Render(row)
+			return lipgloss.NewStyle().Background(bg).Foreground(fg).Width(m.Width()).Render(row)
 		}
 	} else {
-		// Normal item
+		// Normal item — same reasoning as the highlighted branch above.
 		fn = func(s string) string {
-			title := lipgloss.NewStyle().Foreground(d.styles.Gray).Width(18).Render(titleStr)
-			desc := lipgloss.NewStyle().Foreground(d.styles.Muted).Render(descStr)
+			title := lipgloss.NewStyle().Foreground(d.styles.Gray).Background(d.styles.BgInput).Width(commandDelegateTitleWidth).Render(titleStr)
+			desc := lipgloss.NewStyle().Foreground(d.styles.Muted).Background(d.styles.BgInput).MaxWidth(descWidth).Render(descStr)
 			row := "  " + title + desc
 			return lipgloss.NewStyle().Background(d.styles.BgInput).Width(m.Width()).Render(row)
 		}
