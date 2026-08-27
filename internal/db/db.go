@@ -34,6 +34,10 @@ type Store struct {
 	// embedder/vectorIndex back HybridSearch's semantic half (see hybrid.go). Both nilable, wired via SetEmbedder/SetVectorIndex — a Store with neither set runs lexical-only.
 	embedder    embedder
 	vectorIndex vectorIndex
+	// embedsAreFree is set by SetEmbedsAreFree when the embedder is the local engine rather than a metered API. See reconcileBackfillCandidates.
+	embedsAreFree bool
+	// vectorSimilarityFloor overrides minVectorSimilarity for embedders whose cosine scale differs from Gemini's. Zero means use the default. See SetVectorSimilarityFloor.
+	vectorSimilarityFloor float32
 
 	// framesDir is ora-db/frames next to the sqlite file. Empty for :memory: stores — vision JPEGs are skipped.
 	framesDir string
