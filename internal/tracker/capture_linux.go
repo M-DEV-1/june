@@ -10,11 +10,6 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// captureScreen is a no-op on Linux — AT-SPI reads live accessible text, no pixel capture needed.
-func captureScreen() ([]byte, error) {
-	return nil, nil
-}
-
 // extractText returns the text content of the focused window via AT-SPI over D-Bus. Returns ("", nil) on any failure (no bus, no focused window, etc) — callers never see a non-nil error here.
 //
 // Per-app requirements:
