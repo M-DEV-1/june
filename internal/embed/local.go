@@ -56,45 +56,65 @@ func (l *LocalEmbedder) Embed(ctx context.Context, task TaskType, text string) (
 		runes = runes[:maxEmbedRunes]
 	}
 
-	var err error
 	for attempt := 0; ; attempt++ {
-		var vec []float32
-		vec, err = l.embedOnce(ctx, prefix+string(runes))
+		vec, tooLong, err := l.embedOnce(ctx, prefix+string(runes))
 		if err == nil {
 			return vec, nil
 		}
-		if attempt >= embedShrinkAttempts || len(runes) <= 1 {
+		// Only a rejection about the input's size is worth retrying: halving the text cannot fix a refused connection, a cancelled context or a server that is still loading its model, and retrying those just puts four times the load on something already failing.
+		if !tooLong || attempt >= embedShrinkAttempts || len(runes) <= 1 {
 			return nil, err
 		}
 		runes = runes[:len(runes)/2]
 	}
 }
 
-// embedOnce posts one already-prefixed string to the server and returns the vector it produced.
-func (l *LocalEmbedder) embedOnce(ctx context.Context, input string) ([]float32, error) {
+// tooLongSignals are the phrases llama-server uses when it refuses an input for its size. It answers with a 500 rather than a 4xx in that case, so the status alone cannot tell this apart from a genuine server failure.
+var tooLongSignals = []string{"too large", "too long", "exceed", "context size", "n_ubatch", "n_batch"}
+
+// inputTooLong reports whether a failed embed response is the server saying the input was too big, which is the only failure shorter text can fix. Input: the HTTP status (0 when there was no response) and the body snippet. Output: true when the request should be retried with half the text.
+func inputTooLong(status int, body string) bool {
+	if status >= 400 && status < 500 {
+		return true
+	}
+	if status < 500 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	for _, s := range tooLongSignals {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// embedOnce posts one already-prefixed string to the server and returns the vector it produced. The second return value says whether the failure was the server rejecting the input for its size, which is the only failure Embed retries with shorter text.
+func (l *LocalEmbedder) embedOnce(ctx context.Context, input string) ([]float32, bool, error) {
 	body, err := json.Marshal(map[string]any{
 		"model": l.model,
 		"input": []string{input},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("embed: marshal request: %w", err)
+		return nil, false, fmt.Errorf("embed: marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l.baseURL+"/v1/embeddings", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("embed: build request: %w", err)
+		return nil, false, fmt.Errorf("embed: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := l.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("embed: post to %s: %w", l.baseURL, err)
+		return nil, false, fmt.Errorf("embed: post to %s: %w", l.baseURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("embed: server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		text := strings.TrimSpace(string(snippet))
+		return nil, inputTooLong(resp.StatusCode, text), fmt.Errorf("embed: server returned %d: %s", resp.StatusCode, text)
 	}
 
 	var parsed struct {
@@ -103,10 +123,10 @@ func (l *LocalEmbedder) embedOnce(ctx context.Context, input string) ([]float32,
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("embed: decode response: %w", err)
+		return nil, false, fmt.Errorf("embed: decode response: %w", err)
 	}
 	if len(parsed.Data) == 0 || len(parsed.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("embed: response contained zero embeddings")
+		return nil, false, fmt.Errorf("embed: response contained zero embeddings")
 	}
-	return parsed.Data[0].Embedding, nil
+	return parsed.Data[0].Embedding, false, nil
 }
