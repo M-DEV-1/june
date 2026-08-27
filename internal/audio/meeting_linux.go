@@ -49,6 +49,7 @@ func StartMeetingCapture(mic, system io.Writer) (*MeetingCapture, error) {
 		return nil, fmt.Errorf("open monitor stream for sink %q: %w", sink.ID(), err)
 	}
 
+	// ponytail: these two instants are when Start() returned on this side of the PulseAudio round-trip, not when the server actually began handing over samples, so the mic/system offset they give the transcript is good to roughly a stream latency (0.2s here) rather than to the sample. Worse, an underrun drops samples mid-stream, so the two transcripts drift further apart the longer a meeting runs and no offset measured at the start can correct it. Fixing it properly means timestamping from the stream's own sample counter and reading the server's underrun reports; do that if long meetings come out visibly misaligned.
 	c.MicStart = time.Now()
 	micStream.Start()
 	c.SystemStart = time.Now()
