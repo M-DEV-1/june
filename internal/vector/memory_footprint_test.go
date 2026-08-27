@@ -70,7 +70,7 @@ func TestMeasureChromemIndexMemoryFootprint_10kVectors(t *testing.T) {
 	runtime.GC()
 	baselineKB := readRSSKB(t)
 
-	idx, err := NewChromemIndex(dir, "vectorbench-collection", benchNumVectors)
+	idx, err := NewChromemIndex(dir, benchDims, benchNumVectors)
 	if err != nil {
 		t.Fatalf("NewChromemIndex: %v", err)
 	}

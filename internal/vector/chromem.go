@@ -18,11 +18,15 @@ import (
 type ChromemIndex struct {
 	mu      sync.Mutex
 	maxDocs int
+	dim     int
 
 	col         *chromem.Collection
 	sidecarPath string
 	createdAt   map[string]time.Time // id -> createdAt, for oldest-first eviction
 }
+
+// collectionName is the single chromem collection ORA keeps its vectors in.
+const collectionName = "memory"
 
 // loadSidecar reads the sidecar file at path. A missing, unreadable, or corrupt file (e.g. truncated JSON left by a crash mid-write, before persistSidecar wrote atomically) just means starting from an empty map rather than failing — the sidecar only holds recoverable createdAt bookkeeping for eviction ordering, not the vectors themselves, so refusing to construct the index over it would silently and permanently disable semantic search instead (see FINDING 5: the caller only logs a warning and leaves the index nil, with nothing to repair the file afterward).
 func loadSidecar(path string) map[string]time.Time {
@@ -72,8 +76,9 @@ func (c *ChromemIndex) persistSidecar() error {
 	return nil
 }
 
-// NewChromemIndex opens or creates a persistent, gzip-compressed chromem-go collection at dbPath/collectionName, enforcing maxDocs via oldest-first eviction on Add.
-func NewChromemIndex(dbPath, collectionName string, maxDocs int) (*ChromemIndex, error) {
+// NewChromemIndex opens or creates a persistent, gzip-compressed chromem-go collection at dbPath, holding vectors of dim dimensions and enforcing maxDocs via oldest-first eviction on Add.
+// dim is what the current embedding model produces. chromem refuses any query that mixes vector widths, so a collection left behind by a different model would make every search fail; such a collection is dropped and rebuilt here instead (the reconcile sweep refills it) rather than left to degrade search silently and permanently. The sidecar's createdAt bookkeeping is likewise rebuilt from the collection whenever it has drifted, since the reconcile sweep reads the id list out of it.
+func NewChromemIndex(dbPath string, dim, maxDocs int) (*ChromemIndex, error) {
 	if err := os.MkdirAll(dbPath, 0755); err != nil {
 		return nil, fmt.Errorf("create chromem db dir: %w", err)
 	}
@@ -89,14 +94,73 @@ func NewChromemIndex(dbPath, collectionName string, maxDocs int) (*ChromemIndex,
 	}
 
 	sidecarPath := filepath.Join(dbPath, collectionName+"_meta.json")
-	createdAt := loadSidecar(sidecarPath)
-
-	return &ChromemIndex{
+	c := &ChromemIndex{
 		maxDocs:     maxDocs,
+		dim:         dim,
 		col:         col,
 		sidecarPath: sidecarPath,
-		createdAt:   createdAt,
-	}, nil
+		createdAt:   loadSidecar(sidecarPath),
+	}
+
+	ids, err := c.collectionIDs(context.Background())
+	if err != nil {
+		slog.Warn("chromem collection cannot be queried at the current embedding width, dropping it so the reconcile sweep can rebuild it", "docs", col.Count(), "dim", dim, "error", err)
+		if err := db.DeleteCollection(collectionName); err != nil {
+			return nil, fmt.Errorf("drop mismatched chromem collection: %w", err)
+		}
+		if c.col, err = db.GetOrCreateCollection(collectionName, nil, nil); err != nil {
+			return nil, fmt.Errorf("recreate chromem collection: %w", err)
+		}
+		ids = nil
+	}
+	c.reconcileSidecar(ids)
+
+	return c, nil
+}
+
+// collectionIDs returns the id of every document in the collection, or an error when the collection's vectors are not dim wide. chromem has no "list documents" call, so this rides a nearest-neighbour query over the whole collection — which is also what makes it a width check, since chromem compares the probe against every stored vector and refuses on a length mismatch.
+func (c *ChromemIndex) collectionIDs(ctx context.Context) ([]string, error) {
+	n := c.col.Count()
+	if n == 0 {
+		return nil, nil
+	}
+	probe := make([]float32, c.dim)
+	probe[0] = 1
+	results, err := c.col.QueryEmbedding(ctx, probe, n, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
+}
+
+// reconcileSidecar makes the createdAt map name exactly the documents the collection holds: ids the sidecar lost (a crash before the atomic rewrite, a deleted file) come back dated now, and ids for documents that are no longer there are dropped. Called only at open, with no other reference to the index yet, so it takes no lock. A no-op when the two already agree.
+func (c *ChromemIndex) reconcileSidecar(ids []string) {
+	inCollection := make(map[string]bool, len(ids))
+	changed := false
+	for _, id := range ids {
+		inCollection[id] = true
+		if _, ok := c.createdAt[id]; !ok {
+			c.createdAt[id] = time.Now()
+			changed = true
+		}
+	}
+	for id := range c.createdAt {
+		if !inCollection[id] {
+			delete(c.createdAt, id)
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	slog.Info("rebuilt the chromem sidecar from the collection", "docs", len(ids))
+	if err := c.persistSidecar(); err != nil {
+		slog.Warn("could not persist the rebuilt chromem sidecar", "error", err)
+	}
 }
 
 // Add inserts or overwrites a document, then evicts the oldest entries by createdAt if that pushes past maxDocs.
