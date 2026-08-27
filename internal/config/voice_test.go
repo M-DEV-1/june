@@ -38,7 +38,7 @@ func TestAvailableVoicesContainsDefault(t *testing.T) {
 }
 
 func TestLoadConfig_DefaultsVoice(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
 
 	cfg := LoadConfig()
 	if cfg.Voice != DefaultVoice {
@@ -46,8 +46,32 @@ func TestLoadConfig_DefaultsVoice(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_DefaultsProactiveAudioOn covers both a fresh config and one written before the field existed: proactive audio is on unless the user turns it off, so an upgrading install gets it without editing anything. The field is a *bool precisely so "absent" and "explicitly false" stay distinguishable — a plain bool would read a pre-existing config's missing key as "off".
+func TestLoadConfig_DefaultsProactiveAudioOn(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+
+	if cfg := LoadConfig(); !cfg.ProactiveAudioEnabled() {
+		t.Error("expected a fresh config to have proactive audio enabled")
+	}
+}
+
+func TestLoadConfig_KeepsProactiveAudioDisabled(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+
+	cfg := LoadConfig()
+	off := false
+	cfg.ProactiveAudio = &off
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	if reloaded := LoadConfig(); reloaded.ProactiveAudioEnabled() {
+		t.Error("expected an explicitly disabled proactive audio setting to survive a reload")
+	}
+}
+
 func TestSetVoice_RoundTrip(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
 
 	cfg := LoadConfig()
 	if err := cfg.SetVoice("kore"); err != nil {
@@ -65,7 +89,7 @@ func TestSetVoice_RoundTrip(t *testing.T) {
 }
 
 func TestSetVoice_RejectsInvalid(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
 
 	cfg := LoadConfig()
 	original := cfg.Voice
@@ -84,7 +108,7 @@ func TestSetVoice_RejectsInvalid(t *testing.T) {
 }
 
 func TestLoadConfig_RejectsBadPersistedVoice(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
 
 	// write a config with an invalid voice directly, simulating a hand-edited or stale ora-config.json
 	cfg := LoadConfig()
