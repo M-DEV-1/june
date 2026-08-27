@@ -15,6 +15,8 @@ type OraConfig struct {
 	// Voice is the Gemini Live prebuilt voice name used for the assistant's spoken output (see AvailableVoices).
 	// Defaults to DefaultVoice when unset.
 	Voice string `json:"voice"`
+	// Autostart is whether the daemon should be launched when the user logs in. Defaults to true, and the daemon reconciles the on-disk autostart entry to match this field on every startup.
+	Autostart bool `json:"autostart"`
 }
 
 // DefaultVoice is used when the config has no voice set (fresh installs, or configs written before /voice existed).
@@ -86,7 +88,8 @@ func LoadConfig() OraConfig {
 			// 3s is too less to be a dwell time, so 15s sounded better. honestly, it has to be tab switching + dwell, and im not sure what the right number is?
 			DwellTime: 15000,
 		},
-		Voice: DefaultVoice,
+		Voice:     DefaultVoice,
+		Autostart: true,
 	}
 
 	configPath := ConfigPath()
