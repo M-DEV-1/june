@@ -18,11 +18,15 @@ import (
 	"ora/internal/embed"
 	"ora/internal/ipctoken"
 	"ora/internal/memory"
+	"ora/internal/recorder"
 	"ora/internal/tracker"
 	"ora/internal/vector"
 
 	"google.golang.org/genai"
 )
+
+// meetingRecorder is the tray's handle on the meeting recorder. startDaemonServices assigns it once the store exists, before registerSNI runs; it stays nil if the daemon never got that far, and every read of it is nil-safe.
+var meetingRecorder *recorder.Recorder
 
 const DaemonPort = "6942"
 
@@ -133,6 +137,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	reconcileAutostart(appConfig.Autostart)
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
+
+	meetingRecorder = recorder.New(config.DataDir(), store, apiKey)
 
 	summarizer, err := memory.NewGeminiSummarizer(apiKey)
 	if err != nil {
