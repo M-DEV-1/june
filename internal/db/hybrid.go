@@ -125,6 +125,33 @@ func (s *Store) SetVectorIndex(v vectorIndex) {
 	s.mu.Unlock()
 }
 
+// SetEmbedsAreFree tells the Store that its embedder costs CPU rather than metered API calls (the local EmbeddingGemma engine). The only thing this changes is reconciliation's episode age window: with a metered embedder, backfill covers only the last reconcileEpisodeWindow of episodes so a dirty store can't run up a bill; with a free one, every episode that still has text is eligible, which is what brings back the old episodes that lost their vectors to API failures.
+func (s *Store) SetEmbedsAreFree(free bool) {
+	s.mu.Lock()
+	s.embedsAreFree = free
+	s.mu.Unlock()
+}
+
+// SetVectorSimilarityFloor overrides the absolute cosine floor a vector hit must clear to enter fusion. minVectorSimilarity's default was measured against Gemini's similarity range; a different embedding model scores the same genuinely-relevant documents on a different scale, and leaving the floor where it is would drop every vector candidate and reduce hybrid search to lexical-only without saying so. Values of zero or below are ignored, so the floor can never be turned off entirely.
+func (s *Store) SetVectorSimilarityFloor(floor float32) {
+	if floor <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.vectorSimilarityFloor = floor
+	s.mu.Unlock()
+}
+
+// vectorFloor is the absolute cosine floor in force, defaulting to minVectorSimilarity when nothing has overridden it.
+func (s *Store) vectorFloor() float32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.vectorSimilarityFloor > 0 {
+		return s.vectorSimilarityFloor
+	}
+	return float32(minVectorSimilarity)
+}
+
 // hybridVectorPoolSize bounds how many nearest-neighbor results are pulled from the vector index before fusion — wider than the final `limit` so RRF, not raw vector similarity alone, decides the final order.
 const hybridVectorPoolSize = 50
 
@@ -272,8 +299,8 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 			if err != nil {
 				slog.Warn("hybrid search: vector search failed, degrading to lexical-only", "error", err)
 			} else {
-				// The floor is relative to the best hit in this result set, with minVectorSimilarity as its lower bound. Computed from the results rather than assuming they arrive sorted.
-				floor := float32(minVectorSimilarity)
+				// The floor is relative to the best hit in this result set, with the embedder's absolute floor as its lower bound. Computed from the results rather than assuming they arrive sorted.
+				floor := s.vectorFloor()
 				for _, r := range results {
 					if band := r.Similarity - vectorSimilarityBand; band > floor {
 						floor = band

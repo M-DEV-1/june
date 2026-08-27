@@ -1411,3 +1411,187 @@ func TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest(t *testing.T)
 		t.Errorf("expected only the top vector hit to survive the relative floor, got %v", kept)
 	}
 }
+
+// TestReconcileVectors_BackfillsThread verifies a thread gets a vector. Threads were never embedded by any write path, so the whole arc layer ("what has the user been working on for weeks") was invisible to the semantic half of hybrid search while vectorBackingAlive still claimed thread vectors were alive.
+func TestReconcileVectors_BackfillsThread(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "learning Vulkan", Kind: "learning", State: "working through the triangle tutorial"})
+	if err != nil {
+		t.Fatalf("UpsertThread: %v", err)
+	}
+
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{}
+	store.SetVectorIndex(vidx)
+
+	report, err := store.ReconcileVectors(ctx, 200)
+	if err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if report.Backfilled != 1 {
+		t.Fatalf("expected 1 backfilled, got %d", report.Backfilled)
+	}
+
+	rec := vidx.addRecordFor(fmt.Sprintf("thread:%d", id))
+	if rec == nil {
+		t.Fatalf("expected thread:%d in the index, got %v", id, vidx.IDs())
+	}
+	// The embedded text must match what the threads_ai FTS trigger indexes, so the lexical and vector halves of hybrid search see the same thread.
+	if want := "learning Vulkan — working through the triangle tutorial"; rec.content != want {
+		t.Errorf("thread content = %q, want %q", rec.content, want)
+	}
+	if rec.metadata["source"] != "thread" {
+		t.Errorf("thread metadata source = %q, want thread", rec.metadata["source"])
+	}
+	if rec.metadata["kind"] != "arc" {
+		t.Errorf("thread metadata kind = %q, want arc", rec.metadata["kind"])
+	}
+	if rec.metadata["created_at"] == "" {
+		t.Error("thread metadata is missing created_at, which HybridSearch needs for recency")
+	}
+}
+
+// TestReconcileVectors_DeletesOrphanedThreadVector verifies that now threads are backfilled, a vector for a thread row that has since been deleted is cleaned up too — otherwise every deleted thread would leak a permanent phantom hit.
+func TestReconcileVectors_DeletesOrphanedThreadVector(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	vidx := &fakeHybridVectorIndex{}
+	vidx.seedIDs("thread:4242") // no thread with id 4242 exists
+	store.SetVectorIndex(vidx)
+
+	report, err := store.ReconcileVectors(ctx, 0)
+	if err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if report.Deleted != 1 {
+		t.Errorf("expected 1 deleted, got %d", report.Deleted)
+	}
+}
+
+// TestReconcileVectors_EpisodeWindowExcludesOldEpisodesByDefault pins the Gemini-path behavior: an episode older than the default window is not re-embedded, so a dirty store cannot run up an API bill re-embedding years of captures.
+func TestReconcileVectors_EpisodeWindowExcludesOldEpisodesByDefault(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.LogEpisode(ctx, "Code", "old.go", "an old capture")
+	if err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE episodes SET created_at = datetime('now','-60 days') WHERE id = ?`, id); err != nil {
+		t.Fatalf("age episode: %v", err)
+	}
+
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{}
+	store.SetVectorIndex(vidx)
+
+	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if rec := vidx.addRecordFor(fmt.Sprintf("episode:%d", id)); rec != nil {
+		t.Errorf("a 60-day-old episode was backfilled on the default (metered) path, got %v", vidx.IDs())
+	}
+}
+
+// TestReconcileVectors_UnmeteredEmbedsBackfillEveryOldEpisode verifies that with a local embedder wired (SetEmbedsAreFree), the age window is dropped entirely — the ~1000 old episodes that lost their vectors to API failures become searchable again, and re-embedding them costs nothing but CPU.
+func TestReconcileVectors_UnmeteredEmbedsBackfillEveryOldEpisode(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.LogEpisode(ctx, "Code", "old.go", "an old capture")
+	if err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE episodes SET created_at = datetime('now','-60 days') WHERE id = ?`, id); err != nil {
+		t.Fatalf("age episode: %v", err)
+	}
+
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	store.SetEmbedsAreFree(true)
+	vidx := &fakeHybridVectorIndex{}
+	store.SetVectorIndex(vidx)
+
+	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if rec := vidx.addRecordFor(fmt.Sprintf("episode:%d", id)); rec == nil {
+		t.Errorf("expected the 60-day-old episode backfilled with a free embedder, got %v", vidx.IDs())
+	}
+}
+
+// TestHybridSearchVectorFloorFollowsTheEmbedder verifies the absolute cosine floor can be moved to match the embedder in use. minVectorSimilarity's 0.55 was measured against Gemini's similarity range; EmbeddingGemma scores the same genuinely-relevant documents lower, so leaving the floor at 0.55 would drop every vector candidate on the open-ended questions ("what did i do today") and silently reduce hybrid search to lexical-only.
+func TestHybridSearchVectorFloorFollowsTheEmbedder(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	id, err := store.LogNote(ctx, "the user has been building a memory system all week", "fact")
+	if err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	// A hit a local embedder would plausibly score: clearly relevant, comfortably under the Gemini-calibrated 0.55.
+	vidx := &fakeHybridVectorIndex{}
+	vidx.results = []Result{{
+		ID:         fmt.Sprintf("note:%d", id),
+		Content:    "the user has been building a memory system all week",
+		Metadata:   map[string]string{"source": "note", "kind": string(memory.KindFact)},
+		Similarity: 0.44,
+	}}
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	store.SetVectorIndex(vidx)
+
+	// Default floor: the 0.44 hit is below 0.55 and never enters fusion.
+	hits, err := store.HybridSearch(ctx, "zzqqxx", "", 5)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("expected the 0.44 hit to be dropped at the default floor, got %d hits", len(hits))
+	}
+
+	store.SetVectorSimilarityFloor(0.40)
+	hits, err = store.HybridSearch(ctx, "zzqqxx", "", 5)
+	if err != nil {
+		t.Fatalf("HybridSearch after lowering the floor: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected the 0.44 hit to survive a 0.40 floor, got %d hits", len(hits))
+	}
+}
+
+// TestSetVectorSimilarityFloorIgnoresNonPositive verifies a zero or negative floor leaves the default in place, so a miswired caller cannot turn the floor off entirely and let every nearest neighbour chromem returns into fusion.
+func TestSetVectorSimilarityFloorIgnoresNonPositive(t *testing.T) {
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	store.SetVectorSimilarityFloor(0)
+	if got := store.vectorFloor(); got != minVectorSimilarity {
+		t.Errorf("floor = %v after SetVectorSimilarityFloor(0), want the %v default", got, float32(minVectorSimilarity))
+	}
+}
