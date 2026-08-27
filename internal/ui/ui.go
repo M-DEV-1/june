@@ -470,18 +470,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.speakerWave.Update(m.agent.GetSpeaker().CurrentAmplitude())
 		}
 
-		// ReadMemStats causes a GC stop-the-world — only sample every 5s
-		if time.Since(m.lastRAMCheck) > 5*time.Second {
-			var mem runtime.MemStats
-			runtime.ReadMemStats(&mem)
-			if mem.Sys >= 1024*1024*1024 {
-				m.cachedRAM = fmt.Sprintf("%.1f GB", float64(mem.Sys)/(1024*1024*1024))
-			} else {
-				m.cachedRAM = fmt.Sprintf("%d MB", mem.Sys/(1024*1024))
-			}
-			m.lastRAMCheck = time.Now()
-		}
-
 		// check if textarea needs to grow
 		{
 			val := m.textarea.Value()
