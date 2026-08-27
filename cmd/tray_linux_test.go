@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"image/png"
 	"testing"
 )
@@ -119,4 +120,96 @@ func TestTrayIconPixmap(t *testing.T) {
 	if !varied {
 		t.Fatal("icon has no color variation — decode/convert produced a flat image")
 	}
+}
+
+// The recording item is a toggle, so its label always names what the click will do.
+func TestMeetingLabel(t *testing.T) {
+	if got := meetingLabel(false); got != "Start meeting recording" {
+		t.Errorf("idle label = %q", got)
+	}
+	if got := meetingLabel(true); got != "Stop meeting recording" {
+		t.Errorf("recording label = %q", got)
+	}
+}
+
+// A nil recorder (the daemon never got far enough to wire one up) must not panic the menu, and must read as not recording.
+func TestMenuRecording_NilRecorderIsSafe(t *testing.T) {
+	m := &dbusMenu{}
+	if m.recording() {
+		t.Error("a menu with no recorder must not report a recording in progress")
+	}
+	if got := labelOf(t, m.items(), menuMeeting); got != "Start meeting recording" {
+		t.Errorf("meeting item label = %q", got)
+	}
+}
+
+// GetLayout, GetGroupProperties and GetProperty all serve the same menu, so a label change must show up identically in all three — they used to hardcode their own copies.
+func TestMenuViewsAgree(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		m := &dbusMenu{}
+		m.paused.Store(paused)
+
+		_, root, derr := m.GetLayout(0, -1, nil)
+		if derr != nil {
+			t.Fatalf("GetLayout: %v", derr)
+		}
+		items := m.items()
+		if len(root.Children) != len(items) {
+			t.Fatalf("layout has %d children, items() has %d", len(root.Children), len(items))
+		}
+
+		group, derr := m.GetGroupProperties(nil, nil)
+		if derr != nil {
+			t.Fatalf("GetGroupProperties: %v", derr)
+		}
+		if len(group) != len(items) {
+			t.Fatalf("GetGroupProperties returned %d items, want %d", len(group), len(items))
+		}
+
+		for i, it := range items {
+			child, ok := root.Children[i].Value().(dbusMenuLayout)
+			if !ok {
+				t.Fatalf("child %d is not a dbusMenuLayout", i)
+			}
+			if child.ID != it.ID {
+				t.Errorf("child %d id = %d, want %d", i, child.ID, it.ID)
+			}
+			if group[i].ID != it.ID {
+				t.Errorf("group %d id = %d, want %d", i, group[i].ID, it.ID)
+			}
+			for name, want := range it.Properties {
+				got, derr := m.GetProperty(it.ID, name)
+				if derr != nil {
+					t.Fatalf("GetProperty(%d, %s): %v", it.ID, name, derr)
+				}
+				if fmt.Sprint(got.Value()) != fmt.Sprint(want.Value()) {
+					t.Errorf("item %d property %q: GetProperty gave %v, items() gave %v", it.ID, name, got.Value(), want.Value())
+				}
+			}
+		}
+	}
+}
+
+// The menu order puts the recording toggle with the other actions, above the separator and Quit.
+func TestMenuOrder(t *testing.T) {
+	var ids []int32
+	for _, it := range (&dbusMenu{}).items() {
+		ids = append(ids, it.ID)
+	}
+	want := []int32{menuStatus, menuSep1, menuPause, menuMeeting, menuSep2, menuQuit}
+	if fmt.Sprint(ids) != fmt.Sprint(want) {
+		t.Errorf("menu order = %v, want %v", ids, want)
+	}
+}
+
+func labelOf(t *testing.T, items []dbusMenuItemProps, id int32) string {
+	t.Helper()
+	for _, it := range items {
+		if it.ID == id {
+			s, _ := it.Properties["label"].Value().(string)
+			return s
+		}
+	}
+	t.Fatalf("no menu item with id %d", id)
+	return ""
 }

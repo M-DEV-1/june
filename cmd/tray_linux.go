@@ -16,12 +16,18 @@ import (
 	"os"
 	"sync/atomic"
 
+	"ora/internal/recorder"
+
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
 )
 
 //go:embed tray_icon_linux.png
 var trayIconPNG []byte
+
+// meetingRecorder is the tray's handle on the meeting recorder. startDaemonServices (cmd/daemon.go) assigns it once the store exists, before registerSNI runs; it stays nil if the daemon never got that far, and every read of it is nil-safe.
+// ponytail: a package-level var because startDaemonServices' signature is owned elsewhere — pass the recorder through that return value if the daemon ever needs more than one.
+var meetingRecorder *recorder.Recorder
 
 // statusDotSize is the side length of the rendered status indicator (px).
 const statusDotSize = 16
@@ -133,13 +139,80 @@ type dbusMenuLayout struct {
 //	1 = Status indicator  (disabled; label reflects tracking state)
 //	2 = separator
 //	3 = Pause / Resume Tracking  (label toggled by paused flag)
+//	6 = Start / Stop meeting recording  (label toggled by the recorder's own state)
 //	4 = separator
 //	5 = Quit Ora
 type dbusMenu struct {
 	quitCh  chan<- struct{}
 	conn    *dbus.Conn // needed to emit LayoutUpdated when pause label changes
+	rec     *recorder.Recorder
 	paused  atomic.Bool
 	menuRev atomic.Uint32
+}
+
+// menu item IDs, in the order they appear.
+const (
+	menuStatus  int32 = 1
+	menuSep1    int32 = 2
+	menuPause   int32 = 3
+	menuMeeting int32 = 6
+	menuSep2    int32 = 4
+	menuQuit    int32 = 5
+)
+
+// meetingLabel is the recording menu item's text — a toggle, so the label always names the action the click performs.
+func meetingLabel(recording bool) string {
+	if recording {
+		return "Stop meeting recording"
+	}
+	return "Start meeting recording"
+}
+
+// recording reports whether a meeting is being recorded. Nil-safe: the recorder is only wired in once the daemon's store exists, and the tray must still render before then.
+func (m *dbusMenu) recording() bool {
+	return m.rec != nil && m.rec.Active()
+}
+
+// items is the single source of truth for the menu: every property of every item, in display order. GetLayout, GetGroupProperties and GetProperty all read from here so the three views can never disagree about a label.
+func (m *dbusMenu) items() []dbusMenuItemProps {
+	pauseLabel := "Pause Tracking"
+	if m.paused.Load() {
+		pauseLabel = "Resume Tracking"
+	}
+	item := func(id int32, label string, enabled bool) dbusMenuItemProps {
+		return dbusMenuItemProps{ID: id, Properties: map[string]dbus.Variant{
+			"label":   dbus.MakeVariant(label),
+			"enabled": dbus.MakeVariant(enabled),
+			"visible": dbus.MakeVariant(true),
+		}}
+	}
+	sep := func(id int32) dbusMenuItemProps {
+		return dbusMenuItemProps{ID: id, Properties: map[string]dbus.Variant{
+			"type":    dbus.MakeVariant("separator"),
+			"enabled": dbus.MakeVariant(true),
+			"visible": dbus.MakeVariant(true),
+		}}
+	}
+
+	status := item(menuStatus, m.statusLabel(), false)
+	status.Properties["icon-data"] = dbus.MakeVariant(m.statusIcon())
+
+	return []dbusMenuItemProps{
+		status,
+		sep(menuSep1),
+		item(menuPause, pauseLabel, true),
+		item(menuMeeting, meetingLabel(m.recording()), true),
+		sep(menuSep2),
+		item(menuQuit, "Quit Ora", true),
+	}
+}
+
+// refresh bumps the menu revision and tells the shell to re-read the layout, which is how a toggled label reaches the screen.
+func (m *dbusMenu) refresh() {
+	rev := m.menuRev.Add(1)
+	if m.conn != nil {
+		m.conn.Emit("/MenuBar", "com.canonical.dbusmenu.LayoutUpdated", rev, int32(0))
+	}
 }
 
 func (m *dbusMenu) statusLabel() string {
@@ -158,37 +231,15 @@ func (m *dbusMenu) statusIcon() []byte {
 }
 
 func (m *dbusMenu) GetLayout(parentId, recursionDepth int32, propertyNames []string) (uint32, dbusMenuLayout, *dbus.Error) {
-	pauseLabel := "Pause Tracking"
-	if m.paused.Load() {
-		pauseLabel = "Resume Tracking"
+	var children []dbus.Variant
+	for _, it := range m.items() {
+		children = append(children, dbus.MakeVariant(dbusMenuLayout{
+			ID:         it.ID,
+			Properties: it.Properties,
+			Children:   []dbus.Variant{},
+		}))
 	}
-
-	mkItem := func(id int32, label string, enabled, sep bool) dbusMenuLayout {
-		props := map[string]dbus.Variant{
-			"label":   dbus.MakeVariant(label),
-			"enabled": dbus.MakeVariant(enabled),
-			"visible": dbus.MakeVariant(true),
-		}
-		if sep {
-			props["type"] = dbus.MakeVariant("separator")
-		}
-		return dbusMenuLayout{ID: id, Properties: props, Children: []dbus.Variant{}}
-	}
-
-	statusItem := mkItem(1, m.statusLabel(), false, false)
-	statusItem.Properties["icon-data"] = dbus.MakeVariant(m.statusIcon())
-
-	root := dbusMenuLayout{
-		ID:         0,
-		Properties: map[string]dbus.Variant{},
-		Children: []dbus.Variant{
-			dbus.MakeVariant(statusItem),
-			dbus.MakeVariant(mkItem(2, "", true, true)),
-			dbus.MakeVariant(mkItem(3, pauseLabel, true, false)),
-			dbus.MakeVariant(mkItem(4, "", true, true)),
-			dbus.MakeVariant(mkItem(5, "Quit Ora", true, false)),
-		},
-	}
+	root := dbusMenuLayout{ID: 0, Properties: map[string]dbus.Variant{}, Children: children}
 	return m.menuRev.Load(), root, nil
 }
 
@@ -197,7 +248,7 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 		return nil
 	}
 	switch id {
-	case 3: // Pause / Resume
+	case menuPause:
 		var endpoint string
 		if m.paused.Load() {
 			endpoint = "/resume"
@@ -208,11 +259,11 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 		}
 		go authedDaemonGet("http://127.0.0.1:" + DaemonPort + endpoint)
 		// signal from root so both the status label (id 1) and pause label (id 3) refresh
-		rev := m.menuRev.Add(1)
-		if m.conn != nil {
-			m.conn.Emit("/MenuBar", "com.canonical.dbusmenu.LayoutUpdated", rev, int32(0))
-		}
-	case 5: // Quit
+		m.refresh()
+	case menuMeeting:
+		m.toggleMeeting()
+		m.refresh()
+	case menuQuit:
 		select {
 		case m.quitCh <- struct{}{}:
 		default:
@@ -221,33 +272,29 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 	return nil
 }
 
+// toggleMeeting starts or stops the meeting recording. Stopping hands off to background transcription and summarising, so neither branch blocks the D-Bus method call.
+func (m *dbusMenu) toggleMeeting() {
+	if m.rec == nil {
+		slog.Warn("meeting recorder is not wired up, ignoring tray click")
+		return
+	}
+	if m.rec.Active() {
+		if _, err := m.rec.StopAndProcess(context.Background()); err != nil {
+			slog.Error("failed to stop meeting recording", "error", err)
+		}
+		return
+	}
+	if err := m.rec.Start(); err != nil {
+		slog.Error("failed to start meeting recording", "error", err)
+	}
+}
+
 func (m *dbusMenu) AboutToShow(id int32) (bool, *dbus.Error) {
 	return false, nil
 }
 
 func (m *dbusMenu) GetGroupProperties(ids []int32, propertyNames []string) ([]dbusMenuItemProps, *dbus.Error) {
-	pauseLabel := "Pause Tracking"
-	if m.paused.Load() {
-		pauseLabel = "Resume Tracking"
-	}
-	allItems := []dbusMenuItemProps{
-		{ID: 1, Properties: map[string]dbus.Variant{
-			"label": dbus.MakeVariant(m.statusLabel()), "enabled": dbus.MakeVariant(false), "visible": dbus.MakeVariant(true),
-			"icon-data": dbus.MakeVariant(m.statusIcon()),
-		}},
-		{ID: 2, Properties: map[string]dbus.Variant{
-			"type": dbus.MakeVariant("separator"), "enabled": dbus.MakeVariant(true), "visible": dbus.MakeVariant(true),
-		}},
-		{ID: 3, Properties: map[string]dbus.Variant{
-			"label": dbus.MakeVariant(pauseLabel), "enabled": dbus.MakeVariant(true), "visible": dbus.MakeVariant(true),
-		}},
-		{ID: 4, Properties: map[string]dbus.Variant{
-			"type": dbus.MakeVariant("separator"), "enabled": dbus.MakeVariant(true), "visible": dbus.MakeVariant(true),
-		}},
-		{ID: 5, Properties: map[string]dbus.Variant{
-			"label": dbus.MakeVariant("Quit Ora"), "enabled": dbus.MakeVariant(true), "visible": dbus.MakeVariant(true),
-		}},
-	}
+	allItems := m.items()
 	// filter to requested IDs if the caller specified any
 	if len(ids) == 0 {
 		return allItems, nil
@@ -266,33 +313,14 @@ func (m *dbusMenu) GetGroupProperties(ids []int32, propertyNames []string) ([]db
 }
 
 func (m *dbusMenu) GetProperty(id int32, name string) (dbus.Variant, *dbus.Error) {
-	if id == 1 {
-		switch name {
-		case "label":
-			return dbus.MakeVariant(m.statusLabel()), nil
-		case "icon-data":
-			return dbus.MakeVariant(m.statusIcon()), nil
-		case "enabled":
-			return dbus.MakeVariant(false), nil
-		case "visible":
-			return dbus.MakeVariant(true), nil
+	for _, item := range m.items() {
+		if item.ID != id {
+			continue
 		}
-	}
-	pauseLabel := "Pause Tracking"
-	if m.paused.Load() {
-		pauseLabel = "Resume Tracking"
-	}
-	labels := map[int32]string{3: pauseLabel, 5: "Quit Ora"}
-	if label, ok := labels[id]; ok {
-		switch name {
-		case "label":
-			return dbus.MakeVariant(label), nil
-		case "enabled", "visible":
-			return dbus.MakeVariant(true), nil
+		if v, ok := item.Properties[name]; ok {
+			return v, nil
 		}
-	}
-	if (id == 2 || id == 4) && name == "type" {
-		return dbus.MakeVariant("separator"), nil
+		break
 	}
 	return dbus.MakeVariant(""), nil
 }
@@ -401,7 +429,7 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	}
 
 	// Export dbusmenu at /MenuBar.
-	menu := &dbusMenu{quitCh: quitCh, conn: conn}
+	menu := &dbusMenu{quitCh: quitCh, conn: conn, rec: meetingRecorder}
 	if err := conn.Export(menu, menuPath, "com.canonical.dbusmenu"); err != nil {
 		conn.Close()
 		return fmt.Errorf("export dbusmenu: %w", err)
