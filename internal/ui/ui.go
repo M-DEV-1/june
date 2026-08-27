@@ -3,13 +3,14 @@ package ui
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"runtime"
 	"strings"
 	"time"
 
 	"ora/internal/agent"
 	"ora/internal/config"
+	"ora/internal/ipctoken"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -40,7 +41,6 @@ type model struct {
 	speakerWave   *Waveform
 	width         int
 	height        int
-	isThinking    bool
 	isConnected   bool
 	daemonOK      bool
 	mode          AgentMode
@@ -48,12 +48,22 @@ type model struct {
 	showCmdList   bool
 	hitlList      list.Model
 	activeToolReq *agent.ToolRequest
-	cachedRAM     string
-	lastRAMCheck  time.Time
 	spinner       spinner.Model
 	// activity is the shared live-status indicator — covers both "thinking" (sent text, no response yet) and an in-flight tool call, distinguished by kind. nil means nothing active and the status line is hidden.
 	activity *liveStatus
+	// viewportDirty is set when streamLine's 80ms throttle skips a render, so the tickMsg handler can flush it later — otherwise a reply's last chunk can go permanently unrendered if no further chunk ever arrives to trigger the next render.
+	viewportDirty bool
+	// expandThoughts is a global fold toggle (Ctrl+E): false renders every thought message collapsed to one dim preview line, true renders them in full. Streaming still accumulates into the message's Content regardless — folding is a render-time concern only.
+	expandThoughts bool
+	// quitConfirmArmed/quitConfirmArmedAt back the Ctrl+C double-press-to-quit confirmation: the first press arms it and shows a hint instead of quitting; a second press within quitConfirmWindow actually quits. Auto-cleared by the tickMsg handler once the window lapses, same shape as staleActivityTimeout.
+	quitConfirmArmed   bool
+	quitConfirmArmedAt time.Time
+	// closeOraBlock is set by a TurnBoundary chunk and consumed by the next ora chunk streamLine sees — it forces that chunk to start a fresh message block instead of merging into whatever the finished turn left behind.
+	closeOraBlock bool
 }
+
+// quitConfirmWindow is how long a Ctrl+C press stays "armed" waiting for the confirming second press.
+const quitConfirmWindow = 1500 * time.Millisecond
 
 type liveStatusKind int
 
@@ -72,7 +82,8 @@ type liveStatus struct {
 // staleActivityTimeout is a safety valve, not a normal-path timer — real tool calls finish in well under this. ToolActivityChan's non-blocking send (sendToolActivity in connect.go) can drop a Finished event under a burst of concurrent tool calls (buffer is 20, 10 calls' worth of Started+Finished pairs), which would otherwise leave the spinner stuck forever.
 const staleActivityTimeout = 30 * time.Second
 
-type responseMsg string
+// responseMsg carries a model output chunk into bubbletea's Update loop, tagged with the real Part.Thought bit from the Live API — the UI never infers thought-vs-final from content.
+type responseMsg agent.ResponseChunk
 type tickMsg time.Time
 type errorMsg error
 type daemonPollMsg time.Time
@@ -258,8 +269,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agent.ToolRequest:
 		m.activeToolReq = &msg
 		m.mode = ModeToolConfirm
-		m.messages = append(m.messages, Message{Sender: "tool", Content: "Ora wants to execute:\n  " + msg.Command, IsTool: true})
-		m.updateViewport()
+		items := hitlItems(msg.EditableCommand != "")
+		m.hitlList.SetItems(items)
+		// Sized to the actual item count (3-4), not list.New's DefaultListHeight=8 default — with title/status/help/filtering all disabled, the list renders exactly item-count rows, so the fixed default was reserving 4-5 rows nobody used and could overflow a short terminal (see the WP7 finding this fixes).
+		m.hitlList.SetHeight(len(items))
+		m.messages = append(m.messages, Message{Sender: "tool", Content: "Ora wants to:\n  " + msg.Description, IsTool: true})
+		m.updateViewport(false)
 		// The approval menu already says "paused, waiting on you" — a spinner behind it would misleadingly read as "still running".
 		m.activity = nil
 		m.recalcViewportHeight()
@@ -279,7 +294,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			IsToolLog:     true,
 			ToolLogFailed: msg.Err,
 		})
-		m.updateViewport()
+		m.updateViewport(false)
 		if m.activity != nil && m.activity.id == msg.ID {
 			m.activity = &liveStatus{kind: statusThinking, label: "thinking", started: time.Now()}
 			m.recalcViewportHeight()
@@ -310,8 +325,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(vpCmd, tiCmd)
 
 	case tea.KeyMsg:
+		// Checked before the mode branches below so it applies from every mode — ModeToolConfirm and ModeToolEdit each have their own KeyMsg switch that returns before reaching the hotkeys switch further down. Double-press-to-quit: the first press arms a ~1.5s confirmation window (shown in the hint area) instead of quitting immediately; only a second press within that window actually quits.
+		if msg.Type == tea.KeyCtrlC {
+			if m.quitConfirmArmed && time.Since(m.quitConfirmArmedAt) <= quitConfirmWindow {
+				return m, tea.Quit
+			}
+			m.quitConfirmArmed = true
+			m.quitConfirmArmedAt = time.Now()
+			return m, nil
+		}
+
 		if m.mode == ModeToolConfirm {
 			switch msg.Type {
+			case tea.KeyEsc:
+				m.messages = append(m.messages, Message{Sender: "tool", Content: "Command rejected."})
+				m.activeToolReq.ResultChan <- "User rejected this command."
+				m.mode = ModeBoth
+				m.activeToolReq = nil
+				m.updateViewport(false)
+				m.recalcViewportHeight()
+				return m, nil
 			case tea.KeyUp, tea.KeyDown:
 				var cmd tea.Cmd
 				m.hitlList, cmd = m.hitlList.Update(msg)
@@ -321,28 +354,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch i.title {
 					case "Allow once":
 						m.messages = append(m.messages, Message{Sender: "tool", Content: "Approved. Executing..."})
-						go func(cmd string, c chan<- string) {
-							c <- agent.RunShellCommand(cmd)
-						}(m.activeToolReq.Command, m.activeToolReq.ResultChan)
+						go func(execute func() string, c chan<- string) {
+							c <- execute()
+						}(m.activeToolReq.Execute, m.activeToolReq.ResultChan)
 						m.mode = ModeBoth
 					case "Allow for session":
 						m.messages = append(m.messages, Message{Sender: "tool", Content: "Approved for session. Executing..."})
-						m.agent.AllowedCmds.Store(m.activeToolReq.Command, true)
-						go func(cmd string, c chan<- string) {
-							c <- agent.RunShellCommand(cmd)
-						}(m.activeToolReq.Command, m.activeToolReq.ResultChan)
+						if m.activeToolReq.AllowKey != "" {
+							m.agent.AllowedCmds.Store(m.activeToolReq.AllowKey, true)
+						}
+						go func(execute func() string, c chan<- string) {
+							c <- execute()
+						}(m.activeToolReq.Execute, m.activeToolReq.ResultChan)
 						m.mode = ModeBoth
 					case "Reject":
 						m.messages = append(m.messages, Message{Sender: "tool", Content: "Command rejected."})
 						m.activeToolReq.ResultChan <- "User rejected this command."
 						m.mode = ModeBoth
 					case "Suggest changes":
-						m.textarea.SetValue(m.activeToolReq.Command)
+						m.textarea.SetValue(m.activeToolReq.EditableCommand)
 						m.textarea.Focus()
 						m.mode = ModeToolEdit
 					}
 					m.activeToolReq = nil
-					m.updateViewport()
+					m.updateViewport(false)
+					m.recalcViewportHeight()
 					return m, nil
 				}
 			}
@@ -354,7 +390,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				editedCmd := strings.TrimSpace(m.textarea.Value())
 				m.textarea.Reset()
 				m.messages = append(m.messages, Message{Sender: "tool", Content: "Executing modified command:\n  " + editedCmd})
-				m.updateViewport()
+				m.updateViewport(false)
 				go func(cmd string, c chan<- string) {
 					c <- agent.RunShellCommand(cmd)
 				}(editedCmd, m.activeToolReq.ResultChan)
@@ -368,7 +404,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeToolReq.ResultChan <- "User rejected this command."
 				m.mode = ModeBoth
 				m.activeToolReq = nil
-				m.updateViewport()
+				m.updateViewport(false)
 				return m, nil
 			}
 			m.textarea, tiCmd = m.textarea.Update(msg)
@@ -385,18 +421,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEnter:
 				if i, ok := m.cmdList.SelectedItem().(commandItem); ok {
 					input := "/" + i.Title()
-					m.executeCommand(input)
+					cmd := m.executeCommand(input)
 					m.textarea.Reset()
 					m.showCmdList = false
-					return m, nil
+					m.recalcViewportHeight()
+					return m, cmd
 				}
 			}
 		}
 
 		// hotkeys
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
-			return m, tea.Quit
+		case tea.KeyPgDown:
+			m.viewport.PageDown()
+			return m, nil
+		case tea.KeyPgUp:
+			m.viewport.PageUp()
+			return m, nil
+		case tea.KeyCtrlD:
+			// Only takes over when the textarea is empty — bubbles' textarea binds Ctrl+D to DeleteCharacterForward natively, and stealing it mid-sentence broke composing (X1). Falls through to the textarea-update section below when non-empty.
+			if m.textarea.Value() == "" {
+				m.viewport.HalfPageDown()
+				return m, nil
+			}
+		case tea.KeyCtrlU:
+			// Same textarea-empty gating as Ctrl+D above — bubbles binds this to DeleteBeforeCursor, and shell users clear the input line with it constantly (X1).
+			if m.textarea.Value() == "" {
+				m.viewport.HalfPageUp()
+				return m, nil
+			}
+		case tea.KeyCtrlE:
+			// Same textarea-empty gating as Ctrl+D/Ctrl+U above — bubbles binds this to LineEnd (X1).
+			if m.textarea.Value() == "" {
+				m.expandThoughts = !m.expandThoughts
+				m.updateViewport(false)
+				return m, nil
+			}
+		case tea.KeyEsc:
+			// Esc never quits — see the top-of-KeyMsg Ctrl+C check for that. Context-scoped instead: close the open menu, else jump back to the bottom if scrolled away, else clear a non-empty textarea, else no-op. One rung per keypress, not all applicable rungs at once.
+			if m.showCmdList {
+				m.showCmdList = false
+				m.recalcViewportHeight()
+				return m, nil
+			}
+			if !m.viewport.AtBottom() {
+				m.viewport.GotoBottom()
+				return m, nil
+			}
+			if m.textarea.Value() != "" {
+				m.textarea.Reset()
+			}
+			return m, nil
 		case tea.KeyCtrlJ:
 			m.textarea.InsertString("\n")
 			return m, nil
@@ -404,17 +479,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			input := strings.TrimSpace(m.textarea.Value())
 			if input != "" {
 				if strings.HasPrefix(input, "/") {
-					m.executeCommand(input)
+					cmd := m.executeCommand(input)
 					m.textarea.Reset()
 					m.showCmdList = false
+					m.recalcViewportHeight()
+					return m, cmd
 				} else if m.mode == ModeVoice {
 					// Voice-only: text sends are disabled. Only slash commands work.
 					m.messages = append(m.messages, Message{Sender: "system", Content: "Text input disabled in voice mode. Use /both to enable."})
 					m.textarea.Reset()
-					m.updateViewport()
+					m.updateViewport(false)
 				} else {
 					m.agent.TextChan <- input
-					m.streamLine("you", input)
+					m.streamLine("you", input, false)
 					m.textarea.Reset()
 					m.activity = &liveStatus{kind: statusThinking, label: "thinking", started: time.Now()}
 					m.recalcViewportHeight()
@@ -433,24 +510,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showCmdList {
 			FilterCommands(&m.cmdList, inputVal[1:])
 		}
+		m.recalcViewportHeight()
 
 		return m, tiCmd
 
 	case responseMsg:
-		m.isConnected = true
-		m.activity = nil
-		m.recalcViewportHeight()
-		m.streamLine("ora", string(msg))
+		if msg.TurnBoundary {
+			m.closeOraBlock = true
+			return m, m.waitForResponse()
+		}
+		sender := "ora"
+		switch msg.Sender {
+		case agent.SenderYou:
+			sender = "you"
+		case agent.SenderSystem:
+			sender = "system"
+		}
+		// Only ora/you chunks prove real server traffic — a system notice (e.g. "connection lost — reconnecting…") must not flip the header pill to live while the link is actually down.
+		if sender != "system" {
+			m.isConnected = true
+		}
+		// Only an actual ora reply clears the thinking spinner — a "you" transcription or a system notice isn't a reply arriving.
+		if sender == "ora" {
+			m.activity = nil
+			m.recalcViewportHeight()
+		}
+		m.streamLine(sender, msg.Text, msg.IsThought)
 		return m, m.waitForResponse()
 	case errorMsg:
 		m.isConnected = false
 		m.activity = nil
 		m.recalcViewportHeight()
-		m.streamLine("system", "CONNECTION CRITICAL: "+msg.Error())
+		m.streamLine("system", "CONNECTION CRITICAL: "+msg.Error(), false)
 		return m, m.waitForError()
 
 	case daemonPollMsg:
-		return m, tea.Batch(m.daemonPollTick(), m.pollDaemonStatus())
+		// tea.WindowSize() re-probes the terminal's actual current size and feeds it back in as a real WindowSizeMsg — a periodic self-heal in case a resize was missed (e.g. a tmux pane-only resize not delivering SIGWINCH the same way a full terminal resize does; see the WP10 addendum). Piggybacked on this existing 12s ticker rather than a new one. This can only be verified live — bubbletea's own size-probe plumbing isn't observable at the model.Update() level.
+		return m, tea.Batch(m.daemonPollTick(), m.pollDaemonStatus(), tea.WindowSize())
 	case daemonStatusMsg:
 		m.daemonOK = bool(msg)
 		return m, nil
@@ -460,6 +556,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activity != nil && time.Since(m.activity.started) > staleActivityTimeout {
 			m.activity = nil
 			m.recalcViewportHeight()
+		}
+
+		// Clears the "press ctrl+c again to quit" hint once the confirm window lapses without a second press.
+		if m.quitConfirmArmed && time.Since(m.quitConfirmArmedAt) > quitConfirmWindow {
+			m.quitConfirmArmed = false
+		}
+
+		// Flush a render streamLine's throttle skipped — see viewportDirty's doc comment.
+		if m.viewportDirty {
+			m.updateViewport(false)
+			m.viewportDirty = false
 		}
 
 		// update waves from the live audio buffers
@@ -495,6 +602,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.doTick()
 
 	case tea.WindowSizeMsg:
+		// Logged so a live report of a stale/scrambled layout (e.g. a tmux pane resize) can be correlated against whether — and when — a resize was actually received; bubbletea's WindowSizeMsg relies on the OS delivering SIGWINCH to this process, which tmux pane-only resizes aren't guaranteed to do the same way a full terminal resize is.
+		slog.Debug("window size changed", "width", msg.Width, "height", msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
 
@@ -517,6 +626,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textarea.SetHeight(taHeight)
 		}
 
+		// cmdList/hitlList track the real input-deck content width (not the fixed DefaultListWidth they're constructed with) so a row's background band spans the whole deck instead of stopping at a stale 60 columns — set before recalcViewportHeight so its renderInput() measurement sees the resize too.
+		deckWidth := max(0, msg.Width-m.styles.InputWrap.GetHorizontalPadding())
+		m.cmdList.SetWidth(deckWidth)
+		m.hitlList.SetWidth(deckWidth)
+
 		m.viewport.Width = msg.Width
 		m.recalcViewportHeight()
 		m.textarea.SetWidth(msg.Width - GutterWidth)
@@ -525,58 +639,87 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		waveWidth := max(MinWaveWidth, (msg.Width-MinWaveWidth)/2)
 		m.micWave.SetWidth(waveWidth)
 		m.speakerWave.SetWidth(waveWidth)
-		m.updateViewport()
+		m.updateViewport(false)
 	}
 
 	m.viewport, vpCmd = m.viewport.Update(msg)
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
-// recalcViewportHeight is the single source of truth for viewport height: textarea height, signal field (0 in ModeText), and the status line (1 line when m.activity is set). Shared by WindowSizeMsg, tickMsg's textarea-grow branch, and every m.activity mutation site below, so the status line never overlaps the input row or lags a tick behind.
+// recalcViewportHeight is the single source of truth for viewport height: everything else on screen (signal field, input deck — status line, textarea, hints, and any open menu all included since they're all part of renderInput's own output) measured from an actual render rather than hand-maintained row-count constants, so it can't drift out of sync the way the old constant-based version silently did (a 7-row underestimate that pushed the input deck off-screen on any sufficiently tall transcript — see the WP5 bug report). Shared by WindowSizeMsg, tickMsg's textarea-grow branch, and every m.activity/showCmdList/ModeToolConfirm mutation site below, so the layout never overlaps or overflows a tick behind.
+//
+// The invariant View() height == m.height has NO exceptions (WP10) — bubbletea's renderer desyncs the moment it doesn't hold (see WP5/WP9). A menu open is the one case MinViewportHeight's normal floor can't guarantee that on a short terminal, so this drops the floor to 0 first and, if even that isn't enough, shrinks the open list itself as a last resort — the only two levers left once the viewport can't give any more.
 func (m *model) recalcViewportHeight() {
-	signalHeight := SignalFieldHeight
-	if m.mode == ModeText {
-		signalHeight = 0
+	menuOpen := m.showCmdList || m.mode == ModeToolConfirm
+
+	// Reset to the menu's full item count before measuring — otherwise a terminal that grows back after being squeezed by the last-resort shrink below would stay artificially truncated forever.
+	if m.showCmdList {
+		m.cmdList.SetHeight(len(m.cmdList.Items()))
 	}
-	statusLineHeight := 0
-	if m.activity != nil {
-		statusLineHeight = 1
+	if m.mode == ModeToolConfirm {
+		m.hitlList.SetHeight(len(m.hitlList.Items()))
 	}
-	m.viewport.Height = max(MinViewportHeight, m.height-m.textarea.Height()-signalHeight-statusLineHeight-LayoutPadding)
+
+	// paddingRows isolates the Viewport style's own vertical padding (Padding(2,4) as of writing), unambiguously: Render on one real content line, never Render("") — lipgloss's own line-counting floors at 1 line even for an empty string, so measuring against "" would silently fold that 1-line floor into what's supposed to be pure padding.
+	paddingRows := lipgloss.Height(m.styles.Viewport.Render("x")) - 1
+
+	chrome := lipgloss.Height(m.renderInput())
+	if m.mode != ModeText {
+		chrome += lipgloss.Height(m.renderSignalField())
+	}
+
+	floor := MinViewportHeight
+	if menuOpen {
+		floor = 0
+	}
+	available := m.height - chrome - paddingRows
+	m.viewport.Height = max(floor, available)
+
+	// A rendered viewport is never actually 0 rows tall — bubbles' viewport.View() returns "" at Height=0, and lipgloss counts an empty string as 1 line same as any other — so the real practical minimum contribution is 1 content row, not 0.
+	deficit := chrome + paddingRows + max(1, m.viewport.Height) - m.height
+
+	// Last resort: even the practical minimum viewport doesn't close the gap — shrink the open menu list by exactly the shortfall. Each list row is exactly one line (WP7/WP9's delegate fixes), so trimming N rows off the list's height trims exactly N rows off renderInput()'s next measurement.
+	if menuOpen && deficit > 0 {
+		if m.mode == ModeToolConfirm {
+			m.hitlList.SetHeight(max(0, m.hitlList.Height()-deficit))
+		} else {
+			m.cmdList.SetHeight(max(0, m.cmdList.Height()-deficit))
+		}
+	}
 }
 
-// handles the real-time streaming logic, keeps the viewport updated
-func (m *model) streamLine(sender, content string) {
-	// In voice mode, Ora's audio plays through the speaker, so drop text responses from the viewport — they'd be incomplete fragments anyway. Thoughts, system, and tool messages stay visible.
-	if m.mode == ModeVoice && sender == "ora" && !m.isThinking {
-		return
-	}
-
-	// ora uses ** to signal thinking state changes
-	if sender == "ora" && strings.Contains(content, "**") {
-		m.isThinking = !m.isThinking
-		content = strings.ReplaceAll(content, "**", "")
-
-		if content != "" {
-			m.messages = append(m.messages, Message{Sender: sender, Content: content, IsThought: m.isThinking})
-		}
-	} else if len(m.messages) > 0 && m.messages[len(m.messages)-1].Sender == sender && m.messages[len(m.messages)-1].IsThought == m.isThinking && !m.messages[len(m.messages)-1].IsTool {
-		// append to the last message if it's the same sender and state
+// handles the real-time streaming logic, keeps the viewport updated. isThought comes straight from genai's own Part.Thought (via agent.ResponseChunk) — never inferred from content, since any real reply that happens to contain markdown bold would desync a content-sniffing heuristic permanently.
+func (m *model) streamLine(sender, content string, isThought bool) {
+	// Only ora's own text merges across calls (it's a token-by-token stream); "you" and "system" chunks are complete discrete units — merging them runs consecutive utterances/notices together with no separator. A pending closeOraBlock (a turn boundary since the last ora chunk) also forces a fresh block even though sender/thought-state match — see its own doc comment.
+	sameBlock := sender == "ora" && !m.closeOraBlock && len(m.messages) > 0 && m.messages[len(m.messages)-1].Sender == sender && m.messages[len(m.messages)-1].IsThought == isThought && !m.messages[len(m.messages)-1].IsTool
+	if sameBlock && !isThought {
+		mergeOraChunk(&m.messages[len(m.messages)-1], content)
+	} else if sameBlock {
+		// append to the last message if it's the same sender and thought-state
 		m.messages[len(m.messages)-1].Content += content
 	} else {
 		// start a new message block
-		m.messages = append(m.messages, Message{Sender: sender, Content: content, IsThought: m.isThinking})
+		m.messages = append(m.messages, Message{Sender: sender, Content: content, IsThought: isThought})
+	}
+	if sender == "ora" {
+		m.closeOraBlock = false
 	}
 
 	// throttle viewport updates so it doesn't flicker too much
 	if time.Since(m.lastUpdate) > 80*time.Millisecond || sender == "you" {
-		m.updateViewport()
+		m.updateViewport(sender == "you")
 		m.lastUpdate = time.Now()
+		m.viewportDirty = false
+	} else {
+		m.viewportDirty = true
 	}
 }
 
-func (m *model) executeCommand(input string) {
+// executeCommand runs a "/" command. Returns a non-nil tea.Cmd only for /quit (immediate quit, no confirmation — unlike Ctrl+C, typing /quit is explicit); every other command returns nil and the caller falls back to its own default.
+func (m *model) executeCommand(input string) tea.Cmd {
 	switch input {
+	case "/quit":
+		return tea.Quit
 	case "/voice":
 		m.mode = ModeVoice
 		m.agent.SetMute(false)
@@ -620,7 +763,8 @@ func (m *model) executeCommand(input string) {
   /note <txt>     - Save a stable user-stated fact
   /notes          - List saved notes
   /clear          - Clear the chat screen
-  /help           - Show this help menu`
+  /help           - Show this help menu
+  /quit           - Quit immediately (no confirmation)`
 		m.messages = append(m.messages, Message{Sender: "system", Content: helpText})
 	case "/context":
 		importCtx, err := m.agent.GetBrain().GetImplicitContext(context.Background())
@@ -664,7 +808,8 @@ func (m *model) executeCommand(input string) {
 			m.messages = append(m.messages, Message{Sender: "system", Content: "Unknown command: " + input + ". Type /help for available commands."})
 		}
 	}
-	m.updateViewport()
+	m.updateViewport(false)
+	return nil
 }
 
 // handleVoiceCommand implements "/voice list" and "/voice <name>". Bare "/voice" never reaches here — it's handled above as the Voice-Only mode switch.
@@ -720,33 +865,29 @@ func (m model) View() string {
 		return "Initializing Ora..."
 	}
 
-	// stack everything vertically
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		m.renderHeader(),
+	// Built as a slice so ModeText's empty signal field is OMITTED, not joined as a blank row — JoinVertical would otherwise count "" as one line same as recalcViewportHeight's chrome measurement doesn't, a 1-row version of the same overflow-past-the-terminal bug 2b fixed.
+	blocks := []string{
 		m.styles.Viewport.Width(m.width).Render(m.viewport.View()),
-		m.renderSignalField(),
-		m.renderInput(),
-	)
+	}
+	if sf := m.renderSignalField(); sf != "" {
+		blocks = append(blocks, sf)
+	}
+	blocks = append(blocks, m.renderInput())
 
-	// force the background to fill the whole screen
+	// stack everything vertically
+	content := lipgloss.JoinVertical(lipgloss.Left, blocks...)
+
+	// Fills the screen to m.width x m.height (transcript area is transparent now — see message.go's renderMessage doc comment — so no whitespace background to paint; WithWhitespaceChars alone just pads with spaces, not color).
 	return lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Left, lipgloss.Top,
 		m.styles.AppFrame.Render(content),
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceBackground(m.styles.BgBase),
 	)
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func Run(a *agent.Agent, daemonStatus string) error {
-	p := tea.NewProgram(NewModel(a, daemonStatus), tea.WithAltScreen(), tea.WithMouseCellMotion())
+func Run(a *agent.Agent, daemonStatus, buildMismatch string) error {
+	p := tea.NewProgram(NewModel(a, daemonStatus, buildMismatch), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
