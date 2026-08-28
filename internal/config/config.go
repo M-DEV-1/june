@@ -24,25 +24,15 @@ type OraConfig struct {
 	Embed EmbedConfig `json:"embed"`
 	// Brain selects which backend answers the one-shot text duties. Zero value means the Gemini API, as before.
 	Brain BrainConfig `json:"brain"`
-	// Transcribe selects which speech recognition engine transcribes meetings. Zero value means whisper, as before.
+	// Transcribe holds the settings for the whisper.cpp build that transcribes meetings.
 	Transcribe TranscribeConfig `json:"transcribe"`
 }
 
-// TranscribeConfig chooses which speech recognition engine turns a meeting's audio into text. The zero value is whisper, which is what ORA did before this block existed, so a config file written without it behaves exactly as it always has.
+// TranscribeConfig holds the settings for the whisper.cpp build that turns a meeting's audio into text.
 type TranscribeConfig struct {
-	// Engine is EngineWhisper (the default whisperfile), EngineWhisperCPP to run a separately built whisper.cpp that can decode on the GPU, or EngineParakeet to run NVIDIA's Parakeet TDT through sherpa-onnx's offline CLI. Anything else falls back to the whisperfile.
-	// Parakeet is by far the fastest, but it cannot be primed with the meeting's own vocabulary, and the published TDT model speaks twenty-five European languages with no Hindi among them — so a Hindi-English meeting must not be given to it.
-	Engine string `json:"engine"`
-	// GPUDevice is which GPU a whisper.cpp build should decode on, numbered as whisper.cpp numbers the Vulkan devices it finds. Zero, the default, leaves the choice to whisper.cpp, which takes the first device it sees — on a laptop with both integrated and discrete graphics that is usually the slower of the two, so this normally wants setting. The other engines ignore it.
+	// GPUDevice is which GPU whisper.cpp should decode on, numbered as whisper.cpp numbers the Vulkan devices it finds. Zero, the default, leaves the choice to whisper.cpp, which takes the first device it sees — on a laptop with both integrated and discrete graphics that is usually the slower of the two, so this normally wants setting.
 	GPUDevice int `json:"gpu_device"`
 }
-
-// The engine names accepted in TranscribeConfig.Engine.
-const (
-	EngineWhisper    = "whisper"
-	EngineWhisperCPP = "whisper-cpp"
-	EngineParakeet   = "parakeet"
-)
 
 // BrainConfig chooses which backend answers ORA's one-shot text duties — the meeting minutes and the personal context updater. The zero value is the Gemini API on TextModel, which is what ORA did before this block existed, so a config file written without it behaves exactly as it always has.
 // The voice assistant is not covered by this: that is a Gemini Live session, not a one-shot call.

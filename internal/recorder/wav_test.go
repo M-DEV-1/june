@@ -26,7 +26,7 @@ func readHeader(t *testing.T, path string) (riffSize, sampleRate, byteRate, data
 		binary.LittleEndian.Uint32(b[40:44])
 }
 
-// A closed WAV carries the sizes of what was actually written, and no extra chunks: whisperfile's WAV reader rejects a file with a LIST/INFO chunk between fmt and data, which is exactly what ffmpeg writes.
+// A closed WAV carries the sizes of what was actually written, and no extra chunks: whisper's WAV reader (miniaudio) rejects a file with a LIST/INFO chunk between fmt and data, which is exactly what ffmpeg writes.
 func TestWAVWriter_ClosesWithCorrectSizes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mic.wav")
 	w, err := newWAV(path)
@@ -56,9 +56,9 @@ func TestWAVWriter_ClosesWithCorrectSizes(t *testing.T) {
 	}
 }
 
-// whisperfile refuses to read a WAV whose frame count is an exact multiple of 512: its decoder asks for exactly that many frames, the last read comes back "At end", and it prints "failed to read pcm frames from audio file" and exits 0 — which the pipeline then files as a meeting nobody spoke in. Both the writer and the repair path must therefore declare one frame fewer, which costs 1/16000 of a second.
+// whisper's miniaudio decoder refuses to read a WAV whose frame count is an exact multiple of 512: its decoder asks for exactly that many frames, the last read comes back "At end", and it prints "failed to read pcm frames from audio file" and exits 0 — which the pipeline then files as a meeting nobody spoke in. Both the writer and the repair path must therefore declare one frame fewer, which costs 1/16000 of a second.
 func TestWAV_HeaderNeverEndsOnA512FrameBoundary(t *testing.T) {
-	const bad = 512 * 3 * 2 // bytes: a frame count whisperfile chokes on
+	const bad = 512 * 3 * 2 // bytes: a frame count whisper chokes on
 	dir := t.TempDir()
 
 	for _, tc := range []struct {
@@ -89,7 +89,7 @@ func TestWAV_HeaderNeverEndsOnA512FrameBoundary(t *testing.T) {
 
 		riff, _, _, data := readHeader(t, path)
 		if data/2%512 == 0 {
-			t.Errorf("%s: header declares %d frames, a multiple of 512 that whisperfile cannot read", tc.name, data/2)
+			t.Errorf("%s: header declares %d frames, a multiple of 512 that whisper cannot read", tc.name, data/2)
 		}
 		if data != bad-2 {
 			t.Errorf("%s: header declares %d bytes, want %d — exactly one frame is dropped, no more", tc.name, data, bad-2)
