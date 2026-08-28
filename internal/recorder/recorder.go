@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"ora/internal/audio"
+	"ora/internal/config"
 	"ora/internal/db"
 )
 
@@ -176,6 +177,17 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	}
 	r.whisper = transcribeWAV
 	r.findWhisper = whisperBinary
+	// The engine is opt-in through the config file rather than switched on by model files merely being present: parakeet is far faster than whisper but speaks no Hindi, and a Hindi-English meeting must not silently start coming back as gibberish because someone downloaded a model.
+	switch engine := config.LoadConfig().Transcribe.Engine; engine {
+	case config.EngineParakeet:
+		slog.Info("transcribing meetings with parakeet instead of whisper")
+		r.whisper = transcribeParakeetWAV
+		r.findWhisper = parakeetBinary
+	case config.EngineWhisperCPP:
+		// Same model and same flags as the whisperfile, so only where the binary is found changes; transcribeWAV notices the model beside it and adds the two flags whisper.cpp needs.
+		slog.Info("transcribing meetings with a whisper.cpp build instead of the whisperfile")
+		r.findWhisper = whisperCPPBinary
+	}
 	r.minutes = r.defaultBrain
 	r.notify = notifySend
 	r.onAC = onACPower
@@ -573,13 +585,25 @@ func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error
 		slog.Info("priming whisper with the meeting's screen context", "dir", s.dir, "prompt", prompt)
 	}
 
-	mine, err := r.whisper(ctx, bin, filepath.Join(s.dir, "mic.wav"), speakerMe, prompt, s.micOffset)
-	if err != nil {
-		return "", fmt.Errorf("transcribe mic: %w", err)
+	// The two streams are separate files that share nothing, so they are transcribed at the same time rather than one after the other — which halves the wall time of every meeting. transcribeThreads gives each run half the machine so the two are not simply fighting over the same cores.
+	var wg sync.WaitGroup
+	var mine, theirs []Segment
+	var micErr, sysErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		mine, micErr = r.whisper(ctx, bin, filepath.Join(s.dir, "mic.wav"), speakerMe, prompt, s.micOffset)
+	}()
+	go func() {
+		defer wg.Done()
+		theirs, sysErr = r.whisper(ctx, bin, filepath.Join(s.dir, "system.wav"), speakerCall, prompt, s.sysOffset)
+	}()
+	wg.Wait()
+	if micErr != nil {
+		return "", fmt.Errorf("transcribe mic: %w", micErr)
 	}
-	theirs, err := r.whisper(ctx, bin, filepath.Join(s.dir, "system.wav"), speakerCall, prompt, s.sysOffset)
-	if err != nil {
-		return "", fmt.Errorf("transcribe system audio: %w", err)
+	if sysErr != nil {
+		return "", fmt.Errorf("transcribe system audio: %w", sysErr)
 	}
 
 	// Whisper exiting 0 with nothing to show for it is not a success: the meeting may have been silent, or this whisper build may print segments in a shape parseSegments does not recognise. Either way the WAVs are still the only copy of the meeting, so they stay put and the marker records why.

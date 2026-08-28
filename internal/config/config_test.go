@@ -218,3 +218,26 @@ func TestLoadConfig_Brain(t *testing.T) {
 		}
 	})
 }
+
+// A config file with no transcribe block leaves the zero value in place, which the recorder reads as whisper — the behaviour ORA had before the block existed. A file that does carry one is read verbatim.
+func TestLoadConfig_Transcribe(t *testing.T) {
+	t.Run("absent block is the whisper default", func(t *testing.T) {
+		t.Setenv("ORA_DATA_DIR", t.TempDir())
+		if err := os.WriteFile(ConfigPath(), []byte(`{"voice":"Kore"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if got := LoadConfig().Transcribe; got != (TranscribeConfig{}) {
+			t.Errorf("Transcribe = %+v, want the zero value", got)
+		}
+	})
+
+	t.Run("a named engine is read back", func(t *testing.T) {
+		t.Setenv("ORA_DATA_DIR", t.TempDir())
+		if err := os.WriteFile(ConfigPath(), []byte(`{"transcribe":{"engine":"parakeet"}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if got := LoadConfig().Transcribe.Engine; got != EngineParakeet {
+			t.Errorf("Engine = %q, want %q", got, EngineParakeet)
+		}
+	})
+}
