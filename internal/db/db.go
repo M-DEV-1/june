@@ -630,8 +630,9 @@ func FormatHit(h MemoryHit, maxRunes int) string {
 	if age := formatRelativeAge(h.CreatedAt); age != "" {
 		label = fmt.Sprintf("%s (%s)", src, age)
 	}
+	// Content leads and the window provenance trails in a parenthetical: the model reads the row left to right, so what it should say comes first and the machine names it should not say come last (taste audit T1 — the provenance still guards cross-project confabulation, it just stops being the headline).
 	if h.Source == "episode" && (h.App != "" || h.Title != "") {
-		line := fmt.Sprintf("[%s] %s — %s: %s", label, h.App, h.Title, content)
+		line := fmt.Sprintf("[%s] %s (%s — %s)", label, content, h.App, h.Title)
 		if h.ImagePath != "" {
 			line += " [img]"
 		}

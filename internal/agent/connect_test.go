@@ -1177,6 +1177,21 @@ func TestSystemInstructionText_SynthesisBeforeEvidence(t *testing.T) {
 	}
 }
 
+// TestSystemInstructionText_NeverSpeaksMachineNames covers taste criteria T1 and T3: the evidence rows are full of file paths, app names and timestamps, and reading any of them out loud is how a spoken answer stops sounding like a person who was in the room. The rule has to name the categories, since "say the meaning" alone left "analysis/vuln_scored_workbook.py" in a real answer.
+func TestSystemInstructionText_NeverSpeaksMachineNames(t *testing.T) {
+	got := strings.ToLower(systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "some context", 5))
+
+	for _, want := range []string{
+		"nothing that identifies a machine is ever spoken",
+		"no file paths, extensions, app or process names, urls, timestamps, or stored labels",
+		"numbers survive only when they chose them",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
+		}
+	}
+}
+
 // TestSystemInstructionText_AntiConfabulationRules keeps the two rules that survived the prompt's compression: summarising hits together is fine, inventing a connection between them is not, and a repair tool exists for both notes and threads. Ora asserted a meeting was on Microsoft Teams when the captures said Google Meet — a wrong fact inside a merged thread summary it then could not fix.
 func TestSystemInstructionText_AntiConfabulationRules(t *testing.T) {
 	got := systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "some context", 5)

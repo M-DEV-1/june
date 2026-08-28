@@ -338,9 +338,10 @@ func TestToolDefinitions_IncludesBranchWithRequiredTask(t *testing.T) {
 func TestExecuteTool_BranchRequiresTaskArg(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 
+	want := "error: branch needs the question to work on"
 	got := a.executeTool(context.Background(), "branch", map[string]any{})
-	if got != "error: task argument is required" {
-		t.Errorf("executeTool(branch, {}) = %q, want %q", got, "error: task argument is required")
+	if got != want {
+		t.Errorf("executeTool(branch, {}) = %q, want %q", got, want)
 	}
 }
 
