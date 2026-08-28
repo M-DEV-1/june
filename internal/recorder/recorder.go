@@ -165,7 +165,7 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	}
 	r.whisper = transcribeWAV
 	r.findWhisper = whisperBinary
-	r.minutes = r.geminiMinutes
+	r.minutes = r.defaultBrain
 	r.notify = notifySend
 	r.onAC = onACPower
 	r.silenceAfter = defaultSilenceAfter
