@@ -337,11 +337,10 @@ func TestNewChromemIndex_CollectionOfAnotherWidth_IsRebuiltNotLeftUnusable(t *te
 
 // A wrong-width vector must be rejected at Add, because one stored mismatch would make the width probe drop and rebuild the whole collection at next open.
 func TestChromemIndex_Add_RejectsWrongWidth(t *testing.T) {
-	idx, err := NewChromemIndex(t.TempDir(), 4)
+	idx, err := NewChromemIndex(t.TempDir(), 4, 100)
 	if err != nil {
 		t.Fatalf("NewChromemIndex: %v", err)
 	}
-	defer idx.Close()
 	if err := idx.Add(context.Background(), "episode:1", "text", []float32{1, 2, 3}, nil); err == nil {
 		t.Fatal("a 3-wide vector must be rejected by a 4-wide index")
 	}
