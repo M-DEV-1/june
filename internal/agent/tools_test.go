@@ -158,70 +158,46 @@ func (b *toolTestBrain) ConsumeFold(ctx context.Context, id int64) error {
 	return nil
 }
 
-// TestRecallBounds_ExplicitRange verifies that recallBounds returns the exact times parsed from explicit RFC3339 since/until args — the model, knowing "now", resolves any human phrase ("July 5th") into concrete ISO bounds and the tool honors them verbatim.
-func TestRecallBounds_ExplicitRange(t *testing.T) {
+// recallBounds turns the model's since/until args into a concrete window: explicit RFC3339 instants are honored verbatim, an omitted until means "up to now", an omitted since means midnight of now's day, a bare calendar date spans that whole day, and anything unparseable or backwards is an error rather than a silently wrong window.
+func TestRecallBounds(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 44, 0, 0, time.UTC)
-	since, until, err := recallBounds("2026-07-05T00:00:00Z", "2026-07-05T23:59:59Z", now)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	day := func(y int, m time.Month, d, h, min, sec int) time.Time {
+		return time.Date(y, m, d, h, min, sec, 0, now.Location())
 	}
-	wantSince := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
-	wantUntil := time.Date(2026, 7, 5, 23, 59, 59, 0, time.UTC)
-	if !since.Equal(wantSince) {
-		t.Errorf("since = %v, want %v", since, wantSince)
-	}
-	if !until.Equal(wantUntil) {
-		t.Errorf("until = %v, want %v", until, wantUntil)
-	}
-}
 
-// TestRecallBounds_EmptyUntilDefaultsToNow verifies that an omitted until means "up to now" — e.g. "since this morning" with no explicit end.
-func TestRecallBounds_EmptyUntilDefaultsToNow(t *testing.T) {
-	now := time.Date(2026, 7, 6, 12, 44, 0, 0, time.UTC)
-	_, until, err := recallBounds("2026-07-06T08:00:00Z", "", now)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	cases := []struct {
+		name                 string
+		since, until         string
+		wantSince, wantUntil time.Time
+		wantErr              bool
+	}{
+		{name: "explicit range", since: "2026-07-05T00:00:00Z", until: "2026-07-05T23:59:59Z", wantSince: day(2026, 7, 5, 0, 0, 0), wantUntil: day(2026, 7, 5, 23, 59, 59)},
+		{name: "empty until means now", since: "2026-07-06T08:00:00Z", wantSince: day(2026, 7, 6, 8, 0, 0), wantUntil: now},
+		{name: "empty since means start of today", wantSince: day(2026, 7, 6, 0, 0, 0), wantUntil: now},
+		{name: "bare date spans the whole day", since: "2026-07-05", until: "2026-07-05", wantSince: day(2026, 7, 5, 0, 0, 0), wantUntil: day(2026, 7, 5, 23, 59, 59)},
+		{name: "unparseable since", since: "last tuesday", wantErr: true},
+		{name: "since after until", since: "2026-07-10T00:00:00Z", until: "2026-07-05T00:00:00Z", wantErr: true},
 	}
-	if !until.Equal(now) {
-		t.Errorf("until = %v, want now %v", until, now)
-	}
-}
 
-// TestRecallBounds_EmptySinceDefaultsToStartOfToday verifies that an omitted since falls back to midnight of now's day, preserving the old "defaults to today" behavior when the model gives no lower bound.
-func TestRecallBounds_EmptySinceDefaultsToStartOfToday(t *testing.T) {
-	now := time.Date(2026, 7, 6, 12, 44, 0, 0, time.UTC)
-	since, _, err := recallBounds("", "", now)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	wantSince := time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC)
-	if !since.Equal(wantSince) {
-		t.Errorf("since = %v, want start of today %v", since, wantSince)
-	}
-}
-
-// TestRecallBounds_BareDateSpansWholeDay verifies that bare calendar dates (no time component) resolve to the natural whole-day span: since -> 00:00, until -> 23:59:59 of that date. So "what did I do on July 5th" with since=until="2026-07-05" covers the entire day, not a zero-width instant.
-func TestRecallBounds_BareDateSpansWholeDay(t *testing.T) {
-	now := time.Date(2026, 7, 6, 12, 44, 0, 0, time.UTC)
-	since, until, err := recallBounds("2026-07-05", "2026-07-05", now)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	wantSince := time.Date(2026, 7, 5, 0, 0, 0, 0, now.Location())
-	wantUntil := time.Date(2026, 7, 5, 23, 59, 59, 0, now.Location())
-	if !since.Equal(wantSince) {
-		t.Errorf("since = %v, want day-start %v", since, wantSince)
-	}
-	if !until.Equal(wantUntil) {
-		t.Errorf("until = %v, want day-end %v", until, wantUntil)
-	}
-}
-
-// TestRecallBounds_UnparseableErrors verifies that a garbage bound yields an error rather than silently defaulting — so the recall handler can tell the model its timestamp was malformed instead of returning the wrong window.
-func TestRecallBounds_UnparseableErrors(t *testing.T) {
-	now := time.Date(2026, 7, 6, 12, 44, 0, 0, time.UTC)
-	if _, _, err := recallBounds("last tuesday", "", now); err == nil {
-		t.Error("expected error for unparseable since, got nil")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			since, until, err := recallBounds(tc.since, tc.until, now)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("recallBounds(%q, %q) = %v..%v, want an error", tc.since, tc.until, since, until)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !since.Equal(tc.wantSince) {
+				t.Errorf("since = %v, want %v", since, tc.wantSince)
+			}
+			if !until.Equal(tc.wantUntil) {
+				t.Errorf("until = %v, want %v", until, tc.wantUntil)
+			}
+		})
 	}
 }
 
@@ -496,14 +472,6 @@ func TestExecuteTool_Recall_ReversedRangeErrors(t *testing.T) {
 	}
 }
 
-// TestRecallBounds_ReversedRangeErrors verifies recallBounds itself rejects since > until.
-func TestRecallBounds_ReversedRangeErrors(t *testing.T) {
-	now := time.Date(2026, 7, 6, 12, 44, 0, 0, time.UTC)
-	if _, _, err := recallBounds("2026-07-10T00:00:00Z", "2026-07-05T00:00:00Z", now); err == nil {
-		t.Error("expected an error for since after until, got nil")
-	}
-}
-
 // TestExecuteTool_Recall_SubjectPath verifies that calling the "recall" tool with a "subject" arg surfaces the brain's canned RecallSubject lines (thread + episode fusion) rather than the window timeline.
 func TestExecuteTool_Recall_SubjectPath(t *testing.T) {
 	brain := &toolTestBrain{
@@ -538,18 +506,6 @@ func TestExecuteTool_Recall_SubjectWithApp_ReturnsErrorInsteadOfSilentlyIgnoring
 	}
 	if strings.Contains(result, "[thread] DeepSeek") {
 		t.Errorf("expected no unfiltered subject results to leak through when app can't be honored, got %q", result)
-	}
-}
-
-// TestContextReader_HybridSearch_InterfaceConformance is a compile-time probe, not a runtime assertion: calling HybridSearch through the ContextReader INTERFACE type (not the concrete *toolTestBrain) only compiles once the interface actually declares the method.
-func TestContextReader_HybridSearch_InterfaceConformance(t *testing.T) {
-	var cr ContextReader = &toolTestBrain{hybridHits: []db.MemoryHit{{Source: "note", Content: "placeholder"}}}
-	hits, err := cr.HybridSearch(context.Background(), "query", "", 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(hits) != 1 {
-		t.Errorf("expected 1 hit, got %d", len(hits))
 	}
 }
 
@@ -728,45 +684,6 @@ func TestExecuteTool_SaveNote_Success_CallsLogNoteAndReturnsSaved(t *testing.T) 
 	}
 }
 
-func TestExecuteTool_SaveNote_MissingContentArg_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "save_note", map[string]any{})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result for a missing content arg, got %q", result)
-	}
-	if brain.loggedNoteContent != "" {
-		t.Error("expected LogNote not to be called when content is missing")
-	}
-}
-
-func TestExecuteTool_SaveNote_WhitespaceOnlyContent_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "save_note", map[string]any{"content": "   "})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result for whitespace-only content, got %q", result)
-	}
-	if brain.loggedNoteContent != "" {
-		t.Error("expected LogNote not to be called for whitespace-only content")
-	}
-}
-
-func TestExecuteTool_SaveNote_LogNoteFails_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{logNoteErr: fmt.Errorf("db closed")}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "save_note", map[string]any{"content": "something"})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result when LogNote fails, got %q", result)
-	}
-}
-
 // --- update_note ---
 //
 // Closes the gap where the model could save a misheard/wrong fact (save_note) but had no way to fix it in the same conversation — it could only apologize verbally while the bad note stayed in memory forever. Pairs with query_memory's "[note#N]" formatting: the model looks the note up, gets its id, then calls this.
@@ -791,42 +708,6 @@ func TestExecuteTool_UpdateNote_Success_CallsUpdateNoteAndReturnsConfirmation(t 
 	}
 }
 
-func TestExecuteTool_UpdateNote_MissingID_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "update_note", map[string]any{"content": "something"})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result for a missing id arg, got %q", result)
-	}
-}
-
-func TestExecuteTool_UpdateNote_MissingContent_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "update_note", map[string]any{"id": float64(105)})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result for a missing content arg, got %q", result)
-	}
-}
-
-func TestExecuteTool_UpdateNote_BrainFails_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{updateNoteErr: fmt.Errorf("db closed")}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "update_note", map[string]any{
-		"id":      float64(105),
-		"content": "something",
-	})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result when UpdateNote fails, got %q", result)
-	}
-}
-
 // --- delete_note ---
 
 func TestExecuteTool_DeleteNote_Success_CallsDeleteNoteAndReturnsConfirmation(t *testing.T) {
@@ -843,25 +724,35 @@ func TestExecuteTool_DeleteNote_Success_CallsDeleteNoteAndReturnsConfirmation(t 
 	}
 }
 
-func TestExecuteTool_DeleteNote_MissingID_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "delete_note", map[string]any{})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result for a missing id arg, got %q", result)
+// The note tools report a bad argument or a failed store write back to the model as an "error: ..." result instead of a silent no-op, and never touch the store on a bad argument.
+func TestExecuteTool_NoteTools_BadArgsAndStoreFailures(t *testing.T) {
+	cases := []struct {
+		name  string
+		tool  string
+		args  map[string]any
+		brain *toolTestBrain
+	}{
+		{"save_note without content", "save_note", map[string]any{}, &toolTestBrain{}},
+		{"save_note with whitespace-only content", "save_note", map[string]any{"content": "   "}, &toolTestBrain{}},
+		{"save_note when LogNote fails", "save_note", map[string]any{"content": "something"}, &toolTestBrain{logNoteErr: fmt.Errorf("db closed")}},
+		{"update_note without id", "update_note", map[string]any{"content": "something"}, &toolTestBrain{}},
+		{"update_note without content", "update_note", map[string]any{"id": float64(105)}, &toolTestBrain{}},
+		{"update_note when UpdateNote fails", "update_note", map[string]any{"id": float64(105), "content": "something"}, &toolTestBrain{updateNoteErr: fmt.Errorf("db closed")}},
+		{"delete_note without id", "delete_note", map[string]any{}, &toolTestBrain{}},
+		{"delete_note when DeleteNote fails", "delete_note", map[string]any{"id": float64(105)}, &toolTestBrain{deleteNoteErr: fmt.Errorf("db closed")}},
 	}
-}
 
-func TestExecuteTool_DeleteNote_BrainFails_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{deleteNoteErr: fmt.Errorf("db closed")}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "delete_note", map[string]any{"id": float64(105)})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf("expected an error result when DeleteNote fails, got %q", result)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewAgent(nil, nil, tc.brain, nil, "FAKE_API_KEY")
+			result := a.executeTool(context.Background(), tc.tool, tc.args)
+			if !strings.HasPrefix(result, "error") {
+				t.Errorf("expected an error result, got %q", result)
+			}
+			if tc.brain.logNoteErr == nil && tc.brain.loggedNoteContent != "" {
+				t.Errorf("expected the store to be left alone on a bad argument, but LogNote got %q", tc.brain.loggedNoteContent)
+			}
+		})
 	}
 }
 

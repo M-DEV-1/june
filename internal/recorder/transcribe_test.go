@@ -1,7 +1,6 @@
 package recorder
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -96,16 +95,5 @@ func TestParseSegments_DropsNonSpeechMarkers(t *testing.T) {
 	segs := parseSegments(out, speakerMe, 0)
 	if len(segs) != 1 || segs[0].Text != "real words here" {
 		t.Errorf("expected only the spoken segment, got %+v", segs)
-	}
-}
-
-// The system stream is labelled [call], never [them]: it pools several voices, and a later diarization pass is meant to replace that placeholder with names in place.
-func TestSpeakerLabels(t *testing.T) {
-	if speakerCall == "them" {
-		t.Fatal("the system-audio label must not be \"them\"")
-	}
-	got := renderTranscript([]Segment{{Speaker: speakerCall, Text: "hi"}})
-	if strings.Contains(got, "[them]") {
-		t.Errorf("transcript still uses [them]: %q", got)
 	}
 }

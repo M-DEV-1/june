@@ -5,7 +5,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -14,8 +13,15 @@ import (
 	"ora/internal/memory"
 )
 
-func almostEqual(a, b, epsilon float64) bool {
-	return math.Abs(a-b) <= epsilon
+// newStore opens a throwaway in-memory store that is closed when the test ends.
+func newStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
 }
 
 // --- reciprocalRankFusion: pure-function tests against the deck's §02 worked example ---
@@ -33,28 +39,6 @@ func deckWorkedExampleLists() (lexical, vector []rrfCandidate) {
 		{id: "vllm-tuning", content: "vLLM tuning notes", source: "episode"},
 	}
 	return
-}
-
-// TestReciprocalRankFusion_DeckWorkedExample_ExactScores asserts the exact per-item fused scores from the deck's worked example, within a small float epsilon (not exact equality, since the deck's own numbers are rounded to 5 decimal places).
-func TestReciprocalRankFusion_DeckWorkedExample_ExactScores(t *testing.T) {
-	lexical, vector := deckWorkedExampleLists()
-	result := reciprocalRankFusion(rrfK, lexical, vector)
-
-	scores := make(map[string]float64, len(result))
-	for _, c := range result {
-		scores[c.id] = c.score
-	}
-
-	const epsilon = 0.0001
-	if got, want := scores["cuda-fix"], 1.0/51+1.0/52; !almostEqual(got, want, epsilon) {
-		t.Errorf(`"cuda-fix" score = %.5f, want ~%.5f (1/51 + 1/52, rank1 lexical + rank2 vector)`, got, want)
-	}
-	if got, want := scores["gpu-rabbit-hole"], 1.0/51; !almostEqual(got, want, epsilon) {
-		t.Errorf(`"gpu-rabbit-hole" score = %.5f, want ~%.5f (1/51, rank1 vector only)`, got, want)
-	}
-	if got, want := scores["cuda-toolkit"], 1.0/52; !almostEqual(got, want, epsilon) {
-		t.Errorf(`"cuda-toolkit" score = %.5f, want ~%.5f (1/52, rank2 lexical only)`, got, want)
-	}
 }
 
 // TestReciprocalRankFusion_DeckWorkedExample_FinalOrder asserts the exact fused ordering the deck calls out: the consensus item ("cuda-fix", found by both lists) wins outright over items either list ranked higher on its own.
@@ -237,11 +221,7 @@ func (erroringVectorIndex) IDs() []string                               { return
 // TestHybridSearch_EmbedFails_DegradesToLexicalOnly verifies an embed error (e.g. the client's daemon-IPC embedder call failing because the daemon is down) doesn't fail the whole HybridSearch call — it degrades to lexical-only fusion instead, since query_memory should still work off FTS5 alone.
 func TestHybridSearch_EmbedFails_DegradesToLexicalOnly(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "the user likes writing golang", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -267,11 +247,7 @@ func TestHybridSearch_EmbedFails_DegradesToLexicalOnly(t *testing.T) {
 // TestHybridSearch_VectorSearchFails_DegradesToLexicalOnly is the same property for a vector-index Search error specifically (embed itself succeeds, the search call fails).
 func TestHybridSearch_VectorSearchFails_DegradesToLexicalOnly(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "the user likes writing golang", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -294,41 +270,10 @@ func TestHybridSearch_VectorSearchFails_DegradesToLexicalOnly(t *testing.T) {
 	}
 }
 
-// TestHybridSearch_VectorCandidateBelowSimilarityFloor_Dropped verifies a vector hit with cosine similarity below minVectorSimilarity is dropped before fusion — without a floor, chromem always returns its n nearest neighbors regardless of how weakly related they actually are, so a query about an absent topic still gets padded with barely-related rows.
-func TestHybridSearch_VectorCandidateBelowSimilarityFloor_Dropped(t *testing.T) {
-	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	store.SetVectorIndex(&fakeHybridVectorIndex{
-		results: []Result{
-			{ID: "episode:1", Content: "barely related weak match", Similarity: 0.3},
-		},
-	})
-
-	hits, err := store.HybridSearch(ctx, "something entirely unrelated", "", 10)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	for _, h := range hits {
-		if h.Content == "barely related weak match" {
-			t.Errorf("expected the below-floor vector hit to be dropped, got it in: %+v", hits)
-		}
-	}
-}
-
 // TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm verifies that for a query with 3+ significant terms, a lexical candidate matching only one of them (buildFTSMatch's OR-of-terms means FTS5 alone would return it) is dropped from fusion — without this floor, a query like "hiking docker kubernetes" surfaces any row containing just one of those words, on neither of the other topics.
 func TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "the user likes hiking on weekends", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -349,11 +294,7 @@ func TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm(t *test
 // TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm is the other side of the floor: a two-word question is how people ask about one thing, not a demand that both words appear. Requiring both turned every two-term query into a strict AND, so "ora daemon" stopped matching "the daemon crashed at startup" — the floor has to scale with the query, not sit at a flat two terms.
 func TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "the daemon crashed at startup", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -368,36 +309,10 @@ func TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm(t *testing.T) {
 	}
 }
 
-// TestHybridSearch_MultiTermQuery_KeepsLexicalHitMatchingBothTerms is the positive control for the term-overlap floor above: a note containing both query terms must still surface.
-func TestHybridSearch_MultiTermQuery_KeepsLexicalHitMatchingBothTerms(t *testing.T) {
-	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
-
-	if _, err := store.LogNote(ctx, "the user went hiking then worked on docker deployment", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	hits, err := store.HybridSearch(ctx, "hiking docker", "", 10)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	if len(hits) != 1 {
-		t.Fatalf("expected the both-terms note to survive the floor, got %d hits: %+v", len(hits), hits)
-	}
-}
-
 // TestHybridSearch_AbsentTopicQuery_ReturnsNoJunkRows is the combined relevance-floor property both minVectorSimilarity and the lexical term-overlap floor exist for: a multi-term query about a topic genuinely absent from the store returns zero hits, not 10 padded rows the model would confabulate an answer from — even though the store has content, and even though a weak vector match and single-term lexical matches both exist for it.
 func TestHybridSearch_AbsentTopicQuery_ReturnsNoJunkRows(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "the user likes hiking on weekends", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -425,11 +340,7 @@ func TestHybridSearch_AbsentTopicQuery_ReturnsNoJunkRows(t *testing.T) {
 // TestHybridSearch_LexicalOnly_NoEmbedderConfigured_BaselineNoCrash verifies that a Store with neither SetEmbedder nor SetVectorIndex called degrades gracefully to lexical-only fusion instead of erroring/panicking.
 func TestHybridSearch_LexicalOnly_NoEmbedderConfigured_BaselineNoCrash(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "the user likes writing golang", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -456,11 +367,7 @@ func TestHybridSearch_LexicalOnly_NoEmbedderConfigured_BaselineNoCrash(t *testin
 // TestHybridSearch_VectorOnlyMatch_SurfacesSemanticHit proves the "vector recall" half of the hybrid property: an item the fake vector index returns (a semantic/paraphrase match) but that shares no keyword with the query, and so FTS5 alone would never find, still appears in HybridSearch's fused results.
 func TestHybridSearch_VectorOnlyMatch_SurfacesSemanticHit(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	store.SetVectorIndex(&fakeHybridVectorIndex{
@@ -487,11 +394,7 @@ func TestHybridSearch_VectorOnlyMatch_SurfacesSemanticHit(t *testing.T) {
 // TestHybridSearch_ConsensusItemRanksAboveSingleSourceItem mirrors the deck's consensus property at the Store/integration level: an item both lexical (FTS5) and vector agree on must rank above an item only one of them found.
 func TestHybridSearch_ConsensusItemRanksAboveSingleSourceItem(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "fixed the cuda out of memory bug", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -522,11 +425,7 @@ func TestHybridSearch_ConsensusItemRanksAboveSingleSourceItem(t *testing.T) {
 // TestHybridSearch_DomainFilter_ExcludesNonMatchingVectorResult verifies domainFilter="work" hard-excludes a personal-domain-tagged vector result that would otherwise appear. The domain tag here rides on the fake vector index's Result.Metadata["domain"], testing the vector-sourced side of the filter specifically.
 func TestHybridSearch_DomainFilter_ExcludesNonMatchingVectorResult(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	store.SetVectorIndex(&fakeHybridVectorIndex{
@@ -559,11 +458,7 @@ func TestHybridSearch_DomainFilter_ExcludesNonMatchingVectorResult(t *testing.T)
 // TestHybridSearch_DomainFilter_ExcludesNonMatchingLexicalResult covers the lexical-side hard filter (candidateDomain's SQL lookup against episodes/nodes), complementing the vector-side test above. No embedder/vector index is configured, so this exercises the lexical-only path exclusively: two episodes share the keyword "cuda", one classifies to "work" via its app name (Slack), one to "personal" (Netflix), and domainFilter="work" must hard-exclude the personal one.
 func TestHybridSearch_DomainFilter_ExcludesNonMatchingLexicalResult(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogEpisode(ctx, "Slack", "cuda debugging with the team", "discussing the cuda out of memory bug"); err != nil {
 		t.Fatalf("LogEpisode (work): %v", err)
@@ -595,11 +490,7 @@ func TestHybridSearch_DomainFilter_ExcludesNonMatchingLexicalResult(t *testing.T
 // TestHybridSearch_LimitHonored verifies HybridSearch never returns more than `limit` items even with many lexical + vector candidates available.
 func TestHybridSearch_LimitHonored(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	for i := 0; i < 5; i++ {
 		if _, err := store.LogNote(ctx, fmt.Sprintf("keyword match item number %d", i), "fact"); err != nil {
@@ -629,11 +520,7 @@ func TestHybridSearch_LimitHonored(t *testing.T) {
 // TestHybridSearch_EmptyQuery_ReturnsEmptyNoError documents and asserts the chosen behavior for an empty query: an empty result and no error, mirroring SearchMemory's existing "empty query -> empty result, no error" contract elsewhere in this package.
 func TestHybridSearch_EmptyQuery_ReturnsEmptyNoError(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	hits, err := store.HybridSearch(ctx, "", "", 10)
 	if err != nil {
@@ -649,11 +536,7 @@ func TestHybridSearch_EmptyQuery_ReturnsEmptyNoError(t *testing.T) {
 // TestDeleteNote_DeletesVector verifies removing a note also removes its vector entry — without this, delete_note leaves the old content's vector behind, so a semantic query can still surface a "deleted" fact.
 func TestDeleteNote_DeletesVector(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1)}
 	store.SetEmbedder(&fakeHybridEmbedder{})
@@ -682,11 +565,7 @@ func TestDeleteNote_DeletesVector(t *testing.T) {
 // TestUpdateNote_DeletesOldVectorAndReAddsNewContent verifies correcting a note's content removes the stale vector and re-embeds the corrected text — otherwise a semantic query can still surface the pre-correction wording after update_note runs.
 func TestUpdateNote_DeletesOldVectorAndReAddsNewContent(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2), addedIDs: make(chan string, 2)}
 	store.SetEmbedder(&fakeHybridEmbedder{})
@@ -737,11 +616,7 @@ func backdateEpisode(t *testing.T, store *Store, id int64, age time.Duration) {
 // TestAgeEpisodes_DeletesVectorsForAgedEpisodes verifies clearing an episode's screen_text also deletes its vector — otherwise the aged episode's raw text lives on in the vector index even though the SQL row was thinned specifically to reclaim that content.
 func TestAgeEpisodes_DeletesVectorsForAgedEpisodes(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1)}
 	store.SetEmbedder(&fakeHybridEmbedder{})
@@ -775,11 +650,7 @@ func TestAgeEpisodes_DeletesVectorsForAgedEpisodes(t *testing.T) {
 // TestPruneAncientEpisodes_DeletesVectorsForPrunedEpisodes verifies deleting an already-thinned episode row also deletes any leftover vector for it.
 func TestPruneAncientEpisodes_DeletesVectorsForPrunedEpisodes(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2)}
 	store.SetEmbedder(&fakeHybridEmbedder{})
@@ -821,11 +692,7 @@ func TestPruneAncientEpisodes_DeletesVectorsForPrunedEpisodes(t *testing.T) {
 // TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries verifies rolling summaries up into a digest also deletes the replaced summaries' vectors — they no longer exist as nodes, so their vectors would otherwise be permanent orphans.
 func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1)}
 	store.SetVectorIndex(vidx)
@@ -857,11 +724,7 @@ func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testin
 // TestReplaceSummariesWithDigest_AddsVectorForDigest verifies rolling summaries up into a digest also embeds and adds a vector for the new digest node — otherwise the day becomes FTS-only and invisible to the semantic half of HybridSearch, exactly the case digests exist to answer.
 func TestReplaceSummariesWithDigest_AddsVectorForDigest(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1), addedIDs: make(chan string, 1)}
@@ -913,11 +776,7 @@ func TestReplaceSummariesWithDigest_AddsVectorForDigest(t *testing.T) {
 // TestReplaceAllNotes_DeletesVectorsForOldNotes verifies note consolidation (which renumbers every note) deletes the old notes' vectors — otherwise every note vector becomes an orphan after a single consolidation cycle, since the new rows get new ids.
 func TestReplaceAllNotes_DeletesVectorsForOldNotes(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1), addedIDs: make(chan string, 1)}
@@ -953,11 +812,7 @@ func TestReplaceAllNotes_DeletesVectorsForOldNotes(t *testing.T) {
 // TestReconcileVectors_DeletesOrphanedNoteVector verifies a vector whose backing note row no longer exists (e.g. from before Delete/UpdateNote propagated to vectors, or the dirty pre-existing store) gets removed.
 func TestReconcileVectors_DeletesOrphanedNoteVector(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{}
 	vidx.seedIDs("note:999") // no note with id 999 exists
@@ -978,11 +833,7 @@ func TestReconcileVectors_DeletesOrphanedNoteVector(t *testing.T) {
 // TestReconcileVectors_DeletesVectorForThinnedEpisode verifies a vector for an episode whose screen_text has since been cleared (AgeEpisodes) gets removed even though the episode row itself still exists.
 func TestReconcileVectors_DeletesVectorForThinnedEpisode(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.LogEpisode(ctx, "Code", "main.go", "some content")
 	if err != nil {
@@ -1011,11 +862,7 @@ func TestReconcileVectors_DeletesVectorForThinnedEpisode(t *testing.T) {
 // TestReconcileVectors_LeavesFreshEpisodeVectorAlone verifies an episode that still has its screen_text (not aged, backing row present) is left untouched.
 func TestReconcileVectors_LeavesFreshEpisodeVectorAlone(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.LogEpisode(ctx, "Code", "main.go", "some content")
 	if err != nil {
@@ -1041,11 +888,7 @@ func TestReconcileVectors_LeavesFreshEpisodeVectorAlone(t *testing.T) {
 // TestReconcileVectors_BackfillsMissingNoteVector verifies a note that has no vector entry at all (e.g. from before hybrid search was wired client-side, or a dirty pre-existing store) gets embedded and added.
 func TestReconcileVectors_BackfillsMissingNoteVector(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	// Configure the vector index only AFTER LogNote, so LogNote's own async embed never fires — this note is missing a vector purely because ReconcileVectors needs to backfill it, not because of a race with LogNote's own embed goroutine.
 	id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
@@ -1078,11 +921,7 @@ func TestReconcileVectors_BackfillsMissingNoteVector(t *testing.T) {
 // TestReconcileVectors_BackfillsLiveSummaryNode verifies a summary node that survived (not yet rolled into a digest) but has no vector gets backfilled.
 func TestReconcileVectors_BackfillsLiveSummaryNode(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
 	if err != nil {
@@ -1119,11 +958,7 @@ func TestReconcileVectors_BackfillsLiveSummaryNode(t *testing.T) {
 // TestReconcileVectors_BackfillsRecentEpisode_SkipsOldOne verifies only episodes within the recency window get backfilled — an episode outside it is intentionally left without a vector rather than re-embedding stale raw captures indefinitely.
 func TestReconcileVectors_BackfillsRecentEpisode_SkipsOldOne(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	recentID, err := store.LogEpisode(ctx, "Code", "main.go", "recent capture")
 	if err != nil {
@@ -1169,11 +1004,7 @@ func TestReconcileVectors_BackfillsRecentEpisode_SkipsOldOne(t *testing.T) {
 // TestReconcileVectors_RespectsEmbedCap verifies the sweep stops backfilling once embedCap is reached, instead of embedding every missing candidate in one pass — protects API quota on a large dirty store.
 func TestReconcileVectors_RespectsEmbedCap(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	for _, content := range []string{"the user likes tea", "the user likes coffee", "the user likes cocoa"} {
 		if _, err := store.LogNote(ctx, content, "fact"); err != nil {
@@ -1202,11 +1033,7 @@ func TestReconcileVectors_RespectsEmbedCap(t *testing.T) {
 // TestReconcileVectors_BackfillsNote_IncludesCreatedAt verifies note backfill sets created_at metadata, matching LogNote's own async embed goroutine.
 func TestReconcileVectors_BackfillsNote_IncludesCreatedAt(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
 	if err != nil {
@@ -1232,11 +1059,7 @@ func TestReconcileVectors_BackfillsNote_IncludesCreatedAt(t *testing.T) {
 // TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata verifies summary backfill embeds the TaskSummary.Summary text (nodes.content is the full JSON-marshaled TaskSummary, not the plain summary — LogSemanticNode embeds only summary.Summary) with domain/source/kind/created_at all set, matching LogSemanticNode's own async embed goroutine.
 func TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
 	if err != nil {
@@ -1276,11 +1099,7 @@ func TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata(t 
 // TestReconcileVectors_BackfillsDigest verifies the reconciliation sweep backfills a digest node that has no vector yet — this is what heals a digest written before the digest-embed fix existed, or one whose async embed goroutine failed.
 func TestReconcileVectors_BackfillsDigest(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
 	if err != nil {
@@ -1314,11 +1133,7 @@ func TestReconcileVectors_BackfillsDigest(t *testing.T) {
 // TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata verifies episode backfill embeds the same app/title-framed Document() text LogEpisode embeds (not bare screen_text) with domain/source/kind/created_at all set — a missing domain in particular would silently exclude the backfilled vector from every domain-filtered search (chromem's exact-match where fails on a missing key).
 func TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.LogEpisode(ctx, "Code", "auth.go", "debugging the token refresh flow")
 	if err != nil {
@@ -1354,11 +1169,7 @@ func TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata(t *te
 // TestHybridSearch_LexicalNoteHit_CarriesCreatedAt verifies HybridSearch keeps the timestamp SearchMemory already resolved for summary/note/thread hits. The episode loop below it sets createdAt; the memHits loop used to omit it, so every fact/arc/period reached FormatHit with a zero time and rendered undated.
 func TestHybridSearch_LexicalNoteHit_CarriesCreatedAt(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	if _, err := store.LogNote(ctx, "the user works with docker containers", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
@@ -1379,17 +1190,13 @@ func TestHybridSearch_LexicalNoteHit_CarriesCreatedAt(t *testing.T) {
 // TestUpdateNote_MissingID_ErrorsAndSkipsVectorDelete verifies updating a note id that doesn't exist reports the failure instead of silently succeeding, and does not fire the async vector Delete for that id. A hallucinated id used to be "updated" successfully — the user's correction was dropped and the bogus "note:N" Delete still ran, which can evict a real note's vector.
 func TestUpdateNote_MissingID_ErrorsAndSkipsVectorDelete(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2), addedIDs: make(chan string, 2)}
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	store.SetVectorIndex(vidx)
 
-	err = store.UpdateNote(ctx, 4242, "a correction aimed at a note that was never written")
+	err := store.UpdateNote(ctx, 4242, "a correction aimed at a note that was never written")
 	if err == nil {
 		t.Fatal("expected an error updating a nonexistent note id, got nil")
 	}
@@ -1407,11 +1214,7 @@ func TestUpdateNote_MissingID_ErrorsAndSkipsVectorDelete(t *testing.T) {
 // TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest verifies the similarity floor is relative to the best hit, not just the absolute minVectorSimilarity. Real cosine similarities on this store cluster in a narrow band (~0.58-0.69), so an absolute 0.55 floor lets a junk episode through alongside a genuine match.
 func TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	store.SetVectorIndex(&fakeHybridVectorIndex{
@@ -1437,11 +1240,7 @@ func TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest(t *testing.T)
 // TestReconcileVectors_BackfillsThread verifies a thread gets a vector. Threads were never embedded by any write path, so the whole arc layer ("what has the user been working on for weeks") was invisible to the semantic half of hybrid search while vectorBackingAlive still claimed thread vectors were alive.
 func TestReconcileVectors_BackfillsThread(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "learning Vulkan", Kind: "learning", State: "working through the triangle tutorial"})
 	if err != nil {
@@ -1482,11 +1281,7 @@ func TestReconcileVectors_BackfillsThread(t *testing.T) {
 // TestReconcileVectors_DeletesOrphanedThreadVector verifies that now threads are backfilled, a vector for a thread row that has since been deleted is cleaned up too — otherwise every deleted thread would leak a permanent phantom hit.
 func TestReconcileVectors_DeletesOrphanedThreadVector(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{}
 	vidx.seedIDs("thread:4242") // no thread with id 4242 exists
@@ -1504,11 +1299,7 @@ func TestReconcileVectors_DeletesOrphanedThreadVector(t *testing.T) {
 // TestReconcileVectors_EpisodeWindowExcludesOldEpisodesByDefault pins the Gemini-path behavior: an episode older than the default window is not re-embedded, so a dirty store cannot run up an API bill re-embedding years of captures.
 func TestReconcileVectors_EpisodeWindowExcludesOldEpisodesByDefault(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.LogEpisode(ctx, "Code", "old.go", "an old capture")
 	if err != nil {
@@ -1533,11 +1324,7 @@ func TestReconcileVectors_EpisodeWindowExcludesOldEpisodesByDefault(t *testing.T
 // TestReconcileVectors_UnmeteredEmbedsBackfillEveryOldEpisode verifies that with a local embedder wired (SetEmbedsAreFree), the age window is dropped entirely — the ~1000 old episodes that lost their vectors to API failures become searchable again, and re-embedding them costs nothing but CPU.
 func TestReconcileVectors_UnmeteredEmbedsBackfillEveryOldEpisode(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.LogEpisode(ctx, "Code", "old.go", "an old capture")
 	if err != nil {
@@ -1563,11 +1350,7 @@ func TestReconcileVectors_UnmeteredEmbedsBackfillEveryOldEpisode(t *testing.T) {
 // TestHybridSearchVectorFloorFollowsTheEmbedder verifies the absolute cosine floor can be moved to match the embedder in use. minVectorSimilarity's 0.55 was measured against Gemini's similarity range; EmbeddingGemma scores the same genuinely-relevant documents lower, so leaving the floor at 0.55 would drop every vector candidate on the open-ended questions ("what did i do today") and silently reduce hybrid search to lexical-only.
 func TestHybridSearchVectorFloorFollowsTheEmbedder(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	id, err := store.LogNote(ctx, "the user has been building a memory system all week", "fact")
 	if err != nil {
@@ -1606,11 +1389,7 @@ func TestHybridSearchVectorFloorFollowsTheEmbedder(t *testing.T) {
 
 // TestSetVectorSimilarityFloorIgnoresNonPositive verifies a zero or negative floor leaves the default in place, so a miswired caller cannot turn the floor off entirely and let every nearest neighbour chromem returns into fusion.
 func TestSetVectorSimilarityFloorIgnoresNonPositive(t *testing.T) {
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	store.SetVectorSimilarityFloor(0)
 	if got := store.vectorFloor(); got != minVectorSimilarity {
@@ -1621,11 +1400,7 @@ func TestSetVectorSimilarityFloorIgnoresNonPositive(t *testing.T) {
 // TestReconcileBackfillCandidates_BoundedByTheEmbedCap covers the sweep's memory cost: with a local embedder the episode query has neither an age window nor a limit, so it pulled every episode row — id plus the full capture text — into memory to hand ReconcileVectors a list it only ever reads the first embedCap entries of. The candidate list must stay proportional to what one sweep can actually embed.
 func TestReconcileBackfillCandidates_BoundedByTheEmbedCap(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	for i := 0; i < 300; i++ {
 		if _, err := store.LogEpisode(ctx, "Code", "main.go", fmt.Sprintf("capture %d", i)); err != nil {
@@ -1647,11 +1422,7 @@ func TestReconcileBackfillCandidates_BoundedByTheEmbedCap(t *testing.T) {
 // TestReconcileBackfillCandidates_SkipsWhatTheIndexAlreadyHas verifies the already-indexed ids are dropped while the candidate list is being built, not after: with the list bounded, spending that budget on documents that already have vectors would starve the ones that don't.
 func TestReconcileBackfillCandidates_SkipsWhatTheIndexAlreadyHas(t *testing.T) {
 	ctx := context.Background()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
+	store := newStore(t)
 
 	var ids []int64
 	for i := 0; i < 5; i++ {

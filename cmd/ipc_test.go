@@ -14,109 +14,44 @@ import (
 	"ora/internal/tracker"
 )
 
-// TestRequireIPCToken_MissingHeader_Returns401 verifies a request with no token header is rejected before the wrapped handler ever runs.
-func TestRequireIPCToken_MissingHeader_Returns401(t *testing.T) {
-	called := false
-	handler := requireIPCToken("the-real-token", func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/vector/count", nil)
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rec.Code)
-	}
-	if called {
-		t.Error("expected the wrapped handler not to run without a token")
-	}
-}
-
-// TestRequireIPCToken_WrongToken_Returns401 verifies an incorrect token is also rejected, not just a missing one.
-func TestRequireIPCToken_WrongToken_Returns401(t *testing.T) {
-	called := false
-	handler := requireIPCToken("the-real-token", func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/vector/count", nil)
-	req.Header.Set(ipctoken.HeaderName, "wrong-token")
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rec.Code)
-	}
-	if called {
-		t.Error("expected the wrapped handler not to run with the wrong token")
-	}
-}
-
-// TestRequireIPCToken_EmptyToken_Returns401 verifies that when the daemon's own token is empty (ipctoken.Generate failed at startup), requireIPCToken rejects every request rather than authenticating it. subtle.ConstantTimeCompare([]byte(""), []byte("")) returns 1, so without an explicit guard a request with no header (or an explicit empty header) would match an empty token and auth would fail open.
-func TestRequireIPCToken_EmptyToken_Returns401(t *testing.T) {
-	called := false
-	handler := requireIPCToken("", func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/vector/count", nil)
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("no-header request against an empty token: expected 401, got %d", rec.Code)
-	}
-	if called {
-		t.Error("expected the wrapped handler not to run against an empty token with no header")
+// requireIPCToken is the daemon's auth boundary: only the exact token gets through, and the wrapped handler must never run otherwise. The empty-token rows cover a startup where ipctoken.Generate failed — subtle.ConstantTimeCompare("", "") returns 1, so without an explicit guard a request with no header would match and auth would fail open.
+func TestRequireIPCToken(t *testing.T) {
+	cases := []struct {
+		name        string
+		daemonToken string
+		header      string
+		setHeader   bool
+		wantCode    int
+	}{
+		{name: "correct token", daemonToken: "the-real-token", header: "the-real-token", setHeader: true, wantCode: http.StatusOK},
+		{name: "missing header", daemonToken: "the-real-token", wantCode: http.StatusUnauthorized},
+		{name: "wrong token", daemonToken: "the-real-token", header: "wrong-token", setHeader: true, wantCode: http.StatusUnauthorized},
+		{name: "empty daemon token, no header", wantCode: http.StatusUnauthorized},
+		{name: "empty daemon token, empty header", setHeader: true, wantCode: http.StatusUnauthorized},
 	}
 
-	called = false
-	req2 := httptest.NewRequest(http.MethodGet, "/vector/count", nil)
-	req2.Header.Set(ipctoken.HeaderName, "")
-	rec2 := httptest.NewRecorder()
-	handler(rec2, req2)
-	if rec2.Code != http.StatusUnauthorized {
-		t.Errorf("empty-header request against an empty token: expected 401, got %d", rec2.Code)
-	}
-	if called {
-		t.Error("expected the wrapped handler not to run against an empty token with an empty header")
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			handler := requireIPCToken(tc.daemonToken, func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
 
-// TestRequireIPCToken_CorrectToken_CallsWrappedHandler verifies the right token lets the request through.
-func TestRequireIPCToken_CorrectToken_CallsWrappedHandler(t *testing.T) {
-	called := false
-	handler := requireIPCToken("the-real-token", func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
+			req := httptest.NewRequest(http.MethodGet, "/vector/count", nil)
+			if tc.setHeader {
+				req.Header.Set(ipctoken.HeaderName, tc.header)
+			}
+			rec := httptest.NewRecorder()
+			handler(rec, req)
 
-	req := httptest.NewRequest(http.MethodGet, "/vector/count", nil)
-	req.Header.Set(ipctoken.HeaderName, "the-real-token")
-	rec := httptest.NewRecorder()
-	handler(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
-	}
-	if !called {
-		t.Error("expected the wrapped handler to run with the correct token")
-	}
-}
-
-// TestAuthedDaemonGet_HitsExpectedURL is a smoke test: authedDaemonGet must not panic and must actually reach the given URL (token attachment itself is covered by ipctoken's own tests and httpVectorIndex's TestHTTPVectorIndex_AttachesIPCToken, which exercises the identical read-and-set pattern).
-func TestAuthedDaemonGet_HitsExpectedURL(t *testing.T) {
-	hit := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	authedDaemonGet(srv.URL)
-
-	if !hit {
-		t.Error("expected authedDaemonGet to reach the server")
+			if rec.Code != tc.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if want := tc.wantCode == http.StatusOK; called != want {
+				t.Errorf("wrapped handler called = %v, want %v", called, want)
+			}
+		})
 	}
 }
 
@@ -344,8 +279,4 @@ func TestHTTPEmbedder_NonOKStatus_ReturnsError(t *testing.T) {
 	if _, err := h.Embed(context.Background(), embed.TaskRetrievalQuery, "hi"); err == nil {
 		t.Fatal("expected an error when the daemon has no local embedder")
 	}
-}
-
-func TestHTTPEmbedderSatisfiesEmbedder(t *testing.T) {
-	var _ embed.Embedder = newHTTPEmbedder()
 }

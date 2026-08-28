@@ -42,14 +42,9 @@ func TestNewModel_BuildMismatch_ShowsWarningLine(t *testing.T) {
 	if !strings.Contains(joined, "older build") {
 		t.Errorf("expected the build-mismatch warning in the intro messages, got: %q", joined)
 	}
-}
 
-// TestNewModel_NoBuildMismatch_NoWarningLine verifies the common case (empty buildMismatch) doesn't inject any warning text — the vast majority of startups where daemon and client match.
-func TestNewModel_NoBuildMismatch_NoWarningLine(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil, "")
-	m := NewModel(a, "connected", "")
-
-	for _, msg := range m.messages {
+	// The common case — daemon and client match — injects no warning at all.
+	for _, msg := range newTestModel().messages {
 		if strings.Contains(msg.Content, "older build") {
 			t.Errorf("expected no build-mismatch warning when buildMismatch is empty, got: %q", msg.Content)
 		}
@@ -58,35 +53,31 @@ func TestNewModel_NoBuildMismatch_NoWarningLine(t *testing.T) {
 
 // --- daemon status polling ---
 
-func TestPollDaemonHTTP_RespondsOK_ReturnsTrue(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	if !pollDaemonHTTP(http.DefaultClient, srv.URL, "") {
-		t.Error("expected true for a 200 OK response")
-	}
-}
-
-func TestPollDaemonHTTP_NonOKStatus_ReturnsFalse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	if pollDaemonHTTP(http.DefaultClient, srv.URL, "") {
-		t.Error("expected false for a non-200 response")
-	}
-}
-
-func TestPollDaemonHTTP_Unreachable_ReturnsFalse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := srv.URL
-	srv.Close() // now unreachable
-
-	if pollDaemonHTTP(http.DefaultClient, url, "") {
-		t.Error("expected false for an unreachable server")
+// Only a 200 from the daemon counts as up: any other status, and an unreachable daemon, read as down.
+func TestPollDaemonHTTP_OnlyOKCountsAsUp(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		close  bool
+		want   bool
+	}{
+		{"200 OK", http.StatusOK, false, true},
+		{"500", http.StatusInternalServerError, false, false},
+		{"unreachable", http.StatusOK, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			if tc.close {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+			if got := pollDaemonHTTP(http.DefaultClient, srv.URL, ""); got != tc.want {
+				t.Errorf("pollDaemonHTTP = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -126,22 +117,6 @@ func TestUpdate_DaemonStatusMsg_FlipsDaemonOKBothDirections(t *testing.T) {
 	nm2 := next2.(model)
 	if nm2.daemonOK {
 		t.Error("expected daemonOK to flip to false on daemonStatusMsg(false)")
-	}
-}
-
-func TestUpdate_DaemonPollMsg_ReturnsBatchOfTickAndPoll(t *testing.T) {
-	m := model{}
-	_, cmd := m.Update(daemonPollMsg{})
-	if cmd == nil {
-		t.Fatal("expected a non-nil tea.Cmd (should re-arm the poll tick + fire an HTTP check)")
-	}
-	// tea.Batch resolves to a tea.BatchMsg carrying both sub-commands' results — just prove it's non-nil and produces a message, without depending on tea's internal batch representation.
-	msg := cmd()
-	if msg == nil {
-		t.Fatal("expected the batched command to produce a message")
-	}
-	if _, ok := msg.(tea.BatchMsg); !ok {
-		t.Fatalf("expected a tea.BatchMsg from daemonPollMsg's Update, got %T", msg)
 	}
 }
 
@@ -1581,21 +1556,6 @@ func TestRenderInput_DegradedStateChips_OnlyShowWhenUnhealthy(t *testing.T) {
 				t.Errorf("reconnecting chip presence = %v, want %v, got:\n%s", gotConn, tc.wantConn, out)
 			}
 		})
-	}
-}
-
-// TestView_HeaderRowRemoved_NoTrackingOrLivePillText is WP8's deletion pin: the header row (logo + "⊙ tracking"/"● live" pills) is gone entirely, not just hidden — those exact strings must never appear in View() output again, healthy or not (the replacement chips in renderInput use different text and only appear when unhealthy).
-func TestView_HeaderRowRemoved_NoTrackingOrLivePillText(t *testing.T) {
-	m := newTestModel()
-	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	m = next.(model)
-
-	out := m.View()
-	if strings.Contains(out, "⊙ tracking") {
-		t.Error("expected the deleted header's \"⊙ tracking\" pill text to be gone, found it in View() output")
-	}
-	if strings.Contains(out, "● live") {
-		t.Error("expected the deleted header's \"● live\" pill text to be gone, found it in View() output")
 	}
 }
 

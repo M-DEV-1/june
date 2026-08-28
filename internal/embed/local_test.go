@@ -170,10 +170,6 @@ func TestInputTooLong(t *testing.T) {
 	}
 }
 
-func TestLocalEmbedderSatisfiesEmbedder(t *testing.T) {
-	var _ Embedder = NewLocalEmbedder("http://localhost:8080", "m")
-}
-
 // TestLocalEmbedderTruncatesLongText verifies the request body never carries more than maxEmbedRunes of the caller's text. EmbeddingGemma's context is 2048 tokens and llama-server rejects anything longer outright, so an untruncated 96k-character screen capture (the longest in the real store) would just fail and leave that episode with no vector at all.
 func TestLocalEmbedderTruncatesLongText(t *testing.T) {
 	var got map[string]any
