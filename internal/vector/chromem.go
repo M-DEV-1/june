@@ -165,6 +165,10 @@ func (c *ChromemIndex) reconcileSidecar(ids []string) {
 
 // Add inserts or overwrites a document, then evicts the oldest entries by createdAt if that pushes past maxDocs.
 func (c *ChromemIndex) Add(ctx context.Context, id, content string, embedding []float32, metadata map[string]string) error {
+	// One wrong-width vector poisons the whole collection: the width probe at open would then drop and rebuild everything, so a mismatch is rejected at the door instead.
+	if c.dim > 0 && len(embedding) != c.dim {
+		return fmt.Errorf("chromem add %s: embedding has %d dimensions, index expects %d", id, len(embedding), c.dim)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
