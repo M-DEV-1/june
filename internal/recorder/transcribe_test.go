@@ -273,6 +273,58 @@ func TestPrimingPrompt_EmptyWhenThereIsNoContext(t *testing.T) {
 	}
 }
 
+// Whisper keeps only the last whisperMaxContext tokens of this prompt, so whatever sits at the front is what gets cut when the prompt runs long. Participant names matter more than terms for getting the transcript right, so terms have to come first and the names last, where truncation can't reach them.
+func TestPrimingPrompt_NamesComeAfterTermsSoTheySurviveTruncation(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Chat - Brave", ScreenText: "Trupti Hosmani: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"},
+	}
+	got := primingPrompt(eps)
+	termsAt, participantsAt := strings.Index(got, "Terms:"), strings.Index(got, "Participants:")
+	if termsAt == -1 || participantsAt == -1 {
+		t.Fatalf("expected both a Terms and a Participants section, got:\n%s", got)
+	}
+	if participantsAt < termsAt {
+		t.Errorf("participants must come after terms, got:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "Trupti Hosmani.") {
+		t.Errorf("the participant name should be the last thing in the prompt, got:\n%s", got)
+	}
+}
+
+// Knowing how many times faster than real time this machine transcribes is what lets the user predict how long N hours of meetings take to catch up on, so every run logs the audio length and the rate alongside the wall time it already logged.
+func TestTranscribeWAV_LogsAudioDurationAndRate(t *testing.T) {
+	logs := captureLogs(t)
+	bin := fakeWhisper(t, "", "")
+
+	path := filepath.Join(t.TempDir(), "mic.wav")
+	w, err := newWAV(path)
+	if err != nil {
+		t.Fatalf("newWAV: %v", err)
+	}
+	// One second of 16 kHz mono 16-bit audio.
+	if _, err := w.Write(make([]byte, sampleRate*2)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if _, err := transcribeWAV(context.Background(), bin, path, speakerMe, "", 0); err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+
+	got := logs.String()
+	if !strings.Contains(got, "whisper finished") {
+		t.Fatalf("expected the whisper-finished log line, got:\n%s", got)
+	}
+	if !strings.Contains(got, "audio=1s") {
+		t.Errorf("expected the log to carry the audio's own length (1s), got:\n%s", got)
+	}
+	if !strings.Contains(got, "rate=") {
+		t.Errorf("expected the log to carry the audio-to-wall-time rate, got:\n%s", got)
+	}
+}
+
 // The anti-hallucination thresholds and the priming prompt only do anything if they actually reach the whisper process, and nothing else in the pipeline would notice if they stopped being passed.
 func TestTranscribeWAV_PassesThresholdsAndPrompt(t *testing.T) {
 	dir := t.TempDir()

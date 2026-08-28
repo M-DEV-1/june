@@ -1,10 +1,12 @@
 package recorder
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -493,6 +495,16 @@ func TestRecorder_PickupSkipsTheLiveRecording(t *testing.T) {
 	}
 }
 
+// captureLogs redirects the default slog logger into a buffer for the rest of the test, at Debug level so a slog.Debug call shows up too.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prior := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prior) })
+	return &buf
+}
+
 // writeRecording lays out a recording directory on disk with the given files, which is how the sweep's cases are set up.
 func writeRecording(t *testing.T, dir string, files map[string]string) string {
 	t.Helper()
@@ -505,6 +517,93 @@ func writeRecording(t *testing.T, dir string, files map[string]string) string {
 		}
 	}
 	return dir
+}
+
+// A whisper run on a long meeting can still be going the next time the sweep ticks, and the old code logged "finishing an unfinished meeting recording" for that directory anyway, every tick, though process() below was always going to find it already claimed and do nothing. The log line must wait until the sweep is actually about to hand the directory to process().
+func TestRecorder_PickupDoesNotLogUntilItActuallyStartsWork(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	<-r.swept
+	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
+		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
+	})
+
+	logs := captureLogs(t)
+	if !r.claim(dir) {
+		t.Fatal("expected to be free to claim the directory before the sweep runs")
+	}
+	r.pickup(context.Background())
+	if strings.Contains(logs.String(), "finishing an unfinished meeting recording") {
+		t.Errorf("the sweep logged a directory it could not actually process:\n%s", logs.String())
+	}
+
+	r.release(dir)
+	r.pickup(context.Background())
+	if !strings.Contains(logs.String(), "finishing an unfinished meeting recording") {
+		t.Errorf("the sweep should log once it actually starts on the directory:\n%s", logs.String())
+	}
+}
+
+// A recording just ended on battery defers transcription until mains power, and the sweep must honour the same rule for anything it finds still needing whisper — otherwise the very next tick transcribes what StopAndProcess just deferred.
+func TestRecorder_SweepDefersWhisperTranscriptionOnBattery(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	<-r.swept
+	r.onAC = func() bool { return false }
+	r.whisper = func(context.Context, string, string, string, string, time.Duration) ([]Segment, error) {
+		t.Error("whisper ran for a recording found on battery")
+		return nil, errors.New("whisper must not run on battery")
+	}
+	orphan := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T09-30-00"), map[string]string{
+		"mic.wav":    string(make([]byte, 3200)),
+		"system.wav": string(make([]byte, 3200)),
+	})
+
+	r.pickup(context.Background())
+
+	if _, err := os.Stat(filepath.Join(orphan, "transcript.md")); !os.IsNotExist(err) {
+		t.Error("the sweep transcribed an orphaned recording while on battery")
+	}
+}
+
+// Regenerating minutes from a transcript that is already on disk never runs whisper, so it costs nothing extra on battery and must not wait for the same deferral that a fresh transcription does.
+func TestRecorder_SweepRegeneratesMinutesOnBatteryEvenThoughTranscriptionWaits(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	<-r.swept
+	r.onAC = func() bool { return false }
+	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
+		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
+	})
+
+	r.pickup(context.Background())
+
+	if _, err := os.Stat(filepath.Join(dir, "minutes.md")); err != nil {
+		t.Errorf("regenerating minutes from an existing transcript should not wait for mains power: %v", err)
+	}
+}
+
+// A blank reply from the brain is not a summary of anything. Writing it as minutes.md would mark the meeting done, so the next sweep would never look at it again and the meeting would be lost. It must be treated like any other failed summarisation.
+func TestRecorder_EmptyMinutesIsTreatedAsAFailure(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			return `{"updates":[]}`, nil
+		}
+		return "   \n", nil
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	sess, _ := r.stop()
+
+	if err := r.process(context.Background(), sess); err == nil {
+		t.Fatal("process must report an empty brain reply as a failure")
+	}
+	if _, err := os.Stat(filepath.Join(sess.dir, "minutes.md")); !os.IsNotExist(err) {
+		t.Error("an empty brain reply must never be written as minutes.md")
+	}
+	if !exists(filepath.Join(sess.dir, failedMarker)) {
+		t.Error("an empty brain reply must leave a failure marker so the sweep retries it later")
+	}
 }
 
 // A summariser that refuses — a rate limit, a bad key, a prompt too big — used to leave the recording in exactly the shape the sweep looks for, so every tick spent another API call on the same failure. The failure is recorded next to the recording and the sweep leaves it alone until the marker is an hour old.
@@ -652,11 +751,12 @@ func TestRecorder_RegeneratesMinutesFromAnExistingTranscript(t *testing.T) {
 	if got := store.logged(noteKind); len(got) != 1 {
 		t.Errorf("regenerating minutes should file exactly one note, got %v", got)
 	}
-	if !sawPersonalPass {
-		t.Error("regenerating minutes did not run the personal context updater")
+	// The meeting already had its one chance to teach Ora something durable about a person when it was first summarised. Regenerating minutes from the same transcript must not run the updater again and re-propose the same writes.
+	if sawPersonalPass {
+		t.Error("regenerating minutes ran the personal context updater again")
 	}
-	if got := store.personalWrites["trupti-hosmani"]; got == "" {
-		t.Errorf("the personal context updater wrote nothing, writes: %v", store.personalWrites)
+	if len(store.personalWrites) != 0 {
+		t.Errorf("regenerating minutes wrote to personal context, writes: %v", store.personalWrites)
 	}
 	if got, _ := os.ReadFile(filepath.Join(whole, "minutes.md")); !strings.Contains(string(got), "the original") {
 		t.Errorf("a finished recording was summarised again, its minutes now read: %s", got)
