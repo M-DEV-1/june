@@ -48,7 +48,7 @@ func TestLive_BackfillAndRegenerate(t *testing.T) {
 
 	dataDir := config.DataDir()
 	r := &Recorder{dataDir: dataDir, store: readOnlyNotes{store}, apiKey: key}
-	r.minutes = r.geminiMinutes
+	r.minutes = r.defaultBrain
 	r.notify = func(title, body string) { t.Logf("notify: %s — %s", title, body) }
 	// The machine may be on battery and the audio is beside the transcripts either way, so a path that would start whisper is a bug in this run, not something to fall back from.
 	r.findWhisper = func(string) (string, error) { return "", errors.New("this run must never transcribe") }
