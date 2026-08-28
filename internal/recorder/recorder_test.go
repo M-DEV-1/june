@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -837,5 +838,80 @@ func TestMinutesInstruction_AttendeesSplitByEvidence(t *testing.T) {
 		if !strings.Contains(minutesInstruction, want) {
 			t.Errorf("the attendees instruction never says %q", want)
 		}
+	}
+}
+
+// The two sides of a call are independent files, and transcribing them one after the other doubles the wall time of every meeting for no reason. They have to run at the same time.
+// The test is a barrier: each stream announces itself and then waits for the other, so a pipeline that runs them in sequence can never get past the first one.
+func TestTranscriptFor_TranscribesBothStreamsAtTheSameTime(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	arrived := make(chan struct{}, 2)
+	both := make(chan struct{})
+	var once sync.Once
+	r.whisper = func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
+		arrived <- struct{}{}
+		if len(arrived) == 2 {
+			once.Do(func() { close(both) })
+		}
+		select {
+		case <-both:
+		case <-time.After(5 * time.Second):
+			return nil, fmt.Errorf("%s waited for the other stream to start and it never did", speaker)
+		}
+		return []Segment{{Start: 0, End: time.Second, Speaker: speaker, Text: "spoken by " + speaker}}, nil
+	}
+
+	dir := t.TempDir()
+	s := &session{dir: dir, startedAt: time.Now(), stoppedAt: time.Now()}
+	transcript, err := r.transcriptFor(context.Background(), s)
+	if err != nil {
+		t.Fatalf("transcriptFor: %v", err)
+	}
+	for _, want := range []string{"spoken by me", "spoken by call"} {
+		if !strings.Contains(transcript, want) {
+			t.Errorf("transcript is missing %q:\n%s", want, transcript)
+		}
+	}
+}
+
+// A failure on either stream still has to come back as an error naming which side failed, now that the two run concurrently.
+func TestTranscriptFor_ReportsWhichStreamFailed(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	r.whisper = func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
+		if speaker == speakerCall {
+			return nil, errors.New("the model file is corrupt")
+		}
+		return []Segment{{Start: 0, End: time.Second, Speaker: speakerMe, Text: "hello"}}, nil
+	}
+	s := &session{dir: t.TempDir(), startedAt: time.Now(), stoppedAt: time.Now()}
+	_, err := r.transcriptFor(context.Background(), s)
+	if err == nil {
+		t.Fatal("a failed stream must be an error")
+	}
+	if !strings.Contains(err.Error(), "system audio") || !strings.Contains(err.Error(), "corrupt") {
+		t.Errorf("error %q does not say which stream failed and why", err)
+	}
+}
+
+// Two whisper runs sharing one machine must each take about half the threads, or the concurrency buys nothing and the two runs simply fight over the same cores.
+func TestTranscribeThreads(t *testing.T) {
+	got := transcribeThreads()
+	if got < 1 {
+		t.Fatalf("transcribeThreads() = %d, want at least 1", got)
+	}
+	if max := runtime.NumCPU()/2 + 1; got > max {
+		t.Errorf("transcribeThreads() = %d, want no more than %d so two concurrent runs do not oversubscribe %d cores", got, max, runtime.NumCPU())
+	}
+}
+
+// The thread count is a property of the machine, not of the code, so it has to be overridable without a rebuild.
+func TestTranscribeThreads_HonoursTheOverride(t *testing.T) {
+	t.Setenv("ORA_TRANSCRIBE_THREADS", "6")
+	if got := transcribeThreads(); got != 6 {
+		t.Errorf("transcribeThreads() = %d, want the configured 6", got)
+	}
+	t.Setenv("ORA_TRANSCRIBE_THREADS", "not a number")
+	if got := transcribeThreads(); got < 1 {
+		t.Errorf("transcribeThreads() = %d with junk configured, want the default", got)
 	}
 }
