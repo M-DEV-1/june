@@ -308,6 +308,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{
 				App: ev.App, Title: ev.Title, ScreenText: ev.ScreenText,
 				UserActivity: ev.UserActivity, VisibleText: ev.VisibleText, ImageJPEG: ev.ImageJPEG,
+				ExtraJPEG: ev.ExtraJPEG,
 			}); err != nil {
 				slog.Error("log episode failed", "error", err)
 			}

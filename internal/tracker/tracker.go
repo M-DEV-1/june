@@ -9,7 +9,7 @@ type Activity struct {
 	UserActivity string
 	VisibleText  []string
 	// ImageJPEG is the frame for the monitor the user is on, and ExtraJPEG holds one frame per other monitor at the same moment — a meeting on one screen while notes sit on the other is one activity, not two.
-	// Nothing persists ExtraJPEG yet: internal/db writeEpisodeJPEG stores a single image per episode (internal/db/image.go), so the extra frames need a second column or a "{id}-b.jpg" naming rule before they reach disk or the vision call.
+	// Both persist: writeEpisodeJPEG stores the primary as frames/{id}.jpg and each extra as frames/{id}-b.jpg, {id}-c.jpg (internal/db/image.go), read back with Store.EpisodeExtraImages. The vision call still only sees the primary — tieredCapture in internal/tracker/daemon.go passes one PNG to visionFn.
 	ImageJPEG []byte
 	ExtraJPEG [][]byte
 }

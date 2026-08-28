@@ -1445,6 +1445,8 @@ type EpisodeWrite struct {
 	UserActivity           string
 	VisibleText            []string
 	ImageJPEG              []byte
+	// ExtraJPEG holds one frame per monitor other than the one the user was on, captured at the same moment. They are stored beside the primary as {id}-b.jpg, {id}-c.jpg and read back with EpisodeExtraImages.
+	ExtraJPEG [][]byte
 }
 
 // LogEpisode appends one dwell-confirmed capture to the episodes time series — a plain append, not a dedup: repeat visits to the same app+title MUST create distinct rows because screen_text differs between visits and is the whole point of capturing it.
@@ -1502,7 +1504,7 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 		attribute.String("db.episode_domain", string(domain)),
 	)
 
-	if imgPath := s.writeEpisodeJPEG(id, w.ImageJPEG); imgPath != "" {
+	if imgPath := s.writeEpisodeJPEG(id, w.ImageJPEG, w.ExtraJPEG); imgPath != "" {
 		if _, err := s.db.ExecContext(ctx, `UPDATE episodes SET image_path = ? WHERE id = ?`, imgPath, id); err != nil {
 			slog.Error("episode image path update failed", "episode_id", id, "error", err)
 		}
