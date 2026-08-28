@@ -3,10 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"math"
 	"ora/internal/db"
 	"ora/internal/tracker"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -128,20 +131,28 @@ func TestSystemInstructionText_TreatsMemoryAsDataNotInstructions(t *testing.T) {
 	}
 }
 
-// TestSystemInstructionText_PreambleAndMemoryToolMandate covers the two prompt rules that make NON_BLOCKING tool calls survive on a voice call: the model must say a short spoken line before/while a tool runs so the call never goes silent, and any question about the user's own past activity must actually trigger a memory tool call rather than be answered from the frozen handshake context. The second rule is the whole voice-path retrieval mechanism — nothing else injects memory into a spoken turn.
-func TestSystemInstructionText_PreambleAndMemoryToolMandate(t *testing.T) {
+// TestSystemInstructionText_NoPreambleForFastTools_MemoryToolMandate covers the two rules that decide whether a spoken turn works at all. First: memory lookups now finish in milliseconds against a local index, so announcing one is pure stutter — a real session produced "..taking a look.. ..ing a look, okay so.." because the preamble was still draining when the answer arrived. Second: any question about the user's own past has to trigger a memory tool, which is the only mechanism that puts memory into a spoken turn.
+func TestSystemInstructionText_NoPreambleForFastTools_MemoryToolMandate(t *testing.T) {
 	now := time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC)
 
 	got := systemInstructionText(now, "linux", "amd64", "sh", "some context", 5)
 
 	for _, want := range []string{
-		"never go silent",
-		"one short line",
+		"Do not announce it",
+		"let me check",
+		"Announce only what you know will actually take time",
+		"still running, no result yet",
 		"MUST call",
 		"query_memory",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
+		}
+	}
+	// The old contract mandated a spoken line before every tool call. Its absence is the fix, so assert it stays gone.
+	for _, gone := range []string{"say one short line about what you're doing", "never go silent on them while you wait"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("systemInstructionText still carries the preamble mandate %q", gone)
 		}
 	}
 }
@@ -308,7 +319,7 @@ func TestReceiveLoop_OutputTranscription_StreamsAsOraText(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_Interrupted_EmitsSystemStoppedChunk verifies a server-side barge-in (VAD interrupt) is surfaced to the UI as a plain SenderSystem chunk, not markdown-wrapped text — the UI's own "system" sender already has its own rendering style, so the asterisks were redundant.
+// TestReceiveLoop_Interrupted_EmitsSystemStoppedChunk verifies a server-side barge-in the user actually caused — the interrupt arrives with their speech being transcribed alongside it — is surfaced to the UI as a plain SenderSystem chunk, not markdown-wrapped text: the UI's own "system" sender already has its own rendering style, so the asterisks were redundant.
 func TestReceiveLoop_Interrupted_EmitsSystemStoppedChunk(t *testing.T) {
 	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -320,10 +331,16 @@ func TestReceiveLoop_Interrupted_EmitsSystemStoppedChunk(t *testing.T) {
 	defer cancel()
 	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
 
-	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		InputTranscription: &genai.Transcription{Text: "hang on"},
+		Interrupted:        true,
+	}}
 
 	select {
 	case chunk := <-a.TextResponseChan:
+		if chunk.Sender == SenderYou {
+			chunk = <-a.TextResponseChan
+		}
 		if chunk.Text != "[ora stopped]" || chunk.Sender != SenderSystem {
 			t.Errorf("expected {Text: \"[ora stopped]\", Sender: %q}, got %+v", SenderSystem, chunk)
 		}
@@ -524,12 +541,17 @@ func TestCompressionConfig_TriggerAboveTarget(t *testing.T) {
 // fakeSpeaker is a no-op audio.Speaker for receiveLoop tests that exercise the barge-in (Interrupted) path, which calls Flush() on the real speaker — a nil speaker panics there. It counts Flush calls so a test can assert that a tool-delivery interrupt does NOT throw away the audio Ora is in the middle of playing.
 type fakeSpeaker struct {
 	flushes atomic.Int32
+	// amplitude is what CurrentAmplitude reports — the barge-in path uses it to tell a real interruption from the room's own noise coming back through the mic while Ora is audibly speaking.
+	amplitude atomic.Uint64
 }
 
-func (s *fakeSpeaker) Play(pcm []byte) error     { return nil }
-func (s *fakeSpeaker) Flush()                    { s.flushes.Add(1) }
-func (s *fakeSpeaker) Close() error              { return nil }
-func (s *fakeSpeaker) CurrentAmplitude() float64 { return 0 }
+func (s *fakeSpeaker) Play(pcm []byte) error { return nil }
+func (s *fakeSpeaker) Flush()                { s.flushes.Add(1) }
+func (s *fakeSpeaker) Close() error          { return nil }
+func (s *fakeSpeaker) CurrentAmplitude() float64 {
+	return math.Float64frombits(s.amplitude.Load())
+}
+func (s *fakeSpeaker) setAmplitude(v float64) { s.amplitude.Store(math.Float64bits(v)) }
 
 // budgetBrain records the remaining ctx budget RetrieveRelevant is handed, and returns recalls only when that budget covers minBudget. It stands in for the real RetrieveRelevant, whose Gemini embedContent round trip measures 2.3-2.8s against the live API — anything less than that and the semantic half of hybrid search never returns in time.
 type budgetBrain struct {
@@ -552,7 +574,7 @@ func (b *budgetBrain) RetrieveRelevant(ctx context.Context, focus string, maxIte
 	return []string{"kernel work on the retrieval path"}, nil
 }
 
-// TestTextSendLoop_RetrieveBudgetCoversEmbedRoundTrip verifies the deadline textSendLoop puts on RetrieveRelevant leaves room for a real embed round trip, so the recalls it fetches actually reach the turn. With a budget under the measured embed latency the semantic half of hybrid retrieval is cancelled on every typed turn and search silently degrades to lexical-only.
+// TestTextSendLoop_RetrieveBudgetCoversEmbedRoundTrip verifies the deadline textSendLoop puts on RetrieveRelevant leaves room for a real embed round trip, so the recalls it fetches actually reach the turn. With a budget under the worst-case embed latency the semantic half of hybrid retrieval is cancelled and search silently degrades to lexical-only. The budget is a ceiling and not a wait — the call returns as soon as retrieval finishes, which in production is single-digit milliseconds — so the number here only has to cover the slowest case, a cold local embedding server.
 func TestTextSendLoop_RetrieveBudgetCoversEmbedRoundTrip(t *testing.T) {
 	const measuredEmbedLatency = 2800 * time.Millisecond
 
@@ -905,10 +927,16 @@ func TestReceiveLoop_TypedTurnInterrupted_SaysInterruptedByVoice(t *testing.T) {
 	defer cancel()
 	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
 
-	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		InputTranscription: &genai.Transcription{Text: "actually wait"},
+		Interrupted:        true,
+	}}
 
 	select {
 	case chunk := <-a.TextResponseChan:
+		if chunk.Sender == SenderYou {
+			chunk = <-a.TextResponseChan
+		}
 		if chunk.Sender != SenderSystem || !strings.Contains(chunk.Text, "interrupted by voice input") {
 			t.Fatalf("expected an explicit voice-interruption notice, got %+v", chunk)
 		}
@@ -1119,17 +1147,194 @@ func TestRunToolCall_SlowTool_SendsInterimProgressResponse(t *testing.T) {
 	}
 }
 
-// TestSystemInstructionText_NeverEndsTurnSilentlyAfterATool is the prompt half of the silent-after-preamble bug: once a tool result comes back the model must speak the answer, or say plainly that it found nothing, instead of ending the turn on the "let me check" line. It also has to know what an interim "still running" result means, since a slow tool now sends one.
-func TestSystemInstructionText_NeverEndsTurnSilentlyAfterATool(t *testing.T) {
+// TestSystemInstructionText_AlwaysSaysWhatItFound is the prompt half of the silent-after-a-tool bug: once a result is in hand the model must speak it, including when the result is empty or partial, instead of ending the turn on nothing. Twelve of thirty-five typed turns in one day produced no reply at all before the user gave up and typed again.
+func TestSystemInstructionText_AlwaysSaysWhatItFound(t *testing.T) {
 	got := systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "some context", 5)
 
 	for _, want := range []string{
-		"the moment a tool result comes back",
-		"never end your turn",
-		"still running",
+		"whatever you find, say it",
+		"an empty result is an answer",
+		"never stop talking in the middle of a turn",
 	} {
 		if !strings.Contains(strings.ToLower(got), want) {
 			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
 		}
+	}
+}
+
+// TestSystemInstructionText_SynthesisBeforeEvidence covers the answer shape the whole prompt is organised around: the user gets a sentence in Ora's own words, not the tool's rows read back. A real session answered "what have I been working on this week? keep it short" with a fifty-row screen scrape.
+func TestSystemInstructionText_SynthesisBeforeEvidence(t *testing.T) {
+	got := strings.ToLower(systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "some context", 5))
+
+	for _, want := range []string{
+		"answer in one sentence",
+		"your evidence, never your answer",
+		"never read a list out loud",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
+		}
+	}
+}
+
+// TestSystemInstructionText_AntiConfabulationRules keeps the two rules that survived the prompt's compression: summarising hits together is fine, inventing a connection between them is not, and a repair tool exists for both notes and threads. Ora asserted a meeting was on Microsoft Teams when the captures said Google Meet — a wrong fact inside a merged thread summary it then could not fix.
+func TestSystemInstructionText_AntiConfabulationRules(t *testing.T) {
+	got := systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "some context", 5)
+
+	for _, want := range []string{
+		"Inventing a link between them is not",
+		"different apps or different hours",
+		"never assert a detail that isn't in the rows",
+		"fix_thread",
+		"[thread#N]",
+		"update_note",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
+		}
+	}
+}
+
+// logCapture is a slog handler that records every message and its attributes, so a test can assert on what was logged. Guarded by a mutex because receiveLoop logs from its own goroutine.
+type logCapture struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.b.WriteString(r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		c.b.WriteString(" " + a.Key + "=" + a.Value.String())
+		return true
+	})
+	c.b.WriteString("\n")
+	return nil
+}
+func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *logCapture) WithGroup(string) slog.Handler      { return c }
+func (c *logCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.b.String()
+}
+
+// captureLogs redirects the default slog logger into a buffer for the duration of one test.
+func captureLogs(t *testing.T) *logCapture {
+	t.Helper()
+	c := &logCapture{}
+	prior := slog.Default()
+	slog.SetDefault(slog.New(c))
+	t.Cleanup(func() { slog.SetDefault(prior) })
+	return c
+}
+
+// waitForLog polls the capture until want shows up, or fails the test. The receive loop logs from its own goroutine, so there is nothing to synchronize on directly.
+func waitForLog(t *testing.T, c *logCapture, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(c.String(), want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for a log line containing %q; got:\n%s", want, c.String())
+}
+
+// TestReceiveLoop_TurnComplete_LogsWhatOraSaid verifies Ora's own spoken turn reaches the log as one line. Nothing Ora says has been logged since 7 August: the user's side is logged, the model's thoughts are logged, and the actual reply — the thing every conversational-quality question is about — was dropped on the floor. Scoring a session against what it said is impossible without this.
+func TestReceiveLoop_TurnComplete_LogsWhatOraSaid(t *testing.T) {
+	logs := captureLogs(t)
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: "the vulnerability scores "}}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: "are in the spreadsheet."}}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+
+	waitForLog(t, logs, "ora said text=the vulnerability scores are in the spreadsheet.")
+}
+
+// TestReceiveLoop_Interrupted_LogsWhatOraSaidSoFar verifies a cut-off turn still logs the half sentence Ora got out — a barge-in is exactly the case where what was said matters, and the buffer is otherwise discarded with the turn.
+func TestReceiveLoop_Interrupted_LogsWhatOraSaidSoFar(t *testing.T) {
+	logs := captureLogs(t)
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: "so yesterday you were mostly in"}}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+
+	waitForLog(t, logs, "ora said text=so yesterday you were mostly in")
+}
+
+// TestReceiveLoop_NoiseInterruptWhileOraSpeaks_IsNotABargeIn covers the ceiling fan: 47 interrupts in 17 minutes with nobody saying anything, every one of them flushing the audio mid-sentence so not one reply finished. An interrupt with no user transcript, arriving while Ora's own speaker is audibly running, is her voice or the room coming back through the mic — leave the sentence alone.
+func TestReceiveLoop_NoiseInterruptWhileOraSpeaks_IsNotABargeIn(t *testing.T) {
+	speaker := &fakeSpeaker{}
+	speaker.setAmplitude(0.4)
+	a := NewAgent(nil, speaker, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	// The turn carries on: this is what the user must still hear, and it must be the next thing on the channel.
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: "the rest of the sentence"}}}
+
+	select {
+	case chunk := <-a.TextResponseChan:
+		if chunk.Text != "the rest of the sentence" {
+			t.Fatalf("expected the interrupted turn to carry on, got %+v", chunk)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the continuing turn")
+	}
+	if n := speaker.flushes.Load(); n != 0 {
+		t.Errorf("expected the audio Ora was speaking left alone, got %d flushes", n)
+	}
+}
+
+// TestReceiveLoop_InterruptWithNoUserTranscript_WritesNoNotice verifies "[ora stopped]" is only written when the user actually said something. It was written 62 times in one day, almost all of them falsely, and each one tells the user they interrupted a reply they never interrupted.
+func TestReceiveLoop_InterruptWithNoUserTranscript_WritesNoNotice(t *testing.T) {
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: "next turn"}}}
+
+	select {
+	case chunk := <-a.TextResponseChan:
+		if chunk.Sender == SenderSystem {
+			t.Fatalf("expected no system notice for an interrupt nobody caused, got %+v", chunk)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a chunk")
 	}
 }
