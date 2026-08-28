@@ -1441,3 +1441,64 @@ func TestReconcileBackfillCandidates_SkipsWhatTheIndexAlreadyHas(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateThreadState_RewritesRowAndVector covers the repair path for a wrong thread summary: the model diagnosed a bad merge in a thread ("the mf x mdev meeting was on Teams" when the episodes say Google Meet) and had no way to fix it, because update_note only reaches the notes table. Rewriting the state has to land in the row, in FTS, and in the vector, or the wrong wording keeps coming back on the next semantic search.
+func TestUpdateThreadState_RewritesRowAndVector(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "mf x mdev", Kind: "work", State: "recurring Microsoft Teams sync"})
+	if err != nil {
+		t.Fatalf("UpsertThread: %v", err)
+	}
+
+	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2), addedIDs: make(chan string, 2)}
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	store.SetVectorIndex(vidx)
+
+	if err := store.UpdateThreadState(ctx, id, "recurring Google Meet sync"); err != nil {
+		t.Fatalf("UpdateThreadState: %v", err)
+	}
+
+	hits, err := store.SearchMemory(ctx, "Google Meet")
+	if err != nil {
+		t.Fatalf("SearchMemory: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("corrected thread state is not searchable")
+	}
+	if stale, _ := store.SearchMemory(ctx, "Teams"); len(stale) != 0 {
+		t.Errorf("the wrong wording is still in FTS: %+v", stale)
+	}
+
+	wantID := fmt.Sprintf("thread:%d", id)
+	select {
+	case got := <-vidx.deletedCalled:
+		if got != wantID {
+			t.Errorf("expected Delete(%q), got Delete(%q)", wantID, got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the stale thread vector's Delete call")
+	}
+	select {
+	case got := <-vidx.addedIDs:
+		if got != wantID {
+			t.Errorf("expected Add(%q), got Add(%q)", wantID, got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the corrected thread vector's Add call")
+	}
+	if rec := vidx.addRecordFor(wantID); rec == nil || rec.content != "mf x mdev — recurring Google Meet sync" {
+		t.Errorf("re-embedded text = %+v, want the subject and the corrected state", rec)
+	}
+}
+
+// TestUpdateThreadState_MissingID_Errors verifies a thread id the model invented is reported as a failure rather than silently succeeding — the same guard UpdateNote has, for the same reason: reporting "fixed" throws the user's correction away.
+func TestUpdateThreadState_MissingID_Errors(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	if err := store.UpdateThreadState(ctx, 4242, "a correction aimed at a thread that never existed"); err == nil {
+		t.Fatal("expected an error for a thread id that does not exist")
+	}
+}
