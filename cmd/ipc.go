@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"ora/internal/db"
@@ -193,26 +192,3 @@ func (h *httpVectorIndex) Delete(ctx context.Context, id string) error {
 
 // IDs is never called client-side — the reconciliation sweep (db.Store.ReconcileVectors) is daemon-owned and runs directly against the daemon's own *vector.ChromemIndex, not over IPC. No /vector/ids endpoint exists.
 func (h *httpVectorIndex) IDs() []string { return nil }
-
-// toggleRecordingOverIPC flips meeting recording on the running daemon and prints the resulting state. Input: none (token and port come from the shared daemonClient defaults). Output: a line on stdout, or an error line on stderr when no daemon is reachable.
-func toggleRecordingOverIPC() {
-	d := newDaemonClient(10 * time.Second)
-	resp, err := d.post(context.Background(), "/record", struct{}{})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: is the daemon running? %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-	var out struct {
-		Recording bool `json:"recording"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		fmt.Fprintf(os.Stderr, "error: bad reply from daemon: %v\n", err)
-		return
-	}
-	if out.Recording {
-		fmt.Println("recording started")
-		return
-	}
-	fmt.Println("recording stopped — transcribing in the background")
-}
