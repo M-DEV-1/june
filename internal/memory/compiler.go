@@ -147,6 +147,16 @@ Be deterministic. Do not invent facts. Merge wording when updating.`,
 	return ops, nil
 }
 
+// attributionRules is the rule block of the attribution prompt. "summary" is the line that ends up in memory as the record of a slice of the day, so it is told to name the activity rather than the application it happened in; "state" is held to the same voice for the same reason.
+const attributionRules = `Rules:
+- Reuse a thread id when the activity continues that throughline; use 0 only for a new one.
+- Emit MULTIPLE threads for concurrent activities. NEVER collapse entertainment into work or vice-versa.
+- "state" is the SPECIFIC position within the thread, from the screen: the scene of a show, the section of an article, the feature being worked on. Name the thing, not the app; no counts or times.
+- "summary" is what the user did here, in plain words: the activity itself, never the app or site it happened in.
+- "subject" is what the user would call this to a friend: short, stable, plain-spoken; no title case, ampersands, app or file names, or report labels.
+- "novel" is true only if this throughline appears genuinely new.
+- "identity" holds ONLY durable facts about the PERSON (identity, lasting preferences, skills, relationships). Projects and shows are threads, NOT identity. Usually empty.`
+
 // AttributeThreads maps recent screen activity onto ongoing threads, one update per concurrent throughline (so watching + coding never collapse into one thread) with the SPECIFIC state within each, plus any durable PERSON facts as identity.
 func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error) {
 	tracer := obs.GetTracer(ctx, "ora.memory")
@@ -171,13 +181,7 @@ func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tr
 
 You are given EXISTING THREADS (id, kind, subject :: current state) and RECENT ACTIVITIES (app, window title, and any screen text/description).
 
-Rules:
-- Reuse an existing thread id when the activity continues that throughline; use 0 only for a genuinely new one.
-- Emit MULTIPLE threads when concurrent activities are present. NEVER collapse entertainment into a work thread or vice-versa.
-- "state" is the whole point: capture the SPECIFIC position within the thread from screen content — the exact scene/plot point of a show, the chapter/section of an article, the file or feature being worked on. Not just the app.
-- "subject" is what the user would call this out loud to a friend — a short, stable, plain-spoken phrase: no title case, no ampersands, no app or file names, no report-style labels.
-- "novel" is true only if this throughline appears genuinely new to the user.
-- "identity" holds ONLY durable facts about the PERSON (identity, lasting preferences, skills, relationships). Ongoing projects and shows are threads, NOT identity. Usually an empty array.
+%s
 
 EXISTING THREADS:
 %s
@@ -187,6 +191,7 @@ RECENT ACTIVITIES:
 
 Respond strictly as JSON:
 {"threads":[{"id":0,"subject":"","kind":"work|project|entertainment|learning|routine|person","state":"","summary":"","novel":false}],"identity":[]}`,
+		attributionRules,
 		strings.Join(existingLines, "\n"),
 		strings.Join(activityList, "\n"))
 
