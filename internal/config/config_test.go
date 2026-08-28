@@ -231,13 +231,13 @@ func TestLoadConfig_Transcribe(t *testing.T) {
 		}
 	})
 
-	t.Run("a named engine is read back", func(t *testing.T) {
+	t.Run("the gpu device is read back", func(t *testing.T) {
 		t.Setenv("ORA_DATA_DIR", t.TempDir())
-		if err := os.WriteFile(ConfigPath(), []byte(`{"transcribe":{"engine":"parakeet"}}`), 0644); err != nil {
+		if err := os.WriteFile(ConfigPath(), []byte(`{"transcribe":{"gpu_device":1}}`), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if got := LoadConfig().Transcribe.Engine; got != EngineParakeet {
-			t.Errorf("Engine = %q, want %q", got, EngineParakeet)
+		if got := LoadConfig().Transcribe.GPUDevice; got != 1 {
+			t.Errorf("GPUDevice = %d, want 1", got)
 		}
 	})
 }

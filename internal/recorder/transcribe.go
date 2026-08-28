@@ -2,7 +2,6 @@ package recorder
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"ora/internal/db"
@@ -31,31 +29,6 @@ const (
 	speakerMe   = "me"
 	speakerCall = "call"
 )
-
-// whisperCandidates are the whisperfile names looked for under <data dir>/whisper, best first. These are single-file executables from Mozilla's whisperfile release with the weights baked in, so there is no separate model file to point at.
-// The multilingual builds come first because the meetings being recorded are Hindi-English code-switched, and an .en build hears that as nothing at all — a 16-minute call came back with no speech in it. The multilingual models detect the language themselves and transcribe it as spoken, so no language flag is passed and --translate is never used.
-var whisperCandidates = []string{
-	"whisper-medium.llamafile",
-	"whisper-small.llamafile",
-	"whisper-medium.en.llamafile",
-	"whisper-small.en.llamafile",
-	"whisper-tiny.en.llamafile",
-}
-
-// whisperBinary returns the path to the whisper executable to run: $ORA_WHISPER if set, otherwise the best whisperCandidates entry present under dataDir/whisper.
-func whisperBinary(dataDir string) (string, error) {
-	if p := os.Getenv("ORA_WHISPER"); p != "" {
-		return p, nil
-	}
-	dir := filepath.Join(dataDir, "whisper")
-	for _, name := range whisperCandidates {
-		p := filepath.Join(dir, name)
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("no whisperfile found in %s (expected one of %s) and $ORA_WHISPER is unset", dir, strings.Join(whisperCandidates, ", "))
-}
 
 // Decoder thresholds passed to whisper on every run. Whisper decodes each window at a rising temperature and keeps the first result that passes these two tests, so tightening them makes it retry a bad window instead of printing what it invented on the first pass.
 // entropyThreshold is the token-distribution entropy above which a decode counts as failed; whisper.cpp's own default is 2.40 and lowering it catches more of the flat, low-confidence decoding that produces looped sentences on near-silence.
@@ -78,7 +51,7 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	if prompt != "" {
 		args = append(args, "--prompt", prompt)
 	}
-	// A whisper.cpp build takes two flags a whisperfile does not, and decodes on the GPU, where only one run fits at a time.
+	// The model flags mean a real whisper.cpp run, which decodes on the GPU, where only one run fits at a time.
 	if extra := whisperCPPArgs(bin); extra != nil {
 		args = append(args, extra...)
 		gpuRun.Lock()
@@ -86,33 +59,14 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	}
 	started := time.Now()
 	out, errOut, err := run(ctx, bin, args)
-	if errors.Is(err, syscall.ENOEXEC) {
-		// A whisperfile is an APE binary: the kernel refuses it without a binfmt_misc registration, but its header doubles as a shell script that loads the real executable. A plain ELF whisper build takes the direct path above instead.
-		started = time.Now()
-		out, errOut, err = run(ctx, "/bin/sh", append([]string{bin}, args...))
-	}
 	took := time.Since(started)
 	// Whisper's own account of the run used to be thrown away, which is why two meetings that failed outright looked like meetings nobody spoke in. Keep it wherever the run ends up.
 	slog.Debug("whisper finished", "file", filepath.Base(path), "took", took, "stderr", strings.TrimSpace(errOut))
 	if err != nil {
 		return nil, fmt.Errorf("whisper %s: %w (%s)", filepath.Base(path), err, strings.TrimSpace(errOut))
 	}
-	// whisperfile exits 0 whether or not it managed to decode the audio, so a file it could not read is indistinguishable from a meeting nobody spoke in unless its stderr is read.
-	if strings.Contains(errOut, "failed to read") {
-		return nil, fmt.Errorf("whisper could not read %s: %s", filepath.Base(path), strings.TrimSpace(lineContaining(errOut, "failed to read")))
-	}
-
-	segs := parseSegments(out, speaker, offset)
-	// Whisper runs at a few times real time, so a long recording that came back with nothing in a moment was never listened to: whatever went wrong, it exited 0 without saying so. Treating that as a silent meeting is what kept the audio's real contents hidden.
-	if audio := wavDuration(path); len(segs) == 0 && audio >= minAudioForSpeedCheck && took < audio/whisperSlowestPlausibleSpeed {
-		slog.Warn("whisper produced nothing far too quickly to have transcribed the audio", "file", filepath.Base(path), "audio", audio, "took", took, "stderr", strings.TrimSpace(errOut))
-		return nil, fmt.Errorf("whisper returned no speech for %s after %s of %s of audio, which is too fast to be a transcription: %s", filepath.Base(path), took.Round(time.Millisecond), audio.Round(time.Second), strings.TrimSpace(errOut))
-	}
-	return segs, nil
+	return parseSegments(out, speaker, offset), nil
 }
-
-// whisperSlowestPlausibleSpeed is the slowest ratio of audio length to run time that still counts as a real transcription. small on this CPU runs around four times real time, so a run twenty times faster than the audio it was given did not decode it.
-const whisperSlowestPlausibleSpeed = 20
 
 // transcribeThreads is how many threads one transcription run may use. The two sides of a call are transcribed at the same time, so this is deliberately half of what a single run would take: whisper's own default is half the logical CPUs, and two runs at a quarter each add up to the same load rather than fighting over the same cores. Never less than one.
 // $ORA_TRANSCRIBE_THREADS overrides it. The right number is a property of the machine and not of the code: on a hybrid CPU the logical count is a poor guide to how many threads actually run at full speed, and the only way to know is to time a real recording both ways.
@@ -129,19 +83,6 @@ func transcribeThreads() int {
 	return 1
 }
 
-// minAudioForSpeedCheck is the shortest recording the speed check applies to. A few seconds of audio genuinely does transcribe in a blink, and a fixed process startup cost swamps the ratio there.
-const minAudioForSpeedCheck = 30 * time.Second
-
-// wavDuration returns how much 16 kHz mono 16-bit audio a WAV file holds, from its size. Returns zero if the file cannot be measured.
-func wavDuration(path string) time.Duration {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() <= wavHeaderSize {
-		return 0
-	}
-	frames := (info.Size() - wavHeaderSize) / 2
-	return time.Duration(frames) * time.Second / sampleRate
-}
-
 // run executes one command and returns its stdout and stderr separately, so a tool that reports failure on stderr while exiting 0 can still be caught.
 func run(ctx context.Context, name string, args []string) (stdout, stderr string, err error) {
 	var out, errOut strings.Builder
@@ -152,17 +93,7 @@ func run(ctx context.Context, name string, args []string) (stdout, stderr string
 	return out.String(), errOut.String(), err
 }
 
-// lineContaining returns the first line of s that contains want, so an error message can quote the complaint rather than the whole model-loading banner.
-func lineContaining(s, want string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if strings.Contains(line, want) {
-			return line
-		}
-	}
-	return s
-}
-
-// segmentLine matches whisperfile's per-segment stdout line, e.g. "[00:00:07.640 --> 00:00:17.840]   text here".
+// segmentLine matches whisper's per-segment stdout line, e.g. "[00:00:07.640 --> 00:00:17.840]   text here".
 var segmentLine = regexp.MustCompile(`^\[(\d+):(\d+):(\d+)\.(\d+) --> (\d+):(\d+):(\d+)\.(\d+)\]\s*(.*)$`)
 
 // parseSegments pulls the timestamped segments out of whisper's stdout, dropping banner lines and segments with no text. Every timestamp is shifted by offset so segments from both streams share one clock.
