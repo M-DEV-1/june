@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"ora/internal/db"
 )
 
 // fakeWhisper writes a shell script that stands in for the whisperfile: it prints script to stdout, complaint to stderr, and exits 0. Returns its path.
@@ -39,7 +42,7 @@ func testWAV(t *testing.T) string {
 // whisperfile reports a file it could not decode on stderr and still exits 0, so a failed read is indistinguishable from a meeting nobody spoke in. Two meetings were filed as silent that way. It has to come back as an error.
 func TestTranscribeWAV_ReportsAReadFailureThatExitedZero(t *testing.T) {
 	bin := fakeWhisper(t, "", "error: failed to read audio file 'mic.wav'")
-	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, 0); err == nil {
+	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0); err == nil {
 		t.Fatal("a whisper run that could not read the audio must be an error, not an empty transcript")
 	}
 }
@@ -58,7 +61,7 @@ func TestTranscribeWAV_RejectsAnEmptyResultThatCameBackTooFast(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	bin := fakeWhisper(t, "", "")
-	if _, err := transcribeWAV(context.Background(), bin, path, speakerMe, 0); err == nil {
+	if _, err := transcribeWAV(context.Background(), bin, path, speakerMe, "", 0); err == nil {
 		t.Fatal("ten minutes of audio transcribed to nothing in milliseconds must be an error, not a silent meeting")
 	}
 }
@@ -66,7 +69,7 @@ func TestTranscribeWAV_RejectsAnEmptyResultThatCameBackTooFast(t *testing.T) {
 // A genuinely short clip does transcribe in a moment, so the speed check must not turn every brief recording into a failure.
 func TestTranscribeWAV_ShortSilentClipIsStillNotAnError(t *testing.T) {
 	bin := fakeWhisper(t, "", "")
-	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, 0)
+	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0)
 	if err != nil {
 		t.Fatalf("transcribeWAV: %v", err)
 	}
@@ -78,7 +81,7 @@ func TestTranscribeWAV_ShortSilentClipIsStillNotAnError(t *testing.T) {
 // The stderr check must not cost us the transcript: whisper prints progress and banners to stderr on every successful run too.
 func TestTranscribeWAV_KeepsSegmentsWhenStderrIsJustNoise(t *testing.T) {
 	bin := fakeWhisper(t, "[00:00:00.000 --> 00:00:01.000]   hello there", "whisper_model_load: model size = 487.01 MB")
-	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, 0)
+	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0)
 	if err != nil {
 		t.Fatalf("transcribeWAV: %v", err)
 	}
@@ -177,9 +180,8 @@ func TestRenderTranscript_InterleavesByStartTime(t *testing.T) {
 		{Start: 5 * time.Second, End: 6 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
 	}
 	got := renderTranscript(append(mine, theirs...))
-	want := "[00:00:00] [me] morning all\n" +
-		"[00:00:02] [call] morning\n" +
-		"[00:00:05] [call] ship it friday\n" +
+	want := "[00:00:00] [me] morning all\n\n" +
+		"[00:00:02] [call] morning ship it friday\n\n" +
 		"[00:00:10] [me] sounds good\n"
 	if got != want {
 		t.Errorf("transcript mismatch\n got:\n%s\nwant:\n%s", got, want)
@@ -202,5 +204,145 @@ func TestParseSegments_DropsNonSpeechMarkers(t *testing.T) {
 	segs := parseSegments(out, speakerMe, 0)
 	if len(segs) != 1 || segs[0].Text != "real words here" {
 		t.Errorf("expected only the spoken segment, got %+v", segs)
+	}
+}
+
+// Whisper loops on thin audio: the same invented sentence came back five times in the real 2026-08-28 recording, scattered between other lines rather than in one run. A sentence of ordinary length repeated verbatim that often is the decoder stuck, not something anyone said, so every copy goes.
+func TestDropHallucinations_DropsAScatteredVerbatimRepeat(t *testing.T) {
+	const dog = "I'm going to try to reach out to my dog."
+	segs := []Segment{
+		{Start: 11 * time.Second, Speaker: speakerCall, Text: dog},
+		{Start: 14 * time.Second, Speaker: speakerCall, Text: "Okay."},
+		{Start: 15 * time.Second, Speaker: speakerCall, Text: dog},
+		{Start: 18 * time.Second, Speaker: speakerCall, Text: "Okay."},
+		{Start: 19 * time.Second, Speaker: speakerCall, Text: dog},
+		{Start: 33 * time.Second, Speaker: speakerCall, Text: "Are you sharing something?"},
+	}
+	for _, s := range dropHallucinations(segs) {
+		if s.Text == dog {
+			t.Fatalf("the looped sentence survived: %+v", dropHallucinations(segs))
+		}
+	}
+}
+
+// A phrase people really do repeat must survive. Twice is emphasis, not a loop.
+func TestDropHallucinations_KeepsAPhraseSaidTwice(t *testing.T) {
+	const line = "It will be same for all of them in the same country."
+	segs := []Segment{
+		{Start: 37 * time.Second, Speaker: speakerCall, Text: line},
+		{Start: 41 * time.Second, Speaker: speakerCall, Text: line},
+	}
+	if got := dropHallucinations(segs); len(got) != 2 {
+		t.Errorf("got %d segments, want both kept: %+v", len(got), got)
+	}
+}
+
+// Runs of a bare acknowledgement are whisper filling silence. Three or more in a row from one stream collapse to one; two stay as they are.
+func TestDropHallucinations_CollapsesARunOfIdenticalSegments(t *testing.T) {
+	segs := []Segment{
+		{Start: 21 * time.Second, Speaker: speakerCall, Text: "Okay."},
+		{Start: 22 * time.Second, Speaker: speakerCall, Text: "Okay."},
+		{Start: 23 * time.Second, Speaker: speakerCall, Text: "Okay."},
+		{Start: 24 * time.Second, Speaker: speakerCall, Text: "Okay."},
+		{Start: 33 * time.Second, Speaker: speakerCall, Text: "Are you sharing something?"},
+	}
+	got := dropHallucinations(segs)
+	if len(got) != 2 || got[0].Text != "Okay." || got[1].Text != "Are you sharing something?" {
+		t.Errorf("got %+v, want one Okay. and the real line", got)
+	}
+}
+
+// Whisper also loops inside a single segment: one line of the real transcript was the word "Okay." thirteen times over. The repeat is collapsed without touching the words around it.
+func TestDropHallucinations_CollapsesARepeatInsideOneSegment(t *testing.T) {
+	segs := []Segment{{Speaker: speakerMe, Text: "read. Okay. Okay. Okay. Okay. Okay. Okay. Okay. Okay."}}
+	got := dropHallucinations(segs)
+	if len(got) != 1 || got[0].Text != "read. Okay." {
+		t.Errorf("got %+v, want \"read. Okay.\"", got)
+	}
+}
+
+// A sentence said twice inside one segment is emphasis and stays.
+func TestDropHallucinations_KeepsADoubleInsideOneSegment(t *testing.T) {
+	segs := []Segment{{Speaker: speakerMe, Text: "We have to do it. We have to do it."}}
+	if got := dropHallucinations(segs); got[0].Text != "We have to do it. We have to do it." {
+		t.Errorf("got %q, want the pair kept", got[0].Text)
+	}
+}
+
+// A line-per-segment transcript shreds both speakers into fragments. Consecutive segments from one stream are one turn, printed as one paragraph timestamped at its start.
+func TestRenderTranscript_MergesConsecutiveSegmentsIntoOneTurn(t *testing.T) {
+	segs := []Segment{
+		{Start: 0, Speaker: speakerMe, Text: "morning all"},
+		{Start: 2 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
+		{Start: 5 * time.Second, Speaker: speakerCall, Text: "yes."},
+		{Start: 7 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
+		{Start: 10 * time.Second, Speaker: speakerMe, Text: "sounds good"},
+	}
+	want := "[00:00:00] [me] morning all did you see the sheet\n\n" +
+		"[00:00:05] [call] yes. ship it friday\n\n" +
+		"[00:00:10] [me] sounds good\n"
+	if got := renderTranscript(segs); got != want {
+		t.Errorf("transcript mismatch\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// The priming prompt is built out of what Ora already saw on screen during the meeting, so whisper spells the domain's own words: the acronyms and the proper nouns, plus the people whose names were on screen.
+func TestPrimingPrompt_CarriesTheWindowsAcronymsAndNames(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Trupti Hosmani: ok sure ping me. Mahadevan KS: I also found this INFORM Risk Scoring formula and the GRDI numbers. INFORM again. GRDI again."},
+		{Title: "Credibl Essentials - Climate Reporting Platform - Brave", ScreenText: "Climate Risk Studio Double Materiality Assessment ASRS"},
+	}
+	got := primingPrompt(eps)
+	for _, want := range []string{"INFORM", "GRDI", "ASRS", "Trupti Hosmani", "Climate Risk Studio"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("priming prompt is missing %q:\n%s", want, got)
+		}
+	}
+	if len(got) > primingPromptBudget {
+		t.Errorf("priming prompt is %d chars, over the %d-char budget", len(got), primingPromptBudget)
+	}
+	// Whisper continues the prompt's register as well as its words: primed with raw lowercase screen text it returns the whole transcript lowercase and unpunctuated, so the prompt has to read as capitalised, punctuated sentences.
+	if !strings.HasPrefix(got, "Meeting notes.") || !strings.HasSuffix(got, ".") {
+		t.Errorf("priming prompt must read as sentences, got:\n%s", got)
+	}
+}
+
+// Browser and app chrome is on every screen Ora captures and is not what the meeting is about, so it must not crowd the real terms out of the prompt.
+func TestPrimingPrompt_LeavesOutBrowserChrome(t *testing.T) {
+	eps := []db.Episode{{Title: "GitHub - Brave", ScreenText: "Type / to search Pull requests Add file Code Insights Settings Search Search Ctrl K"}}
+	got := primingPrompt(eps)
+	for _, junk := range []string{"Ctrl K", "Search Search", "Add file"} {
+		if strings.Contains(got, junk) {
+			t.Errorf("priming prompt carries chrome %q:\n%s", junk, got)
+		}
+	}
+}
+
+// Nothing on screen means no prompt at all, rather than a prompt made of nothing that whisper would try to continue.
+func TestPrimingPrompt_EmptyWhenThereIsNoContext(t *testing.T) {
+	if got := primingPrompt(nil); got != "" {
+		t.Errorf("got %q, want no prompt", got)
+	}
+}
+
+// The anti-hallucination thresholds and the priming prompt only do anything if they actually reach the whisper process, and nothing else in the pipeline would notice if they stopped being passed.
+func TestTranscribeWAV_PassesThresholdsAndPrompt(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	bin := filepath.Join(dir, "echo-args")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake whisper: %v", err)
+	}
+	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "GDIS, INFORM", 0); err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read back the arguments whisper was given: %v", err)
+	}
+	for _, want := range []string{"-et " + entropyThreshold, "-lpt " + logProbThreshold, "-mc " + whisperMaxContext, "--prompt GDIS, INFORM"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("whisper was called without %q: %s", want, got)
+		}
 	}
 }
