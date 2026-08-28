@@ -33,7 +33,6 @@ type Styles struct {
 	TextYou       lipgloss.Style
 	TextOra       lipgloss.Style
 	TextThought   lipgloss.Style
-	GutterWidth   int
 
 	ToolDot  lipgloss.Style
 	ToolText lipgloss.Style
