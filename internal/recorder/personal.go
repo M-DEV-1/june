@@ -18,7 +18,7 @@ Decide whether the meeting changed anything in the store. Almost always the answ
 
   - If the store already says it, write nothing for it. Only a real change earns an entry: a person who is not there yet, a fact about a person that has actually moved on, a preference or a life fact the user stated.
   - Only durable things about people, relationships, preferences, and the user's life and work. What was decided in this meeting, what is being built this week, what someone is working on right now — none of that belongs here. That is kept elsewhere.
-  - A person earns an entry only with the same evidence the minutes needed: they spoke in the call, they were addressed by name during it, or the meeting app showed them in it. A username, commit author, ticket assignee, page owner or account name on screen is NEVER a person here.
+  - A person earns an entry only with the same evidence the minutes needed: they spoke in the call, they were spoken TO by name during it, or the meeting app or a shared working surface showed them taking part (participant tile, presenting label, a message they sent in the meeting's chat or whiteboard while it ran). Someone merely talked about is not evidence. A username, commit author, ticket assignee, page owner or account name on screen is NEVER a person here.
   - Do not write an entry about the user themself. The "identity" subject already covers who they are.
   - When you update a person who is already stored, rewrite their whole entry: keep what still holds, fold in what is new, and keep it to a few sentences. Include when the user last worked with them, by date, so the entry says how current it is.
   - Subjects are short and lowercase, hyphenated: a person's own name ("priya-shah"), or an area of preference ("preferences-communication").
@@ -69,7 +69,12 @@ func (r *Recorder) updatePersonalContext(ctx context.Context, minutes string, st
 		return
 	}
 
-	for _, u := range parsePersonalUpdates(out) {
+	updates := parsePersonalUpdates(out)
+	if len(updates) == 0 {
+		slog.Info("personal context updater decided no changes for this meeting")
+		return
+	}
+	for _, u := range updates {
 		if strings.TrimSpace(u.Subject) == "" || strings.TrimSpace(u.Content) == "" {
 			continue
 		}
