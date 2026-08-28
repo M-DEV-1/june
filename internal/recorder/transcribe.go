@@ -60,8 +60,14 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	started := time.Now()
 	out, errOut, err := run(ctx, bin, args)
 	took := time.Since(started)
+	// audio and rate say how long the meeting itself runs and how many times faster than real time this machine transcribes it, so a run's log line is enough to predict how long N hours of meetings will take to catch up on.
+	audio := audioDuration(path)
+	var rate float64
+	if took > 0 {
+		rate = audio.Seconds() / took.Seconds()
+	}
 	// Whisper's own account of the run used to be thrown away, which is why two meetings that failed outright looked like meetings nobody spoke in. Keep it wherever the run ends up.
-	slog.Debug("whisper finished", "file", filepath.Base(path), "took", took, "stderr", strings.TrimSpace(errOut))
+	slog.Debug("whisper finished", "file", filepath.Base(path), "took", took, "audio", audio, "rate", rate, "stderr", strings.TrimSpace(errOut))
 	if err != nil {
 		return nil, fmt.Errorf("whisper %s: %w (%s)", filepath.Base(path), err, strings.TrimSpace(errOut))
 	}
@@ -310,49 +316,58 @@ func primingPrompt(eps []db.Episode) string {
 		return terms[i] < terms[j]
 	})
 
+	// Terms come before participants and participants come last: whisper keeps only the last whisperMaxContext tokens of this prompt, so whatever sits at the front is what gets cut when the prompt runs long. Names matter more than terms for getting the transcript right, so they go where the truncation can't reach them.
 	var b strings.Builder
 	b.WriteString("Meeting notes.")
-	// The names are bounded by the same budget as everything else: a screen full of chat history can name more people than the prompt has room for, and a prompt whose front is cut off loses the framing sentence that keeps whisper writing in sentences.
-	named := 0
-	for _, name := range senders {
-		if b.Len()+len(name)+18 > primingPromptBudget {
-			break
+
+	written := 0
+	if len(terms) > 0 {
+		b.WriteString(" Terms:")
+		for _, key := range terms {
+			term := first[key]
+			if seenSender[term] {
+				continue
+			}
+			// Three characters are left over for the separator and the closing full stop, which is what keeps whisper writing in sentences rather than copying a bare word list.
+			if b.Len()+len(term)+3 > primingPromptBudget {
+				break
+			}
+			if written > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(" " + term)
+			written++
 		}
-		if named == 0 {
-			b.WriteString(" Participants: " + name)
+		if written == 0 {
+			s := strings.TrimSuffix(b.String(), " Terms:")
+			b.Reset()
+			b.WriteString(s)
 		} else {
-			b.WriteString(", " + name)
+			b.WriteString(".")
 		}
-		named++
 	}
-	if named > 0 {
-		b.WriteString(".")
-	}
-	if len(terms) == 0 {
-		if named == 0 {
+
+	if len(senders) == 0 {
+		if written == 0 {
 			return ""
 		}
 		return b.String()
 	}
-	b.WriteString(" Terms:")
-	written := 0
-	for _, key := range terms {
-		term := first[key]
-		if seenSender[term] {
-			continue
-		}
-		// Three characters are left over for the separator and the closing full stop, which is what keeps whisper writing in sentences rather than copying a bare word list.
-		if b.Len()+len(term)+3 > primingPromptBudget {
+	b.WriteString(" Participants:")
+	named := 0
+	for _, name := range senders {
+		// Same three characters of slack as the terms loop, for the separator and the closing full stop.
+		if b.Len()+len(name)+3 > primingPromptBudget {
 			break
 		}
-		if written > 0 {
+		if named > 0 {
 			b.WriteString(",")
 		}
-		b.WriteString(" " + term)
-		written++
+		b.WriteString(" " + name)
+		named++
 	}
-	if written == 0 {
-		return strings.TrimSuffix(b.String(), " Terms:")
+	if named == 0 {
+		return strings.TrimSuffix(b.String(), " Participants:")
 	}
 	b.WriteString(".")
 	return b.String()

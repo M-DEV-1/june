@@ -214,6 +214,14 @@ func (r *Recorder) pickup(ctx context.Context) {
 		if !ok || dir == r.liveDir() {
 			continue
 		}
+		// Regenerating minutes from an existing transcript is cheap and may run on battery; running whisper is not, and StopAndProcess already defers that until the machine is plugged in. The sweep has to honour the same deferral, or a recording that just ended on battery gets transcribed on the very next tick.
+		if !s.fromTranscript && !r.onAC() {
+			continue
+		}
+		// Peeking at the claim set (rather than claiming here) is what keeps this log from firing for a directory whose whisper run from a previous tick is still going: without it, a long meeting logged "finishing" every retryEvery for as long as it took to transcribe, though process() below was always going to no-op.
+		if r.claimedElsewhere(dir) {
+			continue
+		}
 		slog.Info("finishing an unfinished meeting recording", "dir", dir, "from the existing transcript", s.fromTranscript)
 		if err := r.process(ctx, s); err != nil {
 			slog.Error("could not finish an unfinished meeting recording", "dir", dir, "error", err)
@@ -249,6 +257,13 @@ func (r *Recorder) release(dir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.inFlight, dir)
+}
+
+// claimedElsewhere reports whether dir is already being processed by another in-flight call, without claiming it. It exists only so the sweep can decide whether to log before it hands a directory to process(), which does the real, race-free claim.
+func (r *Recorder) claimedElsewhere(dir string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inFlight[dir]
 }
 
 // retryDeferred runs pickup every retryEvery for as long as the process lives, so a recording deferred to save the battery is transcribed within a few minutes of the charger going in.
@@ -498,13 +513,20 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	if err != nil {
 		return fmt.Errorf("summarise meeting: %w", err)
 	}
+	// A blank reply is not a summary of anything: writing it as minutes.md would mark the meeting done and lose it silently. Treating it as an error instead sends it through the same failure marker and hour-long backoff as a summariser that returned an error outright.
+	if strings.TrimSpace(text) == "" {
+		return errors.New("summarise meeting: the brain returned empty minutes")
+	}
 	if err := os.WriteFile(filepath.Join(s.dir, "minutes.md"), []byte(text), 0o644); err != nil {
 		return fmt.Errorf("write minutes: %w", err)
 	}
 	r.fileMinutes(ctx, s.dir, text)
 
 	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
-	r.updatePersonalContext(ctx, text, s.startedAt, s.stoppedAt)
+	// Regenerating minutes from a transcript that has already been through this once (fromTranscript) must not run it again: the meeting taught Ora whatever it was going to teach it the first time, and running it again just re-proposes the same writes.
+	if !s.fromTranscript {
+		r.updatePersonalContext(ctx, text, s.startedAt, s.stoppedAt)
+	}
 
 	r.notify("Meeting summary ready", filepath.Join(s.dir, "minutes.md"))
 	return nil
