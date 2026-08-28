@@ -43,34 +43,6 @@ func ClaudeCLI(binary string, timeoutSeconds int) Brain {
 	}
 }
 
-// AgyCLI answers by running Antigravity's `agy --print`, under the Antigravity login the machine already has.
-// The prompt is the value of --print rather than stdin, which is the only text input that CLI takes; that caps a prompt at one argv entry, 128 KB on Linux.
-// The timeout matters more here than for claude: agy has open bugs where a print run with no terminal attached never returns, and a probe of a one-word prompt took 29 seconds of wall clock for 13 seconds of model time.
-// Input: the path to the binary and a hard timeout in seconds. Output: the "response" field of the CLI's JSON.
-func AgyCLI(binary string, timeoutSeconds int) Brain {
-	return func(ctx context.Context, prompt string) (string, error) {
-		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"--print", prompt, "--output-format", "json", "--disable-slash-commands"}, "")
-		if err != nil {
-			return "", err
-		}
-		var res struct {
-			Status   string `json:"status"`
-			Response string `json:"response"`
-		}
-		if err := json.Unmarshal(out, &res); err != nil {
-			return "", fmt.Errorf("could not parse the output of agy --print: %w (%s)", err, head(string(out)))
-		}
-		if res.Status != "SUCCESS" {
-			return "", fmt.Errorf("agy --print failed with status %s: %s", res.Status, head(res.Response))
-		}
-		text := strings.TrimSpace(res.Response)
-		if text == "" {
-			return "", fmt.Errorf("agy --print returned no text")
-		}
-		return text, nil
-	}
-}
-
 // runCLI runs one child process to completion under a hard timeout and returns its stdout.
 // Input: the binary, the timeout in seconds, the arguments, and what to feed the child on stdin. Output: stdout, or an error naming the timeout, the exit status or the stderr the child died with.
 func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []string, stdin string) ([]byte, error) {

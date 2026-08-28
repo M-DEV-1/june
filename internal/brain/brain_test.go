@@ -10,7 +10,7 @@ import (
 	"ora/internal/config"
 )
 
-// fakeCLI writes a stub executable that records how it was called and then runs body, so the CLI brains can be tested without running the real claude or agy.
+// fakeCLI writes a stub executable that records how it was called and then runs body, so the CLI brain can be tested without running the real claude.
 // Input: the file name to give the stub and the shell lines that produce its output. Output: the path to the executable; its argv lands in <dir>/args, one per line, and its stdin in <dir>/stdin.
 func fakeCLI(t *testing.T, name, body string) string {
 	t.Helper()
@@ -127,72 +127,12 @@ func TestClaudeCLI_invocation(t *testing.T) {
 	}
 }
 
-func TestAgyCLI(t *testing.T) {
-	tests := []struct {
-		name    string
-		body    string
-		timeout int
-		want    string
-		wantErr string
-	}{
-		{
-			name: "the response field is the answer",
-			body: `printf '%s' '{"status":"SUCCESS","response":"ok\n","num_turns":1}'`,
-			want: "ok",
-		},
-		{
-			name:    "any status but SUCCESS fails",
-			body:    `printf '%s' '{"status":"ERROR","response":""}'`,
-			wantErr: "ERROR",
-		},
-		{
-			name:    "a headless hang is cut off by the timeout",
-			body:    `sleep 5`,
-			timeout: 1,
-			wantErr: "timed out",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			bin := fakeCLI(t, "agy", tt.body)
-			timeout := tt.timeout
-			if timeout == 0 {
-				timeout = 10
-			}
-			got, err := AgyCLI(bin, timeout)(context.Background(), "summarise this")
-
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected an error containing %q, got %q", tt.wantErr, got)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Fatalf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// agy takes the prompt as the value of --print rather than on stdin.
-func TestAgyCLI_invocation(t *testing.T) {
-	bin := fakeCLI(t, "agy", `printf '%s' '{"status":"SUCCESS","response":"ok"}'`)
-	if _, err := AgyCLI(bin, 10)(context.Background(), "the whole transcript"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	args, _ := recorded(t, bin)
-	if !strings.Contains(args, "--print\nthe whole transcript\n") {
-		t.Errorf("the prompt should be the value of --print:\n%s", args)
-	}
-	if !strings.Contains(args, "--output-format\njson\n") {
-		t.Errorf("argv is missing the JSON output format:\n%s", args)
+// A headless hang is cut off by the timeout.
+func TestClaudeCLI_timeout(t *testing.T) {
+	bin := fakeCLI(t, "claude", `sleep 5`)
+	_, err := ClaudeCLI(bin, 1)(context.Background(), "summarise this")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want it to contain %q", err, "timed out")
 	}
 }
 
@@ -206,7 +146,6 @@ func TestClaudeCLI_missingBinary(t *testing.T) {
 // FromConfig is the only thing the daemon calls: an absent or unrecognised brain block must keep ORA on the Gemini API exactly as it was before this package existed.
 func TestFromConfig(t *testing.T) {
 	claudeBin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"from claude"}'`)
-	agyBin := fakeCLI(t, "agy", `printf '%s' '{"status":"SUCCESS","response":"from agy"}'`)
 
 	tests := []struct {
 		name    string
@@ -228,11 +167,6 @@ func TestFromConfig(t *testing.T) {
 			name: "claude-cli runs the configured binary",
 			cfg:  config.BrainConfig{Provider: config.BrainClaudeCLI, Binary: claudeBin, TimeoutSeconds: 10},
 			want: "from claude",
-		},
-		{
-			name: "agy-cli runs the configured binary",
-			cfg:  config.BrainConfig{Provider: config.BrainAgyCLI, Binary: agyBin, TimeoutSeconds: 10},
-			want: "from agy",
 		},
 	}
 
