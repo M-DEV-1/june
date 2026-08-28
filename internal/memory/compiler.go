@@ -175,7 +175,7 @@ Rules:
 - Reuse an existing thread id when the activity continues that throughline; use 0 only for a genuinely new one.
 - Emit MULTIPLE threads when concurrent activities are present. NEVER collapse entertainment into a work thread or vice-versa.
 - "state" is the whole point: capture the SPECIFIC position within the thread from screen content — the exact scene/plot point of a show, the chapter/section of an article, the file or feature being worked on. Not just the app.
-- Keep "subject" short and stable so the same thread is recognized over time ("Suits", not "watching Suits season 1 episode 10").
+- "subject" is what the user would call this out loud to a friend — short, stable, no title case, no ampersands, no app or file names ("Suits", not "Suits Season 1 Viewing"; "the vulnerability scoring", not "Climate Risk Statement Builder ASRS").
 - "novel" is true only if this throughline appears genuinely new to the user.
 - "identity" holds ONLY durable facts about the PERSON (identity, lasting preferences, skills, relationships). Ongoing projects and shows are threads, NOT identity. Usually an empty array.
 
