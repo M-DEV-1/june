@@ -19,6 +19,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "modernc.org/sqlite"
 
+	"ora/internal/agent"
 	"ora/internal/config"
 	"ora/internal/db"
 )
@@ -28,12 +29,13 @@ func main() {
 	turnCap := flag.Int("turns", 40, "track 2: score at most this many of the most recent turn pairs")
 	outDir := flag.String("out", "evals/runs", "directory the scorecard is written to")
 	questionsPath := flag.String("questions", "evals/questions.jsonl", "track 1: the question set")
+	toolPath := flag.Bool("tool-path", false, "track 1: replay questions through the agent's real query_memory tool (ExecuteTool, honoring each question's args) instead of calling HybridSearch directly")
 	flag.Parse()
 
 	// The judge is chatty on stderr through slog if internal packages log; keep it to warnings so the run's own output stays readable.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
-	if err := run(*tracks, *turnCap, *outDir, *questionsPath); err != nil {
+	if err := run(*tracks, *turnCap, *outDir, *questionsPath, *toolPath); err != nil {
 		fmt.Fprintf(os.Stderr, "eval run failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -50,7 +52,7 @@ type scorecard struct {
 	Ran     map[string]bool
 }
 
-func run(tracks string, turnCap int, outDir, questionsPath string) error {
+func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool) error {
 	// The API key lives in the repo's .env, the same file cmd/root.go loads at startup.
 	_ = godotenv.Load()
 	apiKey := os.Getenv("GEMINI_API_KEY")
@@ -98,7 +100,13 @@ func run(tracks string, turnCap int, outDir, questionsPath string) error {
 			card.Notes = append(card.Notes, fmt.Sprintf("daemon /embed unreachable (%v) — track 1 ran lexical-only, treat its numbers as a floor", err))
 			fmt.Println("  WARNING: /embed unreachable, hybrid search will degrade to lexical-only")
 		}
-		card.T1 = runTrack1(ctx, store, j, qs)
+		search := directSearch(store)
+		if toolPath {
+			// The agent handle exists only to reach ExecuteTool; no mic, speaker, compiler, or live session is involved, and the key is never used by query_memory.
+			search = toolPathSearch(agent.NewAgent(nil, nil, store, nil, apiKey))
+			card.Notes = append(card.Notes, "track 1 replayed through the agent's query_memory tool (ExecuteTool), honoring per-question args")
+		}
+		card.T1 = runTrack1(ctx, search, j, qs)
 		store.Close()
 	}
 

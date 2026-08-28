@@ -25,11 +25,13 @@ type toolTestBrain struct {
 	searchMemoryResult      []db.MemoryHit
 	searchMemoryCalledFocus string
 
-	// hybridHits/capturedDomain back HybridSearch: configurable return value plus a capture of the domainFilter arg, same field-per-method style as the rest of this mock.
-	hybridHits     []db.MemoryHit
-	capturedDomain string
-	// capturedHybridLimit records the limit HybridSearch was asked for, so a test can assert query_memory over-fetches when it has a since/until window to post-filter with.
-	capturedHybridLimit int
+	// hybridHits/capturedDomain back HybridSearchWindow: configurable return value plus a capture of the domainFilter arg, same field-per-method style as the rest of this mock. A call with a nonzero window returns windowedHybridHits instead, so a test can simulate "the topic exists, but not inside the window" without a real store.
+	hybridHits         []db.MemoryHit
+	windowedHybridHits []db.MemoryHit
+	capturedDomain     string
+	// capturedHybridLimit/capturedSince/capturedUntil record what HybridSearchWindow was asked for, so tests can assert query_memory hands the window to the store instead of post-filtering.
+	capturedHybridLimit          int
+	capturedSince, capturedUntil time.Time
 
 	// capturedEpisodeQuery records the last db.EpisodeQuery passed to ListEpisodes, so tests can assert on fields (e.g. NewestFirst) the tool is supposed to set without windowEpisodes itself needing to simulate real sort order.
 	capturedEpisodeQuery db.EpisodeQuery
@@ -169,10 +171,14 @@ func (b *toolTestBrain) RecallSubject(ctx context.Context, subject string, limit
 	return b.subjectRecall, nil
 }
 
-// HybridSearch returns the configured hybridHits and records the domainFilter it was called with, so tests can assert executeTool's "query_memory" case wires args["domain"] through correctly.
-func (b *toolTestBrain) HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error) {
+// HybridSearchWindow records its arguments and returns hybridHits for an unwindowed call, windowedHybridHits when a window is set — so tests can assert executeTool's "query_memory" case wires domain and the time window through correctly.
+func (b *toolTestBrain) HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]db.MemoryHit, error) {
 	b.capturedDomain = domainFilter
 	b.capturedHybridLimit = limit
+	b.capturedSince, b.capturedUntil = since, until
+	if !since.IsZero() || !until.IsZero() {
+		return b.windowedHybridHits, nil
+	}
 	return b.hybridHits, nil
 }
 
@@ -1109,36 +1115,75 @@ func TestParseInstant_TodayAndYesterday(t *testing.T) {
 }
 
 // TestExecuteTool_QueryMemory_SinceFiltersHitsByCreatedAt verifies query_memory accepts a since/until window and drops hits outside it. Without this, "what did I read today" is a pure lexical search for the word "today" and an "India Today" article from last month outranks anything that actually happened today.
-func TestExecuteTool_QueryMemory_SinceFiltersHitsByCreatedAt(t *testing.T) {
-	now := time.Now()
-	brain := &toolTestBrain{hybridHits: []db.MemoryHit{
-		{Source: "episode", Content: "India Today front page", RefID: 1, CreatedAt: now.AddDate(0, 0, -30)},
-		{Source: "episode", Content: "reviewing the retrieval audit", RefID: 2, CreatedAt: now},
-	}}
+func TestExecuteTool_QueryMemory_WindowGoesToTheStoreNotAPostFilter(t *testing.T) {
+	brain := &toolTestBrain{windowedHybridHits: []db.MemoryHit{{Source: "episode", Content: "x", CreatedAt: time.Now()}}}
 	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
 
-	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "today", "since": "today"})
+	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything", "since": "2026-07-05", "until": "2026-07-06"})
 
-	if strings.Contains(result, "India Today") {
-		t.Errorf("expected the month-old hit to be dropped by the since filter, got %q", result)
+	// A bare date means the whole day: since anchors to its midnight, until to its 23:59:59, both in local time.
+	wantSince := time.Date(2026, 7, 5, 0, 0, 0, 0, time.Local)
+	wantUntil := time.Date(2026, 7, 6, 23, 59, 59, 0, time.Local)
+	if !brain.capturedSince.Equal(wantSince) {
+		t.Errorf("since passed to the store = %v, want %v", brain.capturedSince, wantSince)
 	}
-	if !strings.Contains(result, "reviewing the retrieval audit") {
-		t.Errorf("expected today's hit to survive the since filter, got %q", result)
+	if !brain.capturedUntil.Equal(wantUntil) {
+		t.Errorf("until passed to the store = %v, want %v", brain.capturedUntil, wantUntil)
+	}
+	// The store filters SQL-side now, so there is no over-fetch: a windowed call asks for the same limit as a plain one.
+	if brain.capturedHybridLimit != queryMemoryHits {
+		t.Errorf("windowed limit = %d, want %d (no over-fetch)", brain.capturedHybridLimit, queryMemoryHits)
+	}
+
+	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything", "since": "2026-07-05"})
+	if !brain.capturedUntil.IsZero() {
+		t.Errorf("a missing until must stay open-ended (zero), got %v", brain.capturedUntil)
 	}
 }
 
-// TestExecuteTool_QueryMemory_TimeFilterOverfetches verifies a since/until window asks the store for more than the final 10 hits — the ranking that produces those 10 knows nothing about the time window, so filtering the top 10 after the fact would usually leave nothing.
-func TestExecuteTool_QueryMemory_TimeFilterOverfetches(t *testing.T) {
-	brain := &toolTestBrain{hybridHits: []db.MemoryHit{{Source: "episode", Content: "x", CreatedAt: time.Now()}}}
+// TestExecuteTool_QueryMemory_WindowEmptiedANonEmptyTopic_SaysSo verifies the honest-empty answer for a windowed query: when the topic exists but nothing falls inside the window, the model is told both facts instead of a bare "no memory matches" it would relay as "that never happened".
+func TestExecuteTool_QueryMemory_WindowEmptiedANonEmptyTopic_SaysSo(t *testing.T) {
+	now := time.Now()
+	brain := &toolTestBrain{hybridHits: []db.MemoryHit{
+		{Source: "episode", Content: "watching Suits", CreatedAt: now},
+		{Source: "episode", Content: "watching more Suits", CreatedAt: now},
+	}}
 	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
 
-	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything", "since": "today"})
-	timed := brain.capturedHybridLimit
-	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything"})
-	untimed := brain.capturedHybridLimit
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "suits", "since": "2026-07-05", "until": "2026-07-05"})
 
-	if timed <= untimed {
-		t.Errorf("expected a time-filtered query to over-fetch (got limit %d) versus the plain limit %d", timed, untimed)
+	if strings.Contains(result, "watching") {
+		t.Fatalf("expected no out-of-window content in the answer, got %q", result)
+	}
+	if !strings.Contains(result, "2 matches") || !strings.Contains(result, "none") {
+		t.Errorf("expected the emptied-by-window case distinguished from a genuinely empty store, got %q", result)
+	}
+}
+
+// TestExecuteTool_QueryMemory_RealStore_WindowConstrainsResults runs query_memory against a real db.Store: a windowed call must return only in-window content, and a window holding nothing must come back as the honest none-in-window answer, never the out-of-window hits.
+func TestExecuteTool_QueryMemory_RealStore_WindowConstrainsResults(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if _, err := store.LogEpisode(ctx, "Code", "audit.md", "reviewing the retrieval audit"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+	a := NewAgent(nil, nil, store, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(ctx, "query_memory", map[string]any{"query": "retrieval audit", "since": "today"})
+	if !strings.Contains(result, "reviewing the retrieval audit") {
+		t.Errorf("expected today's episode inside a since-today window, got %q", result)
+	}
+
+	result = a.executeTool(ctx, "query_memory", map[string]any{"query": "retrieval audit", "until": "yesterday"})
+	if strings.Contains(result, "reviewing") {
+		t.Errorf("expected no content for a window before the episode existed, got %q", result)
+	}
+	if !strings.Contains(result, "1 matches") || !strings.Contains(result, "none until") {
+		t.Errorf("expected the none-in-window answer naming what exists outside it, got %q", result)
 	}
 }
 

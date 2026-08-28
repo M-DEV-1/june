@@ -1502,3 +1502,161 @@ func TestUpdateThreadState_MissingID_Errors(t *testing.T) {
 		t.Fatal("expected an error for a thread id that does not exist")
 	}
 }
+
+// --- HybridSearchWindow: time-windowed retrieval ---
+
+// TestHybridSearchWindow_SparseWindow_SurfacesInWindowEpisodeSQLSide is the core "what was I doing Tuesday afternoon" property: an episode inside a sparse window must surface even when enough better-ranking out-of-window matches exist to fill the lexical top-10 on their own. Filtering after top-k would return nothing here — the window has to constrain the SQL itself.
+func TestHybridSearchWindow_SparseWindow_SurfacesInWindowEpisodeSQLSide(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	// 12 fresh episodes that out-rank the old one on FTS (the term appears twice), so an implementation that filters the top-10 after ranking never sees the in-window row.
+	for i := 0; i < 12; i++ {
+		if _, err := store.LogEpisode(ctx, "Code", fmt.Sprintf("compose-%d.yaml", i), "docker compose deploy to the docker swarm"); err != nil {
+			t.Fatalf("LogEpisode fresh %d: %v", i, err)
+		}
+	}
+	oldID, err := store.LogEpisode(ctx, "Code", "registry.go", "debugging the registry migration in docker")
+	if err != nil {
+		t.Fatalf("LogEpisode old: %v", err)
+	}
+	backdateEpisode(t, store, oldID, 72*time.Hour)
+
+	now := time.Now()
+	hits, err := store.HybridSearchWindow(ctx, "docker", "", now.Add(-73*time.Hour), now.Add(-71*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("HybridSearchWindow: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly the one in-window episode, got %d hits: %+v", len(hits), hits)
+	}
+	if !strings.Contains(hits[0].Content, "registry migration") {
+		t.Errorf("expected the backdated in-window episode, got: %+v", hits[0])
+	}
+}
+
+// TestHybridSearchWindow_EmptyWindow_ReturnsEmptyNotFallback verifies a window containing nothing returns an honestly empty result — never a silent fallback to the unwindowed matches, which would answer "what did I do last Tuesday" with things from today.
+func TestHybridSearchWindow_EmptyWindow_ReturnsEmptyNotFallback(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	if _, err := store.LogEpisode(ctx, "Code", "main.go", "refactoring the tracker daemon"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+	if _, err := store.LogNote(ctx, "the user is refactoring the tracker", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	now := time.Now()
+	hits, err := store.HybridSearchWindow(ctx, "tracker", "", now.AddDate(0, 0, -10), now.AddDate(0, 0, -9), 10)
+	if err != nil {
+		t.Fatalf("HybridSearchWindow: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("expected an empty result for a window with nothing in it, got: %+v", hits)
+	}
+}
+
+// TestHybridSearchWindow_OpenEndedBounds verifies a zero bound is open on that side: since-only means "from then until now", until-only means "everything up to then".
+func TestHybridSearchWindow_OpenEndedBounds(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	if _, err := store.LogEpisode(ctx, "Meet", "standup", "meeting about the quarterly roadmap"); err != nil {
+		t.Fatalf("LogEpisode recent: %v", err)
+	}
+	oldID, err := store.LogEpisode(ctx, "Meet", "retro", "meeting notes from the sprint retro")
+	if err != nil {
+		t.Fatalf("LogEpisode old: %v", err)
+	}
+	backdateEpisode(t, store, oldID, 48*time.Hour)
+	cut := time.Now().Add(-24 * time.Hour)
+
+	hits, err := store.HybridSearchWindow(ctx, "meeting", "", cut, time.Time{}, 10)
+	if err != nil {
+		t.Fatalf("HybridSearchWindow since-only: %v", err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Content, "quarterly roadmap") {
+		t.Errorf("since-only window: expected only the recent episode, got: %+v", hits)
+	}
+
+	hits, err = store.HybridSearchWindow(ctx, "meeting", "", time.Time{}, cut, 10)
+	if err != nil {
+		t.Fatalf("HybridSearchWindow until-only: %v", err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Content, "sprint retro") {
+		t.Errorf("until-only window: expected only the old episode, got: %+v", hits)
+	}
+}
+
+// TestHybridSearchWindow_NotesAndSummaries_FilteredByCreatedAt verifies the window reaches the memory_fts sources too (notes and summary nodes, whose timestamps live in their own tables), not just episodes.
+func TestHybridSearchWindow_NotesAndSummaries_FilteredByCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	if _, err := store.LogNote(ctx, "the user prefers oat milk lattes", "fact"); err != nil {
+		t.Fatalf("LogNote fresh: %v", err)
+	}
+	oldNoteID, err := store.LogNote(ctx, "ordered an oat milk delivery", "fact")
+	if err != nil {
+		t.Fatalf("LogNote old: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE notes SET created_at = datetime('now','-10 days') WHERE id = ?`, oldNoteID); err != nil {
+		t.Fatalf("backdate note: %v", err)
+	}
+	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-28")
+	if err != nil {
+		t.Fatalf("ensureNode(day): %v", err)
+	}
+	if _, err := store.ensureNode(ctx, dayID, "summary", "afternoon spent comparing oat milk brands"); err != nil {
+		t.Fatalf("ensureNode(summary): %v", err)
+	}
+
+	hits, err := store.HybridSearchWindow(ctx, "oat milk", "", time.Now().AddDate(0, 0, -2), time.Time{}, 10)
+	if err != nil {
+		t.Fatalf("HybridSearchWindow: %v", err)
+	}
+	var contents []string
+	for _, h := range hits {
+		contents = append(contents, h.Content)
+	}
+	joined := strings.Join(contents, " | ")
+	if !strings.Contains(joined, "prefers oat milk lattes") {
+		t.Errorf("expected the in-window note to surface, got: %v", contents)
+	}
+	if !strings.Contains(joined, "comparing oat milk brands") {
+		t.Errorf("expected the in-window summary to surface, got: %v", contents)
+	}
+	if strings.Contains(joined, "oat milk delivery") {
+		t.Errorf("expected the 10-day-old note to be excluded from a 2-day window, got: %v", contents)
+	}
+}
+
+// TestHybridSearchWindow_VectorCandidates_OutsideWindowOrUndatedDropped verifies the vector half honors the window too: a candidate whose created_at metadata falls outside it — or is missing, so membership can't be shown — must not ride into fused results. (Unwindowed search keeps undated vector hits; see TestHybridSearch_VectorOnlyMatch_SurfacesSemanticHit.)
+func TestHybridSearchWindow_VectorCandidates_OutsideWindowOrUndatedDropped(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	now := time.Now().UTC()
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	store.SetVectorIndex(&fakeHybridVectorIndex{
+		results: []Result{
+			{ID: "episode:1", Content: "in-window gpu debugging", Similarity: 0.9,
+				Metadata: map[string]string{"created_at": now.Add(-time.Hour).Format(time.RFC3339)}},
+			{ID: "episode:2", Content: "out-of-window gpu debugging", Similarity: 0.9,
+				Metadata: map[string]string{"created_at": now.AddDate(0, 0, -10).Format(time.RFC3339)}},
+			{ID: "episode:3", Content: "undated gpu debugging", Similarity: 0.9},
+		},
+	})
+
+	hits, err := store.HybridSearchWindow(ctx, "gpu", "", time.Now().Add(-24*time.Hour), time.Time{}, 10)
+	if err != nil {
+		t.Fatalf("HybridSearchWindow: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected only the in-window vector hit, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Content != "in-window gpu debugging" {
+		t.Errorf("expected the in-window vector hit, got: %+v", hits[0])
+	}
+}

@@ -1,6 +1,6 @@
 package main
 
-// Track 1 replays real user questions through the retrieval the live agent actually runs. query_memory (internal/agent/tools.go, the "query_memory" case) calls brain.HybridSearch(ctx, query, domain, limit) and shows the model db.FormatHit of the top ten, so that is exactly what this track calls and formats. The store is a snapshot copy of the live sqlite file; the vector half is the daemon's own chromem index reached over /vector/search, because two processes must never open that directory at once.
+// Track 1 replays real user questions through the retrieval the live agent actually runs. query_memory (internal/agent/tools.go, the "query_memory" case) calls brain.HybridSearchWindow(ctx, query, domain, since, until, limit) and shows the model db.FormatHit of the top ten; directSearch calls that same retrieval directly, and toolPathSearch (-tool-path) goes one layer higher through agent.ExecuteTool so the tool's own arg handling and answers are what gets judged. The store is a snapshot copy of the live sqlite file; the vector half is the daemon's own chromem index reached over /vector/search, because two processes must never open that directory at once.
 
 import (
 	"bufio"
@@ -11,17 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"ora/internal/agent"
 	"ora/internal/db"
 )
 
 // queryMemoryHits mirrors internal/agent/tools.go's constant of the same name: how many hits query_memory puts in front of the model.
 const queryMemoryHits = 10
 
-// question is one row of questions.jsonl: a real thing the user asked, and where it came from.
+// question is one row of questions.jsonl: a real thing the user asked, and where it came from. Args, when set, are extra query_memory arguments (since, until, domain, app) the tool-path replay passes alongside the question text — this is how a golden question pins the time window the model would have chosen.
 type question struct {
-	ID       string `json:"id"`
-	Origin   string `json:"origin"`
-	Question string `json:"question"`
+	ID       string         `json:"id"`
+	Origin   string         `json:"origin"`
+	Question string         `json:"question"`
+	Args     map[string]any `json:"args,omitempty"`
 }
 
 // track1Result is one question's replay: the hits retrieval returned, and the judge's call on whether a companion could answer from them.
@@ -69,13 +71,49 @@ func loadQuestions(path string) ([]question, error) {
 	return qs, sc.Err()
 }
 
-// runTrack1 replays every question through HybridSearch against the store and has the judge score each result set. Input: an open store already wired to the daemon's embedder and vector index, the question set. Output: one result per question.
-func runTrack1(ctx context.Context, store *db.Store, j *judge, qs []question) []track1Result {
+// track1Search resolves one question into the formatted rows the judge scores. Input: the question. Output: the rows the companion's retrieval put in front of the model, empty when it honestly found nothing.
+type track1Search func(ctx context.Context, q question) ([]string, error)
+
+// directSearch replays a question straight through store.HybridSearch and db.FormatHit — the retrieval call query_memory makes, without the tool dispatch around it.
+func directSearch(store *db.Store) track1Search {
+	return func(ctx context.Context, q question) ([]string, error) {
+		hits, err := store.HybridSearch(ctx, q.Question, "", queryMemoryHits)
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]string, 0, len(hits))
+		for _, h := range hits {
+			rows = append(rows, db.FormatHit(h, 0))
+		}
+		return rows, nil
+	}
+}
+
+// toolPathSearch replays a question through the agent's real query_memory tool (agent.ExecuteTool — the exact dispatch the model's function calls take), so the judge scores what the model would actually see: the tool's formatting, its arg handling, and its honest none-in-window answers. The question's Args are passed alongside its text, letting a golden question carry the since/until window the model would have chosen.
+func toolPathSearch(a *agent.Agent) track1Search {
+	return func(ctx context.Context, q question) ([]string, error) {
+		args := map[string]any{"query": q.Question}
+		for k, v := range q.Args {
+			args[k] = v
+		}
+		res := a.ExecuteTool(ctx, "query_memory", args)
+		if strings.HasPrefix(res, "error: ") {
+			return nil, fmt.Errorf("query_memory: %s", strings.TrimPrefix(res, "error: "))
+		}
+		if res == "no memory matches" {
+			return nil, nil
+		}
+		return strings.Split(res, "\n"), nil
+	}
+}
+
+// runTrack1 replays every question through search and has the judge score each result set. Input: the search path to measure (directSearch or toolPathSearch), the question set. Output: one result per question.
+func runTrack1(ctx context.Context, search track1Search, j *judge, qs []question) []track1Result {
 	results := make([]track1Result, 0, len(qs))
 	for _, q := range qs {
 		r := track1Result{question: q}
 		start := time.Now()
-		hits, err := store.HybridSearch(ctx, q.Question, "", queryMemoryHits)
+		rows, err := search(ctx, q)
 		r.Latency = time.Since(start)
 		if err != nil {
 			r.Err = err.Error()
@@ -84,9 +122,7 @@ func runTrack1(ctx context.Context, store *db.Store, j *judge, qs []question) []
 			fmt.Printf("  [%-3s] ERROR %v\n", q.ID, err)
 			continue
 		}
-		for _, h := range hits {
-			r.Hits = append(r.Hits, db.FormatHit(h, 0))
-		}
+		r.Hits = rows
 
 		material := fmt.Sprintf("QUESTION: %s\n\nRETRIEVED ROWS (%d):\n%s",
 			q.Question, len(r.Hits), rowsOrNone(r.Hits))

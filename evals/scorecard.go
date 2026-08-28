@@ -102,7 +102,7 @@ func track3Rate(rs []track3Result) (passes, applicable int) {
 
 func writeTrack1Section(b *strings.Builder, rs []track1Result) {
 	b.WriteString("\n## Track 1 — memory replay\n\n")
-	b.WriteString("Each question is a thing the user really asked (D-cases from the seed corpus, L-cases harvested from ora.log). Retrieval is `db.Store.HybridSearch(question, \"\", 10)` — the same call `query_memory` makes — against a VACUUM INTO snapshot of the live store, with the daemon's own embedder and vector index over IPC. The judge sees the question and the formatted rows and says whether a companion could answer from them.\n\n")
+	b.WriteString("Each question is a thing the user really asked (D-cases from the seed corpus, L-cases harvested from ora.log). Retrieval is `db.Store.HybridSearch(question, \"\", 10)` — the retrieval `query_memory` runs (with `-tool-path`, the replay goes through the agent's real `query_memory` tool via ExecuteTool, honoring each question's args, e.g. a since/until window — see the run notes) — against a VACUUM INTO snapshot of the live store, with the daemon's own embedder and vector index over IPC. The judge sees the question and the formatted rows and says whether a companion could answer from them.\n\n")
 	b.WriteString("| Q | Question | Hits | Latency | Verdict | Judge |\n|---|---|---|---|---|---|\n")
 	for _, r := range rs {
 		fmt.Fprintf(b, "| %s | %s | %d | %dms | %s | %s |\n",
