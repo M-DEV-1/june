@@ -38,9 +38,10 @@ const keepAudio = true
 // dirTimeLayout is how a recording directory is named, and therefore how its start time is read back when the sweep picks up an unfinished recording.
 const dirTimeLayout = "2006-01-02T15-04-05"
 
-// Store is the read-mostly slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, and somewhere to file the minutes.
+// Store is the read-mostly slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, Ora's own long-term memory of the user, and somewhere to file the minutes.
 type Store interface {
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
+	GetNotes(ctx context.Context) ([]db.Note, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 }
 

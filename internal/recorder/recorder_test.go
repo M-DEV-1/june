@@ -20,6 +20,7 @@ func (f *fakeCapture) Stop() { f.stopped = true }
 
 type fakeStore struct {
 	episodes []db.Episode
+	facts    []db.Note
 	notes    []string
 	kinds    []string
 	mu       sync.Mutex
@@ -27,6 +28,10 @@ type fakeStore struct {
 
 func (s *fakeStore) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
 	return s.episodes, nil
+}
+
+func (s *fakeStore) GetNotes(ctx context.Context) ([]db.Note, error) {
+	return s.facts, nil
 }
 
 func (s *fakeStore) LogNote(ctx context.Context, content, kind string) (int64, error) {
@@ -513,5 +518,21 @@ func TestRecorder_KeepsAudioWhenTranscriptionFails(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(sess.dir, name)); err != nil {
 			t.Errorf("%s must survive a failed transcription: %v", name, err)
 		}
+	}
+}
+
+// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Deepak" because a GitHub commit list said "deepak-acmee". Ora's own durable memory of the user is the only thing that can name the [me] speaker, so it has to reach the model — and the meeting minutes stored alongside it must not, or one meeting's guess becomes the next meeting's fact.
+func TestBuildPrompt_CarriesWhatOraKnowsAboutTheUserButNotPastMinutes(t *testing.T) {
+	store := &fakeStore{facts: []db.Note{
+		{Content: "User is Alex Rivera, a systems engineer working on Ora.", Kind: "fact"},
+		{Content: "# Meeting minutes\n## Attendees\n- Deepak", Kind: "meeting"},
+	}}
+	r, _, _ := newTestRecorder(t, store)
+	prompt := r.buildPrompt(context.Background(), "[00:00:00] [me] hello", time.Now(), time.Now())
+	if !strings.Contains(prompt, "User is Alex Rivera") {
+		t.Errorf("the minutes prompt must carry Ora's long-term facts about the user:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Deepak") {
+		t.Errorf("a past meeting's minutes must not be fed back in as background:\n%s", prompt)
 	}
 }
