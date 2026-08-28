@@ -51,7 +51,7 @@ func newTestRecorder(t *testing.T, store *fakeStore) (*Recorder, *fakeCapture, *
 		now := time.Now()
 		return cap, now, now.Add(500 * time.Millisecond), nil
 	}
-	r.whisper = func(ctx context.Context, bin, path, speaker string, offset time.Duration) ([]Segment, error) {
+	r.whisper = func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
 		if speaker == speakerMe {
 			return []Segment{{Start: 0, End: time.Second, Speaker: speakerMe, Text: "shall we ship friday"}}, nil
 		}
@@ -125,7 +125,7 @@ func TestRecorder_Pipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transcript: %v", err)
 	}
-	want := "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n"
+	want := "[00:00:00] [me] shall we ship friday\n\n[00:00:02] [call] friday works\n"
 	if !strings.Contains(string(transcript), want) {
 		t.Errorf("transcript should interleave both sides chronologically, got:\n%s", transcript)
 	}
@@ -183,7 +183,7 @@ func TestRecorder_PromptCarriesDesktopContext(t *testing.T) {
 func TestRecorder_KeepsAudioWhenTranscriptionYieldsNothing(t *testing.T) {
 	store := &fakeStore{}
 	r, _, _ := newTestRecorder(t, store)
-	r.whisper = func(ctx context.Context, bin, path, speaker string, offset time.Duration) ([]Segment, error) {
+	r.whisper = func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
 		return nil, nil
 	}
 	if err := r.Start(); err != nil {
@@ -499,7 +499,7 @@ func TestOnACPower_UnknownCountsAsMains(t *testing.T) {
 // A failed transcription must not destroy the recording — the WAVs are the only copy of what was said.
 func TestRecorder_KeepsAudioWhenTranscriptionFails(t *testing.T) {
 	r, _, _ := newTestRecorder(t, &fakeStore{})
-	r.whisper = func(ctx context.Context, bin, path, speaker string, offset time.Duration) ([]Segment, error) {
+	r.whisper = func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
 		return nil, errors.New("whisper exploded")
 	}
 	if err := r.Start(); err != nil {

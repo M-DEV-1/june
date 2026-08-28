@@ -124,3 +124,13 @@ func (r *Recorder) geminiMinutes(ctx context.Context, prompt string) (string, er
 	}
 	return text, nil
 }
+
+// primingPrompt reads the desktop episodes recorded during the meeting and turns them into the initial prompt for whisper. It is best-effort: a store that cannot answer costs the transcript its spelling hints, not the transcript.
+func (r *Recorder) primingPrompt(ctx context.Context, since, until time.Time) string {
+	episodes, err := r.store.EpisodesInWindow(ctx, since, until, episodeLimit)
+	if err != nil {
+		slog.Warn("could not read desktop context to prime whisper", "error", err)
+		return ""
+	}
+	return primingPrompt(episodes)
+}
