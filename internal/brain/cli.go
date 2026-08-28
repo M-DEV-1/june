@@ -15,12 +15,12 @@ import (
 
 // ClaudeCLI answers by running `claude -p`, which uses whatever Claude Code login the machine already has — a subscription, billed as a subscription, not per-token API calls.
 // --bare is deliberately never passed: it makes the CLI read ANTHROPIC_API_KEY instead of the login, which is the billing this whole path exists to avoid.
-// --restricted and --strict-mcp-config are always passed, because the prompt carries text nobody vetted (a meeting transcript, whatever was on the user's screens) and this duty needs no tools at all; a run that cannot open a shell or a file cannot be talked into one.
+// --restricted, --strict-mcp-config, and an empty --tools list are always passed, because the prompt carries text nobody vetted (a meeting transcript, whatever was on the user's screens) and this duty needs no tools at all — --restricted alone still leaves file tools available, so the empty tool list is what actually closes the door.
 // The prompt goes in on stdin: a single argv entry is capped at 128 KB on Linux and a long meeting is bigger than that.
 // Input: the path to the binary and a hard timeout in seconds. Output: the "result" field of the CLI's JSON.
 func ClaudeCLI(binary string, timeoutSeconds int) Brain {
 	return func(ctx context.Context, prompt string) (string, error) {
-		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"-p", "--output-format", "json", "--restricted", "--strict-mcp-config"}, prompt)
+		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"-p", "--output-format", "json", "--restricted", "--strict-mcp-config", "--tools", ""}, prompt)
 		if err != nil {
 			return "", err
 		}
@@ -49,7 +49,7 @@ func ClaudeCLI(binary string, timeoutSeconds int) Brain {
 // Input: the path to the binary and a hard timeout in seconds. Output: the "response" field of the CLI's JSON.
 func AgyCLI(binary string, timeoutSeconds int) Brain {
 	return func(ctx context.Context, prompt string) (string, error) {
-		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"--print", prompt, "--output-format", "json"}, "")
+		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"--print", prompt, "--output-format", "json", "--disable-slash-commands"}, "")
 		if err != nil {
 			return "", err
 		}
