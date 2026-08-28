@@ -7,9 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"ora/internal/brain"
 	"ora/internal/config"
-
-	"google.golang.org/genai"
 )
 
 // minutesInstruction tells the model what to make of the transcript. The microphone side is [me]; the system-audio side is [call], a single pooled label covering every remote voice, and the model's job is to put names to it from the screen context and from what was said.
@@ -132,24 +131,10 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// geminiMinutes is the default minutes seam: one non-streaming GenerateContent call, the same shape memory.GeminiSummarizer uses for its background summaries.
-func (r *Recorder) geminiMinutes(ctx context.Context, prompt string) (string, error) {
-	if r.apiKey == "" {
-		return "", fmt.Errorf("no GEMINI_API_KEY, cannot summarise the meeting (the transcript is still on disk)")
-	}
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: r.apiKey, Backend: genai.BackendGeminiAPI})
-	if err != nil {
-		return "", fmt.Errorf("gemini client: %w", err)
-	}
-	resp, err := client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), nil)
-	if err != nil {
-		return "", fmt.Errorf("generate minutes: %w", err)
-	}
-	text := resp.Text()
-	if text == "" {
-		return "", fmt.Errorf("gemini returned no minutes text")
-	}
-	return text, nil
+// defaultBrain is the default minutes seam: one one-shot text call to whichever backend the config's brain block names, which is the Gemini API unless the user has pointed it at a CLI they are already paying a subscription for.
+// The config is read on each call rather than at construction, so changing provider takes effect on the next meeting instead of at the next daemon restart.
+func (r *Recorder) defaultBrain(ctx context.Context, prompt string) (string, error) {
+	return brain.FromConfig(config.LoadConfig().Brain, r.apiKey)(ctx, prompt)
 }
 
 // primingPrompt reads the desktop episodes recorded during the meeting and turns them into the initial prompt for whisper. It is best-effort: a store that cannot answer costs the transcript its spelling hints, not the transcript.

@@ -193,3 +193,28 @@ func TestEmbedConfigSimilarityFloorDefault(t *testing.T) {
 		t.Errorf("Floor() = %v with an explicit 0.5, want 0.5", got)
 	}
 }
+
+// A config file with no brain block leaves the zero value in place, which brain.FromConfig reads as the Gemini API — the behaviour ORA had before the block existed. A file that does carry one is read verbatim.
+func TestLoadConfig_Brain(t *testing.T) {
+	t.Run("absent block is the Gemini default", func(t *testing.T) {
+		t.Setenv("ORA_DATA_DIR", t.TempDir())
+		if err := os.WriteFile(ConfigPath(), []byte(`{"voice":"Kore"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if got := LoadConfig().Brain; got != (BrainConfig{}) {
+			t.Errorf("Brain = %+v, want the zero value", got)
+		}
+	})
+
+	t.Run("a named provider is read back", func(t *testing.T) {
+		t.Setenv("ORA_DATA_DIR", t.TempDir())
+		if err := os.WriteFile(ConfigPath(), []byte(`{"brain":{"provider":"claude-cli","binary":"/usr/bin/claude","timeout_seconds":120}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		got := LoadConfig().Brain
+		want := BrainConfig{Provider: BrainClaudeCLI, Binary: "/usr/bin/claude", TimeoutSeconds: 120}
+		if got != want {
+			t.Errorf("Brain = %+v, want %+v", got, want)
+		}
+	})
+}
