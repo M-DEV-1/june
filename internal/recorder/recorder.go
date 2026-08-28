@@ -3,6 +3,7 @@ package recorder
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ora/internal/audio"
@@ -51,6 +54,68 @@ type session struct {
 	cap                  capturer
 	mic, sys             *wavWriter
 	micOffset, sysOffset time.Duration
+	done                 chan struct{} // closed when the recording stops, which retires the silence watchdog
+}
+
+// defaultSilenceAfter is how long the system stream may stay quiet before the user is told. Long enough that a natural pause in a call, or a meeting still on its "waiting for the host" screen, does not trigger it.
+const defaultSilenceAfter = 45 * time.Second
+
+// silenceFloor is the sample magnitude below which a stream counts as silent. A stream recorded from a sink nothing plays into is exact zeros; a real room floor with nobody speaking still sits above this.
+const silenceFloor = 64
+
+// silenceWatch passes samples through to the real writer while remembering when sound last came through. A meeting playing to a sink Ora is not recording writes an unbroken run of zeros, which is indistinguishable from a working recording until the transcript comes back empty.
+type silenceWatch struct {
+	w    io.Writer
+	last atomic.Int64 // unix nanoseconds of the last sample above the noise floor
+}
+
+func newSilenceWatch(w io.Writer) *silenceWatch {
+	s := &silenceWatch{w: w}
+	s.last.Store(time.Now().UnixNano())
+	return s
+}
+
+func (s *silenceWatch) Write(p []byte) (int, error) {
+	if hasSound(p) {
+		s.last.Store(time.Now().UnixNano())
+	}
+	return s.w.Write(p)
+}
+
+// quietFor returns how long it has been since sound last came through.
+func (s *silenceWatch) quietFor() time.Duration {
+	return time.Since(time.Unix(0, s.last.Load()))
+}
+
+// watchSilence warns once, at any point in the recording, if the system stream goes quiet for longer than window. The first-thirty-seconds case is a meeting playing to the wrong sink from the start; the mid-call case is the output device changing under the recording — earbuds connecting, or dying and the audio hopping back to the speakers — which without this is silently lost for the rest of the meeting.
+// ponytail: the warning tells the user to fix it by hand. Re-running the active-sink detection and re-attaching the monitor stream to the new sink mid-recording would fix it without them, and is the named follow-up; it needs a second record stream opened onto the same WAV writer while the first is torn down, which is more surgery than this pass.
+func (r *Recorder) watchSilence(w *silenceWatch, window time.Duration, done <-chan struct{}) {
+	tick := time.NewTicker(window / 3)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick.C:
+			if w.quietFor() < window {
+				continue
+			}
+			slog.Warn("the system audio stream has gone silent, so the meeting is playing to a sink Ora is not recording", "quiet for", w.quietFor().Round(time.Second))
+			r.notify("Meeting audio isn't reaching the recorder", "Nothing is coming through from the system audio — did the output device change? Check it, then restart the recording.")
+			return
+		}
+	}
+}
+
+// hasSound reports whether any little-endian 16-bit sample in p is louder than silenceFloor.
+func hasSound(p []byte) bool {
+	for i := 0; i+1 < len(p); i += 2 {
+		v := int16(binary.LittleEndian.Uint16(p[i:]))
+		if v > silenceFloor || v < -silenceFloor {
+			return true
+		}
+	}
+	return false
 }
 
 // Recorder owns at most one meeting recording at a time. Start and StopAndProcess are what the tray calls; everything after the stop runs in the background.
@@ -62,15 +127,25 @@ type Recorder struct {
 	mu   sync.Mutex
 	live *session
 
+	// inFlight holds the recording directories being processed right now, so the stop path and the retry loop can never transcribe the same recording twice.
+	inFlight map[string]bool
+
 	// swept is closed once the startup sweep for unfinished recordings has finished. Only tests wait on it.
 	swept chan struct{}
 
-	// Seams, all set by New and replaced in tests: opening the sound streams, running whisper, finding the whisper binary, calling Gemini, and posting a desktop notification.
+	// silenceAfter is how long the system stream may stay silent before the user is warned. Tests shorten it.
+	silenceAfter time.Duration
+
+	// retryEvery is how often a deferred recording is checked on. Tests do not rely on it, driving pickup directly instead.
+	retryEvery time.Duration
+
+	// Seams, all set by New and replaced in tests: opening the sound streams, running whisper, finding the whisper binary, calling Gemini, posting a desktop notification, and asking whether the machine is plugged in.
 	capture     func(mic, system io.Writer) (capturer, time.Time, time.Time, error)
 	whisper     func(ctx context.Context, bin, path, speaker string, offset time.Duration) ([]Segment, error)
 	findWhisper func(dataDir string) (string, error)
 	minutes     func(ctx context.Context, prompt string) (string, error)
 	notify      func(title, body string)
+	onAC        func() bool
 }
 
 // New returns a Recorder that writes under dataDir/recordings, reads desktop context from and files minutes into store, and summarises with the Gemini API key apiKey.
@@ -87,19 +162,24 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	r.findWhisper = whisperBinary
 	r.minutes = r.geminiMinutes
 	r.notify = notifySend
+	r.onAC = onACPower
+	r.silenceAfter = defaultSilenceAfter
+	r.retryEvery = defaultRetryEvery
 	r.swept = make(chan struct{})
-	started := time.Now()
 	go func() {
 		defer close(r.swept)
-		r.resumeOrphans(context.Background(), started)
+		r.pickup(context.Background())
 	}()
+	go r.retryDeferred(context.Background())
 	return r
 }
 
-// resumeOrphans finishes recordings that were never processed: a crash, or quitting the tray mid-recording, leaves WAVs with no transcript.md beside them and nothing else ever picks them up.
-// It runs once per Recorder, in the background, and is best-effort — a directory that fails is logged and the next one still gets its turn.
-// Only recordings that began before `before` are considered, so a recording this process starts while the sweep is still running is never mistaken for an abandoned one and transcribed out from under itself.
-func (r *Recorder) resumeOrphans(ctx context.Context, before time.Time) {
+// defaultRetryEvery is how often the recorder looks for a recording it deferred, which is short enough that plugging in gets the transcript within a few minutes and long enough to cost nothing.
+const defaultRetryEvery = 2 * time.Minute
+
+// pickup finishes every recording that still needs it: one abandoned by a crash or by quitting the tray mid-recording, and one whose transcription was deferred because the machine was on battery.
+// It is best-effort — a directory that fails is logged and the next one still gets its turn — and it skips the recording that is running right now, whose WAVs are still being written and which on disk is indistinguishable from an abandoned one.
+func (r *Recorder) pickup(ctx context.Context) {
 	root := filepath.Join(r.dataDir, "recordings")
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -108,22 +188,93 @@ func (r *Recorder) resumeOrphans(ctx context.Context, before time.Time) {
 		}
 		return
 	}
-	// A directory is named to the second, so a recording started in the same second as the cutoff cannot be told apart from one started just after it. Truncating makes the ambiguous case skip: the worst outcome is that an abandoned recording waits for the next daemon start, against transcribing a live one out from under itself.
-	cutoff := before.Truncate(time.Second)
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
 		s, ok := unfinished(dir)
-		if !ok || !s.startedAt.Before(cutoff) {
+		// liveDir is read per directory rather than once up front: a recording starting while this loop runs holds the lock from before it creates its directory until after it publishes it, so by the time this call returns the answer for that directory is settled.
+		if !ok || dir == r.liveDir() {
 			continue
 		}
-		slog.Info("resuming an unfinished meeting recording", "dir", dir)
+		slog.Info("finishing an unfinished meeting recording", "dir", dir)
 		if err := r.process(ctx, s); err != nil {
 			slog.Error("could not finish an unfinished meeting recording", "dir", dir, "error", err)
 		}
 	}
+}
+
+// liveDir returns the directory of the recording running right now, or "" when nothing is recording.
+func (r *Recorder) liveDir() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.live == nil {
+		return ""
+	}
+	return r.live.dir
+}
+
+// claim reserves a recording directory for processing, reporting false if something else already has it. release gives it back.
+func (r *Recorder) claim(dir string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inFlight[dir] {
+		return false
+	}
+	if r.inFlight == nil {
+		r.inFlight = make(map[string]bool)
+	}
+	r.inFlight[dir] = true
+	return true
+}
+
+func (r *Recorder) release(dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.inFlight, dir)
+}
+
+// retryDeferred runs pickup every retryEvery for as long as the process lives, so a recording deferred to save the battery is transcribed within a few minutes of the charger going in.
+func (r *Recorder) retryDeferred(ctx context.Context) {
+	for range time.Tick(r.retryEvery) {
+		if r.onAC() {
+			r.pickup(ctx)
+		}
+	}
+}
+
+// powerSupplyRoot is where Linux exposes the machine's power supplies. Tests point it elsewhere.
+var powerSupplyRoot = "/sys/class/power_supply"
+
+// onACPower reports whether the machine is on mains power, by reading the kernel's power supply class: a supply whose type is "Mains" and whose online flag is 1 is the charger, plugged in.
+// A machine that reports no mains supply at all — a desktop, or any system that does not export this, Windows included — counts as on mains, so transcription is never deferred forever somewhere it cannot be asked.
+func onACPower() bool {
+	entries, err := os.ReadDir(powerSupplyRoot)
+	if err != nil {
+		return true
+	}
+	mains := false
+	for _, e := range entries {
+		dir := filepath.Join(powerSupplyRoot, e.Name())
+		if readTrimmed(filepath.Join(dir, "type")) != "Mains" {
+			continue
+		}
+		mains = true
+		if readTrimmed(filepath.Join(dir, "online")) == "1" {
+			return true
+		}
+	}
+	return !mains
+}
+
+// readTrimmed returns the contents of a one-line sysfs file without its trailing newline, or "" if it cannot be read.
+func readTrimmed(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // unfinished reports whether dir holds a recording that still needs processing — both WAVs present, no transcript.md and no no-speech marker — and returns the session to run it as. The start time comes from the directory name and the stop time from the audio's last write, since the original session's clocks died with the process.
@@ -177,7 +328,8 @@ func (r *Recorder) Start() error {
 		return fmt.Errorf("create system.wav: %w", err)
 	}
 
-	cap, micStart, sysStart, err := r.capture(mic, sys)
+	watch := newSilenceWatch(sys)
+	cap, micStart, sysStart, err := r.capture(mic, watch)
 	if err != nil {
 		mic.Close()
 		sys.Close()
@@ -197,7 +349,9 @@ func (r *Recorder) Start() error {
 		sys:       sys,
 		micOffset: micStart.Sub(zero),
 		sysOffset: sysStart.Sub(zero),
+		done:      make(chan struct{}),
 	}
+	go r.watchSilence(watch, r.silenceAfter, r.live.done)
 	r.notify("Recording meeting", "Ora is recording. Stop it from the tray when the call ends.")
 	return nil
 }
@@ -207,6 +361,12 @@ func (r *Recorder) StopAndProcess(ctx context.Context) (string, error) {
 	s, err := r.stop()
 	if err != nil {
 		return "", err
+	}
+	// Whisper pins every core for minutes. On battery that empties the laptop and the CPU is throttled while it runs, so the recording is left exactly as it is — no marker, nothing to say it is finished — and the retry loop picks it up once the charger is back in.
+	if !r.onAC() {
+		slog.Info("deferring meeting transcription until the machine is on mains power", "dir", s.dir)
+		r.notify("Recording saved", "Ora will transcribe it once you plug in.")
+		return s.dir, nil
 	}
 	r.notify("Transcribing meeting", "Ora is transcribing the recording in the background.")
 	go func() {
@@ -228,6 +388,9 @@ func (r *Recorder) stop() (*session, error) {
 	}
 	r.live = nil
 
+	if s.done != nil {
+		close(s.done)
+	}
 	s.cap.Stop()
 	s.stoppedAt = time.Now()
 	if err := s.mic.Close(); err != nil {
@@ -241,6 +404,12 @@ func (r *Recorder) stop() (*session, error) {
 
 // process transcribes both streams, writes transcript.md and minutes.md, files the minutes as a note, and deletes the audio once both transcriptions have succeeded.
 func (r *Recorder) process(ctx context.Context, s *session) error {
+	// Two paths can reach the same recording — the stop that made it and the retry loop looking for deferred ones — and transcribing it twice would race two whisper runs onto the same files.
+	if !r.claim(s.dir) {
+		return nil
+	}
+	defer r.release(s.dir)
+
 	bin, err := r.findWhisper(r.dataDir)
 	if err != nil {
 		return err

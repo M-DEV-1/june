@@ -43,6 +43,8 @@ func newTestRecorder(t *testing.T, store *fakeStore) (*Recorder, *fakeCapture, *
 	cap := &fakeCapture{}
 	var notes []string
 	r := New(t.TempDir(), store, "")
+	// The sweep New starts runs concurrently and would otherwise race the seams set below, and pick up recordings the test itself makes. Its data dir is empty, so this returns at once.
+	<-r.swept
 	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
 		mic.Write(make([]byte, 3200))
 		system.Write(make([]byte, 3200))
@@ -235,19 +237,19 @@ func TestRecorder_ResumesOrphanedRecordings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A recording that is running right now looks exactly like an abandoned one on disk, so the sweep must leave anything started at or after its cutoff alone.
+	// A recording that is running right now looks exactly like an abandoned one on disk, so the sweep must leave it alone.
 	if err := r.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	live, err := r.stop()
-	if err != nil {
-		t.Fatalf("stop: %v", err)
+	live := r.live.dir
+
+	r.pickup(context.Background())
+
+	if _, err := os.Stat(filepath.Join(live, "transcript.md")); !os.IsNotExist(err) {
+		t.Error("the sweep transcribed the recording that is still running")
 	}
-
-	r.resumeOrphans(context.Background(), time.Now())
-
-	if _, err := os.Stat(filepath.Join(live.dir, "transcript.md")); !os.IsNotExist(err) {
-		t.Error("the sweep transcribed a recording that started after its cutoff, which is how it would eat a live one")
+	if _, err := r.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
 
 	if _, err := os.ReadFile(filepath.Join(orphan, "transcript.md")); err != nil {
@@ -258,6 +260,239 @@ func TestRecorder_ResumesOrphanedRecordings(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(done, "mic.wav")); err != nil {
 		t.Errorf("an already-transcribed recording must not be reprocessed: %v", err)
+	}
+}
+
+// notifications is a race-free sink for r.notify, since the silence warning fires from a timer goroutine.
+type notifications struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (n *notifications) add(title, body string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sent = append(n.sent, title+": "+body)
+}
+
+func (n *notifications) contains(s string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, got := range n.sent {
+		if strings.Contains(strings.ToLower(got), s) {
+			return true
+		}
+	}
+	return false
+}
+
+// A meeting playing to a sink Ora is not recording writes an unbroken run of zero samples, which looks exactly like a working recording until the transcript comes back empty hours later. The user has to be told while the call is still running.
+func TestRecorder_WarnsWhenSystemAudioStaysSilent(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	var got notifications
+	r.notify = got.add
+	r.silenceAfter = 20 * time.Millisecond
+	// The default fake capture writes zeroes, which is exactly the wrong-sink symptom.
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !got.contains("audio") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !got.contains("audio") {
+		t.Errorf("expected a warning that the meeting audio is not reaching the recorder, got %v", got.sent)
+	}
+}
+
+// loudSamples is a block of speech-level 16-bit samples, well clear of the noise floor.
+func loudSamples() []byte {
+	b := make([]byte, 3200)
+	for i := 1; i < len(b); i += 2 {
+		b[i] = 0x10 // 4096 once the low byte is added: speech level
+	}
+	return b
+}
+
+// Sound arriving throughout means the right sink is being recorded, and a warning then would be noise in the middle of a call.
+func TestRecorder_NoSilenceWarningWhileSystemAudioKeepsArriving(t *testing.T) {
+	r, cap, _ := newTestRecorder(t, &fakeStore{})
+	var got notifications
+	r.notify = got.add
+	r.silenceAfter = 30 * time.Millisecond
+	stop, finished := make(chan struct{}), make(chan struct{})
+	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
+		go func() {
+			defer close(finished)
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(2 * time.Millisecond):
+					mic.Write(loudSamples())
+					system.Write(loudSamples())
+				}
+			}
+		}()
+		now := time.Now()
+		return cap, now, now, nil
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// The writer has to be off the files before stop closes them, which the real capture guarantees and this fake must too.
+	defer func() {
+		close(stop)
+		<-finished
+		r.stop()
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	if got.contains("audio") {
+		t.Errorf("a recording that is capturing sound must not warn, got %v", got.sent)
+	}
+}
+
+// The output device can change halfway through a call — earbuds connecting, or dying and the audio hopping back to the speakers — and the recording then goes quiet from that moment. The watchdog has to catch it whenever it happens, not only in the first half-minute.
+func TestRecorder_WarnsWhenSystemAudioStopsPartWayThrough(t *testing.T) {
+	r, cap, _ := newTestRecorder(t, &fakeStore{})
+	var got notifications
+	r.notify = got.add
+	r.silenceAfter = 30 * time.Millisecond
+	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
+		// Sound at the start, so the first-thirty-seconds check would have been satisfied, then nothing.
+		mic.Write(loudSamples())
+		system.Write(loudSamples())
+		now := time.Now()
+		return cap, now, now, nil
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !got.contains("audio") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !got.contains("audio") {
+		t.Errorf("a recording whose system audio stopped mid-meeting must warn, got %v", got.sent)
+	}
+}
+
+// Transcribing on battery is what the 16-minute meeting was doing when it came back empty, and it drains a laptop fast either way. A recording made on battery is kept whole and left for later instead.
+func TestRecorder_DefersTranscriptionUntilMainsPower(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	<-r.swept
+	var got notifications
+	r.notify = got.add
+
+	onAC := false
+	r.onAC = func() bool { return onAC }
+
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	dir, err := r.StopAndProcess(context.Background())
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "transcript.md")); !os.IsNotExist(err) {
+		t.Error("a recording made on battery must not be transcribed yet")
+	}
+	if _, err := os.Stat(filepath.Join(dir, noSpeechMarker)); !os.IsNotExist(err) {
+		t.Error("a deferred recording must not be marked as having no speech, that would stop it ever being picked up")
+	}
+	if !got.contains("plug") {
+		t.Errorf("the user must be told the transcript is waiting on mains power, got %v", got.sent)
+	}
+	for _, name := range []string{"mic.wav", "system.wav"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+
+	// Plugged in, the periodic pickup finishes the job.
+	onAC = true
+	r.pickup(context.Background())
+	if _, err := os.Stat(filepath.Join(dir, "transcript.md")); err != nil {
+		t.Errorf("once on mains power the deferred recording must be transcribed: %v", err)
+	}
+	if len(store.notes) != 1 {
+		t.Errorf("the deferred recording should have filed exactly one set of minutes, got %v", store.notes)
+	}
+}
+
+// The pickup must never transcribe the recording that is running right now: its WAVs are still being written, and on disk it looks exactly like an abandoned one.
+func TestRecorder_PickupSkipsTheLiveRecording(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	<-r.swept
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	live := r.live.dir
+
+	r.pickup(context.Background())
+
+	if _, err := os.Stat(filepath.Join(live, "transcript.md")); !os.IsNotExist(err) {
+		t.Error("the pickup transcribed the recording that is still running")
+	}
+	if _, err := r.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// onACPower reads the kernel's power supply class, so a battery-only machine and a plugged-in one are told apart from the files themselves.
+func TestOnACPower(t *testing.T) {
+	write := func(t *testing.T, supplies map[string][2]string) string {
+		root := t.TempDir()
+		for name, kv := range supplies {
+			dir := filepath.Join(root, name)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "type"), []byte(kv[0]+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if kv[1] != "" {
+				if err := os.WriteFile(filepath.Join(dir, "online"), []byte(kv[1]+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return root
+	}
+	cases := []struct {
+		name     string
+		supplies map[string][2]string
+		want     bool
+	}{
+		{name: "charger plugged in", supplies: map[string][2]string{"AC": {"Mains", "1"}, "BAT0": {"Battery", ""}}, want: true},
+		{name: "running on battery", supplies: map[string][2]string{"AC": {"Mains", "0"}, "BAT0": {"Battery", ""}}, want: false},
+		{name: "no mains supply at all, so the machine cannot be on battery", supplies: map[string][2]string{"BAT0": {"Battery", ""}}, want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			old := powerSupplyRoot
+			powerSupplyRoot = write(t, c.supplies)
+			defer func() { powerSupplyRoot = old }()
+			if got := onACPower(); got != c.want {
+				t.Errorf("onACPower() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A machine that does not export the power supply class at all — a desktop, or Windows — must count as plugged in, or nothing would ever be transcribed there.
+func TestOnACPower_UnknownCountsAsMains(t *testing.T) {
+	old := powerSupplyRoot
+	powerSupplyRoot = filepath.Join(t.TempDir(), "does-not-exist")
+	defer func() { powerSupplyRoot = old }()
+	if !onACPower() {
+		t.Error("a machine that cannot report its power source must be treated as on mains")
 	}
 }
 
