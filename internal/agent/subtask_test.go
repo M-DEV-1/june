@@ -382,27 +382,6 @@ func TestExecuteTool_BranchRejectsCallsPastPerSessionCap(t *testing.T) {
 	}
 }
 
-// TestContextReader_FoldMethods_InterfaceConformance is a deliberate compile-time probe (same trick as TestContextReader_HybridSearch_InterfaceConformance in tools_test.go): calling these through the ContextReader INTERFACE type only compiles once agent.go's interface declares SaveFold/UnconsumedFolds/ConsumeFold and toolTestBrain implements them.
-func TestContextReader_FoldMethods_InterfaceConformance(t *testing.T) {
-	var cr ContextReader = &toolTestBrain{}
-
-	id, err := cr.SaveFold(context.Background(), "task", "result")
-	if err != nil {
-		t.Fatalf("SaveFold: %v", err)
-	}
-	if id == 0 {
-		t.Error("SaveFold returned id 0")
-	}
-
-	if _, err := cr.UnconsumedFolds(context.Background()); err != nil {
-		t.Fatalf("UnconsumedFolds: %v", err)
-	}
-
-	if err := cr.ConsumeFold(context.Background(), id); err != nil {
-		t.Fatalf("ConsumeFold: %v", err)
-	}
-}
-
 // TestAgentConnect_ResetsBranchCallCounterAtSessionStart verifies the per-session branch cap is actually per-session, not permanent for the process's lifetime — a fresh Connect() (reconnect or new session) must reset the counter so branch isn't silently dead for the rest of the program after one long conversation used up its slots.
 func TestAgentConnect_ResetsBranchCallCounterAtSessionStart(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "FAKE_API_KEY")

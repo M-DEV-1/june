@@ -2,18 +2,13 @@ package db_test
 
 import (
 	"context"
-	"ora/internal/db"
 	"testing"
 )
 
 // TestStore_SaveFold_AppearsInUnconsumedFolds is the tracer bullet for fold persistence: a saved fold must be retrievable via UnconsumedFolds, since that's the only path a branch result has back to the user once its live session has died.
 func TestStore_SaveFold_AppearsInUnconsumedFolds(t *testing.T) {
 	ctx := context.Background()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-	defer store.Close()
+	store := memStore(t)
 
 	id, err := store.SaveFold(ctx, "catch me up on Riddler", "Riddler kicked off last week, blocked on X")
 	if err != nil {
@@ -38,11 +33,7 @@ func TestStore_SaveFold_AppearsInUnconsumedFolds(t *testing.T) {
 // TestStore_ConsumeFold_RemovesItFromUnconsumedFolds verifies a consumed fold doesn't repeat at the next session's handshake — it's surfaced once.
 func TestStore_ConsumeFold_RemovesItFromUnconsumedFolds(t *testing.T) {
 	ctx := context.Background()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-	defer store.Close()
+	store := memStore(t)
 
 	id, err := store.SaveFold(ctx, "task", "result")
 	if err != nil {

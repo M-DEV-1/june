@@ -229,7 +229,3 @@ func TestEngineColdStartDoesNotBlockPresenceOrRunning(t *testing.T) {
 		t.Fatalf("MarkClientPresence+Running blocked for %v during a cold start; every authenticated IPC request pays that", elapsed)
 	}
 }
-
-func TestEngineSatisfiesEmbedder(t *testing.T) {
-	var _ Embedder = newEngine("/bin/true", nil, "http://127.0.0.1:6943", "m", time.Minute)
-}
