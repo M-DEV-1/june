@@ -733,6 +733,23 @@ func buildFTSMatch(query string) string {
 // SearchMemory runs FTS5 over summaries + notes. Returns top 10 by rank.
 // Empty query -> empty result, no error.
 func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, error) {
+	return s.searchMemoryWindow(ctx, query, time.Time{}, time.Time{})
+}
+
+// sqliteUTC renders t the way every timestamp column in this store is written (UTC "YYYY-MM-DD HH:MM:SS"), so bound parameters compare correctly against stored values.
+func sqliteUTC(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// ftsRowTime is the SQL expression for a memory_fts row's timestamp — the fts table itself carries none, so it is looked up in the row's source table: notes.created_at, threads.last_seen_at (a thread's meaningful time is when it was last touched — same choice hitCreatedAt makes), or nodes.created_at for summary/digest. NULL for a dangling ref, which any comparison then excludes.
+const ftsRowTime = `(CASE source
+	WHEN 'note' THEN (SELECT created_at FROM notes WHERE id = ref_id)
+	WHEN 'thread' THEN (SELECT last_seen_at FROM threads WHERE id = ref_id)
+	ELSE (SELECT created_at FROM nodes WHERE id = ref_id)
+END)`
+
+// searchMemoryWindow is SearchMemory constrained to rows whose timestamp falls in [since, until]; a zero bound is open on that side. The window is part of the WHERE clause, before the LIMIT, so a sparse window still yields its rows instead of being crowded out by out-of-window rows that rank higher.
+func (s *Store) searchMemoryWindow(ctx context.Context, query string, since, until time.Time) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SearchMemory")
 	defer span.End()
@@ -745,6 +762,17 @@ func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, er
 	// MATCH wants tokens, not one whole-query phrase; OR the significant terms.
 	safe := buildFTSMatch(query)
 
+	where := "memory_fts MATCH ?"
+	args := []any{safe}
+	if !since.IsZero() {
+		where += " AND " + ftsRowTime + " >= ?"
+		args = append(args, sqliteUTC(since))
+	}
+	if !until.IsZero() {
+		where += " AND " + ftsRowTime + " <= ?"
+		args = append(args, sqliteUTC(until))
+	}
+
 	// Summary rows carry the whole marshalled TaskSummary in content (see LogSemanticNode), so the plain summary text is pulled back out here — the model reads a hit's Content verbatim and a raw JSON blob is unreadable. Digest rows and any summary whose content isn't JSON fall through unchanged.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
@@ -754,10 +782,10 @@ func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, er
 			END,
 			source, ref_id
 		FROM memory_fts
-		WHERE memory_fts MATCH ?
+		WHERE `+where+`
 		ORDER BY rank
 		LIMIT 10
-	`, safe)
+	`, args...)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("fts5 search: %w", err)
@@ -1585,11 +1613,11 @@ func (s *Store) ListEpisodes(ctx context.Context, q EpisodeQuery) ([]Episode, er
 	var args []any
 	if !q.Since.IsZero() {
 		clauses = append(clauses, "created_at >= ?")
-		args = append(args, q.Since.UTC().Format("2006-01-02 15:04:05"))
+		args = append(args, sqliteUTC(q.Since))
 	}
 	if !q.Until.IsZero() {
 		clauses = append(clauses, "created_at <= ?")
-		args = append(args, q.Until.UTC().Format("2006-01-02 15:04:05"))
+		args = append(args, sqliteUTC(q.Until))
 	}
 	if app := strings.TrimSpace(q.App); app != "" {
 		clauses = append(clauses, "LOWER(app) LIKE '%' || LOWER(?) || '%'")
@@ -1815,6 +1843,11 @@ func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([
 
 // SearchEpisodes runs FTS5 MATCH over episodes_fts, returning the matching episodes' screen_text as MemoryHit.Content (Source="episode"), ordered by rank. Empty query -> empty result, no error, mirroring SearchMemory.
 func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, error) {
+	return s.searchEpisodesWindow(ctx, query, time.Time{}, time.Time{})
+}
+
+// searchEpisodesWindow is SearchEpisodes constrained to episodes whose created_at falls in [since, until]; a zero bound is open on that side. The window sits in the WHERE clause, before the LIMIT — see searchMemoryWindow for why.
+func (s *Store) searchEpisodesWindow(ctx context.Context, query string, since, until time.Time) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SearchEpisodes")
 	defer span.End()
@@ -1826,15 +1859,26 @@ func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, 
 
 	safe := buildFTSMatch(query)
 
+	where := "episodes_fts MATCH ?"
+	args := []any{safe}
+	if !since.IsZero() {
+		where += " AND episodes.created_at >= ?"
+		args = append(args, sqliteUTC(since))
+	}
+	if !until.IsZero() {
+		where += " AND episodes.created_at <= ?"
+		args = append(args, sqliteUTC(until))
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT episodes.screen_text, episodes.id, episodes.app, episodes.title,
 		       episodes.domain, episodes.created_at, episodes.image_path
 		FROM episodes_fts
 		JOIN episodes ON episodes.id = episodes_fts.rowid
-		WHERE episodes_fts MATCH ?
+		WHERE `+where+`
 		ORDER BY rank
 		LIMIT 10
-	`, safe)
+	`, args...)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("fts5 episode search: %w", err)

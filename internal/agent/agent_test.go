@@ -55,7 +55,7 @@ func (b *mockBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.E
 func (b *mockBrain) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
 	return nil, nil
 }
-func (b *mockBrain) HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error) {
+func (b *mockBrain) HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]db.MemoryHit, error) {
 	return nil, nil
 }
 func (b *mockBrain) SaveFold(ctx context.Context, task, result string) (int64, error)    { return 0, nil }
