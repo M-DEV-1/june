@@ -35,8 +35,8 @@ type ContextReader interface {
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
 	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
 	RecallSubject(ctx context.Context, subject string, limit int) ([]string, error)
-	// HybridSearch fuses lexical (FTS5) and vector search via reciprocal rank fusion, optionally filtered to domainFilter ("work" | "personal" | "" for none). Backs query_memory's "domain" param.
-	HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error)
+	// HybridSearchWindow fuses lexical (FTS5) and vector search via reciprocal rank fusion, optionally filtered to domainFilter ("work" | "personal" | "" for none) and to items whose timestamp falls in [since, until] (a zero bound is open on that side). The window is enforced store-side, before ranking's top-k, so a sparse window still yields its items. Backs query_memory's "domain" and "since"/"until" params.
+	HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]db.MemoryHit, error)
 	// SaveFold/UnconsumedFolds/ConsumeFold back branch()'s dead-session fallback (subtask.go, connect.go): a fold that missed its live session is staged here and surfaced once at the next handshake instead of dropped. Separate from notes — see db.Fold.
 	SaveFold(ctx context.Context, task, result string) (int64, error)
 	UnconsumedFolds(ctx context.Context) ([]db.Fold, error)

@@ -92,6 +92,8 @@ func toolDefinitions() []*genai.Tool {
 				Description: "Topical search over memory (moments, facts, arcs, period summaries). " +
 					"Moments (screen observations) rank with recency; facts/notes do not expire. " +
 					"Use app to restrict to one application (Slack, Firefox, Code). " +
+					"Whenever the question is anchored to a time — a day, a part of a day, a range — pass since/until: " +
+					"the search then runs and ranks entirely inside that window, whereas without it the best matches can all come from the wrong day. " +
 					"For pure day/timeline questions use recall. For 'what was I just doing' use get_recent.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
@@ -99,8 +101,8 @@ func toolDefinitions() []*genai.Tool {
 						"query":  {Type: genai.TypeString, Description: "What to search for — topic, project, show, person, etc. Never put a time word here ('today', 'yesterday', 'last week') — it will match text instead of dates; use since/until for that."},
 						"domain": {Type: genai.TypeString, Description: "Optional. Restrict to 'work' or 'personal' memories only. Omit to search everything, weighted toward whichever domain you're currently in."},
 						"app":    {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring, e.g. slack, firefox, code)."},
-						"since":  {Type: genai.TypeString, Description: "Optional. Keep only results from this time onward. 'today', 'yesterday', a bare date (2026-07-05), or a timestamp (2026-07-05T09:30:00). Omit for no time limit."},
-						"until":  {Type: genai.TypeString, Description: "Optional. Keep only results up to this time (same formats as 'since'; a bare date covers the whole day). Omit for no time limit."},
+						"since":  {Type: genai.TypeString, Description: "Optional. Start of the time window results must fall in. 'today', 'yesterday', a bare date (2026-07-05) meaning its start, or a timestamp (2026-07-05T09:30:00). You know the current date/time — convert other phrases into a concrete date yourself. Omit for no lower bound."},
+						"until":  {Type: genai.TypeString, Description: "Optional. End of the time window (same formats as 'since'; a bare date covers through the end of that day). Omit to mean up to now. For a single day, set since and until to that same date."},
 					},
 					Required: []string{"query"},
 				},
@@ -565,32 +567,8 @@ func optionalWindow(args map[string]any, now time.Time) (time.Time, time.Time, b
 	return since, until, !since.IsZero() || !until.IsZero(), nil
 }
 
-// filterHitsByTime keeps hits whose CreatedAt falls inside [since, until]; a zero bound is unbounded on that side.
-// A hit with no CreatedAt is kept: notes and summaries reach HybridSearch's lexical path without a timestamp, and dropping them would silently delete durable facts from every dated query.
-func filterHitsByTime(hits []db.MemoryHit, since, until time.Time) []db.MemoryHit {
-	out := hits[:0:0]
-	for _, h := range hits {
-		if h.CreatedAt.IsZero() {
-			out = append(out, h)
-			continue
-		}
-		if !since.IsZero() && h.CreatedAt.Before(since) {
-			continue
-		}
-		if !until.IsZero() && h.CreatedAt.After(until) {
-			continue
-		}
-		out = append(out, h)
-	}
-	return out
-}
-
-// queryMemoryHits is how many hits query_memory shows the model, and queryMemoryOverfetch multiplies what it asks the store for when a since/until window is set.
-// The over-fetch is needed because HybridSearch ranks without any notion of the window: filtering its top 10 after the fact usually leaves nothing, since the whole point of a dated question is that the lexically best matches are from the wrong day.
-const (
-	queryMemoryHits      = 10
-	queryMemoryOverfetch = 5
-)
+// queryMemoryHits is how many hits query_memory shows the model. The since/until window is enforced inside HybridSearchWindow (SQL-side, before top-k), so a windowed call asks for the same limit as a plain one.
+const queryMemoryHits = 10
 
 // sensitivePathSubstrings/sensitivePathSuffixes gate read_file behind HITL approval — credentials, SSH/GPG/cloud keys, and ora's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
 var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "ora-db/ipc-token"}
@@ -802,12 +780,8 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		slog.Info("querying long-term memory", "query", query, "domain", domain, "since", since, "until", until)
 
-		// HybridSearch (FTS5 + vector, fused via reciprocal rank fusion) replaces the old two-call SearchMemory + RankedEpisodes merge — it covers episodes/summaries/notes/threads in one fused, domain-aware ranking.
-		limit := queryMemoryHits
-		if timed {
-			limit *= queryMemoryOverfetch
-		}
-		hits, err := a.brain.HybridSearch(ctx, query, domain, limit)
+		// HybridSearchWindow (FTS5 + vector, fused via reciprocal rank fusion) covers episodes/summaries/notes/threads in one fused, domain-aware ranking, with the since/until window enforced store-side — inside the SQL and the vector candidate pool, before any top-k — so a sparse window still yields its items instead of the old over-fetch-and-post-filter returning nothing.
+		hits, err := a.brain.HybridSearchWindow(ctx, query, domain, since, until, queryMemoryHits)
 		if err != nil {
 			slog.Error("query_memory: search failed", "error", err)
 			return toolError(storeUnavailable)
@@ -817,17 +791,21 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if strings.TrimSpace(app) != "" {
 			hits = filterHitsByApp(hits, app)
 		}
-		// The store has no time-filtered search, so the window is applied here on the hits it returned — hence the over-fetch above.
-		if timed {
-			hits = filterHitsByTime(hits, since, until)
-			if len(hits) > queryMemoryHits {
-				hits = hits[:queryMemoryHits]
-			}
-		}
 		if len(hits) == 0 {
 			// "Nothing exists" and "the filters removed everything" are different answers and the model has to be able to tell them apart — answering the second as the first is how a question about episodes watched today got a flat no while the rows sat in the store.
-			if desc := filterDescription(app, since, until); found > 0 && desc != "" {
-				return fmt.Sprintf("%d matches, none %s", found, desc)
+			desc := filterDescription(app, since, until)
+			if desc == "" {
+				return "no memory matches"
+			}
+			total := found
+			if total == 0 && timed {
+				// The window emptied the search inside the store, so what exists outside it takes one unwindowed call to see.
+				if unfiltered, uerr := a.brain.HybridSearchWindow(ctx, query, domain, time.Time{}, time.Time{}, queryMemoryHits); uerr == nil {
+					total = len(unfiltered)
+				}
+			}
+			if total > 0 {
+				return fmt.Sprintf("%d matches, none %s", total, desc)
 			}
 			return "no memory matches"
 		}

@@ -4,8 +4,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"strings"
 	"testing"
+
+	"ora/internal/agent"
+	"ora/internal/db"
 )
 
 // TestParseTurnPairs_PairsEachReplyWithTheQuestionBeforeIt is the shape track 2 depends on: one pair per "ora said", carrying the last user turn before it, whether that turn was typed or spoken.
@@ -98,5 +102,47 @@ func TestRateExcludesNotApplicable(t *testing.T) {
 	}
 	if got := pct(0, 0); got != "n/a" {
 		t.Errorf("pct with nothing applicable = %q, want n/a", got)
+	}
+}
+
+// TestToolPathSearch_RunsQuestionsThroughTheRealQueryMemoryTool verifies the -tool-path replay: a question goes through the agent's ExecuteTool dispatch (the exact path the model's function calls take), a question's args ride along so a since/until window reaches the store, and the tool's honest none-in-window answer comes back as a row for the judge rather than being mistaken for content.
+func TestToolPathSearch_RunsQuestionsThroughTheRealQueryMemoryTool(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if _, err := store.LogNote(ctx, "the user prefers oat milk lattes", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+	search := toolPathSearch(agent.NewAgent(nil, nil, store, nil, "FAKE_API_KEY"))
+
+	rows, err := search(ctx, question{Question: "oat milk"})
+	if err != nil {
+		t.Fatalf("plain question: %v", err)
+	}
+	if len(rows) == 0 || !strings.Contains(strings.Join(rows, "\n"), "oat milk lattes") {
+		t.Errorf("expected the note to come back through the tool path, got: %v", rows)
+	}
+
+	rows, err = search(ctx, question{Question: "oat milk", Args: map[string]any{"since": "2020-01-01", "until": "2020-01-02"}})
+	if err != nil {
+		t.Fatalf("windowed question: %v", err)
+	}
+	joined := strings.Join(rows, "\n")
+	if strings.Contains(joined, "lattes") {
+		t.Errorf("expected no out-of-window content, got: %v", rows)
+	}
+	if !strings.Contains(joined, "none") {
+		t.Errorf("expected the tool's none-in-window answer to reach the judge as a row, got: %v", rows)
+	}
+
+	rows, err = search(ctx, question{Question: "zzqqxx absent topic"})
+	if err != nil {
+		t.Fatalf("absent topic: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf(`expected "no memory matches" to come back as zero rows, got: %v`, rows)
 	}
 }

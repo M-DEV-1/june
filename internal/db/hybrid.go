@@ -207,17 +207,25 @@ func lexicalTermOverlap(content string, queryTerms []string) int {
 // If domainFilter is "work" or "personal", results are hard-filtered to that domain (both the lexical SQL query and the vector search's `where` clause). If domainFilter is "", no hard filter is applied, but candidates matching the store's inferred current domain (see currentDomain) get domainBoostFactor applied to their fused score before the final sort.
 // If the Store has no embedder/vector index configured (both nil — the default for a bare db.New(":memory:")), HybridSearch degrades gracefully to lexical-only fusion rather than erroring.
 func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]MemoryHit, error) {
+	return s.HybridSearchWindow(ctx, query, domainFilter, time.Time{}, time.Time{}, limit)
+}
+
+// HybridSearchWindow is HybridSearch constrained to items whose timestamp falls in [since, until]. A zero bound is open on that side; both zero means no time constraint at all.
+// The window is applied inside the lexical SQL (before each FTS query's LIMIT) and to the vector candidate pool before fusion — never to the fused top-k after ranking, which for a sparse window (the whole point of a dated question) usually leaves nothing. A window containing nothing returns an honestly empty result, not a fallback to unwindowed matches.
+// Under a window, a vector candidate with no readable created_at metadata is dropped: its membership in the window can't be shown. Unwindowed search keeps such candidates.
+func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]MemoryHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
 	}
+	windowed := !since.IsZero() || !until.IsZero()
 
 	// lexical candidates: reuse the existing FTS5 paths, don't reimplement.
-	memHits, err := s.SearchMemory(ctx, query)
+	memHits, err := s.searchMemoryWindow(ctx, query, since, until)
 	if err != nil {
 		return nil, err
 	}
-	episodeHits, err := s.SearchEpisodes(ctx, query)
+	episodeHits, err := s.searchEpisodesWindow(ctx, query, since, until)
 	if err != nil {
 		return nil, err
 	}
@@ -321,6 +329,14 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 					createdAt := time.Time{}
 					if ts := r.Metadata["created_at"]; ts != "" {
 						createdAt = parseSQLiteTime(ts)
+					}
+					// chromem's where clause is exact-match only, so the time window is applied here on the candidate pool (hybridVectorPoolSize wide, not the final top-k).
+					if windowed {
+						if createdAt.IsZero() ||
+							(!since.IsZero() && createdAt.Before(since)) ||
+							(!until.IsZero() && createdAt.After(until)) {
+							continue
+						}
 					}
 					vector = append(vector, rrfCandidate{
 						id:        r.ID,
