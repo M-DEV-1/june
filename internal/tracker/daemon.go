@@ -206,14 +206,18 @@ func (d *Daemon) Start(ctx context.Context) {
 type captureOut struct {
 	text  string
 	sight Sight
-	jpeg  []byte
+	// frames holds one JPEG per monitor, the monitor the user is on first.
+	frames [][]byte
 }
 
 func applyCapture(ev *Activity, out captureOut) {
 	ev.ScreenText = out.text
 	ev.UserActivity = out.sight.UserActivity
 	ev.VisibleText = out.sight.VisibleText
-	ev.ImageJPEG = out.jpeg
+	if len(out.frames) > 0 {
+		ev.ImageJPEG = out.frames[0]
+		ev.ExtraJPEG = out.frames[1:]
+	}
 }
 
 // tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen.
@@ -245,7 +249,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 	if desc == "" {
 		desc = strings.TrimSpace(act.Title)
 	}
-	return resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, encodeJPEG(png))
+	return resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, screenFrames(png))
 }
 
 // resolveCapture decides what a capture emits and updates the right per-tier "last text" tracker.
@@ -256,7 +260,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 // lastVisionText instead — a separate tracker, so a vision capture's stored description never gets compared
 // against the next accessibility-tier capture's raw a11y text of the same, unchanged screen (that mismatch
 // used to look like a change and cause a re-emit, even with nothing on screen actually different).
-func resolveCapture(lastA11yText, lastVisionText *string, a11yText string, useVision bool, desc string, sight Sight, jpeg []byte) captureOut {
+func resolveCapture(lastA11yText, lastVisionText *string, a11yText string, useVision bool, desc string, sight Sight, frames [][]byte) captureOut {
 	a11yChanged := diff(lastA11yText, a11yText)
 	if !useVision {
 		return captureOut{text: a11yChanged}
@@ -265,7 +269,7 @@ func resolveCapture(lastA11yText, lastVisionText *string, a11yText string, useVi
 	if shown == "" {
 		return captureOut{}
 	}
-	return captureOut{text: shown, sight: sight, jpeg: jpeg}
+	return captureOut{text: shown, sight: sight, frames: frames}
 }
 
 // nonWindowApps are the desktop/compositor/shell identifiers that mean no real app is focused. Without this gate the vision tier would screenshot and describe the wallpaper on every idle tick.

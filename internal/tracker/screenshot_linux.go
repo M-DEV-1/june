@@ -5,12 +5,16 @@ package tracker
 import (
 	"context"
 	"fmt"
+	"image"
 	"log/slog"
 	"os"
 	"strings"
 	"sync/atomic"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/jezek/xgb"
+	"github.com/jezek/xgb/randr"
+	"github.com/jezek/xgb/xproto"
 )
 
 var screenshotSeq atomic.Uint64
@@ -143,6 +147,37 @@ func WarmUpScreenshotPermission(ctx context.Context) {
 		return
 	}
 	slog.Info("vision warm-up: screenshot permission granted")
+}
+
+// screenLayout reports the monitor rectangles making up the desktop canvas, plus the pointer position, in the same coordinate space as a whole-screen screenshot. It reads them from the X RandR extension, which under Wayland answers through XWayland — mutter keeps that in step with the real monitor layout.
+// Returns (nil, (-1,-1)) when X or RandR is unreachable (headless, or a compositor with no XWayland), which leaves stored frames whole-canvas.
+func screenLayout() ([]image.Rectangle, image.Point) {
+	unknown := image.Pt(-1, -1)
+	conn, err := xgb.NewConn()
+	if err != nil {
+		return nil, unknown
+	}
+	defer conn.Close()
+	if err := randr.Init(conn); err != nil {
+		return nil, unknown
+	}
+
+	root := xproto.Setup(conn).DefaultScreen(conn).Root
+	reply, err := randr.GetMonitors(conn, root, true).Reply()
+	if err != nil {
+		return nil, unknown
+	}
+	mons := make([]image.Rectangle, 0, len(reply.Monitors))
+	for _, m := range reply.Monitors {
+		mons = append(mons, image.Rect(int(m.X), int(m.Y), int(m.X)+int(m.Width), int(m.Y)+int(m.Height)))
+	}
+
+	// ponytail: the pointer stands in for the focused window, whose position no Wayland API will give us — gnome-shell refuses Introspect.GetWindows to unlisted app-ids, and AT-SPI reports no screen coordinates for Wayland clients. This picks the wrong primary monitor only when the pointer rests on a different screen than the keyboard focus, and every monitor is captured either way. Upgrade path: read the focused window's rectangle if a compositor ever exposes it.
+	pointer := unknown
+	if p, err := xproto.QueryPointer(conn, root).Reply(); err == nil {
+		pointer = image.Pt(int(p.RootX), int(p.RootY))
+	}
+	return mons, pointer
 }
 
 // grabScreen returns a PNG of the current screen for the vision tier.
