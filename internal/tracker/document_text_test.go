@@ -27,10 +27,7 @@ func TestDocumentText_WebPage_DropsChrome(t *testing.T) {
 	got := documentText(tree)
 	want := "Article headline\nthe actual article text"
 	if got != want {
-		t.Errorf("documentText = %q, want %q", got, want)
-	}
-	if got == "Back" || got == "Forward" || got == "Brave Shields" {
-		t.Errorf("documentText leaked chrome text: %q", got)
+		t.Errorf("documentText = %q, want %q (toolbar chrome must not leak)", got, want)
 	}
 }
 

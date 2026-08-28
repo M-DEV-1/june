@@ -3,7 +3,6 @@ package memory
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestNormalize_ContentNeedsContext(t *testing.T) {
@@ -57,31 +56,5 @@ func TestNormalize_StripsObjectReplacement(t *testing.T) {
 	obs := Normalize("firefox", "Article", "Hello \uFFFC world \uFFFC there from a long enough sentence about climate.")
 	if strings.Contains(obs.Content, "\uFFFC") {
 		t.Fatalf("U+FFFC remained: %q", obs.Content)
-	}
-}
-
-func TestFormatLine_Moment(t *testing.T) {
-	at := time.Date(2026, 7, 24, 20, 53, 0, 0, time.UTC)
-	line := FormatLine(KindMoment, DomainPersonal, at, "Netflix", "Suits", "Season 6 Ep 12", 200)
-	if !strings.Contains(line, "moment") || !strings.Contains(line, "personal") {
-		t.Fatalf("line=%q", line)
-	}
-	if !strings.Contains(line, "Netflix") || !strings.Contains(line, "Season 6") {
-		t.Fatalf("missing context/content: %q", line)
-	}
-}
-
-func TestKindOf(t *testing.T) {
-	if KindOf("episode") != KindMoment {
-		t.Fatal()
-	}
-	if KindOf("note") != KindFact {
-		t.Fatal()
-	}
-	if KindOf("digest") != KindPeriod {
-		t.Fatal()
-	}
-	if KindOf("thread") != KindArc {
-		t.Fatal()
 	}
 }

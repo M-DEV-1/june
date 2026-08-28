@@ -123,23 +123,15 @@ func TestChromemIndex_Add_EvictsOldestOverMaxDocs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	var gotIDs []string
+	seen := map[string]bool{}
 	for _, r := range results {
-		gotIDs = append(gotIDs, r.ID)
+		seen[r.ID] = true
 	}
-	for _, id := range gotIDs {
-		if id == "oldest" {
-			t.Errorf("expected 'oldest' to be evicted, but it was found in results: %v", gotIDs)
-		}
+	if seen["oldest"] {
+		t.Errorf("expected 'oldest' to be evicted, but it was found in results: %v", results)
 	}
-	foundNewest := false
-	for _, id := range gotIDs {
-		if id == "newest" {
-			foundNewest = true
-		}
-	}
-	if !foundNewest {
-		t.Errorf("expected 'newest' to still be present, got: %v", gotIDs)
+	if !seen["newest"] {
+		t.Errorf("expected 'newest' to still be present, got: %v", results)
 	}
 }
 

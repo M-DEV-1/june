@@ -49,20 +49,8 @@ func TestStatusDotPNG(t *testing.T) {
 	}
 }
 
-// The watcher drops all items when it restarts and re-announces itself with a new owner. We must re-register on its return — but NOT when it disappears.
-func TestShouldReregister_CoreDistinction(t *testing.T) {
-	const sig = "org.freedesktop.DBus.NameOwnerChanged"
-	const watcher = "org.kde.StatusNotifierWatcher"
-	if !shouldReregister(sig, []interface{}{watcher, "", ":1.42"}) {
-		t.Error("watcher reappearing (new owner) should trigger re-registration")
-	}
-	if shouldReregister(sig, []interface{}{watcher, ":1.42", ""}) {
-		t.Error("watcher disappearing (empty new owner) must NOT trigger re-registration")
-	}
-}
-
-// Guard against firing on unrelated signals or malformed bodies.
-func TestShouldReregister_Guards(t *testing.T) {
+// The watcher drops all items when it restarts and re-announces itself with a new owner, so we must re-register on its return — but not when it disappears, and never on an unrelated signal or a malformed body.
+func TestShouldReregister(t *testing.T) {
 	const noc = "org.freedesktop.DBus.NameOwnerChanged"
 	const watcher = "org.kde.StatusNotifierWatcher"
 	cases := []struct {
@@ -71,6 +59,8 @@ func TestShouldReregister_Guards(t *testing.T) {
 		body   []interface{}
 		want   bool
 	}{
+		{"watcher reappearing with a new owner", noc, []interface{}{watcher, "", ":1.42"}, true},
+		{"watcher disappearing (empty new owner)", noc, []interface{}{watcher, ":1.42", ""}, false},
 		{"wrong signal name", "org.freedesktop.DBus.NameAcquired", []interface{}{watcher, "", ":1.42"}, false},
 		{"unrelated service", noc, []interface{}{"org.example.Other", "", ":1.42"}, false},
 		{"short body", noc, []interface{}{watcher, ""}, false},

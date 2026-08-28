@@ -7,15 +7,12 @@ import (
 	"testing"
 )
 
-func TestAgent_VoiceDefaultsEmpty(t *testing.T) {
+func TestAgent_SetVoiceGetVoiceRoundTrip(t *testing.T) {
 	a := agent.NewAgent(&mockMic{}, &mockSpeaker{}, &mockBrain{}, nil, "FAKE_API_KEY")
 	if got := a.GetVoice(); got != "" {
 		t.Errorf("expected a fresh agent to have no voice set, got %q", got)
 	}
-}
 
-func TestAgent_SetVoiceGetVoiceRoundTrip(t *testing.T) {
-	a := agent.NewAgent(&mockMic{}, &mockSpeaker{}, &mockBrain{}, nil, "FAKE_API_KEY")
 	a.SetVoice("Kore")
 	if got := a.GetVoice(); got != "Kore" {
 		t.Errorf("expected GetVoice to return Kore, got %q", got)

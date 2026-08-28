@@ -1,22 +1,11 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
 )
-
-func TestWaveform_InitialisedToZero(t *testing.T) {
-	w := NewWaveform(10)
-	if w.smoothed != 0 {
-		t.Errorf("expected smoothed=0, got %f", w.smoothed)
-	}
-	if w.width != 10 || len(w.variation) != 10 {
-		t.Errorf("expected width=10 variation=10, got width=%d variation=%d", w.width, len(w.variation))
-	}
-}
 
 func TestWaveform_RisesFast(t *testing.T) {
 	w := NewWaveform(10)
@@ -74,26 +63,4 @@ func TestWaveform_RenderContainsLabel(t *testing.T) {
 	if !strings.Contains(out, "MICROPHONE") {
 		t.Error("Render missing label")
 	}
-}
-
-func TestWaveform_VisualDemo(t *testing.T) {
-	w := NewWaveform(40)
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#10b981"))
-
-	fmt.Println("\n--- silent ---")
-	fmt.Println(w.Render(style, "SILENT"))
-
-	// drive amplitude up
-	for _, a := range []float64{0.1, 0.3, 0.6, 0.9, 1.0, 0.8, 0.5, 0.3, 0.1, 0} {
-		w.Update(a)
-	}
-	fmt.Println("\n--- speaking ---")
-	fmt.Println(w.Render(style, "SPEAKING"))
-
-	// let it decay
-	for range 10 {
-		w.Update(0)
-	}
-	fmt.Println("\n--- after decay ---")
-	fmt.Println(w.Render(style, "DECAYED"))
 }

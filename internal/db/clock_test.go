@@ -6,17 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
 	"ora/internal/memory"
 )
 
 func TestLatestMemoryTime_UsesNewestRowNotWallClock(t *testing.T) {
 	ctx := context.Background()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := memStore(t)
 
 	got, err := store.LatestMemoryTime(ctx)
 	if err != nil {
@@ -43,11 +38,7 @@ func TestLatestMemoryTime_UsesNewestRowNotWallClock(t *testing.T) {
 
 func TestMemoryAsOf_NoteThreadEpisodeWorkingState(t *testing.T) {
 	ctx := context.Background()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := memStore(t)
 
 	noteID, err := store.LogNote(ctx, "User prefers TDD.", "fact")
 	if err != nil {

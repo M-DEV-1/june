@@ -61,12 +61,8 @@ func TestIsVisionWorthy(t *testing.T) {
 
 func TestSightText_IgnoresEmptyAndDoesNotNeedA11y(t *testing.T) {
 	s := Sight{UserActivity: "watching a lecture", VisibleText: []string{"Week 4: backprop", "loss: 0.12"}}
-	got := s.Text()
-	if got != "watching a lecture\nWeek 4: backprop\nloss: 0.12" {
+	if got := s.Text(); got != "watching a lecture\nWeek 4: backprop\nloss: 0.12" {
 		t.Fatalf("got %q", got)
-	}
-	if s.Text() == "" {
-		t.Fatal("expected text")
 	}
 	if (Sight{}).Text() != "" {
 		t.Fatal("empty sight should not invent a11y")

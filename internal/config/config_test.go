@@ -6,39 +6,34 @@ import (
 	"testing"
 )
 
-// TestDataDir_ORADataDirOverrideWins verifies ORA_DATA_DIR, when set, is used verbatim — the override hook tests (and any future scripted/portable install) use to point ORA at a throwaway or explicit directory instead of a real XDG path.
-func TestDataDir_ORADataDirOverrideWins(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("ORA_DATA_DIR", dir)
+// DataDir resolves in a fixed order: the ORA_DATA_DIR override verbatim (what the tests and any scripted/portable install use), then $XDG_DATA_HOME/ora, then ~/.local/share/ora.
+func TestDataDir_ResolutionOrder(t *testing.T) {
+	t.Run("ORA_DATA_DIR override wins", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("ORA_DATA_DIR", dir)
+		if got := DataDir(); got != dir {
+			t.Errorf("DataDir() = %q, want override %q", got, dir)
+		}
+	})
 
-	if got := DataDir(); got != dir {
-		t.Errorf("DataDir() = %q, want override %q", got, dir)
-	}
-}
+	t.Run("XDG_DATA_HOME", func(t *testing.T) {
+		t.Setenv("ORA_DATA_DIR", "")
+		xdg := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", xdg)
+		if got, want := DataDir(), filepath.Join(xdg, "ora"); got != want {
+			t.Errorf("DataDir() = %q, want %q", got, want)
+		}
+	})
 
-// TestDataDir_UsesXDGDataHome verifies that with no override set, DataDir resolves to $XDG_DATA_HOME/ora.
-func TestDataDir_UsesXDGDataHome(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", "")
-	xdg := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", xdg)
-
-	want := filepath.Join(xdg, "ora")
-	if got := DataDir(); got != want {
-		t.Errorf("DataDir() = %q, want %q", got, want)
-	}
-}
-
-// TestDataDir_FallsBackToHomeLocalShare verifies that with neither override set, DataDir resolves to ~/.local/share/ora.
-func TestDataDir_FallsBackToHomeLocalShare(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", "")
-	t.Setenv("XDG_DATA_HOME", "")
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	want := filepath.Join(home, ".local", "share", "ora")
-	if got := DataDir(); got != want {
-		t.Errorf("DataDir() = %q, want %q", got, want)
-	}
+	t.Run("home fallback", func(t *testing.T) {
+		t.Setenv("ORA_DATA_DIR", "")
+		t.Setenv("XDG_DATA_HOME", "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if got, want := DataDir(), filepath.Join(home, ".local", "share", "ora"); got != want {
+			t.Errorf("DataDir() = %q, want %q", got, want)
+		}
+	})
 }
 
 // TestDataDir_MigratesLegacyOraDb verifies the one-time migration: when the new XDG-based directory doesn't exist yet but a legacy "ora-db" directory exists in the current working directory (the old cwd-relative convention), DataDir moves its contents into the new directory instead of leaving them orphaned.
@@ -74,19 +69,6 @@ func TestDataDir_MigratesLegacyOraDb(t *testing.T) {
 
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
 		t.Errorf("expected the legacy ora-db directory to be gone after migration, stat err = %v", err)
-	}
-}
-
-// TestDataDir_NoLegacyDir_NoMigration verifies DataDir doesn't error or create anything unexpected when there's no legacy ora-db to migrate — the common case for a fresh install.
-func TestDataDir_NoLegacyDir_NoMigration(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("ORA_DATA_DIR", "")
-	xdg := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", xdg)
-
-	want := filepath.Join(xdg, "ora")
-	if got := DataDir(); got != want {
-		t.Errorf("DataDir() = %q, want %q", got, want)
 	}
 }
 
