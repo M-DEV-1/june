@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,15 @@ const episodeLimit = 200
 // noSpeechMarker is the file left in a recording directory whose transcription ran fine but produced no speech at all. It tells the user why the audio is still there, and it stops the startup sweep from transcribing that directory again on every daemon start.
 const noSpeechMarker = "no-speech.txt"
 
+// failedMarker is the file left in a recording directory whose processing failed, holding the error and when it happened. Without it the recording keeps the exact shape the sweep looks for, and every tick spends another summariser call on the same failure.
+const failedMarker = "failed.txt"
+
+// failureRetryAfter is how old the failure marker must be before the sweep tries that recording again. A rate limit or a dead API key clears on the scale of an hour, not of the two minutes between sweeps.
+const failureRetryAfter = time.Hour
+
+// noteIDFile is the file in a recording directory holding the id of the note its minutes were filed under, so summarising the same recording again corrects that note instead of filing a second copy of the meeting.
+const noteIDFile = "note-id.txt"
+
 // keepAudio preserves mic.wav and system.wav after a successful transcription instead of deleting them.
 const keepAudio = true
 
@@ -44,6 +54,7 @@ type Store interface {
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	SetPersonalContext(ctx context.Context, subject, content string) error
 	LogNote(ctx context.Context, content, kind string) (int64, error)
+	UpdateNote(ctx context.Context, id int64, content string) error
 }
 
 // capturer is the running-capture half of audio.MeetingCapture, kept as an interface so tests can drive the pipeline without a sound server.
@@ -287,6 +298,10 @@ func unfinished(dir string) (*session, bool) {
 	if exists(filepath.Join(dir, noSpeechMarker)) {
 		return nil, false
 	}
+	// A recording whose last attempt failed is left alone until its marker is failureRetryAfter old, so a summariser that is refusing costs one call an hour instead of one every sweep. Deleting the marker is how the user asks for the retry now.
+	if t := modTime(filepath.Join(dir, failedMarker)); !t.IsZero() && time.Since(t) < failureRetryAfter {
+		return nil, false
+	}
 	if exists(filepath.Join(dir, "transcript.md")) {
 		if exists(filepath.Join(dir, "minutes.md")) {
 			return nil, false
@@ -349,6 +364,16 @@ func (r *Recorder) Active() bool {
 
 // Start opens both audio streams and begins writing mic.wav and system.wav under a fresh timestamped directory.
 func (r *Recorder) Start() error {
+	if err := r.open(); err != nil {
+		return err
+	}
+	// Notifying happens outside the lock, as it does on the stop path: notify shells out to notify-send, and holding the recorder's lock across a process spawn stalls anything asking whether a recording is running.
+	r.notify("Recording meeting", "Ora is recording. Stop it from the tray when the call ends.")
+	return nil
+}
+
+// open makes the recording directory, opens both audio streams and publishes the live session. Input: none. Output: an error if any of that fails, with the half-made recording directory removed again.
+func (r *Recorder) open() (err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.live != nil {
@@ -359,6 +384,14 @@ func (r *Recorder) Start() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create recording dir: %w", err)
 	}
+	// A recording that never got its streams open leaves a directory of stub WAVs, which on disk is indistinguishable from a recording a crash abandoned — so the sweep would pick it up and try to transcribe silence on every tick.
+	defer func() {
+		if err != nil {
+			if rmErr := os.RemoveAll(dir); rmErr != nil {
+				slog.Warn("could not remove the directory of a recording that failed to start", "dir", dir, "error", rmErr)
+			}
+		}
+	}()
 
 	mic, err := newWAV(filepath.Join(dir, "mic.wav"))
 	if err != nil {
@@ -394,7 +427,6 @@ func (r *Recorder) Start() error {
 		done:      make(chan struct{}),
 	}
 	go r.watchSilence(watch, r.silenceAfter, r.live.done)
-	r.notify("Recording meeting", "Ora is recording. Stop it from the tray when the call ends.")
 	return nil
 }
 
@@ -445,12 +477,14 @@ func (r *Recorder) stop() (*session, error) {
 }
 
 // process turns a recording into minutes: it gets the transcript — by running whisper over both streams, or by reading the one already on disk — then writes minutes.md, files the minutes as a note and updates personal context.
-func (r *Recorder) process(ctx context.Context, s *session) error {
+func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	// Two paths can reach the same recording — the stop that made it and the retry loop looking for deferred ones — and transcribing it twice would race two whisper runs onto the same files.
 	if !r.claim(s.dir) {
 		return nil
 	}
 	defer r.release(s.dir)
+	// How this attempt ended is recorded next to the recording, because on disk a recording that failed to summarise looks exactly like one that was never summarised at all.
+	defer func() { markOutcome(s.dir, err) }()
 
 	ctx, cancel := context.WithTimeout(ctx, transcribeTimeout)
 	defer cancel()
@@ -467,15 +501,55 @@ func (r *Recorder) process(ctx context.Context, s *session) error {
 	if err := os.WriteFile(filepath.Join(s.dir, "minutes.md"), []byte(text), 0o644); err != nil {
 		return fmt.Errorf("write minutes: %w", err)
 	}
-	if _, err := r.store.LogNote(ctx, text, noteKind); err != nil {
-		slog.Warn("could not file meeting minutes as a note", "error", err)
-	}
+	r.fileMinutes(ctx, s.dir, text)
 
 	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
 	r.updatePersonalContext(ctx, text, s.startedAt, s.stoppedAt)
 
 	r.notify("Meeting summary ready", filepath.Join(s.dir, "minutes.md"))
 	return nil
+}
+
+// markOutcome records how an attempt at processing a recording ended: a success clears any failure marker, a failure writes one holding the error and the time, which keeps the sweep off this recording for failureRetryAfter. Input: the recording directory and the error the attempt returned, nil on success. Output: none — failing to write the marker is logged, since it only costs a wasted retry.
+func markOutcome(dir string, err error) {
+	path := filepath.Join(dir, failedMarker)
+	if err == nil {
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			slog.Warn("could not clear the failure marker of a recording that has now been processed", "dir", dir, "error", rmErr)
+		}
+		return
+	}
+	// A recording with no speech in it already has its own marker saying so, and unfinished() stops on that one first.
+	if exists(filepath.Join(dir, noSpeechMarker)) {
+		return
+	}
+	note := fmt.Sprintf("Processing this recording failed at %s:\n\n%v\n\nOra will try again in about an hour. Delete this file to have it try again straight away.\n", time.Now().Format(time.RFC3339), err)
+	if wErr := os.WriteFile(path, []byte(note), 0o644); wErr != nil {
+		slog.Warn("could not record why processing a recording failed", "dir", dir, "error", wErr)
+	}
+}
+
+// fileMinutes puts a recording's minutes into memory. If the recording was filed before, the note it was filed under is corrected in place; otherwise the minutes are filed as a new note and its id written to noteIDFile so the next run corrects this one. Input: the recording directory and the minutes text. Output: none — a memory that refuses the minutes is logged and shrugged off, because minutes.md on disk is the copy that matters.
+func (r *Recorder) fileMinutes(ctx context.Context, dir, text string) {
+	path := filepath.Join(dir, noteIDFile)
+	if b, err := os.ReadFile(path); err == nil {
+		if id, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil {
+			// UpdateNote reports a missing row rather than silently doing nothing, so a note the user has since deleted falls through to being filed afresh.
+			if uerr := r.store.UpdateNote(ctx, id, text); uerr == nil {
+				return
+			} else {
+				slog.Warn("could not correct the note this recording was filed under, filing fresh minutes instead", "dir", dir, "note_id", id, "error", uerr)
+			}
+		}
+	}
+	id, err := r.store.LogNote(ctx, text, noteKind)
+	if err != nil {
+		slog.Warn("could not file meeting minutes as a note", "error", err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(strconv.FormatInt(id, 10)), 0o644); err != nil {
+		slog.Warn("could not record which note the meeting minutes were filed under", "dir", dir, "error", err)
+	}
 }
 
 // transcriptFor returns the meeting's transcript. A recording the sweep found with its transcript already written just has it read back off disk, which is what makes deleting minutes.md a request for fresh minutes; anything else is transcribed with whisper and the result written to transcript.md.
