@@ -1,9 +1,116 @@
 package recorder
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+// fakeWhisper writes a shell script that stands in for the whisperfile: it prints script to stdout, complaint to stderr, and exits 0. Returns its path.
+func fakeWhisper(t *testing.T, stdout, stderr string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-whisper")
+	body := "#!/bin/sh\ncat <<'EOF'\n" + stdout + "\nEOF\ncat <<'EOF' >&2\n" + stderr + "\nEOF\nexit 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake whisper: %v", err)
+	}
+	return path
+}
+
+// testWAV writes a small valid recording so repairWAV has something to open.
+func testWAV(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mic.wav")
+	w, err := newWAV(path)
+	if err != nil {
+		t.Fatalf("newWAV: %v", err)
+	}
+	if _, err := w.Write(make([]byte, 1600)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return path
+}
+
+// whisperfile reports a file it could not decode on stderr and still exits 0, so a failed read is indistinguishable from a meeting nobody spoke in. Two meetings were filed as silent that way. It has to come back as an error.
+func TestTranscribeWAV_ReportsAReadFailureThatExitedZero(t *testing.T) {
+	bin := fakeWhisper(t, "", "error: failed to read audio file 'mic.wav'")
+	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, 0); err == nil {
+		t.Fatal("a whisper run that could not read the audio must be an error, not an empty transcript")
+	}
+}
+
+// Whisper runs at a few times real time, so a long recording that comes back with nothing in a fraction of a second did not listen to it — it failed in some way it did not name. That is not a silent meeting, and the recording must survive it.
+func TestTranscribeWAV_RejectsAnEmptyResultThatCameBackTooFast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mic.wav")
+	w, err := newWAV(path)
+	if err != nil {
+		t.Fatalf("newWAV: %v", err)
+	}
+	if _, err := w.Write(make([]byte, sampleRate*2*600)); err != nil { // ten minutes of audio
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	bin := fakeWhisper(t, "", "")
+	if _, err := transcribeWAV(context.Background(), bin, path, speakerMe, 0); err == nil {
+		t.Fatal("ten minutes of audio transcribed to nothing in milliseconds must be an error, not a silent meeting")
+	}
+}
+
+// A genuinely short clip does transcribe in a moment, so the speed check must not turn every brief recording into a failure.
+func TestTranscribeWAV_ShortSilentClipIsStillNotAnError(t *testing.T) {
+	bin := fakeWhisper(t, "", "")
+	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, 0)
+	if err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+	if len(segs) != 0 {
+		t.Errorf("got %+v, want no segments", segs)
+	}
+}
+
+// The stderr check must not cost us the transcript: whisper prints progress and banners to stderr on every successful run too.
+func TestTranscribeWAV_KeepsSegmentsWhenStderrIsJustNoise(t *testing.T) {
+	bin := fakeWhisper(t, "[00:00:00.000 --> 00:00:01.000]   hello there", "whisper_model_load: model size = 487.01 MB")
+	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, 0)
+	if err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+	if len(segs) != 1 || segs[0].Text != "hello there" {
+		t.Errorf("got %+v, want the one spoken segment", segs)
+	}
+}
+
+// The user's meetings are Hindi-English code-switched, and an English-only build transcribes those as nothing at all, so a multilingual whisperfile has to outrank the .en build of the same size.
+func TestWhisperCandidates_PreferMultilingualOverEnglishOnly(t *testing.T) {
+	rank := make(map[string]int, len(whisperCandidates))
+	for i, name := range whisperCandidates {
+		rank[name] = i
+	}
+	for _, pair := range [][2]string{
+		{"whisper-small.llamafile", "whisper-small.en.llamafile"},
+		{"whisper-medium.llamafile", "whisper-medium.en.llamafile"},
+	} {
+		multilingual, ok := rank[pair[0]]
+		if !ok {
+			t.Errorf("%s is not a candidate at all", pair[0])
+			continue
+		}
+		englishOnly, ok := rank[pair[1]]
+		if !ok {
+			continue
+		}
+		if multilingual > englishOnly {
+			t.Errorf("%s must be preferred over %s", pair[0], pair[1])
+		}
+	}
+}
 
 // whisperfile prints one line per segment as "[start --> end]   text". Everything else it prints (banners, blank lines) is not a segment.
 func TestParseSegments(t *testing.T) {

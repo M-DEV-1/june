@@ -62,8 +62,14 @@ func repairWAV(path string) error {
 	return patchSizes(f, data)
 }
 
-// patchSizes writes the RIFF chunk size and the data chunk size for dataLen bytes of samples.
+// whisperfileFrameChunk is the block size whisperfile's decoder reads in. A file whose frame count is an exact multiple of it fails to decode: the decoder asks for every frame at once, the final read comes back "At end", and whisperfile prints "failed to read pcm frames from audio file" and exits 0 — so the pipeline sees an empty transcript and files the meeting as silent. Declaring one frame fewer sidesteps it at a cost of 1/16000 of a second.
+const whisperfileFrameChunk = 512
+
+// patchSizes writes the RIFF chunk size and the data chunk size for dataLen bytes of samples, rounded down off a frame count whisperfile cannot read.
 func patchSizes(f *os.File, dataLen int64) error {
+	if frames := dataLen / 2; frames > 0 && frames%whisperfileFrameChunk == 0 {
+		dataLen -= 2
+	}
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(36+dataLen))
 	if _, err := f.WriteAt(buf[:], 4); err != nil {
