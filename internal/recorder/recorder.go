@@ -141,7 +141,7 @@ type Recorder struct {
 
 	// Seams, all set by New and replaced in tests: opening the sound streams, running whisper, finding the whisper binary, calling Gemini, posting a desktop notification, and asking whether the machine is plugged in.
 	capture     func(mic, system io.Writer) (capturer, time.Time, time.Time, error)
-	whisper     func(ctx context.Context, bin, path, speaker string, offset time.Duration) ([]Segment, error)
+	whisper     func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error)
 	findWhisper func(dataDir string) (string, error)
 	minutes     func(ctx context.Context, prompt string) (string, error)
 	notify      func(title, body string)
@@ -418,11 +418,17 @@ func (r *Recorder) process(ctx context.Context, s *session) error {
 	ctx, cancel := context.WithTimeout(ctx, transcribeTimeout)
 	defer cancel()
 
-	mine, err := r.whisper(ctx, bin, filepath.Join(s.dir, "mic.wav"), speakerMe, s.micOffset)
+	// Whisper is primed with the words Ora already watched go past on screen during the meeting, which is what gets the domain's own acronyms and the participants' names spelled right instead of guessed at phonetically.
+	prompt := r.primingPrompt(ctx, s.startedAt, s.stoppedAt)
+	if prompt != "" {
+		slog.Info("priming whisper with the meeting's screen context", "dir", s.dir, "prompt", prompt)
+	}
+
+	mine, err := r.whisper(ctx, bin, filepath.Join(s.dir, "mic.wav"), speakerMe, prompt, s.micOffset)
 	if err != nil {
 		return fmt.Errorf("transcribe mic: %w", err)
 	}
-	theirs, err := r.whisper(ctx, bin, filepath.Join(s.dir, "system.wav"), speakerCall, s.sysOffset)
+	theirs, err := r.whisper(ctx, bin, filepath.Join(s.dir, "system.wav"), speakerCall, prompt, s.sysOffset)
 	if err != nil {
 		return fmt.Errorf("transcribe system audio: %w", err)
 	}
