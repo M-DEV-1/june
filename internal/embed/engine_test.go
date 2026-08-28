@@ -229,3 +229,27 @@ func TestEngineColdStartDoesNotBlockPresenceOrRunning(t *testing.T) {
 		t.Fatalf("MarkClientPresence+Running blocked for %v during a cold start; every authenticated IPC request pays that", elapsed)
 	}
 }
+
+// StopIfIdle frees the GPU for a heavier job: with no client inside the presence window the child dies now and the next embed just respawns it; with a client pinned it stays up.
+func TestEngineStopIfIdle(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+
+	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err != nil {
+		t.Fatalf("first Embed: %v", err)
+	}
+	if !e.StopIfIdle() {
+		t.Fatal("an engine no client has touched must stop when asked")
+	}
+	waitFor(t, 5*time.Second, "the child to be gone", func() bool { return !e.running() })
+
+	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello again"); err != nil {
+		t.Fatalf("Embed after StopIfIdle: %v", err)
+	}
+	e.MarkClientPresence(context.Background())
+	if e.StopIfIdle() {
+		t.Fatal("an engine pinned by a recent client must refuse to stop")
+	}
+	if !e.running() {
+		t.Fatal("the pinned engine was stopped anyway")
+	}
+}

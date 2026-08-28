@@ -153,6 +153,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	if embedEngine != nil {
+		// A whisper GPU decode and the embedding server share one small card; when the card is short, the recorder may evict an idle embedding server (it respawns on the next embed).
+		recorder.SetGPUReleaser(embedEngine.StopIfIdle)
 		// 10000 = the deck's agreed pruning cap for the vector index.
 		index, err := vector.NewChromemIndex(filepath.Join(config.DataDir(), "vectors"), config.LocalEmbedDim, 10000)
 		if err != nil {

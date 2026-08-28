@@ -1,11 +1,14 @@
 package recorder
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"ora/internal/config"
 )
@@ -50,3 +53,25 @@ func whisperCPPArgs(bin string) []string {
 
 // gpuRun serializes whisper.cpp runs against each other. whisper-medium takes about 2.2 GB of GPU memory, and this machine's card has 4 GB with a share of it already spoken for, so the two streams of a call cannot be decoded at the same time — the second would fail to allocate. Running them one after the other costs nothing, because on the GPU the card is the bottleneck rather than the number of streams.
 var gpuRun sync.Mutex
+
+// gpuReleaser asks the GPU's other tenant to leave before a whisper run — the daemon points it at the embedding server's StopIfIdle. It reports whether the tenant is actually gone; false means someone is mid-conversation and their embeds win. Nil means there is nothing sharing the card.
+var gpuReleaser func() bool
+
+// SetGPUReleaser wires gpuReleaser; the daemon calls it once at startup.
+func SetGPUReleaser(f func() bool) { gpuReleaser = f }
+
+// gpuWaitInterval is how long a decode waits between asking the embedding server to yield. Transcription is a background job with nowhere to be; half a minute per ask is patience, not delay. A variable so the tests can wind it down.
+var gpuWaitInterval = 30 * time.Second
+
+// waitForGPU blocks until the embedding server has yielded the card, asking again every gpuWaitInterval. Transcription never takes the GPU out from under a live conversation and never falls back to a slower decode — it just waits its turn.
+func waitForGPU(ctx context.Context) error {
+	for gpuReleaser != nil && !gpuReleaser() {
+		slog.Info("waiting for the GPU: the embedding server is pinned by a live conversation")
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("gave up waiting for the GPU: %w", ctx.Err())
+		case <-time.After(gpuWaitInterval):
+		}
+	}
+	return nil
+}

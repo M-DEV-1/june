@@ -127,6 +127,21 @@ func (e *Engine) running() bool {
 	return e.aliveLocked()
 }
 
+// StopIfIdle kills the child now so its GPU memory can go to a heavier job, unless a client has been seen inside the presence window — someone mid-conversation keeps their fast embeds. Unlike Close this is not final: the next embed just spawns the server again. Reports whether the server is down when it returns.
+func (e *Engine) StopIfIdle() bool {
+	if e.sinceLastClient() < e.presenceWindow {
+		return !e.running()
+	}
+	e.mu.Lock()
+	cmd, exited := e.detachLocked()
+	e.mu.Unlock()
+	if cmd != nil {
+		slog.Info("stopping the embedding server to free its GPU memory")
+	}
+	killChild(cmd, exited)
+	return true
+}
+
 // Close kills the child and puts the Engine into a state where further embeds fail rather than resurrecting it. Called from the daemon's shutdown path so the server never outlives the daemon. It waits for the child to actually die, but does that outside e.mu so nothing else blocks on it.
 func (e *Engine) Close() error {
 	e.mu.Lock()
