@@ -56,6 +56,50 @@ func TestWAVWriter_ClosesWithCorrectSizes(t *testing.T) {
 	}
 }
 
+// whisperfile refuses to read a WAV whose frame count is an exact multiple of 512: its decoder asks for exactly that many frames, the last read comes back "At end", and it prints "failed to read pcm frames from audio file" and exits 0 — which the pipeline then files as a meeting nobody spoke in. Both the writer and the repair path must therefore declare one frame fewer, which costs 1/16000 of a second.
+func TestWAV_HeaderNeverEndsOnA512FrameBoundary(t *testing.T) {
+	const bad = 512 * 3 * 2 // bytes: a frame count whisperfile chokes on
+	dir := t.TempDir()
+
+	for _, tc := range []struct {
+		name  string
+		crash bool // close the fd without patching the header, then repair it, as a killed daemon would
+	}{
+		{name: "closed.wav"},
+		{name: "crashed.wav", crash: true},
+	} {
+		path := filepath.Join(dir, tc.name)
+		w, err := newWAV(path)
+		if err != nil {
+			t.Fatalf("newWAV: %v", err)
+		}
+		if _, err := w.Write(make([]byte, bad)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if tc.crash {
+			if err := w.f.Close(); err != nil {
+				t.Fatalf("raw close: %v", err)
+			}
+			if err := repairWAV(path); err != nil {
+				t.Fatalf("repairWAV: %v", err)
+			}
+		} else if err := w.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		riff, _, _, data := readHeader(t, path)
+		if data/2%512 == 0 {
+			t.Errorf("%s: header declares %d frames, a multiple of 512 that whisperfile cannot read", tc.name, data/2)
+		}
+		if data != bad-2 {
+			t.Errorf("%s: header declares %d bytes, want %d — exactly one frame is dropped, no more", tc.name, data, bad-2)
+		}
+		if riff != 36+data {
+			t.Errorf("%s: riff size = %d, want %d", tc.name, riff, 36+data)
+		}
+	}
+}
+
 // A recording killed mid-flight leaves zeroed size fields. repairWAV recomputes them from the file length so the audio is still transcribable.
 func TestRepairWAV_FixesCrashedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "system.wav")
