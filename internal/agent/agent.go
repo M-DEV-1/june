@@ -26,6 +26,8 @@ type ContextReader interface {
 	// UpdateNote/DeleteNote back update_note/delete_note (tools.go) — the model's only way to fix or remove a wrong note, using the id query_memory's "[note#N]" format gives it.
 	UpdateNote(ctx context.Context, id int64, content string) error
 	DeleteNote(ctx context.Context, id int64) error
+	// UpdateThreadState backs fix_thread (tools.go). Threads live in their own table with their own semantics — a subject plus a state summary — so update_note cannot reach them, and a thread whose summary merged two unrelated things was unfixable until this existed.
+	UpdateThreadState(ctx context.Context, id int64, state string) error
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
 	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
 	RecallSubject(ctx context.Context, subject string, limit int) ([]string, error)

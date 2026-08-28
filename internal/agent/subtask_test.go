@@ -615,3 +615,24 @@ func TestExecuteTool_BranchSurfacesSubtaskFailureAsErrorString(t *testing.T) {
 		t.Errorf("executeTool(branch, ...) = %q, want it to start with %q", got, "error")
 	}
 }
+
+// TestSubtaskTools_StripsBehavior covers why branch() has been silently dead: the declarations it reuses from toolDefinitions() carry Behavior=NON_BLOCKING, which only BidiGenerateContent accepts. generateContent — the API runSubtask actually calls — rejects the whole request with "FunctionDeclaration.behavior only supported by BidiGenerateContent", so every branch call failed before it ran a single search.
+func TestSubtaskTools_StripsBehavior(t *testing.T) {
+	tools := subtaskTools()
+	if len(tools) == 0 || len(tools[0].FunctionDeclarations) == 0 {
+		t.Fatal("expected the subtask tool subset to be non-empty")
+	}
+	for _, decl := range tools[0].FunctionDeclarations {
+		if decl.Behavior != "" {
+			t.Errorf("declaration %q carries Behavior %q, which generateContent rejects", decl.Name, decl.Behavior)
+		}
+	}
+	// The live session's own declarations must keep it — NON_BLOCKING there is what stops a memory lookup from freezing the conversation.
+	for _, tool := range toolDefinitions() {
+		for _, decl := range tool.FunctionDeclarations {
+			if decl.Behavior != genai.BehaviorNonBlocking {
+				t.Errorf("live declaration %q lost its NON_BLOCKING behavior", decl.Name)
+			}
+		}
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,6 +185,22 @@ func toolDefinitions() []*genai.Tool {
 			},
 			{
 				Behavior: genai.BehaviorNonBlocking,
+				Name:     "fix_thread",
+				Description: "Correct an ongoing thread whose summary is wrong — it merged two unrelated things, " +
+					"or records a fact the user says is not true. Look it up first with query_memory or recall to " +
+					"get its id from the \"[thread#N]\" prefix, then call this with what the thread actually is. " +
+					"Threads are separate from notes: update_note cannot reach them.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"id":         {Type: genai.TypeInteger, Description: "The thread's id, from a \"[thread#N]\" result."},
+						"correction": {Type: genai.TypeString, Description: "What this thread actually is, written as a durable one-line summary — it replaces the wrong one."},
+					},
+					Required: []string{"id", "correction"},
+				},
+			},
+			{
+				Behavior: genai.BehaviorNonBlocking,
 				Name:     "delete_note",
 				Description: "Permanently remove a previously saved note the user says is wrong, irrelevant, or " +
 					"should be forgotten — look the note up first with query_memory to get its id from the " +
@@ -240,6 +257,91 @@ func appendOmitted(lines []string, n int) []string {
 	}
 }
 
+// wrapperProcesses are process names that own a window without being the program the user actually sees: mutter-x11-frames is the compositor's own frame around an X11 client, gnome-terminal-server hosts every GNOME terminal window. Printing them as the application tells the model nothing about what was on screen.
+var wrapperProcesses = map[string]bool{"mutter-x11-frames": true, "gnome-terminal-server": true}
+
+// displayAppTitle picks the app name and title to print for one capture. For a wrapper process the real program name is the tail of the window title — "portfolio_vulnerability_scores.xlsx — LibreOffice Calc" is LibreOffice Calc showing that file — so the tail becomes the app and the head stays the title. A title with no such tail keeps the process name, since a wrong guess is worse than an ugly one.
+// Input: the capture's app and title. Output: the app name and title to print.
+func displayAppTitle(app, title string) (string, string) {
+	if !wrapperProcesses[app] {
+		return app, title
+	}
+	for _, sep := range []string{" — ", " - "} {
+		if i := strings.LastIndex(title, sep); i > 0 {
+			return strings.TrimSpace(title[i+len(sep):]), strings.TrimSpace(title[:i])
+		}
+	}
+	return app, title
+}
+
+// oneLineExcerpt collapses every run of whitespace in captured screen text to a single space, then caps it at recallExcerpt runes. A capture carries the newlines and column padding of whatever was on screen, which turns one timeline row into a dozen lines and spends the rune cap on layout instead of content.
+func oneLineExcerpt(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if runes := []rune(s); len(runes) > recallExcerpt {
+		return string(runes[:recallExcerpt])
+	}
+	return s
+}
+
+// formatSpan renders how long a run of consecutive captures of the same window covered, as "1h04m" or "12m". Anything under a minute returns "" so a single capture prints no duration at all.
+func formatSpan(d time.Duration) string {
+	if d < time.Minute {
+		return ""
+	}
+	if h := int(d.Hours()); h > 0 {
+		return fmt.Sprintf("%dh%02dm", h, int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dm", int(d.Minutes()))
+}
+
+// formatEpisodeTimeline renders episodes (newest first) as one line per window. A run of idle captures collapses to an "(N idle/empty captures omitted)" marker, and consecutive captures of the same app and title collapse to a single line carrying how long that window stayed up — the same window sampled every minute used to print once per sample.
+// Input: the episodes and a function producing the excerpt for one of them (recall shows screen text; get_recent folds in the tracked activity and the frame marker). Output: the formatted lines in the order the episodes came in.
+func formatEpisodeTimeline(episodes []db.Episode, excerptFor func(db.Episode) string) []string {
+	var lines []string
+	idleRun := 0
+	for i := 0; i < len(episodes); {
+		if idleEpisode(episodes[i]) {
+			idleRun++
+			i++
+			continue
+		}
+		lines = appendOmitted(lines, idleRun)
+		idleRun = 0
+
+		j := i + 1
+		for j < len(episodes) && !idleEpisode(episodes[j]) && episodes[j].App == episodes[i].App && episodes[j].Title == episodes[i].Title {
+			j++
+		}
+		oldest := episodes[j-1]
+		app, title := displayAppTitle(episodes[i].App, episodes[i].Title)
+		span := formatSpan(episodes[i].CreatedAt.Sub(oldest.CreatedAt))
+		if span != "" {
+			span += " "
+		}
+		// Established timeline shape: "[Jan 2 15:04] app — title: …", converted to the user's local zone (episodes are stored in UTC) so what's shown matches their wall clock. The stamp is the run's start, so the duration reads forward from it.
+		lines = append(lines, fmt.Sprintf("[%s] %s%s — %s: %s",
+			oldest.CreatedAt.In(time.Local).Format("Jan 2 15:04"), span, app, title, excerptFor(episodes[i])))
+		i = j
+	}
+	return appendOmitted(lines, idleRun)
+}
+
+// capRealRows truncates lines once limit real moment lines have been emitted, ignoring the "(N idle/empty captures omitted)" markers — those are accounting, not moments the user asked for.
+// Input: the formatted lines and how many moments the caller asked for. Output: the prefix holding at most that many moments.
+func capRealRows(lines []string, limit int) []string {
+	n := 0
+	for i, l := range lines {
+		if strings.HasPrefix(l, "(") {
+			continue
+		}
+		n++
+		if n > limit {
+			return lines[:i]
+		}
+	}
+	return lines
+}
+
 // recallBounds resolves the "recall" tool's since/until args into a concrete [since, until] range.
 // The model, knowing the current date/time, converts any human phrase ("July 5th", "last week") into ISO-8601 bounds and passes them here; parseInstant additionally accepts the bare words "today" and "yesterday", which the model passes straight through often enough to be worth handling.
 func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Time, error) {
@@ -289,13 +391,31 @@ func parseInstant(s string, now time.Time, endOfDay bool) (time.Time, error) {
 		case "yesterday":
 			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -1)
 		default:
-			return time.Time{}, err
+			n, ok := parseDaysAgo(s)
+			if !ok {
+				return time.Time{}, err
+			}
+			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -n)
 		}
 	}
 	if endOfDay {
 		return time.Date(d.Year(), d.Month(), d.Day(), 23, 59, 59, 0, loc), nil
 	}
 	return d, nil
+}
+
+// parseDaysAgo reads the "N days ago" phrasing the user says out loud and the model passes straight through to since/until. Without it the call fails with a raw Go time-parse error, which a real session read out loud to the user.
+// Input: the raw argument. Output: how many days back it means, and whether it was that shape at all.
+func parseDaysAgo(s string) (int, bool) {
+	f := strings.Fields(strings.ToLower(s))
+	if len(f) != 3 || f[2] != "ago" || (f[1] != "day" && f[1] != "days") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(f[0])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // dateFormatHint is the one error phrasing for a since/until that didn't parse, shared by recall and query_memory so the model gets the same list of accepted forms wherever it passes a date.
@@ -607,7 +727,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if err != nil {
 			return fmt.Sprintf("error querying memory: %v", err)
 		}
-		if app, _ := args["app"].(string); strings.TrimSpace(app) != "" {
+		found := len(hits)
+		app, _ := args["app"].(string)
+		if strings.TrimSpace(app) != "" {
 			hits = filterHitsByApp(hits, app)
 		}
 		// The store has no time-filtered search, so the window is applied here on the hits it returned — hence the over-fetch above.
@@ -618,6 +740,10 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			}
 		}
 		if len(hits) == 0 {
+			// "Nothing exists" and "the filters removed everything" are different answers and the model has to be able to tell them apart — answering the second as the first is how a question about episodes watched today got a flat no while the rows sat in the store.
+			if desc := filterDescription(app, since, until); found > 0 && desc != "" {
+				return fmt.Sprintf("%d matches, none %s", found, desc)
+			}
 			return "no memory matches"
 		}
 		lines := make([]string, 0, len(hits))
@@ -637,12 +763,6 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return fmt.Sprintf("error: %v", err)
 		}
 		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
-			// RecallSubject takes only a subject and a limit — it has no app filter and no date window — so
-			// combining subject with either can't be honored. Say so rather than answering across every app
-			// and all of time as if the filters had been applied.
-			if hasArg(args, "app") || hasArg(args, "since") || hasArg(args, "until") {
-				return "error: subject cannot be combined with app, since, or until; call recall with only subject, or drop subject and use since/until (with an optional app) for a time window"
-			}
 			slog.Info("recalling subject", "subject", subject)
 			lines, err := a.brain.RecallSubject(ctx, subject, recallSubjectLimit)
 			if err != nil {
@@ -650,6 +770,17 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			}
 			if len(lines) == 0 {
 				return "no memory of that subject"
+			}
+			// RecallSubject takes only a subject and a limit — it has no app filter and no date window — so combining subject with either can't be honored. Erroring taught the model nothing (it made the same call twice in one session) and cost the turn; the answer plus a line saying which filter was dropped is what it was after.
+			var ignored []string
+			if hasArg(args, "since") || hasArg(args, "until") {
+				ignored = append(ignored, "the date window")
+			}
+			if hasArg(args, "app") {
+				ignored = append(ignored, "the app filter")
+			}
+			if len(ignored) > 0 {
+				lines = append(lines, fmt.Sprintf("(note: subject recall ignores %s)", strings.Join(ignored, " and ")))
 			}
 			return strings.Join(lines, "\n")
 		}
@@ -678,26 +809,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if len(episodes) == 0 {
 			return "no episodes in that window"
 		}
-		lines := make([]string, 0, len(episodes))
-		idleRun := 0
-		for _, e := range episodes {
-			// Idle captures are dropped, but counted: a run of them collapses to one line so the model still sees that the window had a quiet stretch.
-			if idleEpisode(e) {
-				idleRun++
-				continue
-			}
-			lines = appendOmitted(lines, idleRun)
-			idleRun = 0
-			excerpt := e.ScreenText
-			if runes := []rune(excerpt); len(runes) > recallExcerpt {
-				excerpt = string(runes[:recallExcerpt])
-			}
-			// Established timeline shape: "[Jan 2 15:04] app — title: …", converted to the user's local zone (episodes are stored in UTC) so what's shown matches their wall clock.
-			lines = append(lines, fmt.Sprintf("[%s] %s — %s: %s",
-				e.CreatedAt.In(time.Local).Format("Jan 2 15:04"), e.App, e.Title, excerpt))
-		}
-		lines = appendOmitted(lines, idleRun)
-		return strings.Join(lines, "\n")
+		return strings.Join(formatEpisodeTimeline(episodes, func(e db.Episode) string {
+			return oneLineExcerpt(e.ScreenText)
+		}), "\n")
 
 	case "get_recent":
 		limit := 10
@@ -709,42 +823,29 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		app, _ := args["app"].(string)
 		slog.Info("recalling recent moments", "limit", limit, "app", app)
-		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{App: app, Limit: limit, NewestFirst: true})
+		// Over-fetch, then cap after the idle rows are dropped: the newest rows in the store are routinely idle captures, so asking for exactly limit rows is how "the last six hours" came back as one real moment plus "(19 idle omitted)".
+		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{App: app, Limit: min(limit*4, 200), NewestFirst: true})
 		if err != nil {
 			return fmt.Sprintf("error getting recent moments: %v", err)
 		}
 		if len(episodes) == 0 {
 			return "no recent episodes"
 		}
-		lines := make([]string, 0, len(episodes))
-		idleRun := 0
-		for _, e := range episodes {
-			// Same idle-capture skip as recall above — get_recent formats the identical line from the identical rows.
-			if idleEpisode(e) {
-				idleRun++
-				continue
-			}
-			lines = appendOmitted(lines, idleRun)
-			idleRun = 0
-			excerpt := e.ScreenText
+		lines := formatEpisodeTimeline(episodes, func(e db.Episode) string {
+			text := e.ScreenText
 			if e.UserActivity != "" {
-				excerpt = e.UserActivity
+				text = e.UserActivity
 				if e.ScreenText != "" && e.ScreenText != e.UserActivity {
-					excerpt = e.UserActivity + " — " + e.ScreenText
+					text = e.UserActivity + " — " + e.ScreenText
 				}
 			}
-			if runes := []rune(excerpt); len(runes) > recallExcerpt {
-				excerpt = string(runes[:recallExcerpt])
-			}
-			line := fmt.Sprintf("[%s] %s — %s: %s",
-				e.CreatedAt.In(time.Local).Format("Jan 2 15:04"), e.App, e.Title, excerpt)
+			excerpt := oneLineExcerpt(text)
 			if e.ImagePath != "" {
-				line += " [img]"
+				excerpt += " [img]"
 			}
-			lines = append(lines, line)
-		}
-		lines = appendOmitted(lines, idleRun)
-		return strings.Join(lines, "\n")
+			return excerpt
+		})
+		return strings.Join(capRealRows(lines, limit), "\n")
 
 	case "branch":
 		task, ok := args["task"].(string)
@@ -787,6 +888,20 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return fmt.Sprintf("error updating note: %v", err)
 		}
 		return "updated"
+
+	case "fix_thread":
+		idFloat, ok := args["id"].(float64)
+		if !ok {
+			return "error: id argument is required (get it from a [thread#N] result)"
+		}
+		correction, ok := args["correction"].(string)
+		if !ok || strings.TrimSpace(correction) == "" {
+			return "error: correction argument is required"
+		}
+		if err := a.brain.UpdateThreadState(ctx, int64(idFloat), correction); err != nil {
+			return fmt.Sprintf("error fixing thread: %v", err)
+		}
+		return "fixed"
 
 	case "delete_note":
 		idFloat, ok := args["id"].(float64)
@@ -897,6 +1012,21 @@ func resultSummary(name, result string) string {
 		return fmt.Sprintf("%d hits", strings.Count(result, "\n")+1)
 	}
 	return "done"
+}
+
+// filterDescription names the post-filters query_memory applied, in the words the model can repeat back: "in slack since Aug 28 00:00". Returns "" when no filter was set, so the caller can fall back to the plain no-matches answer.
+func filterDescription(app string, since, until time.Time) string {
+	var parts []string
+	if strings.TrimSpace(app) != "" {
+		parts = append(parts, "in "+strings.TrimSpace(app))
+	}
+	if !since.IsZero() {
+		parts = append(parts, "since "+since.In(time.Local).Format("Jan 2 15:04"))
+	}
+	if !until.IsZero() {
+		parts = append(parts, "until "+until.In(time.Local).Format("Jan 2 15:04"))
+	}
+	return strings.Join(parts, " ")
 }
 
 // filterHitsByApp keeps episode hits whose App contains filter (case-insensitive) and drops other sources. A missing App on an episode hit is dropped rather than guessed.
