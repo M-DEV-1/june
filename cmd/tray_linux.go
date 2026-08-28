@@ -443,10 +443,9 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 		return fmt.Errorf("export dbusmenu properties: %w", err)
 	}
 
-	// Register with the StatusNotifierWatcher.
+	// Register with the StatusNotifierWatcher. A missing watcher (GNOME's appindicator extension INACTIVE or not loaded yet) is deliberately not fatal: the NameOwnerChanged listener below registers the moment one appears, so the tray arrives late instead of never.
 	if err := registerWithWatcher(conn); err != nil {
-		conn.Close()
-		return fmt.Errorf("register with StatusNotifierWatcher: %w", err)
+		slog.Warn("no StatusNotifierWatcher yet, tray will register when one appears", "error", err)
 	}
 
 	// Self-heal: the watcher (e.g. gnome-shell) drops all items when it restarts and re-announces itself with a new bus owner.
