@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"ora/internal/audio"
-	"ora/internal/config"
 	"ora/internal/db"
 )
 
@@ -176,18 +175,7 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 		return c, c.MicStart, c.SystemStart, nil
 	}
 	r.whisper = transcribeWAV
-	r.findWhisper = whisperBinary
-	// The engine is opt-in through the config file rather than switched on by model files merely being present: parakeet is far faster than whisper but speaks no Hindi, and a Hindi-English meeting must not silently start coming back as gibberish because someone downloaded a model.
-	switch engine := config.LoadConfig().Transcribe.Engine; engine {
-	case config.EngineParakeet:
-		slog.Info("transcribing meetings with parakeet instead of whisper")
-		r.whisper = transcribeParakeetWAV
-		r.findWhisper = parakeetBinary
-	case config.EngineWhisperCPP:
-		// Same model and same flags as the whisperfile, so only where the binary is found changes; transcribeWAV notices the model beside it and adds the two flags whisper.cpp needs.
-		slog.Info("transcribing meetings with a whisper.cpp build instead of the whisperfile")
-		r.findWhisper = whisperCPPBinary
-	}
+	r.findWhisper = whisperCPPBinary
 	r.minutes = r.defaultBrain
 	r.notify = notifySend
 	r.onAC = onACPower

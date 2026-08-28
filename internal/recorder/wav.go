@@ -8,7 +8,7 @@ import (
 // sampleRate is what whisper wants and all whisper does with anything else is resample it, so capture at 16 kHz mono s16le and skip the conversion.
 const sampleRate = 16000
 
-// wavHeaderSize is the canonical RIFF/fmt/data header: 12 bytes RIFF + 24 bytes fmt + 8 bytes data. Nothing else goes in it — whisperfile's WAV reader rejects a file that has a LIST/INFO chunk sitting between fmt and data, which is what ffmpeg writes by default.
+// wavHeaderSize is the canonical RIFF/fmt/data header: 12 bytes RIFF + 24 bytes fmt + 8 bytes data. Nothing else goes in it — whisper's WAV reader (miniaudio) rejects a file that has a LIST/INFO chunk sitting between fmt and data, which is what ffmpeg writes by default.
 const wavHeaderSize = 44
 
 // wavWriter streams raw 16 kHz mono s16le samples into a WAV file. The header goes down first with zeroed sizes and is patched on Close, so a process killed mid-recording still leaves every captured sample on disk for repairWAV to reclaim.
@@ -62,12 +62,12 @@ func repairWAV(path string) error {
 	return patchSizes(f, data)
 }
 
-// whisperfileFrameChunk is the block size whisperfile's decoder reads in. A file whose frame count is an exact multiple of it fails to decode: the decoder asks for every frame at once, the final read comes back "At end", and whisperfile prints "failed to read pcm frames from audio file" and exits 0 — so the pipeline sees an empty transcript and files the meeting as silent. Declaring one frame fewer sidesteps it at a cost of 1/16000 of a second.
-const whisperfileFrameChunk = 512
+// whisperFrameChunk is the block size whisper's miniaudio decoder reads in. A file whose frame count is an exact multiple of it fails to decode: the decoder asks for every frame at once, the final read comes back "At end", and whisper reports it could not read the file. Declaring one frame fewer sidesteps it at a cost of 1/16000 of a second.
+const whisperFrameChunk = 512
 
-// patchSizes writes the RIFF chunk size and the data chunk size for dataLen bytes of samples, rounded down off a frame count whisperfile cannot read.
+// patchSizes writes the RIFF chunk size and the data chunk size for dataLen bytes of samples, rounded down off a frame count whisper cannot read.
 func patchSizes(f *os.File, dataLen int64) error {
-	if frames := dataLen / 2; frames > 0 && frames%whisperfileFrameChunk == 0 {
+	if frames := dataLen / 2; frames > 0 && frames%whisperFrameChunk == 0 {
 		dataLen -= 2
 	}
 	var buf [4]byte

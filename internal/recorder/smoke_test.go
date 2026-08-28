@@ -19,7 +19,7 @@ import (
 )
 
 // TestSmoke_RealCapture is the manual end-to-end check: it plays a known speech WAV through the default sink, records it off the sink's monitor, and runs the real whisper binary over the result.
-// It needs a running sound server, a whisperfile install, and a person to have set ORA_SMOKE_WAV to a 16 kHz mono s16le speech file, so it is skipped by default.
+// It needs a running sound server, a whisper.cpp install, and a person to have set ORA_SMOKE_WAV to a 16 kHz mono s16le speech file, so it is skipped by default.
 //
 //	ORA_SMOKE_WAV=/path/to/speech.wav go test ./internal/recorder/ -run Smoke -v -timeout 30m
 func TestSmoke_RealCapture(t *testing.T) {
@@ -45,7 +45,7 @@ func TestSmoke_RealCapture(t *testing.T) {
 	}
 
 	// The recording itself goes to a temp dir, but whisper is looked up where it is really installed.
-	r.findWhisper = func(string) (string, error) { return whisperBinary(config.DataDir()) }
+	r.findWhisper = func(string) (string, error) { return whisperCPPBinary(config.DataDir()) }
 
 	if err := r.Start(); err != nil {
 		t.Fatalf("start: %v", err)
