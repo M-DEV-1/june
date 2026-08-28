@@ -8,7 +8,10 @@ type Activity struct {
 	ScreenText   string
 	UserActivity string
 	VisibleText  []string
-	ImageJPEG    []byte
+	// ImageJPEG is the frame for the monitor the user is on, and ExtraJPEG holds one frame per other monitor at the same moment — a meeting on one screen while notes sit on the other is one activity, not two.
+	// Nothing persists ExtraJPEG yet: internal/db writeEpisodeJPEG stores a single image per episode (internal/db/image.go), so the extra frames need a second column or a "{id}-b.jpg" naming rule before they reach disk or the vision call.
+	ImageJPEG []byte
+	ExtraJPEG [][]byte
 }
 
 // Sight is the structured vision extract for one capture.
