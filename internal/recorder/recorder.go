@@ -29,6 +29,9 @@ const episodeLimit = 200
 // noSpeechMarker is the file left in a recording directory whose transcription ran fine but produced no speech at all. It tells the user why the audio is still there, and it stops the startup sweep from transcribing that directory again on every daemon start.
 const noSpeechMarker = "no-speech.txt"
 
+// keepAudio preserves mic.wav and system.wav after a successful transcription instead of deleting them.
+const keepAudio = true
+
 // dirTimeLayout is how a recording directory is named, and therefore how its start time is read back when the sweep picks up an unfinished recording.
 const dirTimeLayout = "2006-01-02T15-04-05"
 
@@ -271,9 +274,12 @@ func (r *Recorder) process(ctx context.Context, s *session) error {
 	}
 
 	// Both transcriptions landed and the transcript is on disk, so the audio is no longer the only copy of the meeting.
-	for _, name := range []string{"mic.wav", "system.wav"} {
-		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !os.IsNotExist(err) {
-			slog.Warn("could not delete recording audio", "file", name, "error", err)
+	// ponytail: keepAudio stays true for the alpha phase so bad transcripts can be diagnosed and re-run from source; flip to false (or make it config) once transcription is trusted, since a two-stream hour is ~230 MB.
+	if !keepAudio {
+		for _, name := range []string{"mic.wav", "system.wav"} {
+			if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !os.IsNotExist(err) {
+				slog.Warn("could not delete recording audio", "file", name, "error", err)
+			}
 		}
 	}
 
