@@ -414,18 +414,6 @@ func TestExecuteTool_Recall_TimestampsRenderInLocalTime(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_Recall_BadTimestamp verifies that a malformed bound is reported back to the model (so it can retry with valid ISO-8601) rather than silently recalling the wrong window.
-func TestExecuteTool_Recall_BadTimestamp(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "last tuesday"})
-
-	if !strings.Contains(result, "ISO-8601") {
-		t.Errorf("expected a helpful ISO-8601 timestamp error, got: %q", result)
-	}
-}
-
 // TestExecuteTool_Recall_NonStringSinceErrors verifies that a present-but-wrong-typed "since" arg (e.g. the model sends a JSON number instead of a string) surfaces an explicit error instead of silently coercing to "" and falling through to the default window, which the model could never distinguish from an intentional "default to today" call.
 func TestExecuteTool_Recall_NonStringSinceErrors(t *testing.T) {
 	brain := &toolTestBrain{
@@ -473,11 +461,11 @@ func TestExecuteTool_Recall_ReversedRangeErrors(t *testing.T) {
 	if strings.Contains(result, "no episodes in that window") {
 		t.Errorf("reversed range must not be reported as a genuinely empty window, got: %q", result)
 	}
-	// the range parsed fine — it's the ordering that's wrong, so the message must not claim an ISO-8601 format problem that doesn't exist.
-	if strings.Contains(result, "ISO-8601") {
+	// the range parsed fine — it's the ordering that's wrong, so the message must not claim a date-format problem that doesn't exist.
+	if strings.Contains(result, "real date") {
 		t.Errorf("reversed-range error should not lead with a format complaint, got: %q", result)
 	}
-	if !strings.Contains(result, "since must not be after until") {
+	if !strings.Contains(result, "runs backwards") {
 		t.Errorf("expected the actual ordering problem to be stated, got: %q", result)
 	}
 }
@@ -932,6 +920,85 @@ func TestExecuteTool_GetRecent_TimestampsRenderInLocalTime(t *testing.T) {
 	}
 }
 
+// TestFormatEpisodeTimeline_LeadsWithTheHumanHandle is taste criteria T1/T2: the row the model reads must put the thing the user was doing first and push the app and window title into a parenthetical, so the sentence it builds from the row is about the work rather than about the software. The old shape led with "LibreOffice Calc — portfolio_vulnerability_scores.xlsx", which is what got read out loud.
+func TestFormatEpisodeTimeline_LeadsWithTheHumanHandle(t *testing.T) {
+	at := time.Date(2026, 8, 28, 15, 4, 0, 0, time.Local)
+	lines := formatEpisodeTimeline([]db.Episode{{
+		CreatedAt:    at,
+		App:          "mutter-x11-frames",
+		Title:        "portfolio_vulnerability_scores.xlsx — LibreOffice Calc",
+		UserActivity: "the vulnerability scoring",
+		ScreenText:   "column J holds the score",
+	}}, func(e db.Episode) string { return e.ScreenText })
+
+	want := "[Aug 28 15:04] the vulnerability scoring (LibreOffice Calc, portfolio_vulnerability_scores.xlsx): column J holds the score"
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("expected %q, got: %q", want, lines)
+	}
+}
+
+// TestFormatEpisodeTimeline_FallsBackToTheAppName verifies a capture with no human handle still renders one row: the app name leads and only the window title stays in the parenthetical, rather than printing an empty handle or repeating the app twice.
+func TestFormatEpisodeTimeline_FallsBackToTheAppName(t *testing.T) {
+	at := time.Date(2026, 8, 28, 9, 15, 0, 0, time.Local)
+	lines := formatEpisodeTimeline([]db.Episode{{
+		CreatedAt:  at,
+		App:        "Mail",
+		Title:      "Inbox",
+		ScreenText: "reading morning emails",
+	}}, func(e db.Episode) string { return e.ScreenText })
+
+	want := "[Aug 28 09:15] Mail (Inbox): reading morning emails"
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("expected %q, got: %q", want, lines)
+	}
+}
+
+// TestExecuteTool_ErrorsAreSaidInPlainWords covers every failure the model can provoke with bad arguments or a broken store: the result says what went wrong in words a person would use and keeps enough signal to retry, and no Go error text (a time-parse dump, a %!v verb, a type name) survives into it. A real session read "parsing time \"2 days ago\"" out loud to the user.
+func TestExecuteTool_ErrorsAreSaidInPlainWords(t *testing.T) {
+	goText := []string{"parsing time", "cannot parse", "%!", "0x", "ISO-8601", "RFC3339", "map[", "*errors", "got float64", "sql:"}
+	cases := []struct {
+		name  string
+		tool  string
+		args  map[string]any
+		brain *toolTestBrain
+	}{
+		{"unreadable since", "recall", map[string]any{"since": "last tuesdayish"}, &toolTestBrain{}},
+		{"unreadable query_memory since", "query_memory", map[string]any{"query": "riddler", "since": "sometime"}, &toolTestBrain{}},
+		{"non-string since", "recall", map[string]any{"since": float64(2026)}, &toolTestBrain{}},
+		{"reversed range", "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-01"}, &toolTestBrain{}},
+		{"store failure", "update_note", map[string]any{"id": float64(7), "content": "the corrected fact"}, &toolTestBrain{updateNoteErr: fmt.Errorf("no note with id 7")}},
+		{"missing id", "delete_note", map[string]any{}, &toolTestBrain{}},
+		{"unknown tool", "teleport", map[string]any{}, &toolTestBrain{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewAgent(nil, nil, tc.brain, nil, "FAKE_API_KEY")
+			result := a.executeTool(context.Background(), tc.tool, tc.args)
+			if !strings.HasPrefix(result, "error: ") {
+				t.Fatalf(`expected an "error: ..." result, got %q`, result)
+			}
+			for _, bad := range goText {
+				if strings.Contains(result, bad) {
+					t.Errorf("Go error text %q reached the model: %q", bad, result)
+				}
+			}
+		})
+	}
+}
+
+// TestExecuteTool_BadDate_SaysWhichDatesWork verifies the one date error phrasing names the forms that do work, so the model can fix the argument in the same turn instead of ending the turn on a failure.
+func TestExecuteTool_BadDate_SaysWhichDatesWork(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "last tuesdayish"})
+
+	for _, want := range []string{"real date", "today", "yesterday", "2026-07-05"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected the date error to mention %q so the model can retry, got: %q", want, result)
+		}
+	}
+}
+
 // TestExecuteTool_Recall_UnknownArgument_ReturnsError verifies that an argument recall doesn't have (the real trace called recall with "query", a query_memory parameter) is rejected by name instead of falling through to the timeline branch, where since defaults to the start of today and the model gets a confidently wrong answer for a question that had nothing to do with today.
 func TestExecuteTool_Recall_UnknownArgument_ReturnsError(t *testing.T) {
 	brain := &toolTestBrain{
@@ -1055,7 +1122,7 @@ func TestExecuteTool_QueryMemory_BadDate_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_UpdateNote_StoreError_IsReportedNotSwallowed verifies update_note surfaces the store's error text (e.g. "no note with id 7") instead of answering "updated" — reporting a correction that never landed leaves the wrong fact in memory and tells the model the opposite.
+// TestExecuteTool_UpdateNote_StoreError_IsReportedNotSwallowed verifies update_note reports a failed write instead of answering "updated" — reporting a correction that never landed leaves the wrong fact in memory and tells the model the opposite. The store's own error text stays out of the result; what the model gets is the failure plus what to do about it.
 func TestExecuteTool_UpdateNote_StoreError_IsReportedNotSwallowed(t *testing.T) {
 	brain := &toolTestBrain{updateNoteErr: fmt.Errorf("no note with id 7")}
 	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
@@ -1068,8 +1135,8 @@ func TestExecuteTool_UpdateNote_StoreError_IsReportedNotSwallowed(t *testing.T) 
 	if !strings.HasPrefix(result, "error") {
 		t.Errorf(`expected an "error: ..." result, got %q`, result)
 	}
-	if !strings.Contains(result, "no note with id 7") {
-		t.Errorf("expected the store's error text to reach the model, got %q", result)
+	if !strings.Contains(result, "query_memory") {
+		t.Errorf("expected the failure to tell the model how to get the right id, got %q", result)
 	}
 }
 
@@ -1094,8 +1161,30 @@ func TestExecuteTool_Recall_SkipsIdleCaptures(t *testing.T) {
 	if !strings.Contains(result, "portfolio.xlsx") {
 		t.Errorf("expected the real episode kept, got: %q", result)
 	}
-	if !strings.Contains(result, "3 idle/empty captures omitted") {
-		t.Errorf("expected one line accounting for the 3 dropped captures, got: %q", result)
+	if !strings.Contains(result, "nothing on screen for 2m") {
+		t.Errorf("expected the dropped captures said as a stretch of time, got: %q", result)
+	}
+	if strings.Contains(result, "omitted") {
+		t.Errorf("expected no capture-count bookkeeping in the timeline, got: %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_IdleGapNamesTheSpan is taste criterion T9: a long idle stretch is time the user can picture, not a count of rows the tool threw away. "(19 idle omitted)" is what made a real user answer "are you serious?".
+func TestExecuteTool_Recall_IdleGapNamesTheSpan(t *testing.T) {
+	base := time.Date(2026, 8, 28, 1, 0, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: base.Add(2*time.Hour + 10*time.Minute), App: "Unknown", Title: "Unknown", ScreenText: "Unknown"},
+			{ID: 2, CreatedAt: base.Add(time.Hour), App: "Unknown", Title: "Unknown", ScreenText: ""},
+			{ID: 3, CreatedAt: base, App: "", Title: "", ScreenText: ""},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
+
+	if !strings.Contains(result, "nothing on screen for 2h 10m") {
+		t.Errorf("expected the idle run reported as its own span, got: %q", result)
 	}
 }
 
@@ -1112,8 +1201,8 @@ func TestExecuteTool_Recall_AllIdle_StillReportsTheGap(t *testing.T) {
 
 	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
 
-	if !strings.Contains(result, "2 idle/empty captures omitted") {
-		t.Errorf("expected the all-idle window to report the omission once, got: %q", result)
+	if !strings.Contains(result, "nothing on screen for 1m") {
+		t.Errorf("expected the all-idle window to report the gap once, in plain words, got: %q", result)
 	}
 }
 
@@ -1136,8 +1225,8 @@ func TestExecuteTool_GetRecent_SkipsIdleCaptures(t *testing.T) {
 	if !strings.Contains(result, "go test") {
 		t.Errorf("expected the real episode kept, got: %q", result)
 	}
-	if !strings.Contains(result, "1 idle/empty capture omitted") {
-		t.Errorf("expected the dropped capture accounted for, got: %q", result)
+	if !strings.Contains(result, "nothing on screen for") {
+		t.Errorf("expected the dropped capture accounted for in plain words, got: %q", result)
 	}
 }
 
@@ -1176,8 +1265,8 @@ func TestExecuteTool_Recall_WrapperProcessNamesRealApp(t *testing.T) {
 	if strings.Contains(result, "mutter-x11-frames") {
 		t.Errorf("expected the compositor process name kept out of the answer, got: %q", result)
 	}
-	if !strings.Contains(result, "LibreOffice Calc — portfolio_vulnerability_scores.xlsx") {
-		t.Errorf("expected the real program named with the file as its title, got: %q", result)
+	if !strings.Contains(result, "LibreOffice Calc (portfolio_vulnerability_scores.xlsx)") {
+		t.Errorf("expected the real program named with the file beside it, got: %q", result)
 	}
 }
 
@@ -1198,7 +1287,7 @@ func TestExecuteTool_Recall_RollsConsecutiveSameWindowRows(t *testing.T) {
 	if lines := strings.Count(result, "\n") + 1; lines != 1 {
 		t.Errorf("expected the three captures of one window rolled into one line, got %d lines: %q", lines, result)
 	}
-	if !strings.Contains(result, "1h04m LibreOffice Calc — portfolio_vulnerability_scores.xlsx: vulnerability scores") {
+	if !strings.Contains(result, "1h04m LibreOffice Calc (portfolio_vulnerability_scores.xlsx): vulnerability scores") {
 		t.Errorf("expected the rolled line to carry how long that window was up, got: %q", result)
 	}
 }
@@ -1277,7 +1366,7 @@ func TestExecuteTool_GetRecent_OverFetchesSoIdleRowsDoNotEatTheLimit(t *testing.
 
 	real := 0
 	for _, line := range strings.Split(result, "\n") {
-		if !strings.HasPrefix(line, "(") {
+		if !strings.HasPrefix(line, idleGapPrefix) {
 			real++
 		}
 	}

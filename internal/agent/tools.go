@@ -244,17 +244,32 @@ func idleEpisode(e db.Episode) bool {
 	return blankField(e.App) && blankField(e.Title) && blankField(e.ScreenText) && blankField(e.UserActivity)
 }
 
-// appendOmitted adds one line accounting for a run of n consecutive idle episodes, so a mostly-empty window still reports that the time passed with nothing on screen instead of just returning fewer rows. n == 0 is a no-op.
-// Input: the lines so far and the run length. Output: the lines with the marker appended.
-func appendOmitted(lines []string, n int) []string {
-	switch {
-	case n <= 0:
-		return lines
-	case n == 1:
-		return append(lines, "(1 idle/empty capture omitted)")
-	default:
-		return append(lines, fmt.Sprintf("(%d idle/empty captures omitted)", n))
+// idleGapPrefix opens the line standing in for a run of idle captures. capRealRows keys on it to tell an accounting line from a real moment.
+const idleGapPrefix = "nothing on screen for"
+
+// humanSpan renders a duration the way a person says it out loud: "2h 10m", "12m", or "a moment" for anything under a minute.
+func humanSpan(d time.Duration) string {
+	if d < time.Minute {
+		return "a moment"
 	}
+	if h := int(d.Hours()); h > 0 {
+		return fmt.Sprintf("%dh %dm", h, int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dm", int(d.Minutes()))
+}
+
+// appendIdleGap adds one line saying how long a run of idle captures covered, so a mostly-empty window reads as time passing rather than as a count of rows the tool threw away — "(19 idle omitted)" is what made a real user answer "are you serious?". An empty run is a no-op.
+// Input: the lines so far and the consecutive idle episodes. Output: the lines with the gap line appended.
+func appendIdleGap(lines []string, run []db.Episode) []string {
+	if len(run) == 0 {
+		return lines
+	}
+	// The run is a contiguous slice in whatever order the caller got its episodes (newest-first, in practice), so the span is the distance between its ends either way round.
+	span := run[0].CreatedAt.Sub(run[len(run)-1].CreatedAt)
+	if span < 0 {
+		span = -span
+	}
+	return append(lines, idleGapPrefix+" "+humanSpan(span))
 }
 
 // wrapperProcesses are process names that own a window without being the program the user actually sees: mutter-x11-frames is the compositor's own frame around an X11 client, gnome-terminal-server hosts every GNOME terminal window. Printing them as the application tells the model nothing about what was on screen.
@@ -294,18 +309,40 @@ func formatSpan(d time.Duration) string {
 	return fmt.Sprintf("%dm", int(d.Minutes()))
 }
 
-// formatEpisodeTimeline renders episodes (newest first) as one line per window. A run of idle captures collapses to an "(N idle/empty captures omitted)" marker, and consecutive captures of the same app and title collapse to a single line carrying how long that window stayed up — the same window sampled every minute used to print once per sample.
-// Input: the episodes and a function producing the excerpt for one of them (recall shows screen text; get_recent folds in the tracked activity and the frame marker). Output: the formatted lines in the order the episodes came in.
+// episodeHandle splits one capture into the name its row leads with and the machine names that follow it in a parenthetical, so the model reads a row about the work rather than a row about the software.
+// The handle is what the user would call the thing: the capture's own one-phrase activity, since nothing in the store links an episode to the thread it was attributed to. With no activity phrase the app name from displayAppTitle leads instead and only the window title stays in the parenthetical.
+// Input: one episode. Output: the leading handle and the parenthetical contents, either of which can be "".
+func episodeHandle(e db.Episode) (string, string) {
+	app, title := displayAppTitle(e.App, e.Title)
+	machine := make([]string, 0, 2)
+	for _, s := range []string{app, title} {
+		if !blankField(s) {
+			machine = append(machine, strings.TrimSpace(s))
+		}
+	}
+	handle := strings.TrimSpace(e.UserActivity)
+	if handle == "" && len(machine) > 0 {
+		handle, machine = machine[0], machine[1:]
+	}
+	return handle, strings.Join(machine, ", ")
+}
+
+// formatEpisodeTimeline renders episodes (newest first) as one line per window. A run of idle captures collapses to one "nothing on screen for …" line, and consecutive captures of the same app and title collapse to a single line carrying how long that window stayed up — the same window sampled every minute used to print once per sample.
+// Input: the episodes and a function producing the excerpt for one of them (recall shows screen text; get_recent folds in the frame marker). Output: the formatted lines in the order the episodes came in.
 func formatEpisodeTimeline(episodes []db.Episode, excerptFor func(db.Episode) string) []string {
 	var lines []string
+	idleStart := 0
 	idleRun := 0
 	for i := 0; i < len(episodes); {
 		if idleEpisode(episodes[i]) {
+			if idleRun == 0 {
+				idleStart = i
+			}
 			idleRun++
 			i++
 			continue
 		}
-		lines = appendOmitted(lines, idleRun)
+		lines = appendIdleGap(lines, episodes[idleStart:idleStart+idleRun])
 		idleRun = 0
 
 		j := i + 1
@@ -313,25 +350,36 @@ func formatEpisodeTimeline(episodes []db.Episode, excerptFor func(db.Episode) st
 			j++
 		}
 		oldest := episodes[j-1]
-		app, title := displayAppTitle(episodes[i].App, episodes[i].Title)
+		handle, machine := episodeHandle(episodes[i])
+		if machine != "" {
+			handle += " (" + machine + ")"
+		}
 		span := formatSpan(episodes[i].CreatedAt.Sub(oldest.CreatedAt))
 		if span != "" {
 			span += " "
 		}
-		// Established timeline shape: "[Jan 2 15:04] app — title: …", converted to the user's local zone (episodes are stored in UTC) so what's shown matches their wall clock. The stamp is the run's start, so the duration reads forward from it.
-		lines = append(lines, fmt.Sprintf("[%s] %s%s — %s: %s",
-			oldest.CreatedAt.In(time.Local).Format("Jan 2 15:04"), span, app, title, excerptFor(episodes[i])))
+		excerpt := excerptFor(episodes[i])
+		if excerpt == "" {
+			// Nothing captured beyond the window itself: end the row at the handle rather than on a dangling colon.
+			lines = append(lines, fmt.Sprintf("[%s] %s%s",
+				oldest.CreatedAt.In(time.Local).Format("Jan 2 15:04"), span, handle))
+			i = j
+			continue
+		}
+		// Timeline shape: "[Jan 2 15:04] 1h04m the vulnerability scoring (LibreOffice Calc, portfolio.xlsx): …", converted to the user's local zone (episodes are stored in UTC) so what's shown matches their wall clock. The stamp is the run's start, so the duration reads forward from it.
+		lines = append(lines, fmt.Sprintf("[%s] %s%s: %s",
+			oldest.CreatedAt.In(time.Local).Format("Jan 2 15:04"), span, handle, excerpt))
 		i = j
 	}
-	return appendOmitted(lines, idleRun)
+	return appendIdleGap(lines, episodes[idleStart:idleStart+idleRun])
 }
 
-// capRealRows truncates lines once limit real moment lines have been emitted, ignoring the "(N idle/empty captures omitted)" markers — those are accounting, not moments the user asked for.
+// capRealRows truncates lines once limit real moment lines have been emitted, ignoring the "nothing on screen for …" lines — those are accounting, not moments the user asked for.
 // Input: the formatted lines and how many moments the caller asked for. Output: the prefix holding at most that many moments.
 func capRealRows(lines []string, limit int) []string {
 	n := 0
 	for i, l := range lines {
-		if strings.HasPrefix(l, "(") {
+		if strings.HasPrefix(l, idleGapPrefix) {
 			continue
 		}
 		n++
@@ -418,8 +466,17 @@ func parseDaysAgo(s string) (int, bool) {
 	return n, true
 }
 
-// dateFormatHint is the one error phrasing for a since/until that didn't parse, shared by recall and query_memory so the model gets the same list of accepted forms wherever it passes a date.
-const dateFormatHint = `since/until must be "today", "yesterday", a bare date (2026-07-05), or an ISO-8601 timestamp (2026-07-05T00:00:00 or 2026-07-05T00:00:00Z)`
+// dateHint is the one phrasing for a since/until the tool could not read, shared by recall and query_memory so the model gets the same list of forms that work wherever it passes a date.
+const dateHint = "I can only search by a real date — try 'today', 'yesterday', or a date like 2026-07-05"
+
+// toolError renders a failed tool call as one plain sentence. Every failure path in executeTool goes through it, so a Go error string (a time-parse dump, a type name, a wrapped sqlite message) never reaches the model and, from there, never gets read out loud. The real error goes to the log instead.
+// Input: a plain-words sentence saying what went wrong and, where the model can fix it, what to try instead. Output: the tool result string, prefixed "error: " — which is what the model and resultSummary both read as "this call failed".
+func toolError(msg string) string {
+	return "error: " + msg
+}
+
+// storeUnavailable is what every failed memory read says. The model can only ever do one thing about it, so naming the store's own error would add nothing it can act on.
+const storeUnavailable = "I couldn't reach your memory just now — try that again in a moment"
 
 // hasArg reports whether name was supplied with a value that isn't an empty string. A non-string value counts as supplied — the model meant something by it, and treating it as absent is how a filter gets dropped without anyone noticing.
 func hasArg(args map[string]any, name string) bool {
@@ -444,9 +501,9 @@ func stringArg(args map[string]any, name string) (string, error) {
 	return s, nil
 }
 
-// checkArgs reports every argument name that isn't in valid, listing the valid ones so the model can correct itself on the next call.
+// checkArgs names every argument that isn't in valid, listing the ones that are so the model can correct itself on the next call. Returns "" when every argument is known.
 // This exists because the model invents parameters — a real trace called recall with query_memory's "query" argument, which the recall handler ignored, then answered from the timeline branch with since defaulted to the start of today.
-func checkArgs(args map[string]any, valid ...string) error {
+func checkArgs(args map[string]any, valid ...string) string {
 	var unknown []string
 	for name := range args {
 		if !slices.Contains(valid, name) {
@@ -454,10 +511,10 @@ func checkArgs(args map[string]any, valid ...string) error {
 		}
 	}
 	if len(unknown) == 0 {
-		return nil
+		return ""
 	}
 	slices.Sort(unknown)
-	return fmt.Errorf("unknown argument(s) %s; valid arguments are %s",
+	return fmt.Sprintf("I don't take %s here — what I do take is %s",
 		strings.Join(unknown, ", "), strings.Join(valid, ", "))
 }
 
@@ -549,7 +606,8 @@ func readClipboard() string {
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Sprintf("error reading clipboard: %v", err)
+		slog.Warn("clipboard read failed", "error", err)
+		return toolError("I couldn't read the clipboard")
 	}
 	return string(output)
 }
@@ -564,7 +622,8 @@ func RunShellCommand(command string) string {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Sprintf("error: %v\noutput: %s", err, string(output))
+		// The command's own output is the answer to why it failed and the model needs it; only Go's exit-status wrapper is dropped.
+		return toolError("that command didn't run cleanly") + "\noutput: " + string(output)
 	}
 	result := string(output)
 	if len(result) > 2000 {
@@ -587,7 +646,7 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 	case a.ToolApprovalChan <- req:
 	default:
 		// TUI approval queue full — another tool is pending. Reject to unblock.
-		return "error: approval queue busy, request rejected"
+		return toolError("I'm already waiting on another approval — ask again in a moment")
 	}
 
 	select {
@@ -595,7 +654,7 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 		return res
 	case <-ctx.Done():
 		slog.Warn("HITL approval abandoned: session ended before user responded", "description", description)
-		return "error: session ended before request was approved"
+		return toolError("that ended before it was approved")
 	}
 }
 
@@ -611,7 +670,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 	case "shell_exec":
 		command, ok := args["command"].(string)
 		if !ok {
-			return "error: command argument is required"
+			return toolError("shell_exec needs a command to run")
 		}
 
 		// Check session allowlist
@@ -634,12 +693,13 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 	case "read_file":
 		path, ok := args["path"].(string)
 		if !ok {
-			return "error: path argument is required"
+			return toolError("read_file needs a path")
 		}
 		execute := func() string {
 			data, err := os.ReadFile(path)
 			if err != nil {
-				return fmt.Sprintf("error reading file: %v", err)
+				slog.Warn("read_file failed", "path", path, "error", err)
+				return toolError("I couldn't read that file — check the path")
 			}
 			result := string(data)
 			if len(result) > 4000 {
@@ -664,7 +724,8 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		entries, err := os.ReadDir(path)
 		if err != nil {
-			return fmt.Sprintf("error listing directory: %v", err)
+			slog.Warn("list_files failed", "path", path, "error", err)
+			return toolError("I couldn't list that folder — check the path")
 		}
 		var lines []string
 		for _, e := range entries {
@@ -683,7 +744,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 	case "open_url":
 		url, ok := args["url"].(string)
 		if !ok {
-			return "error: url argument is required"
+			return toolError("open_url needs a url")
 		}
 		var cmd *exec.Cmd
 		switch runtime.GOOS {
@@ -695,26 +756,28 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			cmd = exec.Command("xdg-open", url)
 		}
 		if err := cmd.Start(); err != nil {
-			return fmt.Sprintf("error opening url: %v", err)
+			slog.Warn("open_url failed", "url", url, "error", err)
+			return toolError("I couldn't open that link")
 		}
 		return fmt.Sprintf("opened %s in browser", url)
 
 	case "query_memory":
-		if err := checkArgs(args, "query", "domain", "app", "since", "until"); err != nil {
-			return fmt.Sprintf("error: %v", err)
+		if msg := checkArgs(args, "query", "domain", "app", "since", "until"); msg != "" {
+			return toolError(msg)
 		}
 		query, ok := args["query"].(string)
 		if !ok {
-			return "error: query argument is required"
+			return toolError("query_memory needs something to search for")
 		}
 		// domain is optional: a missing or wrong-typed arg silently becomes "" (search everything, weighted toward the current domain) rather than erroring — since/until below are stricter since a mis-parsed date changes which day the answer comes from.
 		domain, _ := args["domain"].(string)
 		since, until, timed, err := optionalWindow(args, time.Now())
 		if errors.Is(err, errSinceAfterUntil) {
-			return "error: since must not be after until"
+			return toolError("that range runs backwards — the start has to come before the end")
 		}
 		if err != nil {
-			return fmt.Sprintf("error: %s: %v", dateFormatHint, err)
+			slog.Warn("query_memory: unreadable date", "error", err)
+			return toolError(dateHint)
 		}
 		slog.Info("querying long-term memory", "query", query, "domain", domain, "since", since, "until", until)
 
@@ -725,7 +788,8 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		hits, err := a.brain.HybridSearch(ctx, query, domain, limit)
 		if err != nil {
-			return fmt.Sprintf("error querying memory: %v", err)
+			slog.Error("query_memory: search failed", "error", err)
+			return toolError(storeUnavailable)
 		}
 		found := len(hits)
 		app, _ := args["app"].(string)
@@ -759,14 +823,15 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		return strings.Join(lines, "\n")
 
 	case "recall":
-		if err := checkArgs(args, "subject", "since", "until", "app"); err != nil {
-			return fmt.Sprintf("error: %v", err)
+		if msg := checkArgs(args, "subject", "since", "until", "app"); msg != "" {
+			return toolError(msg)
 		}
 		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
 			slog.Info("recalling subject", "subject", subject)
 			lines, err := a.brain.RecallSubject(ctx, subject, recallSubjectLimit)
 			if err != nil {
-				return fmt.Sprintf("error recalling subject: %v", err)
+				slog.Error("recall: subject lookup failed", "subject", subject, "error", err)
+				return toolError(storeUnavailable)
 			}
 			if len(lines) == 0 {
 				return "no memory of that subject"
@@ -788,14 +853,16 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		sinceStr, sinceErr := stringArg(args, "since")
 		untilStr, untilErr := stringArg(args, "until")
 		if err := errors.Join(sinceErr, untilErr); err != nil {
-			return fmt.Sprintf("error: %s: %v", dateFormatHint, err)
+			slog.Warn("recall: date argument was not text", "error", err)
+			return toolError(dateHint)
 		}
 		since, until, err := recallBounds(sinceStr, untilStr, time.Now())
 		if errors.Is(err, errSinceAfterUntil) {
-			return "error: since must not be after until"
+			return toolError("that range runs backwards — the start has to come before the end")
 		}
 		if err != nil {
-			return fmt.Sprintf("error: %s: %v", dateFormatHint, err)
+			slog.Warn("recall: unreadable date", "error", err)
+			return toolError(dateHint)
 		}
 		app, _ := args["app"].(string)
 		slog.Info("recalling timeline window", "since", since, "until", until, "app", app)
@@ -804,7 +871,8 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		// the start of the window — and silently stops there instead of covering the whole day.
 		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{Since: since, Until: until, App: app, Limit: 50, NewestFirst: true})
 		if err != nil {
-			return fmt.Sprintf("error recalling timeline: %v", err)
+			slog.Error("recall: timeline read failed", "error", err)
+			return toolError(storeUnavailable)
 		}
 		if len(episodes) == 0 {
 			return "no episodes in that window"
@@ -826,22 +894,17 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		// Over-fetch, then cap after the idle rows are dropped: the newest rows in the store are routinely idle captures, so asking for exactly limit rows is how "the last six hours" came back as one real moment plus "(19 idle omitted)".
 		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{App: app, Limit: min(limit*4, 200), NewestFirst: true})
 		if err != nil {
-			return fmt.Sprintf("error getting recent moments: %v", err)
+			slog.Error("get_recent: read failed", "error", err)
+			return toolError(storeUnavailable)
 		}
 		if len(episodes) == 0 {
 			return "no recent episodes"
 		}
 		lines := formatEpisodeTimeline(episodes, func(e db.Episode) string {
-			text := e.ScreenText
-			if e.UserActivity != "" {
-				text = e.UserActivity
-				if e.ScreenText != "" && e.ScreenText != e.UserActivity {
-					text = e.UserActivity + " — " + e.ScreenText
-				}
-			}
-			excerpt := oneLineExcerpt(text)
+			// The tracked activity is the row's handle now (see episodeHandle), so the excerpt is just the screen text — printing the activity here too said the same phrase twice on every line.
+			excerpt := oneLineExcerpt(e.ScreenText)
 			if e.ImagePath != "" {
-				excerpt += " [img]"
+				excerpt = strings.TrimSpace(excerpt + " [img]")
 			}
 			return excerpt
 		})
@@ -850,71 +913,78 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 	case "branch":
 		task, ok := args["task"].(string)
 		if !ok || strings.TrimSpace(task) == "" {
-			return "error: task argument is required"
+			return toolError("branch needs the question to work on")
 		}
 		if !a.tryReserveBranchSlot() {
-			return fmt.Sprintf("error: branch call limit (%d) reached for this session", maxBranchesPerSession)
+			return toolError("I've already run all the background searches I get this session — use query_memory or recall instead")
 		}
 		model, err := a.subtaskModelFactory()
 		if err != nil {
-			return fmt.Sprintf("error: branch failed to start: %v", err)
+			slog.Error("branch: could not start", "error", err)
+			return toolError("that background search couldn't start — use query_memory or recall instead")
 		}
 		result, err := a.runSubtask(ctx, model, task)
 		if err != nil {
-			return fmt.Sprintf("error: branch failed: %v", err)
+			slog.Error("branch: failed", "error", err)
+			return toolError("that background search didn't come back — use query_memory or recall instead")
 		}
 		return result
 
 	case "save_note":
 		content, ok := args["content"].(string)
 		if !ok || strings.TrimSpace(content) == "" {
-			return "error: content argument is required"
+			return toolError("save_note needs the fact to remember")
 		}
 		if _, err := a.brain.LogNote(ctx, content, "fact"); err != nil {
-			return fmt.Sprintf("error saving note: %v", err)
+			slog.Error("save_note: write failed", "error", err)
+			return toolError("that didn't save — try saying it again")
 		}
 		return "saved"
 
 	case "update_note":
 		idFloat, ok := args["id"].(float64)
 		if !ok {
-			return "error: id argument is required (get it from a [note#N] query_memory result)"
+			return toolError("update_note needs the note's id — the number in a [note#N] query_memory result")
 		}
 		content, ok := args["content"].(string)
 		if !ok || strings.TrimSpace(content) == "" {
-			return "error: content argument is required"
+			return toolError("update_note needs the corrected fact")
 		}
 		if err := a.brain.UpdateNote(ctx, int64(idFloat), content); err != nil {
-			return fmt.Sprintf("error updating note: %v", err)
+			slog.Error("update_note: write failed", "id", int64(idFloat), "error", err)
+			return toolError("nothing was updated — look the note up again with query_memory and use the id it shows")
 		}
 		return "updated"
 
 	case "fix_thread":
 		idFloat, ok := args["id"].(float64)
 		if !ok {
-			return "error: id argument is required (get it from a [thread#N] result)"
+			return toolError("fix_thread needs the thread's id — the number in a [thread#N] result")
 		}
 		correction, ok := args["correction"].(string)
 		if !ok || strings.TrimSpace(correction) == "" {
-			return "error: correction argument is required"
+			return toolError("fix_thread needs what the thread actually is")
 		}
 		if err := a.brain.UpdateThreadState(ctx, int64(idFloat), correction); err != nil {
-			return fmt.Sprintf("error fixing thread: %v", err)
+			slog.Error("fix_thread: write failed", "id", int64(idFloat), "error", err)
+			return toolError("nothing was fixed — look the thread up again with query_memory and use the id it shows")
 		}
 		return "fixed"
 
 	case "delete_note":
 		idFloat, ok := args["id"].(float64)
 		if !ok {
-			return "error: id argument is required (get it from a [note#N] query_memory result)"
+			return toolError("delete_note needs the note's id — the number in a [note#N] query_memory result")
 		}
 		if err := a.brain.DeleteNote(ctx, int64(idFloat)); err != nil {
-			return fmt.Sprintf("error deleting note: %v", err)
+			slog.Error("delete_note: write failed", "id", int64(idFloat), "error", err)
+			return toolError("nothing was deleted — look the note up again with query_memory and use the id it shows")
 		}
 		return "deleted"
 
 	default:
-		return fmt.Sprintf("unknown tool: %s", name)
+		slog.Warn("unknown tool called", "tool", name)
+		return toolError("there's no tool by that name")
 	}
 }
 

@@ -2070,9 +2070,9 @@ func TestFormatHit_EpisodeProvenance_TableShapes(t *testing.T) {
 		want string
 	}{
 		{
-			name: "episode with app and title carries provenance",
+			name: "episode with app and title carries provenance trailing, content first",
 			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go"},
-			want: "[episode] Code — tracker_linux.go: fixing the null pointer bug",
+			want: "[episode] fixing the null pointer bug (Code — tracker_linux.go)",
 		},
 		{
 			name: "episode without app/title falls back to the plain shape",
@@ -2104,7 +2104,7 @@ func TestFormatHit_EpisodeProvenance_TableShapes(t *testing.T) {
 			// Age and provenance both show up: one does not replace the other.
 			name: "episode with app, title and age",
 			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go", CreatedAt: time.Now().Add(-3 * 24 * time.Hour)},
-			want: "[episode (3d ago)] Code — tracker_linux.go: fixing the null pointer bug",
+			want: "[episode (3d ago)] fixing the null pointer bug (Code — tracker_linux.go)",
 		},
 	}
 
