@@ -20,18 +20,33 @@ func (f *fakeCapture) Stop() { f.stopped = true }
 
 type fakeStore struct {
 	episodes []db.Episode
-	facts    []db.Note
-	notes    []string
-	kinds    []string
-	mu       sync.Mutex
+	personal []db.PersonalEntry
+	// personalWrites records every SetPersonalContext call, subject to content, so a test can see what the meeting updater decided to write.
+	personalWrites map[string]string
+	notes          []string
+	kinds          []string
+	updates        map[int64]string
+	mu             sync.Mutex
 }
 
 func (s *fakeStore) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
 	return s.episodes, nil
 }
 
-func (s *fakeStore) GetNotes(ctx context.Context) ([]db.Note, error) {
-	return s.facts, nil
+func (s *fakeStore) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.personal, nil
+}
+
+func (s *fakeStore) SetPersonalContext(ctx context.Context, subject, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.personalWrites == nil {
+		s.personalWrites = map[string]string{}
+	}
+	s.personalWrites[subject] = content
+	return nil
 }
 
 func (s *fakeStore) LogNote(ctx context.Context, content, kind string) (int64, error) {
@@ -40,6 +55,29 @@ func (s *fakeStore) LogNote(ctx context.Context, content, kind string) (int64, e
 	s.notes = append(s.notes, content)
 	s.kinds = append(s.kinds, kind)
 	return int64(len(s.notes)), nil
+}
+
+func (s *fakeStore) UpdateNote(ctx context.Context, id int64, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.updates == nil {
+		s.updates = make(map[int64]string)
+	}
+	s.updates[id] = content
+	return nil
+}
+
+// logged returns the contents filed under kind, so a test can look at just the person notes or just the minutes.
+func (s *fakeStore) logged(kind string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for i, k := range s.kinds {
+		if k == kind {
+			out = append(out, s.notes[i])
+		}
+	}
+	return out
 }
 
 // newTestRecorder builds a Recorder whose capture, whisper, Gemini and notification calls are all replaced by fakes, and whose data lives in a temp dir.
@@ -63,7 +101,11 @@ func newTestRecorder(t *testing.T, store *fakeStore) (*Recorder, *fakeCapture, *
 		return []Segment{{Start: 2 * time.Second, End: 3 * time.Second, Speaker: speakerCall, Text: "friday works"}}, nil
 	}
 	r.findWhisper = func(string) (string, error) { return "/fake/whisper", nil }
+	// One seam serves both one-shot Gemini calls the pipeline makes: the minutes themselves, and the pass that asks whether the meeting changed personal context.
 	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			return `{"updates":[]}`, nil
+		}
 		if !strings.Contains(prompt, "friday works") {
 			t.Errorf("minutes prompt is missing the transcript:\n%s", prompt)
 		}
@@ -521,18 +563,35 @@ func TestRecorder_KeepsAudioWhenTranscriptionFails(t *testing.T) {
 	}
 }
 
-// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Deepak" because a GitHub commit list said "deepak-acmee". Ora's own durable memory of the user is the only thing that can name the [me] speaker, so it has to reach the model — and the meeting minutes stored alongside it must not, or one meeting's guess becomes the next meeting's fact.
-func TestBuildPrompt_CarriesWhatOraKnowsAboutTheUserButNotPastMinutes(t *testing.T) {
-	store := &fakeStore{facts: []db.Note{
-		{Content: "User is Alex Rivera, a systems engineer working on Ora.", Kind: "fact"},
-		{Content: "# Meeting minutes\n## Attendees\n- Deepak", Kind: "meeting"},
+// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Deepak" because a GitHub commit list said "deepak-acmee". Personal context is the one store that says who the user is with certainty, so it is what names the [me] speaker — and nothing Ora merely inferred goes near this prompt.
+func TestBuildPrompt_CarriesPersonalContextAboutTheUser(t *testing.T) {
+	store := &fakeStore{personal: []db.PersonalEntry{
+		{Subject: "identity", Content: "The user is Alex Rivera — goes by Alex; git handle M-DEV-1."},
 	}}
 	r, _, _ := newTestRecorder(t, store)
 	prompt := r.buildPrompt(context.Background(), "[00:00:00] [me] hello", time.Now(), time.Now())
-	if !strings.Contains(prompt, "User is Alex Rivera") {
-		t.Errorf("the minutes prompt must carry Ora's long-term facts about the user:\n%s", prompt)
+	if !strings.Contains(prompt, "Alex Rivera") {
+		t.Errorf("the minutes prompt must carry the personal context entry that names the user:\n%s", prompt)
 	}
-	if strings.Contains(prompt, "Deepak") {
-		t.Errorf("a past meeting's minutes must not be fed back in as background:\n%s", prompt)
+	if !strings.Contains(prompt, "About the person recording") {
+		t.Errorf("the personal context entries lost their heading:\n%s", prompt)
+	}
+}
+
+// TestBuildPrompt_NoUserBlockWithoutPersonalContext keeps an empty store from putting a heading in the prompt with nothing under it.
+func TestBuildPrompt_NoUserBlockWithoutPersonalContext(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	prompt := r.buildPrompt(context.Background(), "[00:00:00] [me] hello", time.Now(), time.Now())
+	if strings.Contains(prompt, "About the person recording —") {
+		t.Errorf("empty personal context still produced a block:\n%s", prompt)
+	}
+}
+
+// TestMinutesInstruction_AttendeesSplitByEvidence covers the shape the attendee list has to have: two lists split on whether there is evidence the person was in the call, and the recording person appearing once, under their own name.
+func TestMinutesInstruction_AttendeesSplitByEvidence(t *testing.T) {
+	for _, want := range []string{"In the meeting", "Mentioned or on screen only", "(recording)"} {
+		if !strings.Contains(minutesInstruction, want) {
+			t.Errorf("the attendees instruction never says %q", want)
+		}
 	}
 }

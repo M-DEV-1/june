@@ -38,10 +38,11 @@ const keepAudio = true
 // dirTimeLayout is how a recording directory is named, and therefore how its start time is read back when the sweep picks up an unfinished recording.
 const dirTimeLayout = "2006-01-02T15-04-05"
 
-// Store is the read-mostly slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, Ora's own long-term memory of the user, and somewhere to file the minutes.
+// Store is the slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, the personal context that says who the [me] speaker is (and which a finished meeting can add a person to), and somewhere to file the minutes.
 type Store interface {
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
-	GetNotes(ctx context.Context) ([]db.Note, error)
+	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
+	SetPersonalContext(ctx context.Context, subject, content string) error
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 }
 
@@ -469,6 +470,9 @@ func (r *Recorder) process(ctx context.Context, s *session) error {
 	if _, err := r.store.LogNote(ctx, text, noteKind); err != nil {
 		slog.Warn("could not file meeting minutes as a note", "error", err)
 	}
+
+	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
+	r.updatePersonalContext(ctx, text, s.startedAt, s.stoppedAt)
 
 	r.notify("Meeting summary ready", filepath.Join(s.dir, "minutes.md"))
 	return nil

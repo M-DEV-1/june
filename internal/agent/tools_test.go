@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"maps"
 	"ora/internal/db"
 	"os"
 	"path/filepath"
@@ -58,6 +59,10 @@ type toolTestBrain struct {
 	updatedThreadState string
 	updateThreadErr    error
 
+	// personal/personalErr back the personal_context tool's tests: an in-memory subject->content map with the same edit-in-place semantics as the store, and a forced failure.
+	personal    map[string]string
+	personalErr error
+
 	// deletedNoteID captures DeleteNote's arg for the delete_note tool's tests; deleteNoteErr forces it to fail.
 	deletedNoteID int64
 	deleteNoteErr error
@@ -102,6 +107,33 @@ func (b *toolTestBrain) LogNote(ctx context.Context, content, kind string) (int6
 	return 1, nil
 }
 func (b *toolTestBrain) GetNotes(ctx context.Context) ([]db.Note, error) { return nil, nil }
+func (b *toolTestBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
+	if b.personalErr != nil {
+		return nil, b.personalErr
+	}
+	var out []db.PersonalEntry
+	for _, subject := range slices.Sorted(maps.Keys(b.personal)) {
+		out = append(out, db.PersonalEntry{Subject: subject, Content: b.personal[subject]})
+	}
+	return out, nil
+}
+func (b *toolTestBrain) SetPersonalContext(ctx context.Context, subject, content string) error {
+	if b.personalErr != nil {
+		return b.personalErr
+	}
+	if b.personal == nil {
+		b.personal = map[string]string{}
+	}
+	b.personal[subject] = content
+	return nil
+}
+func (b *toolTestBrain) DeletePersonalContext(ctx context.Context, subject string) error {
+	if b.personalErr != nil {
+		return b.personalErr
+	}
+	delete(b.personal, subject)
+	return nil
+}
 func (b *toolTestBrain) UpdateNote(ctx context.Context, id int64, content string) error {
 	b.updatedNoteID = id
 	b.updatedNoteContent = content
