@@ -1,5 +1,5 @@
 // Package brain is ORA's one-shot text seam: one prompt in, one answer out, with a choice of backend behind it.
-// It exists so the duties that only need a prompt answered — the meeting minutes and the personal context updater — can run on the Gemini API, on the Claude Code login the machine already has, or on Antigravity, without any of them knowing which. The voice assistant is not one of these duties: that is a bidirectional Gemini Live session and stays on genai.
+// It exists so the duties that only need a prompt answered — the meeting minutes and the personal context updater — can run on the Gemini API or on the Claude Code login the machine already has, without either of them knowing which. The voice assistant is not one of these duties: that is a bidirectional Gemini Live session and stays on genai.
 package brain
 
 import (
@@ -25,8 +25,6 @@ func FromConfig(cfg config.BrainConfig, apiKey string) Brain {
 	switch cfg.Provider {
 	case config.BrainClaudeCLI:
 		return ClaudeCLI(or(cfg.Binary, "claude"), timeout)
-	case config.BrainAgyCLI:
-		return AgyCLI(or(cfg.Binary, "agy"), timeout)
 	case "", config.BrainGeminiAPI:
 	default:
 		slog.Warn("unknown brain provider in config, using the Gemini API", "provider", cfg.Provider)
