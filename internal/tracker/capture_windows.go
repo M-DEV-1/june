@@ -6,6 +6,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"image"
 	"os"
 	"os/exec"
 	"strings"
@@ -17,6 +18,11 @@ var uiaScript string
 // grabScreen is not yet implemented on Windows — UIA text capture covers most cases; a BitBlt-based visual tier can be added later.
 func grabScreen(_ context.Context) ([]byte, error) {
 	return nil, errors.New("screenshot not implemented on windows")
+}
+
+// screenLayout reports no monitors on Windows: there is no screenshot to split up yet, so it would have nothing to act on.
+func screenLayout() ([]image.Rectangle, image.Point) {
+	return nil, image.Pt(-1, -1)
 }
 
 // extractText reads structured text from the focused window via UI Automation.
