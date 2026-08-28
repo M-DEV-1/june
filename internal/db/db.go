@@ -622,6 +622,10 @@ func FormatHit(h MemoryHit, maxRunes int) string {
 	if src == "" {
 		src = "unknown"
 	}
+	// Threads carry their ref id for the same reason notes do: a thread's summary can be wrong, the model can see that it is, and fix_thread needs an id to name. Nothing else here has a repair tool.
+	if h.Source == "thread" && h.RefID > 0 {
+		src = fmt.Sprintf("thread#%d", h.RefID)
+	}
 	label := src
 	if age := formatRelativeAge(h.CreatedAt); age != "" {
 		label = fmt.Sprintf("%s (%s)", src, age)
@@ -776,6 +780,9 @@ func (s *Store) hitCreatedAt(ctx context.Context, source string, refID int64) ti
 		_ = s.db.QueryRowContext(ctx, `SELECT created_at FROM nodes WHERE id = ?`, refID).Scan(&created)
 	case "note":
 		_ = s.db.QueryRowContext(ctx, `SELECT created_at FROM notes WHERE id = ?`, refID).Scan(&created)
+	case "thread":
+		// last_seen_at, not created_at: a thread's age that matters is when it was last touched, which is also what MemoryAsOf reports for one.
+		_ = s.db.QueryRowContext(ctx, `SELECT last_seen_at FROM threads WHERE id = ?`, refID).Scan(&created)
 	default:
 		return time.Time{}
 	}
@@ -1143,6 +1150,68 @@ func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64,
 	}
 	span.SetAttributes(attribute.Int64("db.thread_id", id))
 	return id, nil
+}
+
+// UpdateThreadState overwrites an existing thread's state — the one-line summary of where that throughline stands — leaving its subject and kind alone. This is the repair path for a thread whose summary merged two unrelated things or recorded a wrong fact; the model can see that from a "[thread#N]" hit but had no way to act on it, since update_note only reaches the notes table.
+// The FTS5 mirror is kept in sync by the threads_au trigger. The stale vector is deleted and the corrected text re-embedded async/best-effort, same non-blocking pattern as UpdateNote — a vector-index error never fails the SQL update. The embed text is "subject — state", matching the threads_ai trigger so both halves of hybrid search see the same thread.
+// Input: the thread's id and the corrected state. Output: an error if no thread carries that id.
+func (s *Store) UpdateThreadState(ctx context.Context, id int64, state string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.UpdateThreadState")
+	defer span.End()
+	span.SetAttributes(attribute.Int64("db.thread_id", id))
+
+	var subject string
+	// A no-op UPDATE is not success: the model can hand us an id it invented, and reporting the fix as done throws the user's correction away. Reading the subject first both catches that and gives the re-embed its text.
+	if err := s.db.QueryRowContext(ctx, `SELECT subject FROM threads WHERE id = ?`, id).Scan(&subject); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("no thread with id %d", id)
+		}
+		span.RecordError(err)
+		return fmt.Errorf("update thread state: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE threads SET state = ?, last_seen_at = CURRENT_TIMESTAMP WHERE id = ?`, state, id); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("update thread state: %w", err)
+	}
+
+	s.mu.RLock()
+	emb, vidx := s.embedder, s.vectorIndex
+	s.mu.RUnlock()
+	if vidx == nil {
+		return nil
+	}
+	text := subject
+	if strings.TrimSpace(state) != "" {
+		text = subject + " — " + state
+	}
+	go func(id int64, text string) {
+		vecCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		vecID := fmt.Sprintf("thread:%d", id)
+		if err := vidx.Delete(vecCtx, vecID); err != nil {
+			slog.Error("async thread vector delete (pre-update) failed", "thread_id", id, "error", err)
+		}
+		if emb == nil {
+			return
+		}
+		vec, err := emb.Embed(vecCtx, "RETRIEVAL_DOCUMENT", text)
+		if err != nil {
+			slog.Error("async thread re-embed failed", "thread_id", id, "error", err)
+			return
+		}
+		meta := map[string]string{
+			"source":     "thread",
+			"kind":       string(memory.KindArc),
+			"created_at": time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := vidx.Add(vecCtx, vecID, text, vec, meta); err != nil {
+			slog.Error("async thread vector re-add failed", "thread_id", id, "error", err)
+		}
+	}(id, text)
+	return nil
 }
 
 // GetLiveThreads returns threads touched in the last 2 days, newest-first. This is the "what's going on in their life right now" view; concurrent threads coexist here.
@@ -1687,7 +1756,7 @@ func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([
 	return out, nil
 }
 
-// RecallSubject fuses a thread's arc with episode specifics for "what do you know about X" recall: (a) matching thread(s) for subject via SearchMemory filtered to Source=="thread", formatted "[thread] <content>"; then (b) a diverse spread of matching episodes via DiverseEpisodes, formatted "[episode] <excerpt≤200 runes>". Threads (the throughline) come first, episodes (the specifics) after — narration should say "you've been doing X" before "specifically, Y and Z".
+// RecallSubject fuses a thread's arc with episode specifics for "what do you know about X" recall: (a) matching thread(s) for subject via SearchMemory filtered to Source=="thread", formatted "[thread#N] <content>"; then (b) a diverse spread of matching episodes via DiverseEpisodes, formatted "[episode] <excerpt≤200 runes>". Threads (the throughline) come first, episodes (the specifics) after — narration should say "you've been doing X" before "specifically, Y and Z".
 func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.RecallSubject")
@@ -1706,7 +1775,7 @@ func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([
 	var out []string
 	for _, h := range hits {
 		if h.Source == "thread" {
-			out = append(out, fmt.Sprintf("[thread] %s", h.Content))
+			out = append(out, fmt.Sprintf("[thread#%d] %s", h.RefID, h.Content))
 		}
 	}
 
