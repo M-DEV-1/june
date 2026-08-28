@@ -5,7 +5,6 @@ package memory
 
 import (
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -31,7 +30,6 @@ const (
 	SignalVision    SignalKind = "vision"
 	SignalA11y      SignalKind = "a11y"
 	SignalTitleOnly SignalKind = "title_only"
-	SignalMPRIS     SignalKind = "mpris"
 )
 
 // signalMaxWords caps moment content — better one short observation than a multi-KB accessibility dump that drowns FTS and embeddings.
@@ -107,44 +105,6 @@ func KindOf(source string) Kind {
 	}
 }
 
-// FormatLine is the only way memory should enter the model: kind + domain + time + app/title context + excerpted content.
-// Empty content yields a context-only line (still useful: "was in Netflix · Suits").
-func FormatLine(kind Kind, domain Domain, at time.Time, app, title, content string, maxRunes int) string {
-	if maxRunes <= 0 {
-		maxRunes = 200
-	}
-	var meta []string
-	meta = append(meta, string(kind))
-	if domain != DomainUnset && domain != "" {
-		meta = append(meta, string(domain))
-	}
-	if !at.IsZero() {
-		meta = append(meta, at.Local().Format("2006-01-02 15:04"))
-	}
-	head := "[" + strings.Join(meta, " · ") + "]"
-
-	ctx := strings.TrimSpace(app + " · " + title)
-	if ctx == "·" {
-		ctx = ""
-	}
-
-	body := collapseSpace(content)
-	if maxRunes > 0 {
-		body = truncateRunes(body, maxRunes)
-	}
-
-	switch {
-	case ctx != "" && body != "":
-		return head + " " + ctx + " — " + body
-	case ctx != "":
-		return head + " " + ctx
-	case body != "":
-		return head + " " + body
-	default:
-		return head
-	}
-}
-
 // extractSignal cleans raw capture text into primary content.
 func extractSignal(raw, title string) (string, SignalKind) {
 	raw = stripControls(raw)
@@ -172,7 +132,7 @@ func extractSignal(raw, title string) (string, SignalKind) {
 		kept = append(kept, line)
 	}
 	text := strings.Join(kept, "\n")
-	text = collapseSpace(text)
+	text = strings.Join(strings.Fields(text), " ")
 	text = capWords(text, signalMaxWords)
 
 	if text == "" {
@@ -328,11 +288,6 @@ func stripControls(s string) string {
 		}
 		return r
 	}, s)
-}
-
-func collapseSpace(s string) string {
-	fields := strings.Fields(s)
-	return strings.Join(fields, " ")
 }
 
 func capWords(s string, max int) string {
