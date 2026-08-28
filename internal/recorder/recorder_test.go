@@ -144,8 +144,8 @@ func TestRecorder_Pipeline(t *testing.T) {
 	}
 
 	for _, name := range []string{"mic.wav", "system.wav"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should be deleted once both transcriptions succeeded", name)
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s should be kept while keepAudio is on: %v", name, err)
 		}
 	}
 	if len(*notes) == 0 {
