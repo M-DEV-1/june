@@ -39,6 +39,13 @@ func (b *mockBrain) LogNote(ctx context.Context, content, kind string) (int64, e
 func (b *mockBrain) GetNotes(ctx context.Context) ([]db.Note, error)                  { return nil, nil }
 func (b *mockBrain) UpdateNote(ctx context.Context, id int64, content string) error   { return nil }
 func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                   { return nil }
+func (b *mockBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
+	return nil, nil
+}
+func (b *mockBrain) SetPersonalContext(ctx context.Context, subject, content string) error {
+	return nil
+}
+func (b *mockBrain) DeletePersonalContext(ctx context.Context, subject string) error { return nil }
 func (b *mockBrain) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
 	return nil, nil
 }

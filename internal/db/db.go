@@ -152,6 +152,20 @@ func (s *Store) createSchema() error {
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
 
+	-- personal_context: the small set of things known for certain about the
+	-- user -- who they are, the people in their life, preferences they stated.
+	-- Keyed by subject and edited in place, never appended to, and only ever
+	-- written from something the user said themselves. No FTS, no vectors: it
+	-- is injected whole into every prompt rather than retrieved, so there is
+	-- nothing to rank and nothing to miss. Its own table so that no compaction
+	-- or consolidation path can reach it.
+	CREATE TABLE IF NOT EXISTS personal_context (
+		id INTEGER PRIMARY KEY,
+		subject TEXT UNIQUE NOT NULL,
+		content TEXT NOT NULL,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
 	-- folds: a branch() subtask's result that couldn't be delivered into the
 	-- live session that requested it. Staged here to surface at the next
 	-- session's handshake instead of being silently dropped. Deliberately
@@ -328,7 +342,8 @@ func (s *Store) createSchema() error {
 			AND NULLIF(json_extract(content, '$.summary'), '') IS NOT NULL`); err != nil {
 		return fmt.Errorf("rebuild summary fts content: %w", err)
 	}
-	return nil
+
+	return s.migrateIdentityNote()
 }
 
 // ensureColumn adds column to table (with the given SQL type/constraint) if it doesn't already exist, checked via PRAGMA table_info since modernc.org/sqlite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS.

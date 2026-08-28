@@ -33,13 +33,16 @@ Rules for naming:
   - Never write "them", "the other side", or "the other participant" as if it were one person.
   - Several people share the [call] label and the recording cannot tell their voices apart, so a name is a claim you must be able to point at evidence for. When two people on the [call] side are both plausible for a line, say the speaker is unclear rather than picking one.
   - The transcript comes from speech recognition, so names in it may be misspelled. Where the screen context has the same name spelled properly, use that spelling.
-  - For the [me] speaker: this is always the same one person, the owner of this computer. Ora's long-term memory of them is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
+  - For the [me] speaker: this is always the same one person, the owner of this computer. What the user has told Ora about themselves is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
 
 Write markdown with these sections, in this order:
 
 # Meeting minutes
 ## Attendees
-Everyone who took part, from both the screen context and the transcript. Name each person, and say what tells you they were there (on screen, spoke, named by someone else). Say "unclear" for a voice you could not place.
+Two lists, and every name goes in exactly one of them.
+**In the meeting** — only people with evidence they were in the call: they spoke, they were addressed by name during it, or the meeting app showed them (participant tile, "presenting" label, chat sender). Say which of those it was. The recording person is one entry here once you know their name, written as "Their Name (recording)" — never also a separate "the person recording" bullet.
+**Mentioned or on screen only** — names that came up in talk or on screen with nothing showing they were in the call: a commit author, a ticket assignee, an account name, someone discussed. Drop this list if there are none.
+A name you can only hedge about ("referenced via screen context") goes in the second list, never the first. Say "unclear" for a voice you could not place at all.
 ## Key points
 What was discussed. Bullet points, plain language, attributing points to named people where you can.
 ## Decisions
@@ -57,7 +60,7 @@ func (r *Recorder) buildPrompt(ctx context.Context, transcript string, startedAt
 		startedAt.Format("Mon 2 Jan 2006 15:04"), stoppedAt.Format("15:04"), stoppedAt.Sub(startedAt).Round(time.Minute))
 
 	if about := r.aboutTheUser(ctx); about != "" {
-		b.WriteString("\nAbout the person recording — what Ora has learned about the owner of this computer over time, from everything else they do. This is the [me] speaker, the same person in every meeting. It is background, not speech: never quote it as something someone said.\n")
+		b.WriteString("\nAbout the person recording — what the user has told Ora for certain about themselves and the people in their life. This is the [me] speaker, the same person in every meeting. It is background, not speech: never quote it as something someone said.\n")
 		b.WriteString(about)
 	}
 
@@ -71,25 +74,17 @@ func (r *Recorder) buildPrompt(ctx context.Context, transcript string, startedAt
 	return b.String()
 }
 
-// userFactLimit caps how many of Ora's long-term facts about the user go into the minutes prompt. They are one-line statements written by the memory compiler, so this is generous.
-const userFactLimit = 60
-
-// aboutTheUser renders Ora's own durable memory of the person recording — the notes the memory compiler files under kind "fact" — as bullet lines. This is what identifies the [me] speaker: nothing on screen does, because a screen is full of other people's names.
-// It deliberately reads only "fact" notes. The meeting minutes Ora files under kind "meeting" live in the same table, and feeding a past meeting's minutes back in as background would let one meeting's guesses harden into the next one's facts.
+// aboutTheUser renders the personal context store — the things the user has stated about themselves and the people in their life — as bullet lines. This is what identifies the [me] speaker: nothing on screen does, because a screen is full of other people's names.
+// It reads personal context and nothing else. Notes are inferred, aged and rewritten by the memory compiler, and a guess about who the user is would name the wrong person in the minutes; every entry here came from the user's own mouth.
 func (r *Recorder) aboutTheUser(ctx context.Context) string {
-	notes, err := r.store.GetNotes(ctx)
+	entries, err := r.store.PersonalContext(ctx)
 	if err != nil {
-		slog.Warn("could not read what Ora knows about the user for meeting minutes", "error", err)
+		slog.Warn("could not read personal context for meeting minutes", "error", err)
 		return ""
 	}
 	var b strings.Builder
-	n := 0
-	for _, note := range notes {
-		if note.Kind != "fact" || n >= userFactLimit {
-			continue
-		}
-		fmt.Fprintf(&b, "  - %s\n", strings.TrimSpace(note.Content))
-		n++
+	for _, e := range entries {
+		fmt.Fprintf(&b, "  - %s\n", strings.TrimSpace(e.Content))
 	}
 	return b.String()
 }

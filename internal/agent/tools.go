@@ -169,6 +169,27 @@ func toolDefinitions() []*genai.Tool {
 			},
 			{
 				Behavior: genai.BehaviorNonBlocking,
+				Name:     "personal_context",
+				Description: "The small store of things known for CERTAIN about the user: who they are, the people in their life " +
+					"(family, colleagues, friends), and preferences they have stated. Every entry goes into every conversation you " +
+					"have with them, so it stays small and it stays true. " +
+					"action \"set\" is only for something the user said about themselves, or confirmed when you asked them. Never " +
+					"put in something you inferred, guessed, or read off their screen — an observation belongs in save_note instead. " +
+					"Call action \"view\" before writing: subjects you already have come back with it, and if one of them covers what " +
+					"you were about to add, edit that subject rather than making a near-duplicate. " +
+					"action \"delete\" is for an entry the user says is wrong or no longer true.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"action":  {Type: genai.TypeString, Description: "\"view\" to read everything stored, \"set\" to write or edit one subject, \"delete\" to remove one."},
+						"subject": {Type: genai.TypeString, Description: "Short key for the entry, lowercase and hyphenated: \"identity\", \"trupti-hosmani\", \"preferences-communication\". Required for set and delete. Reuse an existing subject to edit it."},
+						"content": {Type: genai.TypeString, Description: "For set: the whole entry, written as plain prose about the user or that person. It replaces the subject's previous content, so include what still holds, not just the new part."},
+					},
+					Required: []string{"action"},
+				},
+			},
+			{
+				Behavior: genai.BehaviorNonBlocking,
 				Name:     "update_note",
 				Description: "Correct a previously saved note whose content was wrong (misheard, misunderstood, " +
 					"or the user says it's outdated) — look the note up first with query_memory to get its id " +
@@ -941,6 +962,50 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		return "saved"
 
+	case "personal_context":
+		action, _ := args["action"].(string)
+		subject, _ := args["subject"].(string)
+		content, _ := args["content"].(string)
+		switch strings.ToLower(strings.TrimSpace(action)) {
+		case "view":
+			entries, err := a.brain.PersonalContext(ctx)
+			if err != nil {
+				slog.Error("personal_context: read failed", "error", err)
+				return toolError(storeUnavailable)
+			}
+			if len(entries) == 0 {
+				return "nothing in personal context yet"
+			}
+			var b strings.Builder
+			for _, e := range entries {
+				fmt.Fprintf(&b, "%s: %s\n", e.Subject, e.Content)
+			}
+			return strings.TrimRight(b.String(), "\n")
+		case "set":
+			if strings.TrimSpace(subject) == "" {
+				return toolError("personal_context needs a subject to file this under, like \"identity\" or the person's name")
+			}
+			if strings.TrimSpace(content) == "" {
+				return toolError("personal_context needs the content to save under that subject")
+			}
+			if err := a.brain.SetPersonalContext(ctx, subject, content); err != nil {
+				slog.Error("personal_context: write failed", "subject", subject, "error", err)
+				return toolError("that didn't save — try saying it again")
+			}
+			return "saved"
+		case "delete":
+			if strings.TrimSpace(subject) == "" {
+				return toolError("personal_context needs the subject to remove — view it first to see which ones there are")
+			}
+			if err := a.brain.DeletePersonalContext(ctx, subject); err != nil {
+				slog.Error("personal_context: delete failed", "subject", subject, "error", err)
+				return toolError("nothing was removed — view it first to see which subjects there are")
+			}
+			return "deleted"
+		default:
+			return toolError("personal_context takes view, set or delete")
+		}
+
 	case "update_note":
 		idFloat, ok := args["id"].(float64)
 		if !ok {
@@ -1051,6 +1116,12 @@ func toolActivitySummary(name string, args map[string]any) string {
 		if content, ok := args["content"].(string); ok {
 			return quoteArg(content)
 		}
+	case "personal_context":
+		action, _ := args["action"].(string)
+		if subject, ok := args["subject"].(string); ok && subject != "" {
+			return fmt.Sprintf("%s %s", action, quoteArg(subject))
+		}
+		return quoteArg(action)
 	case "delete_note":
 		if id, ok := args["id"].(float64); ok {
 			return fmt.Sprintf("#%d", int64(id))
