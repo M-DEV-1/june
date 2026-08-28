@@ -53,6 +53,11 @@ type toolTestBrain struct {
 	updatedNoteContent string
 	updateNoteErr      error
 
+	// updatedThreadID/updatedThreadState capture UpdateThreadState's args for the fix_thread tool's tests; updateThreadErr forces it to fail.
+	updatedThreadID    int64
+	updatedThreadState string
+	updateThreadErr    error
+
 	// deletedNoteID captures DeleteNote's arg for the delete_note tool's tests; deleteNoteErr forces it to fail.
 	deletedNoteID int64
 	deleteNoteErr error
@@ -101,6 +106,11 @@ func (b *toolTestBrain) UpdateNote(ctx context.Context, id int64, content string
 	b.updatedNoteID = id
 	b.updatedNoteContent = content
 	return b.updateNoteErr
+}
+func (b *toolTestBrain) UpdateThreadState(ctx context.Context, id int64, state string) error {
+	b.updatedThreadID = id
+	b.updatedThreadState = state
+	return b.updateThreadErr
 }
 func (b *toolTestBrain) DeleteNote(ctx context.Context, id int64) error {
 	b.deletedNoteID = id
@@ -492,8 +502,8 @@ func TestExecuteTool_Recall_SubjectPath(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_Recall_SubjectWithApp_ReturnsErrorInsteadOfSilentlyIgnoringIt verifies that combining "subject" with "app" does not silently return unfiltered results across every app — RecallSubject has no app-filtering parameter to honor, so the tool must say so rather than drop the filter without telling the model.
-func TestExecuteTool_Recall_SubjectWithApp_ReturnsErrorInsteadOfSilentlyIgnoringIt(t *testing.T) {
+// TestExecuteTool_Recall_SubjectWithApp_AnswersAndSaysTheFilterWasIgnored verifies that combining "subject" with "app" answers the subject question and says the app filter was not applied — RecallSubject has no app-filtering parameter to honor, so the one thing the tool must not do is return unfiltered results as if it had.
+func TestExecuteTool_Recall_SubjectWithApp_AnswersAndSaysTheFilterWasIgnored(t *testing.T) {
 	brain := &toolTestBrain{
 		subjectRecall: []string{"[thread] DeepSeek — studying post-training"},
 	}
@@ -501,11 +511,11 @@ func TestExecuteTool_Recall_SubjectWithApp_ReturnsErrorInsteadOfSilentlyIgnoring
 
 	result := a.executeTool(context.Background(), "recall", map[string]any{"subject": "DeepSeek", "app": "slack"})
 
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf(`expected an "error: ..." result when subject and app are combined, got %q`, result)
+	if !strings.Contains(result, "[thread] DeepSeek") {
+		t.Errorf("expected the subject recall to answer, got %q", result)
 	}
-	if strings.Contains(result, "[thread] DeepSeek") {
-		t.Errorf("expected no unfiltered subject results to leak through when app can't be honored, got %q", result)
+	if !strings.Contains(result, "subject recall ignores the app filter") {
+		t.Errorf("expected the dropped app filter called out, got %q", result)
 	}
 }
 
@@ -962,25 +972,6 @@ func TestExecuteTool_QueryMemory_UnknownArgument_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_Recall_SubjectWithDates_ReturnsError verifies that subject combined with since/until errors instead of silently dropping the date window — RecallSubject takes only a subject and a limit, so there is no way to honor the dates, and answering a "what about X last Tuesday" question with X across all time is a wrong answer with no signal that it is one.
-func TestExecuteTool_Recall_SubjectWithDates_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{subjectRecall: []string{"[thread] DeepSeek — studying post-training"}}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	for _, args := range []map[string]any{
-		{"subject": "DeepSeek", "since": "2026-08-20"},
-		{"subject": "DeepSeek", "until": "2026-08-20"},
-	} {
-		result := a.executeTool(context.Background(), "recall", args)
-		if !strings.HasPrefix(result, "error") {
-			t.Errorf(`expected an "error: ..." result for %v, got %q`, args, result)
-		}
-		if strings.Contains(result, "[thread] DeepSeek") {
-			t.Errorf("expected no date-unfiltered subject results to leak through for %v, got %q", args, result)
-		}
-	}
-}
-
 // TestParseInstant_ZonelessDateTime verifies a datetime with no zone offset ("2026-08-20T00:00:00", which the model emits often) parses as local time instead of erroring out of the whole recall call.
 func TestParseInstant_ZonelessDateTime(t *testing.T) {
 	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.Local)
@@ -1148,4 +1139,196 @@ func TestExecuteTool_GetRecent_SkipsIdleCaptures(t *testing.T) {
 	if !strings.Contains(result, "1 idle/empty capture omitted") {
 		t.Errorf("expected the dropped capture accounted for, got: %q", result)
 	}
+}
+
+// TestExecuteTool_Recall_CollapsesWhitespaceInExcerpt covers the real shape a browser capture has: "choosing a profile\nWho's watching?\nm\nKids\nAdd\nEdit" arrived in a production recall result as six lines inside what is supposed to be one timeline row, which both breaks the line format the model is reading and spends the rune cap on layout instead of content.
+func TestExecuteTool_Recall_CollapsesWhitespaceInExcerpt(t *testing.T) {
+	base := time.Date(2026, 8, 27, 23, 17, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: base, App: "Brave Browser", Title: "JioHotstar - Brave", ScreenText: "choosing a profile\nWho's watching?\nm\n\tKids\nAdd\nEdit"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "2026-08-27", "until": "2026-08-27"})
+
+	if strings.Count(result, "\n") != 0 {
+		t.Errorf("expected one timeline row on one line, got: %q", result)
+	}
+	if !strings.Contains(result, "choosing a profile Who's watching? m Kids Add Edit") {
+		t.Errorf("expected the excerpt collapsed to single spaces, got: %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_WrapperProcessNamesRealApp covers the mutter-x11-frames rows in production: the compositor owns the window, so the app column said "mutter-x11-frames" while the title carried the actual program ("portfolio_vulnerability_scores.xlsx — LibreOffice Calc"). The model has to be able to say "LibreOffice Calc".
+func TestExecuteTool_Recall_WrapperProcessNamesRealApp(t *testing.T) {
+	base := time.Date(2026, 8, 28, 10, 0, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 1, CreatedAt: base, App: "mutter-x11-frames", Title: "portfolio_vulnerability_scores.xlsx — LibreOffice Calc", ScreenText: "vulnerability scores"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
+
+	if strings.Contains(result, "mutter-x11-frames") {
+		t.Errorf("expected the compositor process name kept out of the answer, got: %q", result)
+	}
+	if !strings.Contains(result, "LibreOffice Calc — portfolio_vulnerability_scores.xlsx") {
+		t.Errorf("expected the real program named with the file as its title, got: %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_RollsConsecutiveSameWindowRows covers the three identical "Family Guy - JioHotstar - Brave" rows a production recall returned: one window the user sat in for a stretch, printed three times with three near-identical excerpts. One line carrying how long it lasted says the same thing in a third of the tokens.
+func TestExecuteTool_Recall_RollsConsecutiveSameWindowRows(t *testing.T) {
+	base := time.Date(2026, 8, 27, 23, 17, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		windowEpisodes: []db.Episode{
+			{ID: 3, CreatedAt: base.Add(64 * time.Minute), App: "mutter-x11-frames", Title: "portfolio_vulnerability_scores.xlsx — LibreOffice Calc", ScreenText: "vulnerability scores"},
+			{ID: 2, CreatedAt: base.Add(30 * time.Minute), App: "mutter-x11-frames", Title: "portfolio_vulnerability_scores.xlsx — LibreOffice Calc", ScreenText: "vulnerability scores"},
+			{ID: 1, CreatedAt: base, App: "mutter-x11-frames", Title: "portfolio_vulnerability_scores.xlsx — LibreOffice Calc", ScreenText: "vulnerability scores"},
+		},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "2026-08-27", "until": "2026-08-28"})
+
+	if lines := strings.Count(result, "\n") + 1; lines != 1 {
+		t.Errorf("expected the three captures of one window rolled into one line, got %d lines: %q", lines, result)
+	}
+	if !strings.Contains(result, "1h04m LibreOffice Calc — portfolio_vulnerability_scores.xlsx: vulnerability scores") {
+		t.Errorf("expected the rolled line to carry how long that window was up, got: %q", result)
+	}
+}
+
+// TestExecuteTool_Recall_SubjectWithDates_AnswersAndSaysTheWindowWasIgnored covers a call the model made twice in one session: recall with both a subject and a since. Erroring taught it nothing and cost the turn; the subject answer plus a note saying the window was not applied is the answer it was after.
+func TestExecuteTool_Recall_SubjectWithDates_AnswersAndSaysTheWindowWasIgnored(t *testing.T) {
+	brain := &toolTestBrain{subjectRecall: []string{"[thread] DeepSeek — studying post-training"}}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	for _, args := range []map[string]any{
+		{"subject": "DeepSeek", "since": "2026-08-20"},
+		{"subject": "DeepSeek", "until": "2026-08-20"},
+	} {
+		result := a.executeTool(context.Background(), "recall", args)
+		if strings.HasPrefix(result, "error") {
+			t.Errorf("expected an answer rather than an error for %v, got %q", args, result)
+		}
+		if !strings.Contains(result, "[thread] DeepSeek") {
+			t.Errorf("expected the subject recall to still answer for %v, got %q", args, result)
+		}
+		if !strings.Contains(result, "subject recall ignores the date window") {
+			t.Errorf("expected the ignored date window called out for %v, got %q", args, result)
+		}
+	}
+}
+
+// TestParseInstant_DaysAgo verifies the phrase the model passes straight through from speech ("2 days ago") resolves to the start of that day instead of failing the whole call with a Go time-parse error the user then hears out loud.
+func TestParseInstant_DaysAgo(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.Local)
+	got, err := parseInstant("2 days ago", now, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := time.Date(2026, 8, 26, 0, 0, 0, 0, time.Local)
+	if !got.Equal(want) {
+		t.Errorf("parseInstant(%q) = %v, want %v", "2 days ago", got, want)
+	}
+	if _, err := parseInstant("1 day ago", now, false); err != nil {
+		t.Errorf("expected the singular form to parse too, got %v", err)
+	}
+}
+
+// TestExecuteTool_QueryMemory_FiltersEmptiedANonEmptySet_SaysSo verifies the model can tell "the store has nothing about this" apart from "the app and date filters removed everything I found" — answering "no matches" to the second is how a real question about episodes watched today got a flat no while the data sat in the store.
+func TestExecuteTool_QueryMemory_FiltersEmptiedANonEmptySet_SaysSo(t *testing.T) {
+	now := time.Now()
+	brain := &toolTestBrain{hybridHits: []db.MemoryHit{
+		{Source: "episode", App: "Brave Browser", Title: "Suits", Content: "watching", CreatedAt: now},
+		{Source: "episode", App: "Brave Browser", Title: "Suits", Content: "watching", CreatedAt: now},
+	}}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "episodes", "app": "slack"})
+
+	if result == "no memory matches" {
+		t.Fatalf("expected the emptied-by-filter case distinguished from a genuinely empty store, got: %q", result)
+	}
+	if !strings.Contains(result, "2 matches") || !strings.Contains(result, "none in slack") {
+		t.Errorf("expected a count of what was found and which filter removed it, got: %q", result)
+	}
+}
+
+// TestExecuteTool_GetRecent_OverFetchesSoIdleRowsDoNotEatTheLimit verifies asking for N recent moments returns up to N real ones: the store's newest rows are routinely idle captures, and fetching exactly N then dropping the idle ones is how "what did I do in the last six hours" came back as one row plus "(19 idle omitted)".
+func TestExecuteTool_GetRecent_OverFetchesSoIdleRowsDoNotEatTheLimit(t *testing.T) {
+	base := time.Date(2026, 8, 28, 3, 0, 0, 0, time.Local)
+	var episodes []db.Episode
+	for i := range 4 {
+		episodes = append(episodes, db.Episode{ID: int64(i + 1), CreatedAt: base.Add(time.Duration(-i) * time.Minute), App: "Unknown", Title: "Unknown", ScreenText: "Unknown"})
+	}
+	for i := range 3 {
+		episodes = append(episodes, db.Episode{ID: int64(i + 10), CreatedAt: base.Add(time.Duration(-10-i) * time.Minute), App: "Brave Browser", Title: fmt.Sprintf("page %d - Brave", i), ScreenText: "real content"})
+	}
+	brain := &toolTestBrain{windowEpisodes: episodes}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "get_recent", map[string]any{"limit": float64(2)})
+
+	real := 0
+	for _, line := range strings.Split(result, "\n") {
+		if !strings.HasPrefix(line, "(") {
+			real++
+		}
+	}
+	if real != 2 {
+		t.Errorf("expected 2 real moments for limit 2, got %d: %q", real, result)
+	}
+	if brain.capturedEpisodeQuery.Limit <= 2 {
+		t.Errorf("expected get_recent to over-fetch past the limit so idle rows can be dropped, asked for %d", brain.capturedEpisodeQuery.Limit)
+	}
+}
+
+// TestExecuteTool_FixThread covers the repair the model could not make in a real session: it recognised that a thread's summary had merged two unrelated things, and every write tool it had pointed at the notes table. fix_thread rewrites the thread's own summary from the id the "[thread#N]" hit carries.
+func TestExecuteTool_FixThread(t *testing.T) {
+	brain := &toolTestBrain{}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "fix_thread", map[string]any{
+		"id":         float64(19),
+		"correction": "mf x mdev is a Google Meet call, unrelated to the ORA work",
+	})
+
+	if result != "fixed" {
+		t.Fatalf("fix_thread = %q, want %q", result, "fixed")
+	}
+	if brain.updatedThreadID != 19 || brain.updatedThreadState != "mf x mdev is a Google Meet call, unrelated to the ORA work" {
+		t.Errorf("thread %d updated to %q, want the correction against thread 19", brain.updatedThreadID, brain.updatedThreadState)
+	}
+}
+
+// TestExecuteTool_FixThread_MissingArgs verifies a call with no id or an empty correction says what is missing rather than silently reporting a fix.
+func TestExecuteTool_FixThread_MissingArgs(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "FAKE_API_KEY")
+
+	for _, args := range []map[string]any{
+		{"correction": "the meeting was on Google Meet"},
+		{"id": float64(19)},
+	} {
+		if result := a.executeTool(context.Background(), "fix_thread", args); !strings.HasPrefix(result, "error") {
+			t.Errorf("fix_thread(%v) = %q, want an error", args, result)
+		}
+	}
+}
+
+// TestToolDefinitions_DeclaresFixThread verifies the tool is actually offered to the model — the repair it enables is worthless if only executeTool knows about it.
+func TestToolDefinitions_DeclaresFixThread(t *testing.T) {
+	for _, tool := range toolDefinitions() {
+		for _, decl := range tool.FunctionDeclarations {
+			if decl.Name == "fix_thread" {
+				return
+			}
+		}
+	}
+	t.Error("toolDefinitions does not declare fix_thread")
 }

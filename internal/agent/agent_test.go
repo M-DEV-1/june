@@ -51,9 +51,10 @@ func (b *mockBrain) RecallSubject(ctx context.Context, subject string, limit int
 func (b *mockBrain) HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error) {
 	return nil, nil
 }
-func (b *mockBrain) SaveFold(ctx context.Context, task, result string) (int64, error) { return 0, nil }
-func (b *mockBrain) UnconsumedFolds(ctx context.Context) ([]db.Fold, error)           { return nil, nil }
-func (b *mockBrain) ConsumeFold(ctx context.Context, id int64) error                  { return nil }
+func (b *mockBrain) SaveFold(ctx context.Context, task, result string) (int64, error)    { return 0, nil }
+func (b *mockBrain) UnconsumedFolds(ctx context.Context) ([]db.Fold, error)              { return nil, nil }
+func (b *mockBrain) ConsumeFold(ctx context.Context, id int64) error                     { return nil }
+func (b *mockBrain) UpdateThreadState(ctx context.Context, id int64, state string) error { return nil }
 
 // behavior
 
