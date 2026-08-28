@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // A whisper.cpp build needs two things a bare stub does not: the model to load, and which GPU to run it on. The model is found beside the binary.
@@ -89,5 +90,55 @@ func TestTranscribeWAV_SerialisesWhisperCPPRuns(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "OVERLAP") {
 			t.Fatal("two whisper.cpp runs overlapped, which would exhaust the GPU's memory")
 		}
+	}
+}
+
+// A GPU decode waits for the embedding server to yield the card instead of falling back to the CPU: the releaser is retried until it reports the server is down, and only then does whisper run.
+func TestTranscribeWAV_WaitsForTheGPUUntilTheEmbedderYields(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	dir := t.TempDir()
+	bin := filepath.Join(dir, whisperCPPBinaryName)
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, whisperCPPModelName), []byte("lmgg"), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	old, oldWait := gpuReleaser, gpuWaitInterval
+	defer func() { gpuReleaser, gpuWaitInterval = old, oldWait }()
+	gpuWaitInterval = time.Millisecond
+	calls := 0
+	gpuReleaser = func() bool { calls++; return calls >= 3 }
+
+	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0); err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+	if calls < 3 {
+		t.Errorf("whisper ran after %d release attempts, want it to keep waiting until the embedder yields", calls)
+	}
+}
+
+// The wait honours cancellation: a shutdown must not leave a transcription loop spinning against a pinned embedder.
+func TestTranscribeWAV_GPUWaitStopsOnContextCancel(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	dir := t.TempDir()
+	bin := filepath.Join(dir, whisperCPPBinaryName)
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, whisperCPPModelName), []byte("lmgg"), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	old, oldWait := gpuReleaser, gpuWaitInterval
+	defer func() { gpuReleaser, gpuWaitInterval = old, oldWait }()
+	gpuWaitInterval = time.Millisecond
+	gpuReleaser = func() bool { return false }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := transcribeWAV(ctx, bin, testWAV(t), speakerMe, "", 0); err == nil {
+		t.Fatal("a cancelled wait must surface an error, not hang or run anyway")
 	}
 }

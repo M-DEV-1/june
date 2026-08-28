@@ -56,6 +56,10 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 		args = append(args, extra...)
 		gpuRun.Lock()
 		defer gpuRun.Unlock()
+		// Under the lock, so the other stream cannot slip its decode in while this one is still waiting for the card.
+		if err := waitForGPU(ctx); err != nil {
+			return nil, err
+		}
 	}
 	started := time.Now()
 	out, errOut, err := run(ctx, bin, args)
