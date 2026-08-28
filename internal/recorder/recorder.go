@@ -57,6 +57,9 @@ type session struct {
 	mic, sys             *wavWriter
 	micOffset, sysOffset time.Duration
 	done                 chan struct{} // closed when the recording stops, which retires the silence watchdog
+
+	// fromTranscript marks a recording whose transcript.md is already on disk and whose minutes are the only thing missing. Processing it re-summarises that transcript and never runs whisper.
+	fromTranscript bool
 }
 
 // defaultSilenceAfter is how long the system stream may stay quiet before the user is told. Long enough that a natural pause in a call, or a meeting still on its "waiting for the host" screen, does not trigger it.
@@ -179,7 +182,7 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 // defaultRetryEvery is how often the recorder looks for a recording it deferred, which is short enough that plugging in gets the transcript within a few minutes and long enough to cost nothing.
 const defaultRetryEvery = 2 * time.Minute
 
-// pickup finishes every recording that still needs it: one abandoned by a crash or by quitting the tray mid-recording, and one whose transcription was deferred because the machine was on battery.
+// pickup finishes every recording that still needs it: one abandoned by a crash or by quitting the tray mid-recording, one whose transcription was deferred because the machine was on battery, and one that has its transcript but no minutes — which is how the user asks for the minutes again, by deleting minutes.md.
 // It is best-effort — a directory that fails is logged and the next one still gets its turn — and it skips the recording that is running right now, whose WAVs are still being written and which on disk is indistinguishable from an abandoned one.
 func (r *Recorder) pickup(ctx context.Context) {
 	root := filepath.Join(r.dataDir, "recordings")
@@ -200,7 +203,7 @@ func (r *Recorder) pickup(ctx context.Context) {
 		if !ok || dir == r.liveDir() {
 			continue
 		}
-		slog.Info("finishing an unfinished meeting recording", "dir", dir)
+		slog.Info("finishing an unfinished meeting recording", "dir", dir, "from the existing transcript", s.fromTranscript)
 		if err := r.process(ctx, s); err != nil {
 			slog.Error("could not finish an unfinished meeting recording", "dir", dir, "error", err)
 		}
@@ -279,25 +282,62 @@ func readTrimmed(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
-// unfinished reports whether dir holds a recording that still needs processing — both WAVs present, no transcript.md and no no-speech marker — and returns the session to run it as. The start time comes from the directory name and the stop time from the audio's last write, since the original session's clocks died with the process.
+// unfinished reports whether dir holds a recording that still needs processing, and returns the session to run it as. There are two cases: both WAVs present with no transcript.md, which is a recording a crash or a battery deferral left mid-flight, and a transcript.md with no minutes.md, which is either a crash between those two writes or the user deleting minutes.md to ask for the summary again. A no-speech marker means the recording is done with either way.
 func unfinished(dir string) (*session, bool) {
-	for _, name := range []string{"transcript.md", noSpeechMarker} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+	if exists(filepath.Join(dir, noSpeechMarker)) {
+		return nil, false
+	}
+	if exists(filepath.Join(dir, "transcript.md")) {
+		if exists(filepath.Join(dir, "minutes.md")) {
 			return nil, false
 		}
+		s := pickupSession(dir)
+		s.fromTranscript = true
+		return s, true
 	}
-	mic, err := os.Stat(filepath.Join(dir, "mic.wav"))
-	if err != nil {
+	if !exists(filepath.Join(dir, "mic.wav")) || !exists(filepath.Join(dir, "system.wav")) {
 		return nil, false
 	}
-	if _, err := os.Stat(filepath.Join(dir, "system.wav")); err != nil {
-		return nil, false
+	return pickupSession(dir), true
+}
+
+// pickupSession dates a recording found on disk, since the original session's clocks died with the process that made it. The start comes from the directory's name, and the length from how much audio is in mic.wav — the file's own timestamp is not the end of the meeting, because anything that touches the file afterwards moves it, and the window is what decides which screens the summary is written from. With the audio gone, the last write to the transcript is the best guess left.
+func pickupSession(dir string) *session {
+	started, startErr := time.ParseInLocation(dirTimeLayout, filepath.Base(dir), time.Local)
+	stopped := modTime(filepath.Join(dir, "transcript.md"))
+	if d := audioDuration(filepath.Join(dir, "mic.wav")); d > 0 && startErr == nil {
+		stopped = started.Add(d)
+	} else if t := modTime(filepath.Join(dir, "mic.wav")); !t.IsZero() {
+		stopped = t
 	}
-	started, err := time.ParseInLocation(dirTimeLayout, filepath.Base(dir), time.Local)
+	if startErr != nil {
+		started = stopped
+	}
+	return &session{dir: dir, startedAt: started, stoppedAt: stopped}
+}
+
+// audioDuration returns how long the samples in a recorded WAV run for, from its size: capture is always 16 kHz mono 16-bit, so the byte count is the clock. It returns zero if the file is missing or holds nothing but a header.
+func audioDuration(path string) time.Duration {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= wavHeaderSize {
+		return 0
+	}
+	return time.Duration((info.Size()-wavHeaderSize)/2) * time.Second / sampleRate
+}
+
+// exists reports whether path is there at all.
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// modTime returns when path was last written, or the zero time if it cannot be read.
+func modTime(path string) time.Time {
+	info, err := os.Stat(path)
 	if err != nil {
-		started = mic.ModTime()
+		return time.Time{}
 	}
-	return &session{dir: dir, startedAt: started, stoppedAt: mic.ModTime()}, true
+	return info.ModTime()
 }
 
 // Active reports whether a recording is running, which is what the tray menu label keys off.
@@ -404,7 +444,7 @@ func (r *Recorder) stop() (*session, error) {
 	return s, nil
 }
 
-// process transcribes both streams, writes transcript.md and minutes.md, files the minutes as a note, and deletes the audio once both transcriptions have succeeded.
+// process turns a recording into minutes: it gets the transcript — by running whisper over both streams, or by reading the one already on disk — then writes minutes.md, files the minutes as a note and updates personal context.
 func (r *Recorder) process(ctx context.Context, s *session) error {
 	// Two paths can reach the same recording — the stop that made it and the retry loop looking for deferred ones — and transcribing it twice would race two whisper runs onto the same files.
 	if !r.claim(s.dir) {
@@ -412,52 +452,12 @@ func (r *Recorder) process(ctx context.Context, s *session) error {
 	}
 	defer r.release(s.dir)
 
-	bin, err := r.findWhisper(r.dataDir)
-	if err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithTimeout(ctx, transcribeTimeout)
 	defer cancel()
 
-	// Whisper is primed with the words Ora already watched go past on screen during the meeting, which is what gets the domain's own acronyms and the participants' names spelled right instead of guessed at phonetically.
-	prompt := r.primingPrompt(ctx, s.startedAt, s.stoppedAt)
-	if prompt != "" {
-		slog.Info("priming whisper with the meeting's screen context", "dir", s.dir, "prompt", prompt)
-	}
-
-	mine, err := r.whisper(ctx, bin, filepath.Join(s.dir, "mic.wav"), speakerMe, prompt, s.micOffset)
+	transcript, err := r.transcriptFor(ctx, s)
 	if err != nil {
-		return fmt.Errorf("transcribe mic: %w", err)
-	}
-	theirs, err := r.whisper(ctx, bin, filepath.Join(s.dir, "system.wav"), speakerCall, prompt, s.sysOffset)
-	if err != nil {
-		return fmt.Errorf("transcribe system audio: %w", err)
-	}
-
-	// Whisper exiting 0 with nothing to show for it is not a success: the meeting may have been silent, or this whisper build may print segments in a shape parseSegments does not recognise. Either way the WAVs are still the only copy of the meeting, so they stay put and the marker records why.
-	segs := append(mine, theirs...)
-	if len(segs) == 0 {
-		note := fmt.Sprintf("Transcription ran without error but found no speech in this recording, so the audio has been kept instead of deleted. Written %s.\n", time.Now().Format(time.RFC3339))
-		if err := os.WriteFile(filepath.Join(s.dir, noSpeechMarker), []byte(note), 0o644); err != nil {
-			slog.Warn("could not write the no-speech marker", "dir", s.dir, "error", err)
-		}
-		return fmt.Errorf("transcription found no speech; the audio is kept in %s", s.dir)
-	}
-
-	transcript := renderTranscript(segs)
-	if err := os.WriteFile(filepath.Join(s.dir, "transcript.md"), []byte(transcript), 0o644); err != nil {
-		return fmt.Errorf("write transcript: %w", err)
-	}
-
-	// Both transcriptions landed and the transcript is on disk, so the audio is no longer the only copy of the meeting.
-	// ponytail: keepAudio stays true for the alpha phase so bad transcripts can be diagnosed and re-run from source; flip to false (or make it config) once transcription is trusted, since a two-stream hour is ~230 MB.
-	if !keepAudio {
-		for _, name := range []string{"mic.wav", "system.wav"} {
-			if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !os.IsNotExist(err) {
-				slog.Warn("could not delete recording audio", "file", name, "error", err)
-			}
-		}
+		return err
 	}
 
 	text, err := r.minutes(ctx, r.buildPrompt(ctx, transcript, s.startedAt, s.stoppedAt))
@@ -476,6 +476,63 @@ func (r *Recorder) process(ctx context.Context, s *session) error {
 
 	r.notify("Meeting summary ready", filepath.Join(s.dir, "minutes.md"))
 	return nil
+}
+
+// transcriptFor returns the meeting's transcript. A recording the sweep found with its transcript already written just has it read back off disk, which is what makes deleting minutes.md a request for fresh minutes; anything else is transcribed with whisper and the result written to transcript.md.
+func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error) {
+	if s.fromTranscript {
+		b, err := os.ReadFile(filepath.Join(s.dir, "transcript.md"))
+		if err != nil {
+			return "", fmt.Errorf("read the existing transcript: %w", err)
+		}
+		return string(b), nil
+	}
+
+	bin, err := r.findWhisper(r.dataDir)
+	if err != nil {
+		return "", err
+	}
+
+	// Whisper is primed with the words Ora already watched go past on screen during the meeting, which is what gets the domain's own acronyms and the participants' names spelled right instead of guessed at phonetically.
+	prompt := r.primingPrompt(ctx, s.startedAt, s.stoppedAt)
+	if prompt != "" {
+		slog.Info("priming whisper with the meeting's screen context", "dir", s.dir, "prompt", prompt)
+	}
+
+	mine, err := r.whisper(ctx, bin, filepath.Join(s.dir, "mic.wav"), speakerMe, prompt, s.micOffset)
+	if err != nil {
+		return "", fmt.Errorf("transcribe mic: %w", err)
+	}
+	theirs, err := r.whisper(ctx, bin, filepath.Join(s.dir, "system.wav"), speakerCall, prompt, s.sysOffset)
+	if err != nil {
+		return "", fmt.Errorf("transcribe system audio: %w", err)
+	}
+
+	// Whisper exiting 0 with nothing to show for it is not a success: the meeting may have been silent, or this whisper build may print segments in a shape parseSegments does not recognise. Either way the WAVs are still the only copy of the meeting, so they stay put and the marker records why.
+	segs := append(mine, theirs...)
+	if len(segs) == 0 {
+		note := fmt.Sprintf("Transcription ran without error but found no speech in this recording, so the audio has been kept instead of deleted. Written %s.\n", time.Now().Format(time.RFC3339))
+		if err := os.WriteFile(filepath.Join(s.dir, noSpeechMarker), []byte(note), 0o644); err != nil {
+			slog.Warn("could not write the no-speech marker", "dir", s.dir, "error", err)
+		}
+		return "", fmt.Errorf("transcription found no speech; the audio is kept in %s", s.dir)
+	}
+
+	transcript := renderTranscript(segs)
+	if err := os.WriteFile(filepath.Join(s.dir, "transcript.md"), []byte(transcript), 0o644); err != nil {
+		return "", fmt.Errorf("write transcript: %w", err)
+	}
+
+	// Both transcriptions landed and the transcript is on disk, so the audio is no longer the only copy of the meeting.
+	// ponytail: keepAudio stays true for the alpha phase so bad transcripts can be diagnosed and re-run from source; flip to false (or make it config) once transcription is trusted, since a two-stream hour is ~230 MB.
+	if !keepAudio {
+		for _, name := range []string{"mic.wav", "system.wav"} {
+			if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !os.IsNotExist(err) {
+				slog.Warn("could not delete recording audio", "file", name, "error", err)
+			}
+		}
+	}
+	return transcript, nil
 }
 
 // notifySend posts a desktop notification through notify-send, which GNOME provides. Failure is logged and ignored: a missing notification must never take down a finished recording.

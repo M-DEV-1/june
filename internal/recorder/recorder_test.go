@@ -272,17 +272,12 @@ func TestRecorder_ResumesOrphanedRecordings(t *testing.T) {
 		}
 	}
 
-	// A directory that already has its transcript is finished and must be left alone.
-	done := filepath.Join(r.dataDir, "recordings", "2026-08-26T09-30-00")
-	if err := os.MkdirAll(done, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(done, "mic.wav"), make([]byte, 3200), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(done, "transcript.md"), []byte("[00:00:00] [me] already done\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// A directory that already has both its transcript and its minutes is finished and must be left alone.
+	done := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-26T09-30-00"), map[string]string{
+		"mic.wav":       string(make([]byte, 3200)),
+		"transcript.md": "[00:00:00] [me] already done\n",
+		"minutes.md":    "# Meeting minutes\n",
+	})
 
 	// A recording that is running right now looks exactly like an abandoned one on disk, so the sweep must leave it alone.
 	if err := r.Start(); err != nil {
@@ -486,6 +481,149 @@ func TestRecorder_PickupSkipsTheLiveRecording(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(live, "transcript.md")); !os.IsNotExist(err) {
 		t.Error("the pickup transcribed the recording that is still running")
+	}
+	if _, err := r.stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// writeRecording lays out a recording directory on disk with the given files, which is how the sweep's cases are set up.
+func writeRecording(t *testing.T, dir string, files map[string]string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// Deleting minutes.md is how the user asks for the minutes again, and a crash between writing the transcript and writing the minutes leaves the same shape on disk. Either way the sweep summarises the transcript that is already there and never runs whisper again.
+func TestRecorder_RegeneratesMinutesFromAnExistingTranscript(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	<-r.swept
+	r.whisper = func(context.Context, string, string, string, string, time.Duration) ([]Segment, error) {
+		t.Error("whisper ran for a recording that already had its transcript")
+		return nil, errors.New("whisper must not run")
+	}
+	r.findWhisper = func(string) (string, error) {
+		t.Error("the whisper binary was looked up for a recording that already had its transcript")
+		return "", errors.New("whisper must not be needed")
+	}
+	var sawPersonalPass bool
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			sawPersonalPass = true
+			return `{"updates":[{"subject":"trupti-hosmani","content":"Trupti Hosmani was in the call."}]}`, nil
+		}
+		if !strings.Contains(prompt, "friday works") {
+			t.Errorf("the regenerated minutes prompt is missing the existing transcript:\n%s", prompt)
+		}
+		return "# Meeting minutes\n\n## Attendees\n", nil
+	}
+
+	regen := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
+		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
+		"mic.wav":       "",
+		"system.wav":    "",
+	})
+	// A directory with both its transcript and its minutes is finished, and must be left exactly as it is.
+	whole := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-26T11-00-00"), map[string]string{
+		"transcript.md": "[00:00:00] [me] already done\n",
+		"minutes.md":    "# Meeting minutes\n(the original)\n",
+	})
+
+	r.pickup(context.Background())
+
+	if _, err := os.ReadFile(filepath.Join(regen, "minutes.md")); err != nil {
+		t.Errorf("the transcript with no minutes should have been summarised: %v", err)
+	}
+	if got := store.logged(noteKind); len(got) != 1 {
+		t.Errorf("regenerating minutes should file exactly one note, got %v", got)
+	}
+	if !sawPersonalPass {
+		t.Error("regenerating minutes did not run the personal context updater")
+	}
+	if got := store.personalWrites["trupti-hosmani"]; got == "" {
+		t.Errorf("the personal context updater wrote nothing, writes: %v", store.personalWrites)
+	}
+	if got, _ := os.ReadFile(filepath.Join(whole, "minutes.md")); !strings.Contains(string(got), "the original") {
+		t.Errorf("a finished recording was summarised again, its minutes now read: %s", got)
+	}
+}
+
+// A recording the sweep finds has to be dated from what is on disk, and the meeting's window is what decides which screens the summary is written from. How much audio was recorded says how long the meeting ran; the file's timestamp does not, because anything that touches the file afterwards moves it.
+func TestPickupSession_DatesTheMeetingFromHowMuchAudioThereIs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "2026-08-27T10-00-00")
+	// Ten minutes of 16 kHz mono 16-bit samples, in a file last written three hours after the meeting ended.
+	writeRecording(t, dir, map[string]string{"mic.wav": string(make([]byte, wavHeaderSize+10*60*sampleRate*2))})
+	touched := time.Date(2026, 8, 27, 13, 0, 0, 0, time.Local)
+	if err := os.Chtimes(filepath.Join(dir, "mic.wav"), touched, touched); err != nil {
+		t.Fatal(err)
+	}
+
+	s := pickupSession(dir)
+
+	if want := time.Date(2026, 8, 27, 10, 0, 0, 0, time.Local); !s.startedAt.Equal(want) {
+		t.Errorf("started at %s, want %s", s.startedAt, want)
+	}
+	if want := time.Date(2026, 8, 27, 10, 10, 0, 0, time.Local); !s.stoppedAt.Equal(want) {
+		t.Errorf("stopped at %s, want %s — the meeting's length should come from the audio, not the file's timestamp", s.stoppedAt, want)
+	}
+}
+
+// With the audio gone there is nothing to measure, so the last write to the transcript is the best guess left at when the meeting ended.
+func TestPickupSession_FallsBackToTheTranscriptWhenTheAudioIsGone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "2026-08-27T10-00-00")
+	writeRecording(t, dir, map[string]string{"transcript.md": "[00:00:00] [me] hello\n"})
+	written := time.Date(2026, 8, 27, 10, 25, 0, 0, time.Local)
+	if err := os.Chtimes(filepath.Join(dir, "transcript.md"), written, written); err != nil {
+		t.Fatal(err)
+	}
+
+	if s := pickupSession(dir); !s.stoppedAt.Equal(written) {
+		t.Errorf("stopped at %s, want the transcript's timestamp %s", s.stoppedAt, written)
+	}
+}
+
+// The claim set covers the regeneration path too: a directory something else is already processing must not be summarised underneath it.
+func TestRecorder_RegenerationRespectsTheClaimSet(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	<-r.swept
+	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T12-00-00"), map[string]string{
+		"transcript.md": "[00:00:00] [call] friday works\n",
+	})
+	if !r.claim(dir) {
+		t.Fatal("the directory should have been free to claim")
+	}
+
+	r.pickup(context.Background())
+
+	if _, err := os.Stat(filepath.Join(dir, "minutes.md")); !os.IsNotExist(err) {
+		t.Error("the sweep summarised a directory that was already claimed")
+	}
+}
+
+// The live-recording guard sits ahead of both sweep cases, so a directory that is being recorded into right now is skipped whatever else it holds.
+func TestRecorder_RegenerationSkipsTheLiveRecording(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	<-r.swept
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	live := r.live.dir
+	if err := os.WriteFile(filepath.Join(live, "transcript.md"), []byte("[00:00:00] [call] friday works\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r.pickup(context.Background())
+
+	if _, err := os.Stat(filepath.Join(live, "minutes.md")); !os.IsNotExist(err) {
+		t.Error("the sweep summarised the recording that is still running")
 	}
 	if _, err := r.stop(); err != nil {
 		t.Fatalf("stop: %v", err)
