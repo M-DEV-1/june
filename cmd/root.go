@@ -25,6 +25,11 @@ var rootCmd = &cobra.Command{
 		isDaemon, _ := cmd.Flags().GetBool("daemon")
 		autostart, _ := cmd.Flags().GetString("autostart")
 		workdir, _ := cmd.Flags().GetString("workdir")
+		record, _ := cmd.Flags().GetBool("record")
+		if record {
+			toggleRecordingOverIPC()
+			return
+		}
 		runRoot(isDaemon, autostart, workdir)
 	},
 }
@@ -40,6 +45,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("daemon", false, "Run as background daemon")
 	rootCmd.PersistentFlags().String("autostart", "", "Turn start-on-login on or off, persist it to the config, and exit (on|off)")
 	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because ORA loads .env relative to the working directory and a session manager launches from an arbitrary one")
+	rootCmd.PersistentFlags().Bool("record", false, "Toggle meeting recording on the running daemon and exit — the tray toggle's CLI twin for desktops without a system tray")
 }
 
 // runRoot is the root command's behaviour: with no flags it starts the TUI against a get-or-create daemon, --daemon runs the background daemon itself, and --autostart flips start-on-login and returns.

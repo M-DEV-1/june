@@ -458,6 +458,28 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
 	}))
 
+	// The tray toggle's IPC twin, so a recording can be started when the desktop has no StatusNotifierWatcher (GNOME's appindicator extension going INACTIVE leaves the daemon headless until the next login).
+	mux.HandleFunc("/record", auth(func(w http.ResponseWriter, r *http.Request) {
+		if meetingRecorder == nil {
+			http.Error(w, "recorder not ready", http.StatusServiceUnavailable)
+			return
+		}
+		recording := false
+		if meetingRecorder.Active() {
+			if _, err := meetingRecorder.StopAndProcess(context.Background()); err != nil {
+				slog.Error("failed to stop meeting recording", "error", err)
+			}
+		} else {
+			if err := meetingRecorder.Start(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			recording = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"recording": recording})
+	}))
+
 	server := &http.Server{
 		Handler: mux,
 	}
