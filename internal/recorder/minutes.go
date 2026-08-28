@@ -19,17 +19,21 @@ The transcript has two speaker labels and only two:
   [me]   — the person whose computer recorded this, captured from their microphone.
   [call] — everyone else on the call, captured from the computer's speakers. Several different people share this one label; the recording cannot tell their voices apart.
 
-Your job includes working out WHO said what on the [call] side. Two sources let you do it:
-  1. The screen context below. It is what the meeting app itself showed on screen while the call ran — participant tiles, "X is presenting", chat messages with sender names, the meeting title. Names there are real and correctly spelled.
-  2. The transcript itself. People introduce themselves, address each other by name, and refer to their own work.
+Your job includes working out WHO said what on the [call] side. Only these things name a person:
+  1. The meeting app's own display of who is in the call: a participant tile, "X is presenting", a chat message with a sender name, the meeting title. Names there are real and correctly spelled.
+  2. The transcript itself: someone introduces themselves, or one person addresses another by name.
+
+These do NOT name anybody, and you must never take a name from them:
+  - A username, commit author, pull request author, repository owner, file header, profile page, or issue assignee shown on screen. People read other people's code and pages all day; a name on a repository page is not a person in the room and is not whose computer this is.
+  - A name written in a document, spreadsheet, ticket, email or web page that happened to be open.
+  - A name that appears only once, in passing, with nothing tying it to a voice.
 
 Rules for naming:
-  - Use a person's real name whenever the context or the words support it.
-  - When you cannot get a name, describe the role instead: "the interviewer", "the person presenting", "a second participant".
+  - Attribute a line to a named person only when one of the two sources above actually points to it. Otherwise describe the role: "the interviewer", "the person presenting", "a second participant".
   - Never write "them", "the other side", or "the other participant" as if it were one person.
-  - Do not invent people, and do not assign a name to a line unless something actually points to it. Prefer a role description over a guess.
+  - Several people share the [call] label and the recording cannot tell their voices apart, so a name is a claim you must be able to point at evidence for. When two people on the [call] side are both plausible for a line, say the speaker is unclear rather than picking one.
   - The transcript comes from speech recognition, so names in it may be misspelled. Where the screen context has the same name spelled properly, use that spelling.
-  - Name the [me] speaker too if the screen context shows whose machine this is. Otherwise call them "the person recording". Never write "[me]" in the minutes.
+  - For the [me] speaker: this is always the same one person, the owner of this computer. Ora's long-term memory of them is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
 
 Write markdown with these sections, in this order:
 
@@ -52,6 +56,11 @@ func (r *Recorder) buildPrompt(ctx context.Context, transcript string, startedAt
 	fmt.Fprintf(&b, "\n\nThe meeting ran from %s to %s (%s).\n",
 		startedAt.Format("Mon 2 Jan 2006 15:04"), stoppedAt.Format("15:04"), stoppedAt.Sub(startedAt).Round(time.Minute))
 
+	if about := r.aboutTheUser(ctx); about != "" {
+		b.WriteString("\nAbout the person recording — what Ora has learned about the owner of this computer over time, from everything else they do. This is the [me] speaker, the same person in every meeting. It is background, not speech: never quote it as something someone said.\n")
+		b.WriteString(about)
+	}
+
 	if timeline := r.desktopTimeline(ctx, startedAt, stoppedAt); timeline != "" {
 		b.WriteString("\nScreen context — what was on the user's screens while the meeting ran, in order, as read out of the windows themselves. This is where participant names, presenter labels and chat senders come from. It is context, not speech: never quote it as something someone said.\n")
 		b.WriteString(timeline)
@@ -59,6 +68,29 @@ func (r *Recorder) buildPrompt(ctx context.Context, transcript string, startedAt
 
 	b.WriteString("\nTranscript:\n")
 	b.WriteString(transcript)
+	return b.String()
+}
+
+// userFactLimit caps how many of Ora's long-term facts about the user go into the minutes prompt. They are one-line statements written by the memory compiler, so this is generous.
+const userFactLimit = 60
+
+// aboutTheUser renders Ora's own durable memory of the person recording — the notes the memory compiler files under kind "fact" — as bullet lines. This is what identifies the [me] speaker: nothing on screen does, because a screen is full of other people's names.
+// It deliberately reads only "fact" notes. The meeting minutes Ora files under kind "meeting" live in the same table, and feeding a past meeting's minutes back in as background would let one meeting's guesses harden into the next one's facts.
+func (r *Recorder) aboutTheUser(ctx context.Context) string {
+	notes, err := r.store.GetNotes(ctx)
+	if err != nil {
+		slog.Warn("could not read what Ora knows about the user for meeting minutes", "error", err)
+		return ""
+	}
+	var b strings.Builder
+	n := 0
+	for _, note := range notes {
+		if note.Kind != "fact" || n >= userFactLimit {
+			continue
+		}
+		fmt.Fprintf(&b, "  - %s\n", strings.TrimSpace(note.Content))
+		n++
+	}
 	return b.String()
 }
 
