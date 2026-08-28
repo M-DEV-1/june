@@ -24,16 +24,34 @@ type OraConfig struct {
 	Embed EmbedConfig `json:"embed"`
 	// Brain selects which backend answers the one-shot text duties. Zero value means the Gemini API, as before.
 	Brain BrainConfig `json:"brain"`
+	// Transcribe selects which speech recognition engine transcribes meetings. Zero value means whisper, as before.
+	Transcribe TranscribeConfig `json:"transcribe"`
 }
+
+// TranscribeConfig chooses which speech recognition engine turns a meeting's audio into text. The zero value is whisper, which is what ORA did before this block existed, so a config file written without it behaves exactly as it always has.
+type TranscribeConfig struct {
+	// Engine is EngineWhisper (the default whisperfile), EngineWhisperCPP to run a separately built whisper.cpp that can decode on the GPU, or EngineParakeet to run NVIDIA's Parakeet TDT through sherpa-onnx's offline CLI. Anything else falls back to the whisperfile.
+	// Parakeet is by far the fastest, but it cannot be primed with the meeting's own vocabulary, and the published TDT model speaks twenty-five European languages with no Hindi among them — so a Hindi-English meeting must not be given to it.
+	Engine string `json:"engine"`
+	// GPUDevice is which GPU a whisper.cpp build should decode on, numbered as whisper.cpp numbers the Vulkan devices it finds. Zero, the default, leaves the choice to whisper.cpp, which takes the first device it sees — on a laptop with both integrated and discrete graphics that is usually the slower of the two, so this normally wants setting. The other engines ignore it.
+	GPUDevice int `json:"gpu_device"`
+}
+
+// The engine names accepted in TranscribeConfig.Engine.
+const (
+	EngineWhisper    = "whisper"
+	EngineWhisperCPP = "whisper-cpp"
+	EngineParakeet   = "parakeet"
+)
 
 // BrainConfig chooses which backend answers ORA's one-shot text duties — the meeting minutes and the personal context updater. The zero value is the Gemini API on TextModel, which is what ORA did before this block existed, so a config file written without it behaves exactly as it always has.
 // The voice assistant is not covered by this: that is a Gemini Live session, not a one-shot call.
 type BrainConfig struct {
-	// Provider is BrainGeminiAPI (the default), BrainClaudeCLI to run `claude -p` under whatever Claude Code login the machine already has, or BrainAgyCLI to run Antigravity's `agy --print`. Anything else falls back to the Gemini API.
+	// Provider is BrainGeminiAPI (the default) or BrainClaudeCLI to run `claude -p` under whatever Claude Code login the machine already has. Anything else falls back to the Gemini API.
 	Provider string `json:"provider"`
-	// Model is the Gemini model name, defaulting to TextModel. The CLI providers ignore it and use whatever model their own login is set to.
+	// Model is the Gemini model name, defaulting to TextModel. The claude-cli provider ignores it and uses whatever model its own login is set to.
 	Model string `json:"model"`
-	// Binary is the path to the CLI to run, for the two CLI providers. Empty means look "claude" or "agy" up on PATH.
+	// Binary is the path to the claude CLI to run. Empty means look "claude" up on PATH.
 	Binary string `json:"binary"`
 	// TimeoutSeconds is the hard limit on a single CLI run, after which the child is killed and the call fails. Defaults to DefaultBrainTimeoutSeconds. The Gemini provider ignores it and is bounded by the caller's context.
 	TimeoutSeconds int `json:"timeout_seconds"`
@@ -43,10 +61,9 @@ type BrainConfig struct {
 const (
 	BrainGeminiAPI = "gemini-api"
 	BrainClaudeCLI = "claude-cli"
-	BrainAgyCLI    = "agy-cli"
 )
 
-// DefaultBrainTimeoutSeconds caps one CLI run. Measured on this machine: `claude -p` answered a trivial prompt in 3.6 seconds and `agy --print` took 29 seconds for the same prompt, and a meeting transcript is a far bigger input than that. Both CLIs are also known to sit forever with no terminal attached, so the cap is generous but finite: five minutes, which is also agy's own --print-timeout default.
+// DefaultBrainTimeoutSeconds caps one CLI run. Measured on this machine: `claude -p` answered a trivial prompt in 3.6 seconds, and a meeting transcript is a far bigger input than that. A CLI with no terminal attached can also sit forever, so the cap is generous but finite: five minutes.
 const DefaultBrainTimeoutSeconds = 300
 
 // EmbedConfig points ORA at a local llama.cpp llama-server running EmbeddingGemma instead of the Gemini embeddings API. The daemon owns the server process: it spawns it on the first embed, reaps it after IdleTimeout with no embeds, and kills it on shutdown.

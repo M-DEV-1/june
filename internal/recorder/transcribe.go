@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,9 +74,15 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	if err := repairWAV(path); err != nil {
 		return nil, fmt.Errorf("repair %s: %w", path, err)
 	}
-	args := []string{"-f", path, "-np", "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext}
+	args := []string{"-f", path, "-np", "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext, "-t", strconv.Itoa(transcribeThreads())}
 	if prompt != "" {
 		args = append(args, "--prompt", prompt)
+	}
+	// A whisper.cpp build takes two flags a whisperfile does not, and decodes on the GPU, where only one run fits at a time.
+	if extra := whisperCPPArgs(bin); extra != nil {
+		args = append(args, extra...)
+		gpuRun.Lock()
+		defer gpuRun.Unlock()
 	}
 	started := time.Now()
 	out, errOut, err := run(ctx, bin, args)
@@ -106,6 +113,21 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 
 // whisperSlowestPlausibleSpeed is the slowest ratio of audio length to run time that still counts as a real transcription. small on this CPU runs around four times real time, so a run twenty times faster than the audio it was given did not decode it.
 const whisperSlowestPlausibleSpeed = 20
+
+// transcribeThreads is how many threads one transcription run may use. The two sides of a call are transcribed at the same time, so this is deliberately half of what a single run would take: whisper's own default is half the logical CPUs, and two runs at a quarter each add up to the same load rather than fighting over the same cores. Never less than one.
+// $ORA_TRANSCRIBE_THREADS overrides it. The right number is a property of the machine and not of the code: on a hybrid CPU the logical count is a poor guide to how many threads actually run at full speed, and the only way to know is to time a real recording both ways.
+// ponytail: a quarter of the logical CPUs is a safe guess that never oversubscribes, not a tuned one. The knob is there so a machine that wants more can have it without a rebuild.
+func transcribeThreads() int {
+	if v := os.Getenv("ORA_TRANSCRIBE_THREADS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	if n := runtime.NumCPU() / 4; n > 0 {
+		return n
+	}
+	return 1
+}
 
 // minAudioForSpeedCheck is the shortest recording the speed check applies to. A few seconds of audio genuinely does transcribe in a blink, and a fixed process startup cost swamps the ratio there.
 const minAudioForSpeedCheck = 30 * time.Second
