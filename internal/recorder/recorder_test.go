@@ -3,6 +3,7 @@ package recorder
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -63,7 +64,11 @@ func (s *fakeStore) UpdateNote(ctx context.Context, id int64, content string) er
 	if s.updates == nil {
 		s.updates = make(map[int64]string)
 	}
+	if id < 1 || int(id) > len(s.notes) {
+		return fmt.Errorf("no note with id %d", id)
+	}
 	s.updates[id] = content
+	s.notes[id-1] = content
 	return nil
 }
 
@@ -499,6 +504,107 @@ func writeRecording(t *testing.T, dir string, files map[string]string) string {
 		}
 	}
 	return dir
+}
+
+// A summariser that refuses — a rate limit, a bad key, a prompt too big — used to leave the recording in exactly the shape the sweep looks for, so every tick spent another API call on the same failure. The failure is recorded next to the recording and the sweep leaves it alone until the marker is an hour old.
+func TestRecorder_FailedProcessingWaitsBeforeBeingRetried(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	<-r.swept
+	calls, failing := 0, true
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			return `{"updates":[]}`, nil
+		}
+		calls++
+		if failing {
+			return "", errors.New("429 from the summariser")
+		}
+		return "# Minutes\n\n- ship friday", nil
+	}
+	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
+		"transcript.md": "[00:00:00] [me] shall we ship friday\n",
+	})
+	marker := filepath.Join(dir, failedMarker)
+
+	r.pickup(context.Background())
+	if calls != 1 {
+		t.Fatalf("the sweep should have tried to summarise the recording once, it made %d calls", calls)
+	}
+	if !exists(marker) {
+		t.Fatal("a recording whose summary failed left no failure marker behind")
+	}
+
+	r.pickup(context.Background())
+	if calls != 1 {
+		t.Errorf("the failed recording was summarised again on the next tick, %d calls in total", calls)
+	}
+
+	// Age the marker past the backoff window, which is what the passage of an hour does in production.
+	old := time.Now().Add(-2 * failureRetryAfter)
+	if err := os.Chtimes(marker, old, old); err != nil {
+		t.Fatal(err)
+	}
+	failing = false
+	r.pickup(context.Background())
+	if calls != 2 {
+		t.Errorf("an hour-old failure should have been retried, %d calls in total", calls)
+	}
+	if exists(marker) {
+		t.Error("the failure marker survived a run that succeeded")
+	}
+}
+
+// A recording that never got its streams open leaves stub WAVs the sweep would read as an abandoned recording and try to transcribe on every tick.
+func TestRecorder_StartCleansUpAfterItselfWhenCaptureFails(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	r.capture = func(io.Writer, io.Writer) (capturer, time.Time, time.Time, error) {
+		return nil, time.Time{}, time.Time{}, errors.New("no sound server")
+	}
+	if err := r.Start(); err == nil {
+		t.Fatal("Start reported success though capture could not be opened")
+	}
+	entries, err := os.ReadDir(filepath.Join(r.dataDir, "recordings"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a failed Start left %d recording directories behind", len(entries))
+	}
+}
+
+// Summarising a recording twice must leave one meeting note holding the newest minutes. Regeneration used to file a second note, so memory ended up with several drafts of the same meeting and no way to tell which one was current.
+func TestRecorder_RegenerationReplacesTheNoteItAlreadyFiled(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
+		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
+	})
+	text := "# Minutes\n\n- first pass"
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			return `{"updates":[]}`, nil
+		}
+		return text, nil
+	}
+
+	now := time.Now()
+	for _, pass := range []string{"# Minutes\n\n- first pass", "# Minutes\n\n- second pass"} {
+		text = pass
+		if err := r.process(context.Background(), &session{dir: dir, startedAt: now, stoppedAt: now, fromTranscript: true}); err != nil {
+			t.Fatalf("summarising %s: %v", pass, err)
+		}
+	}
+
+	got := store.logged(noteKind)
+	if len(got) != 1 {
+		t.Fatalf("regenerating minutes should leave one meeting note, got %d: %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "second pass") {
+		t.Errorf("the meeting note still holds the superseded minutes: %s", got[0])
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, noteIDFile)); err != nil || strings.TrimSpace(string(b)) != "1" {
+		t.Errorf("the recording should remember the note it was filed under, read %q err %v", b, err)
+	}
 }
 
 // Deleting minutes.md is how the user asks for the minutes again, and a crash between writing the transcript and writing the minutes leaves the same shape on disk. Either way the sweep summarises the transcript that is already there and never runs whisper again.
