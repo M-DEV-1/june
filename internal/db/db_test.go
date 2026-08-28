@@ -1776,7 +1776,7 @@ func TestStore_RecallSubject_FusesThreadAndEpisodes(t *testing.T) {
 	var foundThread, foundEpisode bool
 	threadIdx, episodeIdx := -1, -1
 	for i, l := range lines {
-		if strings.HasPrefix(l, "[thread] ") && strings.Contains(l, "DeepSeek") {
+		if strings.HasPrefix(l, "[thread#") && strings.Contains(l, "DeepSeek") {
 			foundThread = true
 			if threadIdx == -1 {
 				threadIdx = i
@@ -2421,5 +2421,22 @@ func TestNoteConsolidation_LeavesOtherKindsAlone(t *testing.T) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestFormatHit_ThreadCarriesRefID verifies a thread hit is surfaced with its id, the way notes already are. Without one the model can see that a thread's summary is wrong (it diagnosed exactly that in a real session) and have nothing to name in a repair call.
+func TestFormatHit_ThreadCarriesRefID(t *testing.T) {
+	got := db.FormatHit(db.MemoryHit{
+		Source:    "thread",
+		RefID:     19,
+		Content:   "mf x mdev — recurring Microsoft Teams sync",
+		CreatedAt: time.Now().Add(-48 * time.Hour),
+	}, 0)
+
+	if !strings.HasPrefix(got, "[thread#19 ") {
+		t.Errorf("FormatHit = %q, want it to lead with the thread's id", got)
+	}
+	if !strings.Contains(got, "2d ago") {
+		t.Errorf("FormatHit = %q, want the age kept alongside the id", got)
 	}
 }
