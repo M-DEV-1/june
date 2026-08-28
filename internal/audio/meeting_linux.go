@@ -5,6 +5,9 @@ package audio
 import (
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/jfreymuth/pulse"
@@ -31,10 +34,10 @@ func StartMeetingCapture(mic, system io.Writer) (*MeetingCapture, error) {
 	}
 	c := &MeetingCapture{client: client}
 
-	sink, err := client.DefaultSink()
+	sink, err := meetingSink(client)
 	if err != nil {
 		client.Close()
-		return nil, fmt.Errorf("find default sink: %w", err)
+		return nil, err
 	}
 
 	micStream, err := c.open(mic, "Ora meeting (microphone)")
@@ -56,6 +59,48 @@ func StartMeetingCapture(mic, system io.Writer) (*MeetingCapture, error) {
 	sysStream.Start()
 	c.streams = []*pulse.RecordStream{micStream, sysStream}
 	return c, nil
+}
+
+// meetingSink returns the sink whose monitor should be recorded: the one an application is actually playing into, falling back to the default sink when nothing is playing yet or when the server will not say.
+// The default sink alone is not enough. Moving a call to headphones or a dock changes which sink it plays into without necessarily changing the default, and monitoring the wrong sink records a file of pure silence that looks like a working recording until the transcript comes back empty.
+func meetingSink(client *pulse.Client) (*pulse.Sink, error) {
+	def, err := client.DefaultSink()
+	if err != nil {
+		return nil, fmt.Errorf("find default sink: %w", err)
+	}
+	var inputs proto.GetSinkInputInfoListReply
+	if err := client.RawRequest(&proto.GetSinkInputInfoList{}, &inputs); err != nil {
+		slog.Warn("could not list what is playing, recording the default sink", "error", err)
+		return def, nil
+	}
+	index, ok := activeSinkIndex(inputs, strconv.Itoa(os.Getpid()))
+	if !ok || index == def.SinkIndex() {
+		return def, nil
+	}
+	sinks, err := client.ListSinks()
+	if err != nil {
+		slog.Warn("could not list sinks, recording the default sink", "error", err)
+		return def, nil
+	}
+	for _, s := range sinks {
+		if s.SinkIndex() == index {
+			slog.Info("recording the sink something is playing into rather than the default sink", "sink", s.ID(), "default", def.ID())
+			return s, nil
+		}
+	}
+	return def, nil
+}
+
+// activeSinkIndex returns the sink index of the first stream that is actually playing, skipping paused streams and Ora's own speech (which is not part of the meeting and would drag the recording back to whatever sink the assistant talks through).
+// Input: the sink inputs PulseAudio reports, and this process's PID as a string. Output: the sink index and true, or false when nothing else is playing.
+func activeSinkIndex(inputs []*proto.GetSinkInputInfoReply, ownPID string) (uint32, bool) {
+	for _, in := range inputs {
+		if in.Corked || in.Properties["application.process.id"].String() == ownPID {
+			continue
+		}
+		return in.SinkIndex, true
+	}
+	return 0, false
 }
 
 // open creates one 16 kHz mono record stream that forwards its samples to w as little-endian 16-bit PCM.
