@@ -93,7 +93,9 @@ func toolDefinitions() []*genai.Tool {
 					"Moments (screen observations) rank with recency; facts/notes do not expire. " +
 					"Use app to restrict to one application (Slack, Firefox, Code). " +
 					"Whenever the question is anchored to a time — a day, a part of a day, a range — pass since/until: " +
-					"the search then runs and ranks entirely inside that window, whereas without it the best matches can all come from the wrong day. " +
+					"the search then runs and ranks entirely inside that window, whereas without it the best matches can all come from the wrong day, and one busy stretch can drown out the rest of its own day. " +
+					"A part of a day gets timestamp bounds, not the whole day: morning is roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that. " +
+					"When a question narrows the time, run a fresh narrower query — do not answer a narrow question from a wider fetch you already have. " +
 					"For pure day/timeline questions use recall. For 'what was I just doing' use get_recent.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
@@ -111,6 +113,7 @@ func toolDefinitions() []*genai.Tool {
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "recall",
 				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
+					"A part of a day gets timestamp bounds rather than the whole day — morning roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that — and a question that narrows the time deserves a fresh narrower call, not an answer read off a wider fetch. " +
 					"Use subject for an ongoing arc. Use app to keep only that application's moments. " +
 					"Returns short content+context lines, not raw screen dumps.",
 				Parameters: &genai.Schema{
