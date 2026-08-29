@@ -286,6 +286,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}, appConfig.Dream.DreamHour(), dreamBriefHour)
 	// Touching this file makes the next tick dream immediately, gates bypassed — the way to watch a run without leaving the machine.
 	dreamer.ForceMarker = filepath.Join(config.DataDir(), "dream-now")
+	// A dream brain of its own (grok, agy) frees the night from the Claude window curfew, since it spends none of the user's Claude usage.
+	if p := appConfig.Dream.Brain.Provider; p != "" {
+		dreamer.SetBrain(brain.FromConfig(appConfig.Dream.Brain, apiKey))
+		dreamer.CurfewExempt = p != config.BrainClaudeCLI
+	}
 	go every(ctx, 5*time.Minute, "dreaming", func() { dreamer.Tick(ctx) })
 
 	// age out old, low-importance episode text every 24 hours: clears screen_text (row kept, not deleted) for episodes older than keepRawFor whose importance is below importanceFloor.
