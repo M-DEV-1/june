@@ -17,7 +17,6 @@ import (
 
 // toolTestBrain is a minimal ContextReader mock used to exercise executeTool's query_memory case. It lives in an internal (package agent, not agent_test) test file because executeTool is unexported.
 type toolTestBrain struct {
-	episodeHits     []db.MemoryHit
 	windowEpisodes  []db.Episode
 	windowSummaries []db.WindowSummary
 	subjectRecall   []string
@@ -87,9 +86,6 @@ func (b *toolTestBrain) SearchMemory(ctx context.Context, query string) ([]db.Me
 	b.searchMemoryCalledFocus = query
 	return b.searchMemoryResult, nil
 }
-func (b *toolTestBrain) RankedEpisodes(ctx context.Context, focus string, limit int) ([]db.MemoryHit, error) {
-	return b.episodeHits, nil
-}
 func (b *toolTestBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
 	b.capturedRetrieveFocus = focus
 	if b.retrieveRelevantCalled != nil {
@@ -150,9 +146,6 @@ func (b *toolTestBrain) UpdateThreadState(ctx context.Context, id int64, state s
 func (b *toolTestBrain) DeleteNote(ctx context.Context, id int64) error {
 	b.deletedNoteID = id
 	return b.deleteNoteErr
-}
-func (b *toolTestBrain) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
-	return b.windowEpisodes, nil
 }
 func (b *toolTestBrain) SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error) {
 	return b.windowSummaries, nil
@@ -358,7 +351,7 @@ func TestExecuteTool_Recall_TimelineHonorsApp(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_Recall_TimelinePath verifies that calling the "recall" tool with since/until args (and no "subject") surfaces the brain's canned timeline (EpisodesInWindow), formatted chronologically as "[HH:MM] app — title: ...".
+// TestExecuteTool_Recall_TimelinePath verifies that calling the "recall" tool with since/until args (and no "subject") surfaces the brain's canned timeline (ListEpisodes), formatted chronologically as "[HH:MM] app — title: ...".
 // This is the flagship "walk me through July 4th" path: the model resolves the human phrase into ISO bounds and the tool honors them.
 func TestExecuteTool_Recall_TimelinePath(t *testing.T) {
 	// Fixtures use time.Local explicitly (not time.UTC): recall now renders timestamps
