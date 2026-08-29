@@ -34,6 +34,8 @@ type ContextReader interface {
 	UpdateThreadState(ctx context.Context, id int64, state string) error
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
 	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
+	// SummaryTimeline backs recall's coverage tier: when a window holds more episodes than one tool result fits, the window's task summaries — bounded per day by construction — answer instead, so a busy stretch cannot scroll the rest of its own day out of the reply.
+	SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
 	RecallSubject(ctx context.Context, subject string, limit int) ([]string, error)
 	// HybridSearchWindow fuses lexical (FTS5) and vector search via reciprocal rank fusion, optionally filtered to domainFilter ("work" | "personal" | "" for none) and to items whose timestamp falls in [since, until] (a zero bound is open on that side). The window is enforced store-side, before ranking's top-k, so a sparse window still yields its items. Backs query_memory's "domain" and "since"/"until" params.
 	HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]db.MemoryHit, error)

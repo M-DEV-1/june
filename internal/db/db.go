@@ -575,6 +575,48 @@ func (s *Store) RecentSummaries(ctx context.Context, limit int) ([]string, error
 	return out, nil
 }
 
+// WindowSummary is one summary or digest node inside a recall window: when it was written and its content (a task summary is the compiler's JSON, a digest plain prose).
+type WindowSummary struct {
+	CreatedAt time.Time
+	Content   string
+}
+
+// SummaryTimeline returns the summary and digest nodes whose created_at falls in [since, until], oldest first. This is the tier recall reads when a window holds more episodes than fit in one tool result: the summaries are bounded per day by construction, so a whole day or week comes back with every stretch of it represented.
+func (s *Store) SummaryTimeline(ctx context.Context, since, until time.Time) ([]WindowSummary, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.SummaryTimeline")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT created_at, content FROM nodes WHERE type IN ('summary','digest') AND created_at >= ? AND created_at <= ? ORDER BY created_at ASC`,
+		sqliteUTC(since), sqliteUTC(until))
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("summary timeline: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WindowSummary
+	for rows.Next() {
+		var w WindowSummary
+		var created string
+		if err := rows.Scan(&created, &w.Content); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan summary timeline: %w", err)
+		}
+		if t, err := time.Parse("2006-01-02 15:04:05", created); err == nil {
+			w.CreatedAt = t.UTC()
+		}
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate summary timeline: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.window_count", len(out)))
+	return out, nil
+}
+
 // CountSummariesSince returns the number of summary and digest nodes created after since. Used as a cost guard so the state deriver skips recomputation when nothing new has been written.
 // since is formatted as UTC "2006-01-02 15:04:05" to match SQLite's CURRENT_TIMESTAMP storage format, which has no sub-second component.
 func (s *Store) CountSummariesSince(ctx context.Context, since time.Time) (int, error) {
@@ -642,7 +684,11 @@ func FormatHit(h MemoryHit, maxRunes int) string {
 		src = fmt.Sprintf("thread#%d", h.RefID)
 	}
 	label := src
+	// The age carries the calendar date past the first day, because "which day was that" is a question the rows themselves have to be able to answer — a row that only says "4d ago" makes the model do date arithmetic it reliably gets wrong out loud.
 	if age := formatRelativeAge(h.CreatedAt); age != "" {
+		if time.Since(h.CreatedAt) >= 24*time.Hour {
+			age = h.CreatedAt.Local().Format("Mon Jan 2") + ", " + age
+		}
 		label = fmt.Sprintf("%s (%s)", src, age)
 	}
 	// Content leads and the window provenance trails in a parenthetical: the model reads the row left to right, so what it should say comes first and the machine names it should not say come last (taste audit T1 — the provenance still guards cross-project confabulation, it just stops being the headline).
