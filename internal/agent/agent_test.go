@@ -52,6 +52,9 @@ func (b *mockBrain) EpisodesInWindow(ctx context.Context, since, until time.Time
 func (b *mockBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error) {
 	return nil, nil
 }
+func (b *mockBrain) SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error) {
+	return nil, nil
+}
 func (b *mockBrain) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
 	return nil, nil
 }
