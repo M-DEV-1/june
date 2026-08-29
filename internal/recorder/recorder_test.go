@@ -75,6 +75,17 @@ func (s *fakeStore) UpdateNote(ctx context.Context, id int64, content string) er
 	return nil
 }
 
+// GetNotes returns every filed note, newest first, matching the order db.Store's real GetNotes promises — which is what lets lastMatchingMeetingNote take the first match as the most recent one.
+func (s *fakeStore) GetNotes(ctx context.Context) ([]db.Note, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]db.Note, 0, len(s.notes))
+	for i := len(s.notes) - 1; i >= 0; i-- {
+		out = append(out, db.Note{ID: int64(i + 1), Content: s.notes[i], Kind: s.kinds[i]})
+	}
+	return out, nil
+}
+
 // logged returns the contents filed under kind, so a test can look at just the person notes or just the minutes.
 func (s *fakeStore) logged(kind string) []string {
 	s.mu.Lock()
@@ -269,6 +280,8 @@ func TestRecorder_ResumesOrphanedRecordings(t *testing.T) {
 	store := &fakeStore{}
 	r, _, _ := newTestRecorder(t, store)
 	<-r.swept // the sweep New starts has finished, so the fields below are ours alone
+	// The sweep defers whisper work on battery, and this test's outcome must not depend on whether the machine running it happens to be plugged in.
+	r.onAC = func() bool { return true }
 
 	orphan := filepath.Join(r.dataDir, "recordings", "2026-08-27T09-30-00")
 	if err := os.MkdirAll(orphan, 0o755); err != nil {
