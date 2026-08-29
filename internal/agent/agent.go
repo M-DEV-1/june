@@ -32,7 +32,6 @@ type ContextReader interface {
 	DeletePersonalContext(ctx context.Context, subject string) error
 	// UpdateThreadState backs fix_thread (tools.go). Threads live in their own table with their own semantics — a subject plus a state summary — so update_note cannot reach them, and a thread whose summary merged two unrelated things was unfixable until this existed.
 	UpdateThreadState(ctx context.Context, id int64, state string) error
-	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
 	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
 	// SummaryTimeline backs recall's coverage tier: when a window holds more episodes than one tool result fits, the window's task summaries — bounded per day by construction — answer instead, so a busy stretch cannot scroll the rest of its own day out of the reply.
 	SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
