@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -255,6 +256,98 @@ func liveTools() []*genai.Tool {
 
 // recallSubjectLimit bounds how many lines RecallSubject contributes to the "recall" tool's subject path.
 const recallSubjectLimit = 6
+
+// recallEpisodeCap is how many raw episodes one recall window may return, and recallSummaryCap how many summary lines. Together they implement one rule with no span constants in it: a window is answered from the finest tier whose entire content fits — episodes when they all fit, every task summary when those fit, and a per-day-per-task rollup when even the summaries overflow. Coverage is by construction at every tier; nothing is ever cut to the newest slice.
+const (
+	recallEpisodeCap = 50
+	recallSummaryCap = 60
+)
+
+// summaryTimeline renders the summary tier for a recall window, oldest first. Returns nil when the window has no summaries, which sends the caller back to raw episodes.
+func (a *Agent) summaryTimeline(ctx context.Context, since, until time.Time) []string {
+	sums, err := a.brain.SummaryTimeline(ctx, since, until)
+	if err != nil {
+		slog.Warn("recall: summary tier read failed, falling back to episodes", "error", err)
+		return nil
+	}
+	kept := make([]db.WindowSummary, 0, len(sums))
+	for _, s := range sums {
+		if task, _ := parseTaskSummary(s.Content); task == "Raw Activity Log" {
+			// The compiler's fallback bucket for windows it could not read — noise, not a stretch of work.
+			continue
+		}
+		kept = append(kept, s)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	if len(kept) <= recallSummaryCap {
+		lines := make([]string, 0, len(kept))
+		for _, s := range kept {
+			lines = append(lines, "["+s.CreatedAt.Local().Format("Jan 2 15:04")+"] "+summaryLine(s.Content))
+		}
+		return lines
+	}
+	return rollupByDayAndTask(kept)
+}
+
+// parseTaskSummary reads the compiler's JSON summary shape. ok is false for anything else — a digest's plain prose, or a malformed row.
+func parseTaskSummary(content string) (task string, summary string) {
+	var s struct {
+		Task    string `json:"task_name"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(content), &s); err == nil {
+		return s.Task, s.Summary
+	}
+	return "", ""
+}
+
+// summaryLine renders one summary node as prose: the compiler's JSON becomes "task — what happened", a digest's plain prose passes through untouched.
+func summaryLine(content string) string {
+	if task, summary := parseTaskSummary(content); task != "" {
+		return task + " — " + oneLineExcerpt(summary)
+	}
+	return oneLineExcerpt(content)
+}
+
+// rollupByDayAndTask collapses an over-long summary timeline to one line per task per day, carrying how many stretches it covered and the first stretch's description — the tier above task summaries, computed at read time because stored digests only exist once compaction has retired a day's summaries.
+func rollupByDayAndTask(sums []db.WindowSummary) []string {
+	type slot struct {
+		day, task, first string
+		count            int
+		order            int
+	}
+	slots := map[string]*slot{}
+	var ordered []*slot
+	for _, s := range sums {
+		task, summary := parseTaskSummary(s.Content)
+		if task == "" {
+			task, summary = oneLineExcerpt(s.Content), ""
+		}
+		day := s.CreatedAt.Local().Format("Jan 2")
+		key := day + "\x00" + task
+		if sl, ok := slots[key]; ok {
+			sl.count++
+			continue
+		}
+		sl := &slot{day: day, task: task, first: oneLineExcerpt(summary), count: 1, order: len(ordered)}
+		slots[key] = sl
+		ordered = append(ordered, sl)
+	}
+	lines := make([]string, 0, len(ordered))
+	for _, sl := range ordered {
+		line := "[" + sl.day + "] " + sl.task
+		if sl.count > 1 {
+			line += fmt.Sprintf(" (%d stretches)", sl.count)
+		}
+		if sl.first != "" {
+			line += " — " + sl.first
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
 
 // recallExcerpt caps how much of an episode's screen_text is surfaced per line in the "recall" tool's window (timeline) path — shorter than maxEpisodeExcerpt since a whole day's timeline is many lines at once.
 const recallExcerpt = 160
@@ -813,7 +906,15 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return "no memory matches"
 		}
 		lines := make([]string, 0, len(hits))
+		// A minute-sampled screen produces runs of byte-identical captures, and ten copies of one row crowd nine real answers out of the result. Dedupe on the content itself (not the whole line — the same text five minutes apart is still the same information).
+		seen := make(map[string]bool, len(hits))
 		for _, h := range hits {
+			if key := strings.TrimSpace(h.Content); key != "" {
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+			}
 			// Content is excerpted via db.FormatHit/FormatNoteHit like every other read path — an unformatted hit can inject tens of KB from a single oversized row (see RetrieveRelevant/RecallSubject, which already do this).
 			// Notes are the only source with an update_note/delete_note follow-up tool, so they're the only hits that carry their ref_id in the surfaced line — the model needs it in hand to act on a correction.
 			if h.Source == "note" {
@@ -869,15 +970,23 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		app, _ := args["app"].(string)
 		slog.Info("recalling timeline window", "since", since, "until", until, "app", app)
 
-		// NewestFirst: real days exceed the 50-episode cap, so without it this returns the oldest 50 —
-		// the start of the window — and silently stops there instead of covering the whole day.
-		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{Since: since, Until: until, App: app, Limit: 50, NewestFirst: true})
+		// One more than the cap, so overflow is detectable: a window whose episodes all fit is answered from them raw, and a bigger window climbs to the summary tier instead of silently returning whichever slice of itself is newest.
+		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{Since: since, Until: until, App: app, Limit: recallEpisodeCap + 1, NewestFirst: true})
 		if err != nil {
 			slog.Error("recall: timeline read failed", "error", err)
 			return toolError(storeUnavailable)
 		}
 		if len(episodes) == 0 {
 			return "no episodes in that window"
+		}
+		// Summaries carry no app attribution, so an app-filtered recall stays on episodes whatever the size.
+		if len(episodes) > recallEpisodeCap && app == "" {
+			if lines := a.summaryTimeline(ctx, since, until); len(lines) > 0 {
+				return strings.Join(lines, "\n")
+			}
+		}
+		if len(episodes) > recallEpisodeCap {
+			episodes = episodes[:recallEpisodeCap]
 		}
 		return strings.Join(formatEpisodeTimeline(episodes, func(e db.Episode) string {
 			return oneLineExcerpt(e.ScreenText)

@@ -17,9 +17,10 @@ import (
 
 // toolTestBrain is a minimal ContextReader mock used to exercise executeTool's query_memory case. It lives in an internal (package agent, not agent_test) test file because executeTool is unexported.
 type toolTestBrain struct {
-	episodeHits    []db.MemoryHit
-	windowEpisodes []db.Episode
-	subjectRecall  []string
+	episodeHits     []db.MemoryHit
+	windowEpisodes  []db.Episode
+	windowSummaries []db.WindowSummary
+	subjectRecall   []string
 
 	// searchMemoryResult/searchMemoryCalledFocus back SearchMemory — used by buildHandshakeContext's tests (F2) to verify the [working]-buffer focus signal actually drives a SearchMemory call.
 	searchMemoryResult      []db.MemoryHit
@@ -152,6 +153,9 @@ func (b *toolTestBrain) DeleteNote(ctx context.Context, id int64) error {
 }
 func (b *toolTestBrain) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
 	return b.windowEpisodes, nil
+}
+func (b *toolTestBrain) SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error) {
+	return b.windowSummaries, nil
 }
 func (b *toolTestBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error) {
 	b.capturedEpisodeQuery = q
@@ -1497,4 +1501,37 @@ func TestToolDefinitions_DeclaresFixThread(t *testing.T) {
 		}
 	}
 	t.Error("toolDefinitions does not declare fix_thread")
+}
+
+// A window whose episodes overflow the cap is answered from the summary tier — every stretch of the window represented — never from the newest slice of raw episodes. A window that fits stays on episodes.
+func TestExecuteTool_Recall_BigWindowClimbsToSummaries(t *testing.T) {
+	brain := &toolTestBrain{}
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.Local)
+	for i := 0; i < recallEpisodeCap+10; i++ {
+		brain.windowEpisodes = append(brain.windowEpisodes, db.Episode{
+			CreatedAt: base.Add(time.Duration(i) * time.Minute), App: "Brave", Title: "evening stuff", ScreenText: "late night content",
+		})
+	}
+	brain.windowSummaries = []db.WindowSummary{
+		{CreatedAt: base.UTC(), Content: `{"task_name":"Climate Risk Statement Builder ASRS","summary":"scoring vulnerability data"}`},
+		{CreatedAt: base.Add(8 * time.Hour).UTC(), Content: `{"task_name":"Ora Memory Architecture Development","summary":"recall surgery"}`},
+		{CreatedAt: base.Add(9 * time.Hour).UTC(), Content: `{"task_name":"Raw Activity Log","summary":"Unknown | Unknown"}`},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+	out := a.ExecuteTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
+	if !strings.Contains(out, "Climate Risk Statement Builder ASRS") || !strings.Contains(out, "Ora Memory Architecture Development") {
+		t.Errorf("an overflowing window must answer from summaries covering the whole window, got:\n%s", out)
+	}
+	if strings.Contains(out, "late night content") {
+		t.Errorf("summaries and raw episodes must not mix in one overflowing-window answer, got:\n%s", out)
+	}
+	if strings.Contains(out, "Raw Activity Log") {
+		t.Errorf("the compiler's Unknown-window fallback bucket is noise and must be filtered, got:\n%s", out)
+	}
+
+	brain.windowEpisodes = brain.windowEpisodes[:5]
+	out = a.ExecuteTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
+	if !strings.Contains(out, "late night content") {
+		t.Errorf("a window that fits must stay on raw episodes, got:\n%s", out)
+	}
 }

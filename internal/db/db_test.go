@@ -2101,10 +2101,10 @@ func TestFormatHit_EpisodeProvenance_TableShapes(t *testing.T) {
 			want: "[note] the user's favorite color is blue",
 		},
 		{
-			// Age and provenance both show up: one does not replace the other.
+			// Age and provenance both show up: one does not replace the other. Past the first day the label also carries the calendar date, so "which day was that" is answerable straight off the row.
 			name: "episode with app, title and age",
 			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go", CreatedAt: time.Now().Add(-3 * 24 * time.Hour)},
-			want: "[episode (3d ago)] fixing the null pointer bug (Code — tracker_linux.go)",
+			want: "[episode (" + time.Now().Add(-3*24*time.Hour).Local().Format("Mon Jan 2") + ", 3d ago)] fixing the null pointer bug (Code — tracker_linux.go)",
 		},
 	}
 
