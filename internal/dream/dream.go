@@ -20,6 +20,8 @@ import (
 const dayFormat = "2006-01-02"
 
 const (
+	// brainCurfewMinutes is the local time-of-day, in minutes after midnight, past which no unforced dream may start a brain call: the user's Claude subscription runs in five-hour windows and his workday window opens at 08:30, so any call after 03:28 would open an overnight window that bleeds into it. A forced run (the dream-now marker) bypasses the curfew — forcing is the user's own choice.
+	brainCurfewMinutes = 3*60 + 25
 	// idleAfter is how long the newest episode must be old for the user to count as away when the screen is not locked.
 	idleAfter = 15 * time.Minute
 	// missingDiaryGrace is how long past the dream hour the runner waits for the evening close's diary entry before dreaming from raw day summaries instead.
@@ -118,6 +120,10 @@ func (r *Runner) Tick(ctx context.Context) {
 	now := r.now().In(time.Local)
 	forced := r.consumeForceMarker()
 	if !forced && !r.inWindow(now.Hour()) {
+		return
+	}
+	// Past the curfew the whole run waits for tomorrow night: a dream started at 03:20 could still be making brain calls at 03:40, so the gate is on starting at all, with a resumed run equally held.
+	if !forced && now.Hour()*60+now.Minute() >= brainCurfewMinutes && now.Hour() < r.briefHour {
 		return
 	}
 	night := r.nightKey(now)
