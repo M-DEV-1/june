@@ -284,6 +284,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		SessionLocked:     tracker.SessionLocked,
 		RecorderQuiescent: meetingRecorder.Quiescent,
 	}, appConfig.Dream.DreamHour(), dreamBriefHour)
+	// Touching this file makes the next tick dream immediately, gates bypassed — the way to watch a run without leaving the machine.
+	dreamer.ForceMarker = filepath.Join(config.DataDir(), "dream-now")
 	go every(ctx, 5*time.Minute, "dreaming", func() { dreamer.Tick(ctx) })
 
 	// age out old, low-importance episode text every 24 hours: clears screen_text (row kept, not deleted) for episodes older than keepRawFor whose importance is below importanceFloor.
