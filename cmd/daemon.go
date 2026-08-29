@@ -12,11 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
 	"ora/internal/embed"
 	"ora/internal/ipctoken"
 	"ora/internal/memory"
+	"ora/internal/proactive"
 	"ora/internal/recorder"
 	"ora/internal/tracker"
 	"ora/internal/vector"
@@ -270,6 +272,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			lastDerive = time.Now()
 		})
 	}
+
+	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
+	go proactive.New(store, brain.FromConfig(appConfig.Brain, apiKey), proactive.NotifySend, appConfig.Proactive).Run(ctx)
 
 	// age out old, low-importance episode text every 24 hours: clears screen_text (row kept, not deleted) for episodes older than keepRawFor whose importance is below importanceFloor.
 	go every(ctx, 24*time.Hour, "episode-aging", func() {

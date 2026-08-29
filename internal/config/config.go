@@ -26,6 +26,34 @@ type OraConfig struct {
 	Brain BrainConfig `json:"brain"`
 	// Transcribe holds the settings for the whisper.cpp build that transcribes meetings.
 	Transcribe TranscribeConfig `json:"transcribe"`
+	// Proactive schedules the daily proactive seams: the morning brief and the evening diary close.
+	Proactive ProactiveConfig `json:"proactive"`
+}
+
+// ProactiveConfig sets the local hours after which the two daily proactive seams may run. A zero hour means the default (a config written before this block existed keeps working), and a negative hour disables that seam entirely.
+type ProactiveConfig struct {
+	// BriefHour is the local hour after which the morning brief waits for the user's first activity.
+	BriefHour int `json:"brief_hour"`
+	// CloseHour is the local hour after which the evening close writes the day's diary entry.
+	CloseHour int `json:"close_hour"`
+}
+
+// Default local hours for the proactive seams, used when the config leaves them zero.
+const (
+	DefaultBriefHour = 9
+	DefaultCloseHour = 22
+)
+
+// Hours returns the effective brief and close hours: zero fields become the defaults, negative values pass through unchanged and mean the seam is disabled.
+func (p ProactiveConfig) Hours() (brief, close int) {
+	brief, close = p.BriefHour, p.CloseHour
+	if brief == 0 {
+		brief = DefaultBriefHour
+	}
+	if close == 0 {
+		close = DefaultCloseHour
+	}
+	return brief, close
 }
 
 // TranscribeConfig holds the settings for the whisper.cpp build that turns a meeting's audio into text.
