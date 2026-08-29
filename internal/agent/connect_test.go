@@ -1198,8 +1198,8 @@ func TestSystemInstructionText_AntiConfabulationRules(t *testing.T) {
 
 	for _, want := range []string{
 		"Inventing a link between them is not",
-		"different apps or different hours",
-		"never assert a detail that isn't in the rows",
+		"Never assert a detail that isn't in the rows",
+		"a period you never fetched",
 		"fix_thread",
 		"[thread#N]",
 		"update_note",
