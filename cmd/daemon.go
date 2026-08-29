@@ -15,6 +15,7 @@ import (
 	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/dream"
 	"ora/internal/embed"
 	"ora/internal/ipctoken"
 	"ora/internal/memory"
@@ -275,6 +276,15 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
 	go proactive.New(store, brain.FromConfig(appConfig.Brain, apiKey), proactive.NotifySend, appConfig.Proactive).Run(ctx)
+
+	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
+	dreamBriefHour, _ := appConfig.Proactive.Hours()
+	dreamer := dream.New(store, brain.FromConfig(appConfig.Brain, apiKey), dream.Probes{
+		OnAC:              recorder.OnACPower,
+		SessionLocked:     tracker.SessionLocked,
+		RecorderQuiescent: meetingRecorder.Quiescent,
+	}, appConfig.Dream.DreamHour(), dreamBriefHour)
+	go every(ctx, 5*time.Minute, "dreaming", func() { dreamer.Tick(ctx) })
 
 	// age out old, low-importance episode text every 24 hours: clears screen_text (row kept, not deleted) for episodes older than keepRawFor whose importance is below importanceFloor.
 	go every(ctx, 24*time.Hour, "episode-aging", func() {

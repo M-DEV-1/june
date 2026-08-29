@@ -253,3 +253,19 @@ func TestProactiveConfig_HoursDefaultsAndDisable(t *testing.T) {
 		t.Errorf("Hours() = %d, %d; want -1 (disabled) and 7 (explicit)", brief, close)
 	}
 }
+
+// DreamHour and DreamPort resolve the dreaming schedule: zero fields (a config written before the block existed) become the defaults, and a negative hour passes through as the disable signal.
+func TestDreamConfig_DefaultsAndDisable(t *testing.T) {
+	if got := (DreamConfig{}).DreamHour(); got != DefaultDreamHour {
+		t.Errorf("zero DreamHour() = %d, want %d", got, DefaultDreamHour)
+	}
+	if got := (DreamConfig{Hour: -1}).DreamHour(); got != -1 {
+		t.Errorf("DreamHour() = %d, want -1 (disabled)", got)
+	}
+	if got := (DreamConfig{Hour: 1}).DreamHour(); got != 1 {
+		t.Errorf("DreamHour() = %d, want 1", got)
+	}
+	if got := (DreamConfig{}).DreamPort(); got != DefaultDreamPort {
+		t.Errorf("zero DreamPort() = %d, want %d", got, DefaultDreamPort)
+	}
+}
