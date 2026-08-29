@@ -32,6 +32,9 @@ type Daemon struct {
 }
 
 // Pause suspends activity emission. The polling loop still runs so Resume takes effect promptly.
+// sessionLocked reports whether the desktop session's lock screen is up; the platform file sets it (Linux: GNOME's screensaver over D-Bus). Nil means no way to know, which reads as unlocked.
+var sessionLocked func() bool
+
 func (d *Daemon) Pause() { d.paused.Store(true) }
 
 // Resume re-enables activity emission after a Pause.
@@ -118,10 +121,25 @@ func (d *Daemon) Start(ctx context.Context) {
 
 			_, span := tracer.Start(ctx, "Tracker.PollActiveWindow")
 
+			// A locked screen is not the user's activity: capturing through the shield files the lock clock and "press a key to unlock" as episodes, which then surface in summaries as the day's doings.
+			if sessionLocked != nil && sessionLocked() {
+				pendingActivity = nil
+				span.SetAttributes(attribute.Bool("tracker.locked", true))
+				span.End()
+				continue
+			}
+
 			activity, err := d.eye.GetActiveWindow()
 			if err != nil {
 				span.RecordError(err)
 				slog.Error("tracker: failed to get active window", "error", err)
+				span.End()
+				continue
+			}
+
+			// A window nothing could identify carries zero information; filing it pollutes every later summary with "Unknown | Unknown" lines.
+			if activity.App == "Unknown" && activity.Title == "Unknown" {
+				pendingActivity = nil
 				span.End()
 				continue
 			}
