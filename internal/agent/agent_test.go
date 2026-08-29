@@ -29,9 +29,6 @@ func (b *mockBrain) GetImplicitContext(ctx context.Context) ([]string, error) { 
 func (b *mockBrain) SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error) {
 	return nil, nil
 }
-func (b *mockBrain) RankedEpisodes(ctx context.Context, focus string, limit int) ([]db.MemoryHit, error) {
-	return nil, nil
-}
 func (b *mockBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
 	return nil, nil
 }
@@ -46,9 +43,6 @@ func (b *mockBrain) SetPersonalContext(ctx context.Context, subject, content str
 	return nil
 }
 func (b *mockBrain) DeletePersonalContext(ctx context.Context, subject string) error { return nil }
-func (b *mockBrain) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
-	return nil, nil
-}
 func (b *mockBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error) {
 	return nil, nil
 }
