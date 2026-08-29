@@ -47,6 +47,58 @@ func ClaudeCLI(binary, model string, timeoutSeconds int) Brain {
 	}
 }
 
+// AgyCLI answers by running Antigravity's `agy --print`, under the Antigravity login the machine already has — a paid plan whose default model is a pro tier, which is why it earns a place beside claude while the local grinder is still being perfected.
+// The prompt is the value of --print rather than stdin, which is the only text input that CLI takes; that caps a prompt at one argv entry, 128 KB on Linux.
+// The timeout matters more here than for claude: agy has open bugs where a print run with no terminal attached never returns.
+// Input: the path to the binary and a hard timeout in seconds. Output: the "response" field of the CLI's JSON.
+func AgyCLI(binary string, timeoutSeconds int) Brain {
+	return func(ctx context.Context, prompt string) (string, error) {
+		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"--print", prompt, "--output-format", "json", "--disable-slash-commands"}, "")
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			Status   string `json:"status"`
+			Response string `json:"response"`
+		}
+		if err := json.Unmarshal(out, &res); err != nil {
+			return "", fmt.Errorf("could not parse the output of agy --print: %w (%s)", err, head(string(out)))
+		}
+		if res.Status != "SUCCESS" {
+			return "", fmt.Errorf("agy --print failed with status %s: %s", res.Status, head(res.Response))
+		}
+		text := strings.TrimSpace(res.Response)
+		if text == "" {
+			return "", fmt.Errorf("agy --print returned no text")
+		}
+		return text, nil
+	}
+}
+
+// GrokCLI answers by running `grok -p`, under the Grok login the machine already has — also a paid plan with a pro default model. Every tool is denied ('--deny *'), because the prompt carries text nobody vetted and these duties need none.
+// The prompt is an argv entry (grok takes no stdin prompt), capping it at 128 KB on Linux.
+// Input: the path to the binary and a hard timeout in seconds. Output: the "text" field of the CLI's JSON.
+func GrokCLI(binary string, timeoutSeconds int) Brain {
+	return func(ctx context.Context, prompt string) (string, error) {
+		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"-p", prompt, "--output-format", "json", "--deny", "*"}, "")
+		if err != nil {
+			return "", err
+		}
+		var res struct {
+			Text       string `json:"text"`
+			StopReason string `json:"stopReason"`
+		}
+		if err := json.Unmarshal(out, &res); err != nil {
+			return "", fmt.Errorf("could not parse the output of grok -p: %w (%s)", err, head(string(out)))
+		}
+		text := strings.TrimSpace(res.Text)
+		if text == "" {
+			return "", fmt.Errorf("grok -p returned no text (stop reason %s)", res.StopReason)
+		}
+		return text, nil
+	}
+}
+
 // runCLI runs one child process to completion under a hard timeout and returns its stdout.
 // Input: the binary, the timeout in seconds, the arguments, and what to feed the child on stdin. Output: stdout, or an error naming the timeout, the exit status or the stderr the child died with.
 func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []string, stdin string) ([]byte, error) {

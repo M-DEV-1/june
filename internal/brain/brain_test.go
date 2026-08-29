@@ -201,3 +201,35 @@ func TestClaudeCLI_ModelFlag(t *testing.T) {
 		t.Errorf("argv is missing --model sonnet:\n%s", args)
 	}
 }
+
+// grok answers on its "text" field; every tool is denied since the prompt carries unvetted text.
+func TestGrokCLI(t *testing.T) {
+	bin := fakeCLI(t, "grok", `printf '%s' '{"text":"ok\n","stopReason":"end_turn"}'`)
+	got, err := GrokCLI(bin, 10)(context.Background(), "summarise this")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "ok" {
+		t.Fatalf("got %q, want ok", got)
+	}
+	args, _ := recorded(t, bin)
+	for _, want := range []string{"--output-format\njson\n", "--deny\n*\n"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("argv is missing %q:\n%s", want, args)
+		}
+	}
+	if _, err := GrokCLI(fakeCLI(t, "grok", `printf '%s' '{"text":"","stopReason":"refusal"}'`), 10)(context.Background(), "x"); err == nil {
+		t.Error("empty text must be an error, not an empty answer")
+	}
+}
+
+// agy answers on its "response" field and only a SUCCESS status counts.
+func TestAgyCLI_Restored(t *testing.T) {
+	bin := fakeCLI(t, "agy", `printf '%s' '{"status":"SUCCESS","response":"ok"}'`)
+	if got, err := AgyCLI(bin, 10)(context.Background(), "hi"); err != nil || got != "ok" {
+		t.Fatalf("got %q err %v, want ok", got, err)
+	}
+	if _, err := AgyCLI(fakeCLI(t, "agy", `printf '%s' '{"status":"ERROR","response":""}'`), 10)(context.Background(), "x"); err == nil {
+		t.Error("a non-SUCCESS status must be an error")
+	}
+}
