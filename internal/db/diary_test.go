@@ -1,0 +1,140 @@
+package db_test
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// TestStore_SetDiaryEntry_ReplacesByDayAndKind verifies upsert semantics: writing the same (day, kind) twice yields one row holding the second content, which is what lets the understanding doc be rewritten in place.
+func TestStore_SetDiaryEntry_ReplacesByDayAndKind(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if err := store.SetDiaryEntry(ctx, "2026-08-29", "day", "first draft"); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+	if err := store.SetDiaryEntry(ctx, "2026-08-29", "day", "final entry"); err != nil {
+		t.Fatalf("SetDiaryEntry (upsert): %v", err)
+	}
+
+	got, err := store.DiaryEntry(ctx, "2026-08-29", "day")
+	if err != nil {
+		t.Fatalf("DiaryEntry: %v", err)
+	}
+	if got != "final entry" {
+		t.Errorf("DiaryEntry = %q, want %q", got, "final entry")
+	}
+
+	entries, err := store.RecentDiaryEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentDiaryEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("RecentDiaryEntries returned %d rows, want 1 (upsert must not add a second)", len(entries))
+	}
+}
+
+// TestStore_DiaryEntry_MissingIsEmptyNotError pins the contract the scheduler's condition checks rely on: no row for (day, kind) is an ordinary "" result, since a missing entry is exactly what "the close hasn't run yet" looks like.
+func TestStore_DiaryEntry_MissingIsEmptyNotError(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	got, err := store.DiaryEntry(ctx, "2026-08-29", "day")
+	if err != nil {
+		t.Fatalf("DiaryEntry on empty table: %v", err)
+	}
+	if got != "" {
+		t.Errorf("DiaryEntry on empty table = %q, want empty", got)
+	}
+}
+
+// TestStore_DiaryEntry_IndexedInMemoryFTS verifies the diary triggers mirror content into memory_fts, so entries surface through the existing SearchMemory/query_memory path — and that an in-place rewrite replaces the indexed text rather than leaving the old version searchable.
+func TestStore_DiaryEntry_IndexedInMemoryFTS(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if err := store.SetDiaryEntry(ctx, "2026-08-29", "day", "the user spent the evening on the zeppelin project"); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+
+	hits, err := store.SearchMemory(ctx, "zeppelin")
+	if err != nil {
+		t.Fatalf("SearchMemory: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Source != "diary" {
+		t.Fatalf("SearchMemory(zeppelin) = %+v, want one diary hit", hits)
+	}
+
+	if err := store.SetDiaryEntry(ctx, "2026-08-29", "day", "the user spent the evening reading"); err != nil {
+		t.Fatalf("SetDiaryEntry (rewrite): %v", err)
+	}
+	hits, err = store.SearchMemory(ctx, "zeppelin")
+	if err != nil {
+		t.Fatalf("SearchMemory after rewrite: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("SearchMemory(zeppelin) after rewrite = %+v, want none (stale index text)", hits)
+	}
+}
+
+// TestStore_RecentDiaryEntries_NewestFirstDaysOnly verifies ordering and that the understanding doc and brief markers never leak into the day listing.
+func TestStore_RecentDiaryEntries_NewestFirstDaysOnly(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	for _, e := range []struct{ day, kind, content string }{
+		{"2026-08-27", "day", "wednesday"},
+		{"2026-08-28", "day", "thursday"},
+		{"2026-08-29", "day", "friday"},
+		{"", "understanding", "the standing model"},
+		{"2026-08-29", "brief", "the morning brief"},
+	} {
+		if err := store.SetDiaryEntry(ctx, e.day, e.kind, e.content); err != nil {
+			t.Fatalf("SetDiaryEntry(%s, %s): %v", e.day, e.kind, err)
+		}
+	}
+
+	entries, err := store.RecentDiaryEntries(ctx, 2)
+	if err != nil {
+		t.Fatalf("RecentDiaryEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("RecentDiaryEntries(2) returned %d rows, want 2", len(entries))
+	}
+	if entries[0].Day != "2026-08-29" || entries[1].Day != "2026-08-28" {
+		t.Errorf("RecentDiaryEntries order = %s, %s; want 2026-08-29, 2026-08-28", entries[0].Day, entries[1].Day)
+	}
+	if entries[0].Content != "friday" {
+		t.Errorf("newest entry content = %q, want %q", entries[0].Content, "friday")
+	}
+}
+
+// TestStore_NotesOfKindSince_FiltersKindAndTime verifies the proactive seams' minutes query: only the asked-for kind comes back, and only rows created inside the window.
+func TestStore_NotesOfKindSince_FiltersKindAndTime(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if _, err := store.LogNote(ctx, "Minutes: agreed to ship Friday", "meeting"); err != nil {
+		t.Fatalf("LogNote(meeting): %v", err)
+	}
+	if _, err := store.LogNote(ctx, "user prefers dark roast", "fact"); err != nil {
+		t.Fatalf("LogNote(fact): %v", err)
+	}
+
+	notes, err := store.NotesOfKindSince(ctx, "meeting", time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("NotesOfKindSince: %v", err)
+	}
+	if len(notes) != 1 || notes[0].Content != "Minutes: agreed to ship Friday" {
+		t.Fatalf("NotesOfKindSince(meeting, -1h) = %+v, want just the minutes", notes)
+	}
+
+	notes, err = store.NotesOfKindSince(ctx, "meeting", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("NotesOfKindSince (future window): %v", err)
+	}
+	if len(notes) != 0 {
+		t.Errorf("NotesOfKindSince with a future since = %+v, want none", notes)
+	}
+}

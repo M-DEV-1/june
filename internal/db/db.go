@@ -309,6 +309,34 @@ func (s *Store) createSchema() error {
 		INSERT INTO episodes_fts(episodes_fts, rowid, screen_text) VALUES ('delete', OLD.id, OLD.screen_text);
 		INSERT INTO episodes_fts(rowid, screen_text) VALUES (NEW.id, NEW.screen_text);
 	END;
+
+	-- diary: Ora's own first-person record. kind 'day' holds one entry per local
+	-- calendar day (day = 'YYYY-MM-DD'); kind 'understanding' is the single bounded
+	-- current-model-of-the-user document (day = ''), rewritten in place each evening;
+	-- kind 'brief' records the morning brief delivered that day and doubles as its
+	-- once-per-day marker. Upserted by (day, kind) — see SetDiaryEntry.
+	CREATE TABLE IF NOT EXISTS diary (
+		id INTEGER PRIMARY KEY,
+		day TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'day',
+		content TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(day, kind)
+	);
+
+	-- Mirrored into memory_fts exactly like threads, so diary entries surface
+	-- through the existing query_memory path with no agent changes.
+	CREATE TRIGGER IF NOT EXISTS diary_ai AFTER INSERT ON diary BEGIN
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'diary', NEW.id);
+	END;
+	CREATE TRIGGER IF NOT EXISTS diary_ad AFTER DELETE ON diary BEGIN
+		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
+	END;
+	CREATE TRIGGER IF NOT EXISTS diary_au AFTER UPDATE ON diary BEGIN
+		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'diary', NEW.id);
+	END;
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
 	// TODO: salience score to prioritize important activities and not track menial activities
@@ -788,6 +816,7 @@ func sqliteUTC(t time.Time) string {
 const ftsRowTime = `(CASE source
 	WHEN 'note' THEN (SELECT created_at FROM notes WHERE id = ref_id)
 	WHEN 'thread' THEN (SELECT last_seen_at FROM threads WHERE id = ref_id)
+	WHEN 'diary' THEN (SELECT updated_at FROM diary WHERE id = ref_id)
 	ELSE (SELECT created_at FROM nodes WHERE id = ref_id)
 END)`
 
@@ -870,6 +899,9 @@ func (s *Store) hitCreatedAt(ctx context.Context, source string, refID int64) ti
 	case "thread":
 		// last_seen_at, not created_at: a thread's age that matters is when it was last touched, which is also what MemoryAsOf reports for one.
 		_ = s.db.QueryRowContext(ctx, `SELECT last_seen_at FROM threads WHERE id = ?`, refID).Scan(&created)
+	case "diary":
+		// updated_at, not created_at: the understanding doc is one row rewritten in place, and its meaningful age is the last rewrite.
+		_ = s.db.QueryRowContext(ctx, `SELECT updated_at FROM diary WHERE id = ?`, refID).Scan(&created)
 	default:
 		return time.Time{}
 	}
