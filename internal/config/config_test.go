@@ -241,3 +241,15 @@ func TestLoadConfig_Transcribe(t *testing.T) {
 		}
 	})
 }
+
+// Hours resolves the proactive schedule: zero fields (a config written before the block existed) become the defaults, and a negative hour passes through as the disable signal.
+func TestProactiveConfig_HoursDefaultsAndDisable(t *testing.T) {
+	brief, close := ProactiveConfig{}.Hours()
+	if brief != DefaultBriefHour || close != DefaultCloseHour {
+		t.Errorf("zero config Hours() = %d, %d; want defaults %d, %d", brief, close, DefaultBriefHour, DefaultCloseHour)
+	}
+	brief, close = ProactiveConfig{BriefHour: -1, CloseHour: 7}.Hours()
+	if brief != -1 || close != 7 {
+		t.Errorf("Hours() = %d, %d; want -1 (disabled) and 7 (explicit)", brief, close)
+	}
+}
