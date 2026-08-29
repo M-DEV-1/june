@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -65,6 +66,9 @@ type Runner struct {
 	now func() time.Time
 	// watchEvery paces the preemption watcher. Tests shorten it.
 	watchEvery time.Duration
+
+	// ForceMarker is the path of a file whose presence makes the next tick dream immediately, bypassing the window and away-gates — the way to watch a dream run without leaving the machine. The marker is consumed, and a forced run arms no preemption watcher, since the user being present is the whole point.
+	ForceMarker string
 }
 
 // New builds a Runner from the store, a one-shot brain, the machine probes, and the two local hours that bound the window.
@@ -112,7 +116,8 @@ func (r *Runner) Tick(ctx context.Context) {
 		return
 	}
 	now := r.now().In(time.Local)
-	if !r.inWindow(now.Hour()) {
+	forced := r.consumeForceMarker()
+	if !forced && !r.inWindow(now.Hour()) {
 		return
 	}
 	night := r.nightKey(now)
@@ -124,20 +129,22 @@ func (r *Runner) Tick(ctx context.Context) {
 	if exists && run.Finished {
 		return
 	}
-	if !r.probes.OnAC() {
-		return
-	}
 	locked := r.probes.SessionLocked()
 	lastEpisode, err := r.store.MemoryAsOf(ctx, "episode:recent")
 	if err != nil {
 		slog.Warn("dreaming: reading the newest episode failed", "error", err)
 		return
 	}
-	if !locked && !lastEpisode.IsZero() && now.Sub(lastEpisode) < idleAfter {
-		return
-	}
-	if !r.probes.RecorderQuiescent() {
-		return
+	if !forced {
+		if !r.probes.OnAC() {
+			return
+		}
+		if !locked && !lastEpisode.IsZero() && now.Sub(lastEpisode) < idleAfter {
+			return
+		}
+		if !r.probes.RecorderQuiescent() {
+			return
+		}
 	}
 	dayEntry, err := r.store.DiaryEntry(ctx, night, "day")
 	if err != nil {
@@ -145,14 +152,30 @@ func (r *Runner) Tick(ctx context.Context) {
 		return
 	}
 	fallback := dayEntry == ""
-	if fallback && now.Sub(r.windowStart(night)) < missingDiaryGrace {
+	if !forced && fallback && now.Sub(r.windowStart(night)) < missingDiaryGrace {
 		return
 	}
-	r.dream(ctx, night, run, exists, locked, lastEpisode, fallback)
+	r.dream(ctx, night, run, exists, locked && !forced, lastEpisode, fallback, forced)
+}
+
+// consumeForceMarker reports whether the manual dream trigger is set, removing it so one touch means one run.
+func (r *Runner) consumeForceMarker() bool {
+	if r.ForceMarker == "" {
+		return false
+	}
+	if _, err := os.Stat(r.ForceMarker); err != nil {
+		return false
+	}
+	if err := os.Remove(r.ForceMarker); err != nil {
+		slog.Warn("dreaming: could not consume the force marker", "path", r.ForceMarker, "error", err)
+		return false
+	}
+	slog.Info("dreaming: manual trigger, running now with the away-gates bypassed")
+	return true
 }
 
 // dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error — a cancelled context included — just returns; nothing partial was committed and the next wake resumes from stages_done.
-func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback bool) {
+func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback, forced bool) {
 	if !exists {
 		if err := r.store.StartDreamRun(ctx, night); err != nil {
 			slog.Warn("dreaming: starting the run failed", "night", night, "error", err)
@@ -165,7 +188,9 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go r.watchForUser(ctx, cancel, lockedAtStart, baseline)
+	if !forced {
+		go r.watchForUser(ctx, cancel, lockedAtStart, baseline)
+	}
 
 	started := r.now()
 	done := strings.Fields(run.StagesDone)
