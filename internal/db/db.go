@@ -337,6 +337,35 @@ func (s *Store) createSchema() error {
 		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
 		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'diary', NEW.id);
 	END;
+
+	-- dream_runs: one row per night of the overnight dreaming loop, keyed by the
+	-- night's local date. The PRIMARY KEY is the single-run-per-night guarantee;
+	-- stages_done lets an interrupted night resume only what is missing.
+	CREATE TABLE IF NOT EXISTS dream_runs (
+		night TEXT PRIMARY KEY,
+		started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		finished_at DATETIME,
+		stages_done TEXT NOT NULL DEFAULT '',
+		grinder TEXT NOT NULL DEFAULT '',
+		report TEXT NOT NULL DEFAULT ''
+	);
+
+	-- hypotheses: the dreaming loop's private guesses about the user, tracked
+	-- across nights until promoted or retired. Deliberately NO FTS triggers on
+	-- this table or dream_runs: hypotheses are unvetted working state and must
+	-- never surface through retrieval into a prompt — only the finished dream
+	-- report enters the (indexed) diary.
+	CREATE TABLE IF NOT EXISTS hypotheses (
+		id INTEGER PRIMARY KEY,
+		statement TEXT NOT NULL UNIQUE,
+		confidence TEXT NOT NULL DEFAULT 'low',
+		status TEXT NOT NULL DEFAULT 'open',
+		born TEXT NOT NULL,
+		last_tested TEXT,
+		times_tested INTEGER NOT NULL DEFAULT 0,
+		evidence TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT ''
+	);
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
 	// TODO: salience score to prioritize important activities and not track menial activities

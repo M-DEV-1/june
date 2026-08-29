@@ -30,11 +30,19 @@ func (s *Store) SetDiaryEntry(ctx context.Context, day, kind, content string) er
 		return fmt.Errorf("diary entry needs content")
 	}
 
-	if _, err := s.db.ExecContext(ctx,
+	if err := upsertDiary(ctx, s.db, day, kind, content); err != nil {
+		span.RecordError(err)
+		return err
+	}
+	return nil
+}
+
+// upsertDiary is the diary upsert against either the plain connection or a transaction — the dream stage commits need the diary write inside the same transaction as their stage token.
+func upsertDiary(ctx context.Context, e execer, day, kind, content string) error {
+	if _, err := e.ExecContext(ctx,
 		`INSERT INTO diary (day, kind, content) VALUES (?, ?, ?)
 		 ON CONFLICT(day, kind) DO UPDATE SET content = excluded.content, updated_at = CURRENT_TIMESTAMP`,
 		day, kind, content); err != nil {
-		span.RecordError(err)
 		return fmt.Errorf("set diary entry: %w", err)
 	}
 	return nil
@@ -85,6 +93,36 @@ func (s *Store) RecentDiaryEntries(ctx context.Context, n int) ([]DiaryDay, erro
 	if err := rows.Err(); err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("iterate diary entries: %w", err)
+	}
+	return out, nil
+}
+
+// DiaryDays returns the kind='day' diary rows whose day falls in [from, to], both local 'YYYY-MM-DD' strings, inclusive, oldest first. ISO date strings order lexically, so plain string comparison is the range check.
+func (s *Store) DiaryDays(ctx context.Context, from, to string) ([]DiaryDay, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.DiaryDays")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT day, content FROM diary WHERE kind = 'day' AND day >= ? AND day <= ? ORDER BY day ASC`, from, to)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query diary days: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DiaryDay
+	for rows.Next() {
+		var d DiaryDay
+		if err := rows.Scan(&d.Day, &d.Content); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan diary day: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate diary days: %w", err)
 	}
 	return out, nil
 }

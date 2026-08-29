@@ -182,7 +182,7 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	r.findWhisper = whisperCPPBinary
 	r.minutes = r.defaultBrain
 	r.notify = notifySend
-	r.onAC = onACPower
+	r.onAC = OnACPower
 	r.silenceAfter = defaultSilenceAfter
 	r.retryEvery = defaultRetryEvery
 	r.prepTimeout = defaultPrepTimeout
@@ -244,6 +244,13 @@ func (r *Recorder) liveDir() string {
 	return r.live.dir
 }
 
+// Quiescent reports whether the recorder has no live session and nothing in flight — the overnight dreaming loop's licence to take the machine, since a whisper decode or a minutes call must never be raced for the GPU or the brain.
+func (r *Recorder) Quiescent() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.live == nil && len(r.inFlight) == 0
+}
+
 // claim reserves a recording directory for processing, reporting false if something else already has it. release gives it back.
 func (r *Recorder) claim(dir string) bool {
 	r.mu.Lock()
@@ -283,9 +290,9 @@ func (r *Recorder) retryDeferred(ctx context.Context) {
 // powerSupplyRoot is where Linux exposes the machine's power supplies. Tests point it elsewhere.
 var powerSupplyRoot = "/sys/class/power_supply"
 
-// onACPower reports whether the machine is on mains power, by reading the kernel's power supply class: a supply whose type is "Mains" and whose online flag is 1 is the charger, plugged in.
+// OnACPower reports whether the machine is on mains power, by reading the kernel's power supply class: a supply whose type is "Mains" and whose online flag is 1 is the charger, plugged in. Exported because the overnight dreaming loop gates on the same fact.
 // A machine that reports no mains supply at all — a desktop, or any system that does not export this, Windows included — counts as on mains, so transcription is never deferred forever somewhere it cannot be asked.
-func onACPower() bool {
+func OnACPower() bool {
 	entries, err := os.ReadDir(powerSupplyRoot)
 	if err != nil {
 		return true

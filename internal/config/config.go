@@ -28,6 +28,42 @@ type OraConfig struct {
 	Transcribe TranscribeConfig `json:"transcribe"`
 	// Proactive schedules the daily proactive seams: the morning brief and the evening diary close.
 	Proactive ProactiveConfig `json:"proactive"`
+	// Dream schedules the overnight dreaming loop. Zero value means the defaults; a negative hour disables dreaming.
+	Dream DreamConfig `json:"dream"`
+}
+
+// DreamConfig sets when the overnight dreaming loop may run, and reserves the knobs the later local-model slice will need. ModelPath and ShutdownCommand are read by nothing yet and Port is bound by nothing yet — reserved now so a config written today survives the slice that uses them.
+type DreamConfig struct {
+	// Hour is the local hour the dreaming window opens; the window closes at the morning brief hour. Zero means DefaultDreamHour, negative disables dreaming.
+	Hour int `json:"hour"`
+	// ModelPath is the GGUF the future local dreaming model loads. Unused this slice.
+	ModelPath string `json:"model_path"`
+	// Port is the loopback port reserved for the future local dreaming model server.
+	Port int `json:"port"`
+	// ShutdownCommand is what a finished night may run to power the machine down. Unused this slice.
+	ShutdownCommand string `json:"shutdown_command"`
+}
+
+// DefaultDreamHour is the local hour the dreaming window opens when the config leaves it zero.
+const DefaultDreamHour = 23
+
+// DefaultDreamPort continues the daemon's port run (6942 IPC, 6943 embeddings) with the next one up.
+const DefaultDreamPort = 6944
+
+// DreamHour returns the effective local hour the dreaming window opens: zero becomes DefaultDreamHour, a negative value passes through and means dreaming is disabled.
+func (d DreamConfig) DreamHour() int {
+	if d.Hour == 0 {
+		return DefaultDreamHour
+	}
+	return d.Hour
+}
+
+// DreamPort returns the reserved local-model port, defaulting to DefaultDreamPort.
+func (d DreamConfig) DreamPort() int {
+	if d.Port <= 0 {
+		return DefaultDreamPort
+	}
+	return d.Port
 }
 
 // ProactiveConfig sets the local hours after which the two daily proactive seams may run. A zero hour means the default (a config written before this block existed keeps working), and a negative hour disables that seam entirely.
@@ -67,7 +103,7 @@ type TranscribeConfig struct {
 type BrainConfig struct {
 	// Provider is BrainGeminiAPI (the default) or BrainClaudeCLI to run `claude -p` under whatever Claude Code login the machine already has. Anything else falls back to the Gemini API.
 	Provider string `json:"provider"`
-	// Model is the Gemini model name, defaulting to TextModel. The claude-cli provider ignores it and uses whatever model its own login is set to.
+	// Model names the model each provider should use: a Gemini model name (defaulting to TextModel), or for claude-cli a model alias passed as --model ("sonnet", "opus"); empty means the login's default.
 	Model string `json:"model"`
 	// Binary is the path to the claude CLI to run. Empty means look "claude" up on PATH.
 	Binary string `json:"binary"`

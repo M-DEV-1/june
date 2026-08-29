@@ -35,6 +35,9 @@ type Daemon struct {
 // sessionLocked reports whether the desktop session's lock screen is up; the platform file sets it (Linux: GNOME's screensaver over D-Bus). Nil means no way to know, which reads as unlocked.
 var sessionLocked func() bool
 
+// SessionLocked is the exported read of the lock probe for other packages (the overnight dreaming loop uses it as its idle signal). False when the platform gives no way to know.
+func SessionLocked() bool { return sessionLocked != nil && sessionLocked() }
+
 func (d *Daemon) Pause() { d.paused.Store(true) }
 
 // Resume re-enables activity emission after a Pause.

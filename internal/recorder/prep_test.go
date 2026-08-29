@@ -77,7 +77,9 @@ func TestPrepMeeting_MatchesByTitleFragment(t *testing.T) {
 	}
 	var got notifications
 	r.notify = got.add
-	r.minutes = func(ctx context.Context, prompt string) (string, error) { return "Acme Corp is still waiting on the Q3 numbers.", nil }
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		return "Acme Corp is still waiting on the Q3 numbers.", nil
+	}
 
 	r.prepMeeting()
 
