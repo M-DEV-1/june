@@ -48,13 +48,14 @@ const keepAudio = true
 // dirTimeLayout is how a recording directory is named, and therefore how its start time is read back when the sweep picks up an unfinished recording.
 const dirTimeLayout = "2006-01-02T15-04-05"
 
-// Store is the slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, the personal context that says who the [me] speaker is (and which a finished meeting can add a person to), and somewhere to file the minutes.
+// Store is the slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, the personal context that says who the [me] speaker is (and which a finished meeting can add a person to), somewhere to file the minutes, and — for meeting prep — every note filed so far to search for one about the people or meeting on screen right now.
 type Store interface {
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	SetPersonalContext(ctx context.Context, subject, content string) error
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	UpdateNote(ctx context.Context, id int64, content string) error
+	GetNotes(ctx context.Context) ([]db.Note, error)
 }
 
 // capturer is the running-capture half of audio.MeetingCapture, kept as an interface so tests can drive the pipeline without a sound server.
@@ -155,6 +156,9 @@ type Recorder struct {
 	// retryEvery is how often a deferred recording is checked on. Tests do not rely on it, driving pickup directly instead.
 	retryEvery time.Duration
 
+	// prepTimeout bounds the whole meeting-prep flow that Start fires off, the brain call included. Tests shorten it to check that a slow prep is dropped rather than delivered late.
+	prepTimeout time.Duration
+
 	// Seams, all set by New and replaced in tests: opening the sound streams, running whisper, finding the whisper binary, calling Gemini, posting a desktop notification, and asking whether the machine is plugged in.
 	capture     func(mic, system io.Writer) (capturer, time.Time, time.Time, error)
 	whisper     func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error)
@@ -181,6 +185,7 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	r.onAC = onACPower
 	r.silenceAfter = defaultSilenceAfter
 	r.retryEvery = defaultRetryEvery
+	r.prepTimeout = defaultPrepTimeout
 	r.swept = make(chan struct{})
 	go func() {
 		defer close(r.swept)
@@ -384,6 +389,8 @@ func (r *Recorder) Start() error {
 	}
 	// Notifying happens outside the lock, as it does on the stop path: notify shells out to notify-send, and holding the recorder's lock across a process spawn stalls anything asking whether a recording is running.
 	r.notify("Recording meeting", "Ora is recording. Stop it from the tray when the call ends.")
+	// The moment recording starts is the moment Ora knows a call is happening, so it is also the moment to look for what matters from the last time these people met. It runs in its own goroutine and is best-effort throughout: Start must return the instant capture is open, and a slow or empty prep must never hold that up. r.live already guards against Start running twice for one meeting, so this fires at most once per recording the same way the "Recording meeting" notice does.
+	go r.prepMeeting()
 	return nil
 }
 
