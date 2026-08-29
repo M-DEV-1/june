@@ -850,7 +850,7 @@ func TestRecorder_RegenerationSkipsTheLiveRecording(t *testing.T) {
 	}
 }
 
-// onACPower reads the kernel's power supply class, so a battery-only machine and a plugged-in one are told apart from the files themselves.
+// OnACPower reads the kernel's power supply class, so a battery-only machine and a plugged-in one are told apart from the files themselves.
 func TestOnACPower(t *testing.T) {
 	write := func(t *testing.T, supplies map[string][2]string) string {
 		root := t.TempDir()
@@ -884,8 +884,8 @@ func TestOnACPower(t *testing.T) {
 			old := powerSupplyRoot
 			powerSupplyRoot = write(t, c.supplies)
 			defer func() { powerSupplyRoot = old }()
-			if got := onACPower(); got != c.want {
-				t.Errorf("onACPower() = %v, want %v", got, c.want)
+			if got := OnACPower(); got != c.want {
+				t.Errorf("OnACPower() = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -896,7 +896,7 @@ func TestOnACPower_UnknownCountsAsMains(t *testing.T) {
 	old := powerSupplyRoot
 	powerSupplyRoot = filepath.Join(t.TempDir(), "does-not-exist")
 	defer func() { powerSupplyRoot = old }()
-	if !onACPower() {
+	if !OnACPower() {
 		t.Error("a machine that cannot report its power source must be treated as on mains")
 	}
 }
