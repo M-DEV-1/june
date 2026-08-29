@@ -1167,7 +1167,7 @@ func TestSystemInstructionText_SynthesisBeforeEvidence(t *testing.T) {
 	got := strings.ToLower(systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "", "some context", 5))
 
 	for _, want := range []string{
-		"answer in one sentence",
+		"lead with the answer",
 		"your evidence, never your answer",
 		"never read a list out loud",
 	} {
