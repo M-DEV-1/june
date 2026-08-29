@@ -499,3 +499,20 @@ func TestTick_ForceMarkerBypassesGates(t *testing.T) {
 		t.Error("the force marker must be consumed by the run")
 	}
 }
+
+// Past the Claude curfew (03:25) an unforced dream must not start: an overnight five-hour usage window opened after it would bleed into the user's 08:30 workday window.
+func TestTick_CurfewHoldsTheNight(t *testing.T) {
+	store := testStore(t)
+	night := at(4, 0).AddDate(0, 0, -1).Format(dayFormat)
+	if err := store.SetDiaryEntry(context.Background(), night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, brain, yesProbes(), at(4, 0))
+
+	r.Tick(context.Background())
+
+	if len(brain.askedKinds()) != 0 {
+		t.Errorf("a 04:00 tick made brain calls %v, want none past the curfew", brain.askedKinds())
+	}
+}
