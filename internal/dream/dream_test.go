@@ -3,6 +3,8 @@ package dream
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -472,3 +474,28 @@ type flag struct {
 
 func (f *flag) set(v bool) { f.mu.Lock(); f.v = v; f.mu.Unlock() }
 func (f *flag) get() bool  { f.mu.Lock(); defer f.mu.Unlock(); return f.v }
+
+// The force marker makes a tick dream immediately with the away-gates bypassed, and is consumed so one touch means one run.
+func TestTick_ForceMarkerBypassesGates(t *testing.T) {
+	store := testStore(t)
+	if err := store.SetDiaryEntry(context.Background(), at(23, 30).Format(dayFormat), "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	probes := Probes{OnAC: func() bool { return false }, SessionLocked: func() bool { return false }, RecorderQuiescent: func() bool { return false }}
+	r := newRunner(store, brain, probes, at(23, 30))
+	marker := filepath.Join(t.TempDir(), "dream-now")
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.ForceMarker = marker
+
+	r.Tick(context.Background())
+
+	if len(brain.askedKinds()) == 0 {
+		t.Error("a forced tick must dream despite every away-gate failing")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Error("the force marker must be consumed by the run")
+	}
+}
