@@ -42,6 +42,8 @@ type DreamConfig struct {
 	Port int `json:"port"`
 	// ShutdownCommand is what a finished night may run to power the machine down. Unused this slice.
 	ShutdownCommand string `json:"shutdown_command"`
+	// Brain overrides which backend dreams. An empty provider means the main Brain block — but a dream brain that is not claude-cli is exempt from the Claude window curfew, which is the point of setting one: the other paid CLIs can dream all night without touching the user's Claude usage windows.
+	Brain BrainConfig `json:"brain"`
 }
 
 // DefaultDreamHour is the local hour the dreaming window opens when the config leaves it zero.
@@ -115,6 +117,8 @@ type BrainConfig struct {
 const (
 	BrainGeminiAPI = "gemini-api"
 	BrainClaudeCLI = "claude-cli"
+	BrainAgyCLI    = "agy-cli"
+	BrainGrokCLI   = "grok-cli"
 )
 
 // DefaultBrainTimeoutSeconds caps one CLI run. Measured on this machine: `claude -p` answered a trivial prompt in 3.6 seconds, and a meeting transcript is a far bigger input than that. A CLI with no terminal attached can also sit forever, so the cap is generous but finite: five minutes.

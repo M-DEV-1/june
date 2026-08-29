@@ -71,6 +71,9 @@ type Runner struct {
 
 	// ForceMarker is the path of a file whose presence makes the next tick dream immediately, bypassing the window and away-gates — the way to watch a dream run without leaving the machine. The marker is consumed, and a forced run arms no preemption watcher, since the user being present is the whole point.
 	ForceMarker string
+
+	// CurfewExempt lifts the Claude-window curfew: a dream brain that is not claude-cli (grok, agy) spends no Claude usage, so it may run right up to the morning brief.
+	CurfewExempt bool
 }
 
 // New builds a Runner from the store, a one-shot brain, the machine probes, and the two local hours that bound the window.
@@ -122,8 +125,8 @@ func (r *Runner) Tick(ctx context.Context) {
 	if !forced && !r.inWindow(now.Hour()) {
 		return
 	}
-	// Past the curfew the whole run waits for tomorrow night: a dream started at 03:20 could still be making brain calls at 03:40, so the gate is on starting at all, with a resumed run equally held.
-	if !forced && now.Hour()*60+now.Minute() >= brainCurfewMinutes && now.Hour() < r.briefHour {
+	// Past the curfew the whole run waits for tomorrow night: a dream started at 03:20 could still be making brain calls at 03:40, so the gate is on starting at all, with a resumed run equally held. Only Claude spends the user's usage windows, so a non-claude dream brain is exempt.
+	if !forced && !r.CurfewExempt && now.Hour()*60+now.Minute() >= brainCurfewMinutes && now.Hour() < r.briefHour {
 		return
 	}
 	night := r.nightKey(now)
@@ -163,6 +166,9 @@ func (r *Runner) Tick(ctx context.Context) {
 	}
 	r.dream(ctx, night, run, exists, locked && !forced, lastEpisode, fallback, forced)
 }
+
+// SetBrain swaps which backend dreams — the daemon calls it when the config names a dedicated dream brain.
+func (r *Runner) SetBrain(b brain.Brain) { r.brain = b }
 
 // consumeForceMarker reports whether the manual dream trigger is set, removing it so one touch means one run.
 func (r *Runner) consumeForceMarker() bool {
