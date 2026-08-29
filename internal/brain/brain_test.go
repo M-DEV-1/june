@@ -85,7 +85,7 @@ func TestClaudeCLI(t *testing.T) {
 			if timeout == 0 {
 				timeout = 10
 			}
-			got, err := ClaudeCLI(bin, timeout)(context.Background(), "summarise this")
+			got, err := ClaudeCLI(bin, "", timeout)(context.Background(), "summarise this")
 
 			if tt.wantErr != "" {
 				if err == nil {
@@ -109,7 +109,7 @@ func TestClaudeCLI(t *testing.T) {
 // The prompt goes in on stdin, because a meeting transcript is far longer than a single argv entry may be. The flags are the subscription path: -p with JSON output, no --bare (which would switch billing to an API key), and no tools, because the prompt carries text the user never wrote.
 func TestClaudeCLI_invocation(t *testing.T) {
 	bin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"ok"}'`)
-	if _, err := ClaudeCLI(bin, 10)(context.Background(), "the whole transcript"); err != nil {
+	if _, err := ClaudeCLI(bin, "", 10)(context.Background(), "the whole transcript"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -130,14 +130,14 @@ func TestClaudeCLI_invocation(t *testing.T) {
 // A headless hang is cut off by the timeout.
 func TestClaudeCLI_timeout(t *testing.T) {
 	bin := fakeCLI(t, "claude", `sleep 5`)
-	_, err := ClaudeCLI(bin, 1)(context.Background(), "summarise this")
+	_, err := ClaudeCLI(bin, "", 1)(context.Background(), "summarise this")
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("error = %v, want it to contain %q", err, "timed out")
 	}
 }
 
 func TestClaudeCLI_missingBinary(t *testing.T) {
-	_, err := ClaudeCLI(filepath.Join(t.TempDir(), "not-installed"), 10)(context.Background(), "hi")
+	_, err := ClaudeCLI(filepath.Join(t.TempDir(), "not-installed"), "", 10)(context.Background(), "hi")
 	if err == nil {
 		t.Fatal("a missing binary should be an error, not an empty answer")
 	}
@@ -187,5 +187,17 @@ func TestFromConfig(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A configured model rides through to --model, so writing duties can run on a cheaper tier than the login's default; empty keeps the default.
+func TestClaudeCLI_ModelFlag(t *testing.T) {
+	bin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"ok"}'`)
+	if _, err := ClaudeCLI(bin, "sonnet", 10)(context.Background(), "hi"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	args, _ := recorded(t, bin)
+	if !strings.Contains(args, "--model\nsonnet\n") {
+		t.Errorf("argv is missing --model sonnet:\n%s", args)
 	}
 }

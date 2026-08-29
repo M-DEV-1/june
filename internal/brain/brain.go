@@ -24,7 +24,8 @@ func FromConfig(cfg config.BrainConfig, apiKey string) Brain {
 	}
 	switch cfg.Provider {
 	case config.BrainClaudeCLI:
-		return ClaudeCLI(or(cfg.Binary, "claude"), timeout)
+		// cfg.Model rides through to `--model`, so the writing duties can be pinned to a cheaper tier than the login's default.
+		return ClaudeCLI(or(cfg.Binary, "claude"), cfg.Model, timeout)
 	case "", config.BrainGeminiAPI:
 	default:
 		slog.Warn("unknown brain provider in config, using the Gemini API", "provider", cfg.Provider)
