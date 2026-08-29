@@ -17,10 +17,14 @@ import (
 // --bare is deliberately never passed: it makes the CLI read ANTHROPIC_API_KEY instead of the login, which is the billing this whole path exists to avoid.
 // --restricted, --strict-mcp-config, and an empty --tools list are always passed, because the prompt carries text nobody vetted (a meeting transcript, whatever was on the user's screens) and this duty needs no tools at all — --restricted alone still leaves file tools available, so the empty tool list is what actually closes the door.
 // The prompt goes in on stdin: a single argv entry is capped at 128 KB on Linux and a long meeting is bigger than that.
-// Input: the path to the binary and a hard timeout in seconds. Output: the "result" field of the CLI's JSON.
-func ClaudeCLI(binary string, timeoutSeconds int) Brain {
+// Input: the path to the binary, the model to ask for ("" = whatever the login defaults to), and a hard timeout in seconds. Output: the "result" field of the CLI's JSON.
+func ClaudeCLI(binary, model string, timeoutSeconds int) Brain {
 	return func(ctx context.Context, prompt string) (string, error) {
-		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"-p", "--output-format", "json", "--restricted", "--strict-mcp-config", "--tools", ""}, prompt)
+		args := []string{"-p", "--output-format", "json", "--restricted", "--strict-mcp-config", "--tools", ""}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		out, err := runCLI(ctx, binary, timeoutSeconds, args, prompt)
 		if err != nil {
 			return "", err
 		}
