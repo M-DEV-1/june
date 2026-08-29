@@ -2440,3 +2440,26 @@ func TestFormatHit_ThreadCarriesRefID(t *testing.T) {
 		t.Errorf("FormatHit = %q, want the age kept alongside the id", got)
 	}
 }
+
+// SummaryTimeline must carry each node's real creation time: the recall tier groups its lines by day, so a zeroed date collapses a whole week into one fake day (which is exactly what shipped the first time — every line read "[Jan 1]").
+func TestSummaryTimeline_CarriesRealDates(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "climate scoring", Summary: "adjusting vulnerability scores"}); err != nil {
+		t.Fatalf("LogSemanticNode: %v", err)
+	}
+	sums, err := store.SummaryTimeline(ctx, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SummaryTimeline: %v", err)
+	}
+	if len(sums) != 1 {
+		t.Fatalf("got %d summaries, want 1", len(sums))
+	}
+	if sums[0].CreatedAt.IsZero() || time.Since(sums[0].CreatedAt) > 5*time.Minute {
+		t.Errorf("CreatedAt = %v, want the node's real creation time", sums[0].CreatedAt)
+	}
+}

@@ -599,13 +599,10 @@ func (s *Store) SummaryTimeline(ctx context.Context, since, until time.Time) ([]
 	var out []WindowSummary
 	for rows.Next() {
 		var w WindowSummary
-		var created string
-		if err := rows.Scan(&created, &w.Content); err != nil {
+		// The driver converts the DATETIME column itself; scanning through a string re-parses its formatting instead of the stored value and zeroed every date the first time this ran.
+		if err := rows.Scan(&w.CreatedAt, &w.Content); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("scan summary timeline: %w", err)
-		}
-		if t, err := time.Parse("2006-01-02 15:04:05", created); err == nil {
-			w.CreatedAt = t.UTC()
 		}
 		out = append(out, w)
 	}
