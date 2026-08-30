@@ -34,12 +34,19 @@ type Scheduler struct {
 	closeHour int
 	// now is the clock, replaceable in tests. Day boundaries and hour checks are all local time.
 	now func() time.Time
+	// weeklyStudy runs the Sunday-only weekly system log + distillation study pass; unset (the zero value) disables the trigger entirely. See SetWeeklyStudy.
+	weeklyStudy func(ctx context.Context, now time.Time) error
 }
 
 // New builds a Scheduler from the store, a one-shot brain, a desktop-notification func (NotifySend in production), and the proactive config, whose zero hours resolve to the defaults.
 func New(store *db.Store, b brain.Brain, notify func(title, body string), cfg config.ProactiveConfig) *Scheduler {
 	briefHour, closeHour := cfg.Hours()
 	return &Scheduler{store: store, brain: b, notify: notify, briefHour: briefHour, closeHour: closeHour, now: time.Now}
+}
+
+// SetWeeklyStudy wires the Sunday-only weekly system log + distillation study pass — cmd/daemon.go is the only production caller. Unset, the trigger never fires.
+func (s *Scheduler) SetWeeklyStudy(fn func(ctx context.Context, now time.Time) error) {
+	s.weeklyStudy = fn
 }
 
 // Run checks the brief and close conditions once a minute until ctx ends. A condition that is not yet met, or a duty that failed, is simply re-checked on the next tick.
@@ -61,6 +68,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) tick(ctx context.Context) {
 	s.maybeBrief(ctx)
 	s.maybeClose(ctx)
+	s.maybeWeeklyStudy(ctx)
 }
 
 // maybeClose writes the day's diary entry once the close hour has passed, provided today has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
@@ -299,6 +307,36 @@ func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string)
 	}
 	s.notify("Morning brief", brief)
 	return nil
+}
+
+// maybeWeeklyStudy fires the Sunday-only weekly system log + distillation study pass, once the brief hour has passed and the user's first activity of the day shows up — the same first-activity gate maybeBrief uses, so it rides the Claude workday window rather than firing overnight. Disabled when no weeklyStudy func is wired (SetWeeklyStudy never called) or the brief hour itself is disabled. Today's kind='weekly-study' diary row is the once-per-Sunday marker, written after the attempt regardless of its outcome — a failed pass is logged, not retried every minute for the rest of the day.
+func (s *Scheduler) maybeWeeklyStudy(ctx context.Context) {
+	if s.weeklyStudy == nil || s.briefHour < 0 {
+		return
+	}
+	now := s.now()
+	if now.Weekday() != time.Sunday || now.Hour() < s.briefHour {
+		return
+	}
+	day := now.Format(dayFormat)
+	existing, err := s.store.DiaryEntry(ctx, day, "weekly-study")
+	if err != nil {
+		slog.Warn("weekly study: reading marker failed", "error", err)
+		return
+	}
+	if existing != "" {
+		return
+	}
+	last, err := s.store.MemoryAsOf(ctx, "episode:recent")
+	if err != nil || last.IsZero() || s.now().Sub(last) > activityWindow {
+		return
+	}
+	if err := s.weeklyStudy(ctx, now); err != nil {
+		slog.Warn("weekly study failed", "error", err)
+	}
+	if err := s.store.SetDiaryEntry(ctx, day, "weekly-study", "weekly system log and distillation study ran"); err != nil {
+		slog.Warn("weekly study: writing marker failed", "error", err)
+	}
 }
 
 // summaryText pulls the prose out of a summary node's content: task summaries are stored as marshalled JSON (see db.LogSemanticNode) and the model should read the sentence, not the blob. Digests and anything non-JSON pass through unchanged.

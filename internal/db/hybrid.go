@@ -404,6 +404,8 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 		fused = fused[:limit]
 	}
 
+	s.recordVectorContribution(fused, vector)
+
 	out := make([]MemoryHit, len(fused))
 	for i, c := range fused {
 		source, refID := splitCandidateID(c.id)
@@ -421,4 +423,31 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 		}
 	}
 	return out, nil
+}
+
+// recordVectorContribution is the vector-arm contribution counter: for one HybridSearchWindow call, did any of the vector-search candidates survive fusion into the final (post-limit) top-k, and how many. Recorded into the tally table (see db.go's schema comment) as two rows dated today (local): "vector-queries" ticks once per call regardless of outcome, and "vector-hits" ticks once, with the survivor count folded into its total_ms column, only when at least one did. Best-effort — a tally write failure is logged and never surfaces to the caller, same discipline every other accounting write in this package follows.
+func (s *Store) recordVectorContribution(fused, vector []rrfCandidate) {
+	day := time.Now().Format(tallyDayFormat)
+	if err := s.bumpTally(day, "vector-queries", 1, 0, 0); err != nil {
+		slog.Warn("tally: recording vector-queries failed", "error", err)
+	}
+	if len(vector) == 0 {
+		return
+	}
+	fromVector := make(map[string]bool, len(vector))
+	for _, c := range vector {
+		fromVector[c.id] = true
+	}
+	survivors := 0
+	for _, c := range fused {
+		if fromVector[c.id] {
+			survivors++
+		}
+	}
+	if survivors == 0 {
+		return
+	}
+	if err := s.bumpTally(day, "vector-hits", 1, 0, int64(survivors)); err != nil {
+		slog.Warn("tally: recording vector-hits failed", "error", err)
+	}
 }
