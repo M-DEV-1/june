@@ -314,7 +314,10 @@ func (s *Store) createSchema() error {
 	-- calendar day (day = 'YYYY-MM-DD'); kind 'understanding' is the single bounded
 	-- current-model-of-the-user document (day = ''), rewritten in place each evening;
 	-- kind 'brief' records the morning brief delivered that day and doubles as its
-	-- once-per-day marker. Upserted by (day, kind) — see SetDiaryEntry.
+	-- once-per-day marker; kind 'dream' is a night's morning report. The dreaming
+	-- loop's compaction collapses old 'day' rows into 'week' (day = the Monday) and
+	-- old 'week' rows into 'month' (day = 'YYYY-MM-01'). Upserted by (day, kind) —
+	-- see SetDiaryEntry.
 	CREATE TABLE IF NOT EXISTS diary (
 		id INTEGER PRIMARY KEY,
 		day TEXT NOT NULL,
@@ -365,6 +368,24 @@ func (s *Store) createSchema() error {
 		times_tested INTEGER NOT NULL DEFAULT 0,
 		evidence TEXT NOT NULL DEFAULT '',
 		reason TEXT NOT NULL DEFAULT ''
+	);
+
+	-- tally: self-accounting counters, one row per local calendar day per provider.
+	-- "provider" is either a brain backend name ("claude-cli", "gemini", ...) or one
+	-- of two vector-contribution pseudo-providers written by hybrid.go's fusion
+	-- counter: "vector-queries" (one row per HybridSearch call) and "vector-hits"
+	-- (one row per call where a vector-arm candidate survived into the final top-k).
+	-- For real brain providers, total_ms accumulates call latency in milliseconds;
+	-- for "vector-hits" that column is repurposed to accumulate the raw count of
+	-- surviving vector candidates instead (see recordVectorContribution) rather than
+	-- add a second table for one integer. See internal/tally for the reader/writer.
+	CREATE TABLE IF NOT EXISTS tally (
+		day TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		calls INTEGER NOT NULL DEFAULT 0,
+		failures INTEGER NOT NULL DEFAULT 0,
+		total_ms INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, provider)
 	);
 	`
 	// db struc: USER --> DAY --> SESSION --> ACTIVITY
@@ -1370,6 +1391,17 @@ func (s *Store) GetLiveThreads(ctx context.Context, limit int) ([]memory.Thread,
 
 	return s.queryThreads(ctx, span,
 		`SELECT id,subject,kind,IFNULL(state,''),salience,times_seen,last_seen_at,status FROM threads WHERE last_seen_at >= datetime('now','-2 days') ORDER BY last_seen_at DESC LIMIT ?`,
+		limit)
+}
+
+// ActiveThreads returns up to limit status='active' threads, most recently seen first. No recency window on purpose: the dreaming loop wants the standing picture of what is going on in the user's life, not just the last two days of it.
+func (s *Store) ActiveThreads(ctx context.Context, limit int) ([]memory.Thread, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.ActiveThreads")
+	defer span.End()
+
+	return s.queryThreads(ctx, span,
+		`SELECT id,subject,kind,IFNULL(state,''),salience,times_seen,last_seen_at,status FROM threads WHERE status = 'active' ORDER BY last_seen_at DESC LIMIT ?`,
 		limit)
 }
 
