@@ -21,6 +21,8 @@ import (
 	"ora/internal/memory"
 	"ora/internal/proactive"
 	"ora/internal/recorder"
+	"ora/internal/study"
+	"ora/internal/tally"
 	"ora/internal/tracker"
 	"ora/internal/vector"
 )
@@ -83,6 +85,16 @@ func (v *vectorIndexAdapter) Delete(ctx context.Context, id string) error {
 }
 
 func (v *vectorIndexAdapter) IDs() []string { return v.inner.IDs() }
+
+// brainProviderName names a configured brain for the tally counters (see internal/tally.Wrap): the config's own provider constant when it's one of the recognised CLIs, "gemini" for the default/empty/explicit-Gemini-API case.
+func brainProviderName(cfg config.BrainConfig) string {
+	switch cfg.Provider {
+	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI:
+		return cfg.Provider
+	default:
+		return "gemini"
+	}
+}
 
 // every runs fn on a ticker every interval until ctx is done — the ticker/select/ctx.Done skeleton every one of the daemon's background jobs otherwise repeated by hand. Each job's own logging/error-handling stays inside its fn closure; name is only for the stop-log line below.
 func every(ctx context.Context, interval time.Duration, name string, fn func()) {
@@ -275,21 +287,52 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
-	go proactive.New(store, brain.FromConfig(appConfig.Brain, apiKey), proactive.NotifySend, appConfig.Proactive).Run(ctx)
+	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.FromConfig(appConfig.Brain, apiKey), store)
+	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
+	// Sunday-only: render the week's self-accounting log, then run the distillation study pass over the same replay/trace material evals/main.go's track 6 uses — on the daemon's own main brain (claude-cli sonnet by default), which deliberately rides the user's Claude workday window rather than running overnight.
+	scheduler.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
+		if err := tally.RunWeeklyLog(ctx, store, now); err != nil {
+			slog.Warn("weekly system log failed", "error", err)
+		}
+		replays, _ := filepath.Glob("evals/replays/*.md")
+		traces, _ := filepath.Glob(filepath.Join(config.DataDir(), "dreams", "*.jsonl"))
+		if res, err := study.Study(ctx, mainBrain, replays, traces, filepath.Join(config.DataDir(), "study")); err != nil {
+			slog.Warn("weekly distillation study failed", "error", err)
+		} else {
+			slog.Info("weekly distillation study complete", "replays", res.ReplaysRead, "traces", res.TracesRead, "lessons_added", res.LessonsAdded)
+		}
+		return nil
+	})
+	go scheduler.Run(ctx)
 
 	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
 	dreamBriefHour, _ := appConfig.Proactive.Hours()
-	dreamer := dream.New(store, brain.FromConfig(appConfig.Brain, apiKey), dream.Probes{
+	dreamer := dream.New(store, tally.Wrap(brainProviderName(appConfig.Brain), brain.FromConfig(appConfig.Brain, apiKey), store), dream.Probes{
 		OnAC:              recorder.OnACPower,
 		SessionLocked:     tracker.SessionLocked,
 		RecorderQuiescent: meetingRecorder.Quiescent,
 	}, appConfig.Dream.DreamHour(), dreamBriefHour)
 	// Touching this file makes the next tick dream immediately, gates bypassed — the way to watch a run without leaving the machine.
 	dreamer.ForceMarker = filepath.Join(config.DataDir(), "dream-now")
+	// Night traces: every dream brain call's raw reply lands in <data>/dreams/<night>.jsonl as raw material for a later distillation pass.
+	dreamer.DataDir = config.DataDir()
 	// A dream brain of its own (grok, agy) frees the night from the Claude window curfew, since it spends none of the user's Claude usage.
 	if p := appConfig.Dream.Brain.Provider; p != "" {
-		dreamer.SetBrain(brain.FromConfig(appConfig.Dream.Brain, apiKey))
+		dreamer.SetBrain(tally.Wrap(brainProviderName(appConfig.Dream.Brain), brain.FromConfig(appConfig.Dream.Brain, apiKey), store))
 		dreamer.CurfewExempt = p != config.BrainClaudeCLI
+	}
+	// Nightly dual-run: a local Gemma shadows the primary dream brain on the same prompts, replies logged for comparison, never acted on. The daemon owns the llama-server child for exactly one night's run — started before the stages, stopped after. The binary is the same llama-server the embedder already runs (appConfig.Embed.LlamaServer); a config with a dream model_path but no embed.llama_server falls back to PATH.
+	if appConfig.Dream.ModelPath != "" {
+		port := appConfig.Dream.DreamPort()
+		binary := appConfig.Embed.LlamaServer
+		if binary == "" {
+			binary = "llama-server"
+		}
+		dreamer.ShadowLifecycle = dream.NewLlamaServerLifecycle(binary, appConfig.Dream.ModelPath, port, appConfig.Dream.Device)
+		dreamer.Shadow = tally.Wrap("llama-shadow", brain.LlamaServer(fmt.Sprintf("http://127.0.0.1:%d", port), 600), store)
+		if embedEngine != nil {
+			dreamer.GPUReleaser = embedEngine.StopIfIdle
+		}
 	}
 	go every(ctx, 5*time.Minute, "dreaming", func() { dreamer.Tick(ctx) })
 
