@@ -17,6 +17,62 @@ func dreamStore(t *testing.T) *Store {
 	return store
 }
 
+// CommitCompactStage is one transaction per tier: the coarse entry lands, the constituents (and only they) are deleted with the FTS mirror following, and the 'compact' token commits only on the call that says the stage is done.
+func TestCommitCompactStage(t *testing.T) {
+	ctx := context.Background()
+	store := dreamStore(t)
+	if err := store.StartDreamRun(ctx, "2026-08-30"); err != nil {
+		t.Fatal(err)
+	}
+	for _, day := range []string{"2026-08-03", "2026-08-04", "2026-08-05"} {
+		if err := store.SetDiaryEntry(ctx, day, "day", "A daily for "+day+"."); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetDiaryEntry(ctx, "2026-08-04", "dream", "A morning report."); err != nil {
+		t.Fatal(err)
+	}
+
+	comps := []DiaryCompaction{{Day: "2026-08-03", Kind: "week", Content: "A compacted week.", ConstituentKind: "day", ConstituentDays: []string{"2026-08-03", "2026-08-04"}}}
+	if err := store.CommitCompactStage(ctx, "2026-08-30", comps, false); err != nil {
+		t.Fatalf("CommitCompactStage: %v", err)
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-08-03", "week"); got != "A compacted week." {
+		t.Errorf("week entry = %q", got)
+	}
+	for _, day := range []string{"2026-08-03", "2026-08-04"} {
+		if got, _ := store.DiaryEntry(ctx, day, "day"); got != "" {
+			t.Errorf("constituent %s survived: %q", day, got)
+		}
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-08-05", "day"); got == "" {
+		t.Error("a daily outside the constituents was deleted")
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-08-04", "dream"); got == "" {
+		t.Error("the delete must match kind as well as day")
+	}
+	run, _, _ := store.DreamRun(ctx, "2026-08-30")
+	if run.StagesDone != "" {
+		t.Errorf("stages_done = %q before the done call", run.StagesDone)
+	}
+	// The FTS mirror follows the deletes: only the surviving rows are indexed.
+	var n int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM memory_fts WHERE source = 'diary'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Errorf("memory_fts holds %d diary rows, want 3 (week, spare daily, dream report)", n)
+	}
+
+	if err := store.CommitCompactStage(ctx, "2026-08-30", nil, true); err != nil {
+		t.Fatalf("done call: %v", err)
+	}
+	run, _, _ = store.DreamRun(ctx, "2026-08-30")
+	if run.StagesDone != "compact" {
+		t.Errorf("stages_done = %q, want the token exactly once", run.StagesDone)
+	}
+}
+
 // The dream_runs PK is the single-run-per-night guarantee: a second start is a no-op, stage commits append their tokens, and FinishDreamRun stamps finished_at, files the one-line report, and writes the FTS-visible diary dream row.
 func TestDreamRunLifecycle(t *testing.T) {
 	ctx := context.Background()

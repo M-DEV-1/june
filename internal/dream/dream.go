@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -41,6 +43,16 @@ const (
 	staleAfterDays = 30
 	// defaultWatchEvery is how often the preemption watcher polls for the user's return.
 	defaultWatchEvery = 5 * time.Second
+	// evidenceBudget caps the assembled evidence material in bytes; when the week holds more, the oldest items fall away first so the judge always reads the newest material.
+	evidenceBudget = 24 * 1024
+	// evidenceThreads is how many active threads the evidence lists.
+	evidenceThreads = 30
+	// meetingLineCap is how many leading lines of one meeting's minutes the evidence carries.
+	meetingLineCap = 40
+	// compactAfterDays is how old every daily in a Mon-Sun week must be before the week collapses into one kind='week' diary entry.
+	compactAfterDays = 7
+	// compactWeeksToMonth is how old, in weeks, a week entry must be before it may fold into its month's entry.
+	compactWeeksToMonth = 10
 )
 
 // contradictedMark is what a contradiction's evidence line contains, and what the retirement mechanic counts. The lines are written by evidenceLine below, so the format is ours to rely on.
@@ -74,6 +86,21 @@ type Runner struct {
 
 	// CurfewExempt lifts the Claude-window curfew: a dream brain that is not claude-cli (grok, agy) spends no Claude usage, so it may run right up to the morning brief.
 	CurfewExempt bool
+
+	// DataDir, when set, is where night traces land: every brain call's kind and raw reply appended to <DataDir>/dreams/<night>.jsonl as distillation raw material for a later weekly study pass. Empty disables tracing.
+	DataDir string
+
+	// Shadow is an optional second brain fired with the same prompt as every primary brain call, purely for offline comparison: its reply is traced under the primary call's kind with "-shadow" appended and never parsed, stored, or allowed to affect a verdict. Nil disables shadowing.
+	Shadow brain.Brain
+
+	// ShadowLifecycle optionally starts the server Shadow talks to before the night's stages and stops it after. Zero value (both funcs nil) means the shadow's backend is already reachable, or there is none to manage.
+	ShadowLifecycle ShadowLifecycle
+
+	// activeShadow is what ask() actually fires this run: a copy of Shadow, cleared for the run alone when ShadowLifecycle.Start fails, so a bad night never mutates the Shadow the next night would otherwise get.
+	activeShadow brain.Brain
+
+	// GPUReleaser asks the GPU's other tenant to leave before the shadow lifecycle starts — the daemon points it at the embedding server's StopIfIdle. Best-effort and nil-safe: its bool return is ignored, since a shadow that fails to start already runs the night shadowless. Nil means there is nothing sharing the card.
+	GPUReleaser func() bool
 }
 
 // New builds a Runner from the store, a one-shot brain, the machine probes, and the two local hours that bound the window.
@@ -204,6 +231,19 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		go r.watchForUser(ctx, cancel, lockedAtStart, baseline)
 	}
 
+	r.activeShadow = r.Shadow
+	if r.activeShadow != nil && r.ShadowLifecycle.Start != nil {
+		if r.GPUReleaser != nil {
+			r.GPUReleaser()
+		}
+		if err := r.ShadowLifecycle.Start(ctx); err != nil {
+			slog.Warn("dreaming: shadow lifecycle failed to start, running the night without a shadow", "night", night, "error", err)
+			r.activeShadow = nil
+		} else if r.ShadowLifecycle.Stop != nil {
+			defer r.ShadowLifecycle.Stop()
+		}
+	}
+
 	started := r.now()
 	done := strings.Fields(run.StagesDone)
 	var notes []string
@@ -232,7 +272,18 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		slog.Info("dreaming: understanding stage committed", "night", night)
 	}
 
-	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, notes); err != nil {
+	var comp *compactReport
+	if !slices.Contains(done, "compact") {
+		rep, err := r.compactStage(ctx, night)
+		if err != nil {
+			slog.Warn("dreaming: compaction stage did not commit", "night", night, "error", err)
+			return
+		}
+		comp = &rep
+		slog.Info("dreaming: compaction stage committed", "night", night, "weeks", rep.weeks, "months", rep.months)
+	}
+
+	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, comp, notes); err != nil {
 		slog.Warn("dreaming: finishing the night failed", "night", night, "error", err)
 		return
 	}
@@ -291,7 +342,7 @@ func (r *Runner) hypStage(ctx context.Context, night string, fallback bool) (sta
 	if err != nil {
 		return rep, err
 	}
-	material, haveDailies, err := r.evidenceMaterial(ctx, night, fallback)
+	ev, err := r.evidenceMaterial(ctx, night, fallback)
 	if err != nil {
 		return rep, err
 	}
@@ -300,7 +351,7 @@ func (r *Runner) hypStage(ctx context.Context, night string, fallback bool) (sta
 	judged := map[int64]bool{}
 	if len(open) > 0 {
 		var raw []rawVerdict
-		err := r.askJSON(ctx, verdictPrompt(open, material), &raw)
+		err := r.askJSON(ctx, night, "verdicts", verdictPrompt(open, ev.full), &raw)
 		switch {
 		case errors.Is(err, errUnparsable):
 			rep.lines = append(rep.lines, "The judge's verdicts never parsed as JSON, so no hypotheses were tested tonight.")
@@ -342,9 +393,9 @@ func (r *Runner) hypStage(ctx context.Context, night string, fallback bool) (sta
 	}
 
 	var adopted []db.NewHypothesis
-	if haveDailies {
+	if ev.haveDailies {
 		var raw []rawHypothesis
-		err := r.askJSON(ctx, extractPrompt(open, material), &raw)
+		err := r.askJSON(ctx, night, "extract", extractPrompt(open, ev.diary), &raw)
 		switch {
 		case errors.Is(err, errUnparsable):
 			rep.lines = append(rep.lines, "The extraction reply never parsed as JSON, so no new hypotheses were adopted.")
@@ -362,46 +413,252 @@ func (r *Runner) hypStage(ctx context.Context, night string, fallback bool) (sta
 	return rep, r.store.CommitHypothesisStage(ctx, night, verdicts, adopted)
 }
 
-// evidenceMaterial assembles the evidence the two hypothesis calls share: the last seven diary day entries and, when the fallback is on, the night's raw summary timeline. haveDailies reports whether any diary material exists for the extraction call to mine.
-func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bool) (material string, haveDailies bool, err error) {
+// evidence is the grounded material the hypothesis stage assembles: full carries every section for the judging call, diary only the diary entries (and the fallback summaries) for the extraction call, and haveDailies whether extraction has anything to mine.
+type evidence struct {
+	full        string
+	diary       string
+	haveDailies bool
+}
+
+// evidence section indices, in the order the material renders them.
+const (
+	secDiary = iota
+	secWork
+	secThreads
+	secMeetings
+	secFallback
+	secCount
+)
+
+// evidenceHeaders label the sections; the fallback header only renders on a night whose diary entry never arrived.
+var evidenceHeaders = [secCount]string{"Diary:", "The week's work:", "Ongoing threads:", "Meetings:", "Today's screen summaries (no diary entry was written tonight):"}
+
+// evidenceItem is one datable block of evidence, tagged with its section so the budget can drop the oldest items across all sections while the rendering keeps them grouped.
+type evidenceItem struct {
+	section int
+	at      time.Time
+	text    string
+}
+
+// evidenceMaterial assembles the grounded evidence the hypothesis calls read: the last week of diary entries, the week's work summaries, the standing active threads, and the week's meeting minutes, all budget-capped with the oldest items truncated first. The fallback section (the night's raw summaries when no diary entry was written) rides along for both calls, as before.
+func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bool) (evidence, error) {
+	var ev evidence
+	now := r.now()
+	var items []evidenceItem
+
 	dailies, err := r.store.DiaryDays(ctx, nightMinus(night, 6), night)
 	if err != nil {
-		return "", false, err
+		return ev, err
 	}
-	var b strings.Builder
+	ev.haveDailies = len(dailies) > 0
 	for _, d := range dailies {
-		fmt.Fprintf(&b, "\n--- Diary entry, %s ---\n%s\n", d.Day, d.Content)
+		at, _ := time.ParseInLocation(dayFormat, d.Day, time.Local)
+		items = append(items, evidenceItem{secDiary, at, fmt.Sprintf("--- Diary entry, %s ---\n%s\n", d.Day, d.Content)})
 	}
+
+	work, err := r.store.SummaryTimeline(ctx, now.AddDate(0, 0, -7), now)
+	if err != nil {
+		return ev, err
+	}
+	for _, w := range work {
+		line, ok := workLine(w)
+		if !ok {
+			continue
+		}
+		items = append(items, evidenceItem{secWork, w.CreatedAt, line + "\n"})
+	}
+
+	threads, err := r.store.ActiveThreads(ctx, evidenceThreads)
+	if err != nil {
+		return ev, err
+	}
+	for _, t := range threads {
+		line := t.Subject
+		if strings.TrimSpace(t.State) != "" {
+			line += " — " + t.State
+		}
+		items = append(items, evidenceItem{secThreads, t.LastSeen, line + "\n"})
+	}
+
+	meetings, err := r.store.NotesOfKindSince(ctx, "meeting", now.AddDate(0, 0, -7))
+	if err != nil {
+		return ev, err
+	}
+	for _, m := range meetings {
+		items = append(items, evidenceItem{secMeetings, m.CreatedAt, fmt.Sprintf("--- Meeting, %s ---\n%s\n", m.CreatedAt.Local().Format("Jan 2"), headLines(m.Content, meetingLineCap))})
+	}
+
 	if fallback {
 		start := r.windowStart(night)
 		dayStart := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.Local)
-		summaries, err := r.store.SummaryTimeline(ctx, dayStart, r.now())
+		summaries, err := r.store.SummaryTimeline(ctx, dayStart, now)
 		if err != nil {
-			return "", false, err
-		}
-		b.WriteString("\n--- Today's screen summaries (no diary entry was written tonight) ---\n")
-		if len(summaries) == 0 {
-			b.WriteString("(none)\n")
+			return ev, err
 		}
 		for _, w := range summaries {
-			fmt.Fprintf(&b, "%s — %s\n", w.CreatedAt.Local().Format("15:04"), summaryText(w.Content))
+			items = append(items, evidenceItem{secFallback, w.CreatedAt, fmt.Sprintf("%s — %s\n", w.CreatedAt.Local().Format("15:04"), summaryText(w.Content))})
 		}
 	}
-	if b.Len() == 0 {
-		b.WriteString("\n(no material)\n")
-	}
-	return b.String(), len(dailies) > 0, nil
+
+	kept := capEvidence(items, evidenceBudget)
+	ev.full = renderEvidence(kept, fallback, nil)
+	ev.diary = renderEvidence(kept, fallback, map[int]bool{secDiary: true, secFallback: true})
+	return ev, nil
 }
 
-// askJSON runs one brain call and decodes its JSON reply into out, re-asking the same prompt once when the reply fails to parse. A transport error returns as-is so the stage can retry on a later wake; a reply that never parses returns errUnparsable so the caller skips instead.
-func (r *Runner) askJSON(ctx context.Context, prompt string, out any) error {
+// capEvidence keeps items within the byte budget by dropping the oldest first, then restores the original per-section order. Input order within a section must be chronological, which every source query already guarantees.
+func capEvidence(items []evidenceItem, budget int) []evidenceItem {
+	total := 0
+	for _, it := range items {
+		total += len(it.text)
+	}
+	if total <= budget {
+		return items
+	}
+	// Sort a copy of the indices newest first and keep from the top until the budget runs out, so what survives is exactly the newest material.
+	order := make([]int, len(items))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int { return items[b].at.Compare(items[a].at) })
+	keep := make([]bool, len(items))
+	used := 0
+	for _, i := range order {
+		if used+len(items[i].text) > budget {
+			continue
+		}
+		used += len(items[i].text)
+		keep[i] = true
+	}
+	var out []evidenceItem
+	for i, it := range items {
+		if keep[i] {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// renderEvidence lays the kept items out under their section headers, in section order. only, when non-nil, restricts which sections render — the extraction call's diary-only view. A section with nothing left still prints "(none)" so the model knows absence from padding.
+func renderEvidence(items []evidenceItem, fallback bool, only map[int]bool) string {
+	var b strings.Builder
+	for sec := 0; sec < secCount; sec++ {
+		if only != nil && !only[sec] {
+			continue
+		}
+		if sec == secFallback && !fallback {
+			continue
+		}
+		fmt.Fprintf(&b, "\n%s\n", evidenceHeaders[sec])
+		empty := true
+		for _, it := range items {
+			if it.section != sec {
+				continue
+			}
+			b.WriteString(it.text)
+			empty = false
+		}
+		if empty {
+			b.WriteString("(none)\n")
+		}
+	}
+	return b.String()
+}
+
+// workLine renders one summary node as a single line for the week's-work section, with ok false for the compiler's "Raw Activity Log" fallback buckets — noise, not a stretch of work.
+func workLine(w db.WindowSummary) (string, bool) {
+	var t struct {
+		Task    string `json:"task_name"`
+		Summary string `json:"summary"`
+	}
+	text := w.Content
+	if err := json.Unmarshal([]byte(w.Content), &t); err == nil && t.Task != "" {
+		if t.Task == "Raw Activity Log" {
+			return "", false
+		}
+		text = t.Task + " — " + t.Summary
+	}
+	return w.CreatedAt.Local().Format("Jan 2 15:04") + " " + strings.Join(strings.Fields(text), " "), true
+}
+
+// headLines returns the first n lines of s, which is how much of one meeting's minutes the evidence carries.
+func headLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[:n], "\n")
+}
+
+// ask runs one traced brain call: the raw reply — any thinking text a model emits included — lands in the night's trace file before anything parses it. When a shadow is active, the same prompt is then fired at it too, after the primary call has already returned — its reply is only ever traced, never used for anything the primary call's result feeds.
+func (r *Runner) ask(ctx context.Context, night, kind, prompt string) (string, error) {
+	reply, err := r.brain(ctx, prompt)
+	r.traceCall(night, kind, reply, err)
+	if r.activeShadow != nil {
+		r.shadowAsk(ctx, night, kind, prompt)
+	}
+	return reply, err
+}
+
+// shadowAsk fires prompt at the active shadow brain under its own generous timeout (a local Q2 model can take minutes on a long prompt), tracing the reply under kind+"-shadow" into the same night's JSONL. It still respects the parent ctx: a preempted night (the user came back) cuts the shadow call short exactly like the primary one. A shadow failure is only logged — it never fails the stage that called ask, since the shadow never influences the night.
+func (r *Runner) shadowAsk(ctx context.Context, night, kind, prompt string) {
+	shadowCtx, cancel := context.WithTimeout(ctx, shadowTimeout)
+	defer cancel()
+	reply, err := r.activeShadow(shadowCtx, prompt)
+	r.traceCall(night, kind+"-shadow", reply, err)
+	if err != nil {
+		slog.Warn("dreaming: shadow brain call failed", "night", night, "kind", kind, "error", err)
+	}
+}
+
+// traceCall appends one JSONL line for a brain call to <DataDir>/dreams/<night>.jsonl. Best-effort by design: a failed trace write is logged and never fails a stage.
+func (r *Runner) traceCall(night, kind, reply string, callErr error) {
+	if r.DataDir == "" {
+		return
+	}
+	rec := struct {
+		At    string `json:"at"`
+		Kind  string `json:"kind"`
+		Reply string `json:"reply,omitempty"`
+		Error string `json:"error,omitempty"`
+	}{At: r.now().Format(time.RFC3339), Kind: kind, Reply: reply}
+	if callErr != nil {
+		rec.Error = callErr.Error()
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		slog.Warn("dreaming: could not marshal a night trace", "error", err)
+		return
+	}
+	dir := filepath.Join(r.DataDir, "dreams")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("dreaming: could not create the traces dir", "dir", dir, "error", err)
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, night+".jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		slog.Warn("dreaming: could not open the night's trace file", "night", night, "error", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		slog.Warn("dreaming: could not write a night trace", "night", night, "error", err)
+	}
+}
+
+// askJSON runs one traced brain call and decodes its JSON reply into out, re-asking the same prompt once when the reply fails to parse. A transport error returns as-is so the stage can retry on a later wake; a reply that never parses returns errUnparsable so the caller skips instead.
+func (r *Runner) askJSON(ctx context.Context, night, kind, prompt string, out any) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		reply, err := r.brain(ctx, prompt)
+		reply, err := r.ask(ctx, night, kind, prompt)
 		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal([]byte(stripFence(reply)), out); err == nil {
+		body := stripFence(reply)
+		if err := json.Unmarshal([]byte(body), out); err == nil {
+			return nil
+		} else if sliced := outermostJSON(body); sliced != "" && json.Unmarshal([]byte(sliced), out) == nil {
+			// Some models pad the array with prose no instruction talks them out of; the payload between the outermost brackets is still exactly what was asked for.
 			return nil
 		} else {
 			lastErr = err
@@ -409,6 +666,17 @@ func (r *Runner) askJSON(ctx context.Context, prompt string, out any) error {
 		}
 	}
 	return fmt.Errorf("%w: %v", errUnparsable, lastErr)
+}
+
+// outermostJSON slices s to the outermost JSON array or object it contains, or "" when it holds neither — the recovery for a reply that says a sentence and then answers.
+func outermostJSON(s string) string {
+	for _, pair := range [2][2]string{{"[", "]"}, {"{", "}"}} {
+		start, end := strings.Index(s, pair[0]), strings.LastIndex(s, pair[1])
+		if start >= 0 && end > start {
+			return s[start : end+1]
+		}
+	}
+	return ""
 }
 
 // stripFence removes a markdown code fence around a JSON body — the same defence evals' judge needed, since a model wrapping its answer in ``` is the most common way a JSON reply is lost.
@@ -515,7 +783,7 @@ func (r *Runner) undStage(ctx context.Context, night string) error {
 	if err != nil {
 		return err
 	}
-	reply, err := r.brain(ctx, understandingPrompt(current, strong, week))
+	reply, err := r.ask(ctx, night, "understanding", understandingPrompt(current, strong, week))
 	if err != nil {
 		return err
 	}
@@ -526,8 +794,125 @@ func (r *Runner) undStage(ctx context.Context, night string) error {
 	return r.store.CommitUnderstandingStage(ctx, night, reply)
 }
 
+// compactReport is what the compaction stage hands the morning report: how many coarse entries each tier wrote.
+type compactReport struct{ weeks, months int }
+
+// compactStage collapses the diary's old fine entries into coarser ones: complete Mon-Sun weeks of dailies all older than compactAfterDays become one kind='week' entry on the Monday, and a month's worth of week entries all older than compactWeeksToMonth weeks becomes one kind='month' entry on the first. One brain call per coarse entry, one transaction per tier, and the 'compact' token commits with the month tier — so a preemption between tiers costs nothing: the committed week entries simply give the next wake's re-run less to do. A night with nothing to compact commits the token with zero diary writes.
+func (r *Runner) compactStage(ctx context.Context, night string) (compactReport, error) {
+	var rep compactReport
+
+	// Week tier. Querying only through the horizon is itself the age gate: a week can only reach seven fetched dailies when its Sunday is already past the horizon.
+	horizon := nightMinus(night, compactAfterDays+1)
+	dailies, err := r.store.DiaryEntriesThrough(ctx, "day", horizon)
+	if err != nil {
+		return rep, err
+	}
+	byMonday := map[string][]db.DiaryDay{}
+	for _, d := range dailies {
+		byMonday[mondayOf(d.Day)] = append(byMonday[mondayOf(d.Day)], d)
+	}
+	var weekComps []db.DiaryCompaction
+	for _, monday := range slices.Sorted(maps.Keys(byMonday)) {
+		days := byMonday[monday]
+		if len(days) != 7 {
+			// An incomplete week waits; a daily that never gets written holds its week (and its month) open indefinitely, which is the deliberate trade for never compacting around a hole.
+			continue
+		}
+		entry, err := r.compactEntry(ctx, night, "compact-week", fmt.Sprintf("The week of Monday %s through Sunday %s.", monday, nightMinus(monday, -6)), days)
+		if err != nil {
+			return rep, err
+		}
+		weekComps = append(weekComps, db.DiaryCompaction{Day: monday, Kind: "week", Content: entry, ConstituentKind: "day", ConstituentDays: dayKeys(days)})
+	}
+	if len(weekComps) > 0 {
+		if err := r.store.CommitCompactStage(ctx, night, weekComps, false); err != nil {
+			return rep, err
+		}
+		rep.weeks = len(weekComps)
+	}
+
+	// Month tier. A month is ready once every one of its Mondays has a week entry inside the ten-week horizon; the capped query again doubles as the age gate.
+	weekHorizon := nightMinus(night, 7*compactWeeksToMonth)
+	weeks, err := r.store.DiaryEntriesThrough(ctx, "week", weekHorizon)
+	if err != nil {
+		return rep, err
+	}
+	haveWeek := map[string]bool{}
+	byMonth := map[string][]db.DiaryDay{}
+	for _, w := range weeks {
+		haveWeek[w.Day] = true
+		byMonth[w.Day[:7]] = append(byMonth[w.Day[:7]], w)
+	}
+	var monthComps []db.DiaryCompaction
+	for _, month := range slices.Sorted(maps.Keys(byMonth)) {
+		complete := true
+		for _, monday := range mondaysOf(month) {
+			if !haveWeek[monday] {
+				complete = false
+				break
+			}
+		}
+		if !complete {
+			continue
+		}
+		entry, err := r.compactEntry(ctx, night, "compact-month", fmt.Sprintf("The month of %s.", month), byMonth[month])
+		if err != nil {
+			return rep, err
+		}
+		monthComps = append(monthComps, db.DiaryCompaction{Day: month + "-01", Kind: "month", Content: entry, ConstituentKind: "week", ConstituentDays: dayKeys(byMonth[month])})
+	}
+	rep.months = len(monthComps)
+	return rep, r.store.CommitCompactStage(ctx, night, monthComps, true)
+}
+
+// compactEntry makes one traced brain call to collapse a run of diary entries, refusing an empty reply.
+func (r *Runner) compactEntry(ctx context.Context, night, kind, period string, entries []db.DiaryDay) (string, error) {
+	reply, err := r.ask(ctx, night, kind, compactPrompt(period, entries))
+	if err != nil {
+		return "", err
+	}
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return "", fmt.Errorf("the compaction of %q returned nothing", period)
+	}
+	return reply, nil
+}
+
+// mondayOf returns the Monday of the local week a 'YYYY-MM-DD' day falls in, as the same kind of string.
+func mondayOf(day string) string {
+	d, err := time.ParseInLocation(dayFormat, day, time.Local)
+	if err != nil {
+		return day
+	}
+	return d.AddDate(0, 0, -int(d.Weekday()+6)%7).Format(dayFormat)
+}
+
+// mondaysOf returns every Monday date inside a 'YYYY-MM' month, oldest first — the week entries a month must hold before it may compact.
+func mondaysOf(month string) []string {
+	first, err := time.ParseInLocation("2006-01", month, time.Local)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for d := first; d.Format("2006-01") == month; d = d.AddDate(0, 0, 1) {
+		if d.Weekday() == time.Monday {
+			out = append(out, d.Format(dayFormat))
+		}
+	}
+	return out
+}
+
+// dayKeys lists the day keys of a run of diary entries, for the compaction's constituent deletes.
+func dayKeys(entries []db.DiaryDay) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Day
+	}
+	return out
+}
+
 // finish writes the morning report — the diary kind='dream' row, deliberately FTS-indexed so "what did you dream last night" works — and stamps the run finished with its one-line summary.
-func (r *Runner) finish(ctx context.Context, night string, took time.Duration, hyp *stageReport, undRan bool, notes []string) error {
+func (r *Runner) finish(ctx context.Context, night string, took time.Duration, hyp *stageReport, undRan bool, comp *compactReport, notes []string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "I dreamt on the night of %s, judge-only, for %s.\n", night, took.Round(time.Second))
 	if hyp != nil {
@@ -543,6 +928,14 @@ func (r *Runner) finish(ctx context.Context, night string, took time.Duration, h
 		b.WriteString("I rewrote my understanding of the user.\n")
 	} else {
 		b.WriteString("The understanding had already been rewritten on an earlier wake tonight.\n")
+	}
+	switch {
+	case comp == nil:
+		b.WriteString("The diary compaction had already run on an earlier wake tonight.\n")
+	case comp.weeks == 0 && comp.months == 0:
+		b.WriteString("Nothing in the diary was old enough to compact.\n")
+	default:
+		fmt.Fprintf(&b, "I compacted the diary: %d weeks folded into week entries, %d months folded into month entries.\n", comp.weeks, comp.months)
 	}
 	for _, n := range notes {
 		b.WriteString(n)

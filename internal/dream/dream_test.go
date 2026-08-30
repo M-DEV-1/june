@@ -2,6 +2,8 @@ package dream
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,10 +15,10 @@ import (
 	"ora/internal/db"
 )
 
-// testStore opens a throwaway in-memory store closed with the test.
+// testStore opens a throwaway store on a per-test temp file, closed with the test. File-backed rather than ":memory:" because the preemption watcher queries concurrently with the stages, and plain :memory: is per-connection in database/sql + modernc/sqlite — a second pool connection would see an empty database.
 func testStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.New(":memory:")
+	store, err := db.New(filepath.Join(t.TempDir(), "dream-test.db"))
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
@@ -24,12 +26,13 @@ func testStore(t *testing.T) *db.Store {
 	return store
 }
 
-// fakeBrain answers each of the three dream prompts with a canned reply, dispatching on the instruction text, and records what it was asked. Safe for the watcher goroutine's world: only Tick's goroutine calls it, but the mutex keeps the record readable after Tick returns.
+// fakeBrain answers each of the dream prompts with a canned reply, dispatching on the instruction text, and records what it was asked. Safe for the watcher goroutine's world: only Tick's goroutine calls it, but the mutex keeps the record readable after Tick returns.
 type fakeBrain struct {
 	mu       sync.Mutex
 	verdicts string
 	extract  string
 	und      string
+	compact  string
 	asked    []string
 }
 
@@ -46,6 +49,9 @@ func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
 	case strings.Contains(prompt, "Rewrite your standing understanding"):
 		f.asked = append(f.asked, "und")
 		return f.und, nil
+	case strings.Contains(prompt, "Collapse the diary entries below"):
+		f.asked = append(f.asked, "compact")
+		return f.compact, nil
 	}
 	return "", fmt.Errorf("unrecognised prompt: %.80s", prompt)
 }
@@ -210,8 +216,8 @@ func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 		t.Errorf("asked = %v, want only the understanding rewrite", asked)
 	}
 	run, _, _ := store.DreamRun(ctx, night)
-	if !run.Finished || run.StagesDone != "hyp und" {
-		t.Errorf("run = %+v, want finished with both stages done", run)
+	if !run.Finished || run.StagesDone != "hyp und compact" {
+		t.Errorf("run = %+v, want finished with the remaining stages done", run)
 	}
 	if entry, _ := store.DiaryEntry(ctx, night, "dream"); !strings.Contains(entry, "already committed on an earlier wake") {
 		t.Errorf("dream report does not note the resumed stage: %q", entry)
@@ -514,5 +520,529 @@ func TestTick_CurfewHoldsTheNight(t *testing.T) {
 
 	if len(brain.askedKinds()) != 0 {
 		t.Errorf("a 04:00 tick made brain calls %v, want none past the curfew", brain.askedKinds())
+	}
+}
+
+// The grounded evidence carries all four labelled sections — the diary, the week's work summaries (with the compiler's raw-log fallback buckets skipped), the active threads, and the week's meeting minutes — and the extraction view keeps only the diary.
+func TestEvidenceMaterial_AllFourSectionsPresent(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "DIARYTEXT about the day."); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{
+		`{"task_name": "Ora dreaming loop", "summary": "WORKTEXT built the compactor"}`,
+		`{"task_name": "Raw Activity Log", "summary": "RAWLOGTEXT app|title noise"}`,
+	} {
+		if _, err := store.DB().Exec(`INSERT INTO nodes (type, content, created_at) VALUES ('summary', ?, datetime('now','-2 hours'))`, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.DB().Exec(`INSERT INTO threads (subject, kind, state) VALUES ('THREADTEXT ora', 'project', 'mid-flight')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LogNote(ctx, "MEETINGTEXT standup minutes.", "meeting"); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
+	ev, err := r.evidenceMaterial(ctx, night, false)
+	if err != nil {
+		t.Fatalf("evidenceMaterial: %v", err)
+	}
+	for _, want := range []string{"Diary:", "The week's work:", "Ongoing threads:", "Meetings:", "DIARYTEXT", "WORKTEXT", "THREADTEXT", "mid-flight", "MEETINGTEXT"} {
+		if !strings.Contains(ev.full, want) {
+			t.Errorf("full evidence lacks %q:\n%s", want, ev.full)
+		}
+	}
+	if strings.Contains(ev.full, "RAWLOGTEXT") {
+		t.Error("the Raw Activity Log bucket must be skipped")
+	}
+	if !ev.haveDailies {
+		t.Error("haveDailies must be true with a diary entry on file")
+	}
+	if !strings.Contains(ev.diary, "DIARYTEXT") || strings.Contains(ev.diary, "Ongoing threads:") || strings.Contains(ev.diary, "THREADTEXT") || strings.Contains(ev.diary, "MEETINGTEXT") {
+		t.Errorf("the extraction view must be diary-only:\n%s", ev.diary)
+	}
+}
+
+// A meeting's minutes enter the evidence head-first and capped: only the first forty lines survive.
+func TestEvidenceMaterial_MeetingLinesCapped(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	lines := make([]string, 60)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("minute line %d", i)
+	}
+	if _, err := store.LogNote(ctx, strings.Join(lines, "\n"), "meeting"); err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
+	ev, err := r.evidenceMaterial(ctx, night, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ev.full, "minute line 39") || strings.Contains(ev.full, "minute line 40") {
+		t.Errorf("meeting minutes not capped at %d lines:\n%s", meetingLineCap, ev.full)
+	}
+}
+
+// The evidence budget holds: when the week's material overflows ~24KB, the oldest items fall away and the newest survive.
+func TestEvidenceMaterial_BudgetDropsOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	big := strings.Repeat("filler sentence to bloat the entry. ", 280)
+	if err := store.SetDiaryEntry(ctx, nightMinus(night, 3), "day", "OLDESTMARK "+big); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDiaryEntry(ctx, nightMinus(night, 2), "day", "MIDMARK "+big); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDiaryEntry(ctx, nightMinus(night, 1), "day", "LATERMARK "+big); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDiaryEntry(ctx, night, "day", "NEWESTMARK a small entry."); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
+	ev, err := r.evidenceMaterial(ctx, night, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev.full) > evidenceBudget+512 {
+		t.Errorf("evidence is %d bytes, want at most the ~%d budget", len(ev.full), evidenceBudget)
+	}
+	if strings.Contains(ev.full, "OLDESTMARK") {
+		t.Error("the oldest entry must be the one truncated away")
+	}
+	for _, want := range []string{"MIDMARK", "LATERMARK", "NEWESTMARK"} {
+		if !strings.Contains(ev.full, want) {
+			t.Errorf("newer entry %q must survive the budget", want)
+		}
+	}
+}
+
+// setDiary is the compaction tests' shorthand for seeding one diary row.
+func setDiary(t *testing.T, store *db.Store, day, kind, content string) {
+	t.Helper()
+	if err := store.SetDiaryEntry(context.Background(), day, kind, content); err != nil {
+		t.Fatalf("SetDiaryEntry(%s, %s): %v", day, kind, err)
+	}
+}
+
+// The week tier: a complete Mon-Sun week of dailies older than the horizon collapses into one kind='week' entry on the Monday and its dailies are deleted, while an incomplete week, recent dailies, and the diary's other kinds are all left alone.
+func TestCompactStage_CompleteWeekCollapses(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := "2026-08-30"
+	// 2026-08-03 is a Monday; the full week 03..09 is complete and old. The week of the 10th misses its Sunday (the 16th) and must wait.
+	for d := 0; d < 7; d++ {
+		setDiary(t, store, nightMinus("2026-08-03", -d), "day", fmt.Sprintf("Day %d of the complete week.", d))
+	}
+	for d := 0; d < 6; d++ {
+		setDiary(t, store, nightMinus("2026-08-10", -d), "day", "A day of the incomplete week.")
+	}
+	setDiary(t, store, "2026-08-28", "day", "A recent day inside the seven-day horizon.")
+	setDiary(t, store, "2026-08-04", "dream", "A morning report.")
+	setDiary(t, store, "2026-08-05", "brief", "A brief.")
+	setDiary(t, store, "", "understanding", "The standing doc.")
+
+	brain := &fakeBrain{compact: "A remembered week."}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	if err := store.StartDreamRun(ctx, night); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := r.compactStage(ctx, night)
+	if err != nil {
+		t.Fatalf("compactStage: %v", err)
+	}
+	if rep.weeks != 1 || rep.months != 0 {
+		t.Errorf("report = %+v, want exactly one week compacted", rep)
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-08-03", "week"); got != "A remembered week." {
+		t.Errorf("week entry = %q", got)
+	}
+	for d := 0; d < 7; d++ {
+		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-03", -d), "day"); got != "" {
+			t.Errorf("constituent daily %d survived the compaction: %q", d, got)
+		}
+	}
+	for d := 0; d < 6; d++ {
+		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-10", -d), "day"); got == "" {
+			t.Error("an incomplete week's daily was deleted")
+		}
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-08-28", "day"); got == "" {
+		t.Error("a recent daily was deleted")
+	}
+	for _, k := range [][2]string{{"2026-08-04", "dream"}, {"2026-08-05", "brief"}, {"", "understanding"}} {
+		if got, _ := store.DiaryEntry(ctx, k[0], k[1]); got == "" {
+			t.Errorf("protected kind %q was touched by compaction", k[1])
+		}
+	}
+	run, _, _ := store.DreamRun(ctx, night)
+	if run.StagesDone != "compact" {
+		t.Errorf("stages_done = %q, want the compact token committed", run.StagesDone)
+	}
+}
+
+// The month tier: once every Monday of a month holds a week entry older than ten weeks, the weeks collapse into one kind='month' entry on the first; a month missing one of its Mondays waits.
+func TestCompactStage_MonthTierCollapsesCompleteMonths(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := "2026-08-30"
+	// March 2026's Mondays are the 2nd, 9th, 16th, 23rd and 30th, all beyond the ten-week horizon. April misses the 27th, so it waits.
+	march := []string{"2026-03-02", "2026-03-09", "2026-03-16", "2026-03-23", "2026-03-30"}
+	for _, m := range march {
+		setDiary(t, store, m, "week", "The week of "+m+".")
+	}
+	for _, m := range []string{"2026-04-06", "2026-04-13", "2026-04-20"} {
+		setDiary(t, store, m, "week", "The week of "+m+".")
+	}
+
+	brain := &fakeBrain{compact: "A remembered month."}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	if err := store.StartDreamRun(ctx, night); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := r.compactStage(ctx, night)
+	if err != nil {
+		t.Fatalf("compactStage: %v", err)
+	}
+	if rep.weeks != 0 || rep.months != 1 {
+		t.Errorf("report = %+v, want exactly one month compacted", rep)
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-03-01", "month"); got != "A remembered month." {
+		t.Errorf("month entry = %q", got)
+	}
+	for _, m := range march {
+		if got, _ := store.DiaryEntry(ctx, m, "week"); got != "" {
+			t.Errorf("constituent week %s survived the compaction: %q", m, got)
+		}
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-04-01", "month"); got != "" {
+		t.Error("an incomplete month was compacted")
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-04-06", "week"); got == "" {
+		t.Error("an incomplete month's week entry was deleted")
+	}
+}
+
+// A quiet night — nothing old enough to compact — makes no brain calls and still commits the stage token with zero diary writes.
+func TestCompactStage_QuietNightCommitsToken(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	setDiary(t, store, night, "day", "Tonight's entry.")
+
+	brain := &fakeBrain{}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	if err := store.StartDreamRun(ctx, night); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := r.compactStage(ctx, night)
+	if err != nil {
+		t.Fatalf("compactStage: %v", err)
+	}
+	if rep.weeks != 0 || rep.months != 0 || len(brain.askedKinds()) != 0 {
+		t.Errorf("quiet night compacted %+v with calls %v, want nothing", rep, brain.askedKinds())
+	}
+	run, _, _ := store.DreamRun(ctx, night)
+	if run.StagesDone != "compact" {
+		t.Errorf("stages_done = %q, want the token committed on a quiet night", run.StagesDone)
+	}
+	if got, _ := store.DiaryEntry(ctx, night, "day"); got == "" {
+		t.Error("a quiet night must write nothing and delete nothing")
+	}
+}
+
+// Night traces: every brain call the dream makes appends one JSONL line — kind and raw reply — to the run's session.jsonl under <DataDir>/dreams/<night>/.
+func TestTraces_OneLinePerBrainCall(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertHypothesis(ctx, "He codes at night.", "low", nightMinus(night, 10)); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := store.OpenHypotheses(ctx)
+	brain := &fakeBrain{
+		verdicts: fmt.Sprintf(`[{"id": %d, "verdict": "supported", "confidence": "high", "evidence": "late commits", "action": "keep"}]`, open[0].ID),
+		extract:  `[]`,
+		und:      "Thinking about it...\n\nA person who codes at night.",
+	}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	r.DataDir = t.TempDir()
+	r.Tick(ctx)
+
+	raw, err := os.ReadFile(filepath.Join(r.DataDir, "dreams", night+".jsonl"))
+	if err != nil {
+		t.Fatalf("reading the night's trace file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != len(brain.askedKinds()) {
+		t.Fatalf("%d trace lines for %d brain calls", len(lines), len(brain.askedKinds()))
+	}
+	kinds := map[string]string{}
+	for _, l := range lines {
+		var rec struct {
+			At    string `json:"at"`
+			Kind  string `json:"kind"`
+			Reply string `json:"reply"`
+		}
+		if err := json.Unmarshal([]byte(l), &rec); err != nil {
+			t.Fatalf("trace line is not JSON: %q: %v", l, err)
+		}
+		if rec.At == "" || rec.Kind == "" {
+			t.Errorf("trace line missing at/kind: %q", l)
+		}
+		kinds[rec.Kind] = rec.Reply
+	}
+	for _, want := range []string{"verdicts", "extract", "understanding"} {
+		if kinds[want] == "" {
+			t.Errorf("no trace with a reply for the %q call: %v", want, kinds)
+		}
+	}
+	// The raw reply lands verbatim, thinking text included, before any parsing strips it.
+	if !strings.Contains(kinds["understanding"], "Thinking about it...") {
+		t.Errorf("the understanding trace lost the model's thinking text: %q", kinds["understanding"])
+	}
+}
+
+// A trace directory that cannot be created never fails a stage: the night still finishes.
+func TestTraces_FailureIsBestEffort(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	// A regular file where the data dir should be makes every MkdirAll under it fail.
+	r.DataDir = filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(r.DataDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.Tick(ctx)
+	if run, ok, _ := store.DreamRun(ctx, night); !ok || !run.Finished {
+		t.Errorf("a failing trace write must not fail the night: %+v ok=%v", run, ok)
+	}
+}
+
+// A model that says a sentence and then answers still gets its JSON read: the payload between the outermost brackets is the answer.
+func TestAskJSON_RecoversPaddedArrays(t *testing.T) {
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(context.Background(), night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	brain := &fakeBrain{verdicts: "Here are my verdicts:\n[]", extract: "Sure!\n```json\n[{\"statement\":\"He prefers evenings for deep work.\",\"confidence\":\"low\"}]\n```", und: "An understanding."}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+
+	r.Tick(context.Background())
+
+	open, err := store.OpenHypotheses(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("got %d adopted hypotheses, want the padded reply recovered and adopted", len(open))
+	}
+}
+
+// A shadow brain gets fired alongside every primary call and its reply lands under kind+"-shadow" in the same night's trace file — but a shadow that errors out never fails a stage, since it never feeds anything the night acts on.
+func TestShadow_TracesAlongsidePrimaryAndNeverFailsAStage(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, primary, yesProbes(), at(23, 30))
+	r.DataDir = t.TempDir()
+	// The shadow always errors — proving its failure is only logged, never propagated.
+	r.Shadow = func(ctx context.Context, prompt string) (string, error) {
+		return "", errors.New("the local model choked")
+	}
+
+	r.Tick(ctx)
+
+	run, ok, _ := store.DreamRun(ctx, night)
+	if !ok || !run.Finished {
+		t.Fatalf("a failing shadow must not stop the night from finishing: %+v ok=%v", run, ok)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(r.DataDir, "dreams", night+".jsonl"))
+	if err != nil {
+		t.Fatalf("reading the night's trace file: %v", err)
+	}
+	var shadowKinds, primaryKinds int
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var rec struct {
+			Kind  string `json:"kind"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(l), &rec); err != nil {
+			t.Fatalf("trace line is not JSON: %q: %v", l, err)
+		}
+		if strings.HasSuffix(rec.Kind, "-shadow") {
+			shadowKinds++
+			if rec.Error == "" {
+				t.Errorf("shadow trace line missing the error the fake shadow returned: %q", l)
+			}
+		} else {
+			primaryKinds++
+		}
+	}
+	if shadowKinds == 0 {
+		t.Fatal("no -shadow trace lines were written")
+	}
+	if shadowKinds != primaryKinds {
+		t.Errorf("%d shadow lines for %d primary lines, want one shadow line per primary call", shadowKinds, primaryKinds)
+	}
+}
+
+// A lifecycle whose Start fails leaves the night running without a shadow: no -shadow trace lines appear, and the primary stages still complete normally.
+func TestShadowLifecycle_StartFailureRunsShadowless(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, primary, yesProbes(), at(23, 30))
+	r.DataDir = t.TempDir()
+	shadowCalled := false
+	r.Shadow = func(ctx context.Context, prompt string) (string, error) {
+		shadowCalled = true
+		return "should never run", nil
+	}
+	r.ShadowLifecycle = ShadowLifecycle{
+		Start: func(ctx context.Context) error { return errors.New("the local server never came up") },
+		Stop:  func() { t.Error("Stop must not run when Start failed") },
+	}
+
+	r.Tick(ctx)
+
+	if shadowCalled {
+		t.Error("the shadow brain was called even though its lifecycle failed to start")
+	}
+	run, ok, _ := store.DreamRun(ctx, night)
+	if !ok || !run.Finished {
+		t.Fatalf("a lifecycle start failure must not stop the night from finishing: %+v ok=%v", run, ok)
+	}
+	raw, err := os.ReadFile(filepath.Join(r.DataDir, "dreams", night+".jsonl"))
+	if err != nil {
+		t.Fatalf("reading the night's trace file: %v", err)
+	}
+	if strings.Contains(string(raw), "-shadow") {
+		t.Error("no -shadow trace lines should exist when the lifecycle never started")
+	}
+}
+
+// A lifecycle whose Start succeeds is stopped exactly once, after the night's stages, whether or not a Shadow ever answered anything useful.
+func TestShadowLifecycle_StartSucceeds_StopRunsAfterNight(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, primary, yesProbes(), at(23, 30))
+	r.DataDir = t.TempDir()
+	r.Shadow = func(ctx context.Context, prompt string) (string, error) { return "ok", nil }
+
+	started, stopped := false, false
+	r.ShadowLifecycle = ShadowLifecycle{
+		Start: func(ctx context.Context) error {
+			if stopped {
+				t.Error("Start observed after Stop already ran")
+			}
+			started = true
+			return nil
+		},
+		Stop: func() {
+			if !started {
+				t.Error("Stop ran without a prior successful Start")
+			}
+			stopped = true
+		},
+	}
+
+	r.Tick(ctx)
+
+	if !started || !stopped {
+		t.Errorf("started=%v stopped=%v, want both true", started, stopped)
+	}
+}
+
+// GPUReleaser is asked to free the card before the shadow lifecycle starts, since the embedding server may still be sitting on the GPU the shadow needs.
+func TestGPUReleaser_CalledBeforeShadowLifecycleStart(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, primary, yesProbes(), at(23, 30))
+	r.DataDir = t.TempDir()
+	r.Shadow = func(ctx context.Context, prompt string) (string, error) { return "ok", nil }
+
+	released, startedAfterReleased := false, false
+	r.GPUReleaser = func() bool {
+		released = true
+		return true
+	}
+	r.ShadowLifecycle = ShadowLifecycle{
+		Start: func(ctx context.Context) error {
+			startedAfterReleased = released
+			return nil
+		},
+		Stop: func() {},
+	}
+
+	r.Tick(ctx)
+
+	if !released {
+		t.Error("GPUReleaser was never called")
+	}
+	if !startedAfterReleased {
+		t.Error("ShadowLifecycle.Start ran before GPUReleaser was called")
+	}
+}
+
+// With no shadow lifecycle configured, there is nothing for GPUReleaser to make room for, so it must never be called.
+func TestGPUReleaser_NotCalledWithoutShadowLifecycle(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, primary, yesProbes(), at(23, 30))
+	r.DataDir = t.TempDir()
+
+	called := false
+	r.GPUReleaser = func() bool {
+		called = true
+		return true
+	}
+
+	r.Tick(ctx)
+
+	if called {
+		t.Error("GPUReleaser was called with no shadow lifecycle configured")
 	}
 }
