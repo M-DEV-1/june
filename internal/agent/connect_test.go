@@ -157,6 +157,23 @@ func TestSystemInstructionText_NoPreambleForFastTools_MemoryToolMandate(t *testi
 	}
 }
 
+// TestSystemInstructionText_KnowsItsOwnMemoryFeatures covers a real conversation where the model was asked "what did you dream about last night?" and answered "I don't have dreams" without ever calling query_memory, even though the nightly dream report sits FTS-indexed in memory alongside the diary, morning briefs, and meeting minutes. The prompt must tell Ora these are memory-tool questions, not things to deny.
+func TestSystemInstructionText_KnowsItsOwnMemoryFeatures(t *testing.T) {
+	got := systemInstructionText(time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC), "linux", "amd64", "sh", "", "some context", 5)
+
+	for _, want := range []string{
+		"diary",
+		"dream every night",
+		"morning briefs",
+		"meeting minutes",
+		"never something to deny having",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("systemInstructionText missing %q, got: %s", want, got)
+		}
+	}
+}
+
 // TestToolResponseScheduling covers the scheduling table for NON_BLOCKING tool results: a result the user is sitting there waiting for interrupts whatever the model is currently saying, everything else waits for a natural gap so it never talks over the user.
 func TestToolResponseScheduling(t *testing.T) {
 	for _, tc := range []struct {
@@ -811,6 +828,23 @@ func TestRunToolCall_SessionEndsBeforeApproval_GoroutineExitsInsteadOfLeaking(t 
 	case resp := <-fs.responses:
 		t.Fatalf("expected no response delivered for a session that ended before approval, got: %+v", resp)
 	default:
+	}
+}
+
+// TestStripControlTokens covers a real "ora said" log line that came back as the literal text "<ctrl46><ctrl46>" — a control-token artifact that leaked out of OutputTranscription instead of being consumed internally by the Live API.
+func TestStripControlTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"token embedded in real text", "the vulnerability scores<ctrl46> are in the spreadsheet.", "the vulnerability scores are in the spreadsheet."},
+		{"token-only reply", "<ctrl46><ctrl46>", ""},
+		{"clean text untouched", "Hello there.", "Hello there."},
+	} {
+		if got := stripControlTokens(tc.in); got != tc.want {
+			t.Errorf("%s: stripControlTokens(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
 	}
 }
 
