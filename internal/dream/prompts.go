@@ -38,6 +38,7 @@ Principles:
 - Draw only from the entries' Hypotheses sections; the narrative above them is context, not a source of new hypotheses.
 - A hypothesis is a falsifiable statement about the user's habits, preferences, relationships or direction — not a fact they stated outright, and not a one-day event.
 - Skip anything that restates a hypothesis already under test, listed below.
+- Together, the set you propose should span distinct areas of the user's life rather than clustering on one; alongside what is already under test, prefer a candidate about an uncovered area over a stronger candidate that crowds an area already covered.
 - At most five, each statement one sentence under 200 characters.
 - Answer with only a JSON array, no prose around it: one object per new hypothesis, each {"statement": "<sentence>", "confidence": "low"|"medium"|"high"}. An empty array is the right answer when nothing qualifies.`
 
@@ -92,6 +93,29 @@ func understandingPrompt(current string, strong []db.Hypothesis, week []db.Diary
 	}
 	for _, d := range week {
 		fmt.Fprintf(&b, "%s: %s\n", d.Day, firstLine(d.Content))
+	}
+	return b.String()
+}
+
+// compactInstruction heads the diary compaction call that folds a run of finer diary entries into one coarser entry covering the whole period.
+const compactInstruction = `You are Ora, an ambient companion keeping a first-person diary about the user's days. Collapse the diary entries below into one entry covering the whole period, written as if you sat down at the period's end to remember it.
+
+Principles:
+- First person, the same voice the entries below are written in.
+- Keep what mattered across the period: the arcs, the decisions, the people, the turns of direction. Drop the day-to-day mechanics that led nowhere.
+- Carry forward every open question or unresolved thread the entries raise that the later entries do not settle; those must survive the compaction.
+- Under 500 words of plain prose, no markdown.
+- Output only the entry — no title, no preamble, no commentary.`
+
+// compactPrompt assembles one compaction call: the instruction, the period being collapsed, and the entries to fold into it.
+func compactPrompt(period string, entries []db.DiaryDay) string {
+	var b strings.Builder
+	b.WriteString(compactInstruction)
+	b.WriteString("\n\n--- The period ---\n")
+	b.WriteString(period)
+	b.WriteString("\n\n--- The entries to collapse ---\n")
+	for _, e := range entries {
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", e.Day, e.Content)
 	}
 	return b.String()
 }

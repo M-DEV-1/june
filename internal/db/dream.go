@@ -80,6 +80,29 @@ func (s *Store) DreamRun(ctx context.Context, night string) (run DreamRun, ok bo
 	return run, true, nil
 }
 
+// DreamRunsSince returns the dream_runs rows whose night is on or after sinceNight (a local 'YYYY-MM-DD' string), oldest first — the weekly system log's window into how many nights actually ran and how far each got.
+func (s *Store) DreamRunsSince(ctx context.Context, sinceNight string) ([]DreamRun, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT night, stages_done, report, finished_at IS NOT NULL FROM dream_runs WHERE night >= ? ORDER BY night`, sinceNight)
+	if err != nil {
+		return nil, fmt.Errorf("query dream runs since: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DreamRun
+	for rows.Next() {
+		var r DreamRun
+		if err := rows.Scan(&r.Night, &r.StagesDone, &r.Report, &r.Finished); err != nil {
+			return nil, fmt.Errorf("scan dream run: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate dream runs: %w", err)
+	}
+	return out, nil
+}
+
 // OpenHypotheses returns up to openHypothesesCap status='open' hypotheses, oldest born first so long-standing guesses keep getting their nights in front of the judge.
 func (s *Store) OpenHypotheses(ctx context.Context) ([]Hypothesis, error) {
 	return s.queryHypotheses(ctx,
@@ -197,6 +220,40 @@ func (s *Store) CommitUnderstandingStage(ctx context.Context, night, understandi
 			return err
 		}
 		return markStageDone(ctx, tx, night, "und")
+	})
+}
+
+// DiaryCompaction is one coarse diary entry replacing a run of finer ones: the (day, kind) to upsert with its content, and the finer-kind constituent days to delete in the same transaction.
+type DiaryCompaction struct {
+	Day             string
+	Kind            string
+	Content         string
+	ConstituentKind string
+	ConstituentDays []string
+}
+
+// CommitCompactStage writes one tier of the night's diary compaction in a single transaction: every coarse entry upserted, its constituents deleted (the diary FTS triggers keep the mirror in sync), and — when done is set — the 'compact' token in stages_done. The runner calls this once per tier and sets done only on the last call, so the token lands exactly once; a night with nothing to compact is one call with no compactions that still commits the token.
+func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []DiaryCompaction, done bool) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.CommitCompactStage")
+	defer span.End()
+
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		for _, c := range comps {
+			if err := upsertDiary(ctx, tx, c.Day, c.Kind, c.Content); err != nil {
+				return err
+			}
+			for _, day := range c.ConstituentDays {
+				if _, err := tx.ExecContext(ctx,
+					`DELETE FROM diary WHERE kind = ? AND day = ?`, c.ConstituentKind, day); err != nil {
+					return fmt.Errorf("delete compacted diary row: %w", err)
+				}
+			}
+		}
+		if done {
+			return markStageDone(ctx, tx, night, "compact")
+		}
+		return nil
 	})
 }
 

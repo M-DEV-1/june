@@ -44,6 +44,8 @@ type DreamConfig struct {
 	ShutdownCommand string `json:"shutdown_command"`
 	// Brain overrides which backend dreams. An empty provider means the main Brain block — but a dream brain that is not claude-cli is exempt from the Claude window curfew, which is the point of setting one: the other paid CLIs can dream all night without touching the user's Claude usage windows.
 	Brain BrainConfig `json:"brain"`
+	// Device is the llama.cpp Vulkan device name for the shadow model (e.g. "Vulkan1"); empty means let llama-server choose.
+	Device string `json:"device"`
 }
 
 // DefaultDreamHour is the local hour the dreaming window opens when the config leaves it zero.
