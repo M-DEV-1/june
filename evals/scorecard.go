@@ -59,7 +59,7 @@ func summary(c scorecard) string {
 
 func ranTracks(sel map[string]bool) string {
 	var out []string
-	for _, t := range []string{"1", "2", "3"} {
+	for _, t := range []string{"1", "2", "3", "5", "6", "7"} {
 		if sel[t] {
 			out = append(out, t)
 		}
