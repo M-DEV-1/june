@@ -228,3 +228,129 @@ func TestScheduler_Brief_WaitsForUserActivity(t *testing.T) {
 		t.Errorf("brain called %d times with no recent activity, want 0", calls)
 	}
 }
+
+// nextSunday returns the next date on or after base that falls on a Sunday, at the given local hour — the Sunday-only weekly study trigger's tests all need a Sunday timestamp regardless of what day the suite happens to run on.
+func nextSunday(base time.Time, hour int) time.Time {
+	for base.Weekday() != time.Sunday {
+		base = base.AddDate(0, 0, 1)
+	}
+	return time.Date(base.Year(), base.Month(), base.Day(), hour, 0, 0, 0, base.Location())
+}
+
+// TestScheduler_WeeklyStudy_FiresOnceOnSunday is the tracer bullet for the Sunday trigger: past the brief hour, on a Sunday, with fresh activity, one tick must call the wired weeklyStudy func exactly once and write the once-per-Sunday marker, and a second tick must not call it again.
+func TestScheduler_WeeklyStudy_FiresOnceOnSunday(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+
+	sunday := nextSunday(time.Now(), 9)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	calls := 0
+	var gotNow time.Time
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.briefHour = 8
+	s.now = func() time.Time { return sunday }
+	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
+		calls++
+		gotNow = now
+		return nil
+	})
+
+	s.tick(ctx)
+	if calls != 1 {
+		t.Fatalf("weeklyStudy called %d times, want 1", calls)
+	}
+	if !gotNow.Equal(sunday) {
+		t.Errorf("weeklyStudy called with now=%v, want %v", gotNow, sunday)
+	}
+	marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study")
+	if err != nil || marker == "" {
+		t.Errorf("weekly-study marker = %q, %v, want a non-empty marker written", marker, err)
+	}
+
+	s.tick(ctx)
+	if calls != 1 {
+		t.Errorf("weeklyStudy called %d times after a second tick, want still 1 (once-per-Sunday dedup)", calls)
+	}
+}
+
+// TestScheduler_WeeklyStudy_NeverFiresOnANonSunday verifies the same hour/activity conditions on any other day of the week never call weeklyStudy — it is strictly a Sunday-only trigger.
+func TestScheduler_WeeklyStudy_NeverFiresOnANonSunday(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+
+	monday := nextSunday(time.Now(), 9).AddDate(0, 0, 1)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	calls := 0
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.briefHour = 8
+	s.now = func() time.Time { return monday }
+	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error { calls++; return nil })
+
+	s.tick(ctx)
+	if calls != 0 {
+		t.Errorf("weeklyStudy called %d times on a Monday, want 0", calls)
+	}
+}
+
+// TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure verifies a failing weeklyStudy still writes the once-per-Sunday marker — the trigger logs and moves on rather than retrying every minute for the rest of the day, unlike the close/brief duties which do retry on failure.
+func TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+
+	sunday := nextSunday(time.Now(), 9)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	calls := 0
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.briefHour = 8
+	s.now = func() time.Time { return sunday }
+	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
+		calls++
+		return fmt.Errorf("study pass failed")
+	})
+
+	s.tick(ctx)
+	if calls != 1 {
+		t.Fatalf("weeklyStudy called %d times, want 1", calls)
+	}
+	if marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study"); err != nil || marker == "" {
+		t.Errorf("weekly-study marker = %q, %v, want a marker even though weeklyStudy failed", marker, err)
+	}
+
+	s.tick(ctx)
+	if calls != 1 {
+		t.Errorf("weeklyStudy called %d times after a second tick, want still 1", calls)
+	}
+}
+
+// TestScheduler_WeeklyStudy_UnsetNeverFires verifies a Scheduler that never had SetWeeklyStudy called never panics on a Sunday tick and never writes a marker — the trigger is opt-in.
+func TestScheduler_WeeklyStudy_UnsetNeverFires(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+
+	sunday := nextSunday(time.Now(), 9)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.briefHour = 8
+	s.now = func() time.Time { return sunday }
+
+	s.tick(ctx)
+	if marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study"); err != nil || marker != "" {
+		t.Errorf("weekly-study marker = %q, %v, want none written when weeklyStudy was never set", marker, err)
+	}
+}
