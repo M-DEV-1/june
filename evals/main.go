@@ -20,13 +20,18 @@ import (
 	_ "modernc.org/sqlite"
 
 	"ora/internal/agent"
+	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/study"
 )
 
 func main() {
-	tracks := flag.String("tracks", "1,2,3", "which tracks to run, comma separated: 1 memory replay, 2 conversation judge, 3 minutes judge")
+	tracks := flag.String("tracks", "1,2,3", "which tracks to run, comma separated: 1 memory replay, 2 conversation judge, 3 minutes judge, 5 counterfactual replay, 6 distillation study, 7 trajectory eval")
+	session := flag.String("session", "", "track 5: replay only sessions whose start time begins with this prefix (e.g. 2026-08-30); empty means the most recent 3")
 	turnCap := flag.Int("turns", 40, "track 2: score at most this many of the most recent turn pairs")
+	trajTurns := flag.Int("traj-turns", 10, "track 7: how many user messages the roleplay user sends in each arm's conversation")
+	trajModel := flag.String("traj-model", config.TextModel, "track 7: the model the gemini arm runs on — the live session's own native-audio model cannot do text function calling, so this defaults to the text model")
 	outDir := flag.String("out", "evals/runs", "directory the scorecard is written to")
 	questionsPath := flag.String("questions", "evals/questions.jsonl", "track 1: the question set")
 	toolPath := flag.Bool("tool-path", false, "track 1: replay questions through the agent's real query_memory tool (ExecuteTool, honoring each question's args) instead of calling HybridSearch directly")
@@ -35,7 +40,7 @@ func main() {
 	// The judge is chatty on stderr through slog if internal packages log; keep it to warnings so the run's own output stays readable.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
-	if err := run(*tracks, *turnCap, *outDir, *questionsPath, *toolPath); err != nil {
+	if err := run(*tracks, *turnCap, *outDir, *questionsPath, *toolPath, *session, *trajTurns, *trajModel); err != nil {
 		fmt.Fprintf(os.Stderr, "eval run failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -52,7 +57,7 @@ type scorecard struct {
 	Ran     map[string]bool
 }
 
-func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool) error {
+func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool, session string, trajTurns int, trajModel string) error {
 	// The API key lives in the repo's .env, the same file cmd/root.go loads at startup.
 	_ = godotenv.Load()
 	apiKey := os.Getenv("GEMINI_API_KEY")
@@ -129,6 +134,46 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 		card.T3 = runTrack3(ctx, j, dirs)
 	}
 
+	if sel["5"] {
+		fmt.Println("track 5 — counterfactual replay")
+		note, err := runTrack5(ctx, j, teacherBrain(), filepath.Join(dataDir, "ora.log"), "evals/replays", session)
+		if err != nil {
+			return fmt.Errorf("track 5: %w", err)
+		}
+		card.Notes = append(card.Notes, note)
+		fmt.Println("  " + note)
+	}
+
+	if sel["6"] {
+		fmt.Println("track 6 — distillation study")
+		replays, err := filepath.Glob("evals/replays/*.md")
+		if err != nil {
+			return fmt.Errorf("track 6: %w", err)
+		}
+		traces, err := filepath.Glob(filepath.Join(dataDir, "dreams", "*.jsonl"))
+		if err != nil {
+			return fmt.Errorf("track 6: %w", err)
+		}
+		res, err := study.Study(ctx, teacherBrain(), replays, traces, filepath.Join(dataDir, "study"))
+		if err != nil {
+			return fmt.Errorf("track 6: %w", err)
+		}
+		note := fmt.Sprintf("study: %d replays, %d traces (%d trace lines skipped) — %d lessons added, report at %s",
+			res.ReplaysRead, res.TracesRead, res.LinesSkipped, res.LessonsAdded, res.ReportPath)
+		card.Notes = append(card.Notes, note)
+		fmt.Println("  " + note)
+	}
+
+	if sel["7"] {
+		fmt.Println("track 7 — trajectory eval")
+		note, err := runTrack7(ctx, j, apiKey, dataDir, trajModel, trajTurns, "evals/trajectories")
+		if err != nil {
+			return fmt.Errorf("track 7: %w", err)
+		}
+		card.Notes = append(card.Notes, note)
+		fmt.Println("  " + note)
+	}
+
 	path, err := writeScorecard(card, outDir)
 	if err != nil {
 		return err
@@ -136,6 +181,20 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 	fmt.Printf("\nscorecard: %s\n", path)
 	fmt.Print(summary(card))
 	return nil
+}
+
+// teacherBrain is the Claude teacher tracks 5 and 6 both study against: the machine's own login, sonnet unless the config's brain block pins a claude-cli model. Sonnet is the deliberate default: both tracks make many per-turn or per-file calls.
+func teacherBrain() brain.Brain {
+	bc := config.LoadConfig().Brain
+	model := "sonnet"
+	if bc.Provider == config.BrainClaudeCLI && bc.Model != "" {
+		model = bc.Model
+	}
+	binary := bc.Binary
+	if binary == "" {
+		binary = "claude"
+	}
+	return brain.ClaudeCLI(binary, model, config.DefaultBrainTimeoutSeconds)
 }
 
 // snapshotDB copies the live sqlite database into a fresh temp directory with VACUUM INTO, sqlite's own consistent-copy statement, and returns the copy's path. The source is opened read-only so a runner bug can never touch live data; the caller removes the returned file's directory when done. Input: the live database path. Output: the snapshot path.
