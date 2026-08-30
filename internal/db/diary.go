@@ -127,6 +127,67 @@ func (s *Store) DiaryDays(ctx context.Context, from, to string) ([]DiaryDay, err
 	return out, nil
 }
 
+// DiaryEntriesThrough returns the diary rows of one kind whose day is at or before through (a local 'YYYY-MM-DD' string), oldest first. The compaction stage uses it to find the dailies and weeks old enough to collapse; the string comparison works because ISO dates order lexically.
+func (s *Store) DiaryEntriesThrough(ctx context.Context, kind, through string) ([]DiaryDay, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.DiaryEntriesThrough")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT day, content FROM diary WHERE kind = ? AND day <= ? ORDER BY day ASC`, kind, through)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query diary entries through: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DiaryDay
+	for rows.Next() {
+		var d DiaryDay
+		if err := rows.Scan(&d.Day, &d.Content); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan diary entry through: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate diary entries through: %w", err)
+	}
+	return out, nil
+}
+
+// DiaryKindCountsSince counts diary rows of each kind created at or after since — the weekly system log's tally of what Ora wrote down this week (day closes, briefs, dream reports).
+func (s *Store) DiaryKindCountsSince(ctx context.Context, since time.Time) (map[string]int, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.DiaryKindCountsSince")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT kind, COUNT(*) FROM diary WHERE created_at >= ? GROUP BY kind`, sqliteUTC(since))
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query diary kind counts since: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]int{}
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan diary kind count: %w", err)
+		}
+		out[kind] = n
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate diary kind counts: %w", err)
+	}
+	return out, nil
+}
+
 // NotesOfKindSince returns notes of the given kind created at or after since, newest first. The proactive seams use it to pull the day's (or the last few days') meeting minutes without dragging in the whole notes table.
 func (s *Store) NotesOfKindSince(ctx context.Context, kind string, since time.Time) ([]Note, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
