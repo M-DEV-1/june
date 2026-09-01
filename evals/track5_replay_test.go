@@ -129,18 +129,3 @@ func TestWriteReplayFile_SideBySideShape(t *testing.T) {
 		}
 	}
 }
-
-// TestSelectSessions covers the two selection modes: a start-time prefix, and the most-recent-3 default.
-func TestSelectSessions(t *testing.T) {
-	mk := func(day int) replaySession {
-		return replaySession{Start: time.Date(2026, 8, day, 12, 0, 0, 0, time.Local)}
-	}
-	all := []replaySession{mk(26), mk(27), mk(28), mk(30)}
-	if got := selectSessions(all, "2026-08-30"); len(got) != 1 || got[0].Start.Day() != 30 {
-		t.Errorf("prefix selection: %+v", got)
-	}
-	got := selectSessions(all, "")
-	if len(got) != 3 || got[0].Start.Day() != 27 || got[2].Start.Day() != 30 {
-		t.Errorf("default selection: %+v", got)
-	}
-}

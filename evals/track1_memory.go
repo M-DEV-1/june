@@ -24,6 +24,22 @@ type question struct {
 	Origin   string         `json:"origin"`
 	Question string         `json:"question"`
 	Args     map[string]any `json:"args,omitempty"`
+	// Expect is what a correct system should do: answerable, hard, clarify, refuse or false-premise. It is never shown to any judge or arm — telling a judge the answer is meant to be a refusal would have it rubber-stamp one. It is used only when the results are tabulated.
+	Expect string `json:"expect,omitempty"`
+	// Needs names the capture surface the question is aimed at, so a failure can be traced to a store rather than to retrieval in general.
+	Needs string `json:"needs,omitempty"`
+	// AskedAt is when the user really asked this. Without it a question saying "today" or "last week" is scored against whenever the eval happens to run, so five of the twenty-four measured a different window every time and the score moved with the calendar rather than with the code.
+	AskedAt string `json:"asked_at,omitempty"`
+}
+
+// judgeMaterial renders one question and its retrieved rows for a judge, leading with when the question was asked so a relative phrase like "today" resolves to the day the user said it.
+func judgeMaterial(q question, rows []string) string {
+	var b strings.Builder
+	if q.AskedAt != "" {
+		fmt.Fprintf(&b, "ASKED ON: %s\n", q.AskedAt)
+	}
+	fmt.Fprintf(&b, "QUESTION: %s\n\nRETRIEVED ROWS (%d):\n%s", q.Question, len(rows), rowsOrNone(rows))
+	return b.String()
 }
 
 // track1Result is one question's replay: the hits retrieval returned, and the judge's call on whether a companion could answer from them.
@@ -124,9 +140,7 @@ func runTrack1(ctx context.Context, search track1Search, j *judge, qs []question
 		}
 		r.Hits = rows
 
-		material := fmt.Sprintf("QUESTION: %s\n\nRETRIEVED ROWS (%d):\n%s",
-			q.Question, len(r.Hits), rowsOrNone(r.Hits))
-		if err := j.ask(ctx, track1Instruction, material, &r.V); err != nil {
+		if err := j.ask(ctx, track1Instruction, judgeMaterial(q, r.Hits), &r.V); err != nil {
 			r.Err = err.Error()
 			r.V = verdict{Verdict: "fail", Why: "judge call failed"}
 		}

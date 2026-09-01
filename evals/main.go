@@ -54,6 +54,8 @@ type scorecard struct {
 	T1      []track1Result
 	T2      []track2Result
 	T3      []track3Result
+	T8      []track8Result
+	T8Arms  []arm
 	Ran     map[string]bool
 }
 
@@ -112,6 +114,45 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 			card.Notes = append(card.Notes, "track 1 replayed through the agent's query_memory tool (ExecuteTool), honoring per-question args")
 		}
 		card.T1 = runTrack1(ctx, search, j, qs)
+		store.Close()
+	}
+
+	if sel["8"] {
+		fmt.Println("track 8 — context vs capacity")
+		qs, err := loadQuestions(questionsPath)
+		if err != nil {
+			return fmt.Errorf("track 8: %w", err)
+		}
+		snapshot, err := snapshotDB(filepath.Join(dataDir, "db"))
+		if err != nil {
+			return fmt.Errorf("track 8: %w", err)
+		}
+		defer os.RemoveAll(filepath.Dir(snapshot))
+
+		store, err := db.New(snapshot)
+		if err != nil {
+			return fmt.Errorf("track 8: open snapshot: %w", err)
+		}
+		embedder, index := newDaemonClients()
+		store.SetEmbedder(embedder)
+		store.SetVectorIndex(index)
+		store.SetVectorSimilarityFloor(float32(config.LoadConfig().Embed.Floor()))
+		// The same probe track 1 runs: a dead daemon makes every question lexical-only, which would read as a retrieval failure on the cross-tab rather than as the outage it is — and on this track that misreading lands in the "insufficient rows" column and blames retrieval for a machine that was simply not answering.
+		if _, err := embedder.Embed(ctx, "RETRIEVAL_QUERY", "probe"); err != nil {
+			card.Notes = append(card.Notes, fmt.Sprintf("daemon /embed unreachable (%v) — track 8 ran lexical-only, treat its retrieval column as a floor", err))
+			fmt.Println("  WARNING: /embed unreachable, hybrid search will degrade to lexical-only")
+		}
+		search := directSearch(store)
+		if toolPath {
+			search = toolPathSearch(agent.NewAgent(nil, nil, store, nil, apiKey))
+			card.Notes = append(card.Notes, "track 8 retrieved through the agent's query_memory tool (ExecuteTool), honoring per-question args")
+		}
+		arms := capacityArms()
+		// The clock is to the minute, not the day: two runs of the same commit on one evening is the normal case when a fix is being measured, and a day-and-sha name silently overwrote the "before" half of exactly that comparison.
+		frozen := filepath.Join(outDir, fmt.Sprintf("%s-%s-track8.json", card.Started.Format("2006-01-02-1504"), gitSHA()))
+		card.T8 = runTrack8(ctx, search, j, arms, qs, frozen)
+		card.T8Arms = arms
+		card.Notes = append(card.Notes, fmt.Sprintf("track 8 rows and answers frozen to %s", frozen))
 		store.Close()
 	}
 

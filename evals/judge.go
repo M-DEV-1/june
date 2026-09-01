@@ -12,6 +12,8 @@ import (
 	"google.golang.org/genai"
 
 	"ora/internal/config"
+
+	"ora/internal/brain"
 )
 
 // verdict is one binary criterion scored by the judge. Pass is meaningless when Verdict is "na" — a criterion the turn gives no occasion to test (T6 on a greeting, say) is excluded from rates rather than counted as a pass.
@@ -75,30 +77,13 @@ func (j *judge) ask(ctx context.Context, instruction, material string, out any) 
 			lastErr = fmt.Errorf("judge returned no text")
 			continue
 		}
-		if err := json.Unmarshal([]byte(stripFence(text)), out); err != nil {
+		if err := json.Unmarshal([]byte(brain.StripFence(text)), out); err != nil {
 			lastErr = fmt.Errorf("decode judge JSON: %w (body: %.200s)", err, text)
 			continue
 		}
 		return nil
 	}
 	return lastErr
-}
-
-// stripFence removes a markdown code fence around a JSON body. ResponseMIMEType usually stops the model wrapping its answer, but not always, and an unwrapped fence is the single most common way a judge run loses a row. Input: the model's raw text. Output: the text with any leading ```/```json line and trailing ``` line removed.
-func stripFence(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[i+1:]
-	} else {
-		return s
-	}
-	if i := strings.LastIndex(s, "```"); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
 }
 
 // rate turns a set of scored criteria into a pass count over the criteria that actually applied. Input: the verdicts for one criterion across many items. Output: passes, applicable (non-"na") count.
