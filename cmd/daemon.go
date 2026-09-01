@@ -163,6 +163,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	meetingRecorder = recorder.New(config.DataDir(), store, apiKey)
 
+	// Ora watches the microphone rather than the meeting apps: a call is the one thing that always takes it, and watching it needs no list of which applications count as a meeting.
+	if appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord {
+		go recorder.WatchForMeetings(ctx, meetingRecorder, appConfig.Meetings.AutoRecord)
+	}
+
 	summarizer, err := memory.NewGeminiSummarizer(apiKey)
 	if err != nil {
 		slog.Warn("failed to init summarizer, semantic memory disabled", "error", err)

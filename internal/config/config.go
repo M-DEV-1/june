@@ -30,7 +30,21 @@ type OraConfig struct {
 	Proactive ProactiveConfig `json:"proactive"`
 	// Dream schedules the overnight dreaming loop. Zero value means the defaults; a negative hour disables dreaming.
 	Dream DreamConfig `json:"dream"`
+	// Meetings sets what Ora does when it notices a call. Zero value means it offers to record and never records on its own.
+	Meetings MeetingsConfig `json:"meetings"`
 }
+
+// MeetingsConfig sets how Ora reacts to another application taking the microphone, which is how it notices a call is happening.
+type MeetingsConfig struct {
+	// Offer is whether Ora asks "in a meeting?" when another application has held the microphone long enough to be a call. Defaults to on, since noticing a call and then saying nothing about it is no use.
+	// A pointer, not a plain bool, so a config file written before this field existed is distinguishable from one where the user explicitly turned the prompt off. Use OfferEnabled rather than reading it directly.
+	Offer *bool `json:"offer,omitempty"`
+	// AutoRecord starts recording on the same signal without asking first. Off by default: the microphone says a call is likely, not that it is certain, and a recording nobody asked for is the wrong way to be wrong about that.
+	AutoRecord bool `json:"auto_record"`
+}
+
+// OfferEnabled reports whether the prompt should be shown, treating an absent setting as on.
+func (m MeetingsConfig) OfferEnabled() bool { return m.Offer == nil || *m.Offer }
 
 // DreamConfig sets when the overnight dreaming loop may run, and reserves the knobs the later local-model slice will need.
 type DreamConfig struct {
