@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/tracker"
 )
 
 // Segment is one span of speech from one side of the call, with its start and end measured from the beginning of the recording (not from the beginning of its own stream).
@@ -75,8 +76,41 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	if err != nil {
 		return nil, fmt.Errorf("whisper %s: %w (%s)", filepath.Base(path), err, strings.TrimSpace(errOut))
 	}
-	return parseSegments(out, speaker, offset), nil
+	return stripPromptEcho(parseSegments(out, speaker, offset), prompt), nil
 }
+
+// stripPromptEcho removes the priming prompt from the front of the transcript when whisper reads it back as speech instead of only conditioning on it. In the 2026-08-31 recording the first transcript line was "Participants: Rohit Verma, Claude Artifact." — the tail of the prompt, printed at 00:00:00 as though someone had said it, and then read by the minutes model as evidence about who was in the call.
+// Whisper keeps only the last whisperMaxContext tokens of the prompt, so the echo can be any suffix of it. Sentences are stripped one at a time off the front of the first segment, and a segment left empty is dropped.
+func stripPromptEcho(segs []Segment, prompt string) []Segment {
+	if len(segs) == 0 || prompt == "" {
+		return segs
+	}
+	// Whisper prints the echo as the opening of the stream, before anybody has said anything. Restricting the strip to that moment means a sentence the prompt happens to share with real speech is only ever at risk in the first seconds, rather than anywhere a segment starts.
+	if segs[0].Start > promptEchoWindow {
+		return segs
+	}
+	text := segs[0].Text
+	for _, sentence := range sentenceSplit.FindAllString(prompt, -1) {
+		sentence = strings.TrimSpace(sentence)
+		if sentence == "" {
+			continue
+		}
+		if trimmed := strings.TrimSpace(strings.TrimPrefix(text, sentence)); trimmed != text {
+			text = trimmed
+		}
+	}
+	if text == segs[0].Text {
+		return segs
+	}
+	if text == "" {
+		return segs[1:]
+	}
+	segs[0].Text = text
+	return segs
+}
+
+// promptEchoWindow is how far into a stream the priming prompt may still be echoed. Whisper conditions on the prompt for its first decoding window and prints it, if at all, as the first thing it emits; past this the stream is speech.
+const promptEchoWindow = 5 * time.Second
 
 // transcribeThreads is how many threads one transcription run may use. The two sides of a call are transcribed at the same time, so this is deliberately half of what a single run would take: whisper's own default is half the logical CPUs, and two runs at a quarter each add up to the same load rather than fighting over the same cores. Never less than one.
 // $ORA_TRANSCRIBE_THREADS overrides it. The right number is a property of the machine and not of the code: on a hybrid CPU the logical count is a poor guide to how many threads actually run at full speed, and the only way to know is to time a real recording both ways.
@@ -97,6 +131,22 @@ func transcribeThreads() int {
 func run(ctx context.Context, name string, args []string) (stdout, stderr string, err error) {
 	var out, errOut strings.Builder
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err = cmd.Run()
+	return out.String(), errOut.String(), err
+}
+
+// runWithLibPath is run with libDir added to the shared-library search path, for a tool whose libraries sit beside it rather than on the system path. The sherpa-onnx build ships its own ONNX Runtime that way.
+// libDir is prepended to whatever LD_LIBRARY_PATH the daemon inherited rather than replacing it: a machine running under Nix, Conda or a wrapped snap sets that variable for its own system libraries, and dropping it would leave the tool unable to link anything it does not ship itself.
+func runWithLibPath(ctx context.Context, name string, args []string, libDir string) (stdout, stderr string, err error) {
+	path := libDir
+	if inherited := os.Getenv("LD_LIBRARY_PATH"); inherited != "" {
+		path = libDir + string(os.PathListSeparator) + inherited
+	}
+	var out, errOut strings.Builder
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+path)
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 	err = cmd.Run()
@@ -230,7 +280,7 @@ func renderTranscript(segs []Segment) string {
 	for i := 0; i < len(segs); {
 		j := i
 		var turn []string
-		for j < len(segs) && segs[j].Speaker == segs[i].Speaker {
+		for j < len(segs) && segs[j].Speaker == segs[i].Speaker && (j == i || !breaksTurn(segs[i:j], segs[j])) {
 			turn = append(turn, segs[j].Text)
 			j++
 		}
@@ -242,6 +292,29 @@ func renderTranscript(segs []Segment) string {
 		i = j
 	}
 	return b.String()
+}
+
+// How long a turn may run before it is broken regardless of what the audio does.
+// turnSilence is the gap between two segments that counts as a pause rather than someone drawing breath. Whisper cuts on its own token timing, so consecutive segments of one person talking sit a few hundred milliseconds apart.
+// maxTurn bounds a turn that neither a pause nor a speaker marker ever ends, which is the normal case on a call where people talk over each other. About as long as one person speaks uninterrupted in a standup; past that the paragraph is more likely several people than one.
+const (
+	turnSilence = 2 * time.Second
+	maxTurn     = time.Minute
+)
+
+// breaksTurn reports whether next starts a new turn instead of continuing the one already made of turn, which is always at least one segment and always from the same speaker as next. renderTranscript prints one paragraph per turn, so this is the only thing deciding where a transcript gets its timestamps and its boundaries.
+// Input: turn, the segments gathered so far, oldest first; next, the segment being considered. Output: true to end the turn before next.
+func breaksTurn(turn []Segment, next Segment) bool {
+	// Whisper's own speaker-change marker. It is a hint rather than a fact — it appeared seventeen times in the first five minutes of the 2026-08-31 standup and never again — but when it does appear it is the only voice-change signal the transcript carries, so it is trusted.
+	if strings.HasPrefix(strings.TrimSpace(next.Text), ">>") {
+		return true
+	}
+	// A pause. Whisper's silence segments are dropped in parseSegments, so a hole between one segment's end and the next one's start is exactly where nobody was speaking.
+	if next.Start-turn[len(turn)-1].End >= turnSilence {
+		return true
+	}
+	// The backstop, and the one that actually matters on a busy call: six people talking over each other leave no silences and no markers, so without a ceiling the whole meeting stays one paragraph.
+	return next.Start-turn[0].Start >= maxTurn
 }
 
 // primingPromptBudget caps the priming prompt, in characters. Whisper keeps only the last whisperMaxContext tokens of the text it is primed with, and English averages a little over three characters per token, so a prompt longer than this has its front silently cut off — which is exactly where the participant names sit.
@@ -270,6 +343,11 @@ var promptChrome = map[string]bool{
 	"tour": true, "turn": true, "view": true, "wiki": true,
 }
 
+// isMeetingWindow reports whether an episode was captured from the window of a call rather than from whatever else was on screen. Everything that claims to name a participant is checked against this first: a screen during a meeting is mostly not the meeting. The tracker owns the test, since it is the same one it uses to decide which window to capture on its own clock.
+func isMeetingWindow(app, title string) bool {
+	return tracker.IsMeetingWindow(app, title)
+}
+
 // primingPrompt builds the text whisper is primed with, out of what the desktop tracker recorded on screen while the meeting ran. Priming biases whisper's spelling towards the words in the prompt, so feeding it the meeting's own acronyms and proper nouns is what turns "ND game and GRDI" into "INFORM and GDIS".
 // The prompt is deliberately written as capitalised, punctuated English. Whisper continues the prompt's register as well as its vocabulary: primed with a raw lowercase chat log it returns the whole transcript lowercase and unpunctuated, which is worse to read and worse to summarise from.
 // Input: the episodes captured during the recording window. Output: one line of text, capped at primingPromptBudget characters, or "" when there was nothing on screen to learn from.
@@ -278,7 +356,6 @@ func primingPrompt(eps []db.Episode) string {
 	first := map[string]string{} // lower-cased term to the spelling it was first seen with
 	var senders []string
 	seenSender := map[string]bool{}
-
 	add := func(term string) {
 		key := strings.ToLower(term)
 		if hasRepeatedWord(term) || hasChromeWord(term) {
@@ -290,6 +367,23 @@ func primingPrompt(eps []db.Episode) string {
 		counts[key]++
 	}
 
+	// A name written immediately before a colon is how a chat window labels who typed something. Only the meeting's own window counts: on 2026-08-31 a WhatsApp tab open during a standup put "Rohit Verma" and "Claude Artifact" into the prompt as the meeting's participants, and whisper printed them back as the first line of the transcript.
+	for _, e := range eps {
+		inMeeting := isMeetingWindow(e.App, e.Title)
+		for _, text := range []string{e.Title, e.UserActivity, e.ScreenText, e.VisibleText} {
+			if !inMeeting {
+				continue
+			}
+			for _, m := range chatSenderPattern.FindAllStringSubmatch(text, -1) {
+				name := m[1]
+				if !seenSender[name] {
+					seenSender[name] = true
+					senders = append(senders, name)
+				}
+			}
+		}
+	}
+
 	for _, e := range eps {
 		for _, text := range []string{e.Title, e.UserActivity, e.ScreenText, e.VisibleText} {
 			for _, m := range acronymPattern.FindAllString(text, -1) {
@@ -297,13 +391,6 @@ func primingPrompt(eps []db.Episode) string {
 			}
 			for _, m := range properNounPattern.FindAllString(text, -1) {
 				add(m)
-			}
-			// A name written immediately before a colon is how a chat window labels who typed something, which is the one place on screen that names the people in the meeting rather than the software.
-			for _, m := range chatSenderPattern.FindAllStringSubmatch(text, -1) {
-				if name := m[1]; !seenSender[name] {
-					seenSender[name] = true
-					senders = append(senders, name)
-				}
 			}
 		}
 	}
