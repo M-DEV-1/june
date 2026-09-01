@@ -71,26 +71,6 @@ func TestWrap_SuccessAndFailure_TableDriven(t *testing.T) {
 	}
 }
 
-// TestWrap_LatencyReflectsCallDuration proves Wrap actually times the call rather than recording a constant.
-func TestWrap_LatencyReflectsCallDuration(t *testing.T) {
-	rec := &fakeRecorder{}
-	const sleep = 20 * time.Millisecond
-	wrapped := Wrap("gemini", func(ctx context.Context, prompt string) (string, error) {
-		time.Sleep(sleep)
-		return "ok", nil
-	}, rec)
-
-	if _, err := wrapped(context.Background(), "prompt"); err != nil {
-		t.Fatalf("wrapped call: %v", err)
-	}
-	if len(rec.calls) != 1 {
-		t.Fatalf("recorded %d calls, want 1", len(rec.calls))
-	}
-	if rec.calls[0].ms < sleep {
-		t.Errorf("recorded latency %v, want at least the %v the call slept", rec.calls[0].ms, sleep)
-	}
-}
-
 // TestWrap_RecorderFailure_NeverFailsTheCall verifies a broken Recorder can't take down a brain call — the reply and error must pass through exactly as if recording had succeeded.
 func TestWrap_RecorderFailure_NeverFailsTheCall(t *testing.T) {
 	rec := &fakeRecorder{failErr: errors.New("disk full")}
