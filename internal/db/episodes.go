@@ -133,19 +133,22 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			vec, err := emb.Embed(embedCtx, "RETRIEVAL_DOCUMENT", text)
-			if err != nil {
-				slog.Error("async episode embed failed", "episode_id", id, "error", err)
-				return
-			}
 			meta := map[string]string{
 				"domain":     string(domain),
 				"source":     "episode",
 				"kind":       string(memory.KindMoment),
 				"created_at": time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := vidx.Add(embedCtx, fmt.Sprintf("episode:%d", id), text, vec, meta); err != nil {
-				slog.Error("async episode vector index add failed", "episode_id", id, "error", err)
+			// One vector per passage, not per screen. A capture longer than the embedder's cap used to be represented by its first 4,000 runes and nothing else; a capture shorter than one chunk still produces exactly one, under the same id it always had.
+			for i, chunk := range chunkText(text, chunkRunes, chunkOverlap) {
+				vec, err := emb.Embed(embedCtx, "RETRIEVAL_DOCUMENT", chunk)
+				if err != nil {
+					slog.Error("async episode embed failed", "episode_id", id, "chunk", i, "error", err)
+					continue
+				}
+				if err := vidx.Add(embedCtx, chunkVectorID("episode", id, i), chunk, vec, meta); err != nil {
+					slog.Error("async episode vector index add failed", "episode_id", id, "chunk", i, "error", err)
+				}
 			}
 		}(id, embedText, domain)
 	}

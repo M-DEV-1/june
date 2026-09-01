@@ -205,25 +205,26 @@ func (s *Store) reconcileBackfillCandidates(ctx context.Context, existing map[st
 				slog.Error("reconcile: scan episode for backfill failed", "error", err)
 				continue
 			}
-			if existing[fmt.Sprintf("episode:%d", id)] {
-				continue
-			}
 			// Same context-framed document LogEpisode embeds (app/title header + content), not bare screen_text — Normalize re-running on already-clean stored text is safe (it's idempotent chrome-stripping/capping on content that's already clean).
 			doc := memory.Normalize(app, title, screenText).Document()
 			if strings.TrimSpace(doc) == "" {
 				doc = screenText
 			}
-			episodeCandidates++
-			out = append(out, reconcileCandidate{
-				id:      fmt.Sprintf("episode:%d", id),
-				content: doc,
-				metadata: map[string]string{
-					"domain":     domain,
-					"source":     "episode",
-					"kind":       string(memory.KindMoment),
-					"created_at": created,
-				},
-			})
+			meta := map[string]string{
+				"domain":     domain,
+				"source":     "episode",
+				"kind":       string(memory.KindMoment),
+				"created_at": created,
+			}
+			// Per passage, and each checked separately. An episode indexed before chunking existed has its first passage and none of the others, which is exactly the 50% of captured text that had no vector at all — this is the sweep that brings it back.
+			for i, chunk := range chunkText(doc, chunkRunes, chunkOverlap) {
+				vid := chunkVectorID("episode", id, i)
+				if existing[vid] {
+					continue
+				}
+				episodeCandidates++
+				out = append(out, reconcileCandidate{id: vid, content: chunk, metadata: meta})
+			}
 		}
 		episodeRows.Close()
 	}
