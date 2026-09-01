@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -226,4 +227,73 @@ func (s *Store) EpisodesForThread(ctx context.Context, threadID int64, limit int
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// BackfillThreadEdges rebuilds the episode-to-thread links for flushes that happened before the edge was recorded. Returns how many links were made.
+// It is not a heuristic. The compiler writes one summary node per thread per flush, carrying that thread's subject and the moment of the flush, so the node timestamps are the flush boundaries the compiler actually used: every episode between one flush and the next belongs to the threads that flush produced. That is the same rule the live path applies, applied to history.
+// Episodes captured before the oldest summary node stay unlinked — there is no record of what they were attributed to, and inventing one would be worse than leaving the gap visible.
+func (s *Store) BackfillThreadEdges(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT n.created_at, n.content
+		FROM nodes n
+		WHERE n.type = 'summary' AND n.content <> ''
+		ORDER BY n.created_at`)
+	if err != nil {
+		return 0, fmt.Errorf("read summary nodes: %w", err)
+	}
+	type flush struct {
+		at      time.Time
+		subject string
+	}
+	var flushes []flush
+	for rows.Next() {
+		var at time.Time
+		var content string
+		if err := rows.Scan(&at, &content); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan summary node: %w", err)
+		}
+		var ts struct {
+			TaskName string `json:"task_name"`
+		}
+		// A node whose content is not the marshalled summary shape names no thread and is skipped rather than guessed at.
+		if err := json.Unmarshal([]byte(content), &ts); err != nil || strings.TrimSpace(ts.TaskName) == "" {
+			continue
+		}
+		flushes = append(flushes, flush{at, ts.TaskName})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate summary nodes: %w", err)
+	}
+
+	linked := 0
+	// prev is the previous flush's moment, which is where this flush's window opens. The first node has no predecessor, so its window opens at the oldest episode — that stretch was attributed to it and nothing earlier competes for it.
+	var prev time.Time
+	for _, f := range flushes {
+		var id int64
+		err := s.db.QueryRowContext(ctx, `SELECT id FROM threads WHERE subject = ?`, f.subject).Scan(&id)
+		if err == sql.ErrNoRows {
+			prev = f.at
+			continue // the thread was renamed or deleted since; nothing to link to
+		}
+		if err != nil {
+			return linked, fmt.Errorf("look up thread %q: %w", f.subject, err)
+		}
+		if err := s.LinkEpisodesToThread(ctx, id, prev, f.at); err != nil {
+			return linked, err
+		}
+		linked++
+		prev = f.at
+	}
+	return linked, nil
+}
+
+// CountThreadEdges reports how many episode-to-thread links exist, so a backfill can say what it changed.
+func (s *Store) CountThreadEdges(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM episode_threads`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count thread edges: %w", err)
+	}
+	return n, nil
 }

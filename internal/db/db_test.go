@@ -2494,3 +2494,38 @@ func TestStore_ThreadEpisodes_LinkAndReadBack(t *testing.T) {
 		t.Errorf("the evidence did not come back with the episode: %q", got[0].ScreenText)
 	}
 }
+
+// The compiler discarded the episode-to-thread attribution for months, but it left a trace: one summary node per thread per flush, carrying the thread's subject and the moment of the flush. Those timestamps are the flush boundaries, so the edge can be rebuilt exactly rather than guessed at — every episode between one flush and the next belongs to the threads that flush produced.
+func TestStore_BackfillThreadEdges_RebuildsFromSummaryNodes(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inFlush, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The summary node the compiler wrote for that flush, named after the thread.
+	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "code review of ora", Summary: "reviewed the code"}); err != nil {
+		t.Fatal(err)
+	}
+
+	linked, err := store.BackfillThreadEdges(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked == 0 {
+		t.Fatal("backfill linked nothing")
+	}
+
+	eps, err := store.EpisodesForThread(ctx, threadID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 1 || eps[0].ID != inFlush {
+		t.Fatalf("got %+v, want the episode captured before that flush", eps)
+	}
+}
