@@ -120,6 +120,69 @@ func compactPrompt(period string, entries []db.DiaryDay) string {
 	return b.String()
 }
 
+// diaryInstruction heads the nightly diary-writing call: the same brain that spent the night judging turns the night's real material into the diary entry itself, in its own words, instead of a template filling numbers into fixed sentences.
+const diaryInstruction = `You are Ora. You just spent the night dreaming about the user. Write tonight's diary entry in first person — what you turned over in your mind, what you decided to believe, what you let go of and how that felt, what stood out from replaying their day, what you're still wondering. Plain prose, under 250 words, no lists, no numbers-report, no markdown. This is a diary, not a log.`
+
+// diaryPrompt assembles the diary-writing call: the instruction, then the night's real material grounding it — which hypotheses were tested and how they came out, what was retired or adopted and why (the judge's own reasoning where the mechanics kept it), whether the standing understanding changed, what compaction found, and the top piles from tonight's replay of the day. Every section renders something, "(...)" placeholders included, so the model never has to guess whether material is missing or just wasn't given.
+func diaryPrompt(hyp *stageReport, undRan bool, comp *compactReport, replay *replayReport, notes []string) string {
+	var b strings.Builder
+	b.WriteString(diaryInstruction)
+
+	b.WriteString("\n\n--- Testing hypotheses tonight ---\n")
+	switch {
+	case hyp == nil:
+		b.WriteString("(the hypothesis stage had already run earlier tonight)\n")
+	case hyp.tested == 0 && hyp.adopted == 0:
+		b.WriteString("(nothing tested or adopted tonight)\n")
+	default:
+		fmt.Fprintf(&b, "Tested %d, %d promoted, %d retired, %d adopted.\n", hyp.tested, hyp.promoted, hyp.retired, hyp.adopted)
+		for _, l := range hyp.lines {
+			b.WriteString(l)
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n--- Standing understanding of the user ---\n")
+	if undRan {
+		b.WriteString("Rewritten tonight.\n")
+	} else {
+		b.WriteString("Not touched tonight; it already stands as before.\n")
+	}
+
+	b.WriteString("\n--- Compaction ---\n")
+	switch {
+	case comp == nil:
+		b.WriteString("(already ran earlier tonight)\n")
+	case comp.weeks == 0 && comp.months == 0:
+		b.WriteString("Nothing in the diary was old enough to fold away.\n")
+	default:
+		fmt.Fprintf(&b, "%d weeks folded into week entries, %d months folded into month entries.\n", comp.weeks, comp.months)
+	}
+
+	b.WriteString("\n--- Replaying the day ---\n")
+	switch {
+	case replay == nil:
+		b.WriteString("(already ran earlier tonight)\n")
+	case replay.skipped:
+		b.WriteString("(no second read of the day tonight)\n")
+	case len(replay.top) == 0:
+		b.WriteString("(nothing stood out)\n")
+	default:
+		for _, p := range replay.top {
+			fmt.Fprintf(&b, "%s: %s\n", p.thread, strings.Join(p.facts, "; "))
+		}
+	}
+
+	if len(notes) > 0 {
+		b.WriteString("\n--- Notes ---\n")
+		for _, n := range notes {
+			b.WriteString(n)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // firstLine returns the first non-empty line of s — the diary prompt makes each entry's first line its standalone salient sentence.
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)

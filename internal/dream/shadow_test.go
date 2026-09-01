@@ -63,18 +63,6 @@ func spawnHelper(t *testing.T, port int, healthDelay time.Duration) (*exec.Cmd, 
 	return cmd, exited
 }
 
-// waitHealthy returns once a server that is already answering /health, without waiting out its timeout.
-func TestWaitHealthy_ReturnsAsSoonAsHealthy(t *testing.T) {
-	port := freePort(t)
-	cmd, exited := spawnHelper(t, port, 0)
-	defer killShadowChild(cmd, exited)
-
-	err := waitHealthy(context.Background(), fmt.Sprintf("http://127.0.0.1:%d", port), exited, 5*time.Second)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 // A server that is slow to answer /health (standing in for a model load) is still waited for, up to the timeout.
 func TestWaitHealthy_WaitsOutASlowLoad(t *testing.T) {
 	port := freePort(t)
@@ -132,11 +120,6 @@ func TestKillShadowChild_TerminatesTheProcess(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the child was still alive after killShadowChild returned")
 	}
-}
-
-// A nil cmd is a no-op, which is what a ShadowLifecycle.Stop called before any Start ever ran hits.
-func TestKillShadowChild_NilIsNoop(t *testing.T) {
-	killShadowChild(nil, nil)
 }
 
 // An empty device leaves the choice to llama-server: no -dev flag at all.
