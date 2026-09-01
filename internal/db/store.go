@@ -32,6 +32,13 @@ type Store struct {
 
 	// framesDir is ora-db/frames next to the sqlite file. Empty for :memory: stores — vision JPEGs are skipped.
 	framesDir string
+
+	// path is the sqlite file this store was opened from, "" for :memory:. QueryStore uses it to open a second, read-only connection — see query_store.go.
+	path string
+	// roDB/roOnce/roErr back that second connection, opened lazily on the first QueryStore call and reused after.
+	roOnce sync.Once
+	roDB   *sql.DB
+	roErr  error
 }
 
 // constructor, return pointer to struct and err
@@ -66,7 +73,7 @@ func New(path string) (*Store, error) {
 		securePermissions(filepath.Dir(path), path)
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if path != ":memory:" {
 		s.framesDir = filepath.Join(filepath.Dir(path), "frames")
 	}
@@ -470,6 +477,9 @@ func (s *Store) ensureColumn(table, column, coldef string) error {
 }
 
 func (s *Store) Close() error {
+	if s.roDB != nil {
+		s.roDB.Close()
+	}
 	return s.db.Close()
 }
 
