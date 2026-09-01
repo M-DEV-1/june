@@ -51,6 +51,21 @@ rather than bubbling up. This keeps the daemon's poll loop steady.
 
 - **screen *pixel* capture is no-op**. `captureScreen()` returns nil — accessibility
   text (AT-SPI), not pixels. OCR remains a dormant fallback.
+- **the focused window is not the only window read**. `extractMeetingWindow()`
+  (capture_linux.go) walks the same AT-SPI registry but selects by name rather
+  than by STATE_ACTIVE, and `Daemon.watchMeetingWindow` calls it once a minute
+  on its own goroutine — off the 2-second poll, because one walk is allowed
+  2.5s and would otherwise stall window tracking past its own interval.
+  Why it exists: on 2026-08-31 a 39-minute meeting produced 27 episodes and not
+  one was the call. The user spent it in ClickUp and a terminal, so the
+  participant tiles and the window title — the only things on the machine that
+  name who is speaking — were never captured. A Teams PWA titles itself
+  "Microsoft Teams (PWA) - Chat | <person>", so the title alone carries the
+  other participant's name.
+  Dedup is on the window's own text and `lastText` only advances after a
+  successful channel send; recording it before the send would let one full
+  channel retire a meeting's window for the rest of the call.
+
 - **text capture depends on app accessibility**. extractText returns "" when the
   focused app exposes no AT-SPI text (a11y disabled, or a toolkit that needs a flag).
 - **GNOME / KDE wayland** without sway/hyprland: falls back to X11 if
