@@ -4,6 +4,7 @@ import (
 	"context"
 	"ora/internal/agent"
 	"ora/internal/db"
+	"ora/internal/memory"
 	"testing"
 	"time"
 )
@@ -43,6 +44,13 @@ func (b *mockBrain) SetPersonalContext(ctx context.Context, subject, content str
 	return nil
 }
 func (b *mockBrain) DeletePersonalContext(ctx context.Context, subject string) error { return nil }
+func (b *mockBrain) EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error) {
+	return nil, nil
+}
+
+func (b *mockBrain) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {
+	return nil, nil
+}
 func (b *mockBrain) ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error) {
 	return nil, nil
 }
@@ -55,9 +63,13 @@ func (b *mockBrain) RecallSubject(ctx context.Context, subject string, limit int
 func (b *mockBrain) HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]db.MemoryHit, error) {
 	return nil, nil
 }
-func (b *mockBrain) SaveFold(ctx context.Context, task, result string) (int64, error)    { return 0, nil }
-func (b *mockBrain) UnconsumedFolds(ctx context.Context) ([]db.Fold, error)              { return nil, nil }
-func (b *mockBrain) ConsumeFold(ctx context.Context, id int64) error                     { return nil }
+func (b *mockBrain) SaveFold(ctx context.Context, task, result string) (int64, error)   { return 0, nil }
+func (b *mockBrain) UnconsumedFolds(ctx context.Context) ([]db.Fold, error)             { return nil, nil }
+func (b *mockBrain) ConsumeFold(ctx context.Context, id int64) error                    { return nil }
+func (b *mockBrain) SetActionStatus(ctx context.Context, id int64, status string) error { return nil }
+func (b *mockBrain) SetActionPriority(ctx context.Context, id int64, priority string) error {
+	return nil
+}
 func (b *mockBrain) UpdateThreadState(ctx context.Context, id int64, state string) error { return nil }
 
 // behavior

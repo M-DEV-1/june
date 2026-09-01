@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"ora/internal/db"
+	"ora/internal/memory"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,6 +209,51 @@ func toolDefinitions() []*genai.Tool {
 						"content": {Type: genai.TypeString, Description: "The corrected fact, written as a durable statement."},
 					},
 					Required: []string{"id", "content"},
+				},
+			},
+			{
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "update_action",
+				Description: "Mark something the user owes as done or dropped, or change how much it matters. " +
+					"Action items are the things somebody agreed to do in a meeting; they are what the morning " +
+					"brief leads with. Look one up with query_memory to get its id from the \"[note#N]\" prefix, " +
+					"then call this. Use it whenever the user says a task is finished, is not happening, or is " +
+					"more or less urgent than you implied — never leave a task the user says is done still open.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"id":       {Type: genai.TypeInteger, Description: "The action item's id, from a \"[note#N]\" result."},
+						"status":   {Type: genai.TypeString, Description: "open, done, or dropped. Omit to leave the status alone."},
+						"priority": {Type: genai.TypeString, Description: "high, normal, or low. Omit to leave the priority alone."},
+					},
+					Required: []string{"id"},
+				},
+			},
+			{
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "action_items",
+				Description: "List what the user still owes — the things they agreed to do in a meeting and have not " +
+					"closed. Use this for any question about outstanding work, owed tasks, commitments, what is on " +
+					"their plate, or what they need to do. Do not use query_memory for those: an action item's text " +
+					"is the task itself and shares no words with the question, so searching for it finds meetings " +
+					"about meetings instead. This reads the list directly. Each result carries its id, so update_action " +
+					"can close one straight afterwards.",
+				Parameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{}},
+			},
+			{
+				Behavior: genai.BehaviorNonBlocking,
+				Name:     "thread_evidence",
+				Description: "Show the captures behind an ongoing thread — the actual screens, in order, that the " +
+					"thread was summarised from. A thread's state is one line; this is what it was written from. " +
+					"Use it whenever the user asks for detail a thread only gestures at: what the findings actually " +
+					"were, what the error said, which files were touched. Get the id from a \"[thread#N]\" result.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"id":    {Type: genai.TypeInteger, Description: "The thread's id, from a \"[thread#N]\" result."},
+						"limit": {Type: genai.TypeInteger, Description: "Optional. How many captures to show, newest first. Defaults to 10."},
+					},
+					Required: []string{"id"},
 				},
 			},
 			{
@@ -1117,6 +1163,79 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if err := a.brain.UpdateNote(ctx, int64(idFloat), content); err != nil {
 			slog.Error("update_note: write failed", "id", int64(idFloat), "error", err)
 			return toolError("nothing was updated — look the note up again with query_memory and use the id it shows")
+		}
+		return "updated"
+
+	case "thread_evidence":
+		idFloat, ok := args["id"].(float64)
+		if !ok || idFloat <= 0 {
+			return toolError("thread_evidence needs the thread's id — the number in a [thread#N] result")
+		}
+		limit := 10
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			limit = int(l)
+		}
+		eps, err := a.brain.EpisodesForThread(ctx, int64(idFloat), limit)
+		if err != nil {
+			slog.Error("thread_evidence: read failed", "id", int64(idFloat), "error", err)
+			return toolError("could not read this thread's captures")
+		}
+		if len(eps) == 0 {
+			// Threads attributed before the compiler began recording the edge have none, and saying so plainly stops the model reading an empty result as "nothing happened".
+			return "no captures are linked to that thread — it was summarised before Ora started recording which screens a thread came from"
+		}
+		var b strings.Builder
+		for _, e := range eps {
+			fmt.Fprintf(&b, "%s  %s — %s\n", e.CreatedAt.Local().Format("Mon Jan 2 15:04"), e.App, e.Title)
+			if txt := strings.TrimSpace(e.ScreenText); txt != "" {
+				fmt.Fprintf(&b, "    %s\n", db.FormatHit(db.MemoryHit{Source: "episode", Content: txt}, 0))
+			}
+		}
+		return strings.TrimRight(b.String(), "\n")
+
+	case "action_items":
+		items, err := a.brain.OpenActionItems(ctx)
+		if err != nil {
+			slog.Error("action_items: read failed", "error", err)
+			return toolError("could not read the action items")
+		}
+		if len(items) == 0 {
+			return "nothing outstanding — no open action items"
+		}
+		var b strings.Builder
+		for _, it := range items {
+			// The id leads so update_action can close one without a second lookup, and the source meeting trails so the model can say where a task came from.
+			fmt.Fprintf(&b, "[note#%d] %s\n", it.NoteID, it.Note())
+		}
+		return strings.TrimRight(b.String(), "\n")
+
+	case "update_action":
+		idFloat, ok := args["id"].(float64)
+		if !ok {
+			return toolError("update_action needs the action item's id — the number in a [note#N] query_memory result")
+		}
+		status, _ := args["status"].(string)
+		priority, _ := args["priority"].(string)
+		if strings.TrimSpace(status) == "" && strings.TrimSpace(priority) == "" {
+			return toolError("update_action needs a status (open, done, dropped) or a priority (high, normal, low) to change")
+		}
+		if s := strings.TrimSpace(status); s != "" {
+			if !memory.ValidStatus(s) {
+				return toolError("status must be open, done, or dropped")
+			}
+			if err := a.brain.SetActionStatus(ctx, int64(idFloat), s); err != nil {
+				slog.Error("update_action: status write failed", "id", int64(idFloat), "error", err)
+				return toolError("nothing was updated — look the item up again with query_memory and use the id it shows")
+			}
+		}
+		if p := strings.TrimSpace(priority); p != "" {
+			if !memory.ValidPriority(p) {
+				return toolError("priority must be high, normal, or low")
+			}
+			if err := a.brain.SetActionPriority(ctx, int64(idFloat), p); err != nil {
+				slog.Error("update_action: priority write failed", "id", int64(idFloat), "error", err)
+				return toolError("nothing was updated — look the item up again with query_memory and use the id it shows")
+			}
 		}
 		return "updated"
 

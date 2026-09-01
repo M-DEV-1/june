@@ -240,7 +240,7 @@ func TestProactivityConfig(t *testing.T) {
 
 // TestFormatFocusHits_TruncatesOverlongContent verifies the handshake's focus-lookup formatting excerpts content via db.FormatHit/FormatNoteHit like every other read path — this was the one site injecting SearchMemory hits raw and uncapped straight into the system instruction. Raw Activity Log summaries in production run tens of KB; an unformatted hit here can blow the system-prompt budget on a single row.
 func TestFormatFocusHits_TruncatesOverlongContent(t *testing.T) {
-	overlong := strings.Repeat("x", 500) // well past db's excerpt budget (200 runes)
+	overlong := strings.Repeat("x", 2000) // well past db's excerpt budget for a summary (maxSummaryExcerpt, 700 runes)
 	hits := []db.MemoryHit{{Source: "summary", Content: overlong}}
 
 	got := formatFocusHits(hits, 2)

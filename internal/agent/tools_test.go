@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"ora/internal/db"
+	"ora/internal/memory"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +19,9 @@ import (
 
 // toolTestBrain is a minimal ContextReader mock used to exercise executeTool's query_memory case. It lives in an internal (package agent, not agent_test) test file because executeTool is unexported.
 type toolTestBrain struct {
+	threadEpisodes  []db.Episode
+	openActions     []memory.ActionItem
+	openActionsErr  error
 	windowEpisodes  []db.Episode
 	windowSummaries []db.WindowSummary
 	subjectRecall   []string
@@ -56,6 +61,11 @@ type toolTestBrain struct {
 	updatedNoteContent string
 	updateNoteErr      error
 
+	// actionID/actionStatus/actionPriority capture SetActionStatus/SetActionPriority's args for the update_action tool's tests; actionErr forces both to fail.
+	actionID       int64
+	actionStatus   string
+	actionPriority string
+	actionErr      error
 	// updatedThreadID/updatedThreadState capture UpdateThreadState's args for the fix_thread tool's tests; updateThreadErr forces it to fail.
 	updatedThreadID    int64
 	updatedThreadState string
@@ -138,6 +148,24 @@ func (b *toolTestBrain) UpdateNote(ctx context.Context, id int64, content string
 	b.updatedNoteContent = content
 	return b.updateNoteErr
 }
+func (b *toolTestBrain) EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error) {
+	return b.threadEpisodes, nil
+}
+
+func (b *toolTestBrain) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {
+	return b.openActions, b.openActionsErr
+}
+
+func (b *toolTestBrain) SetActionStatus(ctx context.Context, id int64, status string) error {
+	b.actionID, b.actionStatus = id, status
+	return b.actionErr
+}
+
+func (b *toolTestBrain) SetActionPriority(ctx context.Context, id int64, priority string) error {
+	b.actionID, b.actionPriority = id, priority
+	return b.actionErr
+}
+
 func (b *toolTestBrain) UpdateThreadState(ctx context.Context, id int64, state string) error {
 	b.updatedThreadID = id
 	b.updatedThreadState = state
@@ -631,7 +659,7 @@ func TestExecuteTool_QueryMemory_FormatsNoteHitWithRefID(t *testing.T) {
 
 // TestExecuteTool_QueryMemory_TruncatesOverlongHitContent verifies query_memory formats hits through db.FormatHit like every other read path — a hit whose content exceeds the excerpt budget must come back truncated, not injected raw. Raw Activity Log summaries in production run tens of KB; an uncapped hit here can consume the entire tool-result byte budget by itself.
 func TestExecuteTool_QueryMemory_TruncatesOverlongHitContent(t *testing.T) {
-	overlong := strings.Repeat("x", 500) // well past db.maxEpisodeExcerpt (200 runes)
+	overlong := strings.Repeat("x", 2000) // well past db's excerpt budget for a summary (maxSummaryExcerpt, 700 runes)
 	brain := &toolTestBrain{
 		hybridHits: []db.MemoryHit{
 			{Source: "summary", Content: overlong},
@@ -1526,5 +1554,108 @@ func TestExecuteTool_Recall_BigWindowClimbsToSummaries(t *testing.T) {
 	out = a.ExecuteTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
 	if !strings.Contains(out, "late night content") {
 		t.Errorf("a window that fits must stay on raw episodes, got:\n%s", out)
+	}
+}
+
+// TestExecuteTool_UpdateAction covers the correction the user makes out loud after reading the morning brief: something is finished, or it matters more or less than the brief implied. Action items are notes, so the id comes from the same "[note#N]" prefix query_memory already carries.
+func TestExecuteTool_UpdateAction(t *testing.T) {
+	brain := &toolTestBrain{}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	if result := a.executeTool(context.Background(), "update_action", map[string]any{
+		"id": float64(7), "status": "done",
+	}); result != "updated" {
+		t.Fatalf("update_action(status) = %q, want %q", result, "updated")
+	}
+	if brain.actionID != 7 || brain.actionStatus != "done" {
+		t.Errorf("action %d set to status %q, want 7/done", brain.actionID, brain.actionStatus)
+	}
+
+	if result := a.executeTool(context.Background(), "update_action", map[string]any{
+		"id": float64(9), "priority": "low",
+	}); result != "updated" {
+		t.Fatalf("update_action(priority) = %q, want %q", result, "updated")
+	}
+	if brain.actionID != 9 || brain.actionPriority != "low" {
+		t.Errorf("action %d set to priority %q, want 9/low", brain.actionID, brain.actionPriority)
+	}
+}
+
+// Both halves of one call must land: "that's done and it was never urgent anyway" is one correction, not two.
+func TestExecuteTool_UpdateAction_StatusAndPriorityTogether(t *testing.T) {
+	brain := &toolTestBrain{}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	if result := a.executeTool(context.Background(), "update_action", map[string]any{
+		"id": float64(3), "status": "done", "priority": "low",
+	}); result != "updated" {
+		t.Fatalf("update_action = %q", result)
+	}
+	if brain.actionStatus != "done" || brain.actionPriority != "low" {
+		t.Errorf("status/priority = %q / %q, want done/low", brain.actionStatus, brain.actionPriority)
+	}
+}
+
+func TestExecuteTool_UpdateAction_MissingArgs(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "FAKE_API_KEY")
+
+	for _, args := range []map[string]any{
+		{"status": "done"},                       // no id
+		{"id": float64(7)},                       // nothing to change
+		{"id": float64(7), "status": "finished"}, // not a status the store knows
+	} {
+		if result := a.executeTool(context.Background(), "update_action", args); !strings.HasPrefix(result, "error") {
+			t.Errorf("update_action(%v) = %q, want an error", args, result)
+		}
+	}
+}
+
+// A write that fails must be reported as failed: telling the user their correction landed when it did not is worse than telling them to say it again.
+func TestExecuteTool_UpdateAction_WriteFailureIsReported(t *testing.T) {
+	brain := &toolTestBrain{actionErr: errors.New("no action item with id 42")}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	if result := a.executeTool(context.Background(), "update_action", map[string]any{
+		"id": float64(42), "status": "done",
+	}); !strings.HasPrefix(result, "error") {
+		t.Errorf("update_action = %q, want an error", result)
+	}
+}
+
+// "What do I owe?" is a question about a column, not about meaning, and query_memory answered it with ten summaries about attending meetings. The action_items tool reads the list directly, and leads each line with the id so update_action can close one without a second lookup.
+func TestExecuteTool_ActionItemsListsWhatIsOwed(t *testing.T) {
+	brain := &toolTestBrain{openActions: []memory.ActionItem{
+		{NoteID: 41, Owner: "Mahadevan KS", Text: "push the value chain branch", Status: memory.StatusOpen, Priority: memory.PriorityNormal},
+	}}
+	got := NewAgent(nil, nil, brain, nil, "").ExecuteTool(context.Background(), "action_items", map[string]any{})
+	if !strings.Contains(got, "[note#41]") || !strings.Contains(got, "push the value chain branch") {
+		t.Errorf("got %q, want the item with its id", got)
+	}
+}
+
+// Nothing outstanding is an answer, not an error: a model handed an empty result has to be told the list is empty rather than left to read silence as a failure.
+func TestExecuteTool_ActionItemsSaysWhenNothingIsOwed(t *testing.T) {
+	got := NewAgent(nil, nil, &toolTestBrain{}, nil, "").ExecuteTool(context.Background(), "action_items", map[string]any{})
+	if !strings.Contains(got, "nothing outstanding") {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A thread's state is one line. thread_evidence is the walk from that line to the screens it was written from — the thing that was impossible while nothing joined the 261 threads to the 4,901 episodes.
+func TestExecuteTool_ThreadEvidenceShowsTheCapturesBehindAThread(t *testing.T) {
+	brain := &toolTestBrain{threadEpisodes: []db.Episode{
+		{App: "Code", Title: "search.go", ScreenText: "eleven findings, two high severity", CreatedAt: time.Now()},
+	}}
+	got := NewAgent(nil, nil, brain, nil, "").ExecuteTool(context.Background(), "thread_evidence", map[string]any{"id": float64(112)})
+	if !strings.Contains(got, "eleven findings") || !strings.Contains(got, "search.go") {
+		t.Errorf("got %q, want the capture behind the thread", got)
+	}
+}
+
+// A thread attributed before the edge was recorded has no captures, and saying so plainly stops the model reading an empty result as "nothing happened".
+func TestExecuteTool_ThreadEvidenceExplainsAnEmptyResult(t *testing.T) {
+	got := NewAgent(nil, nil, &toolTestBrain{}, nil, "").ExecuteTool(context.Background(), "thread_evidence", map[string]any{"id": float64(1)})
+	if !strings.Contains(got, "no captures are linked") {
+		t.Errorf("got %q", got)
 	}
 }
