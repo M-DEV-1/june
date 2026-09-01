@@ -211,44 +211,16 @@ func composeStudyPrompt(included []block, truncated []string) string {
 
 // parseStudyJSON decodes the teacher's reply into out, tolerating a markdown fence or leading/trailing prose around the JSON. This replicates internal/dream/dream.go's askJSON fence-stripping and outermost-JSON recovery, copied rather than imported since that package is being edited concurrently by another agent.
 func parseStudyJSON(reply string, out any) error {
-	body := stripFence(reply)
+	body := brain.StripFence(reply)
 	if err := json.Unmarshal([]byte(body), out); err == nil {
 		return nil
 	}
-	if sliced := outermostJSON(body); sliced != "" {
+	if sliced := brain.OutermostJSON(body); sliced != "" {
 		if err := json.Unmarshal([]byte(sliced), out); err == nil {
 			return nil
 		}
 	}
 	return json.Unmarshal([]byte(body), out) // re-run to surface the real decode error in the message
-}
-
-// stripFence removes a markdown code fence around a JSON body — copied from internal/dream/dream.go's helper of the same name.
-func stripFence(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[i+1:]
-	} else {
-		return s
-	}
-	if i := strings.LastIndex(s, "```"); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
-}
-
-// outermostJSON slices s to the outermost JSON object or array it contains, or "" when it holds neither. Object is tried first here (unlike internal/dream's copy of this helper): dream's callers always want an array, but study's teacher reply is one object whose "lessons" field happens to be an array, so trying "[" first would slice out just that array and lose "summary".
-func outermostJSON(s string) string {
-	for _, pair := range [2][2]string{{"{", "}"}, {"[", "]"}} {
-		start, end := strings.Index(s, pair[0]), strings.LastIndex(s, pair[1])
-		if start >= 0 && end > start {
-			return s[start : end+1]
-		}
-	}
-	return ""
 }
 
 // writeReport renders one run's report as markdown: the material inventory, the teacher's summary, and its lessons in full. Input: the output directory, the material that was included and truncated, and the parsed reply. Output: the path written.

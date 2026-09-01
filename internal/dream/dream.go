@@ -43,6 +43,8 @@ const (
 	staleAfterDays = 30
 	// defaultWatchEvery is how often the preemption watcher polls for the user's return.
 	defaultWatchEvery = 5 * time.Second
+	// inputFreshAfter is how fresh InputIdle's report must be for the watcher to read it as "real input just happened". Below the polling cadence of a moment ago, so a probe read moments after a keypress still counts.
+	inputFreshAfter = 30 * time.Second
 	// evidenceBudget caps the assembled evidence material in bytes; when the week holds more, the oldest items fall away first so the judge always reads the newest material.
 	evidenceBudget = 24 * 1024
 	// evidenceThreads is how many active threads the evidence lists.
@@ -61,16 +63,45 @@ const contradictedMark = "] contradicted —"
 // errUnparsable marks a brain reply that failed to parse as JSON even after one re-ask, so the caller skips the work instead of retrying it all night.
 var errUnparsable = errors.New("the reply never parsed as JSON")
 
-// Probes are the runner's yes/no reads on the machine — mains power, the lock screen, and whether the meeting recorder is mid-flight — injected so tests can flip them freely.
+// Probes are the runner's yes/no reads on the machine — mains power, the lock screen, real input idle time, and whether the meeting recorder is mid-flight — injected so tests can flip them freely.
 type Probes struct {
 	OnAC              func() bool
 	SessionLocked     func() bool
 	RecorderQuiescent func() bool
+	// InputIdle reports real time since the last keyboard/mouse input (GNOME's Mutter IdleMonitor). Optional: nil keeps the old newest-episode heuristic as the away signal, since a screen-content change (a title bar updating on autoplay or an unread count) is not evidence the user touched anything.
+	InputIdle func() (time.Duration, error)
+}
+
+// Store is the slice of *db.Store the dreaming needs: the night's own run bookkeeping and hypothesis ledger, the diary it reads and rewrites, and the grounded evidence every stage judges against. Declared here rather than taking *db.Store whole, so this package states its entire data dependency in one place and widening it is a deliberate edit instead of an accident.
+type Store interface {
+	// The night's run row and its stage tokens. A wake that finds an unfinished run resumes from stages_done rather than repeating committed work.
+	StartDreamRun(ctx context.Context, night string) error
+	DreamRun(ctx context.Context, night string) (run db.DreamRun, ok bool, err error)
+	FinishDreamRun(ctx context.Context, night, entry, line string) error
+	CommitHypothesisStage(ctx context.Context, night string, verdicts []db.HypothesisVerdict, adopted []db.NewHypothesis) error
+	CommitUnderstandingStage(ctx context.Context, night, understanding string) error
+	CommitCompactStage(ctx context.Context, night string, comps []db.DiaryCompaction, done bool) error
+	CommitReplayStage(ctx context.Context, night string) error
+
+	// The hypothesis ledger the night tests against the week's evidence and adds to.
+	OpenHypotheses(ctx context.Context) ([]db.Hypothesis, error)
+	StrongHypotheses(ctx context.Context) ([]db.Hypothesis, error)
+
+	// The diary. The evening close's entry is the night's starting material, and the compaction stage rewrites older entries in place.
+	DiaryEntry(ctx context.Context, day, kind string) (string, error)
+	DiaryDays(ctx context.Context, from, to string) ([]db.DiaryDay, error)
+	DiaryEntriesThrough(ctx context.Context, kind, through string) ([]db.DiaryDay, error)
+
+	// The grounded evidence the judging calls read, plus the store's own notion of "now" so a night is not measured against the wrong day.
+	SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
+	ActiveThreads(ctx context.Context, limit int) ([]db.Thread, error)
+	NotesOfKindSince(ctx context.Context, kind string, since time.Time) ([]db.Note, error)
+	MemoryAsOf(ctx context.Context, source string) (time.Time, error)
 }
 
 // Runner owns one machine's dreaming. Construct with New; the daemon calls Tick on a ticker and everything else is private.
 type Runner struct {
-	store  *db.Store
+	store  Store
 	brain  brain.Brain
 	probes Probes
 	// dreamHour opens the window (negative disables dreaming); briefHour closes it. Both local hours.
@@ -104,7 +135,7 @@ type Runner struct {
 }
 
 // New builds a Runner from the store, a one-shot brain, the machine probes, and the two local hours that bound the window.
-func New(store *db.Store, b brain.Brain, probes Probes, dreamHour, briefHour int) *Runner {
+func New(store Store, b brain.Brain, probes Probes, dreamHour, briefHour int) *Runner {
 	return &Runner{store: store, brain: b, probes: probes, dreamHour: dreamHour, briefHour: briefHour, now: time.Now, watchEvery: defaultWatchEvery}
 }
 
@@ -142,7 +173,17 @@ func nightMinus(night string, days int) string {
 	return d.AddDate(0, 0, -days).Format(dayFormat)
 }
 
-// Tick is the per-wake entry point, called from the daemon's five-minute ticker. It returns without a trace when the window is closed or any start condition fails, and otherwise starts or resumes the night's run. Conditions, all required: inside the window, the night not yet finished, on mains, the user idle (screen locked or no episode in idleAfter), the recorder quiescent, and the evening close's diary entry present — or missingDiaryGrace past the dream hour, in which case day summaries stand in.
+// userAway reports whether the user counts as away, given the session is not locked: real input idle time (GetIdletime) when the probe is wired and healthy, since that is actual keyboard/mouse activity — a screen-content change (autoplay rolling to the next episode, an unread-count title) is not. When the probe is nil or errors, this falls back to the old heuristic: no episode ever, or the newest one older than idleAfter.
+func (r *Runner) userAway(now, lastEpisode time.Time) bool {
+	if r.probes.InputIdle != nil {
+		if idle, err := r.probes.InputIdle(); err == nil {
+			return idle >= idleAfter
+		}
+	}
+	return lastEpisode.IsZero() || now.Sub(lastEpisode) >= idleAfter
+}
+
+// Tick is the per-wake entry point, called from the daemon's five-minute ticker. It returns without a trace when the window is closed or any start condition fails, and otherwise starts or resumes the night's run. Conditions, all required: inside the window, the night not yet finished, on mains, the user idle (screen locked, or away per userAway), the recorder quiescent, and the evening close's diary entry present — or missingDiaryGrace past the dream hour, in which case day summaries stand in.
 func (r *Runner) Tick(ctx context.Context) {
 	if r.dreamHour < 0 {
 		return
@@ -175,7 +216,7 @@ func (r *Runner) Tick(ctx context.Context) {
 		if !r.probes.OnAC() {
 			return
 		}
-		if !locked && !lastEpisode.IsZero() && now.Sub(lastEpisode) < idleAfter {
+		if !locked && !r.userAway(now, lastEpisode) {
 			return
 		}
 		if !r.probes.RecorderQuiescent() {
@@ -283,14 +324,25 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		slog.Info("dreaming: compaction stage committed", "night", night, "weeks", rep.weeks, "months", rep.months)
 	}
 
-	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, comp, notes); err != nil {
+	var replay *replayReport
+	if !slices.Contains(done, "replay") {
+		rep, err := r.replayStage(ctx, night)
+		if err != nil {
+			slog.Warn("dreaming: replay stage did not commit", "night", night, "error", err)
+			return
+		}
+		replay = &rep
+		slog.Info("dreaming: replay stage finished", "night", night, "skipped", rep.skipped, "partial", rep.partial, "items", rep.items, "piles", rep.piles)
+	}
+
+	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, comp, replay, notes); err != nil {
 		slog.Warn("dreaming: finishing the night failed", "night", night, "error", err)
 		return
 	}
 	slog.Info("dreaming: night finished", "night", night)
 }
 
-// watchForUser cancels the night's work the moment the user comes back: the session unlocking (when the lock was the idle signal at start) or any episode newer than the baseline. A cancelled stage's transaction never commits, so preemption loses at most one in-flight brain call.
+// watchForUser cancels the night's work the moment the user comes back: the session unlocking (when the lock was the idle signal at start), or real input arriving fresh per InputIdle when that probe is wired and healthy. Only when the probe is nil or erroring does a new episode fall back as the return signal — screen-content changes (autoplay, an unread-count title) are not activity, so they must not preempt a night the input probe still calls idle. A cancelled stage's transaction never commits, so preemption loses at most one in-flight brain call.
 func (r *Runner) watchForUser(ctx context.Context, cancel context.CancelFunc, lockedAtStart bool, baseline time.Time) {
 	t := time.NewTicker(r.watchEvery)
 	defer t.Stop()
@@ -303,6 +355,16 @@ func (r *Runner) watchForUser(ctx context.Context, cancel context.CancelFunc, lo
 				slog.Info("dreaming preempted: the session unlocked")
 				cancel()
 				return
+			}
+			if r.probes.InputIdle != nil {
+				if idle, err := r.probes.InputIdle(); err == nil {
+					if idle < inputFreshAfter {
+						slog.Info("dreaming preempted: real input arrived")
+						cancel()
+						return
+					}
+					continue
+				}
 			}
 			if last, err := r.store.MemoryAsOf(ctx, "episode:recent"); err == nil && last.After(baseline) {
 				slog.Info("dreaming preempted: a new episode arrived")
@@ -496,7 +558,7 @@ func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bo
 			return ev, err
 		}
 		for _, w := range summaries {
-			items = append(items, evidenceItem{secFallback, w.CreatedAt, fmt.Sprintf("%s — %s\n", w.CreatedAt.Local().Format("15:04"), summaryText(w.Content))})
+			items = append(items, evidenceItem{secFallback, w.CreatedAt, fmt.Sprintf("%s — %s\n", w.CreatedAt.Local().Format("15:04"), db.SummaryText(w.Content))})
 		}
 	}
 
@@ -654,10 +716,10 @@ func (r *Runner) askJSON(ctx context.Context, night, kind, prompt string, out an
 		if err != nil {
 			return err
 		}
-		body := stripFence(reply)
+		body := brain.StripFence(reply)
 		if err := json.Unmarshal([]byte(body), out); err == nil {
 			return nil
-		} else if sliced := outermostJSON(body); sliced != "" && json.Unmarshal([]byte(sliced), out) == nil {
+		} else if sliced := brain.OutermostJSON(body); sliced != "" && json.Unmarshal([]byte(sliced), out) == nil {
 			// Some models pad the array with prose no instruction talks them out of; the payload between the outermost brackets is still exactly what was asked for.
 			return nil
 		} else {
@@ -666,34 +728,6 @@ func (r *Runner) askJSON(ctx context.Context, night, kind, prompt string, out an
 		}
 	}
 	return fmt.Errorf("%w: %v", errUnparsable, lastErr)
-}
-
-// outermostJSON slices s to the outermost JSON array or object it contains, or "" when it holds neither — the recovery for a reply that says a sentence and then answers.
-func outermostJSON(s string) string {
-	for _, pair := range [2][2]string{{"[", "]"}, {"{", "}"}} {
-		start, end := strings.Index(s, pair[0]), strings.LastIndex(s, pair[1])
-		if start >= 0 && end > start {
-			return s[start : end+1]
-		}
-	}
-	return ""
-}
-
-// stripFence removes a markdown code fence around a JSON body — the same defence evals' judge needed, since a model wrapping its answer in ``` is the most common way a JSON reply is lost.
-func stripFence(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[i+1:]
-	} else {
-		return s
-	}
-	if i := strings.LastIndex(s, "```"); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
 }
 
 // validVerdicts keeps the structurally sound verdicts: a known id (once each), enum-valid verdict, confidence and action, evidence truncated to its cap. Everything else is dropped and logged.
@@ -911,8 +945,56 @@ func dayKeys(entries []db.DiaryDay) []string {
 	return out
 }
 
-// finish writes the morning report — the diary kind='dream' row, deliberately FTS-indexed so "what did you dream last night" works — and stamps the run finished with its one-line summary.
-func (r *Runner) finish(ctx context.Context, night string, took time.Duration, hyp *stageReport, undRan bool, comp *compactReport, notes []string) error {
+// finish writes the morning report — the diary kind='dream' row, deliberately FTS-indexed so "what did you dream last night" works — and stamps the run finished with its one-line summary. The diary content is the night's own brain writing its entry in prose, with a compact audit footer of the hard numbers appended; if that call fails or comes back empty, the old fixed-template entry stands in, so a night never ends without a diary entry.
+func (r *Runner) finish(ctx context.Context, night string, took time.Duration, hyp *stageReport, undRan bool, comp *compactReport, replay *replayReport, notes []string) error {
+	entry := r.diaryEntry(ctx, night, took, hyp, undRan, comp, replay, notes)
+
+	line := fmt.Sprintf("judge-only in %s", took.Round(time.Second))
+	if hyp != nil {
+		line = fmt.Sprintf("judge-only: %d tested, %d promoted, %d retired, %d adopted, in %s", hyp.tested, hyp.promoted, hyp.retired, hyp.adopted, took.Round(time.Second))
+	}
+	return r.store.FinishDreamRun(ctx, night, entry, line)
+}
+
+// diaryEntry asks the night's own brain to write the diary entry in prose, appending a compact audit footer so the hard numbers survive regardless of what the model chose to say. A transport error or an empty reply falls back to the old templated entry instead — every number the template names, nothing in the model's own words, but a diary entry all the same.
+func (r *Runner) diaryEntry(ctx context.Context, night string, took time.Duration, hyp *stageReport, undRan bool, comp *compactReport, replay *replayReport, notes []string) string {
+	prose, err := r.ask(ctx, night, "report", diaryPrompt(hyp, undRan, comp, replay, notes))
+	prose = strings.TrimSpace(prose)
+	switch {
+	case err != nil:
+		slog.Warn("dreaming: the diary-writing call failed, falling back to the templated entry", "night", night, "error", err)
+	case prose == "":
+		slog.Warn("dreaming: the diary-writing call returned nothing, falling back to the templated entry", "night", night)
+	default:
+		return prose + "\n\n" + dreamFooter(hyp, undRan, comp, replay, took)
+	}
+	return templateEntry(night, took, hyp, undRan, comp, replay, notes)
+}
+
+// dreamFooter renders the always-present one-line audit trail: the hard numbers behind the night, in the same compact shape regardless of whether the entry above it came from the model or the fallback template, so eval and recall code that greps for facts finds them either way.
+func dreamFooter(hyp *stageReport, undRan bool, comp *compactReport, replay *replayReport, took time.Duration) string {
+	tested, promoted, retired, adopted := 0, 0, 0, 0
+	if hyp != nil {
+		tested, promoted, retired, adopted = hyp.tested, hyp.promoted, hyp.retired, hyp.adopted
+	}
+	weeks, months := 0, 0
+	if comp != nil {
+		weeks, months = comp.weeks, comp.months
+	}
+	items, piles := 0, 0
+	if replay != nil {
+		items, piles = replay.items, replay.piles
+	}
+	rewritten := "understanding not rewritten"
+	if undRan {
+		rewritten = "understanding rewritten"
+	}
+	return fmt.Sprintf("[tested %d: %d promoted, %d retired, %d adopted; %s; compacted %dw/%dm; replayed %d items into %d piles; %s]",
+		tested, promoted, retired, adopted, rewritten, weeks, months, items, piles, took.Round(time.Second))
+}
+
+// templateEntry is the old fixed-template morning report, kept as the fallback for when the diary-writing call fails or returns nothing.
+func templateEntry(night string, took time.Duration, hyp *stageReport, undRan bool, comp *compactReport, replay *replayReport, notes []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "I dreamt on the night of %s, judge-only, for %s.\n", night, took.Round(time.Second))
 	if hyp != nil {
@@ -937,25 +1019,14 @@ func (r *Runner) finish(ctx context.Context, night string, took time.Duration, h
 	default:
 		fmt.Fprintf(&b, "I compacted the diary: %d weeks folded into week entries, %d months folded into month entries.\n", comp.weeks, comp.months)
 	}
+	if replay == nil {
+		b.WriteString("The replay stage had already run on an earlier wake tonight.\n")
+	} else {
+		b.WriteString(replayLine(*replay))
+	}
 	for _, n := range notes {
 		b.WriteString(n)
 		b.WriteString("\n")
 	}
-
-	line := fmt.Sprintf("judge-only in %s", took.Round(time.Second))
-	if hyp != nil {
-		line = fmt.Sprintf("judge-only: %d tested, %d promoted, %d retired, %d adopted, in %s", hyp.tested, hyp.promoted, hyp.retired, hyp.adopted, took.Round(time.Second))
-	}
-	return r.store.FinishDreamRun(ctx, night, strings.TrimSpace(b.String()), line)
-}
-
-// summaryText pulls the prose out of a summary node's content — task summaries are stored as marshalled JSON and the model should read the sentence, not the blob. Non-JSON content passes through unchanged.
-func summaryText(content string) string {
-	var t struct {
-		Summary string `json:"summary"`
-	}
-	if err := json.Unmarshal([]byte(content), &t); err == nil && strings.TrimSpace(t.Summary) != "" {
-		return t.Summary
-	}
-	return content
+	return strings.TrimSpace(b.String())
 }

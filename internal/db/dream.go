@@ -257,6 +257,17 @@ func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []Di
 	})
 }
 
+// CommitReplayStage marks the night's 'replay' token done in its own transaction. The replay stage's deliverable is a markdown artifact on disk, not a database row, so unlike the other stages there is nothing else to write here — the token alone is what tells the next wake the night's replay (full or partial) is not to be redone.
+func (s *Store) CommitReplayStage(ctx context.Context, night string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.CommitReplayStage")
+	defer span.End()
+
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		return markStageDone(ctx, tx, night, "replay")
+	})
+}
+
 // FinishDreamRun closes the night in one transaction: the morning report becomes the diary kind='dream' row (FTS-indexed via the diary triggers on purpose — "what did you dream last night" must find it), and the run row gets its one-line report and finished_at stamp.
 func (s *Store) FinishDreamRun(ctx context.Context, night, entry, line string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
