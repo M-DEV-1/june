@@ -50,13 +50,24 @@ type Observation struct {
 	Context Context
 }
 
-// Normalize builds an Observation from a raw capture: cleans chrome, caps length, classifies domain, and always fills context fields from app/title even when content ends up empty.
+// Normalize builds an Observation from a raw capture: cleans chrome, caps length at signalMaxWords, classifies domain, and always fills context fields from app/title even when content ends up empty.
+// This is what the compiler and the summaries read, where one short observation really is better than a multi-KB dump.
 func Normalize(app, title, raw string) Observation {
+	return normalize(app, title, raw, signalMaxWords)
+}
+
+// NormalizeFull is Normalize without the word cap — the same chrome-stripping, vision-tail preference and whitespace collapsing, over the whole capture.
+// It exists for the embedding path. The cap was written when a long capture could only be truncated or rejected, and it meant a 96,061-character screen reached the vector index as roughly 700 characters: stored in full, keyword-searchable in full, and semantically searchable for 1% of itself. With a local embedder there is no per-token cost to protect, and chunkText splits a long document into passages rather than dropping its tail, so the reason for the cap no longer holds here.
+func NormalizeFull(app, title, raw string) Observation {
+	return normalize(app, title, raw, 0)
+}
+
+func normalize(app, title, raw string, maxWords int) Observation {
 	app = strings.TrimSpace(app)
 	title = strings.TrimSpace(title)
 	domain := Classify(app, title)
 
-	content, sk := extractSignal(raw, title)
+	content, sk := extractSignal(raw, title, maxWords)
 	return Observation{
 		Content: content,
 		Context: Context{
@@ -106,7 +117,7 @@ func KindOf(source string) Kind {
 }
 
 // extractSignal cleans raw capture text into primary content.
-func extractSignal(raw, title string) (string, SignalKind) {
+func extractSignal(raw, title string, maxWords int) (string, SignalKind) {
 	raw = stripControls(raw)
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -133,7 +144,10 @@ func extractSignal(raw, title string) (string, SignalKind) {
 	}
 	text := strings.Join(kept, "\n")
 	text = strings.Join(strings.Fields(text), " ")
-	text = capWords(text, signalMaxWords)
+	// maxWords of 0 means keep everything: the caller is the embedding path, where a capture is split into passages rather than truncated.
+	if maxWords > 0 {
+		text = capWords(text, maxWords)
+	}
 
 	if text == "" {
 		t := strings.TrimSpace(title)
