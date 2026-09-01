@@ -44,6 +44,17 @@ const maxDeriveStateNotes = 10
 // reconcileEmbedCap bounds how many backfill embeds one ReconcileVectors sweep performs, to protect API quota on a large dirty store — the sweep runs again on the next trigger (startup / note consolidation) and picks up where it left off.
 const reconcileEmbedCap = 200
 
+// localReconcileEmbedCap is the same bound when the embedder is the local llama-server rather than a metered API. The cap exists to protect a quota; with a free embedder there is no quota to protect, and a small cap only means a backlog that never drains. Chunking made that backlog real — a store of 4,866 captures needs about 8,800 passage vectors, so at 200 a sweep it would take dozens of restarts to catch up.
+const localReconcileEmbedCap = 5000
+
+// reconcileCap picks the sweep's budget from whether embedding costs money.
+func reconcileCap(embedsFree bool) int {
+	if embedsFree {
+		return localReconcileEmbedCap
+	}
+	return reconcileEmbedCap
+}
+
 // embedderAdapter adapts an embed.Embedder's Embed (which takes embed.TaskType) to the plain-string task param db.Store.SetEmbedder expects.
 // internal/db can't import internal/embed, so the adapter lives here instead.
 type embedderAdapter struct {
@@ -161,6 +172,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// vecIndex is nil unless the block below succeeds — declared here (not just inside the block) so the /vector/* IPC handlers further down can serve the client's hybrid search over the same index the daemon itself uses, instead of each opening chromem separately (two processes opening the same chromem dir risks torn reads/corruption).
 	var vecIndex *vector.ChromemIndex
 
+	// embedsFree says the embedder is the local llama-server rather than a metered API. Declared out here for the same reason vecIndex is: it is set inside the block below and read by the reconciliation sweeps further down, which size their budget by it.
+	embedsFree := false
+
 	// The embedding engine is the local llama-server child process, and only that: there is no API-backed embedder any more. It stays nil when no local embedder is configured, which is what the shutdown path and the /embed IPC handler key off, and means no semantic half at all — HybridSearch already falls back to lexical-only when Store has no embedder/vector index set.
 	embedEngine := embed.NewEngine(appConfig.Embed)
 	if embedEngine == nil {
@@ -179,12 +193,13 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			store.SetEmbedder(&embedderAdapter{inner: embedEngine})
 			// The local engine costs CPU rather than API calls, which is what lets reconciliation backfill episodes of any age instead of only the last ten days.
 			store.SetEmbedsAreFree(true)
+			embedsFree = true
 			store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
 			store.SetVectorIndex(&vectorIndexAdapter{inner: vecIndex})
 
 			// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later (e.g. client-side note saves) that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
 			go func() {
-				report, err := store.ReconcileVectors(ctx, reconcileEmbedCap)
+				report, err := store.ReconcileVectors(ctx, reconcileCap(embedsFree))
 				if err != nil {
 					slog.Error("startup vector reconciliation failed", "error", err)
 					return
@@ -240,7 +255,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			} else {
 				slog.Info("note consolidation complete")
 				// ReplaceAllNotes (inside Compact) renumbers every note with no vector for the new rows — this sweep backfills them and cleans up anything else that's drifted.
-				if report, err := store.ReconcileVectors(ctx, reconcileEmbedCap); err != nil {
+				if report, err := store.ReconcileVectors(ctx, reconcileCap(embedsFree)); err != nil {
 					slog.Error("post-consolidation vector reconciliation failed", "error", err)
 				} else {
 					slog.Info("post-consolidation vector reconciliation complete", "deleted", report.Deleted, "backfilled", report.Backfilled)

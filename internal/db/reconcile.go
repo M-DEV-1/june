@@ -206,7 +206,7 @@ func (s *Store) reconcileBackfillCandidates(ctx context.Context, existing map[st
 				continue
 			}
 			// Same context-framed document LogEpisode embeds (app/title header + content), not bare screen_text — Normalize re-running on already-clean stored text is safe (it's idempotent chrome-stripping/capping on content that's already clean).
-			doc := memory.Normalize(app, title, screenText).Document()
+			doc := memory.NormalizeFull(app, title, screenText).Document()
 			if strings.TrimSpace(doc) == "" {
 				doc = screenText
 			}
