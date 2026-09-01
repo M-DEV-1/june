@@ -71,6 +71,9 @@ func (b *mockBrain) SetActionPriority(ctx context.Context, id int64, priority st
 	return nil
 }
 func (b *mockBrain) UpdateThreadState(ctx context.Context, id int64, state string) error { return nil }
+func (b *mockBrain) QueryStore(ctx context.Context, query string, rowCap int) (string, error) {
+	return "", nil
+}
 
 // behavior
 
