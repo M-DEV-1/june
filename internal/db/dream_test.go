@@ -6,21 +6,10 @@ import (
 	"testing"
 )
 
-// dreamStore opens a throwaway in-memory store closed with the test.
-func dreamStore(t *testing.T) *Store {
-	t.Helper()
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New(:memory:): %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
-
 // CommitCompactStage is one transaction per tier: the coarse entry lands, the constituents (and only they) are deleted with the FTS mirror following, and the 'compact' token commits only on the call that says the stage is done.
 func TestCommitCompactStage(t *testing.T) {
 	ctx := context.Background()
-	store := dreamStore(t)
+	store := newStore(t)
 	if err := store.StartDreamRun(ctx, "2026-08-30"); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +65,7 @@ func TestCommitCompactStage(t *testing.T) {
 // The dream_runs PK is the single-run-per-night guarantee: a second start is a no-op, stage commits append their tokens, and FinishDreamRun stamps finished_at, files the one-line report, and writes the FTS-visible diary dream row.
 func TestDreamRunLifecycle(t *testing.T) {
 	ctx := context.Background()
-	store := dreamStore(t)
+	store := newStore(t)
 
 	if _, ok, err := store.DreamRun(ctx, "2026-08-29"); err != nil || ok {
 		t.Fatalf("DreamRun before start = ok %v, err %v; want absent", ok, err)
@@ -128,7 +117,7 @@ func TestDreamRunLifecycle(t *testing.T) {
 // InsertHypothesis is idempotent on the statement, OpenHypotheses caps at 20 oldest-born-first, ApplyHypothesisVerdict rewrites the judged fields and appends evidence, and StrongHypotheses returns only promoted or high-confidence rows.
 func TestHypothesisCRUD(t *testing.T) {
 	ctx := context.Background()
-	store := dreamStore(t)
+	store := newStore(t)
 
 	if err := store.InsertHypothesis(ctx, "He codes at night.", "low", "2026-08-20"); err != nil {
 		t.Fatalf("InsertHypothesis: %v", err)
@@ -195,7 +184,7 @@ func TestHypothesisCRUD(t *testing.T) {
 // DiaryDays is an inclusive day-key range over kind='day' rows only, oldest first.
 func TestDiaryDays(t *testing.T) {
 	ctx := context.Background()
-	store := dreamStore(t)
+	store := newStore(t)
 	for _, day := range []string{"2026-08-25", "2026-08-27", "2026-08-29"} {
 		if err := store.SetDiaryEntry(ctx, day, "day", "entry "+day); err != nil {
 			t.Fatalf("SetDiaryEntry: %v", err)
@@ -216,7 +205,7 @@ func TestDiaryDays(t *testing.T) {
 // A cancelled context aborts a stage commit before anything lands: no verdicts, no inserts, no stage token.
 func TestCommitHypothesisStage_CancelledCommitsNothing(t *testing.T) {
 	ctx := context.Background()
-	store := dreamStore(t)
+	store := newStore(t)
 	if err := store.StartDreamRun(ctx, "2026-08-29"); err != nil {
 		t.Fatalf("StartDreamRun: %v", err)
 	}

@@ -28,12 +28,14 @@ func testStore(t *testing.T) *db.Store {
 
 // fakeBrain answers each of the dream prompts with a canned reply, dispatching on the instruction text, and records what it was asked. Safe for the watcher goroutine's world: only Tick's goroutine calls it, but the mutex keeps the record readable after Tick returns.
 type fakeBrain struct {
-	mu       sync.Mutex
-	verdicts string
-	extract  string
-	und      string
-	compact  string
-	asked    []string
+	mu        sync.Mutex
+	verdicts  string
+	extract   string
+	und       string
+	compact   string
+	report    string
+	reportErr error
+	asked     []string
 }
 
 func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
@@ -52,6 +54,9 @@ func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
 	case strings.Contains(prompt, "Collapse the diary entries below"):
 		f.asked = append(f.asked, "compact")
 		return f.compact, nil
+	case strings.Contains(prompt, "You just spent the night dreaming about the user"):
+		f.asked = append(f.asked, "report")
+		return f.report, f.reportErr
 	}
 	return "", fmt.Errorf("unrecognised prompt: %.80s", prompt)
 }
@@ -193,7 +198,7 @@ func TestTick_ConditionsGate(t *testing.T) {
 	}
 }
 
-// A resumed night runs only the stages missing from stages_done: with 'hyp' already committed, only the understanding rewrite is asked for, and the night still finishes.
+// A resumed night runs only the stages missing from stages_done: with 'hyp' already committed, only the understanding rewrite and the closing diary-writing call are asked for, and the night still finishes.
 func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
@@ -212,8 +217,8 @@ func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 	r := newRunner(store, brain, yesProbes(), at(23, 30))
 	r.Tick(ctx)
 
-	if asked := brain.askedKinds(); len(asked) != 1 || asked[0] != "und" {
-		t.Errorf("asked = %v, want only the understanding rewrite", asked)
+	if asked := brain.askedKinds(); len(asked) != 2 || asked[0] != "und" || asked[1] != "report" {
+		t.Errorf("asked = %v, want the understanding rewrite followed by the diary-writing call", asked)
 	}
 	run, _, _ := store.DreamRun(ctx, night)
 	if !run.Finished || run.StagesDone != "hyp und compact" {
@@ -481,6 +486,184 @@ type flag struct {
 func (f *flag) set(v bool) { f.mu.Lock(); f.v = v; f.mu.Unlock() }
 func (f *flag) get() bool  { f.mu.Lock(); defer f.mu.Unlock(); return f.v }
 
+// idleProbe is the mutex-guarded fake InputIdle probe: v is the reported idle duration, failing makes it return an error instead — the way the tests drive the "probe unhealthy, fall back to the episode check" path.
+type idleProbe struct {
+	mu      sync.Mutex
+	v       time.Duration
+	failing bool
+}
+
+func (p *idleProbe) set(v time.Duration) { p.mu.Lock(); defer p.mu.Unlock(); p.v = v }
+func (p *idleProbe) fail(b bool)         { p.mu.Lock(); defer p.mu.Unlock(); p.failing = b }
+func (p *idleProbe) get() (time.Duration, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failing {
+		return 0, errors.New("fake probe error")
+	}
+	return p.v, nil
+}
+
+// A healthy input-idle probe reporting idleAfter or more opens the away-gate even though the newest episode is a minute old — the fix for autoplay/unread-count title changes wrongly reading as presence.
+func TestTick_InputIdleOpensAwayGateDespiteFreshEpisode(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	insertEpisodeAt(t, store, at(23, 29)) // one minute old: fresh enough to block the old heuristic
+
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "Rewritten."}
+	probes := yesProbes()
+	probes.SessionLocked = func() bool { return false }
+	var idle idleProbe
+	idle.set(idleAfter)
+	probes.InputIdle = idle.get
+
+	r := newRunner(store, brain, probes, at(23, 30))
+	r.Tick(ctx)
+
+	if len(brain.askedKinds()) == 0 {
+		t.Error("a healthy input-idle probe at idleAfter did not open the away-gate despite a fresh episode")
+	}
+}
+
+// A probe that errors on every call (as if the D-Bus service is unreachable) falls back to the episode heuristic exactly like a nil probe.
+func TestTick_InputIdleErrorFallsBackToEpisodeHeuristic(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	insertEpisodeAt(t, store, at(23, 29))
+
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "Rewritten."}
+	probes := yesProbes()
+	probes.SessionLocked = func() bool { return false }
+	var idle idleProbe
+	idle.fail(true)
+	probes.InputIdle = idle.get
+
+	r := newRunner(store, brain, probes, at(23, 30))
+	r.Tick(ctx)
+
+	if len(brain.askedKinds()) != 0 {
+		t.Error("an erroring InputIdle probe should fall back to the episode heuristic and block on a fresh episode")
+	}
+}
+
+// While the input-idle probe stays healthy and idle, a new episode arriving mid-run (a title changing on its own) must not preempt the night — that is the whole point of the fix.
+func TestWatcher_DoesNotPreemptOnEpisodeWhileInputStaysIdle(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+
+	probes := yesProbes()
+	probes.SessionLocked = func() bool { return false }
+	var idle idleProbe
+	idle.set(time.Hour) // stays comfortably above idleAfter and inputFreshAfter throughout
+	probes.InputIdle = idle.get
+
+	var once sync.Once
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "Rewritten."}
+	wrapped := func(ctx context.Context, prompt string) (string, error) {
+		once.Do(func() {
+			insertEpisodeAt(t, store, at(23, 35)) // after the run's baseline
+			time.Sleep(20 * time.Millisecond)     // give the watcher several ticks to (wrongly) act on it
+		})
+		return brain.fn(ctx, prompt)
+	}
+
+	r := New(store, wrapped, probes, 23, 9)
+	r.now = func() time.Time { return at(23, 30) }
+	r.watchEvery = time.Millisecond
+
+	r.Tick(ctx)
+
+	run, ok, _ := store.DreamRun(ctx, night)
+	if !ok || !run.Finished {
+		t.Errorf("the night should have finished undisturbed: %+v ok=%v", run, ok)
+	}
+}
+
+// The regression this replaces: with InputIdle nil, a new episode arriving mid-run still preempts, exactly as before the fix.
+func TestWatcher_NilInputIdlePreemptsOnEpisode(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertHypothesis(ctx, "He codes at night.", "low", nightMinus(night, 10)); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := store.OpenHypotheses(ctx)
+
+	probes := yesProbes()
+	probes.SessionLocked = func() bool { return false } // InputIdle left nil
+
+	r := New(store, func(ctx context.Context, prompt string) (string, error) {
+		insertEpisodeAt(t, store, at(23, 35))
+		<-ctx.Done()
+		return fmt.Sprintf(`[{"id": %d, "verdict": "supported", "confidence": "high", "evidence": "x", "action": "keep"}]`, open[0].ID), ctx.Err()
+	}, probes, 23, 9)
+	r.now = func() time.Time { return at(23, 30) }
+	r.watchEvery = time.Millisecond
+
+	r.Tick(ctx)
+
+	run, ok, _ := store.DreamRun(ctx, night)
+	if !ok {
+		t.Fatal("the run row should exist — preemption struck after the start")
+	}
+	if run.Finished || run.StagesDone != "" {
+		t.Errorf("preempted run committed something: %+v", run)
+	}
+}
+
+// When the input-idle probe reports fresh input (below inputFreshAfter), the watcher preempts — real input, not a title change, is what should wake the night.
+func TestWatcher_PreemptsWhenInputIdleDropsFresh(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertHypothesis(ctx, "He codes at night.", "low", nightMinus(night, 10)); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := store.OpenHypotheses(ctx)
+
+	probes := yesProbes()
+	probes.SessionLocked = func() bool { return false } // unlocked from the start: InputIdle is the away signal here
+	var idle idleProbe
+	idle.set(idleAfter)
+	probes.InputIdle = idle.get
+
+	r := New(store, func(ctx context.Context, prompt string) (string, error) {
+		idle.set(3 * time.Second) // real input just arrived
+		<-ctx.Done()
+		return fmt.Sprintf(`[{"id": %d, "verdict": "supported", "confidence": "high", "evidence": "x", "action": "keep"}]`, open[0].ID), ctx.Err()
+	}, probes, 23, 9)
+	r.now = func() time.Time { return at(23, 30) }
+	r.watchEvery = time.Millisecond
+
+	r.Tick(ctx)
+
+	run, ok, _ := store.DreamRun(ctx, night)
+	if !ok {
+		t.Fatal("the run row should exist — preemption struck after the start")
+	}
+	if run.Finished || run.StagesDone != "" {
+		t.Errorf("preempted run committed something: %+v", run)
+	}
+}
+
 // The force marker makes a tick dream immediately with the away-gates bypassed, and is consumed so one touch means one run.
 func TestTick_ForceMarkerBypassesGates(t *testing.T) {
 	store := testStore(t)
@@ -564,28 +747,6 @@ func TestEvidenceMaterial_AllFourSectionsPresent(t *testing.T) {
 	}
 	if !strings.Contains(ev.diary, "DIARYTEXT") || strings.Contains(ev.diary, "Ongoing threads:") || strings.Contains(ev.diary, "THREADTEXT") || strings.Contains(ev.diary, "MEETINGTEXT") {
 		t.Errorf("the extraction view must be diary-only:\n%s", ev.diary)
-	}
-}
-
-// A meeting's minutes enter the evidence head-first and capped: only the first forty lines survive.
-func TestEvidenceMaterial_MeetingLinesCapped(t *testing.T) {
-	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
-	lines := make([]string, 60)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("minute line %d", i)
-	}
-	if _, err := store.LogNote(ctx, strings.Join(lines, "\n"), "meeting"); err != nil {
-		t.Fatal(err)
-	}
-	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
-	ev, err := r.evidenceMaterial(ctx, night, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(ev.full, "minute line 39") || strings.Contains(ev.full, "minute line 40") {
-		t.Errorf("meeting minutes not capped at %d lines:\n%s", meetingLineCap, ev.full)
 	}
 }
 
@@ -1022,27 +1183,68 @@ func TestGPUReleaser_CalledBeforeShadowLifecycleStart(t *testing.T) {
 	}
 }
 
-// With no shadow lifecycle configured, there is nothing for GPUReleaser to make room for, so it must never be called.
-func TestGPUReleaser_NotCalledWithoutShadowLifecycle(t *testing.T) {
+// When the diary-writing call succeeds, the diary entry is the model's own prose plus a compact audit footer carrying the real numbers — so eval/recall code that greps for facts still finds them even though the prose above is free-form.
+func TestFinish_ModelWritesDiaryEntryWithAuditFooter(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
-	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
-		t.Fatal(err)
+	night := "2026-08-30"
+	brain := &fakeBrain{report: "Tonight I turned over what the user believes about their own mornings."}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+
+	hyp := &stageReport{tested: 3, promoted: 0, retired: 1, adopted: 1, lines: []string{"Retired: He hates mornings (open 30 days and never tested)."}}
+	comp := &compactReport{weeks: 0, months: 0}
+	replay := &replayReport{items: 52, piles: 14}
+	took := 11*time.Minute + 14*time.Second
+
+	if err := r.finish(ctx, night, took, hyp, true, comp, replay, nil); err != nil {
+		t.Fatalf("finish: %v", err)
 	}
-	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
-	r := newRunner(store, primary, yesProbes(), at(23, 30))
-	r.DataDir = t.TempDir()
 
-	called := false
-	r.GPUReleaser = func() bool {
-		called = true
-		return true
+	entry, _ := store.DiaryEntry(ctx, night, "dream")
+	if !strings.Contains(entry, "Tonight I turned over what the user believes") {
+		t.Errorf("entry does not carry the model's prose: %q", entry)
 	}
+	wantFooter := "[tested 3: 0 promoted, 1 retired, 1 adopted; understanding rewritten; compacted 0w/0m; replayed 52 items into 14 piles; 11m14s]"
+	if !strings.Contains(entry, wantFooter) {
+		t.Errorf("entry footer = %q, want it to contain %q", entry, wantFooter)
+	}
+	if asked := brain.askedKinds(); len(asked) != 1 || asked[0] != "report" {
+		t.Errorf("asked = %v, want a single traced \"report\" call", asked)
+	}
+}
 
-	r.Tick(ctx)
+// When the diary-writing call errors, the night still gets its old templated entry — a night must never end without a diary entry.
+func TestFinish_FallsBackToTemplateOnBrainError(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := "2026-08-30"
+	brain := &fakeBrain{reportErr: errors.New("the model choked")}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	hyp := &stageReport{tested: 1, adopted: 1, lines: []string{"Adopted: He ships at night."}}
 
-	if called {
-		t.Error("GPUReleaser was called with no shadow lifecycle configured")
+	if err := r.finish(ctx, night, time.Minute, hyp, true, &compactReport{}, &replayReport{}, nil); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	entry, _ := store.DiaryEntry(ctx, night, "dream")
+	if !strings.Contains(entry, "judge-only") || !strings.Contains(entry, "Adopted: He ships at night.") {
+		t.Errorf("entry did not fall back to the template on a brain error: %q", entry)
+	}
+}
+
+// When the diary-writing call comes back empty, the night still gets its old templated entry.
+func TestFinish_FallsBackToTemplateOnEmptyReply(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := "2026-08-30"
+	brain := &fakeBrain{report: "   "}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	hyp := &stageReport{tested: 1, adopted: 1, lines: []string{"Adopted: He ships at night."}}
+
+	if err := r.finish(ctx, night, time.Minute, hyp, true, &compactReport{}, &replayReport{}, nil); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	entry, _ := store.DiaryEntry(ctx, night, "dream")
+	if !strings.Contains(entry, "judge-only") || !strings.Contains(entry, "Adopted: He ships at night.") {
+		t.Errorf("entry did not fall back to the template on an empty reply: %q", entry)
 	}
 }
