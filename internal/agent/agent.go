@@ -30,6 +30,13 @@ type ContextReader interface {
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	SetPersonalContext(ctx context.Context, subject, content string) error
 	DeletePersonalContext(ctx context.Context, subject string) error
+	// SetActionStatus/SetActionPriority back update_action (tools.go). An action item is a notes row whose content carries its own status and priority, so update_note could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead.
+	SetActionStatus(ctx context.Context, id int64, status string) error
+	SetActionPriority(ctx context.Context, id int64, priority string) error
+	// OpenActionItems backs the action_items tool (tools.go). "What do I owe?" is a question about a column, not about meaning: the rows say "[open/normal] Alex Rivera — check out develop-essentials-api", which shares no words with the question and sits nowhere near it in embedding space. Asked through query_memory it returned ten summaries about attending meetings and not one action item, so the structural query gets its own door.
+	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
+	// EpisodesForThread backs thread_evidence (tools.go). A thread's state is one line — "reviewed the code, eleven findings" — and until the compiler started recording which captures it was attributed from, that line was all anyone could reach. This is the walk from the summary to the screens behind it.
+	EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error)
 	// UpdateThreadState backs fix_thread (tools.go). Threads live in their own table with their own semantics — a subject plus a state summary — so update_note cannot reach them, and a thread whose summary merged two unrelated things was unfixable until this existed.
 	UpdateThreadState(ctx context.Context, id int64, state string) error
 	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
