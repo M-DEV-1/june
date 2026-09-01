@@ -87,6 +87,12 @@ type toolTestBrain struct {
 	consumedFoldIDs []int64
 	// foldSaved, if non-nil, receives a value right after SaveFold records its args — lets a test synchronize on "the fallback persistence actually happened" (from a background goroutine) without racing on the plain fields above. Buffered 1 so SaveFold's send never blocks.
 	foldSaved chan struct{}
+
+	// capturedQuery/capturedRowCap record QueryStore's args; queryStoreResult/queryStoreErr back its return, for the query_store tool's tests.
+	capturedQuery    string
+	capturedRowCap   int
+	queryStoreResult string
+	queryStoreErr    error
 }
 
 func (b *toolTestBrain) GetImplicitContext(ctx context.Context) ([]string, error) {
@@ -229,6 +235,12 @@ func (b *toolTestBrain) UnconsumedFolds(ctx context.Context) ([]db.Fold, error) 
 func (b *toolTestBrain) ConsumeFold(ctx context.Context, id int64) error {
 	b.consumedFoldIDs = append(b.consumedFoldIDs, id)
 	return nil
+}
+
+func (b *toolTestBrain) QueryStore(ctx context.Context, query string, rowCap int) (string, error) {
+	b.capturedQuery = query
+	b.capturedRowCap = rowCap
+	return b.queryStoreResult, b.queryStoreErr
 }
 
 // recallBounds turns the model's since/until args into a concrete window: explicit RFC3339 instants are honored verbatim, an omitted until means "up to now", an omitted since means midnight of now's day, a bare calendar date spans that whole day, and anything unparseable or backwards is an error rather than a silently wrong window.

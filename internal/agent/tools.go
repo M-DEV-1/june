@@ -116,6 +116,40 @@ func toolDefinitions() []*genai.Tool {
 			},
 			{
 				Behavior: genai.BehaviorNonBlocking,
+				Name:     "query_store",
+				Description: "Run one read-only SQL query straight against Ora's sqlite store, for structural and aggregate questions that a relevance-ranked search cannot answer — counts, group-bys, joins, \"which meetings did I attend today\", \"what hour do I usually stop working\". " +
+					"query_memory searches by meaning and ranks by relevance; this reads the tables directly, so use it whenever the real answer is a COUNT, a GROUP BY, a MIN/MAX, or a join across tables rather than the ten most-relevant rows. " +
+					"The connection itself is read-only — INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA-writes fail at the database, not by a filter on your text — so only SELECT, PRAGMA table_info(...), and EXPLAIN can do anything. " +
+					"Exactly one statement per call, no trailing statements after a semicolon. " +
+					"Every *_at/*_time column is UTC text — for anything the user would call \"today\" or an hour of day, wrap it: datetime(created_at,'localtime') BETWEEN ... " +
+					"Results render as a header line of column names, then one line per row with values separated by a TAB — window titles routinely contain pipes and spaces, so a tab is the only separator that stays unambiguous. A query matching nothing says \"no rows matched\" plainly. Output is capped in rows and characters — add LIMIT or aggregate rather than pulling raw rows if you hit the cap. " +
+					"Schema (table: columns — type):\n" +
+					"nodes: id INTEGER, parent_id INTEGER, type TEXT, content TEXT, created_at DATETIME, domain TEXT\n" +
+					"threads: id INTEGER, subject TEXT, kind TEXT, state TEXT, salience REAL, times_seen INTEGER, created_at DATETIME, last_seen_at DATETIME, status TEXT\n" +
+					"episode_threads: episode_id INTEGER, thread_id INTEGER — join table linking episodes to the threads they were summarised into\n" +
+					"episodes: id INTEGER, created_at DATETIME, app TEXT, title TEXT, screen_text TEXT, importance REAL, domain TEXT, user_activity TEXT, visible_text TEXT, image_path TEXT\n" +
+					"notes: id INTEGER, content TEXT, kind TEXT, created_at DATETIME, updated_at DATETIME — kind is exactly one of 'action', 'fact', 'meeting', 'system-log'\n" +
+					"  A meeting's minutes are a note with kind='meeting'. Meetings are NOT episodes: episodes are screen captures, so searching them for an app called Teams or Zoom finds the window, never the meeting. Count or read meetings from notes.\n" +
+					"  An action note carries its state as a [state/priority] prefix at the start of content, such as '[open/normal] ...', so items still owed are kind='action' AND content LIKE '[open/%'.\n" +
+					"diary: id INTEGER, day TEXT, kind TEXT, content TEXT, created_at DATETIME, updated_at DATETIME\n" +
+					"folds: id INTEGER, task TEXT, result TEXT, created_at DATETIME, consumed_at DATETIME\n" +
+					"personal_context: id INTEGER, subject TEXT, content TEXT, updated_at DATETIME\n" +
+					"hypotheses: id INTEGER, statement TEXT, confidence TEXT, status TEXT, born TEXT, last_tested TEXT, times_tested INTEGER, evidence TEXT, reason TEXT\n" +
+					"tally: day TEXT, provider TEXT, calls INTEGER, failures INTEGER, total_ms INTEGER\n" +
+					"working_state: id INTEGER, content TEXT, updated_at DATETIME\n" +
+					"dream_runs: night TEXT, started_at DATETIME, finished_at DATETIME, stages_done TEXT, grinder TEXT, report TEXT\n" +
+					"episodes_fts(screen_text) — full-text search over episodes.screen_text; use \"episodes_fts MATCH 'word'\" and join its rowid to episodes.id\n" +
+					"memory_fts(content, source, ref_id) — full-text search over notes/threads/diary/summaries combined; use \"memory_fts MATCH 'word'\", source tells you which table ref_id points into",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"query": {Type: genai.TypeString, Description: "One read-only SQL statement, no trailing statements."},
+					},
+					Required: []string{"query"},
+				},
+			},
+			{
+				Behavior: genai.BehaviorNonBlocking,
 				Name:     "recall",
 				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
 					"A part of a day gets timestamp bounds rather than the whole day — morning roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that — and a question that narrows the time deserves a fresh narrower call, not an answer read off a wider fetch. " +
@@ -983,6 +1017,23 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		return strings.Join(lines, "\n")
 
+	case "query_store":
+		if msg := checkArgs(args, "query"); msg != "" {
+			return toolError(msg)
+		}
+		query, ok := args["query"].(string)
+		if !ok || strings.TrimSpace(query) == "" {
+			return toolError("query_store needs a SQL statement to run")
+		}
+		slog.Info("running query_store", "query", query)
+		result, err := a.brain.QueryStore(ctx, query, maxToolRows)
+		if err != nil {
+			// Every other tool hides its raw error behind toolError's fixed wording, because a Go error string means nothing to a model that can't fix it. Here the error IS the fix — "no such column: titel" or "only one SQL statement is allowed per call" tells the model exactly what to change and try again, so it's passed through instead of hidden.
+			slog.Warn("query_store: rejected or failed", "query", query, "error", err)
+			return toolError(err.Error())
+		}
+		return result
+
 	case "recall":
 		if msg := checkArgs(args, "subject", "since", "until", "app"); msg != "" {
 			return toolError(msg)
@@ -1359,6 +1410,10 @@ func toolActivitySummary(name string, args map[string]any) string {
 		if task, ok := args["task"].(string); ok {
 			return quoteArg(task)
 		}
+	case "query_store":
+		if query, ok := args["query"].(string); ok {
+			return quoteArg(query)
+		}
 	}
 	return ""
 }
@@ -1369,7 +1424,7 @@ func resultSummary(name, result string) string {
 		return "failed"
 	}
 	switch result {
-	case "no memory matches", "no memory of that subject", "no episodes in that window", "no recent episodes":
+	case "no memory matches", "no memory of that subject", "no episodes in that window", "no recent episodes", "no rows matched":
 		return "0 hits"
 	case "saved":
 		return "saved"
