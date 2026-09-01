@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/memory"
 )
 
 type fakeCapture struct{ stopped bool }
@@ -30,6 +31,7 @@ type fakeStore struct {
 	notes          []string
 	kinds          []string
 	updates        map[int64]string
+	actions        []memory.ActionItem
 	mu             sync.Mutex
 }
 
@@ -1026,5 +1028,83 @@ func TestTranscribeThreads_HonoursTheOverride(t *testing.T) {
 	t.Setenv("ORA_TRANSCRIBE_THREADS", "not a number")
 	if got := transcribeThreads(); got < 1 {
 		t.Errorf("transcribeThreads() = %d with junk configured, want the default", got)
+	}
+}
+
+// AddActionItems records what the recorder lifted out of a meeting's minutes, so a test can see the action items filing them produced.
+func (s *fakeStore) AddActionItems(ctx context.Context, items []memory.ActionItem) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.actions = append(s.actions, items...)
+	return len(items), nil
+}
+
+// Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in.
+func TestFileMinutes_LiftsActionItems(t *testing.T) {
+	store := &fakeStore{personal: []db.PersonalEntry{{Subject: "identity", Content: "The user is Mahadevan KS — goes by Mahadevan."}}}
+	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	raised := time.Date(2026, 8, 28, 21, 36, 0, 0, time.UTC)
+
+	r.fileMinutes(context.Background(), t.TempDir(), `# Meeting minutes
+
+**md x mf tool — Google Meet, Fri 28 Aug 2026, 21:36–23:08 IST**
+
+## Action items
+- **Arjun** — carry PR #13 through CI and merge.
+- **Mahadevan** — compare these minutes against his own agent's output.
+`, raised)
+
+	if len(store.actions) != 2 {
+		t.Fatalf("want 2 action items lifted, got %d: %+v", len(store.actions), store.actions)
+	}
+	if store.actions[0].Owner != "Arjun" || store.actions[0].Text != "carry PR #13 through CI and merge." {
+		t.Errorf("first item = %+v", store.actions[0])
+	}
+	if store.actions[0].Source != "md x mf tool" || !store.actions[0].Raised.Equal(raised) {
+		t.Errorf("provenance = %q / %v", store.actions[0].Source, store.actions[0].Raised)
+	}
+	if store.actions[1].Status != memory.StatusOpen {
+		t.Errorf("lifted item is not open: %q", store.actions[1].Status)
+	}
+	// The minutes themselves must still be filed unchanged: they are the record of what was said and nothing may edit them.
+	if len(store.notes) != 1 || !strings.Contains(store.notes[0], "## Action items") {
+		t.Errorf("the minutes were not filed intact: %+v", store.notes)
+	}
+}
+
+// Minutes with no action items file normally and lift nothing.
+func TestFileMinutes_NoActionItems(t *testing.T) {
+	store := &fakeStore{}
+	r := New(t.TempDir(), store, "FAKE_API_KEY")
+
+	r.fileMinutes(context.Background(), t.TempDir(), "# Meeting minutes\n\n## Key points\n- nothing was agreed.\n", time.Now())
+
+	if len(store.actions) != 0 {
+		t.Errorf("lifted %d items from minutes with no action section", len(store.actions))
+	}
+	if len(store.notes) != 1 {
+		t.Errorf("the minutes were not filed: %+v", store.notes)
+	}
+}
+
+// A meeting the user only sat in on leaves nothing on their list, however many action items it produced. The minutes are still filed in full — they are the record of what was said — but none of that work is the user's to answer for.
+func TestFileMinutes_SkipsAMeetingTheUserOnlySatInOn(t *testing.T) {
+	store := &fakeStore{personal: []db.PersonalEntry{{Subject: "identity", Content: "The user is Mahadevan KS — goes by Mahadevan."}}}
+	r := New(t.TempDir(), store, "FAKE_API_KEY")
+
+	r.fileMinutes(context.Background(), t.TempDir(), `# Meeting minutes
+
+**AI dev tools knowledge sharing**
+
+## Action items
+- **Tushar** — add battery optimisation to the app.
+- **Owner unclear** — trial attaching walkthrough videos to PRs.
+`, time.Now())
+
+	if len(store.actions) != 0 {
+		t.Errorf("put %d of someone else's items on the user's list: %+v", len(store.actions), store.actions)
+	}
+	if len(store.notes) != 1 {
+		t.Errorf("the minutes themselves must still be filed: %+v", store.notes)
 	}
 }
