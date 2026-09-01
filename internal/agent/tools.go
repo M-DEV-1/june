@@ -20,6 +20,9 @@ import (
 	"google.golang.org/genai"
 )
 
+// maxToolRows caps how many rows any one tool result may carry. A tool result is prompt text, and action_items and thread_evidence both read from stores that grow without bound — open action items never expire by design, and a long-running thread accumulates captures forever. query_memory has queryMemoryHits for the same reason.
+const maxToolRows = 40
+
 func shellName() string {
 	if runtime.GOOS == "windows" {
 		return "powershell"
@@ -1175,6 +1178,10 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if l, ok := args["limit"].(float64); ok && l > 0 {
 			limit = int(l)
 		}
+		// A tool result is prompt text. query_memory caps at queryMemoryHits for the same reason: without a ceiling a model that asks for a thousand captures gets them, each now rendered with the raised excerpt budget.
+		if limit > maxToolRows {
+			limit = maxToolRows
+		}
 		eps, err := a.brain.EpisodesForThread(ctx, int64(idFloat), limit)
 		if err != nil {
 			slog.Error("thread_evidence: read failed", "id", int64(idFloat), "error", err)
@@ -1203,6 +1210,10 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return "nothing outstanding — no open action items"
 		}
 		var b strings.Builder
+		// Open items never expire by design — "an owed task does not stop being owed" — so the list only grows, and it is prompt text like any other tool result.
+		if len(items) > maxToolRows {
+			items = items[:maxToolRows]
+		}
 		for _, it := range items {
 			// The id leads so update_action can close one without a second lookup, and the source meeting trails so the model can say where a task came from.
 			fmt.Fprintf(&b, "[note#%d] %s\n", it.NoteID, it.Note())
