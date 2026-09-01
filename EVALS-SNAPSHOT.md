@@ -1,4 +1,6 @@
-# evals/ snapshot — taken 2026-08-27, before deleting the directory
+# evals/ snapshot — HISTORICAL (2026-08-27)
+
+> **This describes a suite that no longer exists.** `evals/` was deleted on 2026-08-27 and rebuilt from scratch; the current suite is eight tracks documented in [docs/evals.md](docs/evals.md). Keep this file for the numbers below, which are the last measurements of the old harness and are not comparable to anything the current one reports.
 
 Deleted `evals/` (1,680 lines, 4 packages, 3 commits from Aug 18-19). This file records what it measured so the numbers aren't lost.
 
