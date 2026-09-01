@@ -289,6 +289,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
 	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.FromConfig(appConfig.Brain, apiKey), store)
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
+	// One-click answers to the morning brief's question about an item that has gone quiet. The notification blocks until it is answered, so the scheduler asks from its own goroutine.
+	scheduler.SetAsk(proactive.NotifySendAsk)
 	// Sunday-only: render the week's self-accounting log, then run the distillation study pass over the same replay/trace material evals/main.go's track 6 uses — on the daemon's own main brain (claude-cli sonnet by default), which deliberately rides the user's Claude workday window rather than running overnight.
 	scheduler.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
 		if err := tally.RunWeeklyLog(ctx, store, now); err != nil {
@@ -311,6 +313,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		OnAC:              recorder.OnACPower,
 		SessionLocked:     tracker.SessionLocked,
 		RecorderQuiescent: meetingRecorder.Quiescent,
+		InputIdle:         tracker.InputIdle,
 	}, appConfig.Dream.DreamHour(), dreamBriefHour)
 	// Touching this file makes the next tick dream immediately, gates bypassed — the way to watch a run without leaving the machine.
 	dreamer.ForceMarker = filepath.Join(config.DataDir(), "dream-now")
