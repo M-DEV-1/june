@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/tracker"
 )
 
 // defaultPrepTimeout bounds the whole meeting-prep flow, the brain call included. A prep that lands after the meeting has already got going is worse than none — it is noise mid-call rather than a heads-up before it — so a prep not ready within this window is dropped rather than delivered late.
@@ -83,27 +84,62 @@ func (r *Recorder) prepMeeting() {
 	r.notify(head, text)
 }
 
-// meetingTitle returns the most recent non-blank window title out of the episodes the tracker captured, which is what actually says which meeting this is rather than just which app it's in.
+// meetingTitle returns the most recent window title belonging to a call, which is what actually says which meeting this is. It is not simply the last title captured: on 2026-08-31 the user spent a standup in ClickUp and a terminal, so the newest title was "New Tab - Brave" and naming the meeting from it would have been wrong. Falling back to the newest title of any kind is deliberate — a meeting app the pattern does not know is still better named by its window than not at all.
 func meetingTitle(eps []db.Episode) string {
+	var newest string
 	for i := len(eps) - 1; i >= 0; i-- {
-		if t := strings.TrimSpace(eps[i].Title); t != "" {
+		t := strings.TrimSpace(eps[i].Title)
+		if t == "" {
+			continue
+		}
+		if isMeetingWindow(eps[i].App, t) {
 			return t
 		}
+		if newest == "" {
+			newest = t
+		}
 	}
-	return ""
+	return newest
 }
 
 // meetingParticipants pulls candidate names for who is on the call out of recent screen text, using the same pattern primingPrompt mines a chat sender's name from in transcribe.go: a name written immediately before a colon at the start of its own line, which is how a chat window labels who is talking. Unlike primingPrompt, which runs after the meeting to prime whisper, this runs the moment the meeting is detected, against whatever the tracker has already captured, before a single word of transcript exists.
 func meetingParticipants(eps []db.Episode) []string {
+	return collectMeetingNames(eps, true)
+}
+
+// meetingParticipantsInBody is meetingParticipants without the window title as a source. The title names the conversation rather than the people in it, which is a name in a one-to-one call and a meeting's name in a group one, and nothing tells the two apart.
+func meetingParticipantsInBody(eps []db.Episode) []string {
+	return collectMeetingNames(eps, false)
+}
+
+// collectMeetingNames pulls people's names off the meeting's own window. withTitle includes the window title as a source, which is right when the names are only a hint to search past minutes with and wrong when they are counted.
+func collectMeetingNames(eps []db.Episode, withTitle bool) []string {
 	var names []string
 	seen := map[string]bool{}
 	for _, e := range eps {
-		for _, text := range []string{e.Title, e.UserActivity, e.ScreenText, e.VisibleText} {
-			for _, m := range chatSenderPattern.FindAllStringSubmatch(text, -1) {
-				if name := m[1]; !seen[name] {
-					seen[name] = true
-					names = append(names, name)
+		// Only the call's own window names the people on the call. Any other chat open at the time names people who are not in it.
+		if !isMeetingWindow(e.App, e.Title) {
+			continue
+		}
+		sources := []string{e.UserActivity, e.ScreenText, e.VisibleText}
+		if withTitle {
+			sources = append(sources, e.Title)
+		}
+		for _, text := range sources {
+			add := func(name string) {
+				// The app's own name is written on its window as prominently as anybody's: a Teams window reads "Microsoft Teams (PWA) - Chat | Trupti Hosmani | Microsoft Teams", where two of the three capitalised phrases are the software. What names the window cannot also name a person in it.
+				if seen[name] || tracker.IsMeetingWindow("", name) || hasChromeWord(name) {
+					return
 				}
+				seen[name] = true
+				names = append(names, name)
+			}
+			for _, m := range chatSenderPattern.FindAllStringSubmatch(text, -1) {
+				add(m[1])
+			}
+			// A meeting window writes the people in the call as plain capitalised names, separated however the app likes — before a colon in a chat log, between pipes in a title bar. Reading them as proper nouns covers every separator without knowing any of them.
+			for _, m := range properNounPattern.FindAllString(text, -1) {
+				add(m)
 			}
 		}
 	}
