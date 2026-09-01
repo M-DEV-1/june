@@ -32,7 +32,7 @@ type OraConfig struct {
 	Dream DreamConfig `json:"dream"`
 }
 
-// DreamConfig sets when the overnight dreaming loop may run, and reserves the knobs the later local-model slice will need. ModelPath and ShutdownCommand are read by nothing yet and Port is bound by nothing yet — reserved now so a config written today survives the slice that uses them.
+// DreamConfig sets when the overnight dreaming loop may run, and reserves the knobs the later local-model slice will need.
 type DreamConfig struct {
 	// Hour is the local hour the dreaming window opens; the window closes at the morning brief hour. Zero means DefaultDreamHour, negative disables dreaming.
 	Hour int `json:"hour"`
@@ -40,8 +40,6 @@ type DreamConfig struct {
 	ModelPath string `json:"model_path"`
 	// Port is the loopback port reserved for the future local dreaming model server.
 	Port int `json:"port"`
-	// ShutdownCommand is what a finished night may run to power the machine down. Unused this slice.
-	ShutdownCommand string `json:"shutdown_command"`
 	// Brain overrides which backend dreams. An empty provider means the main Brain block — but a dream brain that is not claude-cli is exempt from the Claude window curfew, which is the point of setting one: the other paid CLIs can dream all night without touching the user's Claude usage windows.
 	Brain BrainConfig `json:"brain"`
 	// Device is the llama.cpp Vulkan device name for the shadow model (e.g. "Vulkan1"); empty means let llama-server choose.
@@ -100,6 +98,11 @@ func (p ProactiveConfig) Hours() (brief, close int) {
 type TranscribeConfig struct {
 	// GPUDevice is which GPU whisper.cpp should decode on, numbered as whisper.cpp numbers the Vulkan devices it finds. Zero, the default, leaves the choice to whisper.cpp, which takes the first device it sees — on a laptop with both integrated and discrete graphics that is usually the slower of the two, so this normally wants setting.
 	GPUDevice int `json:"gpu_device"`
+	// ClusterThreshold is the cosine distance at which the diarizer stops treating two stretches of the call's audio as the same voice. Smaller splits one person into several; larger merges two people into one. Zero means the built-in default.
+	// It wants setting per machine rather than guessing: the right value depends on the embedding model, on how the other people's microphones colour their voices, and on how much everyone talks over each other. Sherpa's own default of 0.5 gave 35 clusters for a six-person standup on this laptop, which is the symptom of it being set too low.
+	ClusterThreshold float64 `json:"cluster_threshold"`
+	// SpeakerCountFromScreen tells the diarizer how many people are in the call, counted from the names the meeting app shows inside its own window, instead of letting it estimate from ClusterThreshold. Off by default: the count is read out of one flattened run of accessibility text, where three names in a row can parse as one, and undercounting fuses several people into a single voice in a way nothing downstream can undo. The recorder logs the count it would have used on every meeting, so turn this on once that log shows the right number for a real group call.
+	SpeakerCountFromScreen bool `json:"speaker_count_from_screen"`
 }
 
 // BrainConfig chooses which backend answers ORA's one-shot text duties — the meeting minutes and the personal context updater. The zero value is the Gemini API on TextModel, which is what ORA did before this block existed, so a config file written without it behaves exactly as it always has.
