@@ -23,26 +23,35 @@ type TallyRow struct {
 	Calls    int
 	Failures int
 	TotalMs  int64
+	// PromptChars and ReplyChars are characters, not tokens — see Recorder in internal/tally for why. Divide at read time.
+	PromptChars int
+	ReplyChars  int
 }
 
-// RecordTally upserts the outcome of one brain call into today's (local) row for provider: one call, one failure if ok is false, and ms added to the running latency total. Satisfies internal/tally.Recorder structurally, so a *Store can be handed straight to tally.Wrap.
-func (s *Store) RecordTally(provider string, ok bool, ms time.Duration) error {
+// RecordUsage upserts the outcome of one brain call into today's (local) row for provider: one call, one failure if ok is false, and ms added to the running latency total. Satisfies internal/tally.Recorder structurally, so a *Store can be handed straight to tally.Wrap.
+func (s *Store) RecordUsage(provider string, ok bool, ms time.Duration, promptChars, replyChars int) error {
 	failures := 0
 	if !ok {
 		failures = 1
 	}
-	return s.bumpTally(time.Now().Format(tallyDayFormat), provider, 1, failures, ms.Milliseconds())
+	return s.bumpTally(time.Now().Format(tallyDayFormat), provider, 1, failures, ms.Milliseconds(), promptChars, replyChars)
 }
 
 // bumpTally adds calls/failures/ms to provider's row for day, creating the row if it doesn't exist yet. Shared by RecordTally (brain calls) and hybrid.go's recordVectorContribution (vector-search fusion counting).
-func (s *Store) bumpTally(day, provider string, calls, failures int, ms int64) error {
+func (s *Store) bumpTally(day, provider string, calls, failures int, ms int64, chars ...int) error {
+	promptChars, replyChars := 0, 0
+	if len(chars) == 2 {
+		promptChars, replyChars = chars[0], chars[1]
+	}
 	if _, err := s.db.Exec(
-		`INSERT INTO tally (day, provider, calls, failures, total_ms) VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO tally (day, provider, calls, failures, total_ms, prompt_chars, reply_chars) VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(day, provider) DO UPDATE SET
 			calls = calls + excluded.calls,
 			failures = failures + excluded.failures,
-			total_ms = total_ms + excluded.total_ms`,
-		day, provider, calls, failures, ms); err != nil {
+			total_ms = total_ms + excluded.total_ms,
+			prompt_chars = prompt_chars + excluded.prompt_chars,
+			reply_chars = reply_chars + excluded.reply_chars`,
+		day, provider, calls, failures, ms, promptChars, replyChars); err != nil {
 		return fmt.Errorf("bump tally: %w", err)
 	}
 	return nil
@@ -51,7 +60,7 @@ func (s *Store) bumpTally(day, provider string, calls, failures int, ms int64) e
 // TallyRowsSince returns every tally row whose day is on or after since (compared as a local 'YYYY-MM-DD' string), for the weekly system log to summarize.
 func (s *Store) TallyRowsSince(ctx context.Context, since time.Time) ([]TallyRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT day, provider, calls, failures, total_ms FROM tally WHERE day >= ? ORDER BY day, provider`,
+		`SELECT day, provider, calls, failures, total_ms, prompt_chars, reply_chars FROM tally WHERE day >= ? ORDER BY day, provider`,
 		since.Format(tallyDayFormat))
 	if err != nil {
 		return nil, fmt.Errorf("query tally rows since: %w", err)
@@ -61,7 +70,7 @@ func (s *Store) TallyRowsSince(ctx context.Context, since time.Time) ([]TallyRow
 	var out []TallyRow
 	for rows.Next() {
 		var r TallyRow
-		if err := rows.Scan(&r.Day, &r.Provider, &r.Calls, &r.Failures, &r.TotalMs); err != nil {
+		if err := rows.Scan(&r.Day, &r.Provider, &r.Calls, &r.Failures, &r.TotalMs, &r.PromptChars, &r.ReplyChars); err != nil {
 			return nil, fmt.Errorf("scan tally row: %w", err)
 		}
 		out = append(out, r)

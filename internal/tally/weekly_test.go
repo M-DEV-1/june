@@ -27,13 +27,13 @@ func TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows(t *testing.T) {
 	now := time.Now()
 
 	// Brain calls: three claude-cli calls, one of which failed.
-	if err := store.RecordTally("claude-cli", true, 100*time.Millisecond); err != nil {
+	if err := store.RecordUsage("claude-cli", true, 100*time.Millisecond, 0, 0); err != nil {
 		t.Fatalf("RecordTally: %v", err)
 	}
-	if err := store.RecordTally("claude-cli", true, 300*time.Millisecond); err != nil {
+	if err := store.RecordUsage("claude-cli", true, 300*time.Millisecond, 0, 0); err != nil {
 		t.Fatalf("RecordTally: %v", err)
 	}
-	if err := store.RecordTally("claude-cli", false, 200*time.Millisecond); err != nil {
+	if err := store.RecordUsage("claude-cli", false, 200*time.Millisecond, 0, 0); err != nil {
 		t.Fatalf("RecordTally: %v", err)
 	}
 

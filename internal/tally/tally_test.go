@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// fakeRecorder captures every RecordTally call for assertions, and can be told to fail.
+// fakeRecorder captures every RecordUsage call for assertions, and can be told to fail.
 type fakeRecorder struct {
 	calls   []recordedCall
 	failErr error
@@ -19,7 +19,7 @@ type recordedCall struct {
 	ms       time.Duration
 }
 
-func (f *fakeRecorder) RecordTally(provider string, ok bool, ms time.Duration) error {
+func (f *fakeRecorder) RecordUsage(provider string, ok bool, ms time.Duration, promptChars, replyChars int) error {
 	f.calls = append(f.calls, recordedCall{provider, ok, ms})
 	return f.failErr
 }
