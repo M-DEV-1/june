@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -20,6 +21,9 @@ const (
 	minVisionInterval = 90 * time.Second // floor between vision calls
 )
 
+// meetingCaptureInterval is how often a call in progress is read on its own, regardless of what has focus. A meeting window's participant list and presenter label change on the scale of a minute, and reading it costs one AT-SPI walk, so once a minute keeps the whole call in the timeline without crowding out the user's actual activity.
+const meetingCaptureInterval = time.Minute
+
 type Daemon struct {
 	eye       Tracker
 	interval  time.Duration
@@ -37,6 +41,20 @@ var sessionLocked func() bool
 
 // SessionLocked is the exported read of the lock probe for other packages (the overnight dreaming loop uses it as its idle signal). False when the platform gives no way to know.
 func SessionLocked() bool { return sessionLocked != nil && sessionLocked() }
+
+// inputIdle reports real time since the last keyboard/mouse input; the platform file sets it (Linux: GNOME Mutter's IdleMonitor over D-Bus). Nil means no way to know.
+var inputIdle func() (time.Duration, error)
+
+// errNoIdleProbe is returned when this platform has no input-idle probe wired.
+var errNoIdleProbe = errors.New("tracker: no input-idle probe on this platform")
+
+// InputIdle is the exported read of the input-idle probe for other packages (the overnight dreaming loop uses it to tell a screen-content change from the user actually touching the keyboard or mouse). An error means there is no way to know, and callers should fall back to their own heuristic.
+func InputIdle() (time.Duration, error) {
+	if inputIdle == nil {
+		return 0, errNoIdleProbe
+	}
+	return inputIdle()
+}
 
 func (d *Daemon) Pause() { d.paused.Store(true) }
 
@@ -112,6 +130,11 @@ func (d *Daemon) Start(ctx context.Context) {
 	}
 
 	tracer := obs.GetTracer(ctx, "ora.tracker")
+
+	// The call is read on its own goroutine, not on this loop. One AT-SPI walk is allowed 2.5 seconds and this loop ticks every two, so doing it inline would stall window polling for longer than its own interval — and a big meeting window, the case this exists for, is exactly the slow walk.
+	if d.capturer == nil {
+		go d.watchMeetingWindow(ctx)
+	}
 
 	for {
 		select {
@@ -220,6 +243,37 @@ func (d *Daemon) Start(ctx context.Context) {
 			}
 
 			span.End()
+		}
+	}
+}
+
+// watchMeetingWindow reads the window of a call in progress once a minute, whether or not it has focus, and emits it as an activity of its own.
+// The focused window is the wrong window during a meeting: on 2026-08-31 a thirty-nine minute standup produced twenty-seven episodes and not one was the call, because the user spent it in ClickUp and a terminal. Participant tiles and presenter labels are the only things on the machine that name who is talking, and none of them were ever captured.
+func (d *Daemon) watchMeetingWindow(ctx context.Context) {
+	tick := time.NewTicker(meetingCaptureInterval)
+	defer tick.Stop()
+	var lastText string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if d.paused.Load() || (sessionLocked != nil && sessionLocked()) {
+				continue
+			}
+			app, title, text, ok := extractMeetingWindow()
+			if !ok || text == "" || text == lastText || MatchesBlocklist(app, d.blocklist) {
+				continue
+			}
+			// lastText is only advanced once the activity is actually on the channel. Recording it before the send would mean one full channel silently retires this meeting's window for good: the text does not change from minute to minute, so every later read would match what was never sent and be skipped.
+			select {
+			case d.eventChan <- Activity{App: app, Title: title, ScreenText: text}:
+				lastText = text
+			case <-ctx.Done():
+				return
+			default:
+				slog.Debug("dropped a meeting window capture, the activity channel was full")
+			}
 		}
 	}
 }

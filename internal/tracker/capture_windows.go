@@ -53,3 +53,8 @@ func extractText() (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// extractMeetingWindow has no unfocused-window reader on this platform, so a call is only ever captured when it happens to have focus.
+func extractMeetingWindow() (app, title, text string, ok bool) {
+	return "", "", "", false
+}
