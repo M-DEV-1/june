@@ -6,12 +6,19 @@
   `capture_windows.go` + `uia.ps1` (UI Automation text capture). rich
   text from the focused element + descendant tree, deduped, capped at
   50KB. embedded into the binary via `//go:embed`.
-- **linux**: tracker shipped, capture shipped (AT-SPI, pure-go via godbus).
+- **linux**: tracker shipped, capture shipped, screenshots shipped, tiered
+  capture shipped.
   - `tracker_linux.go` — sway / hyprland / X11 / fallback.
   - `capture_linux.go` — `extractText()` walks the AT-SPI tree (godbus) for
     the focused window's text. parity intent with `uia.ps1`. returns "" when
     accessibility is unavailable (GTK3 may need `toolkit-accessibility=true`;
     GTK4 / Qt with `QT_ACCESSIBILITY=1` expose by default).
+    Also `extractMeetingWindow()` — same walk, selects a call's window by name
+    instead of by STATE_ACTIVE.
+  - `screenshot_linux.go` — `grabScreen()`, real pixels, plus `screenLayout()`
+    for multi-monitor splitting. See "pixels" below.
+  - `daemon.go` — `tieredCapture`: accessibility text first (free), vision
+    (screenshot → LLM) only when that text is thin.
 - **macos**: not planned (no dev access).
 
 ## linux — as-built
@@ -49,8 +56,6 @@ rather than bubbling up. This keeps the daemon's poll loop steady.
 
 ### what doesn't work yet on linux
 
-- **screen *pixel* capture is no-op**. `captureScreen()` returns nil — accessibility
-  text (AT-SPI), not pixels. OCR remains a dormant fallback.
 - **the focused window is not the only window read**. `extractMeetingWindow()`
   (capture_linux.go) walks the same AT-SPI registry but selects by name rather
   than by STATE_ACTIVE, and `Daemon.watchMeetingWindow` calls it once a minute
@@ -68,6 +73,11 @@ rather than bubbling up. This keeps the daemon's poll loop steady.
 
 - **text capture depends on app accessibility**. extractText returns "" when the
   focused app exposes no AT-SPI text (a11y disabled, or a toolkit that needs a flag).
+  This is what the vision tier exists to cover — see "pixels" below.
+- **pixel capture is a no-op on WINDOWS, not linux**. `capture_windows.go`'s
+  `grabScreen()` returns an error; linux has the real implementation. An earlier
+  version of this file said the opposite, naming a `captureScreen()` that no
+  longer exists — it was written before the screenshot work landed.
 - **GNOME / KDE wayland** without sway/hyprland: falls back to X11 if
   xwayland is active, otherwise → `Unknown / Unknown`. compositor IPC
   for mutter / kwin is per-DE, fragile. ship as a known limitation.
@@ -91,6 +101,49 @@ godbus (active-poll walk):
 
 verified extracting ~10KB from a live focused window. yields "" when the
 focused app exposes no a11y text.
+
+## as-built — linux pixels (`screenshot_linux.go`)
+
+652 frames on disk as of 2026-09-01, from 2026-08-18 onward. Stored as
+`frames/{episode-id}.jpg` (and `-b`, `-c` for extra monitors), path in
+`episodes.image_path`.
+
+Two paths, tried in order:
+
+1. **gnome-shell direct** (`screenshotShell`). Claims the well-known bus name
+   `org.gnome.Screenshot` and calls `org.gnome.Shell.Screenshot.Screenshot`
+   with `flash=false`. gnome-shell only accepts this call from a short list of
+   bus names — settings-daemon media keys, the GNOME/GTK portal backends, and
+   `org.gnome.Screenshot`, which belongs to the standalone `gnome-screenshot`
+   tool that a default GNOME 46 desktop does not install. So we can claim it.
+   **No flash, no shutter animation, no consent dialog.**
+2. **xdg-desktop-portal fallback.** Used on any non-GNOME desktop or when
+   `org.gnome.Screenshot` is already owned. The portal calls the same shell
+   method with `flash=true`, which is where the full-screen white flash on
+   every capture comes from — the reason path 1 exists at all. The user's
+   stored allow/deny decision lives in the portal `PermissionStore`, under the
+   empty app-id because we run unsandboxed.
+
+`screenLayout()` returns the monitor rectangles and the pointer position, so
+one whole-canvas grab is split per monitor with the monitor the user is on
+first. `Activity.ImageJPEG` is that one; `ExtraJPEG` holds the rest. A meeting
+on one screen while notes sit on the other is one activity, not two.
+
+## as-built — tiered capture (`daemon.go::tieredCapture`)
+
+Accessibility text is free; a screenshot plus a vision call is not. So:
+
+1. `extractText()` first, every capture.
+2. Vision fires only when that text is **below `thinTextThreshold` (200 runes)**
+   — accessibility is treated as blind — and no more often than
+   `minVisionInterval` (90s), and only for a real foreground app
+   (`isVisionWorthy`), never the bare desktop.
+3. `lastA11yText` and `lastVisionText` are tracked **separately**, so a tier
+   switch on an unchanged screen does not compare one tier's text against the
+   other's and read as a change.
+
+Vision is injected via `Daemon.SetVisionFn`; nil disables the tier and the
+tracker is text-only. `Sight` carries `UserActivity` plus `VisibleText`.
 
 A future windows polish may also move `uia.ps1` to pure-go go-ole COM
 (same pattern as the WASAPI mic in `internal/audio/capture_windows.go`)
@@ -160,10 +213,18 @@ tracker_windows.go      — //go:build windows
 tracker_linux.go        — //go:build linux
 tracker_stub.go         — //go:build !windows && !linux
 capture_windows.go      — //go:build windows ; UIA path
-capture_linux.go        — //go:build linux   ; AT-SPI stub
+capture_linux.go        — //go:build linux   ; AT-SPI text + meeting window
 capture_stub.go         — //go:build !windows && !linux
+screenshot_linux.go     — //go:build linux   ; gnome-shell + portal pixels
+screenshot_other.go     — //go:build !linux
+jpeg.go                 — frame encoding / monitor splitting
+document_text.go        — role-aware text pick (browser chrome vs page)
+idle_linux.go           — Mutter IdleMonitor, input-idle probe
+lock_linux.go           — GNOME screensaver lock probe
+mpris_linux.go          — MPRIS media-playing probe
 uia.ps1                 — embedded UIA walker for windows
-daemon.go               — dwell-time state machine, blocklist, OS-agnostic
+daemon.go               — dwell state machine, blocklist, tiered capture,
+                          meeting-window watcher. OS-agnostic.
 ```
 
 `tracker_test.go` is build-tagged `windows`. linux tests live in
