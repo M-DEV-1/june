@@ -1670,3 +1670,12 @@ func TestFormatHit_CarriesTheClockTimeNotJustTheDate(t *testing.T) {
 		t.Errorf("hit does not carry the time of day: %q", got)
 	}
 }
+
+// query_memory sends note hits to FormatNoteHit and every other source to FormatHit. Budgeting only the latter left meeting minutes truncated to 200 runes in the live agent while the eval, which formats everything through FormatHit, reported the fix working.
+func TestFormatNoteHit_GetsTheSameBudgetAsFormatHit(t *testing.T) {
+	long := strings.Repeat("a meeting minute. ", 200) // ~3600 runes, the size of real minutes
+	got := FormatNoteHit(MemoryHit{Source: "note", RefID: 7, Content: long}, 0)
+	if len([]rune(got)) < 2000 {
+		t.Errorf("note excerpted to %d runes; it should get the note budget, not the episode one", len([]rune(got)))
+	}
+}

@@ -105,6 +105,10 @@ func formatRelativeAge(t time.Time) string {
 
 // FormatNoteHit renders a note hit with its ref_id in the "[note#N] …" shape — notes are the only source with an update_note/delete_note follow-up tool, so a caller (query_memory) needs the id in hand to act on a correction. Content is excerpted identically to FormatHit.
 func FormatNoteHit(h MemoryHit, maxRunes int) string {
+	if maxRunes <= 0 {
+		// Same budget FormatHit gives a note, and for the same reason. query_memory routes note hits here and everything else to FormatHit, so leaving this on the default meant meeting minutes reached the live agent at 200 runes while the eval — which formats every source through FormatHit — reported the excerpt fix as working.
+		maxRunes = excerptBudget(h.Source)
+	}
 	return fmt.Sprintf("[note#%d] %s", h.RefID, excerptContent(h.Content, maxRunes))
 }
 
