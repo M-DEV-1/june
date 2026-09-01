@@ -639,3 +639,23 @@ func TestCompiler_FlushLinksTheBuffersEpisodesToEachThread(t *testing.T) {
 		}
 	}
 }
+
+// The link window has to close when the buffer is snapshotted, not when the linking happens — processFlush runs an attribution LLM call in between, and at a two-second capture poll a thirty-second call would attach fifteen unrelated screens to the thread.
+func TestCompiler_LinkWindowClosesBeforeTheAttributionCall(t *testing.T) {
+	store := &fakeStorage{}
+	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
+		time.Sleep(60 * time.Millisecond) // stand-in for the attribution call
+		return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{{Subject: "code review", Kind: "work"}}}, nil
+	}}
+	c := memory.NewCompiler(llm, store)
+	c.Ingest(context.Background(), tracker.Activity{App: "Code", Title: "search.go", ScreenText: strings.Repeat("reviewing ", 40)})
+
+	c.ForceFlush(context.Background())
+
+	if len(store.links) != 1 {
+		t.Fatalf("got %d links, want 1", len(store.links))
+	}
+	if slept := store.links[0].until.Add(50 * time.Millisecond); slept.After(time.Now()) {
+		t.Errorf("window end %v looks like it was read after the attribution call, not at snapshot", store.links[0].until)
+	}
+}
