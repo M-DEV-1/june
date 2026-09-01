@@ -168,7 +168,12 @@ func splitCandidateID(id string) (source string, refID int64) {
 		return id, 0
 	}
 	source = id[:idx]
-	refID, _ = strconv.ParseInt(id[idx+1:], 10, 64)
+	// A passage's id carries a "#N" suffix naming which chunk of the row it is. The row is the same one either way, and everything downstream — the domain lookup, the app/title on a formatted hit — wants the row.
+	num := id[idx+1:]
+	if h := strings.IndexByte(num, '#'); h >= 0 {
+		num = num[:h]
+	}
+	refID, _ = strconv.ParseInt(num, 10, 64)
 	return source, refID
 }
 
@@ -357,7 +362,8 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	if len(vector) > 0 {
 		lists = append(lists, vector)
 	}
-	fused := reciprocalRankFusion(rrfK, lists...)
+	// Collapsed to one hit per row before anything downstream spends its budget: a screen matching in three passages is three vectors but one moment, and the ten rows the model gets should cover ten moments.
+	fused := bestPassagePerRow(reciprocalRankFusion(rrfK, lists...))
 
 	// Kind-aware score shaping after fusion:
 	//  - same-domain soft boost when no explicit domain filter
