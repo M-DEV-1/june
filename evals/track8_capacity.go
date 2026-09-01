@@ -57,6 +57,7 @@ func (v answerVerdict) passed() bool { return strings.EqualFold(v.Verdict, "pass
 // armAnswer is what one model said for one question, and the judge's call on it.
 type armAnswer struct {
 	Text string
+	// Err is set when the ARM could not be reached, and JudgeErr when the judge could not. Both exclude the row from every rate rather than counting it as a bad answer.
 	// JudgeErr is set when the judge could not be reached, which is not the same thing as a bad answer and must never be counted as one. Scoring an outage as a failure is how a quota running out turns into an apparent regression: the arms answered fine and the scorecard said they did not.
 	JudgeErr string
 	// Declined is set from the arm's own reply, not from the judge. See where it is assigned for why.
@@ -132,8 +133,9 @@ func runTrack8(ctx context.Context, search track1Search, j *judge, arms []arm, q
 			text, err := a.Brain(ctx, answerPrompt(q, rows))
 			ans.Latency = time.Since(start)
 			if err != nil {
+				// Not a bad answer: a missing CLI binary, a timeout, a rate limit. Scored as a failure it would report the arm as worse at reading retrieved context than it is — the same mistake the judge path made until JudgeErr existed.
 				ans.Err = err.Error()
-				ans.V = answerVerdict{Verdict: "fail", Why: "arm call failed"}
+				ans.V = answerVerdict{Verdict: "", Why: "arm unreachable — excluded from every rate"}
 				fmt.Printf("        %-14s ERROR %v\n", a.Name, err)
 				r.Answers[a.Name] = ans
 				continue
@@ -192,7 +194,7 @@ func track8Table(results []track8Result, arms []arm) string {
 		for _, r := range results {
 			ans, ok := r.Answers[a.Name]
 			// A judgement that never happened belongs in no cell. Left in, an outage reads as "the material was there and the arm failed to use it", which is the one cell that would send someone off to change the model.
-			if !ok || ans.JudgeErr != "" || r.JudgeErr != "" {
+			if !ok || ans.JudgeErr != "" || ans.Err != "" || r.JudgeErr != "" {
 				continue
 			}
 			switch {
@@ -220,7 +222,7 @@ func track8Table(results []track8Result, arms []arm) string {
 		var ansOK, ansN, refOK, refN, fpOK, fpN int
 		for _, r := range results {
 			got, ok := r.Answers[a.Name]
-			if !ok || got.JudgeErr != "" {
+			if !ok || got.JudgeErr != "" || got.Err != "" {
 				continue
 			}
 			switch r.Expect {
@@ -271,7 +273,7 @@ func track8SufficientRate(rs []track8Result) (passes, applicable int) {
 	return rate(vs)
 }
 
-// judgeOutages counts the judgements that never happened, so a run whose judge went down reports that plainly instead of reporting a worse system.
+// judgeOutages counts the measurements that never happened — a judge that could not be reached or an arm that could not be run — so a run with an outage reports that plainly instead of reporting a worse system.
 func judgeOutages(rs []track8Result) int {
 	n := 0
 	for _, r := range rs {
@@ -279,7 +281,7 @@ func judgeOutages(rs []track8Result) int {
 			n++
 		}
 		for _, a := range r.Answers {
-			if a.JudgeErr != "" {
+			if a.JudgeErr != "" || a.Err != "" {
 				n++
 			}
 		}
@@ -291,7 +293,7 @@ func judgeOutages(rs []track8Result) int {
 func track8ArmRate(rs []track8Result, name string) (passes, applicable int) {
 	for _, r := range rs {
 		a, ok := r.Answers[name]
-		if !ok || a.JudgeErr != "" {
+		if !ok || a.JudgeErr != "" || a.Err != "" {
 			continue
 		}
 		applicable++
