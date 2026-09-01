@@ -121,7 +121,8 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 
 	// Async, best-effort embedding: LogEpisode must return immediately after the synchronous INSERT above (see TestLogEpisode_DoesNotBlockOnSlowEmbedder in db_test.go). The real network call happens inside this goroutine, so it deliberately uses its own context (30s timeout) instead of the caller's ctx — ctx may already be canceled by the time this goroutine runs, and canceling the embed with it would permanently lose that episode's vector-searchability.
 	// Embed content+context (Document) even though screen_text is content-only.
-	embedText := memory.Normalize(obs.Context.App, obs.Context.Title, content).Document()
+	// The uncapped variant: the same chrome-stripping, over the whole capture. chunkText below splits it into passages, which is what the 120-word cap used to prevent the need for — and what made a 96,061-character screen reach the index as roughly 700 characters.
+	embedText := memory.NormalizeFull(obs.Context.App, obs.Context.Title, content).Document()
 	if strings.TrimSpace(embedText) == "" {
 		embedText = content
 	}
