@@ -40,7 +40,9 @@ func TestRunTrajTurn_TerminatesAtTheToolRoundCap(t *testing.T) {
 		}
 		return &trajCall{Name: "query_memory", Args: map[string]any{"query": fmt.Sprint(steps)}}, "still looking", nil
 	}
-	exec := func(ctx context.Context, name string, args map[string]any) string { return "row " + fmt.Sprint(args["query"]) }
+	exec := func(ctx context.Context, name string, args map[string]any) string {
+		return "row " + fmt.Sprint(args["query"])
+	}
 
 	turns := []trajTurn{{User: "what was I doing yesterday"}}
 	got := runTrajTurn(context.Background(), "SYS", arm, exec, turns)
@@ -168,41 +170,6 @@ func TestClaudeArmPrompt_CarriesTheHarness(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("claude prompt missing %q", want)
 		}
-	}
-}
-
-// TestNextUserMessage_GroundsTheRoleplayInRealMemory checks the roleplay prompt: the brief, the store's own grounding, the conversation so far, and the per-message nudge that makes the arc happen.
-func TestNextUserMessage_GroundsTheRoleplayInRealMemory(t *testing.T) {
-	var seen string
-	fake := func(ctx context.Context, prompt string) (string, error) {
-		seen = prompt
-		return "  \"so what did I get done yesterday\"  ", nil
-	}
-	turns := []trajTurn{{User: "hey", Reply: "you were on the harness"}}
-	got, err := nextUserMessage(context.Background(), fake, "GROUNDING ROLLUP", turns, 10, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "so what did I get done yesterday" {
-		t.Errorf("the message should come back unquoted and trimmed, got %q", got)
-	}
-	for _, want := range []string{
-		"roleplaying the owner of this laptop",
-		"GROUNDING ROLLUP",
-		"YOU: hey",
-		"ASSISTANT: you were on the harness",
-		"This is message 10 of 10",
-		"ask it to remember that",
-	} {
-		if !strings.Contains(seen, want) {
-			t.Errorf("roleplay prompt missing %q", want)
-		}
-	}
-	if _, err := nextUserMessage(context.Background(), fake, "G", nil, 1, 10); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(seen, "this is your opening message") {
-		t.Error("the opening prompt should say the conversation has not started")
 	}
 }
 

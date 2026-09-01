@@ -14,7 +14,8 @@ func writeScorecard(c scorecard, outDir string) (string, error) {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(outDir, fmt.Sprintf("%s-%s.md", c.Started.Format("2006-01-02"), c.SHA))
+	// To the minute for the same reason the frozen rows are: measuring a fix means running the same commit twice in an evening, and a day-and-sha name overwrites the baseline being measured against.
+	path := filepath.Join(outDir, fmt.Sprintf("%s-%s.md", c.Started.Format("2006-01-02-1504"), c.SHA))
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Ora eval scorecard — %s\n\n", c.Started.Format("2006-01-02 15:04 MST"))
@@ -33,6 +34,9 @@ func writeScorecard(c scorecard, outDir string) (string, error) {
 	}
 	if c.Ran["3"] {
 		writeTrack3Section(&b, c.T3)
+	}
+	if c.Ran["8"] {
+		writeTrack8Section(&b, c.T8, c.T8Arms)
 	}
 	return path, os.WriteFile(path, []byte(b.String()), 0644)
 }
@@ -53,6 +57,14 @@ func summary(c scorecard) string {
 	if c.Ran["3"] {
 		p, n := track3Rate(c.T3)
 		b.WriteString(fmt.Sprintf("| 3 minutes | attendee and taste criteria passed across minutes files | %s |\n", pct(p, n)))
+	}
+	if c.Ran["8"] {
+		p, n := track8SufficientRate(c.T8)
+		b.WriteString(fmt.Sprintf("| 8 context vs capacity | questions whose retrieved rows were sufficient | %s |\n", pct(p, n)))
+		for _, a := range c.T8Arms {
+			p, n := track8ArmRate(c.T8, a.Name)
+			b.WriteString(fmt.Sprintf("| 8 — %s | answered well from those same rows | %s |\n", a.Name, pct(p, n)))
+		}
 	}
 	return b.String()
 }

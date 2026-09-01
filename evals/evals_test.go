@@ -10,6 +10,8 @@ import (
 
 	"ora/internal/agent"
 	"ora/internal/db"
+
+	"ora/internal/brain"
 )
 
 // TestParseTurnPairs_PairsEachReplyWithTheQuestionBeforeIt is the shape track 2 depends on: one pair per "ora said", carrying the last user turn before it, whether that turn was typed or spoken.
@@ -85,8 +87,8 @@ func TestStripFence(t *testing.T) {
 		"  {\"a\":1}  ":           `{"a":1}`,
 	}
 	for in, want := range cases {
-		if got := stripFence(in); got != want {
-			t.Errorf("stripFence(%q) = %q, want %q", in, got, want)
+		if got := brain.StripFence(in); got != want {
+			t.Errorf("brain.StripFence(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
