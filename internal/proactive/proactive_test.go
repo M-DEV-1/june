@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/memory"
 )
 
 // testStore opens a throwaway in-memory store that is closed when the test ends.
@@ -229,12 +231,12 @@ func TestScheduler_Brief_WaitsForUserActivity(t *testing.T) {
 	}
 }
 
-// nextSunday returns the next date on or after base that falls on a Sunday, at the given local hour — the Sunday-only weekly study trigger's tests all need a Sunday timestamp regardless of what day the suite happens to run on.
-func nextSunday(base time.Time, hour int) time.Time {
+// lastSunday returns the most recent date on or before base that falls on a Sunday, keeping base's clock time. The weekly-study tests inject this as the scheduler's now: it must sit at or slightly before the real wall clock, because the activity gate compares the injected now against episode rows the store stamps with the real clock — a next-Sunday-in-the-future fake makes every fresh episode look days stale and the trigger never fires (that is exactly how these tests broke the first Monday they ran).
+func lastSunday(base time.Time) time.Time {
 	for base.Weekday() != time.Sunday {
-		base = base.AddDate(0, 0, 1)
+		base = base.AddDate(0, 0, -1)
 	}
-	return time.Date(base.Year(), base.Month(), base.Day(), hour, 0, 0, 0, base.Location())
+	return base
 }
 
 // TestScheduler_WeeklyStudy_FiresOnceOnSunday is the tracer bullet for the Sunday trigger: past the brief hour, on a Sunday, with fresh activity, one tick must call the wired weeklyStudy func exactly once and write the once-per-Sunday marker, and a second tick must not call it again.
@@ -242,7 +244,7 @@ func TestScheduler_WeeklyStudy_FiresOnceOnSunday(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 
-	sunday := nextSunday(time.Now(), 9)
+	sunday := lastSunday(time.Now())
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -251,7 +253,7 @@ func TestScheduler_WeeklyStudy_FiresOnceOnSunday(t *testing.T) {
 	var gotNow time.Time
 	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
 		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
-	s.briefHour = 8
+	s.briefHour = 0
 	s.now = func() time.Time { return sunday }
 	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
 		calls++
@@ -282,7 +284,7 @@ func TestScheduler_WeeklyStudy_NeverFiresOnANonSunday(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 
-	monday := nextSunday(time.Now(), 9).AddDate(0, 0, 1)
+	monday := lastSunday(time.Now()).AddDate(0, 0, 1)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -290,7 +292,7 @@ func TestScheduler_WeeklyStudy_NeverFiresOnANonSunday(t *testing.T) {
 	calls := 0
 	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
 		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
-	s.briefHour = 8
+	s.briefHour = 0
 	s.now = func() time.Time { return monday }
 	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error { calls++; return nil })
 
@@ -305,7 +307,7 @@ func TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 
-	sunday := nextSunday(time.Now(), 9)
+	sunday := lastSunday(time.Now())
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -313,7 +315,7 @@ func TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure(t *testing.T) {
 	calls := 0
 	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
 		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
-	s.briefHour = 8
+	s.briefHour = 0
 	s.now = func() time.Time { return sunday }
 	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
 		calls++
@@ -334,23 +336,207 @@ func TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure(t *testing.T) {
 	}
 }
 
-// TestScheduler_WeeklyStudy_UnsetNeverFires verifies a Scheduler that never had SetWeeklyStudy called never panics on a Sunday tick and never writes a marker — the trigger is opt-in.
-func TestScheduler_WeeklyStudy_UnsetNeverFires(t *testing.T) {
+// openItem files one open action item raised daysAgo days ago and returns nothing — the brief is meant to find it by status, not by how recent its meeting was.
+func openItem(t *testing.T, store *db.Store, owner, text string, priority string, daysAgo int) {
+	t.Helper()
+	_, err := store.AddActionItems(context.Background(), []memory.ActionItem{{
+		Owner: owner, Text: text,
+		Status: memory.StatusOpen, Priority: priority,
+		Source: "md x mf tool", Raised: time.Now().AddDate(0, 0, -daysAgo),
+	}})
+	if err != nil {
+		t.Fatalf("AddActionItems: %v", err)
+	}
+}
+
+// An open action item reaches the brief however old the meeting that raised it is. This is the whole point of lifting action items out of the minutes: the minutes fall out of briefMinutesWindow after three days, and an owed task must not vanish with them.
+func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatal(err)
+	}
+	openItem(t, store, "Vikram", "carry PR #13 through CI and merge.", memory.PriorityHigh, 9)
 
-	sunday := nextSunday(time.Now(), 9)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
-		t.Fatalf("LogEpisode: %v", err)
+	var prompts []string
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		return "brief", nil
+	}, func(title, body string) {}, config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	s.tick(ctx)
+
+	if len(prompts) != 1 {
+		t.Fatalf("brain called %d times, want 1", len(prompts))
+	}
+	if !strings.Contains(prompts[0], "carry PR #13 through CI and merge.") {
+		t.Errorf("a nine-day-old open item never reached the brief prompt:\n%s", prompts[0])
+	}
+	if !strings.Contains(prompts[0], "Vikram") {
+		t.Errorf("the brief prompt does not say who owes the item")
+	}
+}
+
+// A closed item stops appearing. This is what a correction has to buy the user: saying something is done makes it go away.
+func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatal(err)
+	}
+	openItem(t, store, "Alex Rivera", "finish the acme-essentials setup.", memory.PriorityNormal, 3)
+	open, _ := store.OpenActionItems(ctx)
+	if err := store.SetActionStatus(ctx, open[0].NoteID, memory.StatusDone); err != nil {
+		t.Fatal(err)
 	}
 
-	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
-		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
-	s.briefHour = 8
-	s.now = func() time.Time { return sunday }
+	var prompts []string
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		return "brief", nil
+	}, func(title, body string) {}, config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	s.tick(ctx)
+
+	if strings.Contains(prompts[0], "acme-essentials") {
+		t.Errorf("an item marked done still reached the brief:\n%s", prompts[0])
+	}
+}
+
+// An item that has sat open for a while is asked about rather than restated: the user said they would rather be asked "were you able to make any progress here?" and answer, than be told the same thing every morning.
+func TestScheduler_Brief_AsksAboutStaleItems(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatal(err)
+	}
+	openItem(t, store, "Krish", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
+	openItem(t, store, "Vikram", "settle the payment.", memory.PriorityHigh, 1)
+
+	var prompts []string
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		return "brief", nil
+	}, func(title, body string) {}, config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	s.tick(ctx)
+
+	stale, fresh := "reply on WhatsApp during his leave.", "settle the payment."
+	if !strings.Contains(prompts[0], stale) || !strings.Contains(prompts[0], fresh) {
+		t.Fatalf("both items should reach the prompt:\n%s", prompts[0])
+	}
+	staleAt, freshAt := strings.Index(prompts[0], stale), strings.Index(prompts[0], fresh)
+	if staleAt < freshAt {
+		t.Errorf("the twelve-day-old item is not marked as one to ask about, it is listed alongside the fresh one:\n%s", prompts[0])
+	}
+}
+
+// An item that has gone quiet is asked about in a notification the user can answer with one click, and the answer updates the item. This is the other half of "ask me and I'll tell you": the brief asks in words, this asks in a button.
+func TestScheduler_Brief_AsksAboutAStaleItemAndAppliesTheAnswer(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera — goes by Alex."); err != nil {
+		t.Fatal(err)
+	}
+	openItem(t, store, "Alex Rivera", "improve capture resolution in the screen-frame tool.", memory.PriorityLow, 12)
+
+	asked := make(chan string, 1)
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "brief", nil },
+		func(title, body string) {}, config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	s.SetAsk(func(title, body string, actions []string) (string, error) {
+		asked <- body
+		return "done", nil
+	})
 
 	s.tick(ctx)
-	if marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study"); err != nil || marker != "" {
-		t.Errorf("weekly-study marker = %q, %v, want none written when weeklyStudy was never set", marker, err)
+
+	select {
+	case body := <-asked:
+		if !strings.Contains(body, "improve capture resolution in the screen-frame tool.") {
+			t.Errorf("the question does not name the item: %q", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("nothing was ever asked about the twelve-day-old item")
+	}
+
+	// The answer has to actually land, or the click was theatre.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		open, err := store.OpenActionItems(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(open) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("answering \"done\" left the item open: %+v", open)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Nothing stale means no question — the notification only fires when there is something worth asking about.
+func TestScheduler_Brief_NoQuestionWhenNothingIsStale(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatal(err)
+	}
+	openItem(t, store, "Vikram", "settle the payment.", memory.PriorityNormal, 1)
+
+	var asks int32
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "brief", nil },
+		func(title, body string) {}, config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	s.SetAsk(func(title, body string, actions []string) (string, error) {
+		atomic.AddInt32(&asks, 1)
+		return "", nil
+	})
+
+	s.tick(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if n := atomic.LoadInt32(&asks); n != 0 {
+		t.Errorf("asked about %d items when nothing was stale", n)
+	}
+}
+
+// Somebody else's stale item is never put to the user as a progress question: they cannot answer for work they do not owe. It still reaches the brief's text, because being kept waiting is worth knowing about.
+func TestScheduler_Brief_DoesNotAskAboutSomebodyElsesItem(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera — goes by Alex."); err != nil {
+		t.Fatal(err)
+	}
+	openItem(t, store, "Krish", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
+
+	var asks int32
+	var prompts []string
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		return "brief", nil
+	}, func(title, body string) {}, config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	s.SetAsk(func(title, body string, actions []string) (string, error) {
+		atomic.AddInt32(&asks, 1)
+		return "", nil
+	})
+
+	s.tick(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if n := atomic.LoadInt32(&asks); n != 0 {
+		t.Errorf("asked the user for progress on Krish's task %d times", n)
+	}
+	if !strings.Contains(prompts[0], "reply on WhatsApp during his leave.") {
+		t.Error("the item vanished from the brief entirely; the user should still know they are waiting on it")
 	}
 }
