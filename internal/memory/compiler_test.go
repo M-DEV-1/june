@@ -79,7 +79,21 @@ type fakeStorage struct {
 	notes          []noteCall
 	updates        []updateCall
 	upserts        []memory.ThreadUpdate
+	links          []linkCall
 	existingCalled int
+}
+
+// linkCall is one LinkEpisodesToThread the compiler made, so a test can check the buffer's evidence was joined to the thread it was attributed to.
+type linkCall struct {
+	threadID     int64
+	since, until time.Time
+}
+
+func (s *fakeStorage) LinkEpisodesToThread(_ context.Context, threadID int64, since, until time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.links = append(s.links, linkCall{threadID, since, until})
+	return nil
 }
 
 func (s *fakeStorage) LogSemanticNode(_ context.Context, summary memory.TaskSummary) error {
@@ -595,5 +609,33 @@ func TestCompiler_FlushLogsStoreErrors(t *testing.T) {
 
 	if out := logBuf.String(); !strings.Contains(out, "level=ERROR") {
 		t.Errorf("expected an ERROR log when a store write fails during flush, got: %q", out)
+	}
+}
+
+// Attributing a buffer to a thread is the one moment the connection between a thread and the screens behind it is known. The compiler used to compute it and throw it away on every flush, leaving threads that could say "reviewed the code, eleven findings" with no path to the findings.
+func TestCompiler_FlushLinksTheBuffersEpisodesToEachThread(t *testing.T) {
+	store := &fakeStorage{}
+	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
+		return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{
+			{Subject: "code review of ora", Kind: "work", Summary: "eleven findings"},
+			{Subject: "reading the diff", Kind: "work", Summary: "walked the changes"},
+		}}, nil
+	}}
+	c := memory.NewCompiler(llm, store)
+	c.Ingest(context.Background(), tracker.Activity{App: "Code", Title: "search.go", ScreenText: strings.Repeat("reviewing the findings ", 30)})
+
+	before := time.Now()
+	c.ForceFlush(context.Background())
+
+	if len(store.links) != 2 {
+		t.Fatalf("got %d links, want one per attributed thread", len(store.links))
+	}
+	for _, l := range store.links {
+		if l.until.Before(before) {
+			t.Errorf("link window ends before the flush began: %+v", l)
+		}
+		if l.since.After(l.until) {
+			t.Errorf("link window runs backwards: %+v", l)
+		}
 	}
 }

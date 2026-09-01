@@ -270,6 +270,8 @@ type Storage interface {
 	UpsertThread(ctx context.Context, u ThreadUpdate) (int64, error)
 	// ThreadsForAttribution returns recent threads to seed the attribution call.
 	ThreadsForAttribution(ctx context.Context, limit int) ([]Thread, error)
+	// LinkEpisodesToThread records which captures a thread was attributed from. The attribution happens here on every flush and, until this existed, was discarded every time — leaving a store where a thread could say "reviewed the code, eleven findings" and nothing could reach the screens the findings were on.
+	LinkEpisodesToThread(ctx context.Context, threadID int64, since, until time.Time) error
 }
 
 const wordFlushLimit = 1500
@@ -327,6 +329,7 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 	// snapshot-and-reset happens under the lock; processFlush runs after, on the local copy, without holding c.mu — so slow LLM/store calls never block concurrent Ingest/GetCurrentBuffer/ForceFlush.
 	c.mu.Lock()
 	var flushedBuf []tracker.Activity
+	var flushedSince time.Time
 	if len(c.buffer) > 0 {
 		last := c.buffer[len(c.buffer)-1]
 		appChanged := last.App != act.App
@@ -334,7 +337,7 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 		hourElapsed := time.Since(c.lastFlush) >= time.Hour
 
 		if appChanged || wordLimitHit || hourElapsed {
-			flushedBuf = c.resetBufferLocked()
+			flushedBuf, flushedSince = c.resetBufferLocked()
 		}
 	}
 
@@ -343,17 +346,19 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 	c.mu.Unlock()
 
 	if flushedBuf != nil {
-		c.processFlush(ctx, flushedBuf)
+		c.processFlush(ctx, flushedBuf, flushedSince)
 	}
 }
 
 // resetBufferLocked hands the current buffer to the caller and resets the compiler's buffered state. Caller must hold c.mu.
-func (c *Compiler) resetBufferLocked() []tracker.Activity {
+// It also returns when this buffer started accumulating — the previous flush's timestamp — because that, with now, is the stretch of screen time the buffer covers, and the episodes written inside it are the evidence for whatever threads the buffer turns out to be about.
+func (c *Compiler) resetBufferLocked() ([]tracker.Activity, time.Time) {
 	buf := c.buffer
+	since := c.lastFlush
 	c.buffer = make([]tracker.Activity, 0)
 	c.wordCount = 0
 	c.lastFlush = time.Now()
-	return buf
+	return buf, since
 }
 
 // CountWords counts whitespace-separated tokens in s.
@@ -379,7 +384,7 @@ func CountWords(s string) int {
 const fallbackSummaryMaxRunes = 2000
 
 // processFlush does the slow LLM/store work for a flushed buffer. Operates only on the local buf snapshot — never touches c.buffer/c.wordCount/c.lastFlush, which are already reset by resetBufferLocked. Never called while holding c.mu.
-func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
+func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, since time.Time) {
 	if len(buf) == 0 {
 		return
 	}
@@ -425,8 +430,12 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 	} else {
 		// one update per concurrent thread: refresh its state and log an episodic summary node so history, FTS, and compaction keep working unchanged.
 		for _, u := range attr.Threads {
-			if _, err := c.store.UpsertThread(ctx, u); err != nil {
+			id, err := c.store.UpsertThread(ctx, u)
+			if err != nil {
 				slog.Error("flush: UpsertThread failed", "subject", u.Subject, "err", err)
+			} else if err := c.store.LinkEpisodesToThread(ctx, id, since, time.Now()); err != nil {
+				// Best-effort: the thread and its summary are the record, and losing the edge costs the ability to walk from one to its evidence, not the memory itself.
+				slog.Warn("flush: could not link this buffer's episodes to the thread", "subject", u.Subject, "err", err)
 			}
 			if err := c.store.LogSemanticNode(ctx, TaskSummary{SameTask: u.ID != 0, TaskName: u.Subject, Summary: u.Summary}); err != nil {
 				slog.Error("flush: LogSemanticNode failed", "subject", u.Subject, "err", err)
@@ -480,10 +489,10 @@ func (c *Compiler) ForceFlush(ctx context.Context) {
 		c.mu.Unlock()
 		return
 	}
-	buf := c.resetBufferLocked()
+	buf, since := c.resetBufferLocked()
 	c.mu.Unlock()
 
-	c.processFlush(ctx, buf)
+	c.processFlush(ctx, buf, since)
 }
 
 // GetCurrentBuffer returns a copy so callers (the /buffer HTTP handler, Agent.Connect) never read a slice that Ingest/flush might be mutating concurrently.
