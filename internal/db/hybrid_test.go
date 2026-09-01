@@ -14,6 +14,7 @@ import (
 )
 
 // newStore opens a throwaway in-memory store that is closed when the test ends.
+// newStore opens a throwaway in-memory store, closed when the test ends. Every test in this package uses it; the in-memory pool is pinned to one connection (see New) so concurrent readers see the same database.
 func newStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := New(":memory:")
@@ -1658,5 +1659,14 @@ func TestHybridSearchWindow_VectorCandidates_OutsideWindowOrUndatedDropped(t *te
 	}
 	if hits[0].Content != "in-window gpu debugging" {
 		t.Errorf("expected the in-window vector hit, got: %+v", hits[0])
+	}
+}
+
+// A question about time of day — when someone usually stops working, what they did right before a meeting — is answerable only if the rows say what time things happened. Rendering the date without the clock made every such question unanswerable from any number of rows: "when do I usually stop working" was refused by all three model arms while the rows in front of them plainly described wrapping up for the night.
+func TestFormatHit_CarriesTheClockTimeNotJustTheDate(t *testing.T) {
+	when := time.Now().Add(-72 * time.Hour)
+	got := FormatHit(MemoryHit{Source: "summary", Content: "wrapped up for the night", CreatedAt: when}, 0)
+	if !strings.Contains(got, when.Local().Format("15:04")) {
+		t.Errorf("hit does not carry the time of day: %q", got)
 	}
 }
