@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"ora/internal/audio"
+	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/memory"
 )
 
 // noteKind is the notes.kind written for a meeting, so minutes are distinguishable from the memory compiler's facts.
@@ -56,6 +58,8 @@ type Store interface {
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	UpdateNote(ctx context.Context, id int64, content string) error
 	GetNotes(ctx context.Context) ([]db.Note, error)
+	// AddActionItems files the things people agreed to do in this meeting as their own rows, skipping any already on file.
+	AddActionItems(ctx context.Context, items []memory.ActionItem) (int, error)
 }
 
 // capturer is the running-capture half of audio.MeetingCapture, kept as an interface so tests can drive the pipeline without a sound server.
@@ -163,6 +167,8 @@ type Recorder struct {
 	capture     func(mic, system io.Writer) (capturer, time.Time, time.Time, error)
 	whisper     func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error)
 	findWhisper func(dataDir string) (string, error)
+	diarize     func(ctx context.Context, bin, path string, speakers int, offset time.Duration) ([]diarTurn, error)
+	findSherpa  func(dataDir string) (string, error)
 	minutes     func(ctx context.Context, prompt string) (string, error)
 	notify      func(title, body string)
 	onAC        func() bool
@@ -180,6 +186,8 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	}
 	r.whisper = transcribeWAV
 	r.findWhisper = whisperCPPBinary
+	r.diarize = diarizeWAV
+	r.findSherpa = sherpaBinary
 	r.minutes = r.defaultBrain
 	r.notify = notifySend
 	r.onAC = OnACPower
@@ -534,7 +542,7 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	if err := os.WriteFile(filepath.Join(s.dir, "minutes.md"), []byte(text), 0o644); err != nil {
 		return fmt.Errorf("write minutes: %w", err)
 	}
-	r.fileMinutes(ctx, s.dir, text)
+	r.fileMinutes(ctx, s.dir, text, s.startedAt)
 
 	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
 	// Regenerating minutes from a transcript that has already been through this once (fromTranscript) must not run it again: the meeting taught Ora whatever it was going to teach it the first time, and running it again just re-proposes the same writes.
@@ -565,8 +573,9 @@ func markOutcome(dir string, err error) {
 	}
 }
 
-// fileMinutes puts a recording's minutes into memory. If the recording was filed before, the note it was filed under is corrected in place; otherwise the minutes are filed as a new note and its id written to noteIDFile so the next run corrects this one. Input: the recording directory and the minutes text. Output: none — a memory that refuses the minutes is logged and shrugged off, because minutes.md on disk is the copy that matters.
-func (r *Recorder) fileMinutes(ctx context.Context, dir, text string) {
+// fileMinutes puts a recording's minutes into memory. If the recording was filed before, the note it was filed under is corrected in place; otherwise the minutes are filed as a new note and its id written to noteIDFile so the next run corrects this one. The minutes' action items are also lifted into their own tracked rows, which is what lets a thing somebody agreed to do outlive the few days the minutes themselves are read in. Input: the recording directory, the minutes text, and when the meeting started. Output: none — a memory that refuses the minutes is logged and shrugged off, because minutes.md on disk is the copy that matters.
+func (r *Recorder) fileMinutes(ctx context.Context, dir, text string, startedAt time.Time) {
+	defer r.liftActionItems(ctx, text, startedAt)
 	path := filepath.Join(dir, noteIDFile)
 	if b, err := os.ReadFile(path); err == nil {
 		if id, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil {
@@ -586,6 +595,36 @@ func (r *Recorder) fileMinutes(ctx context.Context, dir, text string) {
 	if err := os.WriteFile(path, []byte(strconv.FormatInt(id, 10)), 0o644); err != nil {
 		slog.Warn("could not record which note the meeting minutes were filed under", "dir", dir, "error", err)
 	}
+}
+
+// liftActionItems files the minutes' action items as their own rows. The minutes are left exactly as written — they are the record of what was said, and nothing may edit them to claim a task is finished; the lifted items are the live copy, the one the user closes or re-prioritises. Re-filing the same meeting adds nothing, because the store matches on the work itself rather than on the line it is rendered as.
+func (r *Recorder) liftActionItems(ctx context.Context, minutes string, startedAt time.Time) {
+	items := memory.ParseMinutesActions(minutes, memory.MinutesLabel(minutes), startedAt)
+	items = memory.UserMeetingActions(items, r.identityText(ctx))
+	if len(items) == 0 {
+		return
+	}
+	added, err := r.store.AddActionItems(ctx, items)
+	if err != nil {
+		slog.Warn("could not file this meeting's action items", "error", err)
+		return
+	}
+	slog.Info("filed action items from a meeting", "found", len(items), "new", added)
+}
+
+// identityText returns the personal-context entry that says who the user is, or "" when there is none. It is what tells an action item whether it is the user's, and it is the same entry the minutes prompt uses to identify the [me] speaker — the one thing on file that came from the user's own mouth rather than from inference.
+func (r *Recorder) identityText(ctx context.Context) string {
+	entries, err := r.store.PersonalContext(ctx)
+	if err != nil {
+		slog.Warn("could not read who the user is; filing no action items rather than filing other people's", "error", err)
+		return ""
+	}
+	for _, e := range entries {
+		if e.Subject == "identity" {
+			return e.Content
+		}
+	}
+	return ""
 }
 
 // transcriptFor returns the meeting's transcript. A recording the sweep found with its transcript already written just has it read back off disk, which is what makes deleting minutes.md a request for fresh minutes; anything else is transcribed with whisper and the result written to transcript.md.
@@ -612,15 +651,32 @@ func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error
 	// The two streams are separate files that share nothing, so they are transcribed at the same time rather than one after the other — which halves the wall time of every meeting. transcribeThreads gives each run half the machine so the two are not simply fighting over the same cores.
 	var wg sync.WaitGroup
 	var mine, theirs []Segment
+	var turns []diarTurn
 	var micErr, sysErr error
-	wg.Add(2)
+
+	// Diarization runs alongside the two transcriptions rather than after them: it is CPU work while whisper decodes on the GPU, so it costs no wall time at all. It only ever reads the system audio — the microphone is one known person and there is nothing there to cluster.
+	// Its context is cancelled the moment either transcription fails, because there is no transcript left to label. Without that it runs to completion on a recording already known to be lost, which measured at about ten minutes of CPU for a thirty-nine minute meeting, repeated on every retry.
+	diarCtx, stopDiar := context.WithCancel(ctx)
+	defer stopDiar()
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		turns = r.diarizeCall(diarCtx, filepath.Join(s.dir, "system.wav"), s.sysOffset, s.startedAt, s.stoppedAt)
+	}()
 	go func() {
 		defer wg.Done()
 		mine, micErr = r.whisper(ctx, bin, filepath.Join(s.dir, "mic.wav"), speakerMe, prompt, s.micOffset)
+		if micErr != nil {
+			stopDiar()
+		}
 	}()
 	go func() {
 		defer wg.Done()
 		theirs, sysErr = r.whisper(ctx, bin, filepath.Join(s.dir, "system.wav"), speakerCall, prompt, s.sysOffset)
+		if sysErr != nil {
+			stopDiar()
+		}
 	}()
 	wg.Wait()
 	if micErr != nil {
@@ -629,6 +685,9 @@ func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error
 	if sysErr != nil {
 		return "", fmt.Errorf("transcribe system audio: %w", sysErr)
 	}
+
+	// Every remote voice arrived under one pooled label; the diarizer's clusters split it back into people, which is what lets the minutes attribute a line rather than hedge about it.
+	theirs = assignSpeakers(theirs, turns)
 
 	// Whisper exiting 0 with nothing to show for it is not a success: the meeting may have been silent, or this whisper build may print segments in a shape parseSegments does not recognise. Either way the WAVs are still the only copy of the meeting, so they stay put and the marker records why.
 	segs := append(mine, theirs...)
@@ -655,6 +714,57 @@ func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error
 		}
 	}
 	return transcript, nil
+}
+
+// diarizeCall splits the call side into voices, best-effort. Every failure — no diarizer installed, a model missing, the run erroring — returns no turns and leaves the transcript exactly as it was, with every remote voice pooled under one label. A meeting is worth having with unattributed speech and worthless without a transcript, so nothing here is allowed to fail a recording.
+func (r *Recorder) diarizeCall(ctx context.Context, path string, offset time.Duration, since, until time.Time) []diarTurn {
+	bin, err := r.findSherpa(r.dataDir)
+	if err != nil {
+		slog.Debug("not splitting the call into voices", "reason", err)
+		return nil
+	}
+	speakers := r.remoteVoices(ctx, since, until)
+	started := time.Now()
+	turns, err := r.diarize(ctx, bin, path, speakers, offset)
+	if err != nil {
+		// A cancelled context here is the transcription having failed and this run being stopped on purpose, not the diarizer going wrong. Reporting that as a warning would put an alarming line in the log for something the code just did deliberately.
+		if ctx.Err() != nil {
+			slog.Debug("stopped splitting the call into voices, the transcription it belongs to failed", "error", err)
+			return nil
+		}
+		slog.Warn("could not split the call into voices, so every remote speaker stays pooled", "error", err)
+		return nil
+	}
+	found := map[int]bool{}
+	for _, t := range turns {
+		found[t.Speaker] = true
+	}
+	slog.Info("split the call into voices", "turns", len(turns), "expected", speakers, "found", len(found), "took", time.Since(started))
+	return turns
+}
+
+// remoteVoices is how many people the meeting app showed inside its window, which the diarizer is given so it returns that many voices instead of estimating from an audio distance that does not transfer between meetings. Zero means the window did not say, and the diarizer estimates instead.
+// The window's TITLE is deliberately not counted, though it often carries a name. A one-to-one call is titled after the other person — "Microsoft Teams (PWA) - Chat | Priya Shah" — but a group call is titled after the meeting, and "Daily AI Standup" is two capitalised words that read exactly like a name. Counting titles would therefore report one voice for a nine-person standup and merge all nine into one, which is worse than not knowing: one voice too many splits a person across two clusters and the summarising model rejoins them from what was said, while one too few fuses two people and nothing downstream can undo it.
+// Only the window's own contents count — the participant tiles and roster the accessibility tree reads out of the meeting window itself, which name people and nothing else.
+func (r *Recorder) remoteVoices(ctx context.Context, since, until time.Time) int {
+	eps, err := r.store.EpisodesInWindow(ctx, since.Add(-contextMargin), until.Add(contextMargin), episodeLimit)
+	if err != nil {
+		return 0
+	}
+	bodies := make([]db.Episode, 0, len(eps))
+	for _, e := range eps {
+		// The title is dropped and the app and window identity kept, so the episode still has to pass the meeting-window test while contributing none of its title's words as names.
+		bodies = append(bodies, db.Episode{App: e.App, Title: e.Title, ScreenText: e.ScreenText, VisibleText: e.VisibleText})
+	}
+	names := meetingParticipantsInBody(bodies)
+
+	// Always logged, so a real group meeting says whether this can be trusted before it is trusted. Reading a roster out of the accessibility tree means reading names out of one flattened run of text, and a run of capitalised words does not say where one person ends and the next begins: three names listed back to back parse as one long name rather than as three people. That undercounts, and undercounting is the direction that fuses several people into one voice, which nothing downstream can undo.
+	// No group meeting has ever been captured from inside its window on this machine, so there is no sample of what a roster looks like here. The setting is what turns the count on once the log line below shows real names from a real group call; until then the diarizer estimates, which over-splits, and over-splitting the summarising model can repair.
+	slog.Info("names read from inside the meeting window", "names", names, "count", len(names), "used", config.LoadConfig().Transcribe.SpeakerCountFromScreen)
+	if !config.LoadConfig().Transcribe.SpeakerCountFromScreen {
+		return 0
+	}
+	return len(names)
 }
 
 // notifySend posts a desktop notification through notify-send, which GNOME provides. Failure is logged and ignored: a missing notification must never take down a finished recording.
