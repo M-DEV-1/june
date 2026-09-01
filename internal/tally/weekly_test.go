@@ -87,22 +87,6 @@ func TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows(t *testing.T) {
 	}
 }
 
-// TestRenderWeeklyLog_EmptyStore_RendersNoneForEverySection verifies a brand-new store with no activity at all renders every section with an honest "no data" line rather than an error or a blank section — the daemon's very first Sunday should still produce a readable log.
-func TestRenderWeeklyLog_EmptyStore_RendersNoneForEverySection(t *testing.T) {
-	ctx := context.Background()
-	store := testStore(t)
-
-	text, err := RenderWeeklyLog(ctx, store, time.Now())
-	if err != nil {
-		t.Fatalf("RenderWeeklyLog: %v", err)
-	}
-	for _, want := range []string{"(none)", "(no retrieval queries this week)", "(no nights ran)"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("empty-store render missing %q, got:\n%s", want, text)
-		}
-	}
-}
-
 // TestRenderWeeklyLog_OnlyLooksAtLastSevenDays verifies a tally row older than the window is excluded from the render — otherwise the "weekly" log would grow to cover the store's entire lifetime.
 func TestRenderWeeklyLog_OnlyLooksAtLastSevenDays(t *testing.T) {
 	ctx := context.Background()

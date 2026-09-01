@@ -34,3 +34,27 @@ func TestMatchesBlocklist_LinuxAppNames(t *testing.T) {
 		}
 	}
 }
+
+// The default blocklist lists both the Windows and the bare form of each app ("1Password.exe" and "1password"), so substring matching alone blocks a Linux app name without ever needing the ".exe" strip. A user-supplied custom blocklist has no such redundancy: someone who adds only "Slack.exe" to their config and then runs on Linux, where the app reports itself as "slack", is relying entirely on normalizeAppIdentifier trimming the suffix off the blocklist entry. Nothing currently pins that, so removing the TrimSuffix leaves the whole suite green.
+func TestMatchesBlocklist_CustomWindowsFormEntry_BlocksLinuxAppName(t *testing.T) {
+	custom := []string{"Slack.exe"}
+
+	cases := []struct {
+		app  string
+		want bool
+	}{
+		// The strip has to apply to the blocklist ENTRY, not just the app name: "slack" does not contain "slack.exe", so without trimming the entry down to "slack" this app is silently never blocked.
+		{"slack", true},
+		{"Slack", true},
+		// The Windows form of the same app must still match once both sides normalize.
+		{"Slack.exe", true},
+		// A non-listed app must stay unblocked, so the test cannot pass by always returning true.
+		{"firefox", false},
+	}
+
+	for _, tc := range cases {
+		if got := tracker.MatchesBlocklist(tc.app, custom); got != tc.want {
+			t.Errorf("MatchesBlocklist(%q, %v) = %v, want %v", tc.app, custom, got, tc.want)
+		}
+	}
+}
