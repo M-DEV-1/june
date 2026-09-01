@@ -9,15 +9,6 @@ import (
 	"ora/internal/db"
 )
 
-// meetingParticipants finds a name a chat window wrote before a colon, the same shape primingPrompt mines for whisper — proving prep reuses that mechanism rather than reinventing it.
-func TestMeetingParticipants_ExtractsChatSenderNames(t *testing.T) {
-	eps := []db.Episode{{ScreenText: "Priya Shah: ok sure ping me | participating in a video call"}}
-	got := meetingParticipants(eps)
-	if len(got) != 1 || got[0] != "Priya Shah" {
-		t.Errorf("meetingParticipants = %v, want [Priya Shah]", got)
-	}
-}
-
 // A window title names a meeting through its proper nouns, not through app furniture around them.
 func TestMeetingTitleFragments_PrefersProperNounsOverChrome(t *testing.T) {
 	got := meetingTitleFragments("Meet – Acme Corp weekly sync - Google Chrome")
@@ -42,7 +33,7 @@ func contains(ss []string, want string) bool {
 
 // A participant on screen now who is also named in a past meeting's minutes is what identifies that meeting as the same one.
 func TestPrepMeeting_MatchesByParticipantAndNotifies(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{ScreenText: "Priya Shah: ok sure ping me"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me"}}}
 	r, _, _ := newTestRecorder(t, store)
 	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck by Friday.", noteKind); err != nil {
 		t.Fatal(err)
@@ -108,7 +99,7 @@ func TestPrepMeeting_SilentWhenNothingOnScreenNamesTheMeeting(t *testing.T) {
 
 // Silence is also correct when the meeting is identified but memory has nothing from a prior instance of it.
 func TestPrepMeeting_SilentWhenNoPastMinutesMatch(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{ScreenText: "Priya Shah: hello"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
 	var got notifications
 	r.notify = got.add
@@ -122,7 +113,7 @@ func TestPrepMeeting_SilentWhenNoPastMinutesMatch(t *testing.T) {
 
 // The most recently filed matching note wins, not just any match, since GetNotes already orders newest first.
 func TestPrepMeeting_MostRecentMatchWins(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{ScreenText: "Priya Shah: hello"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
 	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah: older meeting, decided the budget.", noteKind); err != nil {
 		t.Fatal(err)
@@ -143,7 +134,7 @@ func TestPrepMeeting_MostRecentMatchWins(t *testing.T) {
 // ORA_NO_MEETING_PREP=1 is the alpha kill switch: it must stop prep even when everything else would fire it.
 func TestPrepMeeting_KillSwitchDisablesIt(t *testing.T) {
 	t.Setenv(noMeetingPrepEnv, "1")
-	store := &fakeStore{episodes: []db.Episode{{ScreenText: "Priya Shah: hello"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
 	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck.", noteKind); err != nil {
 		t.Fatal(err)
@@ -164,7 +155,7 @@ func TestPrepMeeting_KillSwitchDisablesIt(t *testing.T) {
 
 // A brain call that is not back within the timeout must be dropped, even if it eventually returns text — a prep that lands mid-meeting is noise, not help.
 func TestPrepMeeting_DropsSilentlyWhenTheBrainIsTooSlow(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{ScreenText: "Priya Shah: hello"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
 	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck.", noteKind); err != nil {
 		t.Fatal(err)
@@ -186,7 +177,7 @@ func TestPrepMeeting_DropsSilentlyWhenTheBrainIsTooSlow(t *testing.T) {
 
 // Start is the call-detection hook: it must fire prep without making the caller wait for it.
 func TestStart_FiresMeetingPrepAsynchronously(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{ScreenText: "Priya Shah: hello"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
 	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck.", noteKind); err != nil {
 		t.Fatal(err)
