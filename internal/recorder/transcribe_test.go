@@ -124,7 +124,7 @@ func TestRenderTranscript_InterleavesByStartTime(t *testing.T) {
 		{Start: 10 * time.Second, End: 11 * time.Second, Speaker: speakerMe, Text: "sounds good"},
 	}
 	theirs := []Segment{
-		{Start: 2 * time.Second, End: 3 * time.Second, Speaker: speakerCall, Text: "morning"},
+		{Start: 2 * time.Second, End: 4 * time.Second, Speaker: speakerCall, Text: "morning"},
 		{Start: 5 * time.Second, End: 6 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
 	}
 	got := renderTranscript(append(mine, theirs...))
@@ -220,11 +220,11 @@ func TestDropHallucinations_KeepsADoubleInsideOneSegment(t *testing.T) {
 // A line-per-segment transcript shreds both speakers into fragments. Consecutive segments from one stream are one turn, printed as one paragraph timestamped at its start.
 func TestRenderTranscript_MergesConsecutiveSegmentsIntoOneTurn(t *testing.T) {
 	segs := []Segment{
-		{Start: 0, Speaker: speakerMe, Text: "morning all"},
-		{Start: 2 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
-		{Start: 5 * time.Second, Speaker: speakerCall, Text: "yes."},
-		{Start: 7 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
-		{Start: 10 * time.Second, Speaker: speakerMe, Text: "sounds good"},
+		{Start: 0, End: 2 * time.Second, Speaker: speakerMe, Text: "morning all"},
+		{Start: 2 * time.Second, End: 4 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
+		{Start: 5 * time.Second, End: 6 * time.Second, Speaker: speakerCall, Text: "yes."},
+		{Start: 7 * time.Second, End: 9 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
+		{Start: 10 * time.Second, End: 11 * time.Second, Speaker: speakerMe, Text: "sounds good"},
 	}
 	want := "[00:00:00] [me] morning all did you see the sheet\n\n" +
 		"[00:00:05] [call] yes. ship it friday\n\n" +
@@ -276,7 +276,7 @@ func TestPrimingPrompt_EmptyWhenThereIsNoContext(t *testing.T) {
 // Whisper keeps only the last whisperMaxContext tokens of this prompt, so whatever sits at the front is what gets cut when the prompt runs long. Participant names matter more than terms for getting the transcript right, so terms have to come first and the names last, where truncation can't reach them.
 func TestPrimingPrompt_NamesComeAfterTermsSoTheySurviveTruncation(t *testing.T) {
 	eps := []db.Episode{
-		{Title: "Chat - Brave", ScreenText: "Priya Shah: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"},
+		{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"},
 	}
 	got := primingPrompt(eps)
 	termsAt, participantsAt := strings.Index(got, "Terms:"), strings.Index(got, "Participants:")
@@ -344,5 +344,81 @@ func TestTranscribeWAV_PassesThresholdsAndPrompt(t *testing.T) {
 		if !strings.Contains(string(got), want) {
 			t.Errorf("whisper was called without %q: %s", want, got)
 		}
+	}
+}
+
+// The 2026-08-31 standup rendered as a single [call] turn of 21,158 characters covering the last thirty minutes of a thirty-nine minute meeting: whisper produced hundreds of timestamped segments and the turn merge threw every one of their timestamps away. Six people spoke in that block and the minutes model had no boundary anywhere to attribute against. A turn has to end somewhere.
+func TestRenderTranscript_BreaksALongUnbrokenRunIntoTurns(t *testing.T) {
+	// Ten minutes of back-to-back call audio, no pauses and no speaker markers — the shape that produced the 21k paragraph.
+	var segs []Segment
+	for i := 0; i < 120; i++ {
+		at := time.Duration(i) * 5 * time.Second
+		segs = append(segs, Segment{Start: at, End: at + 5*time.Second, Speaker: speakerCall, Text: "and then we looked at the numbers again."})
+	}
+	lines := strings.Count(renderTranscript(segs), "[00:")
+	if lines < 2 {
+		t.Fatalf("ten minutes of unbroken call audio rendered as %d turn(s); a turn must be bounded", lines)
+	}
+}
+
+// Segments a couple of seconds apart with nothing between them are one person still talking, and splitting there is what shredded the transcript into fragments before turns existed.
+func TestRenderTranscript_KeepsAContinuousRunTogether(t *testing.T) {
+	segs := []Segment{
+		{Start: 0, End: 2 * time.Second, Speaker: speakerMe, Text: "morning all"},
+		{Start: 2200 * time.Millisecond, End: 4 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
+	}
+	if got := renderTranscript(segs); got != "[00:00:00] [me] morning all did you see the sheet\n" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// The 2026-08-31 standup: a WhatsApp tab was open five minutes in, and its chat senders went into the priming prompt as the meeting's participants. Only the window the call is actually running in names the people on the call.
+func TestPrimingPrompt_TakesParticipantsOnlyFromTheMeetingWindow(t *testing.T) {
+	eps := []db.Episode{
+		{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Rohit Verma: Abhi renew hua"},
+		{App: "Brave Browser", Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vikram Goel: sharing my screen now"},
+	}
+	_, participants, _ := strings.Cut(primingPrompt(eps), "Participants:")
+	if strings.Contains(participants, "Rohit") {
+		t.Errorf("a WhatsApp sender was named as a meeting participant: %q", participants)
+	}
+	if !strings.Contains(participants, "Vikram Goel") {
+		t.Errorf("the meeting window's own chat sender was dropped: %q", participants)
+	}
+}
+
+// Whisper reads its priming prompt back as speech: the 2026-08-31 transcript opened with "Participants: Rohit Verma, Claude Artifact." timestamped at 00:00:00, which the minutes model then treated as something a person said.
+func TestStripPromptEcho_DropsTheEchoedPrompt(t *testing.T) {
+	const prompt = "Meeting notes. Terms: INFORM, GRDI. Participants: Vikram Goel."
+	segs := []Segment{
+		{Start: 0, End: time.Second, Speaker: speakerCall, Text: "Participants: Vikram Goel. Good afternoon."},
+		{Start: 2 * time.Second, End: 3 * time.Second, Speaker: speakerCall, Text: "is my screen visible?"},
+	}
+	got := stripPromptEcho(segs, prompt)
+	if got[0].Text != "Good afternoon." {
+		t.Errorf("got %q, want the echo stripped and the speech kept", got[0].Text)
+	}
+}
+
+// Diarization gives the call side its turns as spans on the same clock as the transcript, so a segment belongs to whichever voice it shares the most time with. A segment the diarizer never covered keeps the pooled label rather than being guessed at.
+func TestAssignSpeakers_TakesTheMostOverlappedCluster(t *testing.T) {
+	segs := []Segment{
+		{Start: 0, End: 4 * time.Second, Speaker: speakerCall, Text: "mostly the first voice"},
+		{Start: 20 * time.Second, End: 22 * time.Second, Speaker: speakerCall, Text: "nobody was placed here"},
+		{Start: 0, End: 4 * time.Second, Speaker: speakerMe, Text: "my own microphone"},
+	}
+	turns := []diarTurn{
+		{Start: 0, End: 3 * time.Second, Speaker: 0},
+		{Start: 3 * time.Second, End: 6 * time.Second, Speaker: 1},
+	}
+	got := assignSpeakers(segs, turns)
+	if got[0].Speaker != "call:S1" {
+		t.Errorf("segment overlapping cluster 0 for 3s and cluster 1 for 1s got %q", got[0].Speaker)
+	}
+	if got[1].Speaker != speakerCall {
+		t.Errorf("an uncovered segment got %q, want the pooled label", got[1].Speaker)
+	}
+	if got[2].Speaker != speakerMe {
+		t.Errorf("the microphone side was relabelled to %q", got[2].Speaker)
 	}
 }
