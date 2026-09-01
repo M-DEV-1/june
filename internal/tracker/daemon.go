@@ -252,6 +252,7 @@ func (d *Daemon) Start(ctx context.Context) {
 func (d *Daemon) watchMeetingWindow(ctx context.Context) {
 	tick := time.NewTicker(meetingCaptureInterval)
 	defer tick.Stop()
+	// lastText is the title and body together, so a call whose body is empty still deduplicates on its title changing — which is how a browser-hosted meeting reports who joined.
 	var lastText string
 	for {
 		select {
@@ -262,14 +263,22 @@ func (d *Daemon) watchMeetingWindow(ctx context.Context) {
 				continue
 			}
 			app, title, text, ok := extractMeetingWindow()
-			if !ok || text == "" || text == lastText || MatchesBlocklist(app, d.blocklist) {
+			// Logged either way, because a silent watcher makes "no call is open" and "this never ran" look identical — which is exactly what happened on 2026-09-01, when two recorded meetings produced no meeting-window episode and nothing on disk could say which of the two it was.
+			if !ok {
+				slog.Debug("no call window on screen", "checked", "meeting watcher")
+				continue
+			}
+			slog.Info("read the call's window", "app", app, "title", title, "runes", len([]rune(text)))
+			// The title is captured even when the body is empty, which is the normal case rather than an edge one: a Chromium window exposes no accessibility text unless the browser was launched with --force-renderer-accessibility, and a meeting in a browser tab is how most calls happen here. The title alone is what names the other person — a Teams tab reads "Chat | Priya Shah | Microsoft Teams" — so requiring body text threw away the only thing on the machine that answers "who was in the room".
+			key := title + "\x00" + text
+			if key == lastText || MatchesBlocklist(app, d.blocklist) {
 				continue
 			}
 			// lastText is only advanced once the activity is actually on the channel. Recording it before the send would mean one full channel silently retires this meeting's window for good: the text does not change from minute to minute, so every later read would match what was never sent and be skipped.
 			// Non-blocking on purpose: a full channel means the consumer is busy, and the next tick is a minute away. No ctx case here — a select with a default never blocks, so one would be unreachable; shutdown is the outer select's job.
 			select {
 			case d.eventChan <- Activity{App: app, Title: title, ScreenText: text}:
-				lastText = text
+				lastText = key
 			default:
 				slog.Debug("dropped a meeting window capture, the activity channel was full")
 			}
