@@ -49,8 +49,6 @@ const (
 	evidenceBudget = 24 * 1024
 	// evidenceThreads is how many active threads the evidence lists.
 	evidenceThreads = 30
-	// meetingLineCap is how many leading lines of one meeting's minutes the evidence carries.
-	meetingLineCap = 40
 	// compactAfterDays is how old every daily in a Mon-Sun week must be before the week collapses into one kind='week' diary entry.
 	compactAfterDays = 7
 	// compactWeeksToMonth is how old, in weeks, a week entry must be before it may fold into its month's entry.
@@ -547,7 +545,7 @@ func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bo
 		return ev, err
 	}
 	for _, m := range meetings {
-		items = append(items, evidenceItem{secMeetings, m.CreatedAt, fmt.Sprintf("--- Meeting, %s ---\n%s\n", m.CreatedAt.Local().Format("Jan 2"), headLines(m.Content, meetingLineCap))})
+		items = append(items, evidenceItem{secMeetings, m.CreatedAt, fmt.Sprintf("--- Meeting, %s ---\n%s\n", m.CreatedAt.Local().Format("Jan 2"), meetingEvidenceBody(m.Content))})
 	}
 
 	if fallback {
@@ -644,12 +642,10 @@ func workLine(w db.WindowSummary) (string, bool) {
 }
 
 // headLines returns the first n lines of s, which is how much of one meeting's minutes the evidence carries.
-func headLines(s string, n int) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) <= n {
-		return s
-	}
-	return strings.Join(lines[:n], "\n")
+// meetingEvidenceBody is one meeting's minutes as the evidence carries them: whole.
+// They used to be cut to their leading 40 lines, which on a real 48-line minutes file reached Attendees, Key points and Decisions and dropped Action items off the end — so the judge read what was discussed and never what anyone agreed to do. evidenceBudget already bounds the assembly by dropping whole items oldest-first, which is the right shape for this: a meeting is either carried or it is not, never carried headless.
+func meetingEvidenceBody(s string) string {
+	return strings.TrimRight(s, "\n")
 }
 
 // ask runs one traced brain call: the raw reply — any thinking text a model emits included — lands in the night's trace file before anything parses it. When a shadow is active, the same prompt is then fired at it too, after the primary call has already returned — its reply is only ever traced, never used for anything the primary call's result feeds.
