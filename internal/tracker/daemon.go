@@ -266,11 +266,10 @@ func (d *Daemon) watchMeetingWindow(ctx context.Context) {
 				continue
 			}
 			// lastText is only advanced once the activity is actually on the channel. Recording it before the send would mean one full channel silently retires this meeting's window for good: the text does not change from minute to minute, so every later read would match what was never sent and be skipped.
+			// Non-blocking on purpose: a full channel means the consumer is busy, and the next tick is a minute away. No ctx case here — a select with a default never blocks, so one would be unreachable; shutdown is the outer select's job.
 			select {
 			case d.eventChan <- Activity{App: app, Title: title, ScreenText: text}:
 				lastText = text
-			case <-ctx.Done():
-				return
 			default:
 				slog.Debug("dropped a meeting window capture, the activity channel was full")
 			}
