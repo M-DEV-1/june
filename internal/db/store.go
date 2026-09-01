@@ -397,6 +397,9 @@ func (s *Store) createSchema() error {
 		calls INTEGER NOT NULL DEFAULT 0,
 		failures INTEGER NOT NULL DEFAULT 0,
 		total_ms INTEGER NOT NULL DEFAULT 0,
+		-- Characters in and out, not tokens: the Brain seam carries no usage metadata and the CLI providers report none, so characters are what every provider can actually be measured in. A token estimate is a read-time division, kept out of the stored data.
+		prompt_chars INTEGER NOT NULL DEFAULT 0,
+		reply_chars INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (day, provider)
 	);
 	`

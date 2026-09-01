@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,8 +20,9 @@ const weeklyDayFormat = "2006-01-02"
 
 // providerStat accumulates one provider's tally rows over the window.
 type providerStat struct {
-	calls, failures int
-	ms              int64
+	calls, failures         int
+	promptChars, replyChars int
+	ms                      int64
 }
 
 // RenderWeeklyLog renders the last 7 days of self-accounting as plain text: per-provider brain call counts, failures and mean latency; the vector-search contribution rate; how many nights the dreaming loop ran and how far each got; and how many diary entries of each kind were written. Read-only — nothing here writes to the store.
@@ -58,6 +60,8 @@ func RenderWeeklyLog(ctx context.Context, store *db.Store, now time.Time) (strin
 			}
 			p.calls += r.Calls
 			p.failures += r.Failures
+			p.promptChars += r.PromptChars
+			p.replyChars += r.ReplyChars
 			p.ms += r.TotalMs
 		}
 	}
@@ -102,7 +106,9 @@ func writeProviderStats(b *strings.Builder, providers map[string]*providerStat) 
 		if p.calls > 0 {
 			mean = float64(p.ms) / float64(p.calls)
 		}
-		fmt.Fprintf(b, "  %s: %d calls, %d failures, %.0fms mean latency\n", name, p.calls, p.failures, mean)
+		// Characters are what is stored; tokens are this division, and the divisor is stated so the number is never mistaken for a measurement. Four characters per token is the usual English rule of thumb.
+		fmt.Fprintf(b, "  %s: %d calls, %d failures, %.0fms mean latency, ~%s tokens in / ~%s out (chars÷4)\n",
+			name, p.calls, p.failures, mean, thousands(p.promptChars/4), thousands(p.replyChars/4))
 	}
 }
 
@@ -157,4 +163,20 @@ func RunWeeklyLog(ctx context.Context, store *db.Store, now time.Time) error {
 	}
 	slog.Info("weekly system log written", "kind", "system-log")
 	return nil
+}
+
+// thousands renders a count with thin separators, because a weekly log line reading 1483920 is a number nobody parses at a glance.
+func thousands(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
