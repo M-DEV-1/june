@@ -29,8 +29,12 @@ const noteKind = "meeting"
 // transcribeTimeout bounds one whisper run. small.en runs several times faster than real time on CPU, so two hours covers a very long meeting with room to spare.
 const transcribeTimeout = 2 * time.Hour
 
-// episodeLimit caps how much of the desktop timeline goes into the summary prompt. The tracker writes an episode every couple of seconds, so a long meeting produces far more than a prompt needs.
-const episodeLimit = 200
+// episodeLimit is how many raw episode rows a meeting's window may fetch. It is deliberately generous, because the rows are deduplicated after they arrive and most of them are repeats: a 39-minute meeting produced 27 rows that collapsed to 7 distinct screens. Capping the fetch tightly spends the budget on duplicates and then throws away the end of the meeting — at the old value of 200, a four-hour call had its last three hours dropped before the model saw any of it, and the minutes read as though it had ended at lunchtime.
+// A four-hour meeting at the tracker's poll rate is a few hundred rows even before deduplication, and each one's text is capped again by screenTextBudget, so the fetch is bounded well below anything a prompt would notice.
+const episodeLimit = 3000
+
+// timelineEntries is how many distinct screens the prompt may carry, applied after deduplication rather than before it. When a meeting has more than this, the entries are sampled evenly across its whole length instead of truncated, because the end of a meeting is where the decisions are.
+const timelineEntries = 120
 
 // noSpeechMarker is the file left in a recording directory whose transcription ran fine but produced no speech at all. It tells the user why the audio is still there, and it stops the startup sweep from transcribing that directory again on every daemon start.
 const noSpeechMarker = "no-speech.txt"

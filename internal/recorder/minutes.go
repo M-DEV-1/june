@@ -9,6 +9,7 @@ import (
 
 	"ora/internal/brain"
 	"ora/internal/config"
+	"ora/internal/db"
 )
 
 // minutesInstruction tells the model what to make of the transcript. The microphone side is [me]; the system-audio side is [call], a single pooled label covering every remote voice, and the model's job is to put names to it from the screen context and from what was said.
@@ -138,8 +139,7 @@ func (r *Recorder) desktopTimeline(ctx context.Context, since, until time.Time) 
 		return ""
 	}
 	var b strings.Builder
-	var last string
-	for _, e := range episodes {
+	for _, e := range sampleTimeline(dedupeEpisodes(episodes), timelineEntries) {
 		text := e.ScreenText
 		if text == "" {
 			text = e.VisibleText
@@ -150,18 +150,45 @@ func (r *Recorder) desktopTimeline(ctx context.Context, since, until time.Time) 
 		}
 		text = truncate(strings.Join(strings.Fields(text), " "), budget)
 
-		key := e.App + "\x00" + e.Title + "\x00" + text
-		if key == last {
-			continue
-		}
-		last = key
-
 		fmt.Fprintf(&b, "  %s  %s — %s\n", e.CreatedAt.Format("15:04"), e.App, e.Title)
 		if text != "" {
 			fmt.Fprintf(&b, "      on screen: %s\n", text)
 		}
 	}
 	return b.String()
+}
+
+// dedupeEpisodes collapses runs of consecutive episodes showing the same app, title and text down to the first of them. The tracker samples every couple of seconds and most samples repeat, so this is where a meeting's rows shrink to the screens it actually visited — 27 rows became 7 screens on the 2026-08-31 standup.
+// It runs before any cap, which is the whole point: capping first spends the budget on duplicates and then drops the end of the meeting.
+func dedupeEpisodes(eps []db.Episode) []db.Episode {
+	out := make([]db.Episode, 0, len(eps))
+	var last string
+	for _, e := range eps {
+		text := e.ScreenText
+		if text == "" {
+			text = e.VisibleText
+		}
+		key := e.App + "\x00" + e.Title + "\x00" + text
+		if key == last {
+			continue
+		}
+		last = key
+		out = append(out, e)
+	}
+	return out
+}
+
+// sampleTimeline keeps at most n entries, spread evenly across the whole slice rather than taken from its front. A meeting's decisions land at the end, so a timeline that runs out of room mid-way is worse than one that thins uniformly: the first and last entries are always kept.
+func sampleTimeline(eps []db.Episode, n int) []db.Episode {
+	if n <= 0 || len(eps) <= n {
+		return eps
+	}
+	out := make([]db.Episode, 0, n)
+	// Stride across the input so the samples land evenly, and the integer arithmetic keeps index 0 first and the final index last.
+	for i := 0; i < n; i++ {
+		out = append(out, eps[i*(len(eps)-1)/(n-1)])
+	}
+	return out
 }
 
 // truncate shortens s to at most n runes, marking that it was cut.
