@@ -1248,3 +1248,19 @@ func TestFinish_FallsBackToTemplateOnEmptyReply(t *testing.T) {
 		t.Errorf("entry did not fall back to the template on an empty reply: %q", entry)
 	}
 }
+
+// A meeting's minutes end with what people agreed to do. Carrying only the leading lines of one dropped that section entirely — on a real 48-line minutes file the 40-line cap reached Attendees, Key points and Decisions, and cut Action items off the end. The evidence budget already bounds the assembly by dropping whole items oldest-first, which is the right shape: a meeting is included or it is not, never included headless.
+func TestBuildEvidence_CarriesAMeetingsActionItems(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("# Meeting minutes\n\n## Attendees\n")
+	for i := 0; i < 40; i++ {
+		b.WriteString(fmt.Sprintf("- attendee %d — spoke throughout\n", i))
+	}
+	b.WriteString("\n## Action items\n- Alex: push the value chain branch\n")
+
+	got := meetingEvidenceBody(b.String())
+
+	if !strings.Contains(got, "push the value chain branch") {
+		t.Error("the action items were cut off the end of the minutes")
+	}
+}
