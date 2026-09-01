@@ -2104,7 +2104,7 @@ func TestFormatHit_EpisodeProvenance_TableShapes(t *testing.T) {
 			// Age and provenance both show up: one does not replace the other. Past the first day the label also carries the calendar date, so "which day was that" is answerable straight off the row.
 			name: "episode with app, title and age",
 			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go", CreatedAt: time.Now().Add(-3 * 24 * time.Hour)},
-			want: "[episode (" + time.Now().Add(-3*24*time.Hour).Local().Format("Mon Jan 2") + ", 3d ago)] fixing the null pointer bug (Code — tracker_linux.go)",
+			want: "[episode (" + time.Now().Add(-3*24*time.Hour).Local().Format("Mon Jan 2 15:04") + ", 3d ago)] fixing the null pointer bug (Code — tracker_linux.go)",
 		},
 	}
 
@@ -2461,5 +2461,36 @@ func TestSummaryTimeline_CarriesRealDates(t *testing.T) {
 	}
 	if sums[0].CreatedAt.IsZero() || time.Since(sums[0].CreatedAt) > 5*time.Minute {
 		t.Errorf("CreatedAt = %v, want the node's real creation time", sums[0].CreatedAt)
+	}
+}
+
+// A thread says what the user was doing; the episodes say what was actually on screen while they did it. Nothing joined the two, so a question like "what were those code review findings" could reach the thread's one-line summary and never the evidence behind it — 261 threads and 4,901 episodes with no edge between them.
+func TestStore_ThreadEpisodes_LinkAndReadBack(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	inWindow, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings, two of them high severity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-time.Minute)
+
+	threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work", State: "reading the findings"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LinkEpisodesToThread(ctx, threadID, since, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.EpisodesForThread(ctx, threadID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != inWindow {
+		t.Fatalf("got %+v, want the one episode written inside the window", got)
+	}
+	if !strings.Contains(got[0].ScreenText, "eleven findings") {
+		t.Errorf("the evidence did not come back with the episode: %q", got[0].ScreenText)
 	}
 }
