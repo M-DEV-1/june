@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"ora/internal/db"
+	"ora/internal/tracker"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,16 +19,18 @@ const (
 	// asksAfterPolls is how many consecutive polls must find the microphone held before Ora asks. Two is the fewest that can tell a sustained hold from a momentary one, since a single poll catches a two-second voice note as readily as a call.
 	// Two polls five seconds apart puts the question on screen between five and ten seconds after the microphone opens, depending on where in the cycle it opened, and that window is the meeting's opening that goes unrecorded. Ten seconds is short enough that what is lost is people saying hello.
 	asksAfterPolls = 2
-	// oraStreamPrefix is how Ora's own capture streams name themselves to the audio server, set in audio.StartMeetingCapture. Ora holds the microphone for the whole of a recording, so without this it would find its own stream and ask about the meeting it is already recording.
-	oraStreamPrefix = "Ora meeting"
-	// oraBinary is this program's own executable name, checked alongside oraStreamPrefix because the process behind Ora's stream is called "ora" and says nothing about the stream being a recording of Ora's own making.
+	// oraStreamPrefix is how Ora's own capture streams name themselves to the audio server: "Ora meeting recorder" while recording a call, "Ora voice" while the user is talking to the assistant. The trailing space keeps it from matching an unrelated application whose name merely starts with those three letters.
+	oraStreamPrefix = "Ora "
+	// oraBinary is this program's own executable name. It is compared against the last element of the stream's process path, not the whole path: the audio library reports application.process.binary as os.Args[0], which is "/home/mdev1/.../ora" or "./ora" and never the bare word — so comparing the raw value matched nothing, and Ora's voice assistant holding the microphone read as somebody else being in a call.
 	oraBinary = "ora"
 	// maxNameRunes is how much of a window title the prompt shows. A page names its own window and some run very long, while the prompt is one line.
 	maxNameRunes = 60
-	// windowLookback is how far back Ora looks for the window belonging to whatever took the microphone. The tracker records the focused window every couple of seconds, so a minute covers the call being joined and the user then switching away to something else.
-	windowLookback = time.Minute
-	// windowLookbackRows caps the episodes read for that lookup. The tracker writes one every couple of seconds at most, so a minute cannot fill this.
-	windowLookbackRows = 100
+	// windowLookback is how far back Ora looks for the window belonging to whatever took the microphone.
+	// Half an hour rather than a minute, because the tracker only records a window when its title changes: a meeting window opened and then left alone writes one episode and nothing more. On 2026-09-01 a call was named eight minutes before Ora asked about it, and a one-minute lookback found nothing and fell back to calling the meeting "Brave".
+	// The risk of reaching too far back is small, because only windows belonging to the application currently holding the microphone are considered — the worst case is naming the last thing that application was showing, which still says more than its process name does.
+	windowLookback = 30 * time.Minute
+	// windowLookbackRows caps the episodes read for that lookup, and is sized for the lookback above rather than for how often the tracker writes.
+	windowLookbackRows = 400
 	// notifyWait is how long a prompt is left on screen before Ora stops waiting for an answer. A prompt nobody answered is not a no — the next poll simply finds the call still running and the state already marked as asked, so it stays quiet.
 	notifyWait = 10 * time.Minute
 )
@@ -61,7 +64,7 @@ func micUsers(dump []byte) []string {
 		if p.MediaClass != "Stream/Input/Audio" || n.Info.State != "running" {
 			continue
 		}
-		if strings.HasPrefix(p.AppName, oraStreamPrefix) || strings.EqualFold(p.Binary, oraBinary) {
+		if strings.HasPrefix(p.AppName, oraStreamPrefix) || strings.EqualFold(filepath.Base(p.Binary), oraBinary) {
 			continue
 		}
 		name := streamName(p.Binary, p.AppName)
@@ -116,6 +119,22 @@ func windowFor(app string, eps []db.Episode) string {
 	return ""
 }
 
+// statusSeparator is what a browser puts between a page's title and its own running commentary about that page — the microphone indicator, the memory warning, the browser's name. Everything after the first one is the browser talking about itself.
+const statusSeparator = " - "
+
+// withoutBrowserStatus trims a browser's own status off the end of a window title.
+//
+// Input: a window title. Output: the part before the browser's first appended status, or the whole title when it appends none.
+//
+// "Meet - xha-yzim-osg - Microphone recording - Brave" becomes "Meet - xha-yzim-osg", and a Teams window loses its memory warning and megabyte count. This is where a browser appends rather than which words it appends, so it needs no list of them and does not care what a browser adds next.
+// Trimming any further would mean dropping the part that says which call this is, which is the one thing the name is for.
+func withoutBrowserStatus(title string) string {
+	if head, _, found := strings.Cut(title, statusSeparator); found && strings.TrimSpace(head) != "" {
+		return strings.TrimSpace(head)
+	}
+	return title
+}
+
 // describe names each capturing application the way a person would recognise it: by the window it has open, falling back to the process when Ora has seen no window for it.
 //
 // Input: the process names holding the microphone, and the episodes Ora recorded recently. Output: one display name each, cut to one line's worth.
@@ -125,6 +144,8 @@ func describe(users []string, eps []db.Episode) []string {
 		name := windowFor(u, eps)
 		if name == "" {
 			name = u
+		} else {
+			name = withoutBrowserStatus(name)
 		}
 		if r := []rune(name); len(r) > maxNameRunes {
 			name = strings.TrimSpace(string(r[:maxNameRunes-1])) + "\u2026"
@@ -211,11 +232,18 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 			if !w.step(users, rec.Active()) {
 				continue
 			}
-			// The prompt names the window rather than the process wherever Ora has seen one, since a call in a browser tab is "chrome" and so is everything else in that browser.
-			names := users
-			if eps, err := rec.store.EpisodesInWindow(ctx, time.Now().Add(-windowLookback), time.Now(), windowLookbackRows); err == nil {
-				names = describe(users, eps)
+			// The prompt names the window rather than the process wherever one can be found, since a call in a browser tab is "chrome" and so is everything else in that browser.
+			// The desktop is asked before Ora's own history, because history is always behind here: the microphone opens as the call is joined and the tracker does not record the window for another minute or so, which is well after the question has been asked and answered.
+			var eps []db.Episode
+			if recent, err := rec.store.EpisodesInWindow(ctx, time.Now().Add(-windowLookback), time.Now(), windowLookbackRows); err == nil {
+				eps = recent
 			}
+			for _, u := range users {
+				if t := tracker.WindowTitleFor(ctx, u); t != "" {
+					eps = append(eps, db.Episode{App: u, Title: t})
+				}
+			}
+			names := describe(users, eps)
 			slog.Info("something else is holding the microphone", "apps", names, "processes", users, "auto", autoRecord)
 			if !autoRecord && !askToRecord(ctx, names) {
 				continue
