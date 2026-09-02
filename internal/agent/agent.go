@@ -26,11 +26,27 @@ type ContextReader interface {
 	// UpdateNote/DeleteNote back update_note/delete_note (tools.go) — the model's only way to fix or remove a wrong note, using the id query_memory's "[note#N]" format gives it.
 	UpdateNote(ctx context.Context, id int64, content string) error
 	DeleteNote(ctx context.Context, id int64) error
-	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
+	// PersonalContext/SetPersonalContext/DeletePersonalContext back the personal_context tool (tools.go) and the block the system prompt opens with. Separate from notes on purpose: these are the things the user stated about themselves, edited in place by subject, and no inference path writes here.
+	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
+	SetPersonalContext(ctx context.Context, subject, content string) error
+	DeletePersonalContext(ctx context.Context, subject string) error
+	// SetActionStatus/SetActionPriority back update_action (tools.go). An action item is a notes row whose content carries its own status and priority, so update_note could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead.
+	SetActionStatus(ctx context.Context, id int64, status string) error
+	SetActionPriority(ctx context.Context, id int64, priority string) error
+	// OpenActionItems backs the action_items tool (tools.go). "What do I owe?" is a question about a column, not about meaning: the rows say "[open/normal] Alex Rivera — check out develop-essentials-api", which shares no words with the question and sits nowhere near it in embedding space. Asked through query_memory it returned ten summaries about attending meetings and not one action item, so the structural query gets its own door.
+	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
+	// EpisodesForThread backs thread_evidence (tools.go). A thread's state is one line — "reviewed the code, eleven findings" — and until the compiler started recording which captures it was attributed from, that line was all anyone could reach. This is the walk from the summary to the screens behind it.
+	EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error)
+	// UpdateThreadState backs fix_thread (tools.go). Threads live in their own table with their own semantics — a subject plus a state summary — so update_note cannot reach them, and a thread whose summary merged two unrelated things was unfixable until this existed.
+	UpdateThreadState(ctx context.Context, id int64, state string) error
 	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
+	// SummaryTimeline backs recall's coverage tier: when a window holds more episodes than one tool result fits, the window's task summaries — bounded per day by construction — answer instead, so a busy stretch cannot scroll the rest of its own day out of the reply.
+	SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
 	RecallSubject(ctx context.Context, subject string, limit int) ([]string, error)
-	// HybridSearch fuses lexical (FTS5) and vector search via reciprocal rank fusion, optionally filtered to domainFilter ("work" | "personal" | "" for none). Backs query_memory's "domain" param.
-	HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]db.MemoryHit, error)
+	// HybridSearchWindow fuses lexical (FTS5) and vector search via reciprocal rank fusion, optionally filtered to domainFilter ("work" | "personal" | "" for none) and to items whose timestamp falls in [since, until] (a zero bound is open on that side). The window is enforced store-side, before ranking's top-k, so a sparse window still yields its items. Backs query_memory's "domain" and "since"/"until" params.
+	HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]db.MemoryHit, error)
+	// QueryStore backs the query_store tool (tools.go): one read-only SQL statement run over a separate read-only connection, rendered as a header line plus one line per row. For structural/aggregate questions query_memory's ranking can't answer — "which meetings today", "what hour do I usually stop" — where the model needs to read the schema and write the query itself, not have relevance-ranked rows guessed at it.
+	QueryStore(ctx context.Context, query string, rowCap int) (string, error)
 	// SaveFold/UnconsumedFolds/ConsumeFold back branch()'s dead-session fallback (subtask.go, connect.go): a fold that missed its live session is staged here and surfaced once at the next handshake instead of dropped. Separate from notes — see db.Fold.
 	SaveFold(ctx context.Context, task, result string) (int64, error)
 	UnconsumedFolds(ctx context.Context) ([]db.Fold, error)
@@ -117,6 +133,32 @@ type Agent struct {
 	subtaskModelFactory func() (subtaskModel, error)
 	// branchCalls counts branch() invocations in the current live session — reset at the top of each Connect() call. maxBranchesPerSession (see subtask.go) bounds it.
 	branchCalls atomic.Int32
+	// typedTurnActive is true while the model is answering a message the user TYPED: set by textSendLoop on send, cleared at the next turn boundary. receiveLoop reads it to tell an ambient-room interruption of a typed answer apart from a real spoken barge-in, which are the same server event but mean opposite things to the user.
+	typedTurnActive atomic.Bool
+	// toolResponseAt is the wall-clock time (unix nanoseconds) of the most recent INTERRUPT-scheduled FunctionResponse send, or 0 when none is outstanding. The Live server interrupts its own generation to fold such a result in and reports that with the same ServerContent.Interrupted flag a user barge-in uses; receiveLoop consumes this to tell the two apart. See toolInterruptWindow in connect.go.
+	toolResponseAt atomic.Int64
+}
+
+// markToolResponseSent records that an INTERRUPT-scheduled tool result is being delivered right now, so the interrupt the server raises to fold it in isn't mistaken for the user cutting in.
+// Input: the moment of the send. Output: none.
+func (a *Agent) markToolResponseSent(now time.Time) {
+	a.toolResponseAt.Store(now.UnixNano())
+}
+
+// consumeToolDeliveryInterrupt reports whether an Interrupted event is the server folding in a tool result rather than a user barge-in, and clears the record so only the first interrupt after each send is attributed to it.
+// Input: the moment the Interrupted event arrived. Output: true when an INTERRUPT-scheduled tool response was sent within toolInterruptWindow of it.
+func (a *Agent) consumeToolDeliveryInterrupt(now time.Time) bool {
+	at := a.toolResponseAt.Load()
+	if at == 0 || now.Sub(time.Unix(0, at)) > toolInterruptWindow {
+		return false
+	}
+	a.toolResponseAt.Store(0)
+	return true
+}
+
+// markTypedTurn records that the turn now starting was initiated by typed text rather than speech.
+func (a *Agent) markTypedTurn() {
+	a.typedTurnActive.Store(true)
 }
 
 // setResumeHandle stores the latest session-resumption handle reported by the server.

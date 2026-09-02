@@ -64,7 +64,11 @@ func (a *Agent) HandshakePrompt(ctx context.Context, now time.Time) (instruction
 	if len(tools) > 0 {
 		toolsCount = len(tools[0].FunctionDeclarations)
 	}
-	instruction = systemInstructionText(now, runtime.GOOS, runtime.GOARCH, shellName(), strings.Join(contextParts, "\n"), toolsCount)
+	personalEntries, err := a.brain.PersonalContext(ctx)
+	if err != nil {
+		slog.Warn("handshake personal context fetch failed, continuing without it", "error", err)
+	}
+	instruction = systemInstructionText(now, runtime.GOOS, runtime.GOARCH, shellName(), personalContextBlock(personalEntries), strings.Join(contextParts, "\n"), toolsCount)
 	return instruction, contextParts
 }
 

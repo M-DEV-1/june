@@ -5,8 +5,6 @@ import "time"
 // probably the only folder which needed these constants cuz its just too much
 const (
 	MinViewportHeight     = 5
-	LayoutPadding         = 6
-	SignalFieldHeight     = 7
 	GutterWidth           = 10
 	DefaultWidth          = 80
 	MaxTextareaHeight     = 6

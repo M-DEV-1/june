@@ -4,6 +4,8 @@ package vector
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -12,7 +14,7 @@ func TestChromemIndex_AddThenSearch_SelfSimilarityNearOne(t *testing.T) {
 
 	ctx := context.Background()
 	dir := t.TempDir()
-	idx, err := NewChromemIndex(dir, "test-collection", 100)
+	idx, err := NewChromemIndex(dir, 4, 100)
 	if err != nil {
 		t.Fatalf("NewChromemIndex: %v", err)
 	}
@@ -49,7 +51,7 @@ func TestChromemIndex_Search_RespectsNAndWhereFilter(t *testing.T) {
 
 	ctx := context.Background()
 	dir := t.TempDir()
-	idx, err := NewChromemIndex(dir, "test-collection", 100)
+	idx, err := NewChromemIndex(dir, 3, 100)
 	if err != nil {
 		t.Fatalf("NewChromemIndex: %v", err)
 	}
@@ -100,7 +102,7 @@ func TestChromemIndex_Add_EvictsOldestOverMaxDocs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	const maxDocs = 3
-	idx, err := NewChromemIndex(dir, "test-collection", maxDocs)
+	idx, err := NewChromemIndex(dir, 3, maxDocs)
 	if err != nil {
 		t.Fatalf("NewChromemIndex: %v", err)
 	}
@@ -121,23 +123,15 @@ func TestChromemIndex_Add_EvictsOldestOverMaxDocs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	var gotIDs []string
+	seen := map[string]bool{}
 	for _, r := range results {
-		gotIDs = append(gotIDs, r.ID)
+		seen[r.ID] = true
 	}
-	for _, id := range gotIDs {
-		if id == "oldest" {
-			t.Errorf("expected 'oldest' to be evicted, but it was found in results: %v", gotIDs)
-		}
+	if seen["oldest"] {
+		t.Errorf("expected 'oldest' to be evicted, but it was found in results: %v", results)
 	}
-	foundNewest := false
-	for _, id := range gotIDs {
-		if id == "newest" {
-			foundNewest = true
-		}
-	}
-	if !foundNewest {
-		t.Errorf("expected 'newest' to still be present, got: %v", gotIDs)
+	if !seen["newest"] {
+		t.Errorf("expected 'newest' to still be present, got: %v", results)
 	}
 }
 
@@ -146,7 +140,7 @@ func TestChromemIndex_Delete_RemovesFromSearchAndCount(t *testing.T) {
 
 	ctx := context.Background()
 	dir := t.TempDir()
-	idx, err := NewChromemIndex(dir, "test-collection", 100)
+	idx, err := NewChromemIndex(dir, 3, 100)
 	if err != nil {
 		t.Fatalf("NewChromemIndex: %v", err)
 	}
@@ -175,6 +169,67 @@ func TestChromemIndex_Delete_RemovesFromSearchAndCount(t *testing.T) {
 	}
 }
 
+// TestChromemIndex_IDs_ListsAllDocsAndReflectsDelete verifies IDs() reports every doc currently in the index and stops reporting one right after Delete — the reconciliation sweep (internal/db) walks this list to find orphaned/missing vectors, so it must reflect live state, not a stale snapshot.
+func TestChromemIndex_IDs_ListsAllDocsAndReflectsDelete(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	idx, err := NewChromemIndex(dir, 2, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex: %v", err)
+	}
+
+	if err := idx.Add(ctx, "note:1", "a", []float32{1, 0}, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := idx.Add(ctx, "note:2", "b", []float32{0, 1}, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	ids := idx.IDs()
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 ids, got %d: %v", len(ids), ids)
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if !seen["note:1"] || !seen["note:2"] {
+		t.Errorf("expected both note:1 and note:2, got %v", ids)
+	}
+
+	if err := idx.Delete(ctx, "note:1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	ids = idx.IDs()
+	if len(ids) != 1 || ids[0] != "note:2" {
+		t.Errorf("expected only note:2 to remain after delete, got %v", ids)
+	}
+}
+
+// TestNewChromemIndex_CorruptSidecar_DegradesInsteadOfFailing verifies a truncated/corrupt sidecar file (as a crash mid-write would leave behind) doesn't fail NewChromemIndex — the sidecar only tracks createdAt for eviction ordering, so losing it should degrade to an empty map, not permanently disable semantic search (cmd/daemon.go only logs a warning and leaves vecIndex nil on a construction error, with nothing to repair the file afterward). It also verifies a normal write survives that recovery and is readable back by a fresh loadSidecar.
+func TestNewChromemIndex_CorruptSidecar_DegradesInsteadOfFailing(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sidecarPath := filepath.Join(dir, collectionName+"_meta.json")
+	if err := os.WriteFile(sidecarPath, []byte(`{"doc-1": "2026-08-1`), 0644); err != nil {
+		t.Fatalf("seed corrupt sidecar: %v", err)
+	}
+
+	idx, err := NewChromemIndex(dir, 3, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex should degrade past a corrupt sidecar, got error: %v", err)
+	}
+
+	if err := idx.Add(ctx, "doc-1", "content", []float32{1, 2, 3}, nil); err != nil {
+		t.Fatalf("Add after corrupt-sidecar recovery: %v", err)
+	}
+
+	reloaded := loadSidecar(sidecarPath)
+	if _, ok := reloaded["doc-1"]; !ok {
+		t.Errorf("expected doc-1 to be readable back from the sidecar after recovery, got %+v", reloaded)
+	}
+}
+
 // TestChromemIndex_PersistenceAcrossRestart_RespectsMaxDocsCap verifies a second ChromemIndex opened on the same dbPath finds docs added by a first, discarded one (simulating a restart), and that the maxDocs sidecar survives too, not just chromem-go's own on-disk data.
 func TestChromemIndex_PersistenceAcrossRestart_RespectsMaxDocsCap(t *testing.T) {
 
@@ -182,7 +237,7 @@ func TestChromemIndex_PersistenceAcrossRestart_RespectsMaxDocsCap(t *testing.T) 
 	dir := t.TempDir()
 	const maxDocs = 2
 
-	first, err := NewChromemIndex(dir, "test-collection", maxDocs)
+	first, err := NewChromemIndex(dir, 3, maxDocs)
 	if err != nil {
 		t.Fatalf("NewChromemIndex (first): %v", err)
 	}
@@ -191,7 +246,7 @@ func TestChromemIndex_PersistenceAcrossRestart_RespectsMaxDocsCap(t *testing.T) 
 	}
 
 	// simulate a restart: discard the first handle, open a fresh one on the same path.
-	second, err := NewChromemIndex(dir, "test-collection", maxDocs)
+	second, err := NewChromemIndex(dir, 3, maxDocs)
 	if err != nil {
 		t.Fatalf("NewChromemIndex (second): %v", err)
 	}
@@ -219,5 +274,77 @@ func TestChromemIndex_PersistenceAcrossRestart_RespectsMaxDocsCap(t *testing.T) 
 	}
 	if got := second.Count(); got > maxDocs {
 		t.Errorf("Count() after restart + more adds = %d, want <= %d", got, maxDocs)
+	}
+}
+
+// TestChromemIndex_IDs_RebuiltFromTheCollectionWhenTheSidecarIsGone covers the reconciliation sweep's dependency on IDs(): the sidecar is bookkeeping that a crash or a stray delete can lose, and answering "no ids" for a collection full of documents makes the sweep skip every orphan delete, skip the over-cap eviction, and re-embed documents that are already there. The ids must come back from the collection itself.
+func TestChromemIndex_IDs_RebuiltFromTheCollectionWhenTheSidecarIsGone(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	idx, err := NewChromemIndex(dir, 3, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex: %v", err)
+	}
+	for i, id := range []string{"note:1", "note:2", "episode:7"} {
+		if err := idx.Add(ctx, id, "content", []float32{float32(i + 1), 1, 0}, nil); err != nil {
+			t.Fatalf("Add %s: %v", id, err)
+		}
+	}
+
+	if err := os.Remove(filepath.Join(dir, collectionName+"_meta.json")); err != nil {
+		t.Fatalf("remove sidecar: %v", err)
+	}
+
+	reopened, err := NewChromemIndex(dir, 3, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex after losing the sidecar: %v", err)
+	}
+	ids := reopened.IDs()
+	if len(ids) != 3 {
+		t.Fatalf("IDs() = %v (%d), want all 3 documents in the collection", ids, len(ids))
+	}
+}
+
+// TestNewChromemIndex_CollectionOfAnotherWidth_IsRebuiltNotLeftUnusable covers an embedding-model swap: chromem refuses every query that mixes vector widths, so a collection written by the old model would make semantic search fail silently and forever. Opening at the new width must leave a collection that answers queries, even at the cost of the old vectors.
+func TestNewChromemIndex_CollectionOfAnotherWidth_IsRebuiltNotLeftUnusable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	old, err := NewChromemIndex(dir, 3, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex (old width): %v", err)
+	}
+	if err := old.Add(ctx, "note:1", "written by the old model", []float32{1, 0, 0}, nil); err != nil {
+		t.Fatalf("Add (old width): %v", err)
+	}
+
+	swapped, err := NewChromemIndex(dir, 4, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex (new width): %v", err)
+	}
+	if err := swapped.Add(ctx, "note:2", "written by the new model", []float32{1, 0, 0, 0}, nil); err != nil {
+		t.Fatalf("Add (new width): %v", err)
+	}
+	results, err := swapped.Search(ctx, []float32{1, 0, 0, 0}, 5, nil)
+	if err != nil {
+		t.Fatalf("Search after the width swap: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "note:2" {
+		t.Fatalf("expected only the new-width document to be searchable, got %+v", results)
+	}
+}
+
+// A wrong-width vector must be rejected at Add, because one stored mismatch would make the width probe drop and rebuild the whole collection at next open.
+func TestChromemIndex_Add_RejectsWrongWidth(t *testing.T) {
+	idx, err := NewChromemIndex(t.TempDir(), 4, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex: %v", err)
+	}
+	if err := idx.Add(context.Background(), "episode:1", "text", []float32{1, 2, 3}, nil); err == nil {
+		t.Fatal("a 3-wide vector must be rejected by a 4-wide index")
+	}
+	if err := idx.Add(context.Background(), "episode:2", "text", []float32{1, 2, 3, 4}, nil); err != nil {
+		t.Fatalf("a correct-width vector must be accepted: %v", err)
 	}
 }

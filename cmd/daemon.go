@@ -8,17 +8,27 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/dream"
 	"ora/internal/embed"
 	"ora/internal/ipctoken"
 	"ora/internal/memory"
+	"ora/internal/proactive"
+	"ora/internal/recorder"
+	"ora/internal/study"
+	"ora/internal/tally"
 	"ora/internal/tracker"
 	"ora/internal/vector"
 )
+
+// meetingRecorder is the tray's handle on the meeting recorder. startDaemonServices assigns it once the store exists, before registerSNI runs; it stays nil if the daemon never got that far, and every read of it is nil-safe.
+var meetingRecorder *recorder.Recorder
 
 const DaemonPort = "6942"
 
@@ -34,10 +44,21 @@ const maxDeriveStateNotes = 10
 // reconcileEmbedCap bounds how many backfill embeds one ReconcileVectors sweep performs, to protect API quota on a large dirty store — the sweep runs again on the next trigger (startup / note consolidation) and picks up where it left off.
 const reconcileEmbedCap = 200
 
-// embedderAdapter adapts *embed.GeminiEmbedder's Embed (which takes embed.TaskType) to the plain-string task param db.Store.SetEmbedder expects.
+// localReconcileEmbedCap is the same bound when the embedder is the local llama-server rather than a metered API. The cap exists to protect a quota; with a free embedder there is no quota to protect, and a small cap only means a backlog that never drains. Chunking made that backlog real — a store of 4,866 captures needs about 8,800 passage vectors, so at 200 a sweep it would take dozens of restarts to catch up.
+const localReconcileEmbedCap = 5000
+
+// reconcileCap picks the sweep's budget from whether embedding costs money.
+func reconcileCap(embedsFree bool) int {
+	if embedsFree {
+		return localReconcileEmbedCap
+	}
+	return reconcileEmbedCap
+}
+
+// embedderAdapter adapts an embed.Embedder's Embed (which takes embed.TaskType) to the plain-string task param db.Store.SetEmbedder expects.
 // internal/db can't import internal/embed, so the adapter lives here instead.
 type embedderAdapter struct {
-	inner *embed.GeminiEmbedder
+	inner embed.Embedder
 }
 
 func (e *embedderAdapter) Embed(ctx context.Context, task string, text string) ([]float32, error) {
@@ -76,6 +97,16 @@ func (v *vectorIndexAdapter) Delete(ctx context.Context, id string) error {
 
 func (v *vectorIndexAdapter) IDs() []string { return v.inner.IDs() }
 
+// brainProviderName names a configured brain for the tally counters (see internal/tally.Wrap): the config's own provider constant when it's one of the recognised CLIs, "gemini" for the default/empty/explicit-Gemini-API case.
+func brainProviderName(cfg config.BrainConfig) string {
+	switch cfg.Provider {
+	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI:
+		return cfg.Provider
+	default:
+		return "gemini"
+	}
+}
+
 // every runs fn on a ticker every interval until ctx is done — the ticker/select/ctx.Done skeleton every one of the daemon's background jobs otherwise repeated by hand. Each job's own logging/error-handling stays inside its fn closure; name is only for the stop-log line below.
 func every(ctx context.Context, interval time.Duration, name string, fn func()) {
 	t := time.NewTicker(interval)
@@ -110,7 +141,7 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 // The returned stop func shuts down the server and closes the db — safe to call once.
 // The returned *tracker.Daemon allows the tray to pause/resume tracking.
 func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(), daemonOut *tracker.Daemon, err error) {
-	store, err := db.New("ora-db/db")
+	store, err := db.New(filepath.Join(config.DataDir(), "db"))
 	if err != nil {
 		slog.Error("failed to init db", "error", err)
 		return nil, nil, err
@@ -124,7 +155,18 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	appConfig := config.LoadConfig()
+
+	// The config file is the switch for start-on-login: make the on-disk login entry agree with it on every daemon start, so a config edited by hand (or an entry left behind by an older build) is corrected here rather than drifting.
+	reconcileAutostart(appConfig.Autostart)
+
 	apiKey := os.Getenv("GEMINI_API_KEY")
+
+	meetingRecorder = recorder.New(config.DataDir(), store, apiKey)
+
+	// Ora watches the microphone rather than the meeting apps: a call is the one thing that always takes it, and watching it needs no list of which applications count as a meeting.
+	if appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord {
+		go recorder.WatchForMeetings(ctx, meetingRecorder, appConfig.Meetings.AutoRecord)
+	}
 
 	summarizer, err := memory.NewGeminiSummarizer(apiKey)
 	if err != nil {
@@ -135,31 +177,40 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// vecIndex is nil unless the block below succeeds — declared here (not just inside the block) so the /vector/* IPC handlers further down can serve the client's hybrid search over the same index the daemon itself uses, instead of each opening chromem separately (two processes opening the same chromem dir risks torn reads/corruption).
 	var vecIndex *vector.ChromemIndex
 
-	// No API key means no genai client, so skip wiring the semantic half of hybrid search entirely.
-	// HybridSearch already falls back to lexical-only when Store has no embedder/vector index set.
-	if apiKey != "" {
-		embedder, err := newSharedGeminiEmbedder(ctx, apiKey)
-		if err != nil {
-			slog.Warn("failed to init genai client for embeddings, hybrid search degrades to lexical-only", "error", err)
-		} else {
-			// 10000 = the deck's agreed pruning cap for the vector index.
-			vecIndex, err = vector.NewChromemIndex("ora-db/vectors", "memory", 10000)
-			if err != nil {
-				slog.Warn("failed to init vector index, hybrid search degrades to lexical-only", "error", err)
-			} else {
-				store.SetEmbedder(&embedderAdapter{inner: embedder})
-				store.SetVectorIndex(&vectorIndexAdapter{inner: vecIndex})
+	// embedsFree says the embedder is the local llama-server rather than a metered API. Declared out here for the same reason vecIndex is: it is set inside the block below and read by the reconciliation sweeps further down, which size their budget by it.
+	embedsFree := false
 
-				// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later (e.g. client-side note saves) that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
-				go func() {
-					report, err := store.ReconcileVectors(ctx, reconcileEmbedCap)
-					if err != nil {
-						slog.Error("startup vector reconciliation failed", "error", err)
-						return
-					}
-					slog.Info("startup vector reconciliation complete", "deleted", report.Deleted, "backfilled", report.Backfilled)
-				}()
-			}
+	// The embedding engine is the local llama-server child process, and only that: there is no API-backed embedder any more. It stays nil when no local embedder is configured, which is what the shutdown path and the /embed IPC handler key off, and means no semantic half at all — HybridSearch already falls back to lexical-only when Store has no embedder/vector index set.
+	embedEngine := embed.NewEngine(appConfig.Embed)
+	if embedEngine == nil {
+		slog.Warn("no local embedder configured (embed.llama_server / embed.model_path), hybrid search degrades to lexical-only")
+	}
+
+	if embedEngine != nil {
+		// A whisper GPU decode and the embedding server share one small card; when the card is short, the recorder may evict an idle embedding server (it respawns on the next embed).
+		recorder.SetGPUReleaser(embedEngine.StopIfIdle)
+		// 10000 = the deck's agreed pruning cap for the vector index.
+		index, err := vector.NewChromemIndex(filepath.Join(config.DataDir(), "vectors"), config.LocalEmbedDim, 10000)
+		if err != nil {
+			slog.Warn("failed to init vector index, hybrid search degrades to lexical-only", "error", err)
+		} else {
+			vecIndex = index
+			store.SetEmbedder(&embedderAdapter{inner: embedEngine})
+			// The local engine costs CPU rather than API calls, which is what lets reconciliation backfill episodes of any age instead of only the last ten days.
+			store.SetEmbedsAreFree(true)
+			embedsFree = true
+			store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
+			store.SetVectorIndex(&vectorIndexAdapter{inner: vecIndex})
+
+			// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later (e.g. client-side note saves) that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
+			go func() {
+				report, err := store.ReconcileVectors(ctx, reconcileCap(embedsFree))
+				if err != nil {
+					slog.Error("startup vector reconciliation failed", "error", err)
+					return
+				}
+				slog.Info("startup vector reconciliation complete", "deleted", report.Deleted, "backfilled", report.Backfilled)
+			}()
 		}
 	}
 
@@ -209,7 +260,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			} else {
 				slog.Info("note consolidation complete")
 				// ReplaceAllNotes (inside Compact) renumbers every note with no vector for the new rows — this sweep backfills them and cleans up anything else that's drifted.
-				if report, err := store.ReconcileVectors(ctx, reconcileEmbedCap); err != nil {
+				if report, err := store.ReconcileVectors(ctx, reconcileCap(embedsFree)); err != nil {
 					slog.Error("post-consolidation vector reconciliation failed", "error", err)
 				} else {
 					slog.Info("post-consolidation vector reconciliation complete", "deleted", report.Deleted, "backfilled", report.Backfilled)
@@ -255,6 +306,59 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		})
 	}
 
+	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
+	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.FromConfig(appConfig.Brain, apiKey), store)
+	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
+	// One-click answers to the morning brief's question about an item that has gone quiet. The notification blocks until it is answered, so the scheduler asks from its own goroutine.
+	scheduler.SetAsk(proactive.NotifySendAsk)
+	// Sunday-only: render the week's self-accounting log, then run the distillation study pass over the same replay/trace material evals/main.go's track 6 uses — on the daemon's own main brain (claude-cli sonnet by default), which deliberately rides the user's Claude workday window rather than running overnight.
+	scheduler.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
+		if err := tally.RunWeeklyLog(ctx, store, now); err != nil {
+			slog.Warn("weekly system log failed", "error", err)
+		}
+		replays, _ := filepath.Glob("evals/replays/*.md")
+		traces, _ := filepath.Glob(filepath.Join(config.DataDir(), "dreams", "*.jsonl"))
+		if res, err := study.Study(ctx, mainBrain, replays, traces, filepath.Join(config.DataDir(), "study")); err != nil {
+			slog.Warn("weekly distillation study failed", "error", err)
+		} else {
+			slog.Info("weekly distillation study complete", "replays", res.ReplaysRead, "traces", res.TracesRead, "lessons_added", res.LessonsAdded)
+		}
+		return nil
+	})
+	go scheduler.Run(ctx)
+
+	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
+	dreamBriefHour, _ := appConfig.Proactive.Hours()
+	dreamer := dream.New(store, tally.Wrap(brainProviderName(appConfig.Brain), brain.FromConfig(appConfig.Brain, apiKey), store), dream.Probes{
+		OnAC:              recorder.OnACPower,
+		SessionLocked:     tracker.SessionLocked,
+		RecorderQuiescent: meetingRecorder.Quiescent,
+		InputIdle:         tracker.InputIdle,
+	}, appConfig.Dream.DreamHour(), dreamBriefHour)
+	// Touching this file makes the next tick dream immediately, gates bypassed — the way to watch a run without leaving the machine.
+	dreamer.ForceMarker = filepath.Join(config.DataDir(), "dream-now")
+	// Night traces: every dream brain call's raw reply lands in <data>/dreams/<night>.jsonl as raw material for a later distillation pass.
+	dreamer.DataDir = config.DataDir()
+	// A dream brain of its own (grok, agy) frees the night from the Claude window curfew, since it spends none of the user's Claude usage.
+	if p := appConfig.Dream.Brain.Provider; p != "" {
+		dreamer.SetBrain(tally.Wrap(brainProviderName(appConfig.Dream.Brain), brain.FromConfig(appConfig.Dream.Brain, apiKey), store))
+		dreamer.CurfewExempt = p != config.BrainClaudeCLI
+	}
+	// Nightly dual-run: a local Gemma shadows the primary dream brain on the same prompts, replies logged for comparison, never acted on. The daemon owns the llama-server child for exactly one night's run — started before the stages, stopped after. The binary is the same llama-server the embedder already runs (appConfig.Embed.LlamaServer); a config with a dream model_path but no embed.llama_server falls back to PATH.
+	if appConfig.Dream.ModelPath != "" {
+		port := appConfig.Dream.DreamPort()
+		binary := appConfig.Embed.LlamaServer
+		if binary == "" {
+			binary = "llama-server"
+		}
+		dreamer.ShadowLifecycle = dream.NewLlamaServerLifecycle(binary, appConfig.Dream.ModelPath, port, appConfig.Dream.Device)
+		dreamer.Shadow = tally.Wrap("llama-shadow", brain.LlamaServer(fmt.Sprintf("http://127.0.0.1:%d", port), 600), store)
+		if embedEngine != nil {
+			dreamer.GPUReleaser = embedEngine.StopIfIdle
+		}
+	}
+	go every(ctx, 5*time.Minute, "dreaming", func() { dreamer.Tick(ctx) })
+
 	// age out old, low-importance episode text every 24 hours: clears screen_text (row kept, not deleted) for episodes older than keepRawFor whose importance is below importanceFloor.
 	go every(ctx, 24*time.Hour, "episode-aging", func() {
 		const (
@@ -294,6 +398,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{
 				App: ev.App, Title: ev.Title, ScreenText: ev.ScreenText,
 				UserActivity: ev.UserActivity, VisibleText: ev.VisibleText, ImageJPEG: ev.ImageJPEG,
+				ExtraJPEG: ev.ExtraJPEG,
 			}); err != nil {
 				slog.Error("log episode failed", "error", err)
 			}
@@ -308,7 +413,15 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	if err != nil {
 		slog.Error("failed to generate IPC auth token, daemon IPC will be unreachable", "error", err)
 	}
-	auth := func(h http.HandlerFunc) http.HandlerFunc { return requireIPCToken(ipcToken, h) }
+	// Every authenticated request is by definition a live TUI client, so the auth wrapper doubles as the presence signal that pins the embedding server in memory and warms it. The daemon has no other notion of a client session, and adding one just for this would be more machinery than a timestamp.
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return requireIPCToken(ipcToken, func(w http.ResponseWriter, r *http.Request) {
+			if embedEngine != nil {
+				embedEngine.MarkClientPresence(ctx)
+			}
+			h(w, r)
+		})
+	}
 
 	// local http for IPC between the tui and daemon
 	mux := http.NewServeMux()
@@ -413,6 +526,29 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	// /embed lets the client reach the daemon's embedding engine instead of running one of its own. Only the daemon may own the llama-server child (one process, one port), so this is the client's only route to a local vector. 503 with no body when the daemon is on the Gemini path or has no embedder at all, which the client's httpEmbedder reports as an error and HybridSearch degrades from.
+	mux.HandleFunc("/embed", auth(func(w http.ResponseWriter, r *http.Request) {
+		if embedEngine == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		var req struct {
+			Task string `json:"task"`
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		vec, err := embedEngine.Embed(r.Context(), embed.TaskType(req.Task), req.Text)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
+	}))
+
 	server := &http.Server{
 		Handler: mux,
 	}
@@ -424,9 +560,19 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}()
 
 	stop = func() {
+		// A recording in progress is closed first, before anything it depends on goes away. Nothing did this until a daemon restart on 2026-09-01 abandoned a meeting fourteen minutes in.
+		if meetingRecorder != nil {
+			if _, err := meetingRecorder.StopForShutdown(); err != nil {
+				slog.Warn("could not close the running meeting recording on shutdown", "error", err)
+			}
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		server.Shutdown(shutdownCtx)
+		// The embedding server is this process's child and must never outlive it — a stranded llama-server holds ~600 MB and the port the next daemon needs.
+		if embedEngine != nil {
+			embedEngine.Close()
+		}
 		store.Close()
 	}
 

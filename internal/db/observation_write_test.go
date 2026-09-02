@@ -4,17 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"ora/internal/db"
 )
 
 // TestLogEpisode_StoresCleanContent keeps chrome out of screen_text while preserving context in columns (app/title/domain). Clean prose is stored as content; embeddings may still frame content with context separately.
 func TestLogEpisode_StoresCleanContent(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := memStore(t)
 
 	raw := strings.Repeat("⣿⣿⣿\n", 30) + "\nWatching Suits season six episode twelve The Painting in a courtroom scene.\n"
 	id, err := store.LogEpisode(context.Background(), "Netflix", "Suits S6E12", raw)

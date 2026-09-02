@@ -41,3 +41,8 @@ Thumbs.db
 old/
 .agents/
 skills-lock.json
+evals/runs/
+evals/replays/
+evals/seeds-*.md
+evals/questions.jsonl
+evals/trajectories/

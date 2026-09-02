@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -20,6 +21,9 @@ const (
 	minVisionInterval = 90 * time.Second // floor between vision calls
 )
 
+// meetingCaptureInterval is how often a call in progress is read on its own, regardless of what has focus. A meeting window's participant list and presenter label change on the scale of a minute, and reading it costs one AT-SPI walk, so once a minute keeps the whole call in the timeline without crowding out the user's actual activity.
+const meetingCaptureInterval = time.Minute
+
 type Daemon struct {
 	eye       Tracker
 	interval  time.Duration
@@ -32,6 +36,26 @@ type Daemon struct {
 }
 
 // Pause suspends activity emission. The polling loop still runs so Resume takes effect promptly.
+// sessionLocked reports whether the desktop session's lock screen is up; the platform file sets it (Linux: GNOME's screensaver over D-Bus). Nil means no way to know, which reads as unlocked.
+var sessionLocked func() bool
+
+// SessionLocked is the exported read of the lock probe for other packages (the overnight dreaming loop uses it as its idle signal). False when the platform gives no way to know.
+func SessionLocked() bool { return sessionLocked != nil && sessionLocked() }
+
+// inputIdle reports real time since the last keyboard/mouse input; the platform file sets it (Linux: GNOME Mutter's IdleMonitor over D-Bus). Nil means no way to know.
+var inputIdle func() (time.Duration, error)
+
+// errNoIdleProbe is returned when this platform has no input-idle probe wired.
+var errNoIdleProbe = errors.New("tracker: no input-idle probe on this platform")
+
+// InputIdle is the exported read of the input-idle probe for other packages (the overnight dreaming loop uses it to tell a screen-content change from the user actually touching the keyboard or mouse). An error means there is no way to know, and callers should fall back to their own heuristic.
+func InputIdle() (time.Duration, error) {
+	if inputIdle == nil {
+		return 0, errNoIdleProbe
+	}
+	return inputIdle()
+}
+
 func (d *Daemon) Pause() { d.paused.Store(true) }
 
 // Resume re-enables activity emission after a Pause.
@@ -94,16 +118,23 @@ func (d *Daemon) Start(ctx context.Context) {
 	var lastCaptureTime time.Time
 
 	// use injected capturer (tests) or default to tiered capture with diff tracking. The default path needs the current activity so vision can skip the bare desktop; the test capturer ignores it.
-	var lastScreenText string
+	// lastA11yText/lastVisionText are tracked separately (not one shared "last text") so a tier switch on an
+	// unchanged screen doesn't compare one tier's text against the other's and falsely look like a change.
+	var lastA11yText, lastVisionText string
 	var lastVisionTime time.Time
 	capture := func(act Activity) captureOut {
 		if d.capturer != nil {
 			return captureOut{text: d.capturer()}
 		}
-		return d.tieredCapture(ctx, act, &lastScreenText, &lastCaptureTime, &lastVisionTime)
+		return d.tieredCapture(ctx, act, &lastA11yText, &lastVisionText, &lastCaptureTime, &lastVisionTime)
 	}
 
 	tracer := obs.GetTracer(ctx, "ora.tracker")
+
+	// The call is read on its own goroutine, not on this loop. One AT-SPI walk is allowed 2.5 seconds and this loop ticks every two, so doing it inline would stall window polling for longer than its own interval — and a big meeting window, the case this exists for, is exactly the slow walk.
+	if d.capturer == nil {
+		go d.watchMeetingWindow(ctx)
+	}
 
 	for {
 		select {
@@ -116,10 +147,25 @@ func (d *Daemon) Start(ctx context.Context) {
 
 			_, span := tracer.Start(ctx, "Tracker.PollActiveWindow")
 
+			// A locked screen is not the user's activity: capturing through the shield files the lock clock and "press a key to unlock" as episodes, which then surface in summaries as the day's doings.
+			if sessionLocked != nil && sessionLocked() {
+				pendingActivity = nil
+				span.SetAttributes(attribute.Bool("tracker.locked", true))
+				span.End()
+				continue
+			}
+
 			activity, err := d.eye.GetActiveWindow()
 			if err != nil {
 				span.RecordError(err)
 				slog.Error("tracker: failed to get active window", "error", err)
+				span.End()
+				continue
+			}
+
+			// A window nothing could identify carries zero information; filing it pollutes every later summary with "Unknown | Unknown" lines.
+			if activity.App == "Unknown" && activity.Title == "Unknown" {
+				pendingActivity = nil
 				span.End()
 				continue
 			}
@@ -201,22 +247,65 @@ func (d *Daemon) Start(ctx context.Context) {
 	}
 }
 
+// watchMeetingWindow reads the window of a call in progress once a minute, whether or not it has focus, and emits it as an activity of its own.
+// The focused window is the wrong window during a meeting: on 2026-08-31 a thirty-nine minute standup produced twenty-seven episodes and not one was the call, because the user spent it in ClickUp and a terminal. Participant tiles and presenter labels are the only things on the machine that name who is talking, and none of them were ever captured.
+func (d *Daemon) watchMeetingWindow(ctx context.Context) {
+	tick := time.NewTicker(meetingCaptureInterval)
+	defer tick.Stop()
+	// lastText is the title and body together, so a call whose body is empty still deduplicates on its title changing — which is how a browser-hosted meeting reports who joined.
+	var lastText string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if d.paused.Load() || (sessionLocked != nil && sessionLocked()) {
+				continue
+			}
+			app, title, text, ok := extractMeetingWindow()
+			// Logged either way, because a silent watcher makes "no call is open" and "this never ran" look identical — which is exactly what happened on 2026-09-01, when two recorded meetings produced no meeting-window episode and nothing on disk could say which of the two it was.
+			if !ok {
+				slog.Debug("no call window on screen", "checked", "meeting watcher")
+				continue
+			}
+			slog.Info("read the call's window", "app", app, "title", title, "runes", len([]rune(text)))
+			// The title is captured even when the body is empty, which is the normal case rather than an edge one: a Chromium window exposes no accessibility text unless the browser was launched with --force-renderer-accessibility, and a meeting in a browser tab is how most calls happen here. The title alone is what names the other person — a Teams tab reads "Chat | Priya Shah | Microsoft Teams" — so requiring body text threw away the only thing on the machine that answers "who was in the room".
+			key := title + "\x00" + text
+			if key == lastText || MatchesBlocklist(app, d.blocklist) {
+				continue
+			}
+			// lastText is only advanced once the activity is actually on the channel. Recording it before the send would mean one full channel silently retires this meeting's window for good: the text does not change from minute to minute, so every later read would match what was never sent and be skipped.
+			// Non-blocking on purpose: a full channel means the consumer is busy, and the next tick is a minute away. No ctx case here — a select with a default never blocks, so one would be unreachable; shutdown is the outer select's job.
+			select {
+			case d.eventChan <- Activity{App: app, Title: title, ScreenText: text}:
+				lastText = key
+			default:
+				slog.Debug("dropped a meeting window capture, the activity channel was full")
+			}
+		}
+	}
+}
+
 type captureOut struct {
 	text  string
 	sight Sight
-	jpeg  []byte
+	// frames holds one JPEG per monitor, the monitor the user is on first.
+	frames [][]byte
 }
 
 func applyCapture(ev *Activity, out captureOut) {
 	ev.ScreenText = out.text
 	ev.UserActivity = out.sight.UserActivity
 	ev.VisibleText = out.sight.VisibleText
-	ev.ImageJPEG = out.jpeg
+	if len(out.frames) > 0 {
+		ev.ImageJPEG = out.frames[0]
+		ev.ExtraJPEG = out.frames[1:]
+	}
 }
 
 // tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen.
 // Returns empty text when content is unchanged since the last capture, so callers never re-emit the same screen. Vision is gated behind thinTextThreshold and minVisionInterval to keep cost down.
-func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *string, lastCaptureTime, lastVisionTime *time.Time) captureOut {
+func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, lastVisionText *string, lastCaptureTime, lastVisionTime *time.Time) captureOut {
 	text, err := extractText()
 	if err != nil {
 		text = ""
@@ -227,12 +316,12 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
 	mediaActive := mediaPlaying(ctx)
 	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
-		return captureOut{text: diff(lastText, text)}
+		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
 	}
 
 	png, err := grabScreen(ctx)
 	if err != nil || len(png) == 0 {
-		return captureOut{text: diff(lastText, text)}
+		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
 	}
 	*lastVisionTime = time.Now()
 
@@ -243,11 +332,27 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastText *stri
 	if desc == "" {
 		desc = strings.TrimSpace(act.Title)
 	}
-	shown := diff(lastText, desc)
+	return resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, screenFrames(png))
+}
+
+// resolveCapture decides what a capture emits and updates the right per-tier "last text" tracker.
+// The accessibility text is diffed against lastA11yText and that tracker is updated every call, regardless of
+// which tier ends up being used — accessibility text is read unconditionally by tieredCapture above, so this
+// keeps lastA11yText current even on a call where vision fires instead.
+// When useVision is set, the emitted text (and change decision) comes from diffing desc against
+// lastVisionText instead — a separate tracker, so a vision capture's stored description never gets compared
+// against the next accessibility-tier capture's raw a11y text of the same, unchanged screen (that mismatch
+// used to look like a change and cause a re-emit, even with nothing on screen actually different).
+func resolveCapture(lastA11yText, lastVisionText *string, a11yText string, useVision bool, desc string, sight Sight, frames [][]byte) captureOut {
+	a11yChanged := diff(lastA11yText, a11yText)
+	if !useVision {
+		return captureOut{text: a11yChanged}
+	}
+	shown := diff(lastVisionText, desc)
 	if shown == "" {
 		return captureOut{}
 	}
-	return captureOut{text: shown, sight: sight, jpeg: encodeJPEG(png)}
+	return captureOut{text: shown, sight: sight, frames: frames}
 }
 
 // nonWindowApps are the desktop/compositor/shell identifiers that mean no real app is focused. Without this gate the vision tier would screenshot and describe the wallpaper on every idle tick.

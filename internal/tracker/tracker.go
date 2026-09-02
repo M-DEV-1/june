@@ -1,6 +1,9 @@
 package tracker
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 type Activity struct {
 	App          string
@@ -8,7 +11,10 @@ type Activity struct {
 	ScreenText   string
 	UserActivity string
 	VisibleText  []string
-	ImageJPEG    []byte
+	// ImageJPEG is the frame for the monitor the user is on, and ExtraJPEG holds one frame per other monitor at the same moment — a meeting on one screen while notes sit on the other is one activity, not two.
+	// Both persist: writeEpisodeJPEG stores the primary as frames/{id}.jpg and each extra as frames/{id}-b.jpg, {id}-c.jpg (internal/db/image.go), read back with Store.EpisodeExtraImages. The vision call still only sees the primary — tieredCapture in internal/tracker/daemon.go passes one PNG to visionFn.
+	ImageJPEG []byte
+	ExtraJPEG [][]byte
 }
 
 // Sight is the structured vision extract for one capture.
@@ -58,3 +64,12 @@ func Normalize(app, title string) *Activity {
 }
 
 // New is our generic constructor, defined in os-specific files
+
+// meetingWindow matches the window title of a call in progress. Only the three apps this machine has actually recorded a meeting in are listed: Google Meet writes "Meet - <code>", Teams titles its window "Microsoft Teams (PWA) - Chat | <person>", Zoom names itself. Matching on the title covers a browser tab and a desktop app alike without needing to know which.
+// ponytail: a hand-written list of app names, which is the wrong shape for the question — it has to be edited every time a meeting happens somewhere new, and it cannot see a call in an app it has never heard of. The signal that does not need a list is the audio server: a meeting app holds a capture stream on the microphone for the whole call and nothing else on a desktop does, so asking PulseAudio which process is recording identifies the call without naming anything. Ora already speaks that protocol for the recording itself (internal/audio/meeting_linux.go); GetSourceOutputInfoList carries application.process.id. Replace this when a meeting happens in an app the list misses.
+var meetingWindow = regexp.MustCompile(`(?i)\b(google meet|meet [–—-] |microsoft teams|zoom meeting|zoom\.us)`)
+
+// IsMeetingWindow reports whether a window is a call in progress rather than whatever else is on screen. Everything that claims to name a participant is checked against this first: a screen during a meeting is mostly not the meeting.
+func IsMeetingWindow(app, title string) bool {
+	return meetingWindow.MatchString(title) || meetingWindow.MatchString(app)
+}

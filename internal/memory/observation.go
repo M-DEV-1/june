@@ -5,7 +5,6 @@ package memory
 
 import (
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -31,7 +30,6 @@ const (
 	SignalVision    SignalKind = "vision"
 	SignalA11y      SignalKind = "a11y"
 	SignalTitleOnly SignalKind = "title_only"
-	SignalMPRIS     SignalKind = "mpris"
 )
 
 // signalMaxWords caps moment content — better one short observation than a multi-KB accessibility dump that drowns FTS and embeddings.
@@ -52,13 +50,24 @@ type Observation struct {
 	Context Context
 }
 
-// Normalize builds an Observation from a raw capture: cleans chrome, caps length, classifies domain, and always fills context fields from app/title even when content ends up empty.
+// Normalize builds an Observation from a raw capture: cleans chrome, caps length at signalMaxWords, classifies domain, and always fills context fields from app/title even when content ends up empty.
+// This is what the compiler and the summaries read, where one short observation really is better than a multi-KB dump.
 func Normalize(app, title, raw string) Observation {
+	return normalize(app, title, raw, signalMaxWords)
+}
+
+// NormalizeFull is Normalize without the word cap — the same chrome-stripping, vision-tail preference and whitespace collapsing, over the whole capture.
+// It exists for the embedding path. The cap was written when a long capture could only be truncated or rejected, and it meant a 96,061-character screen reached the vector index as roughly 700 characters: stored in full, keyword-searchable in full, and semantically searchable for 1% of itself. With a local embedder there is no per-token cost to protect, and chunkText splits a long document into passages rather than dropping its tail, so the reason for the cap no longer holds here.
+func NormalizeFull(app, title, raw string) Observation {
+	return normalize(app, title, raw, 0)
+}
+
+func normalize(app, title, raw string, maxWords int) Observation {
 	app = strings.TrimSpace(app)
 	title = strings.TrimSpace(title)
 	domain := Classify(app, title)
 
-	content, sk := extractSignal(raw, title)
+	content, sk := extractSignal(raw, title, maxWords)
 	return Observation{
 		Content: content,
 		Context: Context{
@@ -107,46 +116,8 @@ func KindOf(source string) Kind {
 	}
 }
 
-// FormatLine is the only way memory should enter the model: kind + domain + time + app/title context + excerpted content.
-// Empty content yields a context-only line (still useful: "was in Netflix · Suits").
-func FormatLine(kind Kind, domain Domain, at time.Time, app, title, content string, maxRunes int) string {
-	if maxRunes <= 0 {
-		maxRunes = 200
-	}
-	var meta []string
-	meta = append(meta, string(kind))
-	if domain != DomainUnset && domain != "" {
-		meta = append(meta, string(domain))
-	}
-	if !at.IsZero() {
-		meta = append(meta, at.Local().Format("2006-01-02 15:04"))
-	}
-	head := "[" + strings.Join(meta, " · ") + "]"
-
-	ctx := strings.TrimSpace(app + " · " + title)
-	if ctx == "·" {
-		ctx = ""
-	}
-
-	body := collapseSpace(content)
-	if maxRunes > 0 {
-		body = truncateRunes(body, maxRunes)
-	}
-
-	switch {
-	case ctx != "" && body != "":
-		return head + " " + ctx + " — " + body
-	case ctx != "":
-		return head + " " + ctx
-	case body != "":
-		return head + " " + body
-	default:
-		return head
-	}
-}
-
 // extractSignal cleans raw capture text into primary content.
-func extractSignal(raw, title string) (string, SignalKind) {
+func extractSignal(raw, title string, maxWords int) (string, SignalKind) {
 	raw = stripControls(raw)
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -172,8 +143,11 @@ func extractSignal(raw, title string) (string, SignalKind) {
 		kept = append(kept, line)
 	}
 	text := strings.Join(kept, "\n")
-	text = collapseSpace(text)
-	text = capWords(text, signalMaxWords)
+	text = strings.Join(strings.Fields(text), " ")
+	// maxWords of 0 means keep everything: the caller is the embedding path, where a capture is split into passages rather than truncated.
+	if maxWords > 0 {
+		text = capWords(text, maxWords)
+	}
 
 	if text == "" {
 		t := strings.TrimSpace(title)
@@ -290,9 +264,34 @@ func isChromeLine(line string) bool {
 	return false
 }
 
+// isObjectChar reports whether r is an object replacement (U+FFFC) or unknown replacement (U+FFFD) character. AT-SPI reports every image, video, and icon as U+FFFC, so a screenful of thumbnails captures as nothing but these \u2014 they carry no meaning, but they tokenize and embed as if they did.
+func isObjectChar(r rune) bool {
+	return r == '\uFFFC' || r == '\uFFFD'
+}
+
+// StripObjectChars removes object replacement characters and drops any line they leave empty, returning "" when nothing but them was there. Input with none is returned trimmed and otherwise unchanged.
+func StripObjectChars(s string) string {
+	if !strings.ContainsFunc(s, isObjectChar) {
+		return strings.TrimSpace(s)
+	}
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(strings.Map(func(r rune) rune {
+			if isObjectChar(r) {
+				return -1
+			}
+			return r
+		}, line))
+		if line != "" {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 func stripControls(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\uFFFC' || r == '\uFFFD' {
+		if isObjectChar(r) {
 			return -1
 		}
 		if r == '\n' || r == '\t' {
@@ -303,11 +302,6 @@ func stripControls(s string) string {
 		}
 		return r
 	}, s)
-}
-
-func collapseSpace(s string) string {
-	fields := strings.Fields(s)
-	return strings.Join(fields, " ")
 }
 
 func capWords(s string, max int) string {

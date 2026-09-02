@@ -5,14 +5,11 @@ package tracker
 import (
 	"context"
 	"errors"
+	"image"
 )
 
-// captureScreen and extractText are no-ops on non-Windows/Linux platforms.
+// extractText is a no-op on non-Windows/Linux platforms.
 // macOS: not planned (no dev access -> would not ship tastefully).
-
-func captureScreen() ([]byte, error) {
-	return nil, nil
-}
 
 func extractText() (string, error) {
 	return "", nil
@@ -21,3 +18,16 @@ func extractText() (string, error) {
 func grabScreen(_ context.Context) ([]byte, error) {
 	return nil, errors.New("screenshot not supported on this platform")
 }
+
+// screenLayout has no monitor list to report on platforms without a screenshot path, so stored frames stay whole-canvas.
+func screenLayout() ([]image.Rectangle, image.Point) {
+	return nil, image.Pt(-1, -1)
+}
+
+// extractMeetingWindow has no unfocused-window reader on this platform, so a call is only ever captured when it happens to have focus.
+func extractMeetingWindow() (app, title, text string, ok bool) {
+	return "", "", "", false
+}
+
+// WindowTitleFor has no window reader on this platform and always reports nothing, which callers treat the same as a desktop with no window open for that application.
+func WindowTitleFor(ctx context.Context, app string) string { return "" }

@@ -6,6 +6,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"image"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,14 +15,14 @@ import (
 //go:embed uia.ps1
 var uiaScript string
 
-// captureScreen is a no-op — UIA reads live from the OS, no pixel capture needed.
-func captureScreen() ([]byte, error) {
-	return nil, nil
-}
-
 // grabScreen is not yet implemented on Windows — UIA text capture covers most cases; a BitBlt-based visual tier can be added later.
 func grabScreen(_ context.Context) ([]byte, error) {
 	return nil, errors.New("screenshot not implemented on windows")
+}
+
+// screenLayout reports no monitors on Windows: there is no screenshot to split up yet, so it would have nothing to act on.
+func screenLayout() ([]image.Rectangle, image.Point) {
+	return nil, image.Pt(-1, -1)
 }
 
 // extractText reads structured text from the focused window via UI Automation.
@@ -52,3 +53,11 @@ func extractText() (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// extractMeetingWindow has no unfocused-window reader on this platform, so a call is only ever captured when it happens to have focus.
+func extractMeetingWindow() (app, title, text string, ok bool) {
+	return "", "", "", false
+}
+
+// WindowTitleFor has no window reader on this platform and always reports nothing, which callers treat the same as a desktop with no window open for that application.
+func WindowTitleFor(ctx context.Context, app string) string { return "" }

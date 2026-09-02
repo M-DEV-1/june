@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -99,7 +100,8 @@ type embedder interface {
 type vectorIndex interface {
 	Add(ctx context.Context, id, content string, embedding []float32, metadata map[string]string) error
 	Search(ctx context.Context, queryEmbedding []float32, n int, where map[string]string) ([]Result, error)
-	Count() int
+	Delete(ctx context.Context, id string) error
+	IDs() []string
 }
 
 // Result mirrors internal/vector.Result — duplicated here rather than imported, same reason as embedder/vectorIndex above: internal/db must not gain an import-time dependency on internal/vector.
@@ -123,8 +125,41 @@ func (s *Store) SetVectorIndex(v vectorIndex) {
 	s.mu.Unlock()
 }
 
+// SetEmbedsAreFree tells the Store that its embedder costs CPU rather than metered API calls (the local EmbeddingGemma engine). The only thing this changes is reconciliation's episode age window: with a metered embedder, backfill covers only the last reconcileEpisodeWindow of episodes so a dirty store can't run up a bill; with a free one, every episode that still has text is eligible, which is what brings back the old episodes that lost their vectors to API failures.
+func (s *Store) SetEmbedsAreFree(free bool) {
+	s.mu.Lock()
+	s.embedsAreFree = free
+	s.mu.Unlock()
+}
+
+// SetVectorSimilarityFloor overrides the absolute cosine floor a vector hit must clear to enter fusion. minVectorSimilarity's default was measured against Gemini's similarity range; a different embedding model scores the same genuinely-relevant documents on a different scale, and leaving the floor where it is would drop every vector candidate and reduce hybrid search to lexical-only without saying so. Values of zero or below are ignored, so the floor can never be turned off entirely.
+func (s *Store) SetVectorSimilarityFloor(floor float32) {
+	if floor <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.vectorSimilarityFloor = floor
+	s.mu.Unlock()
+}
+
+// vectorFloor is the absolute cosine floor in force, defaulting to minVectorSimilarity when nothing has overridden it.
+func (s *Store) vectorFloor() float32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.vectorSimilarityFloor > 0 {
+		return s.vectorSimilarityFloor
+	}
+	return float32(minVectorSimilarity)
+}
+
 // hybridVectorPoolSize bounds how many nearest-neighbor results are pulled from the vector index before fusion — wider than the final `limit` so RRF, not raw vector similarity alone, decides the final order.
 const hybridVectorPoolSize = 50
+
+// minVectorSimilarity is the cosine-similarity floor a vector hit must clear to enter fusion at all — chromem's Search always returns its n nearest neighbors regardless of how weakly related they actually are, so without a floor a query about a topic absent from the store still gets padded with barely-related rows. Unvalidated starting point; tune against real queries.
+const minVectorSimilarity = 0.55
+
+// vectorSimilarityBand is how far below the best hit's cosine similarity a vector hit may sit and still enter fusion. Real similarities on this store span roughly 0.58-0.69, so the absolute minVectorSimilarity floor alone drops nothing and junk rides in alongside genuine matches; the effective floor is max(minVectorSimilarity, topSimilarity-vectorSimilarityBand). Tune against real queries.
+const vectorSimilarityBand = 0.06
 
 // splitCandidateID parses an rrfCandidate/vector-result id of the form "<source>:<refID>" (e.g. "episode:42", "note:3") into its parts. refID is 0 if the numeric suffix doesn't parse cleanly (e.g. a vector-only hit whose id shape doesn't map to a nodes/episodes row) — best effort, not an error, since MemoryHit.RefID is informational.
 func splitCandidateID(id string) (source string, refID int64) {
@@ -133,7 +168,12 @@ func splitCandidateID(id string) (source string, refID int64) {
 		return id, 0
 	}
 	source = id[:idx]
-	refID, _ = strconv.ParseInt(id[idx+1:], 10, 64)
+	// A passage's id carries a "#N" suffix naming which chunk of the row it is. The row is the same one either way, and everything downstream — the domain lookup, the app/title on a formatted hit — wants the row.
+	num := id[idx+1:]
+	if h := strings.IndexByte(num, '#'); h >= 0 {
+		num = num[:h]
+	}
+	refID, _ = strconv.ParseInt(num, 10, 64)
 	return source, refID
 }
 
@@ -156,21 +196,41 @@ func (s *Store) currentDomain(ctx context.Context) string {
 	return domain
 }
 
+// lexicalTermOverlap counts how many distinct queryTerms appear (case-insensitive substring match) in content — used by HybridSearch's multi-term relevance floor to distinguish a real match from a single-term FTS5 coincidence.
+func lexicalTermOverlap(content string, queryTerms []string) int {
+	lower := strings.ToLower(content)
+	n := 0
+	for _, term := range queryTerms {
+		if strings.Contains(lower, term) {
+			n++
+		}
+	}
+	return n
+}
+
 // HybridSearch fuses lexical (FTS5) and vector search over episodes, summaries, notes, and threads via reciprocalRankFusion, and returns the top `limit` as MemoryHit.
 // If domainFilter is "work" or "personal", results are hard-filtered to that domain (both the lexical SQL query and the vector search's `where` clause). If domainFilter is "", no hard filter is applied, but candidates matching the store's inferred current domain (see currentDomain) get domainBoostFactor applied to their fused score before the final sort.
 // If the Store has no embedder/vector index configured (both nil — the default for a bare db.New(":memory:")), HybridSearch degrades gracefully to lexical-only fusion rather than erroring.
 func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, limit int) ([]MemoryHit, error) {
+	return s.HybridSearchWindow(ctx, query, domainFilter, time.Time{}, time.Time{}, limit)
+}
+
+// HybridSearchWindow is HybridSearch constrained to items whose timestamp falls in [since, until]. A zero bound is open on that side; both zero means no time constraint at all.
+// The window is applied inside the lexical SQL (before each FTS query's LIMIT) and to the vector candidate pool before fusion — never to the fused top-k after ranking, which for a sparse window (the whole point of a dated question) usually leaves nothing. A window containing nothing returns an honestly empty result, not a fallback to unwindowed matches.
+// Under a window, a vector candidate with no readable created_at metadata is dropped: its membership in the window can't be shown. Unwindowed search keeps such candidates.
+func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]MemoryHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
 	}
+	windowed := !since.IsZero() || !until.IsZero()
 
 	// lexical candidates: reuse the existing FTS5 paths, don't reimplement.
-	memHits, err := s.SearchMemory(ctx, query)
+	memHits, err := s.searchMemoryWindow(ctx, query, since, until)
 	if err != nil {
 		return nil, err
 	}
-	episodeHits, err := s.SearchEpisodes(ctx, query)
+	episodeHits, err := s.searchEpisodesWindow(ctx, query, since, until)
 	if err != nil {
 		return nil, err
 	}
@@ -183,10 +243,11 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 			domain = s.candidateDomain(ctx, h.Source, h.RefID)
 		}
 		lexical = append(lexical, rrfCandidate{
-			id:      fmt.Sprintf("%s:%d", h.Source, h.RefID),
-			content: h.Content,
-			source:  h.Source,
-			domain:  domain,
+			id:        fmt.Sprintf("%s:%d", h.Source, h.RefID),
+			content:   h.Content,
+			source:    h.Source,
+			domain:    domain,
+			createdAt: h.CreatedAt,
 		})
 	}
 	for _, h := range episodeHits {
@@ -205,6 +266,22 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 		})
 	}
 
+	// Relevance floor for multi-term queries: buildFTSMatch ORs every significant term together, so FTS5 alone returns any row matching even one of them. A candidate matching a small fraction of a long query is coincidental noise, not a real match — this is what "10 junk rows for an absent-topic query" traces back to.
+	// The floor is half the query's terms, capped at two, so it scales with the question instead of turning short queries into a strict AND: two-term queries need one term (unchanged from plain FTS5, since "ora daemon" must still find "the daemon crashed"), three or more need two.
+	if queryTerms := tokenizeQuery(query); len(queryTerms) >= 3 {
+		need := (len(queryTerms) + 1) / 2
+		if need > 2 {
+			need = 2
+		}
+		filtered := lexical[:0:0]
+		for _, c := range lexical {
+			if lexicalTermOverlap(c.content, queryTerms) >= need {
+				filtered = append(filtered, c)
+			}
+		}
+		lexical = filtered
+	}
+
 	if domainFilter != "" {
 		filtered := lexical[:0:0]
 		for _, c := range lexical {
@@ -221,37 +298,60 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 	vidx := s.vectorIndex
 	s.mu.RUnlock()
 
+	// An embed or vector-search failure degrades to lexical-only fusion (logged, not returned) rather than failing the whole call — with the client depending on daemon IPC for the vector half, "daemon down" must not take query_memory down with it.
 	var vector []rrfCandidate
 	if emb != nil && vidx != nil {
 		queryVec, err := emb.Embed(ctx, "RETRIEVAL_QUERY", query)
 		if err != nil {
-			return nil, fmt.Errorf("embed query: %w", err)
+			slog.Warn("hybrid search: embed query failed, degrading to lexical-only", "error", err)
+			queryVec = nil
 		}
 
-		var where map[string]string
-		if domainFilter != "" {
-			where = map[string]string{"domain": domainFilter}
-		}
-
-		results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, where)
-		if err != nil {
-			return nil, fmt.Errorf("vector search: %w", err)
-		}
-
-		vector = make([]rrfCandidate, 0, len(results))
-		for _, r := range results {
-			source, _ := splitCandidateID(r.ID)
-			createdAt := time.Time{}
-			if ts := r.Metadata["created_at"]; ts != "" {
-				createdAt = parseSQLiteTime(ts)
+		if queryVec != nil {
+			var where map[string]string
+			if domainFilter != "" {
+				where = map[string]string{"domain": domainFilter}
 			}
-			vector = append(vector, rrfCandidate{
-				id:        r.ID,
-				content:   r.Content,
-				source:    source,
-				domain:    r.Metadata["domain"],
-				createdAt: createdAt,
-			})
+
+			results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, where)
+			if err != nil {
+				slog.Warn("hybrid search: vector search failed, degrading to lexical-only", "error", err)
+			} else {
+				// The floor is relative to the best hit in this result set, with the embedder's absolute floor as its lower bound. Computed from the results rather than assuming they arrive sorted.
+				floor := s.vectorFloor()
+				for _, r := range results {
+					if band := r.Similarity - vectorSimilarityBand; band > floor {
+						floor = band
+					}
+				}
+
+				vector = make([]rrfCandidate, 0, len(results))
+				for _, r := range results {
+					if r.Similarity < floor {
+						continue
+					}
+					source, _ := splitCandidateID(r.ID)
+					createdAt := time.Time{}
+					if ts := r.Metadata["created_at"]; ts != "" {
+						createdAt = parseSQLiteTime(ts)
+					}
+					// chromem's where clause is exact-match only, so the time window is applied here on the candidate pool (hybridVectorPoolSize wide, not the final top-k).
+					if windowed {
+						if createdAt.IsZero() ||
+							(!since.IsZero() && createdAt.Before(since)) ||
+							(!until.IsZero() && createdAt.After(until)) {
+							continue
+						}
+					}
+					vector = append(vector, rrfCandidate{
+						id:        r.ID,
+						content:   r.Content,
+						source:    source,
+						domain:    r.Metadata["domain"],
+						createdAt: createdAt,
+					})
+				}
+			}
 		}
 	}
 
@@ -262,7 +362,8 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 	if len(vector) > 0 {
 		lists = append(lists, vector)
 	}
-	fused := reciprocalRankFusion(rrfK, lists...)
+	// Collapsed to one hit per row before anything downstream spends its budget: a screen matching in three passages is three vectors but one moment, and the ten rows the model gets should cover ten moments.
+	fused := bestPassagePerRow(reciprocalRankFusion(rrfK, lists...))
 
 	// Kind-aware score shaping after fusion:
 	//  - same-domain soft boost when no explicit domain filter
@@ -309,6 +410,8 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 		fused = fused[:limit]
 	}
 
+	s.recordVectorContribution(fused, vector)
+
 	out := make([]MemoryHit, len(fused))
 	for i, c := range fused {
 		source, refID := splitCandidateID(c.id)
@@ -326,4 +429,31 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 		}
 	}
 	return out, nil
+}
+
+// recordVectorContribution is the vector-arm contribution counter: for one HybridSearchWindow call, did any of the vector-search candidates survive fusion into the final (post-limit) top-k, and how many. Recorded into the tally table (see db.go's schema comment) as two rows dated today (local): "vector-queries" ticks once per call regardless of outcome, and "vector-hits" ticks once, with the survivor count folded into its total_ms column, only when at least one did. Best-effort — a tally write failure is logged and never surfaces to the caller, same discipline every other accounting write in this package follows.
+func (s *Store) recordVectorContribution(fused, vector []rrfCandidate) {
+	day := time.Now().Format(tallyDayFormat)
+	if err := s.bumpTally(day, "vector-queries", 1, 0, 0); err != nil {
+		slog.Warn("tally: recording vector-queries failed", "error", err)
+	}
+	if len(vector) == 0 {
+		return
+	}
+	fromVector := make(map[string]bool, len(vector))
+	for _, c := range vector {
+		fromVector[c.id] = true
+	}
+	survivors := 0
+	for _, c := range fused {
+		if fromVector[c.id] {
+			survivors++
+		}
+	}
+	if survivors == 0 {
+		return
+	}
+	if err := s.bumpTally(day, "vector-hits", 1, 0, int64(survivors)); err != nil {
+		slog.Warn("tally: recording vector-hits failed", "error", err)
+	}
 }
