@@ -37,7 +37,8 @@ func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.isCapturing = true
 	m.mu.Unlock()
 
-	c, err := pulse.NewClient()
+	// Named so the stream says whose it is. Left unnamed, the audio library falls back to the binary's own name, and Ora's meeting watcher — which asks whether to record whenever something takes the microphone — could not tell the assistant listening from a call starting.
+	c, err := pulse.NewClient(pulse.ClientApplicationName("Ora voice"))
 	if err != nil {
 		m.mu.Lock()
 		m.isCapturing = false
