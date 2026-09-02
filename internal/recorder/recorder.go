@@ -57,6 +57,8 @@ const dirTimeLayout = "2006-01-02T15-04-05"
 // Store is the slice of *db.Store the recorder needs: the desktop timeline captured while the meeting ran, the personal context that says who the [me] speaker is (and which a finished meeting can add a person to), somewhere to file the minutes, and — for meeting prep — every note filed so far to search for one about the people or meeting on screen right now.
 type Store interface {
 	EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error)
+	// DistinctTitles backs the judgement of which words in a meeting's window title identify the meeting and which are the browser's own furniture.
+	DistinctTitles(ctx context.Context, limit int) ([]string, error)
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	SetPersonalContext(ctx context.Context, subject, content string) error
 	LogNote(ctx context.Context, content, kind string) (int64, error)
@@ -145,6 +147,9 @@ func hasSound(p []byte) bool {
 
 // Recorder owns at most one meeting recording at a time. Start and StopAndProcess are what the tray calls; everything after the stop runs in the background.
 type Recorder struct {
+	// onStateChange, when set, is called after a recording starts or stops. The tray menu registers its redraw here, because the label reading "Start meeting recording" is wrong the moment anything other than the tray itself starts one — and since Ora began offering to record when it notices a call, that is the common case rather than a corner of it.
+	onStateChange func()
+
 	dataDir string
 	store   Store
 	apiKey  string
@@ -395,6 +400,34 @@ func modTime(path string) time.Time {
 }
 
 // Active reports whether a recording is running, which is what the tray menu label keys off.
+// StopForShutdown closes a recording that is running so the daemon can exit without abandoning it, and does nothing when none is.
+//
+// Input: none. Output: the directory the recording was written to, empty when nothing was running, and an error only when a running recording could not be closed.
+//
+// Transcription is deliberately not run here. Whisper takes minutes and pins every core, and a process being asked to exit — by a logout, a reboot, or a package upgrade — does not have minutes. The audio is closed properly and the sweep on the next start transcribes it, which is the same path that recovers a recording after a crash.
+func (r *Recorder) StopForShutdown() (string, error) {
+	if !r.Active() {
+		return "", nil
+	}
+	s, err := r.stop()
+	if err != nil {
+		return "", err
+	}
+	r.stateChanged()
+	slog.Info("closed a running meeting recording for shutdown, it will be transcribed on the next start", "dir", s.dir)
+	return s.dir, nil
+}
+
+// SetOnStateChange registers a function to call whenever a recording starts or stops. Passing nil clears it. It is called on the caller's goroutine, outside the recorder's lock, so a slow observer delays the caller rather than blocking anything asking whether a recording is running.
+func (r *Recorder) SetOnStateChange(fn func()) { r.onStateChange = fn }
+
+// stateChanged tells the observer, if there is one, that a recording started or stopped.
+func (r *Recorder) stateChanged() {
+	if r.onStateChange != nil {
+		r.onStateChange()
+	}
+}
+
 func (r *Recorder) Active() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -406,6 +439,7 @@ func (r *Recorder) Start() error {
 	if err := r.open(); err != nil {
 		return err
 	}
+	r.stateChanged()
 	// Notifying happens outside the lock, as it does on the stop path: notify shells out to notify-send, and holding the recorder's lock across a process spawn stalls anything asking whether a recording is running.
 	r.notify("Recording meeting", "Ora is recording. Stop it from the tray when the call ends.")
 	// The moment recording starts is the moment Ora knows a call is happening, so it is also the moment to look for what matters from the last time these people met. It runs in its own goroutine and is best-effort throughout: Start must return the instant capture is open, and a slow or empty prep must never hold that up. r.live already guards against Start running twice for one meeting, so this fires at most once per recording the same way the "Recording meeting" notice does.
@@ -477,6 +511,7 @@ func (r *Recorder) StopAndProcess(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	r.stateChanged()
 	// Whisper pins every core for minutes. On battery that empties the laptop and the CPU is throttled while it runs, so the recording is left exactly as it is — no marker, nothing to say it is finished — and the retry loop picks it up once the charger is back in.
 	if !r.onAC() {
 		slog.Info("deferring meeting transcription until the machine is on mains power", "dir", s.dir)

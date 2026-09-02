@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -64,7 +65,8 @@ func runRoot(isDaemon bool, autostart, workdir string) {
 	}
 	secureEnvFile(".env")
 	// global context that listens for sigint
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	// SIGTERM as well as SIGINT: kill, a logout and a system shutdown all send SIGTERM, and catching only SIGINT meant every one of those killed the process outright with no cleanup — abandoning a meeting recording mid-call.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	// initialize otel
