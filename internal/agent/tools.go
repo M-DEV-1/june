@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"ora/internal/config"
 	"ora/internal/db"
 	"ora/internal/memory"
 	"os"
@@ -101,10 +102,12 @@ func toolDefinitions() []*genai.Tool {
 					"the search then runs and ranks entirely inside that window, whereas without it the best matches can all come from the wrong day, and one busy stretch can drown out the rest of its own day. " +
 					"A part of a day gets timestamp bounds, not the whole day: morning is roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that. " +
 					"When a question narrows the time, run a fresh narrower query — do not answer a narrow question from a wider fetch you already have. " +
-					"For pure day/timeline questions use recall. For 'what was I just doing' use get_recent.",
+					"For pure day/timeline questions use recall. For 'what was I just doing' use get_recent. " +
+					"For what a meeting was about, what it decided, or who was in it, pass kind='meeting': that lists the minutes themselves for the window, newest first, instead of ranking — a ranked search finds screens of the user reading minutes before it finds the minutes.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
+						"kind":   {Type: genai.TypeString, Description: "Optional. 'meeting' lists meeting minutes in the window (newest first, query ignored). Omit for a ranked search."},
 						"query":  {Type: genai.TypeString, Description: "What to search for — topic, project, show, person, etc. Never put a time word here ('today', 'yesterday', 'last week') — it will match text instead of dates; use since/until for that."},
 						"domain": {Type: genai.TypeString, Description: "Optional. Restrict to 'work' or 'personal' memories only. Omit to search everything, weighted toward whichever domain you're currently in."},
 						"app":    {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring, e.g. slack, firefox, code)."},
@@ -332,9 +335,16 @@ func toolDefinitions() []*genai.Tool {
 // Verified live (2026-07-25) that both tool types work together on config.VoiceModel (gemini-2.5-flash-native-audio-preview-12-2025) — not guaranteed on every Gemini model/endpoint.
 // GoogleSearch calls are grounded server-side by Gemini and never surface as a ToolCall, so they don't show up in the TUI's live tool status line the way the FunctionDeclarations tools do.
 func liveTools() []*genai.Tool {
+	return liveToolsFor(config.VoiceModel)
+}
+
+// liveToolsFor is liveTools for a named Live model. Google Search grounding rides beside the function tools on the 2.5 model; on the 3.x Live models the same pairing closes the session with "You exceeded your current quota" before the first word (probed on 2026-09-02, every other part of the handshake passes), so there it is left out and the model has no web search.
+func liveToolsFor(model string) []*genai.Tool {
 	tools := toolDefinitions()
-	tools = append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
-	return tools
+	if strings.HasPrefix(model, "gemini-3") {
+		return tools
+	}
+	return append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
 }
 
 // ToolDeclarations returns the function declarations the live session exposes, the same list liveTools builds. Gemini's native search tool is not included because it has no declaration to hand a non-live model. The trajectory eval in evals/ uses it to give a text-mode model the identical tool surface the voice session has. Input: none. Output: the declarations, in the order the live session sends them.
@@ -949,12 +959,19 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		return fmt.Sprintf("opened %s in browser", url)
 
 	case "query_memory":
-		if msg := checkArgs(args, "query", "domain", "app", "since", "until"); msg != "" {
+		if msg := checkArgs(args, "query", "domain", "app", "since", "until", "kind"); msg != "" {
 			return toolError(msg)
 		}
 		query, ok := args["query"].(string)
 		if !ok {
 			return toolError("query_memory needs something to search for")
+		}
+		if kind, _ := args["kind"].(string); kind == "meeting" {
+			since, until, _, err := optionalWindow(args, time.Now())
+			if err != nil {
+				return toolError(dateHint)
+			}
+			return a.listMeetingNotes(ctx, since, until)
 		}
 		// domain is optional: a missing or wrong-typed arg silently becomes "" (search everything, weighted toward the current domain) rather than erroring — since/until below are stricter since a mis-parsed date changes which day the answer comes from.
 		domain, _ := args["domain"].(string)
@@ -1470,4 +1487,30 @@ func filterHitsByApp(hits []db.MemoryHit, app string) []db.MemoryHit {
 		}
 	}
 	return out
+}
+
+// listMeetingNotes renders every meeting-minutes note whose creation time falls in [since, until] (a zero bound is open), newest first, each as "[note#ID] date — excerpt". It reads the notes table directly rather than ranking, because minutes are the answer to "what was the meeting about" and no query word reliably ranks them above the screens of the user reading them.
+func (a *Agent) listMeetingNotes(ctx context.Context, since, until time.Time) string {
+	notes, err := a.brain.GetNotes(ctx)
+	if err != nil {
+		slog.Error("query_memory: reading meeting notes failed", "error", err)
+		return toolError(storeUnavailable)
+	}
+	var lines []string
+	for _, n := range notes {
+		if n.Kind != "meeting" {
+			continue
+		}
+		if !since.IsZero() && n.CreatedAt.Before(since) || !until.IsZero() && n.CreatedAt.After(until) {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("[note#%d] %s — %s", n.ID, n.CreatedAt.Format("Mon Jan 2 15:04"), db.FormatNoteHit(db.MemoryHit{Source: "note", RefID: n.ID, Content: n.Content, CreatedAt: n.CreatedAt}, 0)))
+	}
+	if len(lines) == 0 {
+		if desc := filterDescription("", since, until); desc != "" {
+			return "no meeting minutes " + desc
+		}
+		return "no meeting minutes saved yet"
+	}
+	return strings.Join(lines, "\n")
 }

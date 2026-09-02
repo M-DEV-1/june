@@ -80,12 +80,22 @@ func realtimeInputConfig() *genai.RealtimeInputConfig {
 // Cut from 1024 on 2026-08-28: the 2026-08-28 sessions measured roughly 1.8 seconds from the user's message to the first thought token, on turns whose whole job was one memory lookup and one sentence back. The dead-wait median across typed turns that day was 18.6 seconds, so this is not the whole problem, but it is the part that is paid on every single turn.
 const thinkingBudgetTokens = 256
 
-// thinkingConfig builds the Live API's thinking-behavior config. Extracted from Connect() so it's testable without dialing a real websocket, same pattern as realtimeInputConfig.
+// thinkingConfig builds the Live API's thinking-behavior config for the configured voice model. Extracted from Connect() so it's testable without dialing a real websocket, same pattern as realtimeInputConfig.
 func thinkingConfig() *genai.ThinkingConfig {
-	return &genai.ThinkingConfig{
+	return thinkingConfigFor(config.VoiceModel)
+}
+
+// thinkingConfigFor builds the thinking config the given Live model accepts. The Gemini 3 Live models take a thinking level and reject a token budget; the 2.5 model is the reverse. Low is the level that keeps first-word latency close to the 256-token budget the 2.5 model ran with, which on 2026-08-28 measured under two seconds for a lookup-and-answer turn.
+func thinkingConfigFor(model string) *genai.ThinkingConfig {
+	cfg := &genai.ThinkingConfig{
 		IncludeThoughts: true, // receiveLoop already routes Thought:true parts correctly (ResponseChunk.IsThought) — surfacing them costs nothing and helps diagnose exactly this class of issue.
-		ThinkingBudget:  genai.Ptr[int32](thinkingBudgetTokens),
 	}
+	if strings.HasPrefix(model, "gemini-3") {
+		cfg.ThinkingLevel = genai.ThinkingLevelLow
+		return cfg
+	}
+	cfg.ThinkingBudget = genai.Ptr[int32](thinkingBudgetTokens)
+	return cfg
 }
 
 // compressionTriggerTokens is the context size at which the Live API compresses the session's history. At native audio's ~25 tokens/sec, 64k tokens is roughly the first 42 minutes of a session before compression ever kicks in. The model's own context window is 128k, so this sits at half of it, leaving headroom for the system prompt and tool schemas on top. Raised from an initial 25000 (the SDK's own suggested default) — if voice first-response latency degrades noticeably in live use, this and compressionTargetTokens are the knob to turn back down (toward 40000/16000, the previous step, before reverting all the way to 25000/8000).
@@ -106,10 +116,23 @@ func compressionConfig() *genai.ContextWindowCompressionConfig {
 // Proactive audio lets the model decline to answer audio that wasn't aimed at it — a conversation in the room, a video playing, the user talking to someone else. Ora's mic is always open, so without it every stray sentence in earshot is a prompt. Only supported on the 2.5 native-audio models, which is what config.VoiceModel is.
 // Returning nil rather than a config with ProactiveAudio=false leaves the field off the wire entirely, so the API keeps its own default instead of Ora pinning it.
 func proactivityConfig(enabled bool) *genai.ProactivityConfig {
-	if !enabled {
+	return proactivityConfigFor(config.VoiceModel, enabled)
+}
+
+// proactivityConfigFor is proactivityConfig for a named Live model. The Gemini 3 Live models do not support proactive audio as of 2026-09-02, so for them the field stays off the wire whatever the config file says — which also means the mic hears the room and the model answers it; see the trial note on config.VoiceModel.
+func proactivityConfigFor(model string, enabled bool) *genai.ProactivityConfig {
+	if !enabled || strings.HasPrefix(model, "gemini-3") {
 		return nil
 	}
 	return &genai.ProactivityConfig{ProactiveAudio: genai.Ptr(true)}
+}
+
+// nonSpeechMarker matches one bracketed sound description in an input transcript — "<noise>", "[laughter]", "(music)".
+var nonSpeechMarker = regexp.MustCompile(`<[^<>]*>|\[[^\[\]]*\]|\([^()]*\)`)
+
+// isNonSpeechTranscript reports whether an input transcript is nothing but bracketed sound markers, or empty. Such a transcript is the server describing a noise, not the user saying something, and on 2026-09-02 00:07 a bare "<noise>" that reached the model set off two memory lookups nobody had asked for.
+func isNonSpeechTranscript(s string) bool {
+	return strings.TrimSpace(nonSpeechMarker.ReplaceAllString(s, "")) == ""
 }
 
 // nowAnchor renders the current moment for the system prompt — weekday, date, wall-clock time, timezone — so the model can resolve "yesterday", "this morning", or "July 5th" into concrete dates instead of guessing.
@@ -419,7 +442,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 	flushInputTranscript := func() {
 		utterance := strings.TrimSpace(inputTranscriptBuf.String())
 		inputTranscriptBuf.Reset()
-		if utterance == "" {
+		if isNonSpeechTranscript(utterance) {
 			return
 		}
 		// The mic is off (text-only mode, or /mute) — anything the server still transcribes is audio it already had in hand, or the room rather than the user. Dropping it here, at the one choke point every call site goes through, is what stops text-only mode from answering the conversation happening around the machine.

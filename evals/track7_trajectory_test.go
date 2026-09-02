@@ -251,7 +251,7 @@ func TestTextDecls_DropsTheLiveOnlyBehavior(t *testing.T) {
 			t.Errorf("%s: the live declaration was mutated in place", d.Name)
 		}
 	}
-	if !strings.Contains(describeTools(got), "query_memory(app, domain, query, since, until)") {
+	if !strings.Contains(describeTools(got), "query_memory(app, domain, kind, query, since, until)") {
 		t.Errorf("the tool surface should list parameters in a stable order:\n%s", describeTools(got))
 	}
 }

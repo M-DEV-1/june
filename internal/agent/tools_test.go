@@ -19,6 +19,7 @@ import (
 
 // toolTestBrain is a minimal ContextReader mock used to exercise executeTool's query_memory case. It lives in an internal (package agent, not agent_test) test file because executeTool is unexported.
 type toolTestBrain struct {
+	notes           []db.Note
 	threadEpisodes  []db.Episode
 	openActions     []memory.ActionItem
 	openActionsErr  error
@@ -121,7 +122,7 @@ func (b *toolTestBrain) LogNote(ctx context.Context, content, kind string) (int6
 	}
 	return 1, nil
 }
-func (b *toolTestBrain) GetNotes(ctx context.Context) ([]db.Note, error) { return nil, nil }
+func (b *toolTestBrain) GetNotes(ctx context.Context) ([]db.Note, error) { return b.notes, nil }
 func (b *toolTestBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
 	if b.personalErr != nil {
 		return nil, b.personalErr
@@ -706,7 +707,7 @@ func TestExecuteTool_QueryMemory_ZeroHits_ReturnsNoMatchesString(t *testing.T) {
 
 // TestLiveTools_IncludesFunctionDeclarationsAndGoogleSearch verifies the Live API tool list carries both ORA's custom function tools AND Gemini's native GoogleSearch grounding tool — so Ora can look things up instead of answering from memory alone (see liveTools' doc comment in tools.go for the live-verification note).
 func TestLiveTools_IncludesFunctionDeclarationsAndGoogleSearch(t *testing.T) {
-	tools := liveTools()
+	tools := liveToolsFor("gemini-2.5-flash-native-audio-preview-12-2025")
 
 	var hasFunctionDecls, hasGoogleSearch bool
 	for _, tl := range tools {
@@ -1669,5 +1670,46 @@ func TestExecuteTool_ThreadEvidenceExplainsAnEmptyResult(t *testing.T) {
 	got := NewAgent(nil, nil, &toolTestBrain{}, nil, "").ExecuteTool(context.Background(), "thread_evidence", map[string]any{"id": float64(1)})
 	if !strings.Contains(got, "no captures are linked") {
 		t.Errorf("got %q", got)
+	}
+}
+
+// "What were my meetings about yesterday" ranked screens of the user reading transcripts above the minutes themselves on 2026-09-02, because the summaries literally contain "meeting minutes" and the minutes do not. kind='meeting' skips the ranking and lists the minutes in the window, newest first.
+func TestExecuteTool_QueryMemory_KindMeetingListsMinutes(t *testing.T) {
+	day := time.Date(2026, 9, 1, 10, 0, 0, 0, time.Local)
+	brain := &toolTestBrain{
+		notes: []db.Note{
+			{ID: 3, Kind: "meeting", Content: "# Standup — auth update", CreatedAt: day.Add(4 * time.Hour)},
+			{ID: 2, Kind: "fact", Content: "user likes go", CreatedAt: day},
+			{ID: 1, Kind: "meeting", Content: "# Old sync", CreatedAt: day.AddDate(0, 0, -3)},
+		},
+		hybridHits: []db.MemoryHit{{Source: "summary", Content: "reviewed meeting minutes in the terminal"}},
+	}
+	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+
+	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "meetings", "kind": "meeting", "since": "2026-09-01", "until": "2026-09-01"})
+
+	if !strings.Contains(result, "[note#3]") || !strings.Contains(result, "Standup") {
+		t.Errorf("expected the day's minutes, got %q", result)
+	}
+	if strings.Contains(result, "Old sync") || strings.Contains(result, "likes go") || strings.Contains(result, "reviewed meeting minutes") {
+		t.Errorf("expected only meeting notes inside the window, got %q", result)
+	}
+}
+
+// On 2026-09-02 every 3.1 Flash Live session closed with "You exceeded your current quota" a quarter second after connecting. Bisected with a probe: the prompt, the function tools, the voice, thinking and resumption all pass alone and together; adding Google Search grounding beside the function tools is what trips it. The 2.5 model takes both.
+func TestLiveToolsFor_NoSearchOnLive3(t *testing.T) {
+	for _, tool := range liveToolsFor("gemini-3.1-flash-live-preview") {
+		if tool.GoogleSearch != nil {
+			t.Fatal("a 3.x live model must not be handed Google Search grounding")
+		}
+	}
+	found := false
+	for _, tool := range liveToolsFor("gemini-2.5-flash-native-audio-preview-12-2025") {
+		if tool.GoogleSearch != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the 2.5 live model keeps Google Search grounding")
 	}
 }
