@@ -172,6 +172,21 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	if err != nil {
 		slog.Warn("failed to init summarizer, semantic memory disabled", "error", err)
 	}
+	if summarizer != nil {
+		// The compiler otherwise reads the user's name off a calendar entry and files them as somebody they met.
+		summarizer.SetIdentity(func(ctx context.Context) string {
+			entries, err := store.PersonalContext(ctx)
+			if err != nil {
+				return ""
+			}
+			for _, e := range entries {
+				if e.Subject == "identity" {
+					return e.Content
+				}
+			}
+			return ""
+		})
+	}
 	compiler := memory.NewCompiler(summarizer, store)
 
 	// vecIndex is nil unless the block below succeeds — declared here (not just inside the block) so the /vector/* IPC handlers further down can serve the client's hybrid search over the same index the daemon itself uses, instead of each opening chromem separately (two processes opening the same chromem dir risks torn reads/corruption).

@@ -659,3 +659,17 @@ func TestCompiler_LinkWindowClosesBeforeTheAttributionCall(t *testing.T) {
 		t.Errorf("window end %v looks like it was read after the attribution call, not at snapshot", store.links[0].until)
 	}
 }
+
+// The compiler writes summaries from screen text that names the user in the third person — a calendar entry "Meeting with Alex Rivera" became "participated in a scheduled meeting with Alex Rivera" on 2026-09-01, and Ora then told the user about their meetings with Alex. The prompt has to say who the user is.
+func TestAttributePrompt_NamesTheUser(t *testing.T) {
+	prompt := memory.AttributePrompt(nil, nil, "The user is Alex Rivera — goes by Alex.")
+	if !strings.Contains(prompt, "Alex Rivera") {
+		t.Errorf("prompt does not carry the identity line:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "third party") {
+		t.Errorf("prompt does not tell the model the user is never a third party:\n%s", prompt)
+	}
+	if strings.Contains(memory.AttributePrompt(nil, nil, ""), "third party") {
+		t.Error("with no identity known, the prompt should not carry an empty identity rule")
+	}
+}
