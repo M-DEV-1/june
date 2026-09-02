@@ -232,7 +232,7 @@ func TestProactivityConfig(t *testing.T) {
 	if cfg := proactivityConfig(false); cfg != nil {
 		t.Errorf("expected nil config when disabled, got %+v", cfg)
 	}
-	cfg := proactivityConfig(true)
+	cfg := proactivityConfigFor("gemini-2.5-flash-native-audio-preview-12-2025", true)
 	if cfg == nil || cfg.ProactiveAudio == nil || !*cfg.ProactiveAudio {
 		t.Errorf("expected ProactiveAudio true when enabled, got %+v", cfg)
 	}
@@ -523,7 +523,7 @@ func TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject(t *testing.T) 
 
 // TestThinkingConfig_BoundsThinkingBudget verifies the Live config sets an explicit, bounded ThinkingBudget instead of leaving it unset. Confirmed via a real session on 2026-08-09: with ThinkingConfig unset, gemini-2.5-flash-native-audio-preview-12-2025 ran multi-minute silent "thought" chains (12 thought parts, zero final replies logged across a 5-minute session) — genuinely relevant reasoning, but never surfaced as an actual spoken answer. ThinkingBudget=0 (Pipecat's low-latency voice preset) was considered and rejected: the observed thinking content was real synthesis the user explicitly wants (e.g. connecting a paper's argument to their own work), so the fix is a bound, not a kill switch.
 func TestThinkingConfig_BoundsThinkingBudget(t *testing.T) {
-	cfg := thinkingConfig()
+	cfg := thinkingConfigFor("gemini-2.5-flash-native-audio-preview-12-2025")
 
 	if cfg == nil || cfg.ThinkingBudget == nil {
 		t.Fatalf("expected an explicit ThinkingBudget to be set, got %+v", cfg)
@@ -1421,5 +1421,41 @@ func TestTurnContext_FlattensRecallsToOneLineEach(t *testing.T) {
 func TestTurnContext_NoBlockWithoutRecalls(t *testing.T) {
 	if out := turnContext(time.Now(), nil); strings.Contains(out, "memory") {
 		t.Errorf("emitted a memory block with no memory:\n%s", out)
+	}
+}
+
+// The Gemini 3 Live models take a thinking level, not a token budget; sending the budget field to them is a config the server rejects. The 2.5 model is the other way round.
+func TestThinkingConfigFor_ByGeneration(t *testing.T) {
+	cfg := thinkingConfigFor("gemini-3.1-flash-live-preview")
+	if cfg == nil || cfg.ThinkingLevel == "" || cfg.ThinkingBudget != nil {
+		t.Errorf("3.x live model wants a ThinkingLevel and no budget, got %+v", cfg)
+	}
+	cfg = thinkingConfigFor("gemini-2.5-flash-native-audio-preview-12-2025")
+	if cfg == nil || cfg.ThinkingBudget == nil || cfg.ThinkingLevel != "" {
+		t.Errorf("2.5 live model wants a ThinkingBudget and no level, got %+v", cfg)
+	}
+}
+
+// Proactive audio is not supported on the 3.x Live models as of 2026-09-02, so it must stay off the wire there even when the config file asks for it.
+func TestProactivityConfigFor_Live3StaysOff(t *testing.T) {
+	if cfg := proactivityConfigFor("gemini-3.1-flash-live-preview", true); cfg != nil {
+		t.Errorf("expected nil proactivity config for a 3.x live model, got %+v", cfg)
+	}
+	if cfg := proactivityConfigFor("gemini-2.5-flash-native-audio-preview-12-2025", true); cfg == nil {
+		t.Error("expected proactivity config for the 2.5 live model when enabled")
+	}
+}
+
+// A transcript that is only a bracketed marker — "<noise>", "[laughter]", "(music)" — is the server describing sound, not the user saying anything. On 2026-09-02 00:07 a bare "<noise>" reached the model and set off two memory lookups nobody asked for.
+func TestIsNonSpeechTranscript(t *testing.T) {
+	for _, s := range []string{"<noise>", "[noise]", "(laughs)", " <noise> [music] ", ""} {
+		if !isNonSpeechTranscript(s) {
+			t.Errorf("%q should count as non-speech", s)
+		}
+	}
+	for _, s := range []string{"what did I do <noise> yesterday", "hello", "[me] said hi"} {
+		if isNonSpeechTranscript(s) {
+			t.Errorf("%q is speech and must not be dropped", s)
+		}
 	}
 }
