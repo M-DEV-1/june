@@ -540,3 +540,16 @@ func TestScheduler_Brief_DoesNotAskAboutSomebodyElsesItem(t *testing.T) {
 		t.Error("the item vanished from the brief entirely; the user should still know they are waiting on it")
 	}
 }
+
+// GNOME cuts a notification body off after a few lines, so a morning brief or a meeting prep that runs long was never readable in full. A long body gets a button that opens the whole text; a short one stays a plain notification.
+func TestNotifyArgs_LongBodyGetsReadAction(t *testing.T) {
+	long := strings.Repeat("a sentence about the day. ", 20)
+	args := notifyArgs("x-office-calendar", "Morning brief", long)
+	if !strings.Contains(strings.Join(args, " "), "--action="+readAction+"=") {
+		t.Errorf("long body should carry the read-in-full action, got %v", args)
+	}
+	args = notifyArgs("x-office-calendar", "Recording meeting", "Ora is recording.")
+	if strings.Contains(strings.Join(args, " "), "--action=") {
+		t.Errorf("short body should stay a plain notification, got %v", args)
+	}
+}
