@@ -133,6 +133,16 @@ func (c *MeetingCapture) open(w io.Writer, name string, extra ...pulse.RecordOpt
 const sampleRate16k = 16000
 
 // Stop halts both streams and closes the PulseAudio connection. Safe to call once; the caller closes the writers afterwards.
+// Dropped reports whether either record stream has stopped running or errored while the capture is still meant to be live — the server closed it, or the device it was on went away. Input: none. Output: true when a stream is gone.
+func (c *MeetingCapture) Dropped() bool {
+	for _, s := range c.streams {
+		if s.Closed() || s.Error() != nil || !s.Running() {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *MeetingCapture) Stop() {
 	for _, s := range c.streams {
 		s.Stop()
