@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"ora/internal/db"
 	"ora/internal/memory"
@@ -2527,5 +2528,27 @@ func TestStore_BackfillThreadEdges_RebuildsFromSummaryNodes(t *testing.T) {
 	}
 	if len(eps) != 1 || eps[0].ID != inFlush {
 		t.Fatalf("got %+v, want the episode captured before that flush", eps)
+	}
+}
+
+// The tally table gained prompt_chars and reply_chars on 2026-09-01 in the create statement only, so a database created before that day failed every bump with "no column named prompt_chars". Opening such a database must add the columns.
+func TestCreateSchema_TallyCharColumnsMigrated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := old.Exec(`CREATE TABLE tally (day TEXT NOT NULL, provider TEXT NOT NULL, calls INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, total_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, provider))`); err != nil {
+		t.Fatalf("create old tally: %v", err)
+	}
+	old.Close()
+
+	store, err := db.New(path)
+	if err != nil {
+		t.Fatalf("New over an old tally table: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.DB().Exec(`INSERT INTO tally (day, provider, calls, failures, total_ms, prompt_chars, reply_chars) VALUES ('2026-09-02', 'gemini', 1, 0, 5, 10, 20)`); err != nil {
+		t.Errorf("tally still lacks its character columns after open: %v", err)
 	}
 }
