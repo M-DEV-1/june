@@ -28,3 +28,6 @@ func screenLayout() ([]image.Rectangle, image.Point) {
 func extractMeetingWindow() (app, title, text string, ok bool) {
 	return "", "", "", false
 }
+
+// WindowTitleFor has no window reader on this platform and always reports nothing, which callers treat the same as a desktop with no window open for that application.
+func WindowTitleFor(ctx context.Context, app string) string { return "" }
