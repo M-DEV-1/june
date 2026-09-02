@@ -1,0 +1,363 @@
+package db
+
+import (
+	"context"
+	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	"log/slog"
+	"ora/internal/memory"
+	"ora/internal/obs"
+	"strings"
+	"time"
+)
+
+// Note is a stable, user-stated fact. Always-on in implicit context.
+type Note struct {
+	ID        int64
+	Content   string
+	Kind      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// normalizeNoteContent trims, collapses internal whitespace to single spaces, and lowercases — used by LogNote's dedup check to catch paraphrased restatements.
+// Does not strip punctuation, so "user likes go" and "user likes go." still stay distinct rows.
+func normalizeNoteContent(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// LogNote inserts a note. Idempotent on (content, kind) — returns existing id.
+// Also dedupes paraphrased restatements: existing notes of the same kind are compared via normalizeNoteContent, so "User likes Go" and "user likes go" collapse to one row without needing a semantic/embedding index.
+// Storage keeps the original casing/whitespace though — the first-ever version of a fact wins and is what every later paraphrase resolves back to (GetNotes/ExistingNotes/RetrieveRelevant all depend on this original casing surviving).
+//
+// The exact-match (content, kind) unique index still backs the INSERT OR IGNORE path below for byte-identical restatements and is what actually guards concurrent identical inserts — the normalized-comparison scan above is an application-level, non-atomic check and doesn't itself prevent a race between two differently-cased paraphrases.
+func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.LogNote")
+	defer span.End()
+
+	if kind == "" {
+		kind = "fact"
+	}
+
+	normalized := normalizeNoteContent(content)
+	if id, found, err := s.findNoteByNormalizedContent(ctx, normalized, kind); err != nil {
+		span.RecordError(err)
+		return 0, err
+	} else if found {
+		span.SetAttributes(attribute.Int64("db.note_id", id))
+		return id, nil
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO notes (content, kind) VALUES (?, ?)`,
+		content, kind); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("insert note: %w", err)
+	}
+
+	var id int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM notes WHERE content = ? AND kind = ?`,
+		content, kind).Scan(&id); err != nil {
+		span.RecordError(err)
+		return 0, fmt.Errorf("read note id: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.note_id", id))
+
+	// Async, best-effort embedding — same non-blocking pattern as LogEpisode (own context; see its doc comment for why). notes.domain doesn't exist as a column, so metadata just omits the "domain" key rather than sending it empty.
+	s.mu.RLock()
+	emb, vidx := s.embedder, s.vectorIndex
+	s.mu.RUnlock()
+	if emb != nil && vidx != nil && strings.TrimSpace(content) != "" {
+		go func(id int64, text string) {
+			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			vec, err := emb.Embed(embedCtx, "RETRIEVAL_DOCUMENT", text)
+			if err != nil {
+				slog.Error("async note embed failed", "note_id", id, "error", err)
+				return
+			}
+			meta := map[string]string{
+				"source":     "note",
+				"kind":       string(memory.KindFact),
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := vidx.Add(embedCtx, fmt.Sprintf("note:%d", id), text, vec, meta); err != nil {
+				slog.Error("async note vector index add failed", "note_id", id, "error", err)
+			}
+		}(id, content)
+	}
+	return id, nil
+}
+
+// findNoteByNormalizedContent scans existing notes of kind for one whose content normalizes to the same value as normalized. Used by LogNote to catch paraphrased restatements that the exact-match (content, kind) unique index would not.
+func (s *Store) findNoteByNormalizedContent(ctx context.Context, normalized, kind string) (int64, bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content FROM notes WHERE kind = ?`, kind)
+	if err != nil {
+		return 0, false, fmt.Errorf("scan existing notes for dedup: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var existingContent string
+		if err := rows.Scan(&id, &existingContent); err != nil {
+			return 0, false, fmt.Errorf("scan existing note row: %w", err)
+		}
+		if normalizeNoteContent(existingContent) == normalized {
+			return id, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, fmt.Errorf("iterate existing notes: %w", err)
+	}
+	return 0, false, nil
+}
+
+// GetNotes returns all notes ordered newest first.
+func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.GetNotes")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, kind, created_at, updated_at FROM notes ORDER BY id DESC`)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query notes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Note
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Content, &n.Kind, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan note: %w", err)
+		}
+		out = append(out, n)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
+}
+
+// RelevantNotes returns up to limit note contents relevant to focus, instead of the full notes table — same relevance-gated shape RetrieveRelevant/GetImplicitContext already use, applied to the plain fact strings DeriveState expects (no "[note]" prefix). An empty focus returns nil directly, same reasoning as RetrieveRelevant.
+func (s *Store) RelevantNotes(ctx context.Context, focus string, limit int) ([]string, error) {
+	focus = strings.TrimSpace(focus)
+	if focus == "" {
+		return nil, nil
+	}
+	hits, err := s.SearchMemory(ctx, focus)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, h := range hits {
+		if h.Source != "note" {
+			continue
+		}
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		out = append(out, h.Content)
+	}
+	return out, nil
+}
+
+// DeleteNote removes a note by id. FTS5 mirror is dropped via trigger. Its vector (if any) is deleted async/best-effort — same non-blocking pattern as LogNote's embed goroutine — so a vector-index error never fails the SQL delete the model is waiting on.
+func (s *Store) DeleteNote(ctx context.Context, id int64) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.DeleteNote")
+	defer span.End()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM notes WHERE id = ?`, id)
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+
+	s.mu.RLock()
+	vidx := s.vectorIndex
+	s.mu.RUnlock()
+	if vidx != nil {
+		go func(id int64) {
+			delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := vidx.Delete(delCtx, fmt.Sprintf("note:%d", id)); err != nil {
+				slog.Error("async note vector delete failed", "note_id", id, "error", err)
+			}
+		}(id)
+	}
+	return nil
+}
+
+// UpdateNote overwrites the content of an existing note. FTS5 mirror is kept in sync via the notes_au trigger, and updated_at is refreshed atomically. The stale vector is deleted and the corrected content re-embedded async/best-effort, same non-blocking pattern as LogNote — a vector-index error never fails the SQL update.
+func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.UpdateNote")
+	defer span.End()
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE notes SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		content, id)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("update note: %w", err)
+	}
+	span.SetAttributes(attribute.Int64("db.note_id", id))
+
+	// A no-op UPDATE is not success: the model can hand us an id it invented, and reporting "updated" throws the user's correction away. Returning before the vector work below also stops the "note:<id>" Delete from firing on an id that may belong to some other real note.
+	if n, rerr := res.RowsAffected(); rerr != nil {
+		span.RecordError(rerr)
+		return fmt.Errorf("update note: %w", rerr)
+	} else if n == 0 {
+		err := fmt.Errorf("no note with id %d", id)
+		span.RecordError(err)
+		return err
+	}
+
+	s.mu.RLock()
+	emb, vidx := s.embedder, s.vectorIndex
+	s.mu.RUnlock()
+	if vidx != nil {
+		go func(id int64, text string) {
+			vecCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			vecID := fmt.Sprintf("note:%d", id)
+			if err := vidx.Delete(vecCtx, vecID); err != nil {
+				slog.Error("async note vector delete (pre-update) failed", "note_id", id, "error", err)
+			}
+			if emb == nil || strings.TrimSpace(text) == "" {
+				return
+			}
+			vec, err := emb.Embed(vecCtx, "RETRIEVAL_DOCUMENT", text)
+			if err != nil {
+				slog.Error("async note re-embed failed", "note_id", id, "error", err)
+				return
+			}
+			meta := map[string]string{
+				"source":     "note",
+				"kind":       string(memory.KindFact),
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := vidx.Add(vecCtx, vecID, text, vec, meta); err != nil {
+				slog.Error("async note vector re-add failed", "note_id", id, "error", err)
+			}
+		}(id, content)
+	}
+	return nil
+}
+
+// NoteRef is a note's id paired with its content, which is all the consolidation pass needs to reconcile against. Alias of the memory type for the reason given on db.Thread.
+type NoteRef = memory.NoteRef
+
+// ExistingNotes returns id+content for every stored note of kind "fact". Used by the memory compiler to feed the reconciliation LLM call and by note consolidation to feed the curation call.
+// Both of those calls hand the notes to a model whose job is to merge and drop entries, and both write the result back through ReplaceAllNotes, so only the kind they are allowed to rewrite is shown to them. Other kinds — meeting minutes above all, which are the only record of what was said in a call — are never offered up for curation.
+func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.ExistingNotes")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content FROM notes WHERE kind = 'fact' ORDER BY id ASC`)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query existing notes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []memory.NoteRef
+	for rows.Next() {
+		var n memory.NoteRef
+		if err := rows.Scan(&n.ID, &n.Content); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan note ref: %w", err)
+		}
+		out = append(out, n)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
+}
+
+// ReplaceAllNotes atomically swaps every note of kind "fact" for a curated set, used by periodic note consolidation. The new notes are written as kind "fact" too; FTS5 mirror stays in sync via the per-row notes_ad / notes_ai triggers.
+// Notes of any other kind are left exactly as they are, rows and vectors both: meeting minutes live in this table under kind "meeting" and are the only record of what was said in a call, so consolidation must not be able to reach them.
+// The caller must guarantee contents is non-empty — an empty swap would wipe the facts — but we defend against it here too.
+func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.ReplaceAllNotes")
+	defer span.End()
+
+	if len(contents) == 0 {
+		return fmt.Errorf("replace all notes: refusing to wipe table with empty set")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck — no-op after a successful Commit
+
+	// Selected before the DELETE below so the old ids' vectors can be cleaned up — ReplaceAllNotes renumbers the facts it replaces (new AUTOINCREMENT ids on re-insert), so every replaced note's vector would otherwise become a permanent orphan. The kind filter matches the DELETE exactly: a vector is only deleted when its row is.
+	var oldIDs []int64
+	idRows, err := tx.QueryContext(ctx, `SELECT id FROM notes WHERE kind = 'fact'`)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: select old ids: %w", err)
+	}
+	for idRows.Next() {
+		var id int64
+		if err := idRows.Scan(&id); err != nil {
+			idRows.Close()
+			span.RecordError(err)
+			return fmt.Errorf("replace notes: scan old id: %w", err)
+		}
+		oldIDs = append(oldIDs, id)
+	}
+	idRows.Close()
+	if err := idRows.Err(); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: iterate old ids: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM notes WHERE kind = 'fact'`); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: clear: %w", err)
+	}
+
+	for _, c := range contents {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO notes (content, kind) VALUES (?, 'fact')`, c); err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("replace notes: insert: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: commit: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(contents)))
+
+	s.mu.RLock()
+	vidx := s.vectorIndex
+	s.mu.RUnlock()
+	if vidx != nil && len(oldIDs) > 0 {
+		go func(ids []int64) {
+			delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			for _, id := range ids {
+				if err := vidx.Delete(delCtx, fmt.Sprintf("note:%d", id)); err != nil {
+					slog.Error("async note vector delete (replace-all) failed", "note_id", id, "error", err)
+				}
+			}
+		}(oldIDs)
+	}
+	return nil
+}

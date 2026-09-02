@@ -6,8 +6,6 @@ import (
 	_ "embed"
 	"log/slog"
 	"net"
-	"net/http"
-	"os"
 
 	"context"
 
@@ -51,14 +49,14 @@ func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
 						mStatus.SetTitle("🟢 Ora is tracking")
 						mPause.SetTitle("Pause Tracking")
 						mPause.SetTooltip("Pause workspace activity tracking")
-						go http.Get("http://127.0.0.1:" + DaemonPort + "/resume") //nolint:errcheck
+						go authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/resume")
 						slog.Info("tracking resumed via tray")
 					} else {
 						paused = true
 						mStatus.SetTitle("🟡 Tracking is paused")
 						mPause.SetTitle("Resume Tracking")
 						mPause.SetTooltip("Resume workspace activity tracking")
-						go http.Get("http://127.0.0.1:" + DaemonPort + "/pause") //nolint:errcheck
+						go authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/pause")
 						slog.Info("tracking paused via tray")
 					}
 				case <-mQuit.ClickedCh:

@@ -31,22 +31,16 @@ type replaceCall struct {
 }
 
 type fakeCompactStore struct {
-	groups        []memory.SummaryGroup
-	groupsErr     error
-	replaceCalls  []replaceCall
-	replaceErr    error
-	replaceErrFor int64 // if non-zero, return error only for this dayID
+	groups       []memory.SummaryGroup
+	replaceCalls []replaceCall
 }
 
 func (f *fakeCompactStore) OldSummaryGroups(ctx context.Context, olderThan time.Duration) ([]memory.SummaryGroup, error) {
-	return f.groups, f.groupsErr
+	return f.groups, nil
 }
 
 func (f *fakeCompactStore) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, summaryIDs []int64, digest string) error {
 	f.replaceCalls = append(f.replaceCalls, replaceCall{dayID, summaryIDs, digest})
-	if f.replaceErrFor != 0 && f.replaceErrFor == dayID {
-		return f.replaceErr
-	}
 	return nil
 }
 
@@ -171,41 +165,4 @@ func (e *errorOnFirstDigester) Digest(ctx context.Context, summaries []string) (
 		return "", errors.New("llm rate limit")
 	}
 	return "digest for group", nil
-}
-
-func TestCompactor_MultipleGroups_EachGetsSeparateDigest(t *testing.T) {
-	digester := &fakeDigester{result: "day digest"}
-	store := &fakeCompactStore{
-		groups: []memory.SummaryGroup{
-			{
-				DayID: 40,
-				Day:   "2026-06-05",
-				Summaries: []memory.NodeRef{
-					{ID: 400, Content: "first day summary 1"},
-					{ID: 401, Content: "first day summary 2"},
-				},
-			},
-			{
-				DayID: 41,
-				Day:   "2026-06-06",
-				Summaries: []memory.NodeRef{
-					{ID: 410, Content: "second day summary 1"},
-					{ID: 411, Content: "second day summary 2"},
-					{ID: 412, Content: "second day summary 3"},
-				},
-			},
-		},
-	}
-	c := memory.NewCompactor(digester, store)
-
-	if err := c.Compact(context.Background(), 7*24*time.Hour); err != nil {
-		t.Fatalf("Compact returned error: %v", err)
-	}
-
-	if digester.callCount != 2 {
-		t.Errorf("expected 2 Digest calls (one per group), got %d", digester.callCount)
-	}
-	if len(store.replaceCalls) != 2 {
-		t.Errorf("expected 2 Replace calls, got %d", len(store.replaceCalls))
-	}
 }

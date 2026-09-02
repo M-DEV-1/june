@@ -5,12 +5,16 @@ package tracker
 import (
 	"context"
 	"fmt"
+	"image"
 	"log/slog"
 	"os"
 	"strings"
 	"sync/atomic"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/jezek/xgb"
+	"github.com/jezek/xgb/randr"
+	"github.com/jezek/xgb/xproto"
 )
 
 var screenshotSeq atomic.Uint64
@@ -26,6 +30,62 @@ const (
 
 // screenshotApps are the app-ids a stored screenshot decision can land under for us: "" because we run unsandboxed, plus our own name as a defensive fallback.
 var screenshotApps = []string{"", "ora"}
+
+// gnome-shell's own screenshot API, which takes a flash flag the xdg-desktop-portal API does not expose. The portal on GNOME just calls this method with flash=true, which is where the full-screen white flash on every vision capture comes from.
+// gnome-shell only accepts this call from a short list of well-known bus names (settings-daemon media keys, the GNOME and GTK portal backends, and org.gnome.Screenshot). org.gnome.Screenshot is the one we can claim: it belongs to the standalone gnome-screenshot tool, which is not installed on a default GNOME 46 desktop.
+// Tradeoff: while ORA runs, gnome-screenshot would fail to take the name and refuse to start. We ask with DoNotQueue so we never steal it from a running instance, and fall back to the portal if it is already owned.
+const (
+	shellScreenshotName   = "org.gnome.Screenshot"
+	shellScreenshotPath   = "/org/gnome/Shell/Screenshot"
+	shellScreenshotMethod = "org.gnome.Shell.Screenshot.Screenshot"
+)
+
+// screenshotShell captures the whole screen straight through gnome-shell and returns the PNG bytes. No flash, no shutter animation, no consent dialog.
+// Returns an error on any non-GNOME desktop, or when org.gnome.Screenshot is already owned — callers fall back to the portal.
+func screenshotShell(ctx context.Context) ([]byte, error) {
+	conn, err := dbus.SessionBus()
+	if err != nil {
+		return nil, fmt.Errorf("session bus: %w", err)
+	}
+
+	// Idempotent and cheap: a name we already hold comes back as AlreadyOwner, so this re-arms itself if the shared bus connection was ever replaced.
+	reply, err := conn.RequestName(shellScreenshotName, dbus.NameFlagDoNotQueue)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", shellScreenshotName, err)
+	}
+	if reply != dbus.RequestNameReplyPrimaryOwner && reply != dbus.RequestNameReplyAlreadyOwner {
+		return nil, fmt.Errorf("%s unavailable (reply %d)", shellScreenshotName, reply)
+	}
+
+	// gnome-shell writes the PNG itself, so we only need a unique path it can create.
+	f, err := os.CreateTemp("", "ora-shot-*.png")
+	if err != nil {
+		return nil, fmt.Errorf("temp file: %w", err)
+	}
+	path := f.Name()
+	f.Close()             //nolint:errcheck
+	defer os.Remove(path) //nolint:errcheck — best-effort cleanup
+
+	// Signature is (include_cursor, flash, filename) -> (success, filename_used). flash=false is the whole point of this path.
+	var ok bool
+	var used string
+	if err := conn.Object("org.gnome.Shell", shellScreenshotPath).
+		CallWithContext(ctx, shellScreenshotMethod, 0, false, false, path).Store(&ok, &used); err != nil {
+		return nil, fmt.Errorf("shell screenshot: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("shell screenshot reported failure")
+	}
+
+	data, err := os.ReadFile(used)
+	if err != nil {
+		return nil, fmt.Errorf("read screenshot %q: %w", used, err)
+	}
+	if used != path {
+		os.Remove(used) //nolint:errcheck
+	}
+	return data, nil
+}
 
 // screenshotGranted reports whether the stored permissions already allow screenshots, so warm-up can skip prompting. Portal stores ["yes"] for allow.
 func screenshotGranted(perms map[string][]string) bool {
@@ -54,6 +114,12 @@ func screenshotDenied(perms map[string][]string) bool {
 // WarmUpScreenshotPermission triggers the screenshot consent dialog at daemon startup, so the user grants permission up front instead of the first vision capture silently failing later.
 // No-op if already granted; a stale deny is cleared first so the portal prompts again instead of auto-rejecting. Blocks on the dialog, so callers run it in a goroutine.
 func WarmUpScreenshotPermission(ctx context.Context) {
+	// The gnome-shell path asks no permission of anyone, so if it works there is nothing to warm up and popping the portal dialog would be pointless.
+	if _, err := screenshotShell(ctx); err == nil {
+		slog.Info("vision warm-up: gnome-shell screenshot available, no consent needed")
+		return
+	}
+
 	conn, err := dbus.SessionBus()
 	if err != nil {
 		slog.Warn("vision warm-up: session bus unavailable", "error", err)
@@ -83,8 +149,45 @@ func WarmUpScreenshotPermission(ctx context.Context) {
 	slog.Info("vision warm-up: screenshot permission granted")
 }
 
+// screenLayout reports the monitor rectangles making up the desktop canvas, plus the pointer position, in the same coordinate space as a whole-screen screenshot. It reads them from the X RandR extension, which under Wayland answers through XWayland — mutter keeps that in step with the real monitor layout.
+// Returns (nil, (-1,-1)) when X or RandR is unreachable (headless, or a compositor with no XWayland), which leaves stored frames whole-canvas.
+func screenLayout() ([]image.Rectangle, image.Point) {
+	unknown := image.Pt(-1, -1)
+	conn, err := xgb.NewConn()
+	if err != nil {
+		return nil, unknown
+	}
+	defer conn.Close()
+	if err := randr.Init(conn); err != nil {
+		return nil, unknown
+	}
+
+	root := xproto.Setup(conn).DefaultScreen(conn).Root
+	reply, err := randr.GetMonitors(conn, root, true).Reply()
+	if err != nil {
+		return nil, unknown
+	}
+	mons := make([]image.Rectangle, 0, len(reply.Monitors))
+	for _, m := range reply.Monitors {
+		mons = append(mons, image.Rect(int(m.X), int(m.Y), int(m.X)+int(m.Width), int(m.Y)+int(m.Height)))
+	}
+
+	// ponytail: the pointer stands in for the focused window, whose position no Wayland API will give us — gnome-shell refuses Introspect.GetWindows to unlisted app-ids, and AT-SPI reports no screen coordinates for Wayland clients. This picks the wrong primary monitor only when the pointer rests on a different screen than the keyboard focus, and every monitor is captured either way. Upgrade path: read the focused window's rectangle if a compositor ever exposes it.
+	pointer := unknown
+	if p, err := xproto.QueryPointer(conn, root).Reply(); err == nil {
+		pointer = image.Pt(int(p.RootX), int(p.RootY))
+	}
+	return mons, pointer
+}
+
 // grabScreen returns a PNG of the current screen for the vision tier.
+// Prefers gnome-shell's direct API because it captures silently and invisibly; falls back to the portal on other compositors, which flashes on GNOME but at least works everywhere.
 func grabScreen(ctx context.Context) ([]byte, error) {
+	png, err := screenshotShell(ctx)
+	if err == nil {
+		return png, nil
+	}
+	slog.Debug("vision: gnome-shell screenshot unavailable, falling back to portal", "error", err)
 	return screenshotPortal(ctx)
 }
 

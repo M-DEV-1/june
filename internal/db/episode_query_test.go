@@ -59,11 +59,7 @@ func TestWriteEpisode_StoresStructureAndJPEG(t *testing.T) {
 }
 
 func TestListEpisodes_FiltersAppAndRecency(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := memStore(t)
 	ctx := context.Background()
 
 	if _, err := store.LogEpisode(ctx, "Slack", "ora", "thread about retrieval"); err != nil {

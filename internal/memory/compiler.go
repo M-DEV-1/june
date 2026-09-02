@@ -147,6 +147,16 @@ Be deterministic. Do not invent facts. Merge wording when updating.`,
 	return ops, nil
 }
 
+// attributionRules is the rule block of the attribution prompt. "summary" is the line that ends up in memory as the record of a slice of the day, so it is told to name the activity rather than the application it happened in; "state" is held to the same voice for the same reason.
+const attributionRules = `Rules:
+- Reuse a thread id when the activity continues that throughline; use 0 only for a new one.
+- Emit MULTIPLE threads for concurrent activities. NEVER collapse entertainment into work or vice-versa.
+- "state" is the SPECIFIC position within the thread, from the screen: the scene of a show, the section of an article, the feature being worked on. Name the thing, not the app; no counts or times.
+- "summary" is what the user did here, in plain words: the activity itself, never the app or site it happened in.
+- "subject" is what the user would call this to a friend: short, stable, plain-spoken; no title case, ampersands, app or file names, or report labels.
+- "novel" is true only if this throughline appears genuinely new.
+- "identity" holds ONLY durable facts about the PERSON (identity, lasting preferences, skills, relationships). Projects and shows are threads, NOT identity. Usually empty.`
+
 // AttributeThreads maps recent screen activity onto ongoing threads, one update per concurrent throughline (so watching + coding never collapse into one thread) with the SPECIFIC state within each, plus any durable PERSON facts as identity.
 func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error) {
 	tracer := obs.GetTracer(ctx, "ora.memory")
@@ -171,13 +181,7 @@ func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tr
 
 You are given EXISTING THREADS (id, kind, subject :: current state) and RECENT ACTIVITIES (app, window title, and any screen text/description).
 
-Rules:
-- Reuse an existing thread id when the activity continues that throughline; use 0 only for a genuinely new one.
-- Emit MULTIPLE threads when concurrent activities are present. NEVER collapse entertainment into a work thread or vice-versa.
-- "state" is the whole point: capture the SPECIFIC position within the thread from screen content — the exact scene/plot point of a show, the chapter/section of an article, the file or feature being worked on. Not just the app.
-- Keep "subject" short and stable so the same thread is recognized over time ("Suits", not "watching Suits season 1 episode 10").
-- "novel" is true only if this throughline appears genuinely new to the user.
-- "identity" holds ONLY durable facts about the PERSON (identity, lasting preferences, skills, relationships). Ongoing projects and shows are threads, NOT identity. Usually an empty array.
+%s
 
 EXISTING THREADS:
 %s
@@ -187,6 +191,7 @@ RECENT ACTIVITIES:
 
 Respond strictly as JSON:
 {"threads":[{"id":0,"subject":"","kind":"work|project|entertainment|learning|routine|person","state":"","summary":"","novel":false}],"identity":[]}`,
+		attributionRules,
 		strings.Join(existingLines, "\n"),
 		strings.Join(activityList, "\n"))
 
@@ -265,6 +270,8 @@ type Storage interface {
 	UpsertThread(ctx context.Context, u ThreadUpdate) (int64, error)
 	// ThreadsForAttribution returns recent threads to seed the attribution call.
 	ThreadsForAttribution(ctx context.Context, limit int) ([]Thread, error)
+	// LinkEpisodesToThread records which captures a thread was attributed from. The attribution happens here on every flush and, until this existed, was discarded every time — leaving a store where a thread could say "reviewed the code, eleven findings" and nothing could reach the screens the findings were on.
+	LinkEpisodesToThread(ctx context.Context, threadID int64, since, until time.Time) error
 }
 
 const wordFlushLimit = 1500
@@ -322,6 +329,7 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 	// snapshot-and-reset happens under the lock; processFlush runs after, on the local copy, without holding c.mu — so slow LLM/store calls never block concurrent Ingest/GetCurrentBuffer/ForceFlush.
 	c.mu.Lock()
 	var flushedBuf []tracker.Activity
+	var flushedSince, flushedUntil time.Time
 	if len(c.buffer) > 0 {
 		last := c.buffer[len(c.buffer)-1]
 		appChanged := last.App != act.App
@@ -329,7 +337,7 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 		hourElapsed := time.Since(c.lastFlush) >= time.Hour
 
 		if appChanged || wordLimitHit || hourElapsed {
-			flushedBuf = c.resetBufferLocked()
+			flushedBuf, flushedSince, flushedUntil = c.resetBufferLocked()
 		}
 	}
 
@@ -338,17 +346,19 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 	c.mu.Unlock()
 
 	if flushedBuf != nil {
-		c.processFlush(ctx, flushedBuf)
+		c.processFlush(ctx, flushedBuf, flushedSince, flushedUntil)
 	}
 }
 
 // resetBufferLocked hands the current buffer to the caller and resets the compiler's buffered state. Caller must hold c.mu.
-func (c *Compiler) resetBufferLocked() []tracker.Activity {
+// It also returns the stretch of screen time this buffer covers: from the previous flush's timestamp to this one. Both ends are taken here rather than later because processFlush runs an attribution LLM call before it links anything, and reading the end after that call would sweep in every episode captured while the model was thinking — at a two-second capture poll, a thirty-second call is fifteen unrelated screens attached to the thread.
+func (c *Compiler) resetBufferLocked() ([]tracker.Activity, time.Time, time.Time) {
 	buf := c.buffer
+	since := c.lastFlush
 	c.buffer = make([]tracker.Activity, 0)
 	c.wordCount = 0
 	c.lastFlush = time.Now()
-	return buf
+	return buf, since, c.lastFlush
 }
 
 // CountWords counts whitespace-separated tokens in s.
@@ -374,7 +384,7 @@ func CountWords(s string) int {
 const fallbackSummaryMaxRunes = 2000
 
 // processFlush does the slow LLM/store work for a flushed buffer. Operates only on the local buf snapshot — never touches c.buffer/c.wordCount/c.lastFlush, which are already reset by resetBufferLocked. Never called while holding c.mu.
-func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
+func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, since, until time.Time) {
 	if len(buf) == 0 {
 		return
 	}
@@ -420,8 +430,12 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity) {
 	} else {
 		// one update per concurrent thread: refresh its state and log an episodic summary node so history, FTS, and compaction keep working unchanged.
 		for _, u := range attr.Threads {
-			if _, err := c.store.UpsertThread(ctx, u); err != nil {
+			id, err := c.store.UpsertThread(ctx, u)
+			if err != nil {
 				slog.Error("flush: UpsertThread failed", "subject", u.Subject, "err", err)
+			} else if err := c.store.LinkEpisodesToThread(ctx, id, since, until); err != nil {
+				// Best-effort: the thread and its summary are the record, and losing the edge costs the ability to walk from one to its evidence, not the memory itself.
+				slog.Warn("flush: could not link this buffer's episodes to the thread", "subject", u.Subject, "err", err)
 			}
 			if err := c.store.LogSemanticNode(ctx, TaskSummary{SameTask: u.ID != 0, TaskName: u.Subject, Summary: u.Summary}); err != nil {
 				slog.Error("flush: LogSemanticNode failed", "subject", u.Subject, "err", err)
@@ -475,10 +489,10 @@ func (c *Compiler) ForceFlush(ctx context.Context) {
 		c.mu.Unlock()
 		return
 	}
-	buf := c.resetBufferLocked()
+	buf, since, until := c.resetBufferLocked()
 	c.mu.Unlock()
 
-	c.processFlush(ctx, buf)
+	c.processFlush(ctx, buf, since, until)
 }
 
 // GetCurrentBuffer returns a copy so callers (the /buffer HTTP handler, Agent.Connect) never read a slice that Ingest/flush might be mutating concurrently.

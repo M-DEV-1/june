@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"ora/internal/agent"
@@ -14,7 +15,7 @@ import (
 	"ora/internal/ui"
 )
 
-func runClient(ctx context.Context, shutdownObs func(context.Context) error, daemonStatus string) error {
+func runClient(ctx context.Context, shutdownObs func(context.Context) error, daemonStatus, buildMismatch string) error {
 	slog.Info("Starting Ora Client...")
 
 	// Parallel hardware & DB init
@@ -28,7 +29,7 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 
 	go func() {
 		var err error
-		store, err = db.New("ora-db/db")
+		store, err = db.New(filepath.Join(config.DataDir(), "db"))
 		initErrChan <- err
 	}()
 
@@ -61,11 +62,20 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	}
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
+	appConfig := config.LoadConfig()
+
+	// Wire the client's own store for hybrid search: an embedder built locally (same recipe the daemon uses) plus a vector index reached over the daemon's /vector/* IPC instead of opening chromem directly — chromem must stay exclusive to the daemon process. Without this the client-side store (which is what the live agent's query_memory/RetrieveRelevant/GetImplicitContext actually run against) was lexical-only in production, and client-side note saves never got embedded at all. HybridSearch already degrades to lexical-only if the daemon is unreachable (see internal/db/hybrid.go).
+	// The client never builds an embedder of its own: the daemon owns the llama-server child process and its port, so embeds go over the same IPC the vector index already uses. If the daemon has no embedding engine, /embed answers 503 and HybridSearch degrades to lexical-only.
+	store.SetEmbedder(&embedderAdapter{inner: newHTTPEmbedder()})
+	store.SetVectorIndex(newHTTPVectorIndex())
+	// The client runs its own HybridSearch against the daemon's index, so it needs the same embedder-matched cosine floor the daemon uses.
+	store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
 
 	orchestrator := agent.NewAgent(mic, speaker, store, nil, apiKey)
+	// The client process has no in-process compiler (that only exists in the daemon), so the handshake's "[working]" current-activity context was always dead here — wire it over the daemon's /buffer IPC instead (F2).
+	orchestrator.SetBufferProvider(newBufferProvider().Get)
 	orchestrator.SetModel(config.VoiceModel)
 
-	appConfig := config.LoadConfig()
 	orchestrator.SetVoice(appConfig.Voice)
 
 	// Reconnect loop: if the Gemini session drops (idle timeout, network blip, session limit), restart automatically.
@@ -78,7 +88,7 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 				}
 				slog.Error("agent session lost, reconnecting in 2s", "error", err)
 				select {
-				case orchestrator.TextResponseChan <- "\n*[connection lost — reconnecting...]*\n":
+				case orchestrator.TextResponseChan <- agent.ResponseChunk{Text: "connection lost — reconnecting…", Sender: agent.SenderSystem}:
 				default:
 				}
 				select {
@@ -93,7 +103,7 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 		}
 	}()
 
-	if err := ui.Run(orchestrator, daemonStatus); err != nil {
+	if err := ui.Run(orchestrator, daemonStatus, buildMismatch); err != nil {
 		return fmt.Errorf("UI Error: %w", err)
 	}
 

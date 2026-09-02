@@ -31,12 +31,15 @@ var subtaskAllowedTools = map[string]bool{
 }
 
 // subtaskTools filters toolDefinitions() (the single source of truth for every tool's schema) down to subtaskAllowedTools, so the subtask model is only ever offered — not just guarded against calling — the safe subset.
+// Each declaration is copied with Behavior cleared: NON_BLOCKING is a Live-session-only field, and generateContent (which runSubtask calls) rejects the entire request with "FunctionDeclaration.behavior only supported by BidiGenerateContent". That 400 is what made every branch() call fail silently.
 func subtaskTools() []*genai.Tool {
 	var decls []*genai.FunctionDeclaration
 	for _, tool := range toolDefinitions() {
 		for _, decl := range tool.FunctionDeclarations {
 			if subtaskAllowedTools[decl.Name] {
-				decls = append(decls, decl)
+				copied := *decl
+				copied.Behavior = ""
+				decls = append(decls, &copied)
 			}
 		}
 	}
@@ -112,7 +115,13 @@ func (a *Agent) runSubtask(ctx context.Context, model subtaskModel, task string)
 			if len(parts) == 0 {
 				return "", fmt.Errorf("subtask: model returned no text and no tool calls (iteration %d)", i)
 			}
-			return parts[0].Text, nil
+			// resp.Text() joins every non-thought text part — a plain parts[0].Text would
+			// return "" whenever thinking puts an empty THOUGHT part first.
+			text := resp.Text()
+			if text == "" {
+				return "", fmt.Errorf("subtask: model returned no usable text and no tool calls (iteration %d)", i)
+			}
+			return text, nil
 		}
 
 		var parts []*genai.Part

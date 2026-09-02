@@ -70,6 +70,50 @@ func TestRunSubtask_ReturnsPlainTextWhenNoToolCallsNeeded(t *testing.T) {
 	}
 }
 
+// TestRunSubtask_SkipsThoughtPartAndReturnsRealAnswer verifies runSubtask does not blindly return parts[0].Text: with thinking enabled, Gemini routinely puts an empty THOUGHT part first, and the real answer in a later part. Returning parts[0].Text here would silently return "" as a successful answer.
+func TestRunSubtask_SkipsThoughtPartAndReturnsRealAnswer(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: genai.NewContentFromParts([]*genai.Part{
+				{Text: "", Thought: true},
+				{Text: "real answer"},
+			}, genai.RoleModel),
+		}},
+	}
+	model := &fakeSubtaskModel{responses: []*genai.GenerateContentResponse{resp}}
+
+	got, err := a.runSubtask(context.Background(), model, "what is the answer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "real answer" {
+		t.Errorf("runSubtask result = %q, want %q", got, "real answer")
+	}
+}
+
+// TestRunSubtask_JoinsMultiPartTextResponse verifies a response split across several non-thought text parts is joined in full, not truncated to the first part.
+func TestRunSubtask_JoinsMultiPartTextResponse(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: genai.NewContentFromParts([]*genai.Part{
+				{Text: "first half. "},
+				{Text: "second half."},
+			}, genai.RoleModel),
+		}},
+	}
+	model := &fakeSubtaskModel{responses: []*genai.GenerateContentResponse{resp}}
+
+	got, err := a.runSubtask(context.Background(), model, "what is the answer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "first half. second half." {
+		t.Errorf("runSubtask result = %q, want %q", got, "first half. second half.")
+	}
+}
+
 // TestRunSubtask_DispatchesFunctionCallThroughExecuteToolAndLoops verifies the core multi-hop behavior: when the model asks for a tool, runSubtask must actually run it (via the same executeTool dispatcher every other tool uses — proven here by asserting the brain's HybridSearch was really called) and feed the result back for a second round trip, rather than stopping or fabricating an answer.
 func TestRunSubtask_DispatchesFunctionCallThroughExecuteToolAndLoops(t *testing.T) {
 	brain := &toolTestBrain{
@@ -294,9 +338,10 @@ func TestToolDefinitions_IncludesBranchWithRequiredTask(t *testing.T) {
 func TestExecuteTool_BranchRequiresTaskArg(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 
+	want := "error: branch needs the question to work on"
 	got := a.executeTool(context.Background(), "branch", map[string]any{})
-	if got != "error: task argument is required" {
-		t.Errorf("executeTool(branch, {}) = %q, want %q", got, "error: task argument is required")
+	if got != want {
+		t.Errorf("executeTool(branch, {}) = %q, want %q", got, want)
 	}
 }
 
@@ -335,27 +380,6 @@ func TestExecuteTool_BranchRejectsCallsPastPerSessionCap(t *testing.T) {
 	}
 	if len(fake.calls) != maxBranchesPerSession {
 		t.Errorf("subtask model invoked %d times, want exactly maxBranchesPerSession (%d) — the capped call must never reach the model", len(fake.calls), maxBranchesPerSession)
-	}
-}
-
-// TestContextReader_FoldMethods_InterfaceConformance is a deliberate compile-time probe (same trick as TestContextReader_HybridSearch_InterfaceConformance in tools_test.go): calling these through the ContextReader INTERFACE type only compiles once agent.go's interface declares SaveFold/UnconsumedFolds/ConsumeFold and toolTestBrain implements them.
-func TestContextReader_FoldMethods_InterfaceConformance(t *testing.T) {
-	var cr ContextReader = &toolTestBrain{}
-
-	id, err := cr.SaveFold(context.Background(), "task", "result")
-	if err != nil {
-		t.Fatalf("SaveFold: %v", err)
-	}
-	if id == 0 {
-		t.Error("SaveFold returned id 0")
-	}
-
-	if _, err := cr.UnconsumedFolds(context.Background()); err != nil {
-		t.Fatalf("UnconsumedFolds: %v", err)
-	}
-
-	if err := cr.ConsumeFold(context.Background(), id); err != nil {
-		t.Fatalf("ConsumeFold: %v", err)
 	}
 }
 
@@ -590,5 +614,26 @@ func TestExecuteTool_BranchSurfacesSubtaskFailureAsErrorString(t *testing.T) {
 	got := a.executeTool(context.Background(), "branch", map[string]any{"task": "catch me up"})
 	if !strings.HasPrefix(got, "error") {
 		t.Errorf("executeTool(branch, ...) = %q, want it to start with %q", got, "error")
+	}
+}
+
+// TestSubtaskTools_StripsBehavior covers why branch() has been silently dead: the declarations it reuses from toolDefinitions() carry Behavior=NON_BLOCKING, which only BidiGenerateContent accepts. generateContent — the API runSubtask actually calls — rejects the whole request with "FunctionDeclaration.behavior only supported by BidiGenerateContent", so every branch call failed before it ran a single search.
+func TestSubtaskTools_StripsBehavior(t *testing.T) {
+	tools := subtaskTools()
+	if len(tools) == 0 || len(tools[0].FunctionDeclarations) == 0 {
+		t.Fatal("expected the subtask tool subset to be non-empty")
+	}
+	for _, decl := range tools[0].FunctionDeclarations {
+		if decl.Behavior != "" {
+			t.Errorf("declaration %q carries Behavior %q, which generateContent rejects", decl.Name, decl.Behavior)
+		}
+	}
+	// The live session's own declarations must keep it — NON_BLOCKING there is what stops a memory lookup from freezing the conversation.
+	for _, tool := range toolDefinitions() {
+		for _, decl := range tool.FunctionDeclarations {
+			if decl.Behavior != genai.BehaviorNonBlocking {
+				t.Errorf("live declaration %q lost its NON_BLOCKING behavior", decl.Name)
+			}
+		}
 	}
 }

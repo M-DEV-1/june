@@ -10,11 +10,6 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// captureScreen is a no-op on Linux — AT-SPI reads live accessible text, no pixel capture needed.
-func captureScreen() ([]byte, error) {
-	return nil, nil
-}
-
 // extractText returns the text content of the focused window via AT-SPI over D-Bus. Returns ("", nil) on any failure (no bus, no focused window, etc) — callers never see a non-nil error here.
 //
 // Per-app requirements:
@@ -135,6 +130,69 @@ func atspiExtract(ctx context.Context) (string, error) {
 		result = result[:maxTextLen]
 	}
 	return strings.TrimSpace(result), nil
+}
+
+// extractMeetingWindow finds a call in progress anywhere on the desktop and reads it, whether or not it has focus, returning its app, its window title and its text. ok is false when no meeting window is open.
+// This exists because the focused window is the wrong window during a meeting. On 2026-08-31 a thirty-nine minute standup produced twenty-seven episodes and not one of them was the call: the user spent it in ClickUp and a terminal, so the participant tiles, the "X is presenting" label and the meeting chat — the only things on the machine that name who is speaking — were never captured at all.
+// It walks the same registry tree as atspiExtract and differs in one line: the window is chosen by name rather than by being active.
+func extractMeetingWindow() (app, title, text string, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	sess, err := dbus.SessionBus()
+	if err != nil {
+		return "", "", "", false
+	}
+	regObj := sess.Object("org.a11y.Bus", "/org/a11y/bus")
+	var addr string
+	if err := regObj.CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil || addr == "" {
+		return "", "", "", false
+	}
+	conn, err := dbus.Dial(addr)
+	if err != nil {
+		return "", "", "", false
+	}
+	defer conn.Close()
+	if err := conn.Auth(nil); err != nil {
+		return "", "", "", false
+	}
+	if err := conn.Hello(); err != nil {
+		return "", "", "", false
+	}
+
+	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
+	apps, err := getChildren(ctx, conn, root)
+	if err != nil {
+		return "", "", "", false
+	}
+
+	for _, a := range apps {
+		if ctx.Err() != nil {
+			break
+		}
+		wins, err := getChildren(ctx, conn, a)
+		if err != nil {
+			continue
+		}
+		appName := getName(ctx, conn, a)
+		for _, win := range wins {
+			if ctx.Err() != nil {
+				break
+			}
+			winName := getName(ctx, conn, win)
+			if !IsMeetingWindow(appName, winName) {
+				continue
+			}
+			visited := 0
+			tree := buildA11yTree(ctx, conn, win, 0, &visited)
+			t := strings.TrimSpace(documentText(tree))
+			if len(t) > maxTextLen {
+				t = t[:maxTextLen]
+			}
+			return appName, winName, t, true
+		}
+	}
+	return "", "", "", false
 }
 
 // atspiActiveWindow returns (app, title) of the focused window via AT-SPI, walking the same registry tree as atspiExtract but reading Names instead of text.
@@ -290,4 +348,63 @@ func buildA11yTree(ctx context.Context, conn *dbus.Conn, ref aref, depth int, vi
 		node.Children = append(node.Children, buildA11yTree(ctx, conn, child, depth+1, visited))
 	}
 	return node
+}
+
+// WindowTitleFor returns the title of a window belonging to the named application, or empty when the desktop does not report one.
+//
+// Input: the application's process name, such as "brave" or "chrome". Output: the title of one of its windows, preferring the longest, or empty when nothing matches.
+//
+// This asks the desktop rather than Ora's own history, because history lags: a call is joined seconds before the tracker next records a window. It is best-effort and often returns nothing — an application publishes an accessibility tree only if it was built or launched to, and Brave installed as a snap frequently publishes none at all even when launched with --force-renderer-accessibility. The caller falls back to history, which is why this failing is not a failure.
+// X11 would list every window regardless, but this desktop is Wayland and XWayland reports an empty _NET_CLIENT_LIST, so there is nothing to read there.
+// The longest title is preferred because a browser's several windows include short utility ones and the call is the window that names itself fully. Nothing here knows which applications host meetings; it answers only "what is this program showing".
+func WindowTitleFor(ctx context.Context, app string) string {
+	if app == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, captureTimeout)
+	defer cancel()
+
+	sess, err := dbus.SessionBus()
+	if err != nil {
+		return ""
+	}
+	var addr string
+	if err := sess.Object("org.a11y.Bus", "/org/a11y/bus").CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil || addr == "" {
+		return ""
+	}
+	conn, err := dbus.Dial(addr)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if conn.Auth(nil) != nil || conn.Hello() != nil {
+		return ""
+	}
+
+	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
+	apps, err := getChildren(ctx, conn, root)
+	if err != nil {
+		return ""
+	}
+	want := strings.ToLower(app)
+	best := ""
+	for _, a := range apps {
+		if ctx.Err() != nil {
+			break
+		}
+		name := strings.ToLower(getName(ctx, conn, a))
+		if name == "" || (!strings.Contains(name, want) && !strings.Contains(want, name)) {
+			continue
+		}
+		wins, err := getChildren(ctx, conn, a)
+		if err != nil {
+			continue
+		}
+		for _, w := range wins {
+			if t := strings.TrimSpace(getName(ctx, conn, w)); len(t) > len(best) {
+				best = t
+			}
+		}
+	}
+	return best
 }
