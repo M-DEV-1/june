@@ -172,3 +172,35 @@ func TestDescribe_UsesWindowsWhereThereAreAnyAndTrims(t *testing.T) {
 		t.Errorf("got[1] = %q, want the process name when Ora saw no window", got[1])
 	}
 }
+
+// A browser appends its own status to the end of a window title, after " - ": the microphone indicator, the memory warning, its own name. Both titles here are ones Ora recorded on this machine.
+func TestDescribe_CutsTheBrowsersOwnStatusOffTheEnd(t *testing.T) {
+	eps := []db.Episode{
+		{App: "Brave", Title: "Meet – abc-defg-hij - Microphone recording - Brave"},
+		{App: "Chrome", Title: "Calendar | Priya Shah | Microsoft Teams - High memory usage - 852 MB"},
+	}
+
+	got := describe([]string{"Brave", "Chrome"}, eps)
+
+	if got[0] != "Meet – abc-defg-hij" {
+		t.Errorf("got[0] = %q, want the meeting without the browser's status", got[0])
+	}
+	if got[1] != "Calendar | Priya Shah | Microsoft Teams" {
+		t.Errorf("got[1] = %q, want the meeting without the memory warning", got[1])
+	}
+}
+
+// Ora's voice assistant holds the microphone for as long as the user is talking to it, and the audio library names a stream after the running binary by default: application.name "ora", application.process.binary the full path it was launched from. Comparing that path against "ora" never matched, so Ora noticed itself talking and offered to record the conversation.
+func TestMicUsers_IgnoresOrasOwnVoiceMode(t *testing.T) {
+	dump := []byte(`[
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"ora","application.process.binary":"/home/user/Desktop/Code/projects/ora/ora"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Ora voice","application.process.binary":"./ora"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}}
+	]`)
+
+	got := micUsers(dump)
+
+	if len(got) != 1 || got[0] != "Discord" {
+		t.Fatalf("micUsers = %v, want [Discord] with both of Ora's own streams dropped", got)
+	}
+}
