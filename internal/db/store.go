@@ -433,6 +433,13 @@ func (s *Store) createSchema() error {
 	if err := s.ensureColumn("episodes", "image_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// tally gained its character counts on 2026-09-01 in the create statement only, so every existing database kept failing each bump with "no column named prompt_chars".
+	if err := s.ensureColumn("tally", "prompt_chars", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("tally", "reply_chars", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 
 	// Migration for DBs written before nodes_ai_summary extracted $.summary: their summary rows still hold the raw marshalled TaskSummary, so the JSON keys stay searchable until the text is rewritten. Idempotent — a rewritten row is no longer JSON, so the guard skips it on every later run.
 	if _, err := s.db.Exec(`
