@@ -349,3 +349,62 @@ func buildA11yTree(ctx context.Context, conn *dbus.Conn, ref aref, depth int, vi
 	}
 	return node
 }
+
+// WindowTitleFor returns the title of a window belonging to the named application, or empty when the desktop does not report one.
+//
+// Input: the application's process name, such as "brave" or "chrome". Output: the title of one of its windows, preferring the longest, or empty when nothing matches.
+//
+// This asks the desktop rather than Ora's own history, because history lags: a call is joined seconds before the tracker next records a window. It is best-effort and often returns nothing — an application publishes an accessibility tree only if it was built or launched to, and Brave installed as a snap frequently publishes none at all even when launched with --force-renderer-accessibility. The caller falls back to history, which is why this failing is not a failure.
+// X11 would list every window regardless, but this desktop is Wayland and XWayland reports an empty _NET_CLIENT_LIST, so there is nothing to read there.
+// The longest title is preferred because a browser's several windows include short utility ones and the call is the window that names itself fully. Nothing here knows which applications host meetings; it answers only "what is this program showing".
+func WindowTitleFor(ctx context.Context, app string) string {
+	if app == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, captureTimeout)
+	defer cancel()
+
+	sess, err := dbus.SessionBus()
+	if err != nil {
+		return ""
+	}
+	var addr string
+	if err := sess.Object("org.a11y.Bus", "/org/a11y/bus").CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil || addr == "" {
+		return ""
+	}
+	conn, err := dbus.Dial(addr)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if conn.Auth(nil) != nil || conn.Hello() != nil {
+		return ""
+	}
+
+	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
+	apps, err := getChildren(ctx, conn, root)
+	if err != nil {
+		return ""
+	}
+	want := strings.ToLower(app)
+	best := ""
+	for _, a := range apps {
+		if ctx.Err() != nil {
+			break
+		}
+		name := strings.ToLower(getName(ctx, conn, a))
+		if name == "" || (!strings.Contains(name, want) && !strings.Contains(want, name)) {
+			continue
+		}
+		wins, err := getChildren(ctx, conn, a)
+		if err != nil {
+			continue
+		}
+		for _, w := range wins {
+			if t := strings.TrimSpace(getName(ctx, conn, w)); len(t) > len(best) {
+				best = t
+			}
+		}
+	}
+	return best
+}
