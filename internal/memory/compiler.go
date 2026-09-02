@@ -74,6 +74,13 @@ type Summarizer interface {
 // GeminiSummarizer implements Summarizer via the genai SDK. Other providers can implement the same interface later.
 type GeminiSummarizer struct {
 	client *genai.Client
+	// identity, when set, returns who the user is (the personal-context "identity" entry) so the attribution prompt can say it. Without it the model reads a calendar entry naming the user and writes them up as somebody they met.
+	identity func(context.Context) string
+}
+
+// SetIdentity gives the summarizer a way to look up who the user is at prompt time. It is a lookup rather than a string because the entry can be corrected mid-session.
+func (g *GeminiSummarizer) SetIdentity(lookup func(context.Context) string) {
+	g.identity = lookup
 }
 
 func NewGeminiSummarizer(apiKey string) (*GeminiSummarizer, error) {
@@ -163,37 +170,11 @@ func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tr
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AttributeThreads")
 	defer span.End()
 
-	var activityList []string
-	for _, a := range activities {
-		entry := fmt.Sprintf("- %s: %s", a.App, a.Title)
-		if a.ScreenText != "" {
-			entry += fmt.Sprintf("\n  screen: %s", a.ScreenText)
-		}
-		activityList = append(activityList, entry)
+	var identity string
+	if g.identity != nil {
+		identity = g.identity(ctx)
 	}
-
-	var existingLines []string
-	for _, t := range existing {
-		existingLines = append(existingLines, fmt.Sprintf("id=%d [%s] %s :: %s", t.ID, t.Kind, t.Subject, t.State))
-	}
-
-	prompt := fmt.Sprintf(`You are the memory compiler for an ambient OS companion. The user often does several things AT ONCE (e.g. watching a show while coding). Attribute the recent screen activity to ongoing "threads" — durable throughlines in the user's life — and say where they currently are within each.
-
-You are given EXISTING THREADS (id, kind, subject :: current state) and RECENT ACTIVITIES (app, window title, and any screen text/description).
-
-%s
-
-EXISTING THREADS:
-%s
-
-RECENT ACTIVITIES:
-%s
-
-Respond strictly as JSON:
-{"threads":[{"id":0,"subject":"","kind":"work|project|entertainment|learning|routine|person","state":"","summary":"","novel":false}],"identity":[]}`,
-		attributionRules,
-		strings.Join(existingLines, "\n"),
-		strings.Join(activityList, "\n"))
+	prompt := AttributePrompt(activities, existing, identity)
 
 	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent.AttributeThreads")
 	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), &genai.GenerateContentConfig{
@@ -502,4 +483,45 @@ func (c *Compiler) GetCurrentBuffer() []tracker.Activity {
 	buf := make([]tracker.Activity, len(c.buffer))
 	copy(buf, c.buffer)
 	return buf
+}
+
+// AttributePrompt renders the attribution call's prompt. Input: the recent activities, the existing threads, and who the user is ("" when unknown). Output: the prompt text. Exported so the prompt shape is testable without a model.
+func AttributePrompt(activities []tracker.Activity, existing []Thread, identity string) string {
+	var activityList []string
+	for _, a := range activities {
+		entry := fmt.Sprintf("- %s: %s", a.App, a.Title)
+		if a.ScreenText != "" {
+			entry += fmt.Sprintf("\n  screen: %s", a.ScreenText)
+		}
+		activityList = append(activityList, entry)
+	}
+
+	var existingLines []string
+	for _, t := range existing {
+		existingLines = append(existingLines, fmt.Sprintf("id=%d [%s] %s :: %s", t.ID, t.Kind, t.Subject, t.State))
+	}
+
+	who := ""
+	if identity != "" {
+		who = fmt.Sprintf("\nWHO THE USER IS: %s\nEvery activity below is this person's own screen. When their name appears in a title, a calendar entry or a chat, it is them, never a third party: write \"attended the standup\", never \"met with <their name>\".\n", identity)
+	}
+
+	return fmt.Sprintf(`You are the memory compiler for an ambient OS companion. The user often does several things AT ONCE (e.g. watching a show while coding). Attribute the recent screen activity to ongoing "threads" — durable throughlines in the user's life — and say where they currently are within each.
+
+You are given EXISTING THREADS (id, kind, subject :: current state) and RECENT ACTIVITIES (app, window title, and any screen text/description).
+%s
+%s
+
+EXISTING THREADS:
+%s
+
+RECENT ACTIVITIES:
+%s
+
+Respond strictly as JSON:
+{"threads":[{"id":0,"subject":"","kind":"work|project|entertainment|learning|routine|person","state":"","summary":"","novel":false}],"identity":[]}`,
+		who,
+		attributionRules,
+		strings.Join(existingLines, "\n"),
+		strings.Join(activityList, "\n"))
 }
