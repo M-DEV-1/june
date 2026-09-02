@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -548,9 +549,56 @@ func firstLine(s string) string {
 	return s
 }
 
-// NotifySend posts a desktop notification through notify-send, which GNOME provides — the recorder has its own twin with a microphone icon. Failure is logged and ignored: a missed notification must never break the seam that sent it.
-func NotifySend(title, body string) {
-	if err := exec.Command("notify-send", "-a", "Ora", "-i", "x-office-calendar", title, body).Run(); err != nil {
-		slog.Debug("notify-send failed", "title", title, "error", err)
+// readAction is the notify-send action key for the button that opens a long body in full.
+const readAction = "read"
+
+// longBodyRunes is the body length past which GNOME's banner has already cut the text off. GNOME shows a few lines of a notification and hides the rest, which is how every morning brief and meeting prep went unread past its first sentences.
+const longBodyRunes = 200
+
+// notifyArgs builds the notify-send arguments for one notification: the app name and icon, then for a body longer than longBodyRunes a "Read in full" action, then the title and body.
+func notifyArgs(icon, title, body string) []string {
+	args := []string{"-a", "Ora", "-i", icon}
+	if len([]rune(body)) > longBodyRunes {
+		args = append(args, "--action="+readAction+"=Read in full")
 	}
+	return append(args, title, body)
+}
+
+// Notify posts a desktop notification through notify-send, which GNOME provides. A long body also gets a "Read in full" button that opens the whole text in a zenity window, because GNOME's banner truncates it. Failure is logged and ignored: a missing notification must never take down the work that produced it.
+// The long form waits in the background for the button, up to an hour, so the caller never blocks on it.
+func Notify(icon, title, body string) {
+	args := notifyArgs(icon, title, body)
+	if len([]rune(body)) <= longBodyRunes {
+		if err := exec.Command("notify-send", args...).Run(); err != nil {
+			slog.Debug("notify-send failed", "title", title, "error", err)
+		}
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "notify-send", args...).Output()
+		if err != nil {
+			slog.Debug("notify-send failed", "title", title, "error", err)
+			return
+		}
+		if strings.TrimSpace(string(out)) != readAction {
+			return
+		}
+		f, err := os.CreateTemp("", "ora-*.md")
+		if err != nil {
+			return
+		}
+		f.WriteString(body)
+		f.Close()
+		if err := exec.Command("zenity", "--text-info", "--title="+title, "--filename="+f.Name(), "--width=720", "--height=560").Run(); err != nil {
+			slog.Debug("zenity failed, opening the text with the default app", "error", err)
+			exec.Command("xdg-open", f.Name()).Run()
+		}
+	}()
+}
+
+// NotifySend posts a calendar-icon notification; the recorder uses Notify with its own microphone icon.
+func NotifySend(title, body string) {
+	Notify("x-office-calendar", title, body)
 }
