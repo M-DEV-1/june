@@ -790,3 +790,33 @@ func (s *Store) removeEpisodeJPEG(id int64) {
 		}
 	}
 }
+
+// DistinctTitles returns the distinct window titles the tracker has recorded, most recently seen first.
+//
+// Input: how many to return. Output: one entry per distinct title.
+//
+// This is what tells an identifying word in a window title from the furniture around it. A browser writes its own state into the title bar — the app's name, "Microphone recording", "High memory usage" — and those phrases recur across hundreds of unrelated titles, while the words naming an actual meeting appear in one or two. Counting titles is what separates them, and it needs no list of which words a browser uses.
+func (s *Store) DistinctTitles(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT title FROM episodes
+		WHERE title != ''
+		GROUP BY title
+		ORDER BY MAX(created_at) DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var titles []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		titles = append(titles, t)
+	}
+	return titles, rows.Err()
+}

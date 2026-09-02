@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -197,5 +198,60 @@ func TestStart_FiresMeetingPrepAsynchronously(t *testing.T) {
 			t.Fatal("meeting prep never notified")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// twelveMeetingNotes mirrors the real store: every meeting note contains the words "meet" and "recording", because minutes are about meetings and say so, and two of them happen to mention a microphone. Measured on this machine's 12 meeting notes on 2026-09-01.
+func twelveMeetingNotes() []db.Note {
+	notes := make([]db.Note, 0, 12)
+	for i := 0; i < 12; i++ {
+		c := fmt.Sprintf("# Meeting %d\nWe met and this is the recording of what was decided.", i)
+		if i == 7 || i == 9 {
+			c += " Someone's microphone was cutting out."
+		}
+		notes = append(notes, db.Note{ID: int64(i), Kind: "meeting", Content: c})
+	}
+	return notes
+}
+
+// pastTitles is the shape of this machine's real history: the browser's own words recur across every title, and a meeting's own words appear once or twice.
+func pastTitles() []string {
+	var ts []string
+	for i := 0; i < 20; i++ {
+		ts = append(ts, fmt.Sprintf("Meet - room-%d - Microphone recording - Brave", i))
+	}
+	return append(ts, "Calendar | Zitadel auth review | Microsoft Teams - Brave")
+}
+
+// A Google Meet window is titled after a room code and the browser's own indicators — "Meet – xha-yzim-osg - Microphone recording - Brave" — so every word in it except the code comes from the browser. Matching on any one of them picked an unrelated meeting from a week earlier, because "meet" and "recording" appear in all twelve past notes and identify nothing. The room code identifies the room and matches no minutes, so the right answer is to say nothing.
+func TestPickMeetingNote_DeclinesWhenTheTitleIsOnlyBrowserChrome(t *testing.T) {
+	frags := meetingTitleFragments("Meet \u2013 xha-yzim-osg - Microphone recording - Brave")
+
+	if _, ok := pickMeetingNote(twelveMeetingNotes(), nil, frags, pastTitles()); ok {
+		t.Error("matched a past meeting on words that appear in every past meeting")
+	}
+}
+
+// A name read off the meeting window is the strong signal and still matches on its own.
+func TestPickMeetingNote_MatchesOnAParticipant(t *testing.T) {
+	notes := append(twelveMeetingNotes(), db.Note{ID: 99, Kind: "meeting", Content: "# Sync\nTrupti walked through the value chain work."})
+
+	got, ok := pickMeetingNote(notes, []string{"Trupti"}, nil, pastTitles())
+
+	if !ok || got.ID != 99 {
+		t.Errorf("pickMeetingNote = %d,%v, want the note naming the participant", got.ID, ok)
+	}
+}
+
+// The word that only ever appears in one title is the one that names the meeting, and it matches on its own. The common word beside it is ignored rather than allowed to match everything.
+func TestPickMeetingNote_MatchesOnTheRareWordAndIgnoresTheCommonOne(t *testing.T) {
+	notes := append(twelveMeetingNotes(),
+		db.Note{ID: 42, Kind: "meeting", Content: "# Zitadel auth\nWe agreed the Zitadel migration."},
+	)
+
+	got, ok := pickMeetingNote(notes, nil, []string{"Meet", "Zitadel"}, pastTitles())
+
+	if !ok || got.ID != 42 {
+		t.Errorf("pickMeetingNote = %d,%v, want the note sharing the rare word", got.ID, ok)
 	}
 }

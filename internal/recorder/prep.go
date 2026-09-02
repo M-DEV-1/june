@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"ora/internal/db"
 	"ora/internal/tracker"
@@ -146,18 +147,63 @@ func collectMeetingNames(eps []db.Episode, withTitle bool) []string {
 	return names
 }
 
+// titleSeparators are the characters a meeting app uses to divide its window title into parts. Read off this machine's own history: Teams writes "Calendar | climate risk sync | Microsoft Teams - Desktop content shared", Meet writes "Meet - xha-yzim-osg - Microphone recording - Brave". The parts either name the meeting or describe the app, and which is which is decided later by how often each part has been seen before.
+var titleSeparators = []string{" | ", " \u2013 ", " \u2014 ", " - "}
+
+// titleSections splits a window title on the separators meeting apps use, and drops the parts that cannot be a meeting's name.
+//
+// Input: a window title. Output: its parts, trimmed, without the ones that are app furniture or mostly digits.
+//
+// Splitting is what catches a meeting whose name is not capitalised. Reading proper nouns alone finds "Microsoft Teams" in "Calendar | climate risk sync | Microsoft Teams" and misses the only part that says what the meeting is.
+// A part with at least as many digits as letters is dropped because it is a measurement rather than a name — a browser writes "852 MB" and "1.1 GB" into the title bar, and being unique to that moment those would otherwise look like the most identifying thing in it.
+func titleSections(title string) []string {
+	parts := []string{title}
+	for _, sep := range titleSeparators {
+		var next []string
+		for _, p := range parts {
+			next = append(next, strings.Split(p, sep)...)
+		}
+		parts = next
+	}
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		digits, letters := 0, 0
+		for _, r := range p {
+			switch {
+			case r >= '0' && r <= '9':
+				digits++
+			case unicode.IsLetter(r):
+				letters++
+			}
+		}
+		if digits >= letters {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // meetingTitleFragments pulls the distinctive words out of a meeting's window title, the same way primingPrompt pulls terms out of screen text: multi-word proper nouns and acronyms first, since those are what actually name a meeting or a client rather than describe the app around it, falling back to individual words long enough to mean something. Every candidate, from either source, is dropped if it is app furniture ("Google Chrome", "Zoom Meeting") rather than something the meeting is about — the same hasChromeWord check primingPrompt runs every term through.
 func meetingTitleFragments(title string) []string {
 	var frags []string
+	// The proper-noun pass and the section pass often find the same words, and a fragment counted twice would weigh twice as much when the rarest is chosen.
+	seen := map[string]bool{}
 	add := func(cands []string) {
 		for _, c := range cands {
-			if !hasChromeWord(c) {
+			if !hasChromeWord(c) && !seen[c] {
+				seen[c] = true
 				frags = append(frags, c)
 			}
 		}
 	}
 	add(properNounPattern.FindAllString(title, -1))
 	add(acronymPattern.FindAllString(title, -1))
+	add(titleSections(title))
 	if len(frags) > 0 {
 		return frags
 	}
@@ -169,7 +215,47 @@ func meetingTitleFragments(title string) []string {
 	return frags
 }
 
-// meetingNoteMatches reports whether a past meeting's minutes are about the same meeting as the one on screen now: either a participant named on screen is also named in those minutes, or a distinctive word from the current meeting's title shows up in them. Both comparisons are case-insensitive, since a chat sender's name and the same name typed into minutes rarely share capitalisation exactly.
+// titleHistoryLimit is how many distinct past window titles are read to judge which words in a title identify a meeting. A few thousand covers months of use and costs one indexed scan.
+const titleHistoryLimit = 2000
+
+// rarestFragments keeps only the least common words of a window title, measured across every window title Ora has recorded.
+//
+// Input: the fragments read from the current title, and the distinct titles seen before. Output: the fragments tied for least common, or all of them when there is no history to judge by.
+//
+// A window title is mostly furniture. Measured on this machine across 1,118 distinct titles, "Brave" appears in 1,022 of them, "Microsoft Teams" and "recording" in 33, "Meet" in 28 — while "climate risk sync" appears in 2 and a person's name in 8. The rare words are the meeting; the common ones are the browser talking about itself.
+// Rarity is judged within the title rather than against a fixed count, so there is no threshold to tune and nothing breaks when a browser changes the words it writes: whatever is rarest in this title is what identifies it. When that rarest word is a Google Meet room code, it matches no past meeting, and declining is the right answer.
+func rarestFragments(fragments []string, titles []string) []string {
+	if len(titles) == 0 || len(fragments) < 2 {
+		return fragments
+	}
+	counts := make([]int, len(fragments))
+	lows := make([]string, len(titles))
+	for i, t := range titles {
+		lows[i] = strings.ToLower(t)
+	}
+	min := -1
+	for i, f := range fragments {
+		lf := strings.ToLower(f)
+		for _, t := range lows {
+			if strings.Contains(t, lf) {
+				counts[i]++
+			}
+		}
+		if min < 0 || counts[i] < min {
+			min = counts[i]
+		}
+	}
+	var kept []string
+	for i, f := range fragments {
+		if counts[i] == min {
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
+// meetingNoteMatches reports whether a past meeting's minutes are about the same meeting as the one on screen now: either a participant named on screen is also named in those minutes, or one of the title's identifying words shows up in them. Both comparisons are case-insensitive, since a chat sender's name and the same name typed into minutes rarely share capitalisation exactly.
+// The fragments passed here must already have been narrowed by rarestFragments. Before that narrowing existed, a single word in common was enough to call two meetings the same, and since every set of minutes contains the words "meet" and "recording", any call matched the most recent meeting whatever it had been about.
 func meetingNoteMatches(content string, participants, titleFragments []string) bool {
 	lc := strings.ToLower(content)
 	for _, p := range participants {
@@ -185,21 +271,34 @@ func meetingNoteMatches(content string, participants, titleFragments []string) b
 	return false
 }
 
-// lastMatchingMeetingNote scans the store's meeting notes for the most recent one that matches this meeting, by participant or by title. GetNotes already orders every note newest first, so the first meeting-kind match found is the most recent one — there are few enough meeting notes that a plain scan needs nothing cleverer.
+// pickMeetingNote chooses the most recent past meeting that is about the same meeting as the one starting now, or reports that none is.
+// Input: every note newest first, the participant names read off the meeting window, the words from its title, and the distinct titles seen before. Output: the chosen note and whether one was found.
+// Finding nothing is a normal outcome and the right one for a call whose window says only "Meet - xha-yzim-osg": a room code identifies the room and not the people in it, and a prep about the wrong meeting is worse than no prep.
+func pickMeetingNote(notes []db.Note, participants, fragments, pastTitles []string) (db.Note, bool) {
+	fragments = rarestFragments(fragments, pastTitles)
+	for _, n := range notes {
+		if n.Kind != noteKind {
+			continue
+		}
+		if meetingNoteMatches(n.Content, participants, fragments) {
+			return n, true
+		}
+	}
+	return db.Note{}, false
+}
+
+// lastMatchingMeetingNote finds the most recent past meeting that is about the same meeting as the one starting now. GetNotes already orders every note newest first, so the first match found is the most recent one — there are few enough meeting notes that a plain scan needs nothing cleverer.
 func (r *Recorder) lastMatchingMeetingNote(ctx context.Context, participants, titleFragments []string) (db.Note, bool, error) {
 	notes, err := r.store.GetNotes(ctx)
 	if err != nil {
 		return db.Note{}, false, err
 	}
-	for _, n := range notes {
-		if n.Kind != noteKind {
-			continue
-		}
-		if meetingNoteMatches(n.Content, participants, titleFragments) {
-			return n, true, nil
-		}
+	titles, err := r.store.DistinctTitles(ctx, titleHistoryLimit)
+	if err != nil {
+		return db.Note{}, false, err
 	}
-	return db.Note{}, false, nil
+	note, ok := pickMeetingNote(notes, participants, titleFragments, titles)
+	return note, ok, nil
 }
 
 // prepPrompt assembles the brain input for a prep note: the instruction, which meeting is about to start, and the minutes of the last time it happened.
