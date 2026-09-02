@@ -64,6 +64,11 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	}
 	started := time.Now()
 	out, errOut, err := run(ctx, bin, args)
+	// A primed run can lock onto a non-speech marker and print it for the whole file: on 2026-09-02 17:32 the call side came back as 308 lines of "[ Silence ]" and one invented sentence, while the same file unprimed gave 42 real lines. The prompt is only a spelling aid, so when the run is that loop it is redone without one.
+	if err == nil && prompt != "" && markerLooped(out) {
+		slog.Warn("whisper looped on a silence marker under the priming prompt, transcribing again without it", "file", filepath.Base(path))
+		out, errOut, err = run(ctx, bin, args[:len(args)-2])
+	}
 	took := time.Since(started)
 	// audio and rate say how long the meeting itself runs and how many times faster than real time this machine transcribes it, so a run's log line is enough to predict how long N hours of meetings will take to catch up on.
 	audio := audioDuration(path)
@@ -107,6 +112,27 @@ func stripPromptEcho(segs []Segment, prompt string) []Segment {
 	}
 	segs[0].Text = text
 	return segs
+}
+
+// markerLooped reports whether whisper's output is mostly one non-speech marker repeated — more marker lines than lines with words — which is the decoder conditioning on its own "[ Silence ]" and never leaving it. Input: whisper's stdout. Output: true for the loop, false for normal output (a quiet stream still has words between its markers) and for empty output.
+func markerLooped(out string) bool {
+	markers, words := 0, 0
+	for _, line := range strings.Split(out, "\n") {
+		i := strings.Index(line, "]")
+		if !strings.HasPrefix(line, "[") || i < 0 {
+			continue
+		}
+		text := strings.TrimSpace(line[i+1:])
+		if text == "" {
+			continue
+		}
+		if nonSpeech.MatchString(text) {
+			markers++
+		} else {
+			words++
+		}
+	}
+	return markers > 0 && markers > words
 }
 
 // promptEchoWindow is how far into a stream the priming prompt may still be echoed. Whisper conditions on the prompt for its first decoding window and prints it, if at all, as the first thing it emits; past this the stream is speech.

@@ -1155,3 +1155,41 @@ func TestStopForShutdown_QuietWhenNothingIsRecording(t *testing.T) {
 		t.Errorf("StopForShutdown = %q, %v; want no directory and no error", dir, err)
 	}
 }
+
+// In a standup the user talks for minutes while everyone else is muted, and Teams then sends exact zeros on the call side. On 2026-09-02 14:34 that fired the "audio isn't reaching the recorder" warning in the middle of the user's own update. Sound on either stream means the recording is alive.
+func TestRecorder_NoSilenceWarningWhileMicKeepsArriving(t *testing.T) {
+	r, cap, _ := newTestRecorder(t, &fakeStore{})
+	var got notifications
+	r.notify = got.add
+	r.silenceAfter = 30 * time.Millisecond
+	stop, finished := make(chan struct{}), make(chan struct{})
+	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
+		go func() {
+			defer close(finished)
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(2 * time.Millisecond):
+					mic.Write(loudSamples())
+					system.Write(make([]byte, 3200))
+				}
+			}
+		}()
+		now := time.Now()
+		return cap, now, now, nil
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		close(stop)
+		<-finished
+		r.stop()
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	if got.contains("audio") {
+		t.Errorf("a recording whose microphone is still capturing speech must not warn, got %v", got.sent)
+	}
+}

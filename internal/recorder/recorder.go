@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"ora/internal/config"
 	"ora/internal/db"
 	"ora/internal/memory"
+	"ora/internal/proactive"
 )
 
 // noteKind is the notes.kind written for a meeting, so minutes are distinguishable from the memory compiler's facts.
@@ -84,8 +84,8 @@ type session struct {
 	fromTranscript bool
 }
 
-// defaultSilenceAfter is how long the system stream may stay quiet before the user is told. Long enough that a natural pause in a call, or a meeting still on its "waiting for the host" screen, does not trigger it.
-const defaultSilenceAfter = 45 * time.Second
+// defaultSilenceAfter is how long BOTH streams may stay quiet before the user is told. It was 45 seconds on the call side alone, which fired on 2026-09-02 in the middle of the user's own standup update (everyone else muted, so the call side was exact zeros) and again a minute after a call had ended. Sound on either side now counts, and the window is minutes rather than seconds.
+const defaultSilenceAfter = 3 * time.Minute
 
 // silenceFloor is the sample magnitude below which a stream counts as silent. A stream recorded from a sink nothing plays into is exact zeros; a real room floor with nobody speaking still sits above this.
 const silenceFloor = 64
@@ -114,9 +114,21 @@ func (s *silenceWatch) quietFor() time.Duration {
 	return time.Since(time.Unix(0, s.last.Load()))
 }
 
-// watchSilence warns once, at any point in the recording, if the system stream goes quiet for longer than window. The first-thirty-seconds case is a meeting playing to the wrong sink from the start; the mid-call case is the output device changing under the recording — earbuds connecting, or dying and the audio hopping back to the speakers — which without this is silently lost for the rest of the meeting.
-// ponytail: the warning tells the user to fix it by hand. Re-running the active-sink detection and re-attaching the monitor stream to the new sink mid-recording would fix it without them, and is the named follow-up; it needs a second record stream opened onto the same WAV writer while the first is torn down, which is more surgery than this pass.
-func (r *Recorder) watchSilence(w *silenceWatch, window time.Duration, done <-chan struct{}) {
+// shouldWarn decides whether the recording has gone dead. micQuiet and callQuiet are how long each stream has been below the noise floor; dropped is whether the capture reports a stream that is no longer running; window is defaultSilenceAfter or the test override.
+// Input: the two quiet durations, the dropped flag and the window. Output: true when the user should be told, and a one-line reason for the notification body.
+func shouldWarn(micQuiet, callQuiet time.Duration, dropped bool, window time.Duration) (bool, string) {
+	if dropped {
+		return true, "An audio stream stopped."
+	}
+	if micQuiet < window || callQuiet < window {
+		return false, ""
+	}
+	return true, fmt.Sprintf("Nothing from the microphone or the call for %s.", window.Round(time.Second))
+}
+
+// watchSilence warns once, at any point in the recording, when shouldWarn says the recording is dead: every stream quiet for the window, or a stream dropped. The mid-call case it exists for is the output device changing under the recording — earbuds connecting, or dying and the audio hopping back to the speakers — which is otherwise silently lost for the rest of the meeting.
+// ponytail: the warning tells the user to fix it by hand. Re-running the active-sink detection and re-attaching the monitor stream to the new sink mid-recording would fix it without them, and is the named follow-up.
+func (r *Recorder) watchSilence(mic, call *silenceWatch, window time.Duration, dropped func() bool, done <-chan struct{}) {
 	tick := time.NewTicker(window / 3)
 	defer tick.Stop()
 	for {
@@ -124,11 +136,12 @@ func (r *Recorder) watchSilence(w *silenceWatch, window time.Duration, done <-ch
 		case <-done:
 			return
 		case <-tick.C:
-			if w.quietFor() < window {
+			warn, reason := shouldWarn(mic.quietFor(), call.quietFor(), dropped(), window)
+			if !warn {
 				continue
 			}
-			slog.Warn("the system audio stream has gone silent, so the meeting is playing to a sink Ora is not recording", "quiet for", w.quietFor().Round(time.Second))
-			r.notify("Meeting audio isn't reaching the recorder", "Nothing is coming through from the system audio — did the output device change? Check it, then restart the recording.")
+			slog.Warn("the recording has gone dead", "reason", reason, "mic quiet for", mic.quietFor().Round(time.Second), "call quiet for", call.quietFor().Round(time.Second))
+			r.notify("Meeting audio isn't reaching the recorder", reason+" Check the output device, then restart the recording.")
 			return
 		}
 	}
@@ -478,8 +491,8 @@ func (r *Recorder) open() (err error) {
 		return fmt.Errorf("create system.wav: %w", err)
 	}
 
-	watch := newSilenceWatch(sys)
-	cap, micStart, sysStart, err := r.capture(mic, watch)
+	micWatch, sysWatch := newSilenceWatch(mic), newSilenceWatch(sys)
+	cap, micStart, sysStart, err := r.capture(micWatch, sysWatch)
 	if err != nil {
 		mic.Close()
 		sys.Close()
@@ -501,7 +514,12 @@ func (r *Recorder) open() (err error) {
 		sysOffset: sysStart.Sub(zero),
 		done:      make(chan struct{}),
 	}
-	go r.watchSilence(watch, r.silenceAfter, r.live.done)
+	// A capture that can say whether a stream fell over (the real one can, the test fakes need not) is asked on every tick.
+	dropped := func() bool { return false }
+	if d, ok := cap.(interface{ Dropped() bool }); ok {
+		dropped = d.Dropped
+	}
+	go r.watchSilence(micWatch, sysWatch, r.silenceAfter, dropped, r.live.done)
 	return nil
 }
 
@@ -806,9 +824,7 @@ func (r *Recorder) remoteVoices(ctx context.Context, since, until time.Time) int
 	return len(names)
 }
 
-// notifySend posts a desktop notification through notify-send, which GNOME provides. Failure is logged and ignored: a missing notification must never take down a finished recording.
+// notifySend posts a microphone-icon desktop notification; a long body gets a "Read in full" button, see proactive.Notify.
 func notifySend(title, body string) {
-	if err := exec.Command("notify-send", "-a", "Ora", "-i", "audio-input-microphone", title, body).Run(); err != nil {
-		slog.Debug("notify-send failed", "title", title, "error", err)
-	}
+	proactive.Notify("audio-input-microphone", title, body)
 }

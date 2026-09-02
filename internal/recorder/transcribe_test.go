@@ -422,3 +422,18 @@ func TestAssignSpeakers_TakesTheMostOverlappedCluster(t *testing.T) {
 		t.Errorf("the microphone side was relabelled to %q", got[2].Speaker)
 	}
 }
+
+// On the 2026-09-02 17:32 call the priming prompt made whisper decode the whole 21-minute call side as 308 lines of "[ Silence ]" plus one invented sentence, while the same file without the prompt gave 42 real lines. A run whose output is mostly one repeated non-speech marker is that loop, and the cure is to run again without the prompt.
+func TestMarkerLooped(t *testing.T) {
+	looped := "[00:00:00.000 --> 00:00:30.000]   [ Silence ]\n[00:00:30.000 --> 00:01:00.000]   [ Silence ]\n[00:01:00.000 --> 00:01:30.000]   [ Silence ]\n[00:01:30.000 --> 00:01:32.000]   Me, I am frustrated.\n"
+	if !markerLooped(looped) {
+		t.Error("three marker lines against one sentence is the silence loop and must be caught")
+	}
+	fine := "[00:00:00.000 --> 00:00:18.000]   [no audio]\n[00:00:18.000 --> 00:00:20.000]   Yes.\n[00:00:22.000 --> 00:00:24.000]   Year in order.\n"
+	if markerLooped(fine) {
+		t.Error("a quiet stream with real words between its markers is not a loop")
+	}
+	if markerLooped("") {
+		t.Error("empty output is not a loop")
+	}
+}
