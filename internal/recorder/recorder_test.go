@@ -1108,3 +1108,50 @@ func TestFileMinutes_SkipsAMeetingTheUserOnlySatInOn(t *testing.T) {
 		t.Errorf("the minutes themselves must still be filed: %+v", store.notes)
 	}
 }
+
+// DistinctTitles serves the fake's own episode titles, which is enough for prep to judge which words recur.
+func (f *fakeStore) DistinctTitles(ctx context.Context, limit int) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range f.episodes {
+		if e.Title != "" && !seen[e.Title] {
+			seen[e.Title] = true
+			out = append(out, e.Title)
+		}
+	}
+	return out, nil
+}
+
+// Killing the daemon mid-meeting on 2026-09-01 left a recording with no transcript, because nothing on the shutdown path stopped it. The audio survived only because the next start sweeps for unfinished recordings. Closing the files on the way out is what makes that a fallback rather than the mechanism.
+func TestStopForShutdown_ClosesTheRecordingWithoutTranscribing(t *testing.T) {
+	r, cap, _ := newTestRecorder(t, &fakeStore{})
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := r.StopForShutdown()
+
+	if err != nil {
+		t.Fatalf("StopForShutdown: %v", err)
+	}
+	if dir == "" {
+		t.Error("want the directory of the recording that was closed")
+	}
+	if r.Active() {
+		t.Error("a recording is still running after shutdown stopped it")
+	}
+	if !cap.stopped {
+		t.Error("the capture was not stopped, so the audio device stays held")
+	}
+}
+
+// Shutting down with nothing recording is the normal case and must not be an error the daemon logs on every exit.
+func TestStopForShutdown_QuietWhenNothingIsRecording(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+
+	dir, err := r.StopForShutdown()
+
+	if err != nil || dir != "" {
+		t.Errorf("StopForShutdown = %q, %v; want no directory and no error", dir, err)
+	}
+}

@@ -560,6 +560,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}()
 
 	stop = func() {
+		// A recording in progress is closed first, before anything it depends on goes away. Nothing did this until a daemon restart on 2026-09-01 abandoned a meeting fourteen minutes in.
+		if meetingRecorder != nil {
+			if _, err := meetingRecorder.StopForShutdown(); err != nil {
+				slog.Warn("could not close the running meeting recording on shutdown", "error", err)
+			}
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		server.Shutdown(shutdownCtx)

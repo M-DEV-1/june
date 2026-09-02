@@ -426,6 +426,10 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 
 	// Export dbusmenu at /MenuBar.
 	menu := &dbusMenu{quitCh: quitCh, conn: conn, rec: meetingRecorder}
+	// The menu's own clicks redraw it themselves; this covers a recording started or stopped by anything else, which since the microphone watcher landed is how most of them begin.
+	if meetingRecorder != nil {
+		meetingRecorder.SetOnStateChange(menu.refresh)
+	}
 	if err := conn.Export(menu, menuPath, "com.canonical.dbusmenu"); err != nil {
 		conn.Close()
 		return fmt.Errorf("export dbusmenu: %w", err)
