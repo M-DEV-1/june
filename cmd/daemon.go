@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ora/internal/agent"
 	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
@@ -145,6 +146,13 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	if err != nil {
 		slog.Error("failed to init db", "error", err)
 		return nil, nil, err
+	}
+
+	// The query_store tool's description carries the store's own schema and the vocabulary of every column that holds only a handful of values. It is read here rather than written into the tool, because a written one goes stale silently: the hand-written version claimed notes.kind included "action_item" when the real value is "action", and a query counting open action items returned zero against twenty-five real ones.
+	if schema, err := store.DescribeSchema(ctx); err != nil {
+		slog.Warn("could not read the store's schema for the query tool", "error", err)
+	} else {
+		agent.SetStoreSchema(schema)
 	}
 
 	trackerImpl, err := tracker.New()

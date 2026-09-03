@@ -126,23 +126,10 @@ func toolDefinitions() []*genai.Tool {
 					"Exactly one statement per call, no trailing statements after a semicolon. " +
 					"Every *_at/*_time column is UTC text — for anything the user would call \"today\" or an hour of day, wrap it: datetime(created_at,'localtime') BETWEEN ... " +
 					"Results render as a header line of column names, then one line per row with values separated by a TAB — window titles routinely contain pipes and spaces, so a tab is the only separator that stays unambiguous. A query matching nothing says \"no rows matched\" plainly. Output is capped in rows and characters — add LIMIT or aggregate rather than pulling raw rows if you hit the cap. " +
-					"Schema (table: columns — type):\n" +
-					"nodes: id INTEGER, parent_id INTEGER, type TEXT, content TEXT, created_at DATETIME, domain TEXT\n" +
-					"threads: id INTEGER, subject TEXT, kind TEXT, state TEXT, salience REAL, times_seen INTEGER, created_at DATETIME, last_seen_at DATETIME, status TEXT\n" +
-					"episode_threads: episode_id INTEGER, thread_id INTEGER — join table linking episodes to the threads they were summarised into\n" +
-					"episodes: id INTEGER, created_at DATETIME, app TEXT, title TEXT, screen_text TEXT, importance REAL, domain TEXT, user_activity TEXT, visible_text TEXT, image_path TEXT\n" +
-					"notes: id INTEGER, content TEXT, kind TEXT, created_at DATETIME, updated_at DATETIME — kind is exactly one of 'action', 'fact', 'meeting', 'system-log'\n" +
-					"  A meeting's minutes are a note with kind='meeting'. Meetings are NOT episodes: episodes are screen captures, so searching them for an app called Teams or Zoom finds the window, never the meeting. Count or read meetings from notes.\n" +
-					"  An action note carries its state as a [state/priority] prefix at the start of content, such as '[open/normal] ...', so items still owed are kind='action' AND content LIKE '[open/%'.\n" +
-					"diary: id INTEGER, day TEXT, kind TEXT, content TEXT, created_at DATETIME, updated_at DATETIME\n" +
-					"folds: id INTEGER, task TEXT, result TEXT, created_at DATETIME, consumed_at DATETIME\n" +
-					"personal_context: id INTEGER, subject TEXT, content TEXT, updated_at DATETIME\n" +
-					"hypotheses: id INTEGER, statement TEXT, confidence TEXT, status TEXT, born TEXT, last_tested TEXT, times_tested INTEGER, evidence TEXT, reason TEXT\n" +
-					"tally: day TEXT, provider TEXT, calls INTEGER, failures INTEGER, total_ms INTEGER\n" +
-					"working_state: id INTEGER, content TEXT, updated_at DATETIME\n" +
-					"dream_runs: night TEXT, started_at DATETIME, finished_at DATETIME, stages_done TEXT, grinder TEXT, report TEXT\n" +
-					"episodes_fts(screen_text) — full-text search over episodes.screen_text; use \"episodes_fts MATCH 'word'\" and join its rowid to episodes.id\n" +
-					"memory_fts(content, source, ref_id) — full-text search over notes/threads/diary/summaries combined; use \"memory_fts MATCH 'word'\", source tells you which table ref_id points into",
+					"Meetings are NOT episodes: an episode is a screen capture, so searching episodes for an app called Teams or Zoom finds the window and never the meeting. A meeting's minutes are a note with kind='meeting'. " +
+					"An action note carries its state as a [state/priority] prefix at the start of content, so the things still owed are kind='action' AND content LIKE '[open/%'. " +
+					"episodes_fts and memory_fts are full-text indexes: use \"episodes_fts MATCH 'word'\" and join its rowid to episodes.id, or \"memory_fts MATCH 'word'\" where source names the table ref_id points into. " +
+					"Schema, read from the store itself. A column listed as \"is one of\" holds only those values:\n" + storeSchemaBlock(),
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
