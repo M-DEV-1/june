@@ -828,7 +828,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// One accessor over the config the request goroutines share, so POST /settings writing ClaudeUsageFromLogin and the /brains and /usage handlers reading it are not touching the same struct from several goroutines at once.
 	liveConfig := ipc.NewLiveConfig(&appConfig, config.SaveConfig)
 	brainLimits := brainLimitsFrom(brainUsage, geminiQuota, liveConfig, geminiQuotaOpts)
-	mux.HandleFunc("/brains", auth(ipc.Brains(&appConfig, config.SaveConfig, brainLimits)))
+	mux.HandleFunc("/brains", auth(ipc.Brains(liveConfig, brainLimits)))
 	mux.HandleFunc("/overlay", auth(ipcServer.Overlay))
 	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), liveConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
 	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, brainLimits)))
