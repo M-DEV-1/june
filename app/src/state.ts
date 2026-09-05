@@ -138,6 +138,8 @@ export type Event =
   | { kind: "voiceEvent"; ev: DaemonEvent }
   /** hoverOpen says whether the window was already on screen when the notice arrived, which is the one thing about the notice the reducer cannot work out for itself; main.ts reads it off the OS window. */
   | { kind: "notice"; notice: Notice; hoverOpen: boolean }
+  /** One of the card's own buttons pressed: "done", "hour", "evening", "tomorrow" or "open". */
+  | { kind: "noticeAct"; act: string }
   | { kind: "noticeHold" }
   | { kind: "noticeRelease" }
   | { kind: "noticeGone" }
@@ -165,6 +167,8 @@ export function noticeActionLine(n: Notice, now: Date): string | undefined {
 export type Effect =
   | { kind: "close" }
   | { kind: "openNotice"; place: string; id: string }
+  /** Sends Done or a snooze for the notice to the daemon's notice route. */
+  | { kind: "noticeAct"; notice: Notice; act: string }
   | { kind: "ask"; question: string; conversation?: string }
   /** Starts a computer-use job for a goal (POST /act), opened by a "do:" question. */
   | { kind: "startJob"; goal: string }
@@ -996,6 +1000,15 @@ export function step(
         },
         effect: { kind: "openNotice", place: notice.place, id: notice.id },
       };
+    }
+
+    case "noticeAct": {
+      const notice = view.notice;
+      if (!notice) return { view };
+      const down = { ...view, notice: undefined, noticeAlone: false, noticeHeld: false };
+      // Open is the click the card has always answered; everything else goes to the daemon, whose follow-up event brings the one-line confirmation back.
+      if (event.act === "open") return { view: down, effect: { kind: "openNotice", place: notice.place, id: notice.id } };
+      return { view: down, effect: { kind: "noticeAct", notice, act: event.act } };
     }
 
     case "voiceEvent": {

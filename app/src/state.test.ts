@@ -1630,3 +1630,25 @@ describe("the conversation the hover asks in", () => {
     expect(next.state).toBe("answered");
   });
 });
+
+// The notice card's own buttons: Done and the three snoozes go to the daemon, Open goes to the app window, and each takes the card down at once; the daemon's follow-up event (the same notice with its action filled in) is what shows the one-line confirmation afterwards.
+describe("noticeAct", () => {
+  const task = { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" };
+
+  it("hands Done and the snoozes to the daemon and takes the card away", () => {
+    const up = step(view(), { kind: "notice", notice: task, hoverOpen: false }).view;
+    const { view: next, effect } = step(up, { kind: "noticeAct", act: "hour" });
+    expect(effect).toEqual({ kind: "noticeAct", notice: task, act: "hour" });
+    expect(next.notice).toBeUndefined();
+    expect(next.noticeAlone).toBe(false);
+  });
+
+  it("treats Open as the click it always was", () => {
+    const up = step(view(), { kind: "notice", notice: task, hoverOpen: false }).view;
+    expect(step(up, { kind: "noticeAct", act: "open" }).effect).toEqual({ kind: "openNotice", place: "tasks", id: "42" });
+  });
+
+  it("does nothing with no card up", () => {
+    expect(step(view(), { kind: "noticeAct", act: "done" }).effect).toBeUndefined();
+  });
+});

@@ -6,6 +6,8 @@ import {
   edgeInset,
   fitWindow,
   hoverPlacement,
+  noticePlacement,
+  threadMaxHeight,
   monitorForPoint,
   placementFor,
   resolveContext,
@@ -329,5 +331,25 @@ describe("fitWindow", () => {
     const win = fakeWin(true);
     await fitWindow(win, { width: 720, height: 700 }, true, null);
     expect(win.calls).toEqual(["setSize(720x700)"]);
+  });
+});
+
+describe("noticePlacement", () => {
+  it("puts a notice-only window under the top bar at the right of the work area, the way a desktop notification sits", () => {
+    // 1920 wide minus the 720 window is 1200; the bar ends at y=32 and the window starts 8 physical pixels under it.
+    expect(noticePlacement(laptopWork, { width: 720, height: 160 }, 1)).toEqual({ x: 1200, y: 40 });
+  });
+
+  it("scales the gap under the bar with the monitor", () => {
+    expect(noticePlacement({ x: 0, y: 64, width: 3840, height: 2096 }, { width: 1440, height: 320 }, 2)).toEqual({ x: 2400, y: 80 });
+  });
+});
+
+describe("threadMaxHeight", () => {
+  it("lets the card's thread take six tenths of the work area, in logical pixels", () => {
+    // 1048 physical at scale 1 is 1048 logical; six tenths is 628.
+    expect(threadMaxHeight(laptopWork, 1)).toBe(628);
+    // At scale 2 the same work area is 524 logical; six tenths is 314.
+    expect(threadMaxHeight(laptopWork, 2)).toBe(314);
   });
 });

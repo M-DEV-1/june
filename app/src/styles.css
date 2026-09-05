@@ -70,7 +70,8 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .W.bare .in { padding: 17px 24px; border-bottom: none; }
 .W.bare .foot { display: none; }
 
-.W .thread { padding: var(--pad); display: grid; gap: 10px; }
+/* The thread stops growing at six tenths of the screen it is on (--thread-max, set by main.ts from the placement of each open) and scrolls inside itself past that, so an answer that keeps coming never walks the card up the screen. */
+.W .thread { padding: var(--pad); display: grid; gap: 10px; max-height: var(--thread-max, 640px); overflow-y: auto; }
 /* The answer is the loudest thing on the card: DESIGN.md's text-lead, the size an opening paragraph reads at, and full-strength colour. */
 .W .a { font-size: 17px; line-height: 1.55; letter-spacing: -.008em; color: var(--fg); }
 .W .a b { font-weight: 600; }
@@ -189,31 +190,36 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
   .W .in .wave i, .W .in .dot.pulse { animation: none; }
 }
 
-/* The notice bubble: one of Ora's own moments — the morning brief, the evening close, a meeting prep — arriving on the daemon's event stream and shown above the card. It is Ora talking rather than part of the window's own surface, so it keeps one flat green fill in both themes with white text on it, and it is a speech bubble: a tail on the side facing the nearest screen edge, which is the dock the hover is anchored to. Deep enough a green that white 13px type sits at 5.4:1 on it. */
-:root { --notice: #16794b; }
+/* The notice card: one of Ora's own moments — the morning brief, the evening close, a task lifted from a meeting — arriving on the daemon's event stream. It is the same surface as the card under it, with its answers on it, so it is dealt with where it appears: no separate desktop banner, nowhere else to go. Shown on its own it sits under the top bar at the right, where the desktop's own notifications sit (see noticePlacement in winplace.ts). */
 .N {
   position: relative;
   width: fit-content;
   max-width: 420px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: var(--notice);
-  color: #fff;
+  margin-left: auto;
+  padding: 12px 14px 10px;
+  border-radius: var(--card-radius);
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
   font-size: 13px;
   line-height: 1.5;
   cursor: pointer;
   animation: notice-in 160ms ease-out;
 }
-/* The title carries the moment ("Morning brief"), the body the few lines under it, cut off after three: a card is something read in a glance on the way past, and the whole text is one click away in the app window. */
+/* The small "Ora" over the title says who is talking, in the muted meta size; the title carries the moment ("Morning brief"), the body the few lines under it, cut off after three: a card is read in a glance, and the whole text is one click away in the app window. */
+.N .nh { font: 500 11px/1.3 var(--body); letter-spacing: .02em; color: var(--mute); margin-bottom: 2px; }
 .N .nt { font-weight: 600; }
-.N .nb { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-/* The tail, drawn as one triangle out of borders so the bubble stays a single element: down for a hover that opens at the bottom or the middle of the screen, up for one that opens at the top. Its 8px of margin on that side is the room it hangs in. */
+.N .nb { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--mute); }
+/* The buttons, one row, ghost until hovered: Done, the three snoozes and Open, in the order the desktop banner offered them. */
+.N .nr { display: flex; gap: 4px; margin: 10px -6px -4px; flex-wrap: wrap; }
+.N .na { font: 500 12px/1.4 var(--body); color: var(--fg); background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+.N .na:hover { background: var(--well); border-color: var(--line); }
+.N .na:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Stacked over an open card the notice sits above it with a little air; on its own it has the body's padding around it and nothing else. */
 .N.down { margin-bottom: 8px; }
 .N.up { margin-top: 8px; }
-.N::after { content: ""; position: absolute; left: 22px; width: 0; height: 0; border: 8px solid transparent; }
-.N.down::after { top: 100%; border-top-color: var(--notice); border-bottom: 0; }
-.N.up::after { bottom: 100%; border-bottom-color: var(--notice); border-top: 0; }
-@keyframes notice-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes notice-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
 
 /* A notice that arrived while the hover was shut shows on its own: the card underneath has nothing on it but an empty input, and the window is up only to say this one thing. A notice that arrived while the hover was already open leaves the card where it is and stacks above it. */
 body.alone .W { display: none; }
