@@ -21,6 +21,7 @@ import {
   drawMs,
   ttlFor,
   keepsPrevious,
+  nextCursor,
   NO_ASK,
   type Layout,
 } from "./draw";
@@ -545,6 +546,33 @@ describe("shouldRipple", () => {
   it("does not ripple when the second ring lands somewhere else", () => {
     const rect = { x: 600, y: 300, w: 320, h: 40 };
     expect(shouldRipple("Graph settings", rect, { rect: { ...rect, x: 20 }, at: 1000 }, 1500)).toBe(false);
+  });
+});
+
+describe("nextCursor", () => {
+  it("keeps staggering strokes by the gap while the running delay is still under budget", () => {
+    expect(nextCursor(500, 100, 3000, 100)).toBe(600);
+  });
+
+  it("caps a stroke that would cross the budget to land exactly on it, not one gap past", () => {
+    expect(nextCursor(3450, 2950, 3000, 100)).toBe(3000);
+  });
+
+  it("freezes further strokes at the budget once it has been reached, so they land together", () => {
+    expect(nextCursor(3450, 3000, 3000, 100)).toBe(3000);
+  });
+
+  it("keeps a drawing of many strokes bounded to the stagger budget plus one stroke's own draw time, however many strokes it has", () => {
+    const budget = 3000;
+    const gap = 100;
+    const ms = drawMs(999999); // the longest a stroke may ever take to draw itself
+    let cursor = 0;
+    let shaftEnd = 0;
+    for (let i = 0; i < 200; i++) {
+      shaftEnd = cursor + ms;
+      cursor = nextCursor(shaftEnd, cursor, budget, gap);
+    }
+    expect(shaftEnd).toBeLessThanOrEqual(budget + ms);
   });
 });
 

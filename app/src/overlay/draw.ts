@@ -319,6 +319,12 @@ export function drawMs(length: number): number {
   return Math.round(clamp(length / DRAW_PX_PER_MS, DRAW_MIN_MS, DRAW_MAX_MS));
 }
 
+/** Where a later stroke of a multi-stroke drawing should start, once the one before it has landed. Input: when the stroke just drawn finishes (shaftEnd), the delay that stroke itself started at (cursor), the most staggering may add before strokes start landing together instead (budget), and the gap normally left between one stroke and the next (gap). Output: shaftEnd plus the gap while the running delay is still under budget, so strokes still draw one after another; once budget is reached or a gap would cross it, the budget itself, unmoving, so every stroke after that starts at the same instant. This is what keeps a drawing of many strokes from pushing its last stroke's landing arbitrarily far out: however many strokes a "marks" or "box" event carries, the last one can only land at budget plus that one stroke's own draw time. */
+export function nextCursor(shaftEnd: number, cursor: number, budget: number, gap: number): number {
+  if (cursor >= budget) return budget;
+  return Math.min(shaftEnd + gap, budget);
+}
+
 /** Cuts a number to one decimal place, which is finer than a screen pixel and keeps a path string short. */
 function r1(v: number): number {
   return Math.round(v * 10) / 10;
