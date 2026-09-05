@@ -76,6 +76,8 @@ type claudeToolServer struct {
 	mu sync.Mutex
 	// steps is how many of this run's step budget have been reserved so far, checked and incremented together in reserveStep.
 	steps int
+	// annotations is how many marks this run has drawn on the screen. They are counted apart from steps because drawing over the screen changes nothing the model has to read back, and counted at all because this path has no round bound of its own — the two loops in ask.go and the one in codex.go stop at maxAskRounds whatever their step count says, and without this a run that did nothing but draw would never end.
+	annotations int
 	// hops are the tool calls this run made, in call order.
 	hops []ToolHop
 }
@@ -137,6 +139,17 @@ func (s *claudeToolServer) reserveStep() bool {
 	return true
 }
 
+// reserveAnnotation claims one of this run's allowance for marks on the screen, which is counted apart from the step budget because an annotation changes nothing the model must then re-read (see annotationTools). The allowance is maxAskRounds, the same hard bound the round-based loops stop at, so a run that does nothing but draw still ends. Output: true when one was claimed, false when the allowance is spent.
+func (s *claudeToolServer) reserveAnnotation() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.annotations >= maxAskRounds {
+		return false
+	}
+	s.annotations++
+	return true
+}
+
 // handle answers one JSON-RPC request from the CLI. Input: an HTTP POST carrying an MCP request. Output: the JSON-RPC reply, 202 for a notification (which carries no id and expects no answer), and 405 for anything that is not a POST.
 func (s *claudeToolServer) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -191,7 +204,11 @@ func (s *claudeToolServer) call(name string, args map[string]any) string {
 	if args == nil {
 		args = map[string]any{}
 	}
-	if !s.reserveStep() {
+	if annotationTools[name] {
+		if !s.reserveAnnotation() {
+			return "error: this turn has marked the screen as much as it can; answer now with what you already have."
+		}
+	} else if !s.reserveStep() {
 		return "error: this turn has no steps left; answer now with what you already have."
 	}
 	ObserveTool(s.askCtx, name, toolActivitySummary(name, args))

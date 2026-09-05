@@ -120,31 +120,8 @@ func toolDefinitions() []*genai.Tool {
 			{
 				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "draw",
-				Description: "Show where to look or what to press; point_at rings a single element. arrow/line take from/to or points, path takes points, box/circle take on or rect. Nothing is clicked.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"shape": {Type: genai.TypeString, Description: "arrow, line, path, box or circle"},
-						"from":  {Type: genai.TypeNumber, Description: "start element"},
-						"to":    {Type: genai.TypeNumber, Description: "end element"},
-						"on":    {Type: genai.TypeNumber, Description: "element to surround"},
-						"points": {
-							Type:        genai.TypeArray,
-							Description: "[[x,y],...] in the last look's coordinates, instead of from/to; two, or three for path",
-							Items:       &genai.Schema{Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeNumber}},
-						},
-						"rect": {
-							Type:        genai.TypeObject,
-							Description: "a rectangle in the last look's coordinates, instead of on",
-							Properties: map[string]*genai.Schema{
-								"x": {Type: genai.TypeNumber}, "y": {Type: genai.TypeNumber},
-								"w": {Type: genai.TypeNumber}, "h": {Type: genai.TypeNumber},
-							},
-						},
-						"label": {Type: genai.TypeString, Description: "A short label beside it"},
-					},
-					Required: []string{"shape"},
-				},
+				Description: "Mark up the screen, all shapes in one call. arrow/line take from/to or points, path takes points, box/circle take on or rect. Nothing is clicked.",
+				Parameters:  drawParameters(),
 			},
 			{
 				Behavior:    genai.BehaviorNonBlocking,
@@ -1102,51 +1079,66 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		return fmt.Sprintf("marked %d element(s) on the screen", len(items))
 
 	case "draw":
-		shape, _ := args["shape"].(string)
 		if a.Draw == nil {
 			return toolError("this session cannot draw on the screen")
 		}
-		label, _ := args["label"].(string)
-		switch shape {
-		case "arrow", "line":
-			points, errText := a.drawPoints(ctx, args, true, 2)
+		shapes, errText := drawShapeList(args)
+		remembered, hadRemembered := a.screenTarget()
+		var drawn, refused []string
+		var last *ScreenTarget
+		// Shapes the stream already resolved — drawn or refused — are reported but never acted on again, and they are always the leading ones, because the stream hands them over in the order the call lists them; a refused one still holds its place so the shapes after it are not shifted onto the wrong entries.
+		if early := streamDrawnFrom(ctx); len(early) > 0 {
+			for _, d := range early {
+				if d.Err != "" {
+					refused = append(refused, fmt.Sprintf("shape %d — %s", len(drawn)+len(refused)+1, strings.TrimPrefix(d.Err, "error: ")))
+					continue
+				}
+				drawn = append(drawn, d.Phrase)
+				if d.Target != nil {
+					last = d.Target
+				}
+			}
+			if len(early) >= len(shapes) {
+				shapes = nil
+			} else {
+				shapes = shapes[len(early):]
+			}
+		}
+		// Read after the early block rather than returned bare, so shapes the stream already drew are still reported even when the finished call as a whole is over the cap or carries a bad entry.
+		if errText != "" {
+			refused = append(refused, strings.TrimPrefix(errText, "error: "))
+		}
+		for _, shape := range shapes {
+			phrase, target, errText := a.drawOne(ctx, shape)
 			if errText != "" {
-				return errText
+				// One bad shape does not lose the rest of the drawing: the others are drawn and the model is told which entry failed, so it can send that one again rather than the whole diagram.
+				refused = append(refused, fmt.Sprintf("shape %d — %s", len(drawn)+len(refused)+1, strings.TrimPrefix(errText, "error: ")))
+				continue
 			}
-			if err := a.Draw(shape, points, 0, 0, 0, 0, label); err != nil {
-				return toolError(err.Error())
+			drawn = append(drawn, phrase)
+			if target != nil {
+				last = target
 			}
-			return "drew " + shape + fmt.Sprintf(" through %d point(s)", len(points)) + labelNote(label)
-		case "path":
-			points, errText := a.drawPoints(ctx, args, false, 3)
-			if errText != "" {
-				return errText
-			}
-			if err := a.Draw(shape, points, 0, 0, 0, 0, label); err != nil {
-				return toolError(err.Error())
-			}
-			return fmt.Sprintf("drew a path through %d point(s)", len(points)) + labelNote(label)
-		case "box", "circle":
-			remembered, hadRemembered := a.screenTarget()
-			x, y, w, h, it, errText := a.drawRect(ctx, args)
-			if errText != "" {
-				return errText
-			}
-			if err := a.Draw(shape, nil, x, y, w, h, label); err != nil {
-				return toolError(err.Error())
-			}
-			// it is nil for the "rect" form (a point read off a picture, naming no observe_screen item), so there is nothing to remember or check a mismatch against — only the "on" form draws around a numbered item.
-			if it == nil {
-				return fmt.Sprintf("drew a %s around %d,%d %dx%d", shape, x, y, w, h) + labelNote(label)
-			}
-			a.rememberTarget(ScreenTarget{Label: it.Label, Role: it.Role, Window: a.currentWindow(ctx), HasRect: true, X: x, Y: y, W: w, H: h})
-			note := ""
+		}
+		// Only the last shape drawn around a numbered element is remembered, so a later bare "draw a circle around it" resolves to the last thing this call drew around rather than to whichever entry happened to come first.
+		note := ""
+		if last != nil {
+			a.rememberTarget(*last)
 			if hadRemembered {
-				note = targetMismatchNote(questionFrom(ctx), &remembered, it.Label)
+				note = targetMismatchNote(questionFrom(ctx), &remembered, last.Label)
 			}
-			return fmt.Sprintf("drew a %s around [%d] %s %q", shape, it.N, it.Role, it.Label) + labelNote(label) + note
+		}
+		switch {
+		case len(drawn) == 0:
+			return toolError(strings.Join(refused, "; "))
+		case len(drawn) == 1 && len(refused) == 0:
+			return "drew " + drawn[0] + note
 		default:
-			return toolError("draw needs shape to be arrow, line, path, box or circle")
+			result := fmt.Sprintf("drew %d shapes: %s", len(drawn), strings.Join(drawn, "; ")) + note
+			if len(refused) > 0 {
+				result += "\nnot drawn — " + strings.Join(refused, "; ")
+			}
+			return result
 		}
 
 	case "click":
@@ -1972,6 +1964,30 @@ type askLookState struct {
 	focusUnknown bool
 }
 
+// streamDrawn is one shape that was resolved while the model was still writing the call it belongs to, whether it drew or not. The Codex stream hands over each shape the moment its object closes, so the ink starts before the round has finished rather than after it (see parseCodexStream); the phrase and the target are what the draw tool would have produced had it drawn the shape itself. Err carries the tool error when the shape failed instead — a shape refused during the stream still has to occupy its place in this slice, or the shapes it precedes in the finished call would be shifted onto the wrong entries.
+type streamDrawn struct {
+	Phrase string
+	Target *ScreenTarget
+	Err    string
+}
+
+// streamDrawnKey is the unexported context key withStreamDrawn stores one call's already-drawn shapes under.
+type streamDrawnKey struct{}
+
+// withStreamDrawn carries the shapes a draw call already drew off the stream into that call's own execution, so the tool draws only what is left rather than drawing everything a second time. Input: the ask's context and the shapes already drawn, in the order the call listed them. Output: a context for that one tool call.
+func withStreamDrawn(ctx context.Context, drawn []streamDrawn) context.Context {
+	if len(drawn) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, streamDrawnKey{}, drawn)
+}
+
+// streamDrawnFrom returns the leading shapes of this draw call that the stream already drew. Output: those shapes in call order, or nil when the call drew nothing early — which is every provider but Codex, and every Codex round whose backend sent no argument deltas.
+func streamDrawnFrom(ctx context.Context) []streamDrawn {
+	drawn, _ := ctx.Value(streamDrawnKey{}).([]streamDrawn)
+	return drawn
+}
+
 // askLookStateKey is the unexported context key withAskLookState stores the per-ask look state under.
 type askLookStateKey struct{}
 
@@ -2241,6 +2257,118 @@ func itemByNumber(items []act.Item, n int) (act.Item, string) {
 	return items[n-1], ""
 }
 
+// drawShapeProperties are the fields one shape takes. The flat form of the draw tool and every entry of its shapes array share this one definition, so the two forms cannot drift apart and a model that learned one has learned the other.
+func drawShapeProperties() map[string]*genai.Schema {
+	return map[string]*genai.Schema{
+		"shape": {Type: genai.TypeString, Enum: []string{"arrow", "line", "path", "box", "circle"}},
+		"from":  {Type: genai.TypeNumber, Description: "start element"},
+		"to":    {Type: genai.TypeNumber, Description: "end element"},
+		"on":    {Type: genai.TypeNumber, Description: "element to surround (box, circle)"},
+		"points": {
+			Type:        genai.TypeArray,
+			Description: "[[x,y],...] in look coordinates; two, three for path. Not box or circle.",
+			Items:       &genai.Schema{Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeNumber}},
+		},
+		"rect": {
+			Type:        genai.TypeObject,
+			Description: "{x,y,w,h} in look coordinates (box, circle), instead of on",
+			Properties: map[string]*genai.Schema{
+				"x": {Type: genai.TypeNumber}, "y": {Type: genai.TypeNumber},
+				"w": {Type: genai.TypeNumber}, "h": {Type: genai.TypeNumber},
+			},
+		},
+		"label": {Type: genai.TypeString, Description: "A short label beside it"},
+	}
+}
+
+// drawParameters are the draw tool's arguments: a list of shapes, always, even for one. Only the list is declared, because declaring a single-shape form beside it would send both field sets on every round of every screen task to say the same thing twice — and because a model shown a list draws a diagram in one call, where one shown both drew a shape per round and spent a whole turn's steps on it. The handler still accepts a bare shape (see drawShapeList), so a model that sends one anyway is answered rather than refused.
+func drawParameters() *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"shapes": {
+				Type:        genai.TypeArray,
+				Description: "All shapes in one call.",
+				Items:       &genai.Schema{Type: genai.TypeObject, Properties: drawShapeProperties(), Required: []string{"shape"}},
+			},
+		},
+		Required: []string{"shapes"},
+	}
+}
+
+// maxDrawShapes bounds one draw call. The list comes from the model and every entry is resolved against the screen and broadcast to the overlay on its own, so it is worth a ceiling; thirty-two is far above any real diagram.
+const maxDrawShapes = 32
+
+// drawShapeList returns the shapes one draw call is asking for. Input: the tool's arguments. Output: the entries of "shapes" when it holds at least one, otherwise the arguments themselves as a single shape, or a tool error when shapes holds more than maxDrawShapes or an entry that is not an object. A call carrying both forms is read as the batch, because refusing it would cost a round to say something the batch already answers.
+func drawShapeList(args map[string]any) ([]map[string]any, string) {
+	raw, ok := args["shapes"].([]any)
+	if !ok || len(raw) == 0 {
+		// shapes was sent but is unusable as a batch — empty, or not an array at all — and the fallback below would read args itself as the one shape it names, which is only right when args actually carries "shape". Otherwise the fallback ends up refusing over a field ("shape") the model never meant to send, rather than the one it did.
+		if _, present := args["shapes"]; present {
+			if _, hasShape := args["shape"]; !hasShape {
+				return nil, toolError("shapes must be a non-empty array of shape objects")
+			}
+		}
+		return []map[string]any{args}, ""
+	}
+	if len(raw) > maxDrawShapes {
+		return nil, toolError(fmt.Sprintf("draw takes at most %d shapes in one call, got %d", maxDrawShapes, len(raw)))
+	}
+	shapes := make([]map[string]any, len(raw))
+	for i, entry := range raw {
+		shape, ok := entry.(map[string]any)
+		if !ok {
+			return nil, toolError(fmt.Sprintf("shapes[%d] must be an object carrying shape and its own points, rect, on or from/to", i))
+		}
+		shapes[i] = shape
+	}
+	return shapes, ""
+}
+
+// drawOne draws one shape and says what it drew. Input: the ask's context and one shape's arguments — shape, then from/to, points, on or rect as that shape needs, and an optional label. Output: the phrase naming what was drawn, for the caller to put after "drew "; the target to remember when the shape was drawn around a numbered element, nil for every other form since there is nothing to resolve a later "it" against; and a tool error when the shape cannot be drawn, in which case nothing was drawn.
+func (a *Agent) drawOne(ctx context.Context, args map[string]any) (string, *ScreenTarget, string) {
+	shape, _ := args["shape"].(string)
+	label, _ := args["label"].(string)
+	switch shape {
+	case "arrow", "line":
+		points, errText := a.drawPoints(ctx, args, true, 2)
+		if errText != "" {
+			return "", nil, errText
+		}
+		if err := a.Draw(shape, points, 0, 0, 0, 0, label); err != nil {
+			return "", nil, toolError(err.Error())
+		}
+		return shape + fmt.Sprintf(" through %d point(s)", len(points)) + labelNote(label), nil, ""
+	case "path":
+		points, errText := a.drawPoints(ctx, args, false, 3)
+		if errText != "" {
+			return "", nil, errText
+		}
+		if err := a.Draw(shape, points, 0, 0, 0, 0, label); err != nil {
+			return "", nil, toolError(err.Error())
+		}
+		return fmt.Sprintf("a path through %d point(s)", len(points)) + labelNote(label), nil, ""
+	case "box", "circle":
+		x, y, w, h, it, errText := a.drawRect(ctx, args)
+		if errText != "" {
+			return "", nil, errText
+		}
+		if err := a.Draw(shape, nil, x, y, w, h, label); err != nil {
+			return "", nil, toolError(err.Error())
+		}
+		// it is nil for the "rect" form (a point read off a picture, naming no observe_screen item), so there is nothing to remember or check a mismatch against — only the "on" form draws around a numbered item.
+		if it == nil {
+			return fmt.Sprintf("a %s around %d,%d %dx%d", shape, x, y, w, h) + labelNote(label), nil, ""
+		}
+		target := ScreenTarget{Label: it.Label, Role: it.Role, Window: a.currentWindow(ctx), HasRect: true, X: x, Y: y, W: w, H: h}
+		return fmt.Sprintf("a %s around [%d] %s %q", shape, it.N, it.Role, it.Label) + labelNote(label), &target, ""
+	case "":
+		return "", nil, toolError("draw needs shape (arrow, line, path, box or circle), or shapes for several at once")
+	default:
+		return "", nil, toolError("draw needs shape to be arrow, line, path, box or circle")
+	}
+}
+
 // drawPoints resolves the draw tool's arguments into the screen points to draw through, for shapes arrow, line and path. Input: the tool's arguments, carrying either "points" ([[x,y],...] read off the picture the last look took, at least min) or, when allowFromTo is set, "from" and "to" (element numbers from the latest observe_screen list, mapped to their rectangles' centres). Output: the points in screen coordinates, or nil and a tool error when points has fewer than min well-formed [x,y] entries, no look has been taken this turn, a point falls outside that picture, neither form is present or allowed, or an element number is not in the last list.
 // The two forms are the only two ways a point can be known rather than guessed: an element the accessibility tree listed, or a place in a picture the model has actually seen. Inside a video, an image, a canvas or a game there are no elements, and on 2026-09-05 that is exactly where a run drew two labelled arrows at coordinates it had made up.
 func (a *Agent) drawPoints(ctx context.Context, args map[string]any, allowFromTo bool, min int) ([][2]int, string) {
@@ -2329,7 +2457,7 @@ func (a *Agent) drawRect(ctx context.Context, args map[string]any) (x, y, w, h i
 	}
 	rect, ok := args["rect"].(map[string]any)
 	if !ok {
-		return 0, 0, 0, 0, nil, toolError("draw needs on (an element number) or rect ({x,y,w,h}) for shape box or circle")
+		return 0, 0, 0, 0, nil, toolError(`box and circle say where with rect {"x":..,"y":..,"w":..,"h":..} in the last look's coordinates, or with on (an element number from observe_screen); points is only for arrow, line and path`)
 	}
 	rx, xOK := rect["x"].(float64)
 	ry, yOK := rect["y"].(float64)

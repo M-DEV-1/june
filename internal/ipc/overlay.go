@@ -13,6 +13,9 @@ const defaultOverlayTTLMs = 3000
 // maxOverlayTTLMs is the longest a drawing may stay up; a larger ttl is capped to this so a bad caller cannot leave the screen marked for ever.
 const maxOverlayTTLMs = 15000
 
+// overlayTTLFromInk is the ttl the five shapes the draw tool dispatches to send instead of a number of their own: it leaves the reading time to the overlay, which counts the ink actually on screen and gives a ten-shape diagram longer to be read than a single box. A drawing is several shapes that arrive one after another and keep the ones before them, so only the overlay knows how much is standing there by the time the last one lands. A caller that names its own ttl through POST /overlay still gets exactly that, since the handler fills a zero in with defaultOverlayTTLMs before broadcasting; zero therefore reaches the overlay only from a draw.
+const overlayTTLFromInk = 0
+
 // overlayNoAsk is the id an overlay event carries when no question drew it: a POST /overlay straight from another program, or a voice session's own ring. It is deliberately not of the "ask-N" shape newID mints, so a client reading /events can see at once that there is no question to trace this drawing back to, instead of being handed an id that names an ask it never saw.
 const overlayNoAsk = "overlay"
 
@@ -105,29 +108,29 @@ func (s *Server) Marks(askID string, rects []OverlayRect) {
 	s.draw(askID, OverlayRequest{Kind: "marks", Rects: rects, TTLMs: defaultOverlayTTLMs})
 }
 
-// Arrow draws an arrowed path through the given points for the default time, the way POST /overlay with kind arrow would. Input: the id of the ask whose draw asked for it (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the points in screen pixels (at least two, in the order the arrow should follow) and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
+// Arrow draws an arrowed path through the given points for as long as the overlay judges its ink needs, the way POST /overlay with kind arrow would. Input: the id of the ask whose draw asked for it (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the points in screen pixels (at least two, in the order the arrow should follow) and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
 func (s *Server) Arrow(askID string, points [][2]int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "arrow", Label: label, Points: points, TTLMs: defaultOverlayTTLMs})
+	s.draw(askID, OverlayRequest{Kind: "arrow", Label: label, Points: points, TTLMs: overlayTTLFromInk})
 }
 
-// Line draws a plain path through the given points for the default time, the way POST /overlay with kind line would. Input and output are as Arrow, but the extension draws it with no arrowhead.
+// Line draws a plain path through the given points for as long as the overlay judges its ink needs, the way POST /overlay with kind line would. Input and output are as Arrow, but the extension draws it with no arrowhead.
 func (s *Server) Line(askID string, points [][2]int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "line", Label: label, Points: points, TTLMs: defaultOverlayTTLMs})
+	s.draw(askID, OverlayRequest{Kind: "line", Label: label, Points: points, TTLMs: overlayTTLFromInk})
 }
 
-// Path draws a free-form smooth stroke through the given points (at least three) with no arrowhead, for the default time, the way POST /overlay with kind path would. Input and output are as Arrow.
+// Path draws a free-form smooth stroke through the given points (at least three) with no arrowhead, for as long as the overlay judges its ink needs, the way POST /overlay with kind path would. Input and output are as Arrow.
 func (s *Server) Path(askID string, points [][2]int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "path", Label: label, Points: points, TTLMs: defaultOverlayTTLMs})
+	s.draw(askID, OverlayRequest{Kind: "path", Label: label, Points: points, TTLMs: overlayTTLFromInk})
 }
 
-// Box draws a dashed rectangle around a region for the default time, the way POST /overlay with kind box would. Input: the id of the ask, the rectangle in screen pixels and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
+// Box draws a dashed rectangle around a region for as long as the overlay judges its ink needs, the way POST /overlay with kind box would. Input: the id of the ask, the rectangle in screen pixels and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
 func (s *Server) Box(askID string, x, y, w, h int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "box", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: defaultOverlayTTLMs})
+	s.draw(askID, OverlayRequest{Kind: "box", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
 }
 
 // Circle draws a dashed circle inscribed in a rectangle for the default time, the way POST /overlay with kind circle would. Input and output are as Box; the extension draws the circle inscribed in the given rectangle rather than the rectangle itself.
 func (s *Server) Circle(askID string, x, y, w, h int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "circle", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: defaultOverlayTTLMs})
+	s.draw(askID, OverlayRequest{Kind: "circle", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
 }
 
 // Draw dispatches to Arrow, Line, Path, Box or Circle by shape, for the agent's draw tool to call directly without knowing which ask is running. Input: the shape, the points to draw through (arrow, line, path — ignored otherwise) and the rectangle to draw around or inscribe within (box, circle — ignored otherwise), and the label. Output: nil once broadcast under the ask DrawingAsk names, or an error naming the bad shape when it is none of the five.
