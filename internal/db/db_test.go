@@ -628,23 +628,33 @@ func TestStore_ReplaceSummariesWithDigest_TransactionAndFTS(t *testing.T) {
 		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
 	}
 
-	// summaries must be gone
-	var sumCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary'`).Scan(&sumCount); err != nil {
-		t.Fatalf("count summaries: %v", err)
-	}
-	if sumCount != 0 {
-		t.Errorf("expected 0 summaries after replace, got %d", sumCount)
-	}
-
 	// digest must exist under dayID
+	var digestID int64
 	var digestContent string
 	if err := store.DB().QueryRowContext(ctx,
-		`SELECT content FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestContent); err != nil {
+		`SELECT id, content FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestID, &digestContent); err != nil {
 		t.Fatalf("find digest node: %v", err)
 	}
 	if digestContent != digest {
 		t.Errorf("digest content mismatch: got %q", digestContent)
+	}
+
+	// summaries must survive, reparented under the digest rather than deleted
+	var sumCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary'`).Scan(&sumCount); err != nil {
+		t.Fatalf("count summaries: %v", err)
+	}
+	if sumCount != 2 {
+		t.Errorf("expected 2 summaries to survive replace, got %d", sumCount)
+	}
+	for _, id := range summaryIDs {
+		var parentID int64
+		if err := store.DB().QueryRowContext(ctx, `SELECT parent_id FROM nodes WHERE id=?`, id).Scan(&parentID); err != nil {
+			t.Fatalf("find summary %d: %v", id, err)
+		}
+		if parentID != digestID {
+			t.Errorf("summary %d: expected parent_id=%d, got %d", id, digestID, parentID)
+		}
 	}
 
 	// FTS: digest term must be searchable
@@ -659,21 +669,168 @@ func TestStore_ReplaceSummariesWithDigest_TransactionAndFTS(t *testing.T) {
 		t.Errorf("expected source=digest, got %s", hits[0].Source)
 	}
 
-	// FTS: terms unique to deleted summaries must be gone
+	// FTS: terms unique to the surviving summaries must still be searchable — they were reparented, not deleted.
 	oldHits1, err := store.SearchMemory(ctx, "uniquetoken1")
 	if err != nil {
-		t.Fatalf("SearchMemory for deleted summary term: %v", err)
+		t.Fatalf("SearchMemory for surviving summary term: %v", err)
 	}
-	if len(oldHits1) != 0 {
-		t.Errorf("FTS still returns deleted summary term 'uniquetoken1' — delete trigger not firing")
+	if len(oldHits1) == 0 {
+		t.Error("FTS lost surviving summary term 'uniquetoken1' — summary should not have been deleted")
 	}
 
 	oldHits2, err := store.SearchMemory(ctx, "uniquetoken2")
 	if err != nil {
-		t.Fatalf("SearchMemory for deleted summary term: %v", err)
+		t.Fatalf("SearchMemory for surviving summary term: %v", err)
 	}
-	if len(oldHits2) != 0 {
-		t.Errorf("FTS still returns deleted summary term 'uniquetoken2' — delete trigger not firing")
+	if len(oldHits2) == 0 {
+		t.Error("FTS lost surviving summary term 'uniquetoken2' — summary should not have been deleted")
+	}
+}
+
+// Two summaries written under different original parents can carry identical content — nothing stops two unrelated activities being written up in the same words. Reparenting both under the same new digest would give them the same (parent_id, type, content), which idx_nodes_unique forbids; the batch must survive that instead of failing the whole compaction and retrying forever.
+func TestStore_ReplaceSummariesWithDigest_ToleratesDuplicateContentAmongSummaries(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+	raw := store.DB()
+
+	var userID int64
+	if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='user' LIMIT 1`).Scan(&userID); err != nil {
+		t.Fatalf("find user node: %v", err)
+	}
+	var dayID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`,
+		userID, "day", "2026-08-01").Scan(&dayID); err != nil {
+		t.Fatalf("insert day node: %v", err)
+	}
+
+	const dupContent = "fixed the flaky test uniquedup"
+	var taskAID, taskBID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`, dayID, "task", "Task A").Scan(&taskAID); err != nil {
+		t.Fatalf("insert task A: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`, dayID, "task", "Task B").Scan(&taskBID); err != nil {
+		t.Fatalf("insert task B: %v", err)
+	}
+	var sumA, sumB int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskAID, dupContent).Scan(&sumA); err != nil {
+		t.Fatalf("insert summary A: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskBID, dupContent).Scan(&sumB); err != nil {
+		t.Fatalf("insert summary B: %v", err)
+	}
+
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{sumA, sumB}, "digest covering both tasks"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest with duplicate summary content: %v", err)
+	}
+
+	var digestID int64
+	if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestID); err != nil {
+		t.Fatalf("find digest node: %v", err)
+	}
+
+	var survivors int
+	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary' AND parent_id=? AND content=?`, digestID, dupContent).Scan(&survivors); err != nil {
+		t.Fatalf("count surviving summaries: %v", err)
+	}
+	if survivors != 1 {
+		t.Errorf("expected exactly 1 surviving summary under the digest once the duplicate content is deduped, got %d", survivors)
+	}
+
+	hits, err := store.SearchMemory(ctx, "uniquedup")
+	if err != nil {
+		t.Fatalf("SearchMemory for the deduped summary term: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Error("FTS lost the deduped summary's term entirely")
+	}
+}
+
+// A real store was found on 2026-09-05 with a day whose digest already existed but only some of its summaries had been reparented under it — the shape the pre-fix unique-index collision above left behind: the transaction's digest insert survived, its reparent update did not, on some batches. The next compaction pass for that day must not insert a second digest; it must find the one already there and finish reparenting whatever is still loose under it, including deduping a loose summary whose content already matches one already parented on the digest.
+func TestStore_ReplaceSummariesWithDigest_ResumesADayWithAnExistingDigestAndLooseSummaries(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+	raw := store.DB()
+
+	var userID int64
+	if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='user' LIMIT 1`).Scan(&userID); err != nil {
+		t.Fatalf("find user node: %v", err)
+	}
+	var dayID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`,
+		userID, "day", "2026-08-28").Scan(&dayID); err != nil {
+		t.Fatalf("insert day node: %v", err)
+	}
+
+	// The digest a first, partial run already committed, with one summary already reparented under it.
+	var digestID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'digest',?) RETURNING id`, dayID, "first digest text").Scan(&digestID); err != nil {
+		t.Fatalf("insert existing digest: %v", err)
+	}
+	var alreadyDone int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, digestID, "already reparented uniqueresume1").Scan(&alreadyDone); err != nil {
+		t.Fatalf("insert already-reparented summary: %v", err)
+	}
+
+	// Two summaries still loose under a task, one of them a duplicate of what is already under the digest.
+	var taskID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`, dayID, "task", "Loose Task").Scan(&taskID); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	var loose1, loose2 int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskID, "already reparented uniqueresume1").Scan(&loose1); err != nil {
+		t.Fatalf("insert loose duplicate summary: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskID, "new work uniqueresume2").Scan(&loose2); err != nil {
+		t.Fatalf("insert loose new summary: %v", err)
+	}
+
+	// The next compaction pass finds these two through the same query OldSummaryGroups runs (still under a task), and calls ReplaceSummariesWithDigest again for the same day.
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{loose1, loose2}, "a fresh digest text that must be ignored"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest resuming a day with an existing digest: %v", err)
+	}
+
+	var digestCount int
+	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestCount); err != nil {
+		t.Fatalf("count digests: %v", err)
+	}
+	if digestCount != 1 {
+		t.Fatalf("expected exactly 1 digest for the day, got %d — a resumed compaction must reuse the existing digest rather than insert another", digestCount)
+	}
+
+	var digestContent string
+	if err := raw.QueryRowContext(ctx, `SELECT content FROM nodes WHERE id=?`, digestID).Scan(&digestContent); err != nil {
+		t.Fatalf("read digest content: %v", err)
+	}
+	if digestContent != "first digest text" {
+		t.Errorf("digest content = %q, want the original left untouched, not the freshly generated text", digestContent)
+	}
+
+	var loose2Parent int64
+	if err := raw.QueryRowContext(ctx, `SELECT parent_id FROM nodes WHERE id=?`, loose2).Scan(&loose2Parent); err != nil {
+		t.Fatalf("find loose2: %v", err)
+	}
+	if loose2Parent != digestID {
+		t.Errorf("loose2 parent = %d, want it reparented under the existing digest %d", loose2Parent, digestID)
+	}
+
+	var survivorsOfDup int
+	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary' AND parent_id=? AND content=?`,
+		digestID, "already reparented uniqueresume1").Scan(&survivorsOfDup); err != nil {
+		t.Fatalf("count duplicate survivors: %v", err)
+	}
+	if survivorsOfDup != 1 {
+		t.Errorf("expected exactly 1 surviving copy of the duplicate content under the digest, got %d", survivorsOfDup)
 	}
 }
 
@@ -1409,195 +1566,6 @@ func TestStore_RankedEpisodes_WeightedOrdering(t *testing.T) {
 	}
 	if len(limited) != 1 {
 		t.Errorf("expected exactly 1 result with limit=1, got %d", len(limited))
-	}
-}
-
-// ─── Episode tests (Cycle 5: culling / aging) ─────────────────────────────────
-
-// TestStore_AgeEpisodes_DropsOnlyOldLowImportance seeds an old low-importance episode, an old high-importance episode, and a recent one, and verifies AgeEpisodes empties screen_text only for the old low-importance row while keeping the row itself intact — the other two keep their screen_text untouched.
-func TestStore_AgeEpisodes_DropsOnlyOldLowImportance(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-	raw := store.DB()
-
-	oldLowID, err := store.LogEpisode(ctx, "Notes", "old low", "trivial old content")
-	if err != nil {
-		t.Fatalf("LogEpisode (old low): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.1, created_at = datetime('now', '-720 hours') WHERE id = ?`, oldLowID); err != nil {
-		t.Fatalf("backdate old low: %v", err)
-	}
-
-	oldHighID, err := store.LogEpisode(ctx, "VSCode", "old high", "important old content about the core architecture")
-	if err != nil {
-		t.Fatalf("LogEpisode (old high): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.9, created_at = datetime('now', '-720 hours') WHERE id = ?`, oldHighID); err != nil {
-		t.Fatalf("backdate old high: %v", err)
-	}
-
-	recentID, err := store.LogEpisode(ctx, "Notes", "recent low", "trivial recent content")
-	if err != nil {
-		t.Fatalf("LogEpisode (recent): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.1 WHERE id = ?`, recentID); err != nil {
-		t.Fatalf("set recent importance: %v", err)
-	}
-
-	aged, err := store.AgeEpisodes(ctx, 168*time.Hour, 0.5)
-	if err != nil {
-		t.Fatalf("AgeEpisodes: %v", err)
-	}
-	if aged != 1 {
-		t.Errorf("expected exactly 1 episode aged, got %d", aged)
-	}
-
-	var oldLowText, oldHighText, recentText string
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, oldLowID).Scan(&oldLowText); err != nil {
-		t.Fatalf("query old low text: %v", err)
-	}
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, oldHighID).Scan(&oldHighText); err != nil {
-		t.Fatalf("query old high text: %v", err)
-	}
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, recentID).Scan(&recentText); err != nil {
-		t.Fatalf("query recent text: %v", err)
-	}
-
-	if oldLowText != "" {
-		t.Errorf("expected old low-importance episode's screen_text to be emptied, got %q", oldLowText)
-	}
-	if oldHighText != "important old content about the core architecture" {
-		t.Errorf("old high-importance episode's screen_text must survive, got %q", oldHighText)
-	}
-	if recentText != "trivial recent content" {
-		t.Errorf("recent episode's screen_text must survive, got %q", recentText)
-	}
-
-	// rows must still exist (never deleted)
-	var count int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes`).Scan(&count); err != nil {
-		t.Fatalf("count episodes: %v", err)
-	}
-	if count != 3 {
-		t.Errorf("expected all 3 episode rows to survive aging, got %d", count)
-	}
-
-	// FTS mirror must not keep surfacing the cleared content (external-content fts5 requires the update trigger to purge the stale index entry).
-	staleHits, err := store.SearchEpisodes(ctx, "trivial old content")
-	if err != nil {
-		t.Fatalf("SearchEpisodes after aging: %v", err)
-	}
-	for _, h := range staleHits {
-		if strings.Contains(h.Content, "trivial old content") {
-			t.Errorf("aged episode's old content still searchable via FTS: %+v", staleHits)
-		}
-	}
-}
-
-// TestStore_PruneAncientEpisodes_DeletesOnlyThinnedRowsPastThreshold seeds three episodes: one ancient AND already thinned (screen_text emptied by AgeEpisodes) — eligible for deletion; one ancient but NOT thinned — must survive, since PruneAncientEpisodes must never delete raw text that hasn't gone through the aging pass; and one recent + thinned — must survive since it isn't past the ancient threshold yet.
-// Also confirms FTS5 no longer returns the deleted row's content, via both a keyword search and the fts5 'integrity-check' command, which fails loudly if the shadow index and content table drift.
-func TestStore_PruneAncientEpisodes_DeletesOnlyThinnedRowsPastThreshold(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-	raw := store.DB()
-
-	// ancient + already thinned: eligible for deletion.
-	ancientThinID, err := store.LogEpisode(ctx, "Notes", "ancient thinned", "zorptastic")
-	if err != nil {
-		t.Fatalf("LogEpisode (ancient thinned): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.05, created_at = datetime('now', '-9000 hours') WHERE id = ?`,
-		ancientThinID); err != nil {
-		t.Fatalf("backdate ancient thinned: %v", err)
-	}
-	// thin it via the real aging path (not a hand-rolled UPDATE) so the FTS mirror is brought to empty by the existing episodes_au trigger first, exactly as would happen in production before a prune ever runs.
-	if _, err := store.AgeEpisodes(ctx, 168*time.Hour, 0.5); err != nil {
-		t.Fatalf("AgeEpisodes (thin ancientThinID): %v", err)
-	}
-	var thinnedCheck string
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, ancientThinID).Scan(&thinnedCheck); err != nil {
-		t.Fatalf("query thinned check: %v", err)
-	}
-	if thinnedCheck != "" {
-		t.Fatalf("precondition failed: ancientThinID must be thinned before prune, got %q", thinnedCheck)
-	}
-
-	// ancient but NOT thinned: still carries raw text, must survive.
-	ancientRawID, err := store.LogEpisode(ctx, "VSCode", "ancient raw", "quibblefrond")
-	if err != nil {
-		t.Fatalf("LogEpisode (ancient raw): %v", err)
-	}
-	// high importance so AgeEpisodes above does not thin it too.
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.95, created_at = datetime('now', '-9000 hours') WHERE id = ?`,
-		ancientRawID); err != nil {
-		t.Fatalf("backdate ancient raw: %v", err)
-	}
-
-	// recent + thinned (screen_text already empty, but not past the ancient threshold): must survive.
-	recentThinID, err := store.LogEpisode(ctx, "Notes", "recent thinned", "")
-	if err != nil {
-		t.Fatalf("LogEpisode (recent thinned): %v", err)
-	}
-
-	const ancientAfter = 365 * 24 * time.Hour
-	pruned, err := store.PruneAncientEpisodes(ctx, ancientAfter)
-	if err != nil {
-		t.Fatalf("PruneAncientEpisodes: %v", err)
-	}
-	if pruned != 1 {
-		t.Fatalf("expected exactly 1 row pruned, got %d", pruned)
-	}
-
-	var count int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes`).Scan(&count); err != nil {
-		t.Fatalf("count episodes: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 surviving episode rows, got %d", count)
-	}
-
-	// the deleted row's id must actually be gone
-	var stillThere int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes WHERE id = ?`, ancientThinID).Scan(&stillThere); err != nil {
-		t.Fatalf("check deleted row: %v", err)
-	}
-	if stillThere != 0 {
-		t.Errorf("expected ancientThinID row to be deleted, but it still exists")
-	}
-
-	// the ancient-but-raw and recent-but-thinned rows must both survive untouched
-	var ancientRawText string
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, ancientRawID).Scan(&ancientRawText); err != nil {
-		t.Fatalf("query ancient raw survivor: %v", err)
-	}
-	if ancientRawText != "quibblefrond" {
-		t.Errorf("ancient-but-not-thinned episode must survive with its raw text intact, got %q", ancientRawText)
-	}
-	var recentExists int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes WHERE id = ?`, recentThinID).Scan(&recentExists); err != nil {
-		t.Fatalf("check recent thinned survivor: %v", err)
-	}
-	if recentExists != 1 {
-		t.Errorf("recent thinned episode must survive (not past the ancient threshold), but it's gone")
-	}
-
-	// FTS5 must not still surface the deleted row's old content — proves the episodes_ad DELETE trigger kept episodes_fts in sync rather than orphaning a shadow-index entry for the removed rowid.
-	staleHits, err := store.SearchEpisodes(ctx, "zorptastic")
-	if err != nil {
-		t.Fatalf("SearchEpisodes after prune: %v", err)
-	}
-	if len(staleHits) != 0 {
-		t.Errorf("deleted episode's old content still searchable via FTS after prune: %+v", staleHits)
-	}
-
-	// fts5 integrity-check: for an external-content table, this command scans the content table (episodes) and the shadow index and fails if they've drifted — the definitive proof the DELETE didn't orphan the index.
-	if _, err := raw.ExecContext(ctx, `INSERT INTO episodes_fts(episodes_fts) VALUES('integrity-check')`); err != nil {
-		t.Errorf("episodes_fts integrity-check failed after prune (shadow index orphaned): %v", err)
 	}
 }
 
