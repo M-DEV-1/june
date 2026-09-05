@@ -335,13 +335,28 @@ describe("fitWindow", () => {
 });
 
 describe("noticePlacement", () => {
-  it("puts a notice-only window under the top bar at the right of the work area, the way a desktop notification sits", () => {
-    // 1920 wide minus the 720 window is 1200; the bar ends at y=32 and the window starts 8 physical pixels under it.
-    expect(noticePlacement(laptopWork, { width: 720, height: 160 }, 1)).toEqual({ x: 1200, y: 40 });
+  /** A placement context on one monitor, for the notice placement to read. Input: the work area, the scale and the dock. Output: the context. */
+  const ctx = (work: typeof laptopWork, scale: number, dock: { edge: "bottom" | "left" | "right" | "top"; clearance: number }): PlaceContext =>
+    ({ work, scale, dock, position: "bottom" });
+
+  it("puts a notice-only window under the top bar at the right of the usable area, beside the tray", () => {
+    // 1920 wide minus the 456 window is 1464; the bar ends at y=32 and the window starts 8 physical pixels under it.
+    expect(noticePlacement(ctx(laptopWork, 1, noDock), { width: 456, height: 160 })).toEqual({ x: 1464, y: 40 });
   });
 
-  it("scales the gap under the bar with the monitor", () => {
-    expect(noticePlacement({ x: 0, y: 64, width: 3840, height: 2096 }, { width: 1440, height: 320 }, 2)).toEqual({ x: 2400, y: 80 });
+  it("scales the window and the gap under the bar with the monitor", () => {
+    // At scale 2 the 456 logical window is 912 physical, so it starts 912 back from the right edge of a 3840-wide area.
+    expect(noticePlacement(ctx({ x: 0, y: 64, width: 3840, height: 2096 }, 2, noDock), { width: 456, height: 160 })).toEqual({ x: 2928, y: 80 });
+  });
+
+  it("keeps clear of an auto-hiding dock on the right edge", () => {
+    // A 64 logical-pixel dock on the right reserves no screen space, so the placement has to take it off the work area itself: 1920 - 64 - 456 = 1400.
+    expect(noticePlacement(ctx(laptopWork, 1, { edge: "right", clearance: 64 }), { width: 456, height: 160 })).toEqual({ x: 1400, y: 40 });
+  });
+
+  it("starts a window too big for the screen on the screen rather than off its left or bottom edge", () => {
+    // 720 logical at scale 2 is 1440 physical, wider than this 1280-wide area, and 900 physical is taller than it.
+    expect(noticePlacement(ctx({ x: 100, y: 32, width: 1280, height: 700 }, 2, noDock), { width: 720, height: 450 })).toEqual({ x: 100, y: 32 });
   });
 });
 

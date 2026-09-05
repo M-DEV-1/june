@@ -428,7 +428,8 @@ describe("a notice card carries its own buttons", () => {
       expect(call).toBeDefined();
       expect(call![1].method).toBe("POST");
       expect(JSON.parse(call![1].body)).toEqual({ title: "Still open", body: "Send the invoice", action: "hour" });
-      expect(document.getElementById("n")?.hidden).toBe(true);
+      // The card stays up until the daemon's own follow-up event replaces it: a snooze the daemon refuses must not look like it took.
+      expect(document.getElementById("n")?.hidden).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -538,5 +539,164 @@ describe("the voice grid breathes on its own while the daemon is quiet", () => {
     const after = document.querySelectorAll(".vw-spk .vw-row").length;
     await vi.advanceTimersByTimeAsync(1000);
     expect(document.querySelectorAll(".vw-spk .vw-row").length).toBe(after);
+  });
+});
+
+// The thread grew the window without limit until it was given a max-height and its own scrollbar; a fresh element starts at scrollTop 0 and render() rebuilds the whole card's innerHTML on almost every daemon event, so without pinning, the newest turn — which is at the bottom — scrolled out of sight the moment the thread passed its ceiling.
+describe("the thread stays pinned to the newest turn", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("scrolls the rebuilt thread to its bottom, where the answer being written is", async () => {
+    // jsdom lays nothing out, so scrollHeight is always 0 and scrollTop refuses to be set; both are stood in for here, a 900px-tall thread whose scroll position is remembered per element.
+    const height = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight")!;
+    const top = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
+    const tops = new WeakMap<Element, number>();
+    Object.defineProperty(Element.prototype, "scrollHeight", { configurable: true, get: () => 900 });
+    Object.defineProperty(Element.prototype, "scrollTop", {
+      configurable: true,
+      get(this: Element) {
+        return tops.get(this) ?? 0;
+      },
+      set(this: Element, v: number) {
+        tops.set(this, v);
+      },
+    });
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+
+      dispatch({ kind: "type", value: "what changed on this page" });
+      dispatch({ kind: "enter" });
+      // A full rebuild of the card, which is what used to throw the scroll position away.
+      dispatch({ kind: "daemonEvent", ev: { id: "", type: "answer", text: "The page reloaded." } });
+
+      expect(document.querySelector(".thread")!.scrollTop).toBe(900);
+    } finally {
+      Object.defineProperty(Element.prototype, "scrollHeight", height);
+      Object.defineProperty(Element.prototype, "scrollTop", top);
+    }
+  });
+});
+
+// A snooze the daemon could not write answers 500 (see internal/ipc/notices.go). The card used to come down at the press, before the request had even gone out, so a refusal read as done and the item was never seen again.
+describe("a notice the daemon refuses", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("keeps the card up and says on it that the button did not take", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+
+      document.querySelector<HTMLButtonElement>('#n button.na[data-act="evening"]')!.click();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(document.getElementById("n")?.hidden).toBe(false);
+      expect(document.querySelector("#n .nf")?.textContent).toBe("Couldn't do that");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says the same when the daemon cannot be reached at all", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connection refused")));
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+      document.querySelector<HTMLButtonElement>('#n button.na[data-act="done"]')!.click();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(document.querySelector("#n .nf")?.textContent).toBe("Couldn't do that");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+// The pointer being over the card is what pauses its six seconds, and that is learnt from pointerenter — which does not fire again for a card the pointer is already on. A tick can post five notices in a row (see maybeTaskNotices in internal/proactive/notify.go), and each used to re-arm the timer under a stationary pointer.
+describe("the notice timer under a pointer that is already on the card", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("leaves a second notice up while the pointer sits on the card", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+
+    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+    const bubble = document.getElementById("n")!;
+    // The pointer is on the card; no fresh pointerenter fires for the notice that lands under it.
+    vi.spyOn(bubble, "matches").mockReturnValue(true);
+    dispatch({ kind: "notice", notice: { title: "Also open", body: "Book the flight", place: "tasks", id: "43", kind: "task" }, hoverOpen: true });
+
+    await vi.advanceTimersByTimeAsync(7000);
+    expect(bubble.hidden).toBe(false);
+    expect(bubble.querySelector(".nt")?.textContent).toBe("Also open");
+  });
+});
+
+// The step ticker wakes ten times a second for the whole length of an ask or a computer-use job, which run for minutes. Nothing it draws is on screen once the window is hidden.
+describe("the step ticker rests while the window is not on screen", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    vi.useFakeTimers();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("leaves the grid where it is while the document is hidden", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+    dispatch({ kind: "type", value: "what changed on this page" });
+    dispatch({ kind: "enter" });
+
+    const label = document.querySelector(".steps .step.run .step-label")!;
+    const before = label.textContent;
+    const hidden = Object.getOwnPropertyDescriptor(Document.prototype, "hidden")!;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+    try {
+      await vi.advanceTimersByTimeAsync(600);
+      expect(label.textContent).toBe(before);
+    } finally {
+      Object.defineProperty(Document.prototype, "hidden", hidden);
+      delete (document as unknown as { hidden?: boolean }).hidden;
+    }
+  });
+
+  it("stops the ticker altogether when Escape hides the hover mid-ask", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+    dispatch({ kind: "type", value: "what changed on this page" });
+    dispatch({ kind: "enter" });
+    dispatch({ kind: "escape" });
+
+    const label = document.querySelector(".steps .step.run .step-label")!;
+    const before = label.textContent;
+    await vi.advanceTimersByTimeAsync(600);
+    expect(label.textContent).toBe(before);
   });
 });

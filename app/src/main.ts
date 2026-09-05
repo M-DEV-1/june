@@ -228,6 +228,9 @@ function render(v: View): void {
   const m = v.matters[v.current] ?? placeholderMatter();
   root.innerHTML = cardHtml(v, m);
   root.classList.toggle("bare", !hasContent(v, m));
+  // Past its ceiling the thread scrolls inside itself (see threadMaxHeight and --thread-max), and the newest turn is at the bottom of it — but this rebuild has just thrown the old element and its scroll position away, so the freshly built one starts at the top. Pinning it to the bottom is what keeps the answer being written in view.
+  const thread = root.querySelector<HTMLElement>(".thread");
+  if (thread) thread.scrollTop = thread.scrollHeight;
   renderNotice(v);
   void fitWindow();
 
@@ -299,7 +302,7 @@ function noticeButtonsHtml(): string {
   return `<div class="nr">${acts.map(([act, label]) => `<button class="na" data-act="${act}" type="button">${label}</button>`).join("")}</div>`;
 }
 
-/** Sends one of the card's buttons to the daemon's notice route, the same one the desktop banner's buttons and the app window's rail line use. Input: the notice and the button pressed ("done", "hour", "evening" or "tomorrow"). Output: nothing; a daemon that cannot be reached leaves the notice as it was, and it will come back on the next tick. */
+/** Sends one of the card's buttons to the daemon's notice route, the same one the desktop banner's buttons and the app window's rail line use. The card is still up while this runs (see the noticeAct case in state.ts), so a refusal has somewhere to be said: the daemon answers 500 when it could not write the snooze or the done (see internal/ipc/notices.go), and a press that goes nowhere must not look like it took. Input: the notice and the button pressed ("done", "hour", "evening" or "tomorrow"). Output: nothing; the daemon's own follow-up "notice" event is what replaces the card with its one-line confirmation when the press did take. */
 function actOnNotice(n: Notice, act: string): void {
   const { base, token } = endpoint();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -308,17 +311,25 @@ function actOnNotice(n: Notice, act: string): void {
     method: "POST",
     headers,
     body: JSON.stringify({ title: n.title, body: n.body, action: act }),
-  }).catch(() => {
-    /* the daemon is gone; the notice comes back on its own */
-  });
+  })
+    .then((r) => {
+      if (!r.ok) noticeFailed();
+    })
+    .catch(noticeFailed);
 }
 
-/** The six seconds a notice stays up. Input: the view. Output: nothing; the timer is cleared and started again from the top whenever the notice itself changes, and left cleared while the pointer is over the card, which is what pauses it — the card then gets its full six seconds again when the pointer leaves. */
+/** Puts one muted line at the bottom of the notice card saying the button did not take, for a daemon that answered with an error or could not be reached at all. Input: none. Output: nothing; the line is appended to the card, once however many presses fail, and goes when the card is next redrawn for a different notice (see renderNotice). */
+function noticeFailed(): void {
+  if (!noticeEl.querySelector(".nf"))
+    noticeEl.insertAdjacentHTML("beforeend", `<div class="nf">Couldn't do that</div>`);
+}
+
+/** The six seconds a notice stays up. Input: the view. Output: nothing; the timer is cleared and started again from the top whenever the notice itself changes, and left cleared while the pointer is over the card, which is what pauses it — the card then gets its full six seconds again when the pointer leaves. The card is asked directly whether the pointer is on it rather than only reading noticeHeld, because a notice landing under a pointer that is already there fires no pointerenter of its own, so the flag would say the card is free while the user is reading it (a tick can post five notices in a row; see maybeTaskNotices in internal/proactive/notify.go). */
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 function armNotice(v: View): void {
   clearTimeout(noticeTimer);
   noticeTimer = undefined;
-  if (!v.notice || v.noticeHeld) return;
+  if (!v.notice || v.noticeHeld || noticeEl.matches(":hover")) return;
   noticeTimer = setTimeout(() => dispatch({ kind: "noticeGone" }), NOTICE_MS);
 }
 
@@ -466,7 +477,7 @@ let breathTimer: ReturnType<typeof setInterval> | undefined;
 
 /** Starts or stops the breath with the session. Input: whether a live voice session is on. Output: nothing. Under reduced motion the grid holds still, so nothing is started. */
 function syncBreath(voiceOn: boolean): void {
-  if (voiceOn && breathTimer === undefined && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (voiceOn && breathTimer === undefined && !reduce) {
     breathTimer = setInterval(() => {
       if (Date.now() - lastLevelAt < BREATH_AFTER_MS) return;
       speakerWave.update(voiceGridAmplitude(0));
@@ -589,6 +600,8 @@ function patchLiveSteps(v: View): boolean {
 
 /** Ticks the running step's own elapsed-seconds number without touching anything else — what startStepTicker calls once a second instead of the full render() it used to, which tore the whole steps list down and rebuilt it every second an ask ran, restarting its shimmer and breathe animations on a one-second loop regardless of whether any tool call had actually happened. Input: none, reads the live DOM and the view. Output: nothing; does nothing once the running step has finished (the gap before the next one starts, or the turn's last step already done) rather than show a stale number. */
 function tickSteps(): void {
+  // An ask, and a computer-use job even more so, runs for minutes; none of what this draws is on screen while the window is hidden, so the ten wakeups a second do no work until it comes back.
+  if (document.hidden) return;
   const turns = view.matters[view.current]?.turns ?? [];
   const last = turns[turns.length - 1];
 
@@ -1001,17 +1014,30 @@ function onInputKeydown(e: KeyboardEvent): void {
 }
 
 // Tauri wiring; harmless in a plain browser.
-let hideWindow = () => {};
+/** Hides the OS window. Replaced by the real one below when this page is running inside Tauri. */
+let hide: () => Promise<void> = async () => {};
+/** The last hide's own promise. A notice arriving milliseconds behind a hide has to wait for it before asking whether the window is visible, or isVisible() answers true for a window on its way out and the notice takes the "already open" branch and is never shown (see showNotice). */
+let hidden: Promise<void> = Promise.resolve();
+/** Hides the hover and stops the step ticker with it, whichever way the hide was asked for — Escape, a notice's six seconds running out, or the card being clicked through. Input: none. Output: nothing; the hide's promise is kept in `hidden` for showNotice to wait on. */
+function hideWindow(): void {
+  stopStepTicker();
+  hidden = hide();
+}
 /** Shows the hover so it can say one of Ora's own moments, and takes no focus doing it: the notice arrives while the user is working in another window, so the window is placed and shown exactly as the hotkey path places and shows it but with no raise() and nothing else that asks GNOME for focus. Input: the notice off the daemon's stream. Output: a promise for when the window is up. */
 let showNotice: (n: Notice) => Promise<void> = async () => {};
+/** How wide the hover is, in logical pixels: the width of the ask card. */
+const HOVER_WIDTH = 720;
+/** How wide a window showing nothing but a notice is, in logical pixels: the notice card's own 420 maximum (see .N in styles.css) plus the 18 of body padding on each side. The window is transparent and paints nothing outside the card, but it still takes the pointer, so a window any wider than this would sit as an invisible band over the top right of the screen swallowing clicks meant for whatever is under it. */
+const NOTICE_WIDTH = 456;
+
 /** Sizes the OS window to the rendered content so the empty state is a short strip and an answer grows the window, keeping it anchored to the dock whenever that height changes while the window is visible. Input: none. Output: the logical size the window was set to. */
 let fitWindow: () => Promise<{ width: number; height: number }> = async () => ({
-  width: 720,
+  width: HOVER_WIDTH,
   height: 0,
 });
 try {
   const win = getCurrentWindow();
-  hideWindow = () => void win.hide();
+  hide = () => win.hide();
 
   // Where the dock is, re-read from the desktop on every open so moving the dock takes effect on the next hotkey press instead of on the next restart. The last answer is kept as the fallback, and the first one is a bottom dock that reserves no space, which is also what the Rust side returns when it can read nothing.
   let dock: Dock = { edge: "bottom", clearance: 0 };
@@ -1026,9 +1052,12 @@ try {
   };
   // The monitor, dock and chosen position this open used, held for as long as the window stays up so that an answer growing the window keeps sitting where it opened instead of following the pointer onto another screen.
   let placeCtx: PlaceContext | null = null;
+  // Whether this window is up only to show a notice, which is a different window from the hover: it is the width of the notice card rather than of the ask card, it sits under the top bar at the right rather than where the hover opens, and it goes again when the notice does. Set when a notice arrives at a shut window and cleared when the hotkey opens the hover proper, so a second notice landing on top of the first is still treated as a notice-only window rather than as a hover the user opened.
+  let noticeOnly = false;
 
   // The card does not fill the window: the body keeps a gutter around it so the card's shadow has somewhere to fall, so the window has to be as tall as the card's bottom edge plus that gutter. Growing it downwards alone would walk it off the position it opened at, so every height change is followed by a move (see winplace.fitWindow).
   let lastHeight = 0;
+  let lastWidth = 0;
   fitWindow = async () => {
     const gutter =
       parseFloat(getComputedStyle(document.body).paddingBottom) || 0;
@@ -1038,32 +1067,41 @@ try {
       noticeEl.getBoundingClientRect().bottom,
     );
     // The 96px floor is the card's own minimum height; a notice showing on its own has no card under it, so it is only as tall as the bubble and would otherwise float half a card's height off the dock.
-    const floor = view.notice && view.noticeAlone ? 0 : 96;
+    const floor = noticeOnly ? 0 : 96;
     const height = Math.max(floor, Math.ceil(bottom + gutter));
-    const changed = height !== lastHeight;
+    const width = noticeOnly ? NOTICE_WIDTH : HOVER_WIDTH;
+    const changed = height !== lastHeight || width !== lastWidth;
     lastHeight = height;
-    const size = { width: 720, height };
-    await winplaceFitWindow(win, size, changed, placeCtx);
+    lastWidth = width;
+    const size = { width, height };
+    // A notice-only window is placed where notices go on every resize as well as on the first show, so a second notice with a taller body does not fly off to the hover's own position (winplace.fitWindow moves a visible window with placementFor, which is the hover's bottom-centre by default).
+    await winplaceFitWindow(win, size, changed, noticeOnly ? null : placeCtx);
+    if (noticeOnly && changed) await placeNotice(size);
     return size;
+  };
+  /** Puts the window where a notice-only window belongs. Input: the window's logical size. Output: nothing; does nothing when no monitor was resolved for this open. */
+  const placeNotice = async (size: { width: number; height: number }): Promise<void> => {
+    if (!placeCtx) return;
+    const at = noticePlacement(placeCtx, size);
+    await win.setPosition(new PhysicalPosition(at.x, at.y));
   };
   // The thread's ceiling is a share of the screen it is on, so it is set from the placement each open resolves; the stylesheet reads it as --thread-max and scrolls the thread inside itself past it.
   const capThread = (ctx: PlaceContext | null): void => {
     if (ctx) document.body.style.setProperty("--thread-max", `${threadMaxHeight(ctx.work, ctx.scale)}px`);
   };
   showNotice = async (n) => {
+    // A notice pressed on a notice-only window hides that window and the daemon's confirmation follows milliseconds later; without waiting for the hide to land, isVisible() answers true for a window on its way out and the confirmation takes the "already open" branch below and is never seen.
+    await hidden;
     const open = await win.isVisible();
     // A hover already on screen keeps the position it opened at; one that is shut is placed for this notice the same way the hotkey path places it, before anything is shown.
     if (!open) placeCtx = await resolveContext(desktop, storedHoverPosition());
     capThread(placeCtx);
-    dispatch({ kind: "notice", notice: n, hoverOpen: open });
+    // A window that is up only for the notice before this one is still a notice-only window: the card stays on its own and goes with the notice, rather than un-hiding an empty ask card that nothing would then take down.
+    if (!open) noticeOnly = true;
+    dispatch({ kind: "notice", notice: n, hoverOpen: open && !noticeOnly });
     if (open) return;
-    const size = await fitWindow();
-    if (placeCtx) {
-      // A window up only to show a notice sits where desktop notifications do, under the top bar at the right, not where the hover opens for a question.
-      const physical = { width: size.width * placeCtx.scale, height: size.height * placeCtx.scale };
-      const at = noticePlacement(placeCtx.work, physical, placeCtx.scale);
-      await win.setPosition(new PhysicalPosition(at.x, at.y));
-    }
+    // A window up only to show a notice sits under the top bar at the right, beside the tray, not where the hover opens for a question.
+    await placeNotice(await fitWindow());
     // show() and nothing else. No raise(), no setFocus(): the user is typing in another window and a notice must not take the keyboard off them.
     await win.show();
   };
@@ -1074,6 +1112,8 @@ try {
       // Ask the daemon what is on screen before this window takes focus, or the context would be Ora itself.
       beforeShow: connect,
       openContext: async () => {
+        // The hotkey opens the hover proper, so whatever notice-only window came before it is over: full width, the chosen position, and the card underneath on show again.
+        noticeOnly = false;
         // The position is re-read from storage on every open, so choosing a different one on the Settings screen takes effect on the next hotkey press without a restart.
         placeCtx = await resolveContext(desktop, storedHoverPosition());
         capThread(placeCtx);
