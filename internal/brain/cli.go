@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	oratext "ora/internal/text"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,9 +52,9 @@ func ClaudeCLI(binary, model string, timeoutSeconds int) Brain {
 // The prompt is the value of --print rather than stdin, which is the only text input that CLI takes; that caps a prompt at one argv entry, 128 KB on Linux.
 // The timeout matters more here than for claude: agy has open bugs where a print run with no terminal attached never returns.
 // Input: the path to the binary and a hard timeout in seconds. Output: the "response" field of the CLI's JSON.
-func AgyCLI(binary string, timeoutSeconds int) Brain {
+func AgyCLI(binary string, timeoutSeconds int, model ...string) Brain {
 	return func(ctx context.Context, prompt string) (string, error) {
-		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"--print", prompt, "--output-format", "json", "--disable-slash-commands"}, "")
+		out, err := runCLI(ctx, binary, timeoutSeconds, agyArgs(prompt, first(model)), "")
 		if err != nil {
 			return "", err
 		}
@@ -78,9 +79,9 @@ func AgyCLI(binary string, timeoutSeconds int) Brain {
 // GrokCLI answers by running `grok -p`, under the Grok login the machine already has — also a paid plan with a pro default model. Every tool is denied ('--deny *'), because the prompt carries text nobody vetted and these duties need none.
 // The prompt is an argv entry (grok takes no stdin prompt), capping it at 128 KB on Linux.
 // Input: the path to the binary and a hard timeout in seconds. Output: the "text" field of the CLI's JSON.
-func GrokCLI(binary string, timeoutSeconds int) Brain {
+func GrokCLI(binary string, timeoutSeconds int, model ...string) Brain {
 	return func(ctx context.Context, prompt string) (string, error) {
-		out, err := runCLI(ctx, binary, timeoutSeconds, []string{"-p", prompt, "--output-format", "json", "--deny", "*"}, "")
+		out, err := runCLI(ctx, binary, timeoutSeconds, grokArgs(prompt, first(model)), "")
 		if err != nil {
 			return "", err
 		}
@@ -97,6 +98,32 @@ func GrokCLI(binary string, timeoutSeconds int) Brain {
 		}
 		return text, nil
 	}
+}
+
+// agyArgs is the argument list for one agy --print run. An empty model leaves --model off, which is what keeps the CLI's own default.
+func agyArgs(prompt, model string) []string {
+	args := []string{"--print", prompt, "--output-format", "json", "--disable-slash-commands"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	return args
+}
+
+// grokArgs is the argument list for one grok -p run. An empty model leaves -m off.
+func grokArgs(prompt, model string) []string {
+	args := []string{"-p", prompt, "--output-format", "json", "--deny", "*"}
+	if model != "" {
+		args = append(args, "-m", model)
+	}
+	return args
+}
+
+// first is the caller's optional model name, or empty when they passed none.
+func first(ss []string) string {
+	if len(ss) > 0 {
+		return ss[0]
+	}
+	return ""
 }
 
 // runCLI runs one child process to completion under a hard timeout and returns its stdout.
@@ -127,11 +154,7 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 	return out.Bytes(), nil
 }
 
-// head is the first 300 characters of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line.
+// head is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line. Cutting on runes rather than bytes keeps the log line valid UTF-8 whatever the CLI printed.
 func head(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 300 {
-		return s[:300] + "…"
-	}
-	return s
+	return oratext.RunesEllipsis(oratext.OneLine(s), 300)
 }

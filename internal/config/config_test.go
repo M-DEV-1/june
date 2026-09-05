@@ -269,3 +269,108 @@ func TestDreamConfig_DefaultsAndDisable(t *testing.T) {
 		t.Errorf("zero DreamPort() = %d, want %d", got, DefaultDreamPort)
 	}
 }
+
+// TestBackgroundModel_DefaultsToFlashLite checks that every unattended job runs on the cheap high-allowance model unless the config pins one, so no background job can quietly spend the 20-request day that gemini-3.5-flash gets on the free tier.
+func TestBackgroundModel_DefaultsToFlashLite(t *testing.T) {
+	SetBackgroundModels(nil)
+	for _, job := range BackgroundJobs() {
+		if got := BackgroundModel(job); got != DefaultBackgroundModel {
+			t.Errorf("BackgroundModel(%q) = %q, want the default %q", job, got, DefaultBackgroundModel)
+		}
+	}
+}
+
+// TestBackgroundModel_ConfigPinsAJob checks that a model named in the config's background_models map wins for that job and leaves every other job on the default.
+func TestBackgroundModel_ConfigPinsAJob(t *testing.T) {
+	SetBackgroundModels(map[string]string{JobMeetingMinutes: "gemini-3.5-flash"})
+	t.Cleanup(func() { SetBackgroundModels(nil) })
+
+	if got := BackgroundModel(JobMeetingMinutes); got != "gemini-3.5-flash" {
+		t.Errorf("pinned job = %q, want %q", got, "gemini-3.5-flash")
+	}
+	if got := BackgroundModel(JobWorkingState); got != DefaultBackgroundModel {
+		t.Errorf("unpinned job = %q, want the default %q", got, DefaultBackgroundModel)
+	}
+}
+
+// TestBackgroundModel_UnknownJobStillAnswers checks that a job name with no entry and no default of its own falls back to the default model rather than returning an empty model name that would fail the call.
+func TestBackgroundModel_UnknownJobStillAnswers(t *testing.T) {
+	SetBackgroundModels(nil)
+	if got := BackgroundModel("not-a-job"); got != DefaultBackgroundModel {
+		t.Errorf("unknown job = %q, want the default %q", got, DefaultBackgroundModel)
+	}
+}
+
+// TestBackgroundJobs_CoversEveryUnattendedJob checks that the job list the user configures by name includes each background duty that reaches a metered model.
+func TestBackgroundJobs_CoversEveryUnattendedJob(t *testing.T) {
+	want := []string{
+		JobWorkingState,
+		JobEpisodeSummary,
+		JobEpisodicCompaction,
+		JobNoteConsolidation,
+		JobPersonalContext,
+		JobMeetingMinutes,
+		JobDream,
+	}
+	got := BackgroundJobs()
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("BackgroundJobs() is missing %q", w)
+		}
+	}
+}
+
+// TestBackgroundBrainConfig_PinsGeminiOnlyWhenUnset checks that a background duty on the Gemini API gets the cheap high-allowance model, that a model the user pinned is left alone, and that a CLI provider is untouched because its Model field is a CLI alias rather than a Gemini model name.
+func TestBackgroundBrainConfig_PinsGeminiOnlyWhenUnset(t *testing.T) {
+	SetBackgroundModels(map[string]string{JobMeetingMinutes: "gemini-3.5-flash-lite"})
+	t.Cleanup(func() { SetBackgroundModels(nil) })
+
+	cases := []struct {
+		name      string
+		in        BrainConfig
+		wantModel string
+	}{
+		{"an empty provider is the gemini api and gets the background model", BrainConfig{}, "gemini-3.5-flash-lite"},
+		{"the named gemini api provider gets it too", BrainConfig{Provider: BrainGeminiAPI}, "gemini-3.5-flash-lite"},
+		{"a model the user pinned wins", BrainConfig{Provider: BrainGeminiAPI, Model: "gemini-3.6-flash"}, "gemini-3.6-flash"},
+		{"a claude-cli alias is left alone", BrainConfig{Provider: BrainClaudeCLI, Model: "sonnet"}, "sonnet"},
+		{"a claude-cli with no alias stays empty rather than getting a gemini model name", BrainConfig{Provider: BrainClaudeCLI}, ""},
+		{"codex is left alone", BrainConfig{Provider: BrainCodex, Model: "gpt-5.5"}, "gpt-5.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := BackgroundBrainConfig(tc.in, JobMeetingMinutes).Model; got != tc.wantModel {
+				t.Errorf("Model = %q, want %q", got, tc.wantModel)
+			}
+		})
+	}
+}
+
+// TestDailyTokenBudgetFor_DefaultsToOff checks that a provider named with no budget, and a config that never set the map at all, both come back as 0 — off — rather than some other default, since a user who never asked for a budget should never see a warning.
+func TestDailyTokenBudgetFor_DefaultsToOff(t *testing.T) {
+	var zero OraConfig
+	if got := zero.DailyTokenBudgetFor("codex"); got != 0 {
+		t.Errorf("a config with no budgets at all = %d, want 0", got)
+	}
+	cfg := OraConfig{DailyTokenBudget: map[string]int{"codex": 500000}}
+	if got := cfg.DailyTokenBudgetFor("gemini"); got != 0 {
+		t.Errorf("a provider named with no budget = %d, want 0", got)
+	}
+}
+
+// TestDailyTokenBudgetFor_ReturnsTheSetBudget checks the budget set for one provider is returned unchanged and does not leak into another provider's.
+func TestDailyTokenBudgetFor_ReturnsTheSetBudget(t *testing.T) {
+	cfg := OraConfig{DailyTokenBudget: map[string]int{"codex": 500000, "gemini": 1000000}}
+	if got := cfg.DailyTokenBudgetFor("codex"); got != 500000 {
+		t.Errorf("codex budget = %d, want 500000", got)
+	}
+	if got := cfg.DailyTokenBudgetFor("gemini"); got != 1000000 {
+		t.Errorf("gemini budget = %d, want 1000000", got)
+	}
+}

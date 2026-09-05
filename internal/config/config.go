@@ -17,6 +17,8 @@ type OraConfig struct {
 	Voice string `json:"voice"`
 	// Autostart is whether the daemon should be launched when the user logs in. Defaults to false — an upgrading user must opt in to a screen-recording daemon starting at login, not get one installed silently — and the daemon reconciles the on-disk autostart entry to match this field on every startup.
 	Autostart bool `json:"autostart"`
+	// Window is whether the daemon also runs the desktop window, so the login entry starts one thing and gets both. Defaults to true; set it to false in ora-config.json to run the daemon headless, and see cmd/window.go for where the window binary is looked for.
+	Window bool `json:"window"`
 	// ProactiveAudio turns on the Gemini Live "proactive audio" feature, which lets the model stay silent when what the mic picked up wasn't addressed to it — a room conversation, a video, the user talking to someone else. Defaults to on; set it to false in ora-config.json to have the model answer everything it hears.
 	// A pointer, not a plain bool, so a config file written before this field existed (no key at all) is distinguishable from one where the user explicitly turned it off. Use ProactiveAudioEnabled rather than reading it directly.
 	ProactiveAudio *bool `json:"proactive_audio,omitempty"`
@@ -32,6 +34,45 @@ type OraConfig struct {
 	Dream DreamConfig `json:"dream"`
 	// Meetings sets what Ora does when it notices a call. Zero value means it offers to record and never records on its own.
 	Meetings MeetingsConfig `json:"meetings"`
+	// BrainModels remembers the model last picked for each brain from POST /brains (see internal/ipc/brains.go), keyed by brain id ("claude", "codex", "gemini", "grok", "ollama"). It lives here rather than inside BrainConfig because BrainConfig is compared with == in tests, which a map field would break.
+	BrainModels map[string]string `json:"brain_models,omitempty"`
+	// BackgroundModels pins a Gemini model per unattended job, keyed by the Job* names in gemini.go ("working_state", "meeting_minutes", ...). A job with no entry runs on DefaultBackgroundModel. It exists so the model each background duty spends the free tier's per-day request allowance on is named in the config rather than buried in code; the daemon installs it with SetBackgroundModels at startup.
+	BackgroundModels map[string]string `json:"background_models,omitempty"`
+	// LocalText points the working-state derive at a local llama-server instead of the metered API. Zero value means there is no local text model and the job stays on Gemini.
+	LocalText LocalTextConfig `json:"local_text"`
+	// ActRunKeep caps how many ordinary act runs the store keeps — the screen-tool traces behind db.PruneActRuns, which grow without bound otherwise. Zero means DefaultActRunKeep; a negative number keeps every run. Runs the nightly notes were written from, and recent failures, are kept whatever this says. Read it through ActRunsKept rather than directly.
+	ActRunKeep int `json:"act_run_keep"`
+	// ActRunFailedKeepDays is how many days a failed act run is kept regardless of ActRunKeep — the grace db.Store.PruneActRuns measures a failure's age against. Zero means DefaultActRunFailedKeepDays; a negative number turns the grace off, so a failed run is capped by count like any other. Read it through FailedActRunsKeptDays rather than directly.
+	ActRunFailedKeepDays int `json:"act_run_failed_keep_days"`
+	// DailyTokenBudget caps how many tokens a provider (see the Provider* names in internal/agent/ask.go — "codex", "gemini", ...) may spend in one local calendar day, keyed by provider name. A provider named with 0 or absent from the map has no budget: the default is off, since a user who never set one should never see a warning. Read it through DailyTokenBudgetFor rather than directly.
+	DailyTokenBudget map[string]int `json:"daily_token_budget,omitempty"`
+}
+
+// DefaultActRunKeep is how many ordinary act runs are kept when the config names no number. Two thousand: the nightly procedures stage reads the newest 200 runs, so this leaves ten times its window, and at the few dozen screen asks a day the machine actually logs it covers a couple of months of them for a few megabytes.
+const DefaultActRunKeep = 2000
+
+// ActRunsKept returns the act run cap to hand db.Store.PruneActRuns: the number the user set, DefaultActRunKeep when they set none, and the negative number unchanged when they turned the cap off.
+func (cfg OraConfig) ActRunsKept() int {
+	if cfg.ActRunKeep == 0 {
+		return DefaultActRunKeep
+	}
+	return cfg.ActRunKeep
+}
+
+// DefaultActRunFailedKeepDays is how many days a failed act run is kept when the config names no number. Thirty: a failure is never written up as a nightly "How I did X" note, so nothing else protects it, and the point of keeping one is being able to look back at what went wrong on the screen — worth a month, not worth forever.
+const DefaultActRunFailedKeepDays = 30
+
+// FailedActRunsKeptDays returns the failed-run grace in days to hand db.Store.PruneActRuns: the number the user set, DefaultActRunFailedKeepDays when they set none, and the negative number unchanged when they turned the grace off.
+func (cfg OraConfig) FailedActRunsKeptDays() int {
+	if cfg.ActRunFailedKeepDays == 0 {
+		return DefaultActRunFailedKeepDays
+	}
+	return cfg.ActRunFailedKeepDays
+}
+
+// DailyTokenBudgetFor returns the daily token budget set for provider, or 0 when none was set — reading a nil map the zero value the same way an empty one does, so a config file written before this field existed behaves exactly like one that set no budgets at all. Zero always means off; there is no default to fall back to, unlike ActRunsKept.
+func (cfg OraConfig) DailyTokenBudgetFor(provider string) int {
+	return cfg.DailyTokenBudget[provider]
 }
 
 // MeetingsConfig sets how Ora reacts to another application taking the microphone, which is how it notices a call is happening.
@@ -138,6 +179,10 @@ const (
 	BrainClaudeCLI = "claude-cli"
 	BrainAgyCLI    = "agy-cli"
 	BrainGrokCLI   = "grok-cli"
+	// BrainCodex answers through the Codex Responses backend under the user's ChatGPT login, the way internal/agent.CodexBrain calls it; internal/brain.FromConfig only reaches that backend when its caller supplies an asker, and falls back to the Gemini API otherwise.
+	BrainCodex = "codex-direct"
+	// BrainOllama names the Ollama brain in a persisted config; internal/brain has no chat backend for it yet, so internal/brain.FromConfig falls back to the Gemini API whenever this is configured.
+	BrainOllama = "ollama-cli"
 )
 
 // DefaultBrainTimeoutSeconds caps one CLI run. Measured on this machine: `claude -p` answered a trivial prompt in 3.6 seconds, and a meeting transcript is a far bigger input than that. A CLI with no terminal attached can also sit forever, so the cap is generous but finite: five minutes.
@@ -153,8 +198,12 @@ type EmbedConfig struct {
 	Port int `json:"port"`
 	// IdleTimeout is how long the server may sit with no embed request before the daemon kills it to free its memory. Defaults to DefaultEmbedIdleTimeout. Milliseconds on disk, like TrackerConfig.DwellTime.
 	IdleTimeout time.Duration `json:"idle_timeout_ms"`
+	// Device is the llama.cpp device name to run the server on, such as "Vulkan1", as listed by `llama-server --list-devices`. Empty leaves the choice to llama-server, which on a machine with two GPUs may spread the model across both.
+	Device string `json:"device"`
 	// SimilarityFloor is the cosine floor a vector hit must clear to enter hybrid search's fusion. Defaults to DefaultLocalSimilarityFloor; set it here to retune retrieval without a rebuild.
 	SimilarityFloor float64 `json:"similarity_floor"`
+	// ActRunSimilarityFloor is the cosine a past screen run's question must reach against a new one before that run is shown to the model as reference. Defaults to db.DefaultActRunSimilarity, which was measured on written-for-the-purpose desktop questions rather than on anything in this store, and wants revisiting once there are real questions asked days apart to measure. Zero or less is ignored. Read it through ActRunFloor rather than directly.
+	ActRunSimilarityFloor float64 `json:"act_run_similarity_floor"`
 }
 
 // DefaultLocalSimilarityFloor is the cosine floor for EmbeddingGemma, against internal/db's 0.55 default for Gemini. Measured by replaying thirteen real queries from the log against both indexes: the same genuinely-relevant documents that Gemini scored 0.55-0.79 EmbeddingGemma scores 0.43-0.81, so keeping 0.55 dropped every vector candidate on the open-ended questions ("what did i do today") and quietly reduced those searches to lexical-only.
@@ -166,6 +215,14 @@ func (e EmbedConfig) Floor() float64 {
 		return e.SimilarityFloor
 	}
 	return DefaultLocalSimilarityFloor
+}
+
+// ActRunFloor is the cosine floor to hand db.Store.SetActRunSimilarityFloor, or zero when the config names none — which the store reads as "keep your own default", so this package does not restate a number that belongs to internal/db.
+func (e EmbedConfig) ActRunFloor() float64 {
+	if e.ActRunSimilarityFloor > 0 {
+		return e.ActRunSimilarityFloor
+	}
+	return 0
 }
 
 // DefaultEmbedPort continues the daemon's 6942 with the next port up. Bound to 127.0.0.1 only.
@@ -188,6 +245,92 @@ func (e EmbedConfig) LocalEnabled() bool {
 // BaseURL is the root the local embeddings server is reachable at, for embed.NewLocalEmbedder.
 func (e EmbedConfig) BaseURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", e.Port)
+}
+
+// LocalTextConfig points ORA's unattended text jobs at a local llama.cpp llama-server running an instruction-tuned model, so they spend no metered per-day request allowance at all. The daemon owns the server process the same way it owns the embedding one: spawned on first use, reaped after IdleTimeout, killed on shutdown.
+type LocalTextConfig struct {
+	// LlamaServer is the absolute path to the llama-server binary. Empty falls back to EmbedConfig.LlamaServer, and then to "llama-server" on PATH.
+	LlamaServer string `json:"llama_server"`
+	// ModelPath is the absolute path to the instruction-tuned GGUF the server loads. Empty falls back to DreamConfig.ModelPath, which is where this machine's Gemma already is; with neither set the local path is off.
+	ModelPath string `json:"model_path"`
+	// Port is the loopback port llama-server binds. Defaults to DefaultLocalTextPort.
+	Port int `json:"port"`
+	// IdleTimeout is how long the server may sit unused before the daemon kills it to give its GPU memory back. Defaults to DefaultLocalTextIdleTimeout. Milliseconds on disk, like the other timeouts here.
+	IdleTimeout time.Duration `json:"idle_timeout_ms"`
+	// Device is the llama.cpp device name to run on, such as "Vulkan1". Empty falls back to DreamConfig.Device and then to llama-server's own choice.
+	Device string `json:"device"`
+	// TimeoutSeconds is the hard limit on one local generation. Defaults to DefaultLocalTextTimeoutSeconds.
+	TimeoutSeconds int `json:"timeout_seconds"`
+}
+
+// DefaultLocalTextPort continues the port run (6942 IPC, 6943 embeddings, 6944 the dream shadow) with the next one up, so the working-state server and a night's dream shadow can hold their own models at once.
+const DefaultLocalTextPort = 6945
+
+// DefaultLocalTextIdleTimeout is how long the local text server may idle before the daemon reaps it, in milliseconds to match the JSON field. Fifteen minutes: longer than the ten-minute working-state floor, so a working session keeps one loaded model rather than paying the reload on every derive, and short enough that a machine left alone gets the memory back.
+const DefaultLocalTextIdleTimeout = time.Duration(15 * 60 * 1000)
+
+// DefaultLocalTextTimeoutSeconds bounds one local generation. Three minutes: a quantised model on this machine writes a 120-word paragraph in seconds, and the cap is only there so a wedged server cannot hang the job forever.
+const DefaultLocalTextTimeoutSeconds = 180
+
+// Enabled reports whether the local text path should be used, resolving ModelPath against the dream block so a machine that already names a local GGUF there needs no new configuration. Input: the whole config, for those fallbacks. Output: true when a model file is named somewhere.
+func (l LocalTextConfig) Enabled(cfg OraConfig) bool {
+	return l.ResolvedModelPath(cfg) != ""
+}
+
+// ResolvedModelPath returns the GGUF to load: this block's own, else the dream block's, else empty.
+func (l LocalTextConfig) ResolvedModelPath(cfg OraConfig) string {
+	if l.ModelPath != "" {
+		return l.ModelPath
+	}
+	return cfg.Dream.ModelPath
+}
+
+// ResolvedBinary returns the llama-server binary to run: this block's own, else the embed block's, else "llama-server" from PATH.
+func (l LocalTextConfig) ResolvedBinary(cfg OraConfig) string {
+	if l.LlamaServer != "" {
+		return l.LlamaServer
+	}
+	if cfg.Embed.LlamaServer != "" {
+		return cfg.Embed.LlamaServer
+	}
+	return "llama-server"
+}
+
+// ResolvedDevice returns the llama.cpp device to pin the server to: this block's own, else the dream block's, else empty for llama-server's own choice.
+func (l LocalTextConfig) ResolvedDevice(cfg OraConfig) string {
+	if l.Device != "" {
+		return l.Device
+	}
+	return cfg.Dream.Device
+}
+
+// LocalTextPort returns the loopback port for the local text server, defaulting to DefaultLocalTextPort.
+func (l LocalTextConfig) LocalTextPort() int {
+	if l.Port <= 0 {
+		return DefaultLocalTextPort
+	}
+	return l.Port
+}
+
+// Timeout returns the hard limit in seconds on one local generation, defaulting to DefaultLocalTextTimeoutSeconds.
+func (l LocalTextConfig) Timeout() int {
+	if l.TimeoutSeconds <= 0 {
+		return DefaultLocalTextTimeoutSeconds
+	}
+	return l.TimeoutSeconds
+}
+
+// Idle returns how long the local text server may sit unused before it is reaped, defaulting to DefaultLocalTextIdleTimeout.
+func (l LocalTextConfig) Idle() time.Duration {
+	if l.IdleTimeout <= 0 {
+		return DefaultLocalTextIdleTimeout
+	}
+	return l.IdleTimeout
+}
+
+// BaseURL is the root the local text server is reachable at, for internal/brain.LlamaServer.
+func (l LocalTextConfig) BaseURL() string {
+	return fmt.Sprintf("http://127.0.0.1:%d", l.LocalTextPort())
 }
 
 // ProactiveAudioEnabled reports whether proactive audio should be requested at the next Live API handshake. Unset means on.
@@ -364,6 +507,7 @@ func LoadConfig() OraConfig {
 		},
 		Voice:     DefaultVoice,
 		Autostart: false,
+		Window:    true,
 		Embed: EmbedConfig{
 			Port:        DefaultEmbedPort,
 			IdleTimeout: DefaultEmbedIdleTimeout,
