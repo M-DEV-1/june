@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 /** Regression test for the "stuttering" status line: main.ts used to rebuild the whole card's innerHTML on every daemon event while an ask was running (and once a second besides, from the elapsed-time ticker), tearing down and recreating the live step row on every one of them. A CSS animation restarts from its first frame whenever the element carrying it is removed and recreated, so the shimmer and breathe never got to run a full pass — that restart, not the animations themselves, was the stutter. patchLiveSteps (see main.ts) now patches that row in place instead. This checks the fix holds: the row survives a run of daemon events as the same DOM node instead of being swapped for a fresh one. */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonEvent } from "./daemon";
 
 // jsdom does not implement matchMedia at all; main.ts reads prefers-reduced-motion at module load.
@@ -446,5 +446,97 @@ describe("a notice card carries its own buttons", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+// The live row's "working" state is the braille dot grid — Ora's one signature for "listening or working", the same grid live voice draws — rather than the words that used to sit there.
+describe("the live step row's braille grid", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    // An earlier block leaves probe resolving false, which would send the ask down the offline path and never show a live row at all.
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Whether every character of a string is a braille cell, U+2800 to U+28FF. */
+  const allBraille = (t: string) =>
+    t.length > 0 && [...t].every((c) => c.codePointAt(0)! >= 0x2800 && c.codePointAt(0)! <= 0x28ff);
+
+  it("shows one row of the dot grid, not words, while a question runs with no tool call yet", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "type", value: "what changed on this page" });
+    dispatch({ kind: "enter" });
+
+    const text = document.querySelector(".steps .step.run .step-label")?.textContent ?? "";
+    expect(allBraille(text)).toBe(true);
+    // No "Thinking", no "working" — the grid is the whole of what the row says.
+    expect(document.querySelector(".steps")?.textContent).not.toMatch(/[A-Za-z]/);
+  });
+
+  it("advances the row while it is shown, without replacing the element its animations run on", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    // Installed before the ask starts, so the ticker the ask sets up is the fake one this test drives.
+    vi.useFakeTimers();
+
+    dispatch({ kind: "type", value: "what changed on this page" });
+    dispatch({ kind: "enter" });
+
+    const label = document.querySelector(".steps .step.run .step-label")!;
+    const before = label.textContent;
+    vi.advanceTimersByTime(600);
+    expect(label.textContent).not.toBe(before);
+    expect(allBraille(label.textContent ?? "")).toBe(true);
+    // The row is patched in place, so the element carrying the CSS animations is still the same one.
+    expect(document.querySelector(".steps .step.run .step-label")).toBe(label);
+  });
+
+  it("shows a running tool call's own label instead of the grid", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "type", value: "what changed on this page" });
+    dispatch({ kind: "enter" });
+    dispatch({ kind: "daemonEvent", ev: { id: "", type: "tool", text: "observe_screen", detail: "" } });
+    // The label cross-fades rather than swapping instantly (see crossFadeText), so the new words land 150ms later.
+    await new Promise((r) => setTimeout(r, 200));
+
+    const label = document.querySelector(".steps .step.run .step-label")!;
+    expect(label.textContent).toMatch(/[A-Za-z]/);
+    expect(label.classList.contains("work")).toBe(false);
+  });
+});
+
+// The daemon stops sending "level" events while nothing changes, which is exactly the silent stretch the grid's breath is for, so the breath has to run on the window's own clock.
+describe("the voice grid breathes on its own while the daemon is quiet", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("changes the rows with no level event arriving, and stops once the session ends", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+    dispatch({ kind: "voiceOn", id: "voice-1" });
+    const rows = () => Array.from(document.querySelectorAll(".vw-spk .vw-row")).map((r) => r.textContent).join("|");
+    const quiet = rows();
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(rows()).not.toBe(quiet);
+
+    dispatch({ kind: "voiceOff" });
+    const after = document.querySelectorAll(".vw-spk .vw-row").length;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(document.querySelectorAll(".vw-spk .vw-row").length).toBe(after);
   });
 });

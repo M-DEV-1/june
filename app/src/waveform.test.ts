@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildVariation, renderLevelEvent, Waveform } from "./waveform";
+import { buildVariation, renderLevelEvent, Waveform, workingRow, WORKING_PERIOD_MS } from "./waveform";
 
 describe("buildVariation", () => {
   it("keeps every column's multiplier in (0, 1]", () => {
@@ -100,5 +100,26 @@ describe("renderLevelEvent", () => {
 
   it("defaults a missing field to zero rather than undefined", () => {
     expect(renderLevelEvent('{"mic":0.5}')).toEqual({ mic: 0.5, speaker: 0 });
+  });
+});
+
+describe("workingRow", () => {
+  it("is one row of braille cells, as wide as asked", () => {
+    const row = workingRow(12, 0);
+    expect([...row]).toHaveLength(12);
+    for (const ch of row) {
+      const code = ch.codePointAt(0)!;
+      expect(code >= 0x2800 && code <= 0x28ff).toBe(true);
+    }
+  });
+
+  it("is a wave that travels: the same moment draws the same row, a later moment a different one, and it is never flat", () => {
+    expect(workingRow(12, 700)).toBe(workingRow(12, 700));
+    expect(workingRow(12, 700)).not.toBe(workingRow(12, 1400));
+    expect(new Set([...workingRow(12, 0)]).size).toBeGreaterThan(1);
+  });
+
+  it("stays a whole period long, so the loop point is invisible", () => {
+    expect(workingRow(12, 0)).toBe(workingRow(12, WORKING_PERIOD_MS));
   });
 });
