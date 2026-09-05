@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -191,6 +193,11 @@ type Executor interface {
 	ExecuteAskTool(ctx context.Context, name string, args map[string]any) string
 }
 
+// ScreenScope is the half of the Executor seam a job needs to have a screen of its own: an executor that keeps per-caller screen state — the numbered list observe_screen produced, the picture look took, what the last click focused — hands this job a context carrying its own, so a click by number cannot land in another job's window and the pictures a job takes count against its own allowance. An executor that does not implement it (a scripted one in a test) runs on whatever state it already has. Input: the job's context. Output: a context to make every tool call of that job with.
+type ScreenScope interface {
+	NewScreenScope(ctx context.Context) context.Context
+}
+
 // Store is what a job needs from the database: write its checkpoint after every step, read one back to resume it, and say what the highest job id already on disk is so a restarted daemon carries on numbering from there.
 type Store interface {
 	SaveActJob(ctx context.Context, row db.ActJobRow) error
@@ -229,6 +236,8 @@ type live struct {
 	// waitedMS is how long this run has already spent waiting on the user, and waitingSince is when the wait it is in now began, zero when it is not waiting. Neither counts against the wall budget: a job holding still for a person is not a job running away with the screen.
 	waitedMS     atomic.Int64
 	waitingSince atomic.Int64
+	// working is how endWait tells the wall-clock guard that the job has gone back to work, so the guard can sleep through a wait instead of polling a frozen clock. It holds one token, and a token left over from a wait the guard never saw costs one extra wakeup and nothing else.
+	working chan struct{}
 }
 
 // New builds the runner. Input: the store checkpoints go to, the executor tools run through, the models by brain name, the name of the daemon's configured brain (used by a job that names none), and the sink progress events go to, which may be nil. Output: the runner.
@@ -312,7 +321,7 @@ func (r *Runner) claim(id string) (*live, bool) {
 		return l, false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &live{job: Job{ID: id}, ctx: ctx, cancel: cancel, answers: make(chan string, 1), resumes: make(chan struct{}, 1), started: time.Now()}
+	l := &live{job: Job{ID: id}, ctx: ctx, cancel: cancel, answers: make(chan string, 1), resumes: make(chan struct{}, 1), working: make(chan struct{}, 1), started: time.Now()}
 	r.live[id] = l
 	return l, true
 }
@@ -329,6 +338,7 @@ func (r *Runner) launch(l *live, job Job) {
 	l.mu.Lock()
 	l.job, l.started, l.baseMS = job, time.Now(), job.ElapsedMS
 	l.mu.Unlock()
+	l.paused.Store(job.State == Paused)
 	r.emit(Event{Job: job.ID, Kind: "started", State: job.State, Text: job.Goal})
 	go wallGuard(l, job.Budget.Wall)
 	go r.loop(l.ctx, l)
@@ -383,7 +393,10 @@ func (r *Runner) resumable(ctx context.Context, id string, budget Budget) (Job, 
 	if _, ok := r.models[job.Brain]; !ok {
 		return Job{}, fmt.Errorf("job %s ran on brain %q, which this daemon no longer has", id, job.Brain)
 	}
-	job.State = Stepping
+	// A job that was being held or was waiting on an answer keeps saying so: forcing stepping here would start driving the screen on a job the user had stopped in its tracks, and would throw away the question it was waiting on without ever asking it again.
+	if job.State != Stuck && job.State != Paused {
+		job.State = Stepping
+	}
 	return job, nil
 }
 
@@ -442,7 +455,8 @@ func (r *Runner) Pause(id string) error {
 		return fmt.Errorf("job %s is not running", id)
 	}
 	l.paused.Store(true)
-	l.set(func(j *Job) { j.State = Paused })
+	// The pause goes to disk as well as to the window: a daemon that stops here comes back knowing the job was being held, instead of resuming it into the screen the user had just asked it to leave alone.
+	r.save(l, l.set(func(j *Job) { j.State = Paused }))
 	r.emit(Event{Job: id, Kind: "paused", State: Paused})
 	return nil
 }
@@ -454,7 +468,12 @@ func (r *Runner) Answer(id, text string) error {
 	if l == nil {
 		return fmt.Errorf("job %s is not running", id)
 	}
-	if l.snapshot().State != Stuck {
+	// The live slot outlives the end of a job by as long as its last checkpoint takes to write, and an answer dropped into it then is never read by anyone, so a job whose context is done refuses it rather than reporting that it landed.
+	if l.ctx.Err() != nil {
+		return fmt.Errorf("job %s is not running", id)
+	}
+	// The gate is the question itself rather than the state word: a job that is stuck and then paused is still sitting in the same select waiting for this answer, and gating on the state would leave it unanswerable and unresumable both.
+	if l.snapshot().Question == "" {
 		return fmt.Errorf("job %s is not waiting on a question", id)
 	}
 	select {
@@ -472,29 +491,68 @@ func (r *Runner) find(id string) *live {
 	return r.live[id]
 }
 
-// snapshot copies the job out from under its lock.
+// snapshot copies the job out from under its lock, deeply enough to be encoded or marshalled while the loop goes on working (see cloned). Input: none. Output: the copy.
 func (l *live) snapshot() Job {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.job
+	return cloned(l.job)
 }
 
-// set edits the job under its lock and returns the edited copy.
+// set edits the job under its lock and returns the edited copy, deep enough to hand out (see cloned).
 func (l *live) set(edit func(*Job)) Job {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	edit(&l.job)
-	return l.job
+	return cloned(l.job)
+}
+
+// cloned copies the two fields of a job that go on being written after a copy of it has been handed out: the per-model spend map, which every round writes an entry into, and the steps slice, whose last element is rewritten when its check comes back. A shallow copy shares both, so a GET that encodes one while the loop writes the other is a concurrent map read and write — which is not a panic but a fatal error that takes the daemon down. The other slices are only ever replaced wholesale or appended to, so the header alone is enough for them. Input: the job under the lock. Output: the copy.
+func cloned(j Job) Job {
+	j.Steps = slices.Clone(j.Steps)
+	j.Spend.ByModel = maps.Clone(j.Spend.ByModel)
+	return j
 }
 
 // row renders a job as the database row that holds it. Input: the job. Output: the row, or an error when the checkpoint will not marshal — which the caller must not paper over, because writing an empty object in its place would replace the job's whole history with nothing.
 func row(job Job) (db.ActJobRow, error) {
+	job.Observations, job.Steps = digestedObservations(job.Observations), storedSteps(job.Steps)
 	blob, err := json.Marshal(job)
 	if err != nil {
 		return db.ActJobRow{}, fmt.Errorf("act job %s: its checkpoint will not marshal: %w", job.ID, err)
 	}
 	return db.ActJobRow{ID: job.ID, Goal: job.Goal, Brain: job.Brain, State: string(job.State), Answer: job.Say, Error: job.Err, DurationMS: job.ElapsedMS, Checkpoint: blob}, nil
 }
+
+// digestedObservations is what a screen reading is kept as on disk: its first line, which names the app and the window, and how many items were listed under it. The listing itself is the live text of somebody's window — the messages on screen, the half-typed reply in the compose box — and the checkpoint is a lasting record, so the body stays in memory where the prompt reads it and never reaches the row. Input: the readings the job is holding. Output: one line each.
+func digestedObservations(obs []string) []string {
+	if len(obs) == 0 {
+		return nil
+	}
+	out := make([]string, len(obs))
+	for i, o := range obs {
+		lines := strings.Split(o, "\n")
+		items := 0
+		for _, line := range lines[1:] {
+			if strings.HasPrefix(line, "[") {
+				items++
+			}
+		}
+		out[i] = fmt.Sprintf("%s (%d items listed)", lines[0], items)
+	}
+	return out
+}
+
+// storedSteps is what the steps are kept as on disk: the same steps with each result cut to storedResultCap runes. The fuller copy stays in memory for the prompt. Input: the job's steps. Output: a copy of them, since the originals are the loop's own and must not be edited under it.
+func storedSteps(steps []Step) []Step {
+	out := slices.Clone(steps)
+	for i := range out {
+		out[i].Result = capRunes(out[i].Result, storedResultCap)
+	}
+	return out
+}
+
+// stopLineRefusal is what every stop-line refusal begins with (see agent's stopBeforeClick and the type_text and press_key stop lines): the action did not happen and the user has to say go before it can.
+const stopLineRefusal = "Stopped before "
 
 // save writes the job's checkpoint, with the wall time it has spent brought up to date first, so a daemon that crashes mid-job resumes on what is left of the budget rather than on a fresh one. A failed write is logged, never returned: losing the ability to resume must not stop the job that is working.
 func (r *Runner) save(l *live, job Job) {
@@ -528,6 +586,10 @@ func (l *live) endWait() {
 	if since := l.waitingSince.Swap(0); since != 0 {
 		l.waitedMS.Add(time.Since(time.Unix(0, since)).Milliseconds())
 	}
+	select {
+	case l.working <- struct{}{}:
+	default:
+	}
 }
 
 // wallGuard ends a job once the time it has spent actually working reaches its wall budget. It does that instead of a deadline on the job's own context because the time a job spends stuck on a question or held paused is the user's, not the job's, and a job must not be timed out for how long someone took to answer it. Input: the live job and the whole wall budget, what earlier runs of the job spent included. Output: none; it returns when the job's context is done.
@@ -535,6 +597,15 @@ func wallGuard(l *live, wall time.Duration) {
 	t := time.NewTicker(wallTick)
 	defer t.Stop()
 	for {
+		if l.waitingSince.Load() != 0 {
+			// The job is waiting on the user, so elapsed() is frozen and no amount of ticking can bring it nearer the budget: sleep until the wait ends or the job does, rather than waking ten times a second for as long as the question goes unanswered.
+			select {
+			case <-l.ctx.Done():
+				return
+			case <-l.working:
+			}
+			continue
+		}
 		if time.Duration(l.elapsed())*time.Millisecond >= wall {
 			l.cancel()
 			return
@@ -553,6 +624,9 @@ const wallTick = 100 * time.Millisecond
 // saveTimeout bounds one checkpoint write so a wedged store cannot hold a job's own goroutine.
 const saveTimeout = 10 * time.Second
 
+// storedResultCap is how much of a tool result the checkpoint keeps, in runes: the same 300 the ordinary act runs keep theirs at (see db/act_runs.go). The prompt still sees the fuller resultCap copy the job holds in memory; what goes on disk is only what a later reader needs to see what happened.
+const storedResultCap = 300
+
 // waitTimeoutMS is how long wait_for polls for the expected change before calling it a failure, in milliseconds — the tool's own default, passed explicitly so a job's verification time is on record rather than implied.
 const waitTimeoutMS = 5000
 
@@ -566,6 +640,18 @@ const stuckAfter = 3
 func (r *Runner) loop(ctx context.Context, l *live) {
 	defer l.cancel()
 	defer r.release(l.snapshot().ID)
+
+	// Every tool call of this job runs in its own screen scope, so two jobs never share one numbered list, one screenshot or one record of what has keyboard focus.
+	if scoped, ok := r.exec.(ScreenScope); ok {
+		ctx = scoped.NewScreenScope(ctx)
+	}
+	// A job resumed while it was stuck asks its question again: the answer it was waiting for never came, and the checkpoint is the only place that question survived.
+	if job := l.snapshot(); job.State == Stuck && job.Question != "" {
+		if !r.askUser(ctx, l, job.Question) {
+			r.endedWaiting(ctx, l)
+			return
+		}
+	}
 
 	for {
 		if !l.waitWhilePaused(ctx) {
@@ -646,6 +732,14 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		// The arguments are kept as the act runs keep them (see db.StorableArgs): what the user dictated into type_text is dropped here, before the step is ever written to disk or described on the event stream. Expect gets the same treatment (see redactedExpect): a field_holds check right after a type_text step would otherwise repeat the typed text StorableArgs just dropped, this time under Expect.Value rather than under an argument. The tool itself is still called with what the model actually said, and the live wait_for check below still verifies against the real, unredacted Expect.
 		storedExpect := redactedExpect(d.Tool, d.Expect)
 		step := Step{N: len(job.Steps) + 1, Tool: d.Tool, Args: db.StorableArgs(d.Tool, d.Args), Expect: storedExpect}
+
+		// A stop or a pause decided while the model was still thinking takes effect here, before the mouse or the keyboard is touched: the input drivers take no context, so a click or a keystroke started after the stop really lands on the user's screen, and the checks after the tool call would only notice it afterwards.
+		if r.ended(ctx, l) {
+			return
+		}
+		if l.paused.Load() {
+			continue
+		}
 		l.set(func(j *Job) { j.State = Stepping })
 		r.emit(Event{Job: job.ID, Kind: "step", State: Stepping, Step: step.N, Text: describeAction(d), Expect: storedExpect.Describe()})
 
@@ -653,10 +747,22 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		step.Result = capRunes(result, resultCap)
 		step.Why = "the action ran, and the check had not answered yet"
 
+		// Nothing was clicked, typed or pressed, and no rewording of the same action gets past the stop line, so the refusal goes to the user as the job's one question rather than back to the model as a result to try around — which is what the ask loop does with the same sentinel (see ask.go).
+		// ponytail: the user's answer is kept with the goal and shown to the model, but it is not put on the context the next tool call runs with, so a guarded control still cannot be clicked and the job will ask again; carrying agent.WithGo through the Executor seam is the upgrade path.
+		if strings.HasPrefix(result, stopLineRefusal) {
+			if !r.askUser(ctx, l, result) {
+				r.endedWaiting(ctx, l)
+				return
+			}
+			continue
+		}
+
 		// The step goes on disk the moment its action has run, before it is checked: a daemon that dies between the two comes back knowing the action happened, rather than taking it a second time on the real screen.
 		job = l.set(func(j *Job) {
 			j.Steps = append(j.Steps, step)
-			j.State = Verifying
+			if !l.paused.Load() {
+				j.State = Verifying
+			}
 		})
 		r.save(l, job)
 		if r.ended(ctx, l) {
@@ -677,9 +783,12 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			} else {
 				j.FailsInARow++
 			}
-			j.State = Stepping
+			// A pause the user pressed while this check was running stands: both front ends take the state word off every event, so writing stepping here would put a Pause button back on a job that is already held and leave no Resume to press.
+			if !l.paused.Load() {
+				j.State = Stepping
+			}
 		})
-		r.emit(Event{Job: job.ID, Kind: "verified", State: Stepping, Step: step.N, Text: step.Why, Expect: step.Expect.Describe(), Outcome: step.Outcome})
+		r.emit(Event{Job: job.ID, Kind: "verified", State: job.State, Step: step.N, Text: step.Why, Expect: step.Expect.Describe(), Outcome: step.Outcome})
 		r.save(l, job)
 
 		if job.FailsInARow >= stuckAfter {

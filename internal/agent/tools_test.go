@@ -2851,3 +2851,24 @@ func TestDelegateTool_IsRegistered(t *testing.T) {
 		t.Errorf("executeTool(delegate) = %q, want the handler's own missing-brief error rather than the unknown-tool default", got)
 	}
 }
+
+// TestNewScreenScope_GivesOneCallerItsOwnNumberedList checks the exported scope a long-running job installs keeps that job's screen state to itself: the list one scope observed is not visible in another scope, nor in the agent-wide state a directly driven tool call reads. Two jobs sharing one list is how a click by number lands in the other job's window.
+func TestNewScreenScope_GivesOneCallerItsOwnNumberedList(t *testing.T) {
+	a := &Agent{}
+	jobA := a.NewScreenScope(context.Background())
+	jobB := a.NewScreenScope(context.Background())
+	a.rememberScreen(jobA, []act.Item{{N: 1, Role: "push button", Label: "Play"}}, screenSnapshot{app: "Brave", title: "Netflix"})
+
+	if got := a.seen(jobA); len(got) != 1 || got[0].Label != "Play" {
+		t.Fatalf("the job's own scope holds %+v, want the list it observed", got)
+	}
+	if got := a.seen(jobB); len(got) != 0 {
+		t.Errorf("a second scope holds %+v, want nothing of the first one's list", got)
+	}
+	if got := a.seen(context.Background()); len(got) != 0 {
+		t.Errorf("the agent-wide state holds %+v, want a scoped call to have left it alone", got)
+	}
+	if got := a.lastScreen(jobB); got.app != "" {
+		t.Errorf("a second scope's last screen = %+v, want the zero value", got)
+	}
+}

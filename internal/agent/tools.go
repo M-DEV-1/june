@@ -2002,6 +2002,11 @@ func withAskLookState(ctx context.Context) context.Context {
 	return context.WithValue(ctx, askLookStateKey{}, &askLookState{})
 }
 
+// NewScreenScope gives one caller its own screen state — the numbered list observe_screen produced, the picture look took, how many looks it has taken and what they cost, and which control the last click focused — in place of the agent-wide state a directly driven tool call would otherwise read and write. A long-running computer-use job (internal/actjob) calls it once and makes every tool call of that job with the context it returns, so two jobs never resolve a number against each other's window and a job's screenshots count against its own look allowance. Input: the job's own context. Output: a context carrying fresh screen state.
+func (a *Agent) NewScreenScope(ctx context.Context) context.Context {
+	return withAskLookState(ctx)
+}
+
 // lookStateFrom reads the look state withAskLookState attached to ctx. Output: that state, or a throwaway empty one when ctx carries none, which only happens when a tool is driven directly rather than through an ask.
 func lookStateFrom(ctx context.Context) *askLookState {
 	if s, ok := ctx.Value(askLookStateKey{}).(*askLookState); ok {

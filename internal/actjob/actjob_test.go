@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,10 @@ type fakeExec struct {
 	verdicts []bool
 	// block, when non-nil, is closed by the test to release a tool call that is standing in for a slow action.
 	block chan struct{}
+	// blockTool, when set, narrows block to that one tool rather than every tool but observe_screen.
+	blockTool string
+	// result, when set, is what every tool but observe_screen and wait_for answers with.
+	result string
 }
 
 func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[string]any) string {
@@ -49,9 +55,12 @@ func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[str
 			verdict = f.verdicts[i]
 		}
 	}
-	block := f.block
+	block, blockTool, result := f.block, f.blockTool, f.result
 	f.mu.Unlock()
 
+	if blockTool != "" && name != blockTool {
+		block = nil
+	}
 	if block != nil && name != "observe_screen" {
 		select {
 		case <-block:
@@ -67,6 +76,9 @@ func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[str
 			return act.WaitPassPrefix + "the title is \"S16 E8\""
 		}
 		return act.WaitFailPrefix + "5s: the title is \"Netflix\""
+	}
+	if result != "" {
+		return result
 	}
 	return "did " + name
 }
@@ -961,5 +973,419 @@ func TestRedactedExpect_LeavesAnEmptyCheckAlone(t *testing.T) {
 	got := redactedExpect("type_text", act.Check{})
 	if got.Value != "" || got.Kind != "" {
 		t.Errorf("redactedExpect(type_text, empty) = %+v, want it untouched", got)
+	}
+}
+
+// TestRunner_ARunningJobCanBeReadWhileItWorks checks the copy a GET is handed can be encoded while the loop goes on working. The job it is copied from has two fields the loop writes in place — the per-model spend map and the last element of the steps slice — and handing those out unguarded is a concurrent map read and write, which is not a panic but a fatal error that takes the whole daemon down. Run under -race.
+func TestRunner_ARunningJobCanBeReadWhileItWorks(t *testing.T) {
+	exec := &fakeExec{}
+	steps := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		steps = append(steps, stepReply("click", "S16 E8"))
+	}
+	r, _, _ := newRunner(t, exec, script(append(steps, doneReply("Playing."))...))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	stop := make(chan struct{})
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			job, err := r.Job(context.Background(), id)
+			if err != nil {
+				continue
+			}
+			if err := json.NewEncoder(io.Discard).Encode(job); err != nil {
+				t.Errorf("encoding a running job: %v", err)
+				return
+			}
+		}
+	}()
+	job := waitState(t, r, id, Done, Failed, Stuck)
+	close(stop)
+	<-read
+	if job.State != Done {
+		t.Fatalf("state = %q (%s), want done", job.State, job.Err)
+	}
+}
+
+// TestRunner_StopDuringTheModelRoundLeavesTheToolUncalled checks a stop that lands while the model is still thinking takes effect before the action it decided is run. The input drivers take no context, so a keystroke or a click started after the stop really lands on the user's screen.
+func TestRunner_StopDuringTheModelRoundLeavesTheToolUncalled(t *testing.T) {
+	exec := &fakeExec{}
+	thinking, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	model := func(ctx context.Context, prompt string) (string, Usage, error) {
+		once.Do(func() { close(thinking) })
+		<-release
+		return stepReply("click", "S16 E8"), Usage{Model: "fake", Input: 100}, nil
+	}
+	r, _, _ := newRunner(t, exec, model)
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-thinking
+	if err := r.Stop(id); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	close(release)
+
+	job := waitState(t, r, id, Stopped, Done, Failed)
+	if job.State != Stopped {
+		t.Fatalf("state = %q, want stopped", job.State)
+	}
+	for _, name := range exec.names() {
+		if name == "click" {
+			t.Errorf("the job clicked after it was stopped; calls = %v", exec.names())
+		}
+	}
+}
+
+// TestRunner_APausedStuckJobStillTakesItsAnswer checks pausing a job that is waiting on a question does not make that question unanswerable: the answer still lands, and the job carries on once it is resumed.
+func TestRunner_APausedStuckJobStillTakesItsAnswer(t *testing.T) {
+	exec := &fakeExec{}
+	r, _, _ := newRunner(t, exec, script(
+		`{"ask":"Which season is it under?"}`,
+		stepReply("click", "S16 E8"),
+		doneReply("Playing now."),
+	))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Stuck, Done, Failed)
+	if err := r.Pause(id); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if err := r.Answer(id, "season 16"); err != nil {
+		t.Fatalf("Answer to a paused job that is waiting on a question: %v", err)
+	}
+	if err := r.Resume(context.Background(), id, Budget{}); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if job := waitState(t, r, id, Done, Failed, Stopped); job.State != Done {
+		t.Fatalf("state = %q (%s), want done once answered and resumed", job.State, job.Err)
+	}
+}
+
+// scopeKey is the value scopedExec stamps on a context to tell one screen scope from another.
+type scopeKey struct{}
+
+// scopedExec is an executor that keeps per-caller screen state the way the agent does: NewScreenScope stamps a fresh scope on the context, and every tool call records which scope it was made with.
+type scopedExec struct {
+	fakeExec
+	smu    sync.Mutex
+	scopes int
+	seen   []int
+}
+
+func (s *scopedExec) NewScreenScope(ctx context.Context) context.Context {
+	s.smu.Lock()
+	s.scopes++
+	n := s.scopes
+	s.smu.Unlock()
+	return context.WithValue(ctx, scopeKey{}, n)
+}
+
+func (s *scopedExec) ExecuteAskTool(ctx context.Context, name string, args map[string]any) string {
+	n, _ := ctx.Value(scopeKey{}).(int)
+	s.smu.Lock()
+	s.seen = append(s.seen, n)
+	s.smu.Unlock()
+	return s.fakeExec.ExecuteAskTool(ctx, name, args)
+}
+
+// scopesSeen returns the scope each tool call carried, in call order.
+func (s *scopedExec) scopesSeen() []int {
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	return append([]int(nil), s.seen...)
+}
+
+// TestRunner_AJobRunsInItsOwnScreenScope checks the loop asks the executor for a screen scope once and makes every tool call of the job inside it. Without it every job shares one numbered list, so a click by number can land in another job's window, and the screenshots a job takes are recorded against a state nobody reads.
+func TestRunner_AJobRunsInItsOwnScreenScope(t *testing.T) {
+	exec := &scopedExec{}
+	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("Playing.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if job := waitState(t, r, id, Done, Failed, Stuck); job.State != Done {
+		t.Fatalf("state = %q (%s), want done", job.State, job.Err)
+	}
+	if exec.scopes != 1 {
+		t.Errorf("the job asked for %d screen scopes, want exactly one for the whole job", exec.scopes)
+	}
+	for i, n := range exec.scopesSeen() {
+		if n != 1 {
+			t.Fatalf("tool call %d ran in scope %d, want every call of the job in its own scope 1", i, n)
+		}
+	}
+}
+
+// TestRunner_TheCheckpointDoesNotCarryTheScreenListing checks the stored job keeps a screen reading as its window line and an item count rather than the listing itself, and cuts a step's result to the length the ordinary act runs keep. The listing is the live text of somebody's window — a half-written message, whatever is on the page — and the checkpoint is a lasting record.
+func TestRunner_TheCheckpointDoesNotCarryTheScreenListing(t *testing.T) {
+	exec := &fakeExec{result: "did click, and then " + strings.Repeat("x", 600)}
+	r, store, _ := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("Playing.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if job := waitState(t, r, id, Done, Failed, Stuck); job.State != Done {
+		t.Fatalf("state = %q (%s), want done", job.State, job.Err)
+	}
+	row, err := store.ActJob(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ActJob: %v", err)
+	}
+	if strings.Contains(string(row.Checkpoint), "push button") {
+		t.Errorf("the checkpoint carries the screen listing itself:\n%s", row.Checkpoint)
+	}
+	var stored Job
+	if err := json.Unmarshal(row.Checkpoint, &stored); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(stored.Observations) == 0 {
+		t.Fatal("the stored job kept no screen readings at all")
+	}
+	for _, obs := range stored.Observations {
+		if !strings.Contains(obs, "Brave · Netflix") || !strings.Contains(obs, "1 item") {
+			t.Errorf("stored observation = %q, want the window line and how many items were listed", obs)
+		}
+	}
+	if len(stored.Steps) != 1 {
+		t.Fatalf("stored steps = %d, want one", len(stored.Steps))
+	}
+	if n := len([]rune(stored.Steps[0].Result)); n != storedResultCap {
+		t.Errorf("the stored step result is %d runes, want it cut to %d", n, storedResultCap)
+	}
+}
+
+// TestRow_LeavesTheJobItWasGivenAlone checks rendering a row for the store does not edit the running job's own observations or steps, since the loop goes on using them for the prompt.
+func TestRow_LeavesTheJobItWasGivenAlone(t *testing.T) {
+	job := Job{
+		ID:           "act-1",
+		Observations: []string{"Brave · Netflix\n[1] push button \"Play\" (10,10)"},
+		Steps:        []Step{{N: 1, Tool: "click", Result: strings.Repeat("y", 700)}},
+	}
+	if _, err := row(job); err != nil {
+		t.Fatalf("row: %v", err)
+	}
+	if !strings.Contains(job.Observations[0], "push button") {
+		t.Errorf("observations = %q, want the full listing still in memory for the prompt", job.Observations)
+	}
+	if n := len([]rune(job.Steps[0].Result)); n != 700 {
+		t.Errorf("the in-memory step result is %d runes, want the full %d", n, 700)
+	}
+}
+
+// TestRunner_AStopLineRefusalIsPutToTheUser checks a tool the stop line refused becomes the job's one question rather than a result the model is invited to work around. Nothing was clicked, and no rewording of the same action gets past the stop line.
+func TestRunner_AStopLineRefusalIsPutToTheUser(t *testing.T) {
+	refusal := `Stopped before clicking [7] push button "Send" in "Slack". Say "yes, go ahead" if you want me to.`
+	exec := &fakeExec{result: refusal}
+	r, _, events := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("Playing.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Stuck, Done, Failed)
+	if job.State != Stuck || job.Question != refusal {
+		t.Fatalf("state = %q with question %q, want it stuck on the stop line's own words", job.State, job.Question)
+	}
+	for _, name := range exec.names() {
+		if name == "wait_for" {
+			t.Errorf("the job verified an action the stop line refused; calls = %v", exec.names())
+		}
+	}
+	var asked bool
+	for _, ev := range events() {
+		if ev.Kind == "question" && ev.Text == refusal {
+			asked = true
+		}
+	}
+	if !asked {
+		t.Error("the refusal never went out as a question event")
+	}
+}
+
+// TestRunner_PauseIsCheckpointed checks a pause reaches disk, so a daemon that stops while a job is held comes back knowing it was held rather than resuming it into the screen the user had just asked it to leave alone.
+func TestRunner_PauseIsCheckpointed(t *testing.T) {
+	exec := &fakeExec{}
+	slow := func(ctx context.Context, prompt string) (string, Usage, error) {
+		time.Sleep(20 * time.Millisecond)
+		return stepReply("click", "S16 E8"), Usage{Model: "fake", Input: 100}, nil
+	}
+	r, store, _ := newRunner(t, exec, slow)
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := r.Pause(id); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	row, err := store.ActJob(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ActJob: %v", err)
+	}
+	if row.State != string(Paused) {
+		t.Errorf("the stored row says %q, want the pause on disk", row.State)
+	}
+	r.Stop(id)
+	waitState(t, r, id, Stopped, Done, Failed)
+}
+
+// TestRunner_AVerifiedStepDoesNotUndoAPause checks a check that comes back after the user pressed Pause leaves the job reading as paused. Both front ends take the state word off every event, so a "verified" that says stepping puts a Pause button back on a job that is already held and leaves the user with no Resume to press.
+func TestRunner_AVerifiedStepDoesNotUndoAPause(t *testing.T) {
+	exec := &fakeExec{block: make(chan struct{}), blockTool: "wait_for"}
+	r, _, events := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("Playing.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Wait until the check is in flight, then pause and let it answer.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(exec.names()) >= 3 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if err := r.Pause(id); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	close(exec.block)
+
+	// Wait for the check that was in flight to report, since that is the event that used to undo the pause.
+	var verified Event
+	for deadline = time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		for _, ev := range events() {
+			if ev.Kind == "verified" {
+				verified = ev
+			}
+		}
+		if verified.Kind != "" {
+			break
+		}
+	}
+	if verified.Kind == "" {
+		t.Fatal("the check that was in flight never reported")
+	}
+	if verified.State == Stepping {
+		t.Errorf("the verified event says %q, want the pause the user pressed", verified.State)
+	}
+	if job, err := r.Job(context.Background(), id); err != nil || job.State != Paused {
+		t.Fatalf("state = %q (%v), want it still paused after the check came back", job.State, err)
+	}
+	r.Stop(id)
+	waitState(t, r, id, Stopped, Done, Failed)
+}
+
+// TestRunner_ResumeAsksAStuckJobsQuestionAgain checks a job read back from a checkpoint it was stuck on asks its question again rather than starting to drive the screen while the user is still deciding what to answer.
+func TestRunner_ResumeAsksAStuckJobsQuestionAgain(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer store.Close()
+	saved := Job{
+		ID: "act-4", Goal: "play S16 E8", Brain: "fake", State: Stuck,
+		Question: "Which season is it under?", Budget: DefaultBudget(),
+	}
+	blob, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := store.SaveActJob(context.Background(), db.ActJobRow{ID: saved.ID, Goal: saved.Goal, Brain: "fake", State: string(Stuck), Checkpoint: blob}); err != nil {
+		t.Fatalf("SaveActJob: %v", err)
+	}
+
+	r := New(store, &fakeExec{}, map[string]Model{"fake": script(stepReply("click", "S16 E8"), doneReply("Playing."))}, "fake", func(Event) {})
+	if err := r.Resume(context.Background(), "act-4", Budget{}); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	job := waitState(t, r, "act-4", Stuck, Done, Failed)
+	if job.State != Stuck || job.Question != saved.Question {
+		t.Fatalf("the resumed job is %q asking %q, want it stuck on the question it was waiting on", job.State, job.Question)
+	}
+	if err := r.Answer("act-4", "season 16"); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	if job := waitState(t, r, "act-4", Done, Failed, Stopped); job.State != Done {
+		t.Fatalf("state after the answer = %q (%s), want done", job.State, job.Err)
+	}
+}
+
+// gateStore is a store whose write of a row in one state is held until the test lets it through, so a test can look at a job in the moment between its last checkpoint starting and its live slot being given up.
+type gateStore struct {
+	*db.Store
+	state string
+	gate  chan struct{}
+	once  sync.Once
+	hit   chan struct{}
+}
+
+func (g *gateStore) SaveActJob(ctx context.Context, row db.ActJobRow) error {
+	if row.State == g.state {
+		g.once.Do(func() { close(g.hit) })
+		<-g.gate
+	}
+	return g.Store.SaveActJob(ctx, row)
+}
+
+// TestRunner_AnswerIsRefusedOnceTheJobHasEnded checks an answer sent to a job that has already been stopped is refused rather than reported as landed. The live slot outlives the stop by as long as the last checkpoint takes to write, and an answer dropped into it is never read by anyone.
+func TestRunner_AnswerIsRefusedOnceTheJobHasEnded(t *testing.T) {
+	inner, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer inner.Close()
+	store := &gateStore{Store: inner, state: string(Stopped), gate: make(chan struct{}), hit: make(chan struct{})}
+	r := New(store, &fakeExec{}, map[string]Model{"fake": script(`{"ask":"Which season is it under?"}`)}, "fake", func(Event) {})
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Stuck, Done, Failed)
+	if err := r.Stop(id); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	<-store.hit
+	if err := r.Answer(id, "season 16"); err == nil {
+		t.Error("an answer to a job that had already been stopped was accepted")
+	}
+	close(store.gate)
+	waitState(t, r, id, Stopped, Done, Failed)
+}
+
+// TestRunner_TheWallBudgetStillEndsAJobAfterItHasWaited checks the wall-clock guard is still watching after a job has waited on the user: the time spent waiting is the user's and does not count, but the work done after the answer does, and it must still be able to end the job.
+func TestRunner_TheWallBudgetStillEndsAJobAfterItHasWaited(t *testing.T) {
+	var rounds atomic.Int64
+	model := func(ctx context.Context, prompt string) (string, Usage, error) {
+		if rounds.Add(1) == 1 {
+			return `{"ask":"Which season is it under?"}`, Usage{Model: "fake", Input: 10}, nil
+		}
+		time.Sleep(40 * time.Millisecond)
+		return stepReply("click", "S16 E8"), Usage{Model: "fake", Input: 10}, nil
+	}
+	r, _, _ := newRunner(t, &fakeExec{}, model)
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: 200 * time.Millisecond}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Stuck, Done, Failed)
+	time.Sleep(400 * time.Millisecond)
+	if err := r.Answer(id, "season 16"); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	job := waitState(t, r, id, Failed, Done, Stopped)
+	if job.State != Failed || !strings.Contains(job.Err, "wall-clock") {
+		t.Fatalf("state = %q (%s), want it failed on the wall-clock budget once it went back to work", job.State, job.Err)
 	}
 }
