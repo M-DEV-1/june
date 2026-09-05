@@ -111,8 +111,17 @@ Do not invent facts. Plain text only — no JSON, no bullet points.
 Summaries:
 %s`, strings.Join(numbered, "\n"))
 
-	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), nil)
+	// The daily request gate is asked before the call so a spent Gemini allowance refuses here and falls through to the fallback text path like a real 429 would.
+	model := config.BackgroundModel(config.JobEpisodicCompaction)
+	var resp *genai.GenerateContentResponse
+	err := g.allow(model)
+	if err == nil {
+		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), nil)
+	}
 	if err != nil {
+		if text, ok := g.fallbackText(ctx, err, prompt); ok {
+			return text, nil
+		}
 		return "", fmt.Errorf("digest llm call: %w", err)
 	}
 

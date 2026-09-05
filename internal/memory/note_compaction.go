@@ -100,9 +100,14 @@ Return ONLY a JSON array of strings — the final canonical fact set, no comment
 Current facts:
 %s`, strings.Join(numbered, "\n"))
 
-	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), &genai.GenerateContentConfig{
-		ResponseMIMEType: "application/json",
-	})
+	model := config.BackgroundModel(config.JobNoteConsolidation)
+	var resp *genai.GenerateContentResponse
+	err := g.allow(model)
+	if err == nil {
+		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), &genai.GenerateContentConfig{
+			ResponseMIMEType: "application/json",
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("consolidate notes llm call: %w", err)
 	}

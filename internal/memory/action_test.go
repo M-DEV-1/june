@@ -241,3 +241,23 @@ func TestUserMeetingActions_KeepsOthersWorkWhenTheUserIsInvolved(t *testing.T) {
 		t.Errorf("kept %d of 3 items from a meeting the user was actually in", len(got))
 	}
 }
+
+// Mine is true only for the user's own items ("Me", however the model cased or spaced it) and for items nobody was named for, since an unassigned item might still be the user's. Anybody else's name is false.
+func TestActionItem_Mine(t *testing.T) {
+	for _, tc := range []struct {
+		owner string
+		want  bool
+	}{
+		{MeOwner, true},
+		{"me", true},
+		{"  Me  ", true},
+		{UnknownOwner, true},
+		{"Vikram", false},
+		{"Priya Shah", false},
+		{"", false},
+	} {
+		if got := (ActionItem{Owner: tc.owner}).Mine(); got != tc.want {
+			t.Errorf("Mine(%q) = %v, want %v", tc.owner, got, tc.want)
+		}
+	}
+}
