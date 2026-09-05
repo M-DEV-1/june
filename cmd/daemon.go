@@ -779,6 +779,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	mux.HandleFunc("/ask", auth(ipcServer.Ask))
 	mux.HandleFunc("/events", auth(ipcServer.Events))
 
+	// A reply's link posts here instead of the webview's own window.open, which WebKitGTK does not reliably hand off to the system browser; the daemon opens it the same way the open_url tool does. See internal/ipc/open.go.
+	mux.HandleFunc("POST /open", auth(ipc.Open(ipc.OpenCommand)))
+
 	// A long computer-use goal: POST /act starts one and returns its id, GET /act/{id} is its whole record, and the four control routes stop it, hold it, carry it on and answer the one question a stuck job asks. Progress rides the same /events stream as an ask, tagged type "act" with the job's id.
 	mux.HandleFunc("POST /act", auth(actJobs.Start))
 	mux.HandleFunc("GET /act/{id}", auth(actJobs.Get))

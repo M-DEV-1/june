@@ -463,6 +463,10 @@ export const oraApi = createApi({
         return { data: result.data as { text: string } };
       },
     }),
+    /** Opens a link in the system browser. The reply markdown's own links post here (see chat-markdown.tsx) instead of calling window.open, which a Tauri WebKitGTK webview does not reliably hand off to the real browser; the daemon runs the same xdg-open/open command its open_url tool uses. The daemon answers 204, and 400 for a url that is not http or https. */
+    openUrl: build.mutation<void, string>({
+      query: (href) => ({ url: "/open", method: "POST", body: { url: href } }),
+    }),
   }),
 });
 
@@ -500,6 +504,7 @@ export const {
   useRunRoutineMutation,
   useStartDictationMutation,
   useStopDictationMutation,
+  useOpenUrlMutation,
 } = oraApi;
 
 /** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep, a task or routine raised on its own. body is the routine's or task's own text for those two kinds (see internal/proactive/routine.go and proactive.go); kind is "task", "routine", "brief", "close", "meeting" or "note", and id is the row's own id. action and until are empty on a notice arriving fresh, and set once the user has pressed Done or a snooze button on the desktop notification it was also posted as: action is "snoozed" or "done", and until is the RFC 3339 moment a snoozed notice comes back. Only the hover window draws title and place (see internal/ipc/notice.go); this window reacts to action and until alone, through noticeActionMessage in format.ts. */
