@@ -339,6 +339,51 @@ func TestCollectMeetingNames_KnownInterfaceWordsNeverBecomeAName(t *testing.T) {
 	}
 }
 
+// A name written in a script without case — Devanagari here, Tamil there — must reach the participant list the same way a Latin name does, each on its own line the way a participants pane lists one name per line, with the usual interface furniture around it still dropped.
+func TestCollectMeetingNames_ScriptsWithoutCaseReachParticipants(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - team-sync - Brave", ScreenText: "People (2)\nराहुल\nYou\nMute\nLeave call"},
+		{Title: "Meet - team-sync - Brave", ScreenText: "Participants (2)\nபிரியா\nYou\nMute\nLeave call"},
+	}
+
+	got := collectMeetingNames(eps, true, nil)
+
+	for _, want := range []string{"राहुल", "பிரியா"} {
+		if !contains(got, want) {
+			t.Errorf("collectMeetingNames = %v, want it to include %q", got, want)
+		}
+	}
+	for _, deny := range []string{"Mute", "Leave", "You"} {
+		if contains(got, deny) {
+			t.Errorf("collectMeetingNames = %v, must not include interface text %q", got, deny)
+		}
+	}
+}
+
+// A Hinglish meeting mixes a Latin name and a Devanagari name on the same line, and both must be read off it — the Latin one by the existing capitalised-word rule, the Devanagari one by the caseless-script pass added beside it.
+func TestCollectMeetingNames_MixedHinglishLineYieldsBothScripts(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - team-sync - Brave", ScreenText: "Rohit Verma राहुल\nMute\nLeave call"},
+	}
+
+	got := collectMeetingNames(eps, true, nil)
+
+	if !contains(got, "Rohit Verma") {
+		t.Errorf("collectMeetingNames = %v, want the Latin name %q", got, "Rohit Verma")
+	}
+	if !contains(got, "राहुल") {
+		t.Errorf("collectMeetingNames = %v, want the Devanagari name %q", got, "राहुल")
+	}
+}
+
+// Cyrillic has an upper and lower form, so it belongs to the capitalised-word rule rather than the caseless-script pass — this pins the boundary the new rule draws, so a cased script never gets swept in beside Devanagari or Tamil.
+func TestCaselessScriptNames_ScriptsWithCaseAreLeftToTheCapitalisedRule(t *testing.T) {
+	got := caselessScriptNames("Иван Петров")
+	if len(got) != 0 {
+		t.Errorf("caselessScriptNames(%q) = %v, want none: Cyrillic has case", "Иван Петров", got)
+	}
+}
+
 // A name written in a script without letter case has no "all caps" form, so the shouting check must leave it alone, while a Latin word in all caps is still interface furniture. The proper-noun matcher that feeds collectMeetingNames is Latin-only, so this checks the shape rule on its own.
 func TestLooksLikeName_ScriptsWithoutCaseAreNotShouting(t *testing.T) {
 	cases := []struct {
