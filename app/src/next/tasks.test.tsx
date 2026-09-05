@@ -146,6 +146,35 @@ describe("changing a task's status", () => {
     expect(calls.find((c) => c.path === "/tasks/task-1/done")).toBeUndefined();
   });
 
+  it("holds the circle filled while the change is in flight, and sends nothing when it is clicked again in that time", async () => {
+    const { calls } = renderApp({ tasks }, { place: "tasks" });
+    const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    // The fake daemon answers at once, so the round trip is held open here: the status change waits for `answer` to be called, everything else the window reads answers as usual, and `sent` counts the status changes that actually went out.
+    const daemon = globalThis.fetch;
+    const sent: string[] = [];
+    let answer = () => {};
+    const held = new Promise<void>((r) => {
+      answer = r;
+    });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(typeof input === "object" && "url" in input ? input.url : String(input)).pathname;
+      if (path !== "/tasks/task-1/done") return daemon(input, init);
+      sent.push(path);
+      return held.then(() => daemon(input, init));
+    });
+
+    await userEvent.click(tick);
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
+    await userEvent.click(screen.getByRole("checkbox", { name: "Reopen Book the flight" }));
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent).toHaveLength(1);
+
+    answer();
+    await waitFor(() => expect(calls.find((c) => c.path === "/tasks/task-1/done")?.body).toEqual({ status: "done" }));
+    expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
+  });
+
   it("moves the tick back and says so when the daemon refuses the change", async () => {
     renderApp({ tasks, fails: ["POST /tasks/task-1/done"] }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });

@@ -1,6 +1,6 @@
 /** The tick on a task, wherever a task is drawn: the Tasks list, the Days page's raised list, and the block of what a meeting left behind. Input: the task, as little of it as the tick needs so a day's raised item can use it too without carrying a whole Task. Output: the tick — an empty ring until it is done and a filled one after.
  *
- * The circle fills the instant it is clicked, but nothing is told to the daemon until UNDO_MS later: a second click inside that window puts the circle back and the daemon is never called at all, which is what makes a misclick free. Only once the window passes uncontested does the real status change go out — at which point the row it sits in, reading task.done rather than anything kept here, strikes the title through and the daemon's own reply is what a failed change is undone against.
+ * The circle fills the instant it is clicked, but nothing is told to the daemon until UNDO_MS later: a second click inside that window puts the circle back and the daemon is never called at all, which is what makes a misclick free. Only once the window passes uncontested does the real status change go out, and the circle holds what it is showing until the daemon has answered — at which point the row it sits in, reading task.done rather than anything kept here, strikes the title through and the daemon's own reply is what a failed change is undone against. A click while that request is in flight does nothing: the change has already gone out, so there is nothing left to undo.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -18,11 +18,16 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
   // What the circle is showing right now, ahead of task.done itself: undefined once nothing is pending, in which case the circle just reads task.done like any other row.
   const [pending, setPending] = useState<boolean | undefined>(undefined);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // True from the moment the change goes out until the daemon has answered it. A click in that time is ignored: the change is already gone, so there is nothing left to undo, and treating it as a fresh tick would send the opposite status straight after the first one.
+  const sending = useRef(false);
   useEffect(() => () => clearTimeout(timer.current), []);
 
   const done = pending ?? task.done;
 
   const click = () => {
+    if (sending.current) {
+      return;
+    }
     if (pending !== undefined) {
       // Inside the undo window: put the circle back and drop the pending change, nothing was ever sent.
       clearTimeout(timer.current);
@@ -32,11 +37,15 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
     const next = !task.done;
     setPending(next);
     timer.current = setTimeout(async () => {
-      setPending(undefined);
+      sending.current = true;
       try {
         await setStatus({ id: task.id, status: next ? "done" : "open" }).unwrap();
       } catch {
         dispatch(ui.noticed("Could not change that task"));
+      } finally {
+        // The circle only goes back to reading task.done once the daemon has answered; dropping the pending state any earlier empties the circle again for the whole round trip.
+        sending.current = false;
+        setPending(undefined);
       }
     }, UNDO_MS);
   };
