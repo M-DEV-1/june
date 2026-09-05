@@ -6,19 +6,43 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"ora/internal/memory"
 )
 
+// allOwners is the ?owner value that filters nothing out.
+const allOwners = "all"
+
+// typedTaskDetail is where a task the user typed in came from, in the same slot a noticed task names its meeting.
+const typedTaskDetail = "you said"
+
+// raisedIn names where a noticed task came from: the meeting it was raised in and the day it was raised on, or just the day when the minutes never named the meeting.
+func raisedIn(a memory.ActionItem) string {
+	day := ""
+	if !a.Raised.IsZero() {
+		day = a.Raised.Format("2006-01-02")
+	} else if !a.Created.IsZero() {
+		day = a.Created.Local().Format("2006-01-02")
+	}
+	switch {
+	case a.Source == "":
+		return day
+	case day == "":
+		return a.Source
+	}
+	return a.Source + ", " + day
+}
+
 // userTaskPrefix marks the ids of tasks the user typed in, so POST /tasks/{id}/done knows whether to close a user_tasks row or an action note. A noticed task's id is the plain note id, the same id /matters already hands out.
 const userTaskPrefix = "task-"
 
-// Task is one thing to do on GET /tasks. Source is "you" for a task the user typed in and "noticed" for an action item a meeting raised. When is when it was raised, Detail its provenance (the meeting or note title a noticed task was raised from, "" for one the user typed in), and ConversationID the conversation opened alongside it (empty for a noticed task).
+// Task is one thing to do on GET /tasks. Source is "you" for a task the user typed in and "noticed" for an action item a meeting raised. When is when it was raised, Detail where it came from (the meeting and the date it was raised on, or "you said" for one the user typed in), and ConversationID the conversation opened alongside it (empty for a noticed task).
+// Owner is whose task it is — "me", "them" or "unclear" — which is what tells the user's own work from something he merely heard somebody else agree to.
 type Task struct {
 	ID             string `json:"id"`
 	Title          string `json:"title"`
 	Source         string `json:"source"`
+	Owner          string `json:"owner"`
 	When           string `json:"when"`
 	Done           bool   `json:"done"`
 	ConversationID string `json:"conversation_id"`
@@ -38,14 +62,27 @@ func (s *Server) Tasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // listTasks answers GET /tasks: the user's own tasks first, then the action items still owed, both newest first within their group.
+// ?owner=me is the default and is his work alone. ?owner=them is what he is waiting on other people for, ?owner=unclear the items a meeting left unowned, and ?owner=all the lot. The tasks he typed in are his by definition, so they appear under "me" and "all" and nowhere else.
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tasks := []Task{}
+
+	owner := r.URL.Query().Get("owner")
+	if owner == "" {
+		owner = memory.OwnerMe
+	}
+	if owner != memory.OwnerMe && owner != memory.OwnerThem && owner != memory.OwnerUnclear && owner != allOwners {
+		http.Error(w, "owner must be me, them, unclear or all", http.StatusBadRequest)
+		return
+	}
 
 	mine, err := s.store.UserTasks(ctx)
 	if err != nil {
 		fail(w, err, http.StatusInternalServerError)
 		return
+	}
+	if owner != memory.OwnerMe && owner != allOwners {
+		mine = nil
 	}
 	for _, t := range mine {
 		conv := ""
@@ -56,31 +93,33 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			ID:             userTaskPrefix + strconv.FormatInt(t.ID, 10),
 			Title:          t.Title,
 			Source:         "you",
+			Owner:          memory.OwnerMe,
 			When:           rfc3339(t.Created),
 			Done:           t.Done,
 			ConversationID: conv,
-			Detail:         "",
+			Detail:         typedTaskDetail,
 		})
 	}
 
-	// Read as notes rather than through OpenActionItems: the time the window shows is the note's own date, and only the note carries it — an item parsed out of minutes has a raised date only when the minutes named one.
-	notes, err := s.store.NotesOfKindSince(ctx, memory.ActionNoteKind, time.Time{})
+	items, err := s.store.ActionItemsByOwner(ctx, owner)
 	if err != nil {
 		fail(w, err, http.StatusInternalServerError)
 		return
 	}
-	for _, n := range notes {
-		a, ok := memory.ParseAction(n.Content)
-		if !ok || a.Status != memory.StatusOpen || !a.Mine() {
+	identity := s.store.Identity(ctx)
+	for _, a := range items {
+		if a.Status != memory.StatusOpen {
 			continue
 		}
 		tasks = append(tasks, Task{
-			ID:     strconv.FormatInt(n.ID, 10),
+			ID:     strconv.FormatInt(a.NoteID, 10),
 			Title:  a.Text,
 			Source: "noticed",
-			When:   rfc3339(n.CreatedAt),
+			Owner:  a.OwnerClass(identity),
+			// The time the window shows is the note's own date, not the item's raised date: an item parsed out of minutes has a raised date only when the minutes named one.
+			When:   rfc3339(a.Created),
 			Done:   false,
-			Detail: a.Source,
+			Detail: raisedIn(a),
 		})
 	}
 	writeJSON(w, map[string]any{"tasks": tasks})

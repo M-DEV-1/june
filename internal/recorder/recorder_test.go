@@ -32,6 +32,7 @@ type fakeStore struct {
 	kinds          []string
 	updates        map[int64]string
 	actions        []memory.ActionItem
+	closeSweeps    int
 	mu             sync.Mutex
 }
 
@@ -1030,7 +1031,15 @@ func (s *fakeStore) AddActionItems(ctx context.Context, items []memory.ActionIte
 	return len(items), nil
 }
 
-// Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in. Only the user's own work is kept: the minutes write the user's bullets as "Me", so an "Vikram" bullet never lands on the user's list.
+// CloseDoneActionItems records that the recorder asked for the evidence sweep after filing a meeting, and closes nothing.
+func (s *fakeStore) CloseDoneActionItems(ctx context.Context, since time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeSweeps++
+	return 0, nil
+}
+
+// Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in. Every item is kept, the other people's included: whose an item is comes from its owner read against who the user is, so an "Vikram" bullet is something he is waiting for rather than something the store never heard.
 func TestFileMinutes_LiftsActionItems(t *testing.T) {
 	store := &fakeStore{}
 	r := New(t.TempDir(), store, "FAKE_API_KEY")
@@ -1045,17 +1054,24 @@ func TestFileMinutes_LiftsActionItems(t *testing.T) {
 - **Me** — compare these minutes against his own agent's output.
 `, raised, raised.Add(90*time.Minute))
 
-	if len(store.actions) != 1 {
-		t.Fatalf("want 1 action item lifted, got %d: %+v", len(store.actions), store.actions)
+	if len(store.actions) != 2 {
+		t.Fatalf("want both action items lifted, got %d: %+v", len(store.actions), store.actions)
 	}
-	if store.actions[0].Owner != "Me" || store.actions[0].Text != "compare these minutes against his own agent's output." {
-		t.Errorf("lifted item = %+v", store.actions[0])
+	mine := store.actions[1]
+	if store.actions[0].Owner != "Vikram" {
+		t.Errorf("the other person's item was dropped instead of kept to wait on: %+v", store.actions)
 	}
-	if store.actions[0].Source != "md x mf tool" || !store.actions[0].Raised.Equal(raised) {
-		t.Errorf("provenance = %q / %v", store.actions[0].Source, store.actions[0].Raised)
+	if mine.Owner != "Me" || mine.Text != "compare these minutes against his own agent's output." {
+		t.Errorf("lifted item = %+v", mine)
 	}
-	if store.actions[0].Status != memory.StatusOpen {
-		t.Errorf("lifted item is not open: %q", store.actions[0].Status)
+	if mine.Source != "md x mf tool" || !mine.Raised.Equal(raised) {
+		t.Errorf("provenance = %q / %v", mine.Source, mine.Raised)
+	}
+	if mine.Status != memory.StatusOpen {
+		t.Errorf("lifted item is not open: %q", mine.Status)
+	}
+	if store.closeSweeps != 1 {
+		t.Errorf("close sweeps after filing a meeting = %d, want 1", store.closeSweeps)
 	}
 	// The minutes themselves must still be filed unchanged: they are the record of what was said and nothing may edit them.
 	if len(store.notes) != 1 || !strings.Contains(store.notes[0], "## Action items") {
@@ -1063,8 +1079,8 @@ func TestFileMinutes_LiftsActionItems(t *testing.T) {
 	}
 }
 
-// A meeting with one item the user owes, one owed by somebody else, and one nobody was named for lifts only the two that might be the user's — theirs and the unclear one — and drops the other person's.
-func TestFileMinutes_LiftsOnlyTheUsersOwnItems(t *testing.T) {
+// A meeting with one item the user owes, one owed by somebody else and one nobody was named for files all three with their owners intact. Filing is not the place whose-is-it gets decided: the store answers that on every read, from the owner against who the user is, so the user's own list and the list of what he is waiting on both come out of the same rows.
+func TestFileMinutes_LiftsEveryItemWithItsOwner(t *testing.T) {
 	store := &fakeStore{}
 	r := New(t.TempDir(), store, "FAKE_API_KEY")
 
@@ -1076,12 +1092,13 @@ func TestFileMinutes_LiftsOnlyTheUsersOwnItems(t *testing.T) {
 - **Owner unclear** — trial attaching walkthrough videos to PRs.
 `, time.Now(), time.Now())
 
-	if len(store.actions) != 2 {
-		t.Fatalf("want 2 action items lifted, got %d: %+v", len(store.actions), store.actions)
+	if len(store.actions) != 3 {
+		t.Fatalf("want 3 action items lifted, got %d: %+v", len(store.actions), store.actions)
 	}
-	for _, a := range store.actions {
-		if a.Owner == "Sandeep" {
-			t.Errorf("kept an item owed by somebody else: %+v", a)
+	want := []string{memory.MeOwner, "Sandeep", memory.UnknownOwner}
+	for i, a := range store.actions {
+		if a.Owner != want[i] {
+			t.Errorf("item %d owner = %q, want %q", i, a.Owner, want[i])
 		}
 	}
 }
@@ -1098,31 +1115,6 @@ func TestFileMinutes_NoActionItems(t *testing.T) {
 	}
 	if len(store.notes) != 1 {
 		t.Errorf("the minutes were not filed: %+v", store.notes)
-	}
-}
-
-// A meeting the user did not owe anything in but sat in on still surfaces its unowned item, since "Owner unclear" might turn out to be the user's; only the item clearly owed by somebody else is dropped. The minutes are still filed in full — they are the record of what was said — but that work stays off the user's list.
-func TestFileMinutes_DropsOtherPeoplesItemsButKeepsUnclearOnes(t *testing.T) {
-	store := &fakeStore{}
-	r := New(t.TempDir(), store, "FAKE_API_KEY")
-
-	r.fileMinutes(context.Background(), t.TempDir(), `# Meeting minutes
-
-**AI dev tools knowledge sharing**
-
-## Action items
-- **Sandeep** — add battery optimisation to the app.
-- **Owner unclear** — trial attaching walkthrough videos to PRs.
-`, time.Now(), time.Now())
-
-	if len(store.actions) != 1 {
-		t.Fatalf("want 1 action item lifted, got %d: %+v", len(store.actions), store.actions)
-	}
-	if store.actions[0].Owner != memory.UnknownOwner {
-		t.Errorf("put someone else's item on the user's list: %+v", store.actions[0])
-	}
-	if len(store.notes) != 1 {
-		t.Errorf("the minutes themselves must still be filed: %+v", store.notes)
 	}
 }
 

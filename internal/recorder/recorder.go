@@ -87,6 +87,8 @@ type Store interface {
 	GetNotes(ctx context.Context) ([]db.Note, error)
 	// AddActionItems files the things people agreed to do in this meeting as their own rows, skipping any already on file.
 	AddActionItems(ctx context.Context, items []memory.ActionItem) (int, error)
+	// CloseDoneActionItems closes the open tasks this meeting's own minutes say are finished.
+	CloseDoneActionItems(ctx context.Context, since time.Time) (int, error)
 }
 
 // capturer is the running-capture half of audio.MeetingCapture, kept as an interface so tests can drive the pipeline without a sound server.
@@ -766,18 +768,10 @@ func (r *Recorder) fileMinutes(ctx context.Context, dir, text string, startedAt,
 	}
 }
 
-// liftActionItems files the minutes' action items as their own rows, keeping only the ones that might be the user's — the minutes prompt writes the user's own bullets as "Me", so anything owed by somebody else by name is dropped here rather than ever reaching the user's task list. The minutes are left exactly as written — they are the record of what was said, and nothing may edit them to claim a task is finished; the lifted items are the live copy, the one the user closes or re-prioritises. Re-filing the same meeting adds nothing, because the store matches on the work itself rather than on the line it is rendered as.
+// liftActionItems files the minutes' action items as their own rows, every one of them, and then closes any open task these minutes say is finished. The minutes are left exactly as written — they are the record of what was said, and nothing may edit them to claim a task is finished; the lifted items are the live copy, the one the user closes or re-prioritises. Re-filing the same meeting adds nothing, because the store matches on the work itself rather than on the line it is rendered as.
+// Other people's items are filed too, rather than dropped as they used to be: whose an item is now comes from its owner read against who the user is, so an item owed by somebody else is a thing he is waiting for (GET /tasks?owner=them) instead of something the store never heard.
 func (r *Recorder) liftActionItems(ctx context.Context, minutes string, startedAt time.Time) {
-	all := memory.ParseMinutesActions(minutes, memory.MinutesLabel(minutes), startedAt)
-	var items []memory.ActionItem
-	for _, a := range all {
-		if a.Mine() {
-			items = append(items, a)
-		}
-	}
-	if dropped := len(all) - len(items); dropped > 0 {
-		slog.Info("dropped action items owed by other people", "dropped", dropped)
-	}
+	items := memory.ParseMinutesActions(minutes, memory.MinutesLabel(minutes), startedAt)
 	if len(items) == 0 {
 		return
 	}
@@ -787,7 +781,17 @@ func (r *Recorder) liftActionItems(ctx context.Context, minutes string, startedA
 		return
 	}
 	slog.Info("filed action items from a meeting", "found", len(items), "new", added)
+
+	// A meeting is where somebody says last week's task is done, so the freshly filed minutes are read straight back as evidence against the open list.
+	if closed, err := r.store.CloseDoneActionItems(ctx, startedAt.Add(-closingEvidenceMargin)); err != nil {
+		slog.Warn("could not close the tasks this meeting says are finished", "error", err)
+	} else if closed > 0 {
+		slog.Info("closed tasks this meeting says are finished", "closed", closed)
+	}
 }
+
+// closingEvidenceMargin is how far before a meeting started the evidence sweep reads from. A day either side, so the minutes filed for this meeting are certainly inside the window however long the write-up took, without re-reading months of writing after every call.
+const closingEvidenceMargin = 24 * time.Hour
 
 // transcriptFor returns the meeting's transcript. A recording the sweep found with its transcript already written just has it read back off disk, which is what makes deleting minutes.md a request for fresh minutes; anything else is transcribed with whisper and the result written to transcript.md.
 func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error) {

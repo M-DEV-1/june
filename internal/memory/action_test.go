@@ -261,3 +261,80 @@ func TestActionItem_Mine(t *testing.T) {
 		}
 	}
 }
+
+// identityEntry is the personal-context line that says who the user is, copied from what the store actually holds.
+const identityEntry = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
+
+func TestOwnerClass(t *testing.T) {
+	cases := []struct {
+		name  string
+		owner string
+		text  string
+		want  string
+	}{
+		{"his full name", "Alex Rivera", "Rework the hardcoded location-finder logic.", OwnerMe},
+		{"the name he goes by", "Alex", "Report status on the PFP task.", OwnerMe},
+		{"the label the prompt asks for", "Me", "send the deck by Friday", OwnerMe},
+		{"written as you", "You", "send the deck by Friday", OwnerMe},
+		{"written as I", "I", "send the deck by Friday", OwnerMe},
+		{"another person", "Priya Shah", "Create the Northwind Freight test account.", OwnerThem},
+		{"a role rather than a name", "The project lead", "Give campaign managers access to his ElevenLabs account.", OwnerThem},
+		{"no subject at all", UnknownOwner, "clean up the mixed lockfile situation in the frontend; raised but not assigned.", OwnerUnclear},
+		{"unclear but qualified", "Owner unclear (workstream lead)", "Set up the X API dashboard via Proton email.", OwnerThem},
+		{"a bolded person prefix left in the text", UnknownOwner, "**Every campaign manager (including Imanshu)** — Choose a market and post it in the group chat.", OwnerThem},
+		{"a name before will", UnknownOwner, "Krish will take the technical interviews for the developer hire.", OwnerThem},
+		{"a name before to", UnknownOwner, "Handed to Sam to finish the load testing task.", OwnerThem},
+		{"a name before should", UnknownOwner, "Nikunj should add the Verity-workflow task to the sprint board.", OwnerThem},
+		{"a capitalised first word is not a name", UnknownOwner, "Define how the knowledge pool concept should work in practice.", OwnerUnclear},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := ActionItem{Owner: c.owner, Text: c.text}
+			if got := a.OwnerClass(identityEntry); got != c.want {
+				t.Errorf("OwnerClass(%q, %q) = %q, want %q", c.owner, c.text, got, c.want)
+			}
+		})
+	}
+}
+
+func TestOwnerClass_NoIdentityLeavesHisOwnNameUnclassified(t *testing.T) {
+	a := ActionItem{Owner: "Alex Rivera", Text: "Continue transition-risk work."}
+	if got := a.OwnerClass(""); got != OwnerThem {
+		t.Errorf("with no identity on file OwnerClass = %q, want %q — guessing here would put another person's work on his list", got, OwnerThem)
+	}
+}
+
+func TestEvidenceCloses(t *testing.T) {
+	item := ActionItem{Owner: "Me", Text: "deploy the Value Chain & risk-statements PR (#5632)."}
+	cases := []struct {
+		name     string
+		evidence string
+		want     bool
+	}{
+		{"the pull request it names was merged", "Merged the Value Chain risk-statements PR #5632 to main today.", true},
+		{"the work is named as finished", "Finished the Value Chain risk-statements deploy this morning.", true},
+		{"named but not finished", "Discussed the Value Chain risk-statements PR with Priya and agreed a review order.", false},
+		{"finished, but a different piece of work", "Merged the emissions-factor PR #5601; the Value Chain risk-statements deploy is still pending.", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := EvidenceCloses(item, c.evidence); got != c.want {
+				t.Errorf("EvidenceCloses(%q) = %v, want %v", c.evidence, got, c.want)
+			}
+		})
+	}
+}
+
+func TestActionItem_DoneSourceRoundTrip(t *testing.T) {
+	a := ActionItem{Owner: "Me", Text: "deploy the PR", Status: StatusDone, Priority: PriorityNormal, DoneSource: "Daily AI Sprint Standup 2026-09-04", Source: "standup", Raised: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)}
+	back, ok := ParseAction(a.Note())
+	if !ok {
+		t.Fatalf("ParseAction could not read back %q", a.Note())
+	}
+	if back.DoneSource != a.DoneSource {
+		t.Errorf("done source = %q, want %q (line was %q)", back.DoneSource, a.DoneSource, a.Note())
+	}
+	if back.Priority != PriorityNormal || back.Status != StatusDone {
+		t.Errorf("status/priority = %q/%q", back.Status, back.Priority)
+	}
+}
