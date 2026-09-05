@@ -60,9 +60,9 @@ func TestPrepMeeting_MatchesByParticipantAndNotifies(t *testing.T) {
 	}
 }
 
-// A shared title fragment ("Acme Corp") is enough to match even when no chat sender was on screen.
+// A shared title fragment ("Acme Corp") is enough to match even when no chat sender was on screen. The window is the call's own — a title that is not a meeting window names nothing, whatever words are in it.
 func TestPrepMeeting_MatchesByTitleFragment(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "Weekly sync - Acme Corp"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet – Weekly sync with Acme Corp"}}}
 	r, _, _ := newTestRecorder(t, store)
 	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nAcme Corp asked for the Q3 numbers.", noteKind); err != nil {
 		t.Fatal(err)
@@ -455,5 +455,26 @@ func TestCollectMeetingNames_CJKScreenTextWithoutAColonIsNotAParticipant(t *test
 
 	if len(got) != 0 {
 		t.Errorf("collectMeetingNames = %v, want no names from unspaced screen text with no colon on it", got)
+	}
+}
+
+// A call in an app the meeting-window pattern does not list leaves no meeting window on screen at all, and the last window that was there names something else entirely. Naming the meeting after it — and then searching memory for its words — produced "Before you join: Gmail — Inbox (12)". Nothing on screen names the meeting, so prep stays silent.
+func TestPrepMeeting_SilentWhenNoWindowOnScreenIsACall(t *testing.T) {
+	store := &fakeStore{episodes: []db.Episode{{App: "Brave", Title: "Inbox (12) - Acme Corp - Brave"}}}
+	r, _, _ := newTestRecorder(t, store)
+	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nAcme Corp asked for the Q3 numbers.", noteKind); err != nil {
+		t.Fatal(err)
+	}
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		t.Fatal("the brain must not be called when nothing on screen is a call")
+		return "", nil
+	}
+	var got notifications
+	r.notify = got.add
+
+	r.prepMeeting()
+
+	if len(got.sent) != 0 {
+		t.Errorf("expected silence when no window on screen is a call, got %v", got.sent)
 	}
 }
