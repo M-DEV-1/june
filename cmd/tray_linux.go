@@ -134,6 +134,7 @@ type dbusMenuLayout struct {
 //	0 = root
 //	1 = Status indicator  (disabled; label reflects tracking state)
 //	2 = separator
+//	7 = Open Ora  (brings the desktop window to the front)
 //	3 = Pause / Resume Tracking  (label toggled by paused flag)
 //	6 = Start / Stop meeting recording  (label toggled by the recorder's own state)
 //	4 = separator
@@ -150,6 +151,7 @@ type dbusMenu struct {
 const (
 	menuStatus  int32 = 1
 	menuSep1    int32 = 2
+	menuOpen    int32 = 7
 	menuPause   int32 = 3
 	menuMeeting int32 = 6
 	menuSep2    int32 = 4
@@ -196,6 +198,8 @@ func (m *dbusMenu) items() []dbusMenuItemProps {
 	return []dbusMenuItemProps{
 		status,
 		sep(menuSep1),
+		// The window has no tray icon of its own, so opening it lives here, on the one icon. The hover is not in the menu: it is what the keyboard shortcut is for, and a menu item for it would be a second name for the same thing.
+		item(menuOpen, "Open Ora", true),
 		item(menuPause, pauseLabel, true),
 		item(menuMeeting, meetingLabel(m.recording()), true),
 		sep(menuSep2),
@@ -244,6 +248,8 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 		return nil
 	}
 	switch id {
+	case menuOpen:
+		go authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
 	case menuPause:
 		var endpoint string
 		if m.paused.Load() {

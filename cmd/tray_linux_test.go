@@ -180,13 +180,13 @@ func TestMenuViewsAgree(t *testing.T) {
 	}
 }
 
-// The menu order puts the recording toggle with the other actions, above the separator and Quit.
+// The menu order puts opening the window and the recording toggle with the other actions, above the separator and Quit. Ora shows one tray icon, so what the window's own removed menu offered lives here, except showing the hover, which is what the keyboard shortcut is for.
 func TestMenuOrder(t *testing.T) {
 	var ids []int32
 	for _, it := range (&dbusMenu{}).items() {
 		ids = append(ids, it.ID)
 	}
-	want := []int32{menuStatus, menuSep1, menuPause, menuMeeting, menuSep2, menuQuit}
+	want := []int32{menuStatus, menuSep1, menuOpen, menuPause, menuMeeting, menuSep2, menuQuit}
 	if fmt.Sprint(ids) != fmt.Sprint(want) {
 		t.Errorf("menu order = %v, want %v", ids, want)
 	}
