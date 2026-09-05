@@ -356,7 +356,7 @@ func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
-	openItem(t, store, "Vikram", "carry PR #13 through CI and merge.", memory.PriorityHigh, 9)
+	openItem(t, store, "Me", "carry PR #13 through CI and merge.", memory.PriorityHigh, 9)
 
 	var prompts []string
 	s := New(store, func(ctx context.Context, prompt string) (string, error) {
@@ -372,7 +372,7 @@ func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 	if !strings.Contains(prompts[0], "carry PR #13 through CI and merge.") {
 		t.Errorf("a nine-day-old open item never reached the brief prompt:\n%s", prompts[0])
 	}
-	if !strings.Contains(prompts[0], "Vikram") {
+	if !strings.Contains(prompts[0], "Me") {
 		t.Errorf("the brief prompt does not say who owes the item")
 	}
 }
@@ -384,7 +384,7 @@ func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
-	openItem(t, store, "Alex Rivera", "finish the acme-essentials setup.", memory.PriorityNormal, 3)
+	openItem(t, store, "Me", "finish the acme-essentials setup.", memory.PriorityNormal, 3)
 	open, _ := store.OpenActionItems(ctx)
 	if err := store.SetActionStatus(ctx, open[0].NoteID, memory.StatusDone); err != nil {
 		t.Fatal(err)
@@ -410,8 +410,8 @@ func TestScheduler_Brief_AsksAboutStaleItems(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
-	openItem(t, store, "Krish", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
-	openItem(t, store, "Vikram", "settle the payment.", memory.PriorityHigh, 1)
+	openItem(t, store, "Me", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
+	openItem(t, store, "Me", "settle the payment.", memory.PriorityHigh, 1)
 
 	var prompts []string
 	s := New(store, func(ctx context.Context, prompt string) (string, error) {
@@ -438,10 +438,7 @@ func TestScheduler_Brief_AsksAboutAStaleItemAndAppliesTheAnswer(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera — goes by Alex."); err != nil {
-		t.Fatal(err)
-	}
-	openItem(t, store, "Alex Rivera", "improve capture resolution in the screen-frame tool.", memory.PriorityLow, 12)
+	openItem(t, store, "Me", "improve capture resolution in the screen-frame tool.", memory.PriorityLow, 12)
 
 	asked := make(chan string, 1)
 	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "brief", nil },
@@ -487,7 +484,7 @@ func TestScheduler_Brief_NoQuestionWhenNothingIsStale(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
-	openItem(t, store, "Vikram", "settle the payment.", memory.PriorityNormal, 1)
+	openItem(t, store, "Me", "settle the payment.", memory.PriorityNormal, 1)
 
 	var asks int32
 	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "brief", nil },
@@ -506,14 +503,11 @@ func TestScheduler_Brief_NoQuestionWhenNothingIsStale(t *testing.T) {
 	}
 }
 
-// Somebody else's stale item is never put to the user as a progress question: they cannot answer for work they do not owe. It still reaches the brief's text, because being kept waiting is worth knowing about.
-func TestScheduler_Brief_DoesNotAskAboutSomebodyElsesItem(t *testing.T) {
+// An item filed under somebody else's name never reaches the user at all, brief or question: OpenActionItems already keeps only the user's own work, so this is not something deliverBrief has to guard against itself.
+func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera — goes by Alex."); err != nil {
 		t.Fatal(err)
 	}
 	openItem(t, store, "Krish", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
@@ -536,8 +530,132 @@ func TestScheduler_Brief_DoesNotAskAboutSomebodyElsesItem(t *testing.T) {
 	if n := atomic.LoadInt32(&asks); n != 0 {
 		t.Errorf("asked the user for progress on Krish's task %d times", n)
 	}
-	if !strings.Contains(prompts[0], "reply on WhatsApp during his leave.") {
-		t.Error("the item vanished from the brief entirely; the user should still know they are waiting on it")
+	if strings.Contains(prompts[0], "reply on WhatsApp during his leave.") {
+		t.Error("an item owed by somebody else reached the brief")
+	}
+}
+
+// The four moments now go to Ora's own card in the desktop window, which is the whole point of the change: GNOME's banner cut every one of them off after two lines and there was nothing to click. notify-send stays as the fallback for when no window is listening.
+
+// TestScheduler_Brief_GoesToTheWindow checks the morning brief is handed to the window as a notice — title, body, the place a click opens and the moment it came from — and that notify-send is not also used when the window took it.
+func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	var notes []notification
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		return "Send the deck. Retrieval work is still half done.", nil
+	}, func(title, body string) { notes = append(notes, notification{title, body}) },
+		config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s.tick(ctx)
+
+	want := Notice{Title: "Morning brief", Body: "Send the deck. Retrieval work is still half done.", Place: "tasks", Kind: "brief"}
+	if len(sent) != 1 || sent[0] != want {
+		t.Errorf("notices = %+v, want exactly %+v", sent, want)
+	}
+	if len(notes) != 0 {
+		t.Errorf("notify-send was used as well as the window: %+v", notes)
+	}
+}
+
+// TestScheduler_Brief_FallsBackToNotifySend checks the brief still arrives through notify-send when no window is subscribed to the event stream, which is what the sender reports by returning false.
+func TestScheduler_Brief_FallsBackToNotifySend(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	var notes []notification
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "One thing is still open.", nil },
+		func(title, body string) { notes = append(notes, notification{title, body}) },
+		config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	SetNoticeSender(func(n Notice) bool { return false })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s.tick(ctx)
+
+	if len(notes) != 1 || notes[0].title != "Morning brief" || notes[0].body != "One thing is still open." {
+		t.Errorf("notifications = %+v, want the brief through notify-send", notes)
+	}
+}
+
+// TestScheduler_Close_GoesToTheWindow checks the evening close is handed over as a notice pointing at the day it just wrote, so clicking the card opens that day's page.
+func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "an evening on the diary seam"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	var notes []notification
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		return "Today was about the diary seam.\n\nThe user built it all evening.", nil
+	}, func(title, body string) { notes = append(notes, notification{title, body}) },
+		config.ProactiveConfig{BriefHour: -1})
+	s.closeHour = 0
+
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s.tick(ctx)
+
+	want := Notice{Title: "Day's written down", Body: "Today was about the diary seam.", Place: "days", ID: time.Now().Format(dayFormat), Kind: "close"}
+	if len(sent) != 1 || sent[0] != want {
+		t.Errorf("notices = %+v, want exactly %+v", sent, want)
+	}
+	if len(notes) != 0 {
+		t.Errorf("notify-send was used as well as the window: %+v", notes)
+	}
+}
+
+// TestNotify_PrefersTheWindow covers the meeting prep, which reaches this package through the recorder's own notifySend rather than through the scheduler: a package-level Notify offers itself to the window first, and only shells out to notify-send when no window took it. The kind is read from the icon, the one thing such a call carries that says what the moment is about.
+//
+// Every case here wires a sender that accepts, deliberately: a case that let the call fall through would run the real notify-send and put a banner on the screen of whoever is running the tests.
+func TestNotify_PrefersTheWindow(t *testing.T) {
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	Notify("audio-input-microphone", "Before you join: standup", "Last time you owed the deck.")
+	Notify("x-office-calendar", "Recording saved", "Ora will transcribe it once you plug in.")
+
+	want := []Notice{
+		{Title: "Before you join: standup", Body: "Last time you owed the deck.", Kind: "meeting"},
+		{Title: "Recording saved", Body: "Ora will transcribe it once you plug in.", Kind: "day"},
+	}
+	if len(sent) != len(want) {
+		t.Fatalf("notices = %+v, want %+v", sent, want)
+	}
+	for i := range want {
+		if sent[i] != want[i] {
+			t.Errorf("notice %d = %+v, want %+v", i, sent[i], want[i])
+		}
+	}
+}
+
+// A body long enough that notify-send would have cut it off still goes to the window whole: the length rule exists because GNOME truncates, and Ora's own card does not.
+func TestNotify_SendsALongBodyToTheWindowWhole(t *testing.T) {
+	long := strings.Repeat("a sentence about the day. ", 20)
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	Notify("x-office-calendar", "Morning brief", long)
+
+	if len(sent) != 1 || sent[0].Body != long {
+		t.Errorf("notices = %+v, want the whole long body", sent)
 	}
 }
 
