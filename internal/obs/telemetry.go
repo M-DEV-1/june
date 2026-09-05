@@ -31,9 +31,16 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFile, err := os.OpenFile(filepath.Join(logDir, "ora.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// The log is 0600, readable only by the user who runs Ora. Every tool call writes the first 160 characters of its result here, and for observe_screen that is the title and the contents of whatever window was in front — a password manager, an inbox — so nobody else with an account on the machine may read it.
+	logPath := filepath.Join(logDir, "ora.log")
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
+	// Opening an existing file does not change its mode, so a log written by an older build is still world-readable until this tightens it.
+	if err := os.Chmod(logPath, 0600); err != nil {
+		logFile.Close()
+		return nil, fmt.Errorf("failed to secure log file: %w", err)
 	}
 
 	// custom slog Handler pulls trace/span out of ctx and injects them into every json log line
