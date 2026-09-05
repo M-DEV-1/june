@@ -1,7 +1,9 @@
 package ipc
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -22,6 +24,9 @@ func withEmptyFirstRun(t *testing.T) {
 
 // noFirstRunSteps is the FirstRunView a config with no brain, no login files and no local model produces: nothing is set up, so every step is listed.
 var noFirstRunSteps = FirstRunView{Steps: firstRunSteps(FirstRunView{})}
+
+// noopSave is the persist function for a test that never posts a change and so never needs one to actually write anything.
+func noopSave(config.OraConfig) error { return nil }
 
 // withFakeGsettings replaces the gsettings runner for the rest of the test, restoring the real one when it ends. Every test that does not care about the hotkey uses the "nothing configured" fake, so it never depends on what this machine's own desktop actually has bound.
 func withFakeGsettings(t *testing.T, fake func(args ...string) (string, error)) {
@@ -73,7 +78,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
 				VoiceModel: config.VoiceModel, Brain: config.TextModel, EmbedModel: config.LocalEmbedModel,
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
-				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps,
+				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
 			},
 		},
 		{
@@ -85,7 +90,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
 				VoiceModel: config.VoiceModel, Brain: "claude-cli sonnet", EmbedModel: "none",
 				MeetingsEnabled: false, CaptureEnabled: false, KeepAudioDays: -1,
-				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps,
+				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
 			},
 		},
 		{
@@ -97,7 +102,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
 				VoiceModel: config.VoiceModel, Brain: config.BrainClaudeCLI, EmbedModel: "none",
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
-				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps,
+				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
 			},
 		},
 	}
@@ -105,7 +110,8 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			paused := c.paused
-			srv := httptest.NewServer(Settings(dataDir, c.cfg, c.meetingsEnabled, func() bool { return paused }, startedAt))
+			cfg := c.cfg
+			srv := httptest.NewServer(Settings(dataDir, &cfg, noopSave, c.meetingsEnabled, func() bool { return paused }, startedAt))
 			defer srv.Close()
 
 			var got SettingsView
@@ -120,7 +126,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 func TestSettings_MissingDataDirGivesZeroSizes(t *testing.T) {
 	withFakeGsettings(t, noCustomKeybindings)
 	dataDir := filepath.Join(t.TempDir(), "does-not-exist")
-	srv := httptest.NewServer(Settings(dataDir, config.OraConfig{}, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(dataDir, &config.OraConfig{}, noopSave, false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -131,6 +137,51 @@ func TestSettings_MissingDataDirGivesZeroSizes(t *testing.T) {
 	// capturePaused nil (no tracker wired) defaults to capture enabled, the same "nothing wired yet" default the rest of the daemon uses.
 	if !got.CaptureEnabled {
 		t.Errorf("CaptureEnabled with a nil capturePaused = false, want true")
+	}
+}
+
+// TestSettings_ClaudeUsageFromLoginReflectsLiveConfig checks GET reads the flag off the pointer it was given, not a snapshot taken when the route was built — the same reason POST /brains is handed a pointer.
+func TestSettings_ClaudeUsageFromLoginReflectsLiveConfig(t *testing.T) {
+	withFakeGsettings(t, noCustomKeybindings)
+	off := false
+	cfg := &config.OraConfig{ClaudeUsageFromLogin: &off}
+	srv := httptest.NewServer(Settings(t.TempDir(), cfg, noopSave, false, nil, time.Now()))
+	defer srv.Close()
+
+	var got SettingsView
+	getJSON(t, srv, "/", &got)
+	if got.ClaudeUsageFromLogin {
+		t.Errorf("claude_usage_from_login = true, want false: the config had it explicitly turned off")
+	}
+}
+
+// TestSettings_PostClaudeUsageFromLoginPersists checks POST {"claude_usage_from_login": false} comes back false on the same response, is written to the on-disk config, and is read back correctly by a fresh LoadConfig — the point being that turning off the undocumented Claude usage fetch survives a daemon restart, the same round trip TestBrainsPostPersists checks for the brain picker.
+func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	withFakeGsettings(t, noCustomKeybindings)
+	cfg := &config.OraConfig{}
+	srv := httptest.NewServer(Settings(t.TempDir(), cfg, config.SaveConfig, false, nil, time.Now()))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{"claude_usage_from_login":false}`))
+	if err != nil {
+		t.Fatalf("POST /settings: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /settings = %d, want 200", resp.StatusCode)
+	}
+	var got SettingsView
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ClaudeUsageFromLogin {
+		t.Errorf("claude_usage_from_login in the response = true, want false")
+	}
+
+	reloaded := config.LoadConfig()
+	if reloaded.ClaudeUsageFromLoginEnabled() {
+		t.Errorf("claude_usage_from_login on disk is still enabled after turning it off")
 	}
 }
 
@@ -158,7 +209,7 @@ func fakeGsettingsWithHotkey(args ...string) (string, error) {
 // TestSettings_HotkeyFoundAmongOthers checks that the custom keybinding whose command names ora-window-toggle is picked out from among others, and its binding is unquoted.
 func TestSettings_HotkeyFoundAmongOthers(t *testing.T) {
 	withFakeGsettings(t, fakeGsettingsWithHotkey)
-	srv := httptest.NewServer(Settings(t.TempDir(), config.OraConfig{}, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -171,7 +222,7 @@ func TestSettings_HotkeyFoundAmongOthers(t *testing.T) {
 // TestSettings_HotkeyNoneConfigured checks that an empty custom-keybindings list reads as no hotkey rather than an error.
 func TestSettings_HotkeyNoneConfigured(t *testing.T) {
 	withFakeGsettings(t, noCustomKeybindings)
-	srv := httptest.NewServer(Settings(t.TempDir(), config.OraConfig{}, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -186,7 +237,7 @@ func TestSettings_HotkeyGsettingsUnavailable(t *testing.T) {
 	withFakeGsettings(t, func(args ...string) (string, error) {
 		return "", fmt.Errorf("gsettings: command not found")
 	})
-	srv := httptest.NewServer(Settings(t.TempDir(), config.OraConfig{}, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -203,7 +254,7 @@ func TestSettings_HotkeyNonLinux(t *testing.T) {
 	hotkeyGOOS = "darwin"
 	t.Cleanup(func() { hotkeyGOOS = prevGOOS })
 
-	srv := httptest.NewServer(Settings(t.TempDir(), config.OraConfig{}, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView

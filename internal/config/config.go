@@ -46,6 +46,13 @@ type OraConfig struct {
 	ActRunFailedKeepDays int `json:"act_run_failed_keep_days"`
 	// DailyTokenBudget caps how many tokens a provider (see the Provider* names in internal/agent/ask.go — "codex", "gemini", ...) may spend in one local calendar day, keyed by provider name. A provider named with 0 or absent from the map has no budget: the default is off, since a user who never set one should never see a warning. Read it through DailyTokenBudgetFor rather than directly.
 	DailyTokenBudget map[string]int `json:"daily_token_budget,omitempty"`
+	// ClaudeUsageFromLogin is whether GET /brains reads the Claude row's usage bars from the undocumented https://api.anthropic.com/api/oauth/usage endpoint, using the access token Claude Code's own login already wrote to ~/.claude/.credentials.json. Defaults to on; a pointer, like ProactiveAudio, so a config written before this field existed is distinguishable from one where the user explicitly turned it off. Read it through ClaudeUsageFromLoginEnabled rather than directly.
+	ClaudeUsageFromLogin *bool `json:"claude_usage_from_login,omitempty"`
+}
+
+// ClaudeUsageFromLoginEnabled reports whether the Claude usage endpoint should be read. Unset means on.
+func (cfg OraConfig) ClaudeUsageFromLoginEnabled() bool {
+	return cfg.ClaudeUsageFromLogin == nil || *cfg.ClaudeUsageFromLogin
 }
 
 // DefaultActRunKeep is how many ordinary act runs are kept when the config names no number. Two thousand: the nightly procedures stage reads the newest 200 runs, so this leaves ten times its window, and at the few dozen screen asks a day the machine actually logs it covers a couple of months of them for a few megabytes.

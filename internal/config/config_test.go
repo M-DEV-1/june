@@ -374,3 +374,28 @@ func TestDailyTokenBudgetFor_ReturnsTheSetBudget(t *testing.T) {
 		t.Errorf("gemini budget = %d, want 1000000", got)
 	}
 }
+
+// TestLoadConfig_DefaultsClaudeUsageFromLoginOn covers both a fresh config and one written before the field existed: the Claude usage endpoint is read unless the user turns it off, so an upgrading install keeps seeing its usage bars without editing anything.
+func TestLoadConfig_DefaultsClaudeUsageFromLoginOn(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+
+	if cfg := LoadConfig(); !cfg.ClaudeUsageFromLoginEnabled() {
+		t.Error("expected a fresh config to read the Claude usage endpoint")
+	}
+}
+
+// TestLoadConfig_KeepsClaudeUsageFromLoginDisabled checks an explicit off survives a reload, the same round trip TestLoadConfig_KeepsProactiveAudioDisabled checks for ProactiveAudio.
+func TestLoadConfig_KeepsClaudeUsageFromLoginDisabled(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+
+	cfg := LoadConfig()
+	off := false
+	cfg.ClaudeUsageFromLogin = &off
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	if reloaded := LoadConfig(); reloaded.ClaudeUsageFromLoginEnabled() {
+		t.Error("expected an explicitly disabled Claude usage setting to survive a reload")
+	}
+}

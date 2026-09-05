@@ -8,7 +8,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HOVER_POSITION_KEY, storedHoverPosition, type HoverPosition } from "../winplace";
-import { useBrainsQuery, usePickBrainMutation, useSetCaptureMutation, useSettingsQuery, useTrackerQuery, useUsageQuery, type SettingsView, type Usage, type UsageWindow } from "./api";
+import { useBrainsQuery, usePickBrainMutation, useSetCaptureMutation, useSetClaudeUsageFromLoginMutation, useSettingsQuery, useTrackerQuery, useUsageQuery, type SettingsView, type Usage, type UsageWindow } from "./api";
 import { bytes, cachedInput, compact, hhmm, hotkeyKeys, perQuestion, tokens, took } from "./format";
 import { Blank, Group, HEAD, PageHeader, Reading, Scroller, SectionHeading, TAIL, useWide } from "./parts";
 import { settings as settingsUi, ui, useAppDispatch, useAppSelector, type Theme } from "./store";
@@ -287,6 +287,7 @@ export function SettingsScreen() {
   const { data: usage } = useUsageQuery();
   const [pickBrain] = usePickBrainMutation();
   const [setCapture] = useSetCaptureMutation();
+  const [setClaudeUsageFromLogin] = useSetClaudeUsageFromLoginMutation();
   const [wide, pane] = useWide();
   // Where the hover opens, kept in the localStorage key both windows share rather than on the daemon; read once on mount, same as the hover itself re-reads it on every open.
   const [hoverPosition, setHoverPosition] = useState<HoverPosition>(() => storedHoverPosition());
@@ -319,6 +320,14 @@ export function SettingsScreen() {
       await pickBrain({ brain, model }).unwrap();
     } catch {
       dispatch(ui.noticed("Could not change the model"));
+    }
+  };
+
+  const toggleClaudeUsage = async (on: boolean) => {
+    try {
+      await setClaudeUsageFromLogin(on).unwrap();
+    } catch {
+      dispatch(ui.noticed("Could not change that setting"));
     }
   };
 
@@ -384,6 +393,15 @@ export function SettingsScreen() {
           <section className="mt-10">
             <SectionHeading>Brain</SectionHeading>
             <Group>
+              <div className="border-b">
+                <Row label="Show Claude plan usage" hint="Reads your Claude Code login's usage from an undocumented Anthropic endpoint. Turn off if you would rather it did not.">
+                  <Switch
+                    checked={daemon?.claude_usage_from_login ?? true}
+                    aria-label="Show Claude plan usage"
+                    onCheckedChange={(on) => void toggleClaudeUsage(on)}
+                  />
+                </Row>
+              </div>
               {brains.length === 0 ? (
                 <p className="px-3.5 py-3 text-ui text-muted-foreground">{isError ? "Not connected." : "No brains reported."}</p>
               ) : (

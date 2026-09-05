@@ -469,6 +469,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			return err
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("closing task %s: %w", id, proactive.ErrTaskGone)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("closing task %s answered %s", id, resp.Status)
 		}
@@ -820,7 +823,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	brainLimits := brainLimitsFrom(brainUsage, geminiQuota, &appConfig, geminiQuotaOpts)
 	mux.HandleFunc("/brains", auth(ipc.Brains(&appConfig, config.SaveConfig, brainLimits)))
 	mux.HandleFunc("/overlay", auth(ipcServer.Overlay))
-	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), appConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
+	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), &appConfig, config.SaveConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
 	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, brainLimits)))
 
 	server := &http.Server{
@@ -875,7 +878,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	return stop, daemon, nil
 }
 
-// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the live config (for the Gemini model those requests are metered under) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker, Codex's whatever its last response's headers said, and nothing at all for Grok and Ollama, which expose no allowance to read.
+// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the live config (for the Gemini model those requests are metered under, and for whether the Claude read is turned on) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker (skipped entirely when config.OraConfig.ClaudeUsageFromLogin is off), Codex's whatever its last response's headers said, and nothing at all for Grok and Ollama, which expose no allowance to read.
 func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *config.OraConfig, opts brain.QuotaOptions) ipc.BrainLimits {
 	return func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
 		switch id {
@@ -886,7 +889,9 @@ func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *conf
 			}
 			return brain.GeminiDaily(quota, model, opts, time.Now())
 		case "claude":
-			agent.RefreshClaudeUsage(ctx)
+			if cfg.ClaudeUsageFromLoginEnabled() {
+				agent.RefreshClaudeUsage(ctx)
+			}
 		}
 		return usage.Get(id)
 	}

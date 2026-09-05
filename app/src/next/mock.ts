@@ -50,6 +50,7 @@ const emptySettings: SettingsView = {
   daemon_started: "",
   version: "dev",
   hotkey: "",
+  claude_usage_from_login: true,
 };
 
 /** A fake daemon as one fetch function. Input: what it should answer with, and the list to record every call in — the tests read that list to check a click wrote what it should have, and the browser mode passes one it ignores. Output: a function with fetch's own signature, to be put in fetch's place.
@@ -65,6 +66,8 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
   let nextRoutineID = routines.length + 1;
   // What a tick on either screen last set a task to, kept apart from `tasks` itself because a dropped item falls out of that list — GET /tasks would not return it either — but a day that raised it still needs to say so.
   const statusById = new Map<string, { done: boolean; status: string }>();
+  // Settings the mock daemon holds in place: a POST /settings changes this, and the next GET /settings sees it, the same way the task lists above hold what a write left behind.
+  let settingsState: Partial<SettingsView> = { ...(canned.settings ?? {}) };
 
   const answer = (method: string, path: string, body: unknown, params: URLSearchParams): { status: number; body: unknown } => {
     const conversation = /^\/conversations\/([^/]+)$/.exec(path);
@@ -140,7 +143,11 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     if (method === "GET" && path === "/meetings") return { status: 200, body: { meetings: canned.meetings ?? [] } };
     if (method === "GET" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
     if (method === "POST" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
-    if (method === "GET" && path === "/settings") return { status: 200, body: { ...emptySettings, ...canned.settings } };
+    if (method === "GET" && path === "/settings") return { status: 200, body: { ...emptySettings, ...settingsState } };
+    if (method === "POST" && path === "/settings") {
+      settingsState = { ...settingsState, ...(body as Partial<SettingsView>) };
+      return { status: 200, body: { ...emptySettings, ...settingsState } };
+    }
     if (method === "GET" && path === "/usage") return { status: 200, body: canned.usage ?? { today: { providers: [], models: [] }, week: { providers: [], models: [] }, days: [], recent: [] } };
     if (method === "GET" && path === "/routines") return { status: 200, body: { routines } };
     if (method === "POST" && path === "/routines") {
