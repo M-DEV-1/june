@@ -1,0 +1,35 @@
+/* The word beside the clock: quiet, lower case, dimmer than the clock itself. */
+.ora-word {
+    margin-left: 8px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+/* The ring: a rounded outline around a rectangle the daemon named. */
+.ora-ring {
+    border: 3px solid rgba(90, 170, 255, 0.95);
+    border-radius: 10px;
+    background-color: rgba(90, 170, 255, 0.08);
+}
+
+.ora-ring-label {
+    font-size: 12px;
+    color: #ffffff;
+    background-color: rgba(20, 60, 110, 0.9);
+    border-radius: 6px;
+    padding: 2px 8px;
+}
+
+/* The pen: a red numbered circle at a rectangle's top left corner. */
+.ora-mark {
+    width: 22px;
+    height: 22px;
+    font-size: 13px;
+    font-weight: bold;
+    color: #ffffff;
+    background-color: rgba(220, 40, 40, 0.95);
+    border: 2px solid #ffffff;
+    border-radius: 13px;
+    text-align: center;
+    padding-top: 3px;
+}
