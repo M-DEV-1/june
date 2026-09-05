@@ -21,11 +21,11 @@ function list() {
 
 const when = new Date().toISOString();
 
-/** One task the user typed in and two an agent noticed in the same meeting. */
+/** One task the user typed in and two an agent noticed in the same meeting, all three the user's own — the tests below that predate the owner split expect one flat list, so all three stay in Mine. */
 const tasks: Task[] = [
-  { id: "task-1", title: "Book the flight", source: "you", when, done: false, conversation_id: "c1", detail: "" },
-  { id: "12", title: "Send the TCFD file", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call" },
-  { id: "13", title: "Book the room", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call" },
+  { id: "task-1", title: "Book the flight", source: "you", when, done: false, conversation_id: "c1", detail: "", owner: "me" },
+  { id: "12", title: "Send the TCFD file", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call", owner: "me" },
+  { id: "13", title: "Book the room", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call", owner: "me" },
 ];
 
 const conversation: ConversationView = {
@@ -185,5 +185,57 @@ describe("talking to a task", () => {
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     await userEvent.click(list().getByText("Send the TCFD file"));
     expect(await screen.findByText("Nothing said about “Send the TCFD file” yet.")).toBeDefined();
+  });
+});
+
+/** Two of the user's own and two a meeting raised for someone else or for nobody named — owner "them" and "unclear" are both watched rather than assumed onto the user's own list. */
+const withWatched: Task[] = [
+  { id: "task-1", title: "Book the flight", source: "you", when, done: false, conversation_id: "c1", detail: "you said", owner: "me" },
+  { id: "20", title: "Send the file", source: "noticed", when, done: true, conversation_id: "", detail: "TCFD call", owner: "me" },
+  { id: "21", title: "Re-run the source data", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call", owner: "them" },
+  { id: "22", title: "Write up the findings", source: "noticed", when, done: true, conversation_id: "", detail: "Standup", owner: "unclear" },
+];
+
+describe("Mine and Theirs", () => {
+  it("shows only the user's own by default, with what a meeting raised for someone else collapsed behind a count", async () => {
+    renderApp({ tasks: withWatched }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    expect(list().getByText("Book the flight")).toBeDefined();
+    expect(list().getByText("Send the file")).toBeDefined();
+    expect(list().queryByText("Re-run the source data")).toBeNull();
+    expect(list().queryByText("Write up the findings")).toBeNull();
+    const disclosure = screen.getByRole("button", { name: /Theirs, watching/ });
+    expect(disclosure.textContent).toContain("2");
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("opens the theirs section on its own disclosure and shows where each one came from", async () => {
+    renderApp({ tasks: withWatched }, { place: "tasks" });
+    await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
+    const watched = within(screen.getByRole("listbox", { name: "Theirs, watching" }));
+    expect(watched.getByText("Re-run the source data")).toBeDefined();
+    expect(watched.getByText(/from TCFD call/)).toBeDefined();
+    expect(watched.getByText("Write up the findings")).toBeDefined();
+  });
+
+  it("says nothing of yours is open when every task is someone else's, naming the filter rather than showing an empty list", async () => {
+    const allWatched = withWatched.filter((t) => t.owner !== "me");
+    renderApp({ tasks: allWatched }, { place: "tasks" });
+    expect(await screen.findByText("Nothing of yours open.")).toBeDefined();
+    expect(screen.getByRole("button", { name: /Theirs, watching/ })).toBeDefined();
+  });
+
+  it("says nothing is being watched at all, rather than showing an empty section, when nothing was raised for anyone else", async () => {
+    renderApp({ tasks }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    expect(screen.queryByRole("button", { name: /Theirs, watching/ })).toBeNull();
+  });
+
+  it("names a watched row's owner control read-only, and the route it would need, rather than pretending a move works", async () => {
+    renderApp({ tasks: withWatched }, { place: "tasks" });
+    await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
+    const control = screen.getByRole("button", { name: "Move Re-run the source data to mine" });
+    expect(control).toHaveProperty("disabled", true);
+    expect(control.title).toMatch(/PATCH \/tasks\/\{id\}/);
   });
 });

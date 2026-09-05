@@ -1,13 +1,12 @@
 /** The Days screen: one day's page at a time — the sentences Ora wrote that night, under the day's own date and the one line the daemon writes about what the day held. The day is chosen from the picker in the header, which carries a search and each day's counts; there is no list of days beside the sidebar, because the sidebar is for chats. */
 
-import { Check } from "lucide-react";
-
 import { useDayQuery, useDaysQuery, type DayView } from "./api";
 import { activeDays, dayCounts, dayRailed, dayShort, daysShown, groupDays, pageHeading } from "./format";
+import { TaskTick } from "./tasks";
 import { Blank, Group, HEAD, Outline, PageHeader, Picker, Rail, RailBlock, Reading, Scroller, SectionHeading, TAIL, useReading, useWide } from "./parts";
 import { ui, useAppDispatch, useAppSelector } from "./store";
 
-/** The work a day raised, as it reads on the page: a tick that says what became of each one, and nothing to click, since a day's page is a record of what happened rather than a place to change it. Input: the day's tasks. Output: the block, or nothing when the day raised none. */
+/** The work a day raised, as it reads on the page: the same tick the Tasks screen draws, wired to the same POST /tasks/{id}/done, so ticking one here and ticking it there are the same action on the same row — the "Task" tag both screens' queries carry means either one refetches the other. Input: the day's tasks. Output: the block, or nothing when the day raised none. */
 function Raised({ tasks }: { tasks: DayView["tasks"] }) {
   if (!tasks?.length) return null;
   return (
@@ -15,13 +14,9 @@ function Raised({ tasks }: { tasks: DayView["tasks"] }) {
       <SectionHeading>Raised that day</SectionHeading>
       <Group>
         <ul className="divide-y">
-          {tasks.map((t, i) => (
-            <li key={`${t.title}-${i}`} className="flex items-center gap-2.5 px-3 py-2 text-ui">
-              <span
-                className={`grid size-[15px] shrink-0 place-items-center rounded-full border ${t.done ? "border-primary bg-primary text-primary-foreground" : "border-hairline-strong text-transparent"}`}
-              >
-                <Check aria-label={t.done ? "done" : "still open"} className="size-2.5" strokeWidth={3} />
-              </span>
+          {tasks.map((t) => (
+            <li key={t.id} className="flex items-center gap-2.5 px-3 py-2 text-ui">
+              <TaskTick task={{ id: t.id, title: t.title, done: t.done }} />
               <span className={t.done ? "text-muted-foreground line-through" : ""}>{t.title}</span>
             </li>
           ))}
