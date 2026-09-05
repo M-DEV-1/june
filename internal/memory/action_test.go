@@ -357,3 +357,26 @@ func TestActionItem_DoneSourceRoundTrip(t *testing.T) {
 		t.Errorf("status/priority = %q/%q", back.Status, back.Priority)
 	}
 }
+
+// The minutes prompt asks for an em dash, but a model writes whichever dash it feels like. Every separator the window's own renderer accepts (app/src/next/format.ts's minutesLines) has to parse here too, or the user reads a bullet saying they owe something that never becomes a task.
+func TestParseMinutesActions_AcceptsEveryDashTheModelWrites(t *testing.T) {
+	for _, sep := range []string{"—", "–", "-", ":"} {
+		minutes := "## Action items\n- **Me** " + sep + " send the deck by Friday.\n"
+		items := ParseMinutesActions(minutes, "Lodestone sync", time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC))
+		if len(items) != 1 {
+			t.Errorf("separator %q: got %d items, want 1", sep, len(items))
+			continue
+		}
+		if items[0].Owner != MeOwner || items[0].Text != "send the deck by Friday." {
+			t.Errorf("separator %q: owner/text = %q / %q", sep, items[0].Owner, items[0].Text)
+		}
+	}
+}
+
+// A hyphen inside a name is not a separator: only a spaced hyphen separates the owner from the work, so "Jean-Luc" keeps his name and his task.
+func TestParseMinutesActions_AHyphenatedNameIsNotSplit(t *testing.T) {
+	items := ParseMinutesActions("## Action items\n- **Jean-Luc** — book the room.\n", "Lodestone sync", time.Time{})
+	if len(items) != 1 || items[0].Owner != "Jean-Luc" {
+		t.Fatalf("items = %+v, want one owned by Jean-Luc", items)
+	}
+}

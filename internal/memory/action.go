@@ -193,10 +193,12 @@ func ParseMinutesActions(minutes, source string, raised time.Time) []ActionItem 
 
 // splitBullet separates one action bullet into its owner and the work owed. Input: the bullet's text with its "- " marker already stripped, in the "**Owner** — what they agreed to do" shape the minutes prompt asks for. Output: the owner with its bold markers removed, the work, and false for a bullet carrying no owner separator at all.
 func splitBullet(bullet string) (owner, text string, ok bool) {
-	// The em dash is what the minutes prompt asks for and a colon is what models write anyway — both of today's recordings came back as "Alex: review his code", which parsed as nothing at all. Either separator is accepted, the em dash first so a bullet carrying both splits where it was told to.
-	owner, text, ok = strings.Cut(bullet, "—")
-	if !ok {
-		owner, text, ok = strings.Cut(bullet, ":")
+	// The em dash is what the minutes prompt asks for, and everything else here is what models write anyway — both of today's recordings came back as "Alex: review his code", which parsed as nothing at all, and a plain hyphen is common enough that the window's own renderer already accepts it.
+	// They are tried in this order so a bullet carrying more than one splits where the prompt told it to, and the hyphen is matched with spaces around it so a hyphenated name is not cut in half.
+	for _, sep := range []string{"—", "–", " - ", ":"} {
+		if owner, text, ok = strings.Cut(bullet, sep); ok {
+			break
+		}
 	}
 	if !ok {
 		return "", "", false
