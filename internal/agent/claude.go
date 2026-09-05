@@ -1,0 +1,478 @@
+// claude.go answers /ask with Anthropic models on the user's own Claude subscription by running the Claude Code CLI, and offers it Ora's own tools — the screen tools and the memory tools — as an MCP server the daemon holds open for the length of one ask.
+// The CLI is the only way to reach the subscription: a third-party login billed through the API key is extra usage on top of what the user already pays for, which is why --bare is never passed here (it makes the CLI read ANTHROPIC_API_KEY instead of the login).
+package agent
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	oratext "ora/internal/text"
+
+	"google.golang.org/genai"
+)
+
+const (
+	// claudeBinary is the Claude Code command line, found on PATH.
+	claudeBinary = "claude"
+	// claudeDefaultModel is the model an ask uses when nothing names another: sonnet, because computer use is a great many cheap rounds rather than a few hard ones.
+	claudeDefaultModel = "sonnet"
+	// claudeAskTimeout bounds one whole ask, every tool round included, and matches what the Codex path allows itself.
+	claudeAskTimeout = 12 * time.Minute
+	// claudeMCPServerName is what the CLI calls Ora's tool server, and so is the prefix on every tool name the model sees: mcp__ora__observe_screen.
+	claudeMCPServerName = "ora"
+	// claudeProtocolVersion is the MCP version the server falls back to when the client names none of its own.
+	claudeProtocolVersion = "2025-11-25"
+)
+
+// ProviderClaude is the Claude Code command line, which serves Anthropic models on the user's own subscription rather than on an API key.
+const ProviderClaude = "claude"
+
+// claudeModel is the model an ask asks for. Input: none. Output: ORA_CLAUDE_MODEL when it is set, else claudeDefaultModel.
+func claudeModel() string {
+	if model := strings.TrimSpace(os.Getenv("ORA_CLAUDE_MODEL")); model != "" {
+		return model
+	}
+	return claudeDefaultModel
+}
+
+// claudeLoggedIn reports whether this machine has a Claude Code login to run under, which is what makes Claude worth handing a question to.
+func claudeLoggedIn() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(home + "/.claude/.credentials.json")
+	return err == nil
+}
+
+// claudeToolServer offers Ora's own tools to one `claude -p` run over MCP's HTTP transport, running each call through the same gate as every other ask and keeping the calls it ran so the turn's trace can carry them.
+// It listens on the loopback interface at an unguessable path, which is what stops anything else on the machine from driving the user's screen through it. The listener lives only as long as the ask.
+// ponytail: one server per ask on a fresh port; if asks ever run often enough for that to matter, one long-lived server with a per-ask path would do.
+type claudeToolServer struct {
+	agent *Agent
+	// askCtx is the ask's own context, not the HTTP request's, so a tool result still reaches the window's progress stream under the right ask id.
+	askCtx   context.Context
+	decls    []*genai.FunctionDeclaration
+	path     string
+	listener net.Listener
+	server   *http.Server
+	// mu guards steps and hops together, because the CLI may have more than one call in flight: the step budget has to be checked and reserved in the one locked section, or two calls that both see a step free can both spend it and run one tool more than the cap allows.
+	mu sync.Mutex
+	// steps is how many of this run's step budget have been reserved so far, checked and incremented together in reserveStep.
+	steps int
+	// hops are the tool calls this run made, in call order.
+	hops []ToolHop
+}
+
+// startClaudeToolServer starts the tool server for one ask on a loopback port. Input: the ask's context, used to run the tools it is asked to run. Output: the running server, which the caller must Close, or an error when the port could not be taken.
+func (a *Agent) startClaudeToolServer(ctx context.Context) (*claudeToolServer, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return nil, fmt.Errorf("claude: naming the tool server: %w", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("claude: opening the tool server: %w", err)
+	}
+	s := &claudeToolServer{
+		agent:    a,
+		askCtx:   ctx,
+		decls:    a.askToolDeclarations(),
+		path:     "/" + hex.EncodeToString(buf[:]),
+		listener: listener,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(s.path, s.handle)
+	s.server = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go s.server.Serve(listener)
+	return s, nil
+}
+
+// URL is where the CLI reaches this server.
+func (s *claudeToolServer) URL() string {
+	return "http://" + s.listener.Addr().String() + s.path
+}
+
+// Close stops the server and frees its port.
+func (s *claudeToolServer) Close() { s.server.Close() }
+
+// Hops is the tool calls this run made so far, in call order.
+func (s *claudeToolServer) Hops() []ToolHop {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hops
+}
+
+// record adds one finished tool call.
+func (s *claudeToolServer) record(hop ToolHop) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hops = append(s.hops, hop)
+}
+
+// reserveStep claims one of this run's step budget, checking the cap and spending a step in the same locked section — otherwise two tool calls arriving at once could both see one step free and both spend it, running one tool more than the cap allows. Output: true when a step was claimed, false when the budget was already spent.
+func (s *claudeToolServer) reserveStep() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.steps >= maxAskIterations {
+		return false
+	}
+	s.steps++
+	return true
+}
+
+// handle answers one JSON-RPC request from the CLI. Input: an HTTP POST carrying an MCP request. Output: the JSON-RPC reply, 202 for a notification (which carries no id and expects no answer), and 405 for anything that is not a POST.
+func (s *claudeToolServer) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params struct {
+			ProtocolVersion string          `json:"protocolVersion"`
+			Name            string          `json:"name"`
+			Arguments       map[string]any  `json:"arguments"`
+			Meta            json.RawMessage `json:"_meta"`
+		} `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.ID) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	var result any
+	switch req.Method {
+	case "initialize":
+		version := req.Params.ProtocolVersion
+		if version == "" {
+			version = claudeProtocolVersion
+		}
+		result = map[string]any{"protocolVersion": version, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]any{"name": claudeMCPServerName, "version": "1"}}
+	case "tools/list":
+		result = map[string]any{"tools": claudeTools(s.decls)}
+	case "tools/call":
+		content := []any{map[string]any{"type": "text", "text": s.call(req.Params.Name, req.Params.Arguments)}}
+		// A tool that took a picture of the screen hands it back beside its text, as MCP's own image content item, which is how the command line gets to see what a look saw.
+		if shot, ok := takeLook(s.askCtx); ok {
+			content = append(content, map[string]any{"type": "image", "data": base64.StdEncoding.EncodeToString(shot.Data), "mimeType": shot.Mime})
+		}
+		result = map[string]any{"content": content}
+	default:
+		// Anything else — a discovery probe, a resources or prompts listing — is a method this server does not have, which is a thing MCP clients are built to carry on past.
+		writeClaudeRPC(w, req.ID, nil, &claudeRPCError{Code: -32601, Message: "no such method: " + req.Method})
+		return
+	}
+	writeClaudeRPC(w, req.ID, result, nil)
+}
+
+// call runs one tool for the model and returns what to tell it. Input: the tool's name and arguments as the CLI sent them. Output: the tool's result, a refusal when the tool is outside the ask's gate, or a note that the turn has no steps left once the step cap is reached.
+func (s *claudeToolServer) call(name string, args map[string]any) string {
+	if args == nil {
+		args = map[string]any{}
+	}
+	if !s.reserveStep() {
+		return "error: this turn has no steps left; answer now with what you already have."
+	}
+	ObserveTool(s.askCtx, name, toolActivitySummary(name, args))
+	result := s.agent.evalExecute(s.askCtx, name, args)
+	ObserveTool(s.askCtx, name, resultSummary(name, result))
+	slog.Info("ask: tool", "tool", name, "args", toolActivitySummary(name, args), "result", resultSummary(name, result), "detail", toolLogDetail(name, result))
+	s.record(ToolHop{Name: name, Args: args, Result: result})
+	return result
+}
+
+// claudeRPCError is the error object a JSON-RPC reply carries instead of a result.
+type claudeRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// writeClaudeRPC writes one JSON-RPC reply. Input: the response writer, the request's id echoed back, and exactly one of a result or an error.
+func writeClaudeRPC(w http.ResponseWriter, id json.RawMessage, result any, rpcErr *claudeRPCError) {
+	reply := map[string]any{"jsonrpc": "2.0", "id": id}
+	if rpcErr != nil {
+		reply["error"] = rpcErr
+	} else {
+		reply["result"] = result
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(reply)
+}
+
+// claudeTools converts the agent's tool declarations into the MCP tool objects tools/list answers with, one per declaration in the same order. The argument schema is the same JSON Schema the Codex path sends.
+func claudeTools(decls []*genai.FunctionDeclaration) []any {
+	out := make([]any, 0, len(decls))
+	for _, d := range decls {
+		out = append(out, map[string]any{"name": d.Name, "description": d.Description, "inputSchema": jsonSchema(d.Parameters)})
+	}
+	return out
+}
+
+// writeClaudeAskFiles writes the MCP config and the system prompt to two 0600 files inside a fresh temp directory of their own, so neither ever sits in argv: any local process can read another process's argv for the life of a run, on Linux via /proc/<pid>/cmdline, and the config carries the tool server's own unguessable URL while the system prompt carries the user's personal context. Input: where the tool server is listening and the system prompt to send. Output: the directory — the caller removes it once the ask ends — and the two file paths, or an error naming what could not be written.
+func writeClaudeAskFiles(mcpURL, instruction string) (dir, mcpConfigPath, systemPromptPath string, err error) {
+	dir, err = os.MkdirTemp(os.TempDir(), "ora-claude-ask-")
+	if err != nil {
+		return "", "", "", fmt.Errorf("claude: making the ask's own temp dir: %w", err)
+	}
+	config := fmt.Sprintf(`{"mcpServers":{%q:{"type":"http","url":%q}}}`, claudeMCPServerName, mcpURL)
+	mcpConfigPath = filepath.Join(dir, "mcp.json")
+	if err := os.WriteFile(mcpConfigPath, []byte(config), 0o600); err != nil {
+		os.RemoveAll(dir)
+		return "", "", "", fmt.Errorf("claude: writing the mcp config: %w", err)
+	}
+	systemPromptPath = filepath.Join(dir, "system-prompt.txt")
+	if err := os.WriteFile(systemPromptPath, []byte(instruction), 0o600); err != nil {
+		os.RemoveAll(dir)
+		return "", "", "", fmt.Errorf("claude: writing the system prompt: %w", err)
+	}
+	return dir, mcpConfigPath, systemPromptPath, nil
+}
+
+// claudeArgs is the argument list for one `claude -p` run.
+// Input: the model to ask for, the files writeClaudeAskFiles wrote (the MCP config and the system prompt — the CLI reads both from disk, keeping the tool server's URL and the user's personal context off argv), and the tools to allow. Output: the arguments.
+// The user's own settings, hooks, skills, plugins and MCP servers are all shut out, because the prompt carries text nobody vetted — a meeting transcript, whatever was on the user's screens — and because a hook or a skill of the user's own would change what Ora's answers are made of without Ora knowing. --restricted drops the built-in command-running tools and ignores the settings files; --tools "" drops the rest of the built-in set, leaving the model with Ora's tools and nothing else.
+func claudeArgs(model, mcpConfigPath, systemPromptPath string, toolNames []string) []string {
+	allowed := make([]string, 0, len(toolNames))
+	for _, name := range toolNames {
+		allowed = append(allowed, "mcp__"+claudeMCPServerName+"__"+name)
+	}
+	return []string{
+		"-p",
+		"--output-format", "json",
+		"--model", model,
+		"--mcp-config", mcpConfigPath,
+		"--strict-mcp-config",
+		"--restricted",
+		"--tools", "",
+		"--allowed-tools", strings.Join(allowed, ","),
+		"--permission-prompts", "none",
+		"--disable-slash-commands",
+		"--no-session-persistence",
+		"--system-prompt-file", systemPromptPath,
+	}
+}
+
+// claudeResult is the object `claude -p --output-format json` prints when the run is over.
+type claudeResult struct {
+	Result   string `json:"result"`
+	IsError  bool   `json:"is_error"`
+	Subtype  string `json:"subtype"`
+	NumTurns int    `json:"num_turns"`
+	Usage    struct {
+		InputTokens      int `json:"input_tokens"`
+		OutputTokens     int `json:"output_tokens"`
+		CacheReadTokens  int `json:"cache_read_input_tokens"`
+		CacheWriteTokens int `json:"cache_creation_input_tokens"`
+	} `json:"usage"`
+}
+
+// claudeRunner runs one CLI process to completion. Input: the arguments and the prompt to feed it on stdin. Output: its stdout, or an error naming what went wrong. A test replaces it with a stub so a whole ask, tool calls included, runs without the CLI.
+type claudeRunner func(ctx context.Context, args []string, stdin string) ([]byte, error)
+
+// runClaudeCLI is the runner that actually starts the command line.
+// The prompt goes in on stdin because a single argv entry is capped at 128 KB on Linux and a thread with recalled memory in it can be bigger than that. The working directory is an empty temporary one, so the CLI finds no project files or instruction files of the user's to read.
+func runClaudeCLI(binary string) claudeRunner {
+	return func(ctx context.Context, args []string, stdin string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, binary, args...)
+		cmd.Stdin = strings.NewReader(stdin)
+		cmd.Dir = os.TempDir()
+		var out, stderr bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &stderr
+		// Killing the child does not kill its own children, and stdout stays open as long as any of them holds it, so without this a hung run would block here for as long as its grandchildren live.
+		cmd.WaitDelay = 2 * time.Second
+		if err := cmd.Run(); err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, fmt.Errorf("claude: the run timed out after %s", claudeAskTimeout)
+			}
+			// A run that failed still prints its result object on stdout, and that object says more about why than the exit status does, so it is preferred when it is there.
+			if len(out.Bytes()) > 0 {
+				return out.Bytes(), nil
+			}
+			return nil, fmt.Errorf("claude: %w: %s", err, claudeHead(stderr.String()))
+		}
+		return out.Bytes(), nil
+	}
+}
+
+// claudeHead is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line. Input: any string, including one that is not ASCII. Output: the flattened string, cut on a rune boundary with an ellipsis when it was longer than the cap.
+func claudeHead(s string) string {
+	return oratext.RunesEllipsis(oratext.OneLine(s), 300)
+}
+
+// AskClaude answers a question through the Claude Code command line on the user's own subscription, running Ora's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "claude/<model>", or the trace so far and an error.
+func (a *Agent) AskClaude(ctx context.Context, question string) (TurnTrace, error) {
+	return a.AskClaudeWith(ctx, nil, question)
+}
+
+// AskClaudeWith is AskClaude with the conversation so far sent ahead of the question, so a follow-up reads as one. Input: the prior turns (see HistoryFromTurns), nil for a question that stands alone, and the question. Output: the same TurnTrace AskClaude returns.
+func (a *Agent) AskClaudeWith(ctx context.Context, history History, question string) (TurnTrace, error) {
+	return a.askClaude(ctx, runClaudeCLI(claudeBinary), claudeModel(), history, question)
+}
+
+// claudeThread renders the prior turns as plain text to put ahead of the question, because the command line takes one prompt rather than a list of messages. Input: the history, oldest first. Output: the thread as labelled lines, or "" when there is none.
+func claudeThread(history History) string {
+	var b strings.Builder
+	for _, c := range history {
+		if c == nil {
+			continue
+		}
+		var text strings.Builder
+		for _, p := range c.Parts {
+			if p != nil {
+				text.WriteString(p.Text)
+			}
+		}
+		if text.Len() == 0 {
+			continue
+		}
+		who := "Ora"
+		if c.Role == genai.RoleUser {
+			who = "The user"
+		}
+		fmt.Fprintf(&b, "%s: %s\n", who, text.String())
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "[thread] What was said earlier in this conversation:\n" + b.String()
+}
+
+// askClaude is AskClaudeWith against the given runner and model, so a test can drive a whole ask without the command line.
+func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, history History, question string) (TurnTrace, error) {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, claudeAskTimeout)
+	defer cancel()
+	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
+	ctx = withAskLookState(ctx)
+	instruction, handshake := a.HandshakePrompt(ctx, start)
+
+	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
+	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
+	cancelRecall()
+	if err != nil {
+		slog.Warn("AskClaude retrieve relevant failed, continuing without inject", "error", err)
+		injected = nil
+	}
+
+	tr := TurnTrace{
+		Channel:   ChannelText,
+		Model:     "claude/" + model,
+		Question:  question,
+		Handshake: handshake,
+		Injected:  injected,
+		Usage:     TokenUsage{Provider: ProviderClaude},
+	}
+
+	server, err := a.startClaudeToolServer(ctx)
+	if err != nil {
+		tr.Duration = time.Since(start)
+		return tr, err
+	}
+	defer server.Close()
+
+	// The question is the last thing the model reads: the thread comes first, then this turn's time and recalled memory, then the reference to a close past run, then what was actually asked.
+	var prompt strings.Builder
+	if thread := claudeThread(history); thread != "" {
+		prompt.WriteString(thread + "\n")
+	}
+	prompt.WriteString(turnContext(start, injected) + "\n\n")
+	if reference := a.ActReferenceFor(ctx, question, start); reference != "" {
+		prompt.WriteString(reference + "\n\n")
+	}
+	prompt.WriteString(question)
+
+	dir, mcpConfigPath, systemPromptPath, err := writeClaudeAskFiles(server.URL(), instruction)
+	if err != nil {
+		tr.Duration = time.Since(start)
+		return tr, err
+	}
+	defer os.RemoveAll(dir)
+
+	names := make([]string, 0, len(server.decls))
+	for _, d := range server.decls {
+		names = append(names, d.Name)
+	}
+	out, err := run(ctx, claudeArgs(model, mcpConfigPath, systemPromptPath, names), prompt.String())
+	tr.ToolHops = server.Hops()
+	tr.Evidence = evidenceFromToolHops(tr.ToolHops)
+	tr.ImageTokens = lookTokensSpent(ctx)
+	tr.Duration = time.Since(start)
+	if err != nil {
+		return tr, err
+	}
+	var res claudeResult
+	if err := json.Unmarshal(out, &res); err != nil {
+		return tr, fmt.Errorf("claude: could not parse what the command line printed: %w (%s)", err, claudeHead(string(out)))
+	}
+	tr.Usage.Rounds = res.NumTurns
+	// The CLI reports the input in three parts: what it read afresh, what it wrote into its prompt cache, and what it answered out of that cache. All three are input the model read, so the whole input is their sum and the cached part is one of them, which is the same shape the Codex path records. Measured against the real command line on 2026-09-05: a two-round ask reported input_tokens 4, cache_creation 7,283 and cache_read 7,143, so counting input_tokens alone would put a 14,430-token ask on record as having cost four.
+	input := res.Usage.InputTokens + res.Usage.CacheWriteTokens + res.Usage.CacheReadTokens
+	tr.Usage.add(input, res.Usage.OutputTokens, input+res.Usage.OutputTokens)
+	tr.Usage.CachedInputTokens = res.Usage.CacheReadTokens
+	if res.IsError {
+		return tr, fmt.Errorf("claude: the run failed (%s): %s", res.Subtype, claudeHead(res.Result))
+	}
+	tr.Answer = strings.TrimSpace(res.Result)
+	slog.Debug("ask claude: done", "model", model, "turns", res.NumTurns, "tools", len(tr.ToolHops), "input_tokens", res.Usage.InputTokens, "output_tokens", res.Usage.OutputTokens, "cached_input_tokens", res.Usage.CacheReadTokens, "duration", tr.Duration)
+	if tr.Answer == "" {
+		return tr, errors.New("claude: the run returned no text")
+	}
+	return tr, nil
+}
+
+// ClaudeBrain is the asker the daemon registers under the "claude" brain name; it answers through the agent's AskClaude.
+type ClaudeBrain struct {
+	Agent *Agent
+}
+
+// AskText answers the question through AskClaude, so the ipc server can route a "claude" ask like any other brain.
+func (b ClaudeBrain) AskText(ctx context.Context, question string) (TurnTrace, error) {
+	return b.Agent.AskClaude(ctx, question)
+}
+
+// AskTextWith answers the question with the conversation so far, so the ipc server can hand a "claude" ask its thread exactly as it hands one to the default brain. Input: the prior turns and the question. Output: the turn trace from AskClaudeWith.
+func (b ClaudeBrain) AskTextWith(ctx context.Context, history History, question string) (TurnTrace, error) {
+	return b.Agent.AskClaudeWith(ctx, history, question)
+}
+
+// claudeFallbackWanted says whether a question Codex refused should go to Claude instead: only when Codex answered 429, which is the monthly allowance spent rather than a failure another provider would hit too, only when no tool has run yet so an action is never taken twice, and only when the machine has a Claude login.
+func claudeFallbackWanted(err error, hops int, loggedIn bool) bool {
+	var httpErr codexHTTPError
+	return err != nil && hops == 0 && loggedIn && errors.As(err, &httpErr) && httpErr.Code == http.StatusTooManyRequests
+}
+
+// CodexThenClaude asks Codex first and hands the question to Claude when Codex's allowance is spent, so the unattended jobs and the /ask fallback chain do not stop at the smaller of the two subscriptions. It is the asker shape the ipc server and internal/brain both take.
+type CodexThenClaude struct {
+	Agent *Agent
+}
+
+// AskText answers through Codex, or through Claude when Codex refused because its allowance is spent. Input: the question. Output: whichever turn trace answered, or Codex's own error when Claude is not a way out of it.
+func (b CodexThenClaude) AskText(ctx context.Context, question string) (TurnTrace, error) {
+	tr, err := b.Agent.AskCodex(ctx, question)
+	if claudeFallbackWanted(err, actionHops(tr.ToolHops), claudeLoggedIn()) {
+		slog.Warn("ask: the Codex allowance is spent, asking Claude", "error", err)
+		return b.Agent.AskClaude(ctx, question)
+	}
+	return tr, err
+}
