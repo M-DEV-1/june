@@ -87,4 +87,29 @@ describe("the fake daemon", () => {
     expect(tasksAnswer.tasks.some((t) => t.id === "12")).toBe(false); // dropped
     expect(tasksAnswer.tasks.find((t) => t.id === "11")?.done).toBe(true); // must reflect A's own "done", not B's "dropped"
   });
+
+  it("opens a fresh conversation for a question naming none, the way a chat draft's first message does", async () => {
+    const fetching = daemonFetch(demo);
+    const opened = await fetching("http://127.0.0.1:6942/ask", { method: "POST", body: JSON.stringify({ question: "hello", conversation_id: "" }) });
+    const { conversation_id } = (await opened.json()) as { conversation_id: string };
+    expect(conversation_id).not.toBe("");
+    const list = (await (await fetching("http://127.0.0.1:6942/conversations")).json()) as { conversations: { id: string }[] };
+    expect(list.conversations.some((c) => c.id === conversation_id)).toBe(true);
+  });
+
+  it("answers a computer-use job's routes", async () => {
+    const calls: { method: string; path: string; body?: unknown }[] = [];
+    const fetching = daemonFetch(demo, calls);
+    const started = await fetching("http://127.0.0.1:6942/act", { method: "POST", body: JSON.stringify({ goal: "reorder the slides" }) });
+    expect(started.status).toBe(202);
+    const { id } = (await started.json()) as { id: string };
+    expect(id).toBe("act-1");
+    const job = await fetching(`http://127.0.0.1:6942/act/${id}`);
+    expect((await job.json()).goal).toBe(demo.jobs?.[id]?.goal);
+    for (const suffix of ["stop", "pause", "resume"]) {
+      expect((await fetching(`http://127.0.0.1:6942/act/${id}/${suffix}`, { method: "POST" })).status).toBe(204);
+    }
+    expect((await fetching(`http://127.0.0.1:6942/act/${id}/answer`, { method: "POST", body: JSON.stringify({ text: "yes" }) })).status).toBe(204);
+    expect(calls.filter((c) => c.path.startsWith("/act")).length).toBe(6);
+  });
 });
