@@ -2,7 +2,7 @@
 
 /** Tests for the small pieces more than one screen draws: the Scroller's stick-to-bottom behaviour, and the usage bars the brain picker draws under a row. */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Provider } from "react-redux";
@@ -92,6 +92,13 @@ describe("UsageBar", () => {
     expect(screen.getByText(`Resets ${weekday} ${clock}`)).toBeDefined();
   });
 
+  it("names an unlabelled window 'Limit' rather than leaving it blank", () => {
+    const now = new Date();
+    const soon = new Date(now.getTime() + 60000).toISOString();
+    render(<UsageBar limit={limit(0.1, soon, "")} now={now} />);
+    expect(screen.getByText("Limit")).toBeDefined();
+  });
+
   it("turns the fill the danger colour at or above 90% used, and keeps it the accent colour below that", () => {
     const now = new Date();
     const resets = new Date(now.getTime() + 3600000).toISOString();
@@ -125,14 +132,18 @@ describe("the brain picker's usage rows", () => {
     { id: "gemini", name: "Gemini", signed_in: false, account: "", models: [], model: "", note: "", default: false },
   ];
 
-  function renderPicker() {
+  function renderPickerWith(list: Brain[]) {
     stubBrowser();
     const store = makeStore({ ui: { place: "chats" } });
     return render(
       <Provider store={store}>
-        <BrainPicker current="claude" brains={brains} />
+        <BrainPicker current="claude" brains={list} />
       </Provider>,
     );
+  }
+
+  function renderPicker() {
+    return renderPickerWith(brains);
   }
 
   it("draws one row per limit under a brain that reports them, labelled in sentence case", async () => {
@@ -153,6 +164,77 @@ describe("the brain picker's usage rows", () => {
     expect(codexItem.querySelector(".bg-muted")).toBeNull();
     const geminiItem = menu.getByRole("menuitem", { name: /Gemini/ }) as HTMLElement;
     expect(within(geminiItem).getByText("Not signed in")).toBeDefined();
+  });
+
+  it("shows a note's first clause in sentence case for a signed-in brain with no limits, with the full note on the title", async () => {
+    const withNote: Brain[] = [
+      { ...brains[1], limits_note: "grok exposes no usage data: its CLI, config, logs, and session files carry no quota, usage, or rate-limit reading, and it has no command that reports one" },
+      brains[2],
+    ];
+    renderPickerWith(withNote);
+    await userEvent.click(screen.getByRole("button", { name: /Brain: claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const codexItem = (await menu.findByRole("menuitem", { name: /Codex/ })) as HTMLElement;
+    const line = within(codexItem).getByText("Grok exposes no usage data");
+    expect(line.getAttribute("title")).toBe(withNote[0].limits_note);
+  });
+
+  it("shows a note with no colon in it whole, sentence-cased", async () => {
+    const withNote: Brain[] = [{ ...brains[1], limits_note: "turned off in Settings" }, brains[2]];
+    renderPickerWith(withNote);
+    await userEvent.click(screen.getByRole("button", { name: /Brain: claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const codexItem = (await menu.findByRole("menuitem", { name: /Codex/ })) as HTMLElement;
+    expect(within(codexItem).getByText("Turned off in Settings")).toBeDefined();
+  });
+
+  it("keeps 'Not signed in' ahead of a note for a brain that isn't signed in", async () => {
+    const withNote: Brain[] = [brains[1], { ...brains[2], limits_note: "some reason" }];
+    renderPickerWith(withNote);
+    await userEvent.click(screen.getByRole("button", { name: /Brain: claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const geminiItem = (await menu.findByRole("menuitem", { name: /Gemini/ })) as HTMLElement;
+    expect(within(geminiItem).getByText("Not signed in")).toBeDefined();
+    expect(within(geminiItem).queryByText("Some reason")).toBeNull();
+  });
+
+  it("still shows 'No usage data' for a signed-in brain with an empty note", async () => {
+    renderPicker();
+    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const codexItem = (await menu.findByRole("menuitem", { name: /Codex/ })) as HTMLElement;
+    expect(within(codexItem).getByText("No usage data")).toBeDefined();
+  });
+
+  it("keys each limit row by its index as well as its window, so two limits sharing a window never collide", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sameWindow: Brain[] = [
+      {
+        ...brains[0],
+        limits: [
+          { window: "5h", used_fraction: 0.1, resets_at: new Date(Date.now() + 3600000).toISOString(), source: "test" },
+          { window: "5h", used_fraction: 0.5, resets_at: new Date(Date.now() + 3600000).toISOString(), source: "test" },
+        ],
+      },
+    ];
+    renderPickerWith(sameWindow);
+    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const claudeItem = (await menu.findByRole("menuitem", { name: /Claude/ })) as HTMLElement;
+    expect(within(claudeItem).getAllByText("5-hour").length).toBe(2);
+    const keyWarning = spy.mock.calls.some((c) => String(c[0]).includes("same key"));
+    expect(keyWarning).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("lays the menu out as menu > menuitem with no wrapping element between them", async () => {
+    renderPicker();
+    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
+    const menu = await screen.findByRole("menu");
+    const items = within(menu).getAllByRole("menuitem");
+    for (const item of items) {
+      expect(item.parentElement).toBe(menu);
+    }
   });
 
   it("separates each brain's section from the next with a hairline", async () => {
