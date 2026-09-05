@@ -173,6 +173,8 @@ export type SettingsView = {
   hotkey: string;
   /** Optional because a daemon older than the field sends no "first_run" at all, and the window must draw nothing rather than a panel full of undefined. */
   first_run?: FirstRun;
+  /** Whether GET /brains may read the Claude row's usage bars from the undocumented Anthropic endpoint using the Claude Code login's own token. POST /settings with this field writes it back. */
+  claude_usage_from_login: boolean;
 };
 
 /** One allowance window a brain's provider reports for the user's own account: a five-hour or weekly subscription window, a daily request ceiling. Mirrors internal/agent.UsageLimit (aliased as brain.UsageLimit). used_fraction is 0 to 1; resets_at is RFC3339. */
@@ -190,6 +192,8 @@ export type Brain = {
   default: boolean;
   limits?: UsageLimit[];
   limits_at?: string;
+  /** Why this brain has no usage bars: Grok's names what its CLI has no reading for, Claude's says the usage source was turned off in Settings. Empty when the daemon has nothing to say, or the brain does report limits. */
+  limits_note?: string;
 };
 
 /** What one provider has cost in tokens over a window. Mirrors ipc.ProviderTotal. */
@@ -363,6 +367,14 @@ export const oraApi = createApi({
       query: ({ id, owner }) => ({ url: `/tasks/${encodeURIComponent(id)}`, method: "PATCH", body: { owner } }),
       invalidatesTags: ["Task"],
     }),
+    /** Applies one of the rail line's own Done/1h/Evening/Tomorrow buttons to a live notice, exactly as pressing it on the desktop notification would (see internal/proactive/notify.go's Act, which both call). id is "-" when the notice has none of its own (a morning brief, say) — an empty path segment is not a URL Go's own router will match, so the daemon resolves this placeholder back to "" before calling Act. title and body are the notice's own, since a snooze needs them to re-fire it later. The daemon answers 200 with no body and reports what happened back over the SSE stream as the same "notice" event a desktop press produces, which is what replaces these buttons with the line reactToNotice already draws (see store.ts) — this mutation does not touch the cache itself. 400 for an action that is none of the four; 404 when the notice names a task that no longer exists. */
+    actOnNotice: build.mutation<void, { kind: string; id: string; title: string; body: string; action: "done" | "hour" | "evening" | "tomorrow" }>({
+      query: ({ kind, id, title, body, action }) => ({
+        url: `/notices/${encodeURIComponent(kind)}/${encodeURIComponent(id || "-")}/action`,
+        method: "POST",
+        body: { title, body, action },
+      }),
+    }),
     /** The last sixty days that have anything in them, newest first. */
     days: build.query<DaySummary[], void>({
       query: () => "/days",
@@ -384,6 +396,11 @@ export const oraApi = createApi({
     settings: build.query<SettingsView, void>({
       query: () => "/settings",
       providesTags: ["Settings"],
+    }),
+    /** Turns the Claude row's undocumented usage-endpoint read on or off; the daemon writes it to config and answers with the same view GET would. */
+    setClaudeUsageFromLogin: build.mutation<SettingsView, boolean>({
+      query: (claude_usage_from_login) => ({ url: "/settings", method: "POST", body: { claude_usage_from_login } }),
+      invalidatesTags: ["Settings"],
     }),
     /** The brains Ora can call on this machine and which one is the default. */
     brains: build.query<Brain[], void>({
@@ -466,10 +483,12 @@ export const {
   useCreateTaskMutation,
   useSetTaskStatusMutation,
   useSetTaskOwnerMutation,
+  useActOnNoticeMutation,
   useDaysQuery,
   useDayQuery,
   useMeetingsQuery,
   useSettingsQuery,
+  useSetClaudeUsageFromLoginMutation,
   useBrainsQuery,
   usePickBrainMutation,
   useUsageQuery,

@@ -2,6 +2,8 @@ package proactive
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -289,6 +291,66 @@ func TestSnooze_OnARefiredSnooze_ReplacesIt(t *testing.T) {
 	}
 	if len(due) != 1 {
 		t.Fatalf("DueSnoozes = %+v, want exactly one pending snooze for the notice, not one per snooze button pressed", due)
+	}
+}
+
+// TestAct_BadAction checks an action string that is none of the four buttons is refused rather than silently doing nothing, since a route answering it must know to say 400.
+func TestAct_BadAction(t *testing.T) {
+	s, _, _ := testScheduler(t)
+	if err := s.Act(context.Background(), "task", "42", "Still open", "Send the invoice", "snooze-forever"); !errors.Is(err, ErrBadNoticeAction) {
+		t.Errorf("Act = %v, want ErrBadNoticeAction", err)
+	}
+}
+
+// TestAct_Done_ClosesTheTask checks Act's "done" takes the same task-done path a D-Bus press does, so the route and the notification apply Done identically.
+func TestAct_Done_ClosesTheTask(t *testing.T) {
+	ctx := context.Background()
+	s, store, _ := testScheduler(t)
+	var closed []string
+	s.SetTaskDone(func(ctx context.Context, id string) error {
+		closed = append(closed, id)
+		return nil
+	})
+
+	if err := s.Act(ctx, "task", "42", "Still open", "Send the invoice", "done"); err != nil {
+		t.Fatalf("Act: %v", err)
+	}
+
+	if len(closed) != 1 || closed[0] != "42" {
+		t.Errorf("task-done path called with %v, want [42]", closed)
+	}
+	assertNoSnoozes(t, ctx, store)
+}
+
+// TestAct_Done_TaskGone checks Act reports a task that no longer exists as ErrTaskGone rather than swallowing it, since a D-Bus press has nowhere to show that failure but a route answering it must say 404.
+func TestAct_Done_TaskGone(t *testing.T) {
+	s, _, _ := testScheduler(t)
+	s.SetTaskDone(func(context.Context, string) error {
+		return fmt.Errorf("closing task 42: %w", ErrTaskGone)
+	})
+
+	if err := s.Act(context.Background(), "task", "42", "Still open", "Send the invoice", "done"); !errors.Is(err, ErrTaskGone) {
+		t.Errorf("Act = %v, want ErrTaskGone", err)
+	}
+}
+
+// TestAct_Snooze_WritesTheSameSnoozeAPressWould checks Act's snooze buttons write the same pending snooze a D-Bus press writes, keyed off the kind and id it was called with rather than a notice built from a live posting.
+func TestAct_Snooze_WritesTheSameSnoozeAPressWould(t *testing.T) {
+	ctx := context.Background()
+	s, store, _ := testScheduler(t)
+	now := time.Date(2026, 9, 5, 9, 15, 0, 0, time.Local)
+	s.now = func() time.Time { return now }
+
+	if err := s.Act(ctx, "task", "42", "Still open", "Send the invoice", "hour"); err != nil {
+		t.Fatalf("Act: %v", err)
+	}
+
+	due, err := store.DueSnoozes(ctx, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("DueSnoozes: %v", err)
+	}
+	if len(due) != 1 || due[0].Kind != "task" || due[0].NoticeID != "42" || due[0].Title != "Still open" || due[0].Body != "Send the invoice" {
+		t.Errorf("DueSnoozes = %+v, want one snooze for the notice Act was called with", due)
 	}
 }
 

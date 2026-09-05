@@ -41,6 +41,8 @@ type UiState = {
   taskChats: Record<string, string>;
   paletteOpen: boolean;
   notice?: string;
+  /** The most recent notice to reach the window with no action yet — the live one the rail line offers Done/1h/Evening/Tomorrow buttons for. Cleared the moment the daemon's answer comes back as the same notice with its action set (see reactToNotice), which is what the buttons are replaced by. */
+  liveNotice?: Pick<Notice, "kind" | "id" | "title" | "body">;
 };
 
 /** What Escape does, dispatched once and answered by whichever slices have something to give up. */
@@ -136,6 +138,10 @@ const uiSlice = createSlice({
     /** Says on one line that a write did not go through, or clears what was said. */
     noticed(s, a: PayloadAction<string | undefined>) {
       s.notice = a.payload;
+    },
+    /** Records, or clears, the live notice the rail line offers buttons for — see reactToNotice, the only dispatcher. */
+    liveNoticeSet(s, a: PayloadAction<UiState["liveNotice"]>) {
+      s.liveNotice = a.payload;
     },
     /** Puts the layout flag on another of its options, so the alternative can be tried without a rebuild. */
   },
@@ -367,11 +373,15 @@ export const conversationsUi = conversationsSlice.actions;
 export const settings = settingsSlice.actions;
 export const progress = progressSlice.actions;
 
-/** What a "notice" event does outside the progress slice, once its action is set: says it on the sidebar's rail line — the one surface every notice already reaches, alongside the routine run result "Could not add that routine" and the rest of ui.notice's callers — and, for a task notice pressed Done from its own desktop notification, tells the Tasks screen's cache to read the list again, since the daemon closed that task through its own task-done path (see internal/proactive/notify.go's markDone) without this window's POST /tasks/{id}/done ever running to invalidate it. A notice with no action (one arriving fresh, drawn only by the hover window) is left alone. */
+/** What a "notice" event does outside the progress slice. One arriving fresh, with no action yet, becomes the sidebar's liveNotice — the rail line's own Done/1h/Evening/Tomorrow buttons, wired through useActOnNoticeMutation in sidebar.tsx. Once its action is set — the daemon's answer to one of those buttons, or to the desktop notification's own — it says so on the rail line instead (the one surface every notice already reaches, alongside the routine run result "Could not add that routine" and the rest of ui.notice's callers), clears liveNotice so the buttons are gone, and, for a task notice pressed Done, tells the Tasks screen's cache to read the list again, since the daemon closed that task through its own task-done path (see internal/proactive/notify.go's markDone) without this window's POST /tasks/{id}/done ever running to invalidate it. */
 function reactToNotice(n: Notice, api: { dispatch: AppDispatch }): void {
+  if (!n.action) {
+    api.dispatch(uiSlice.actions.liveNoticeSet({ kind: n.kind, id: n.id, title: n.title, body: n.body }));
+    return;
+  }
+  api.dispatch(uiSlice.actions.liveNoticeSet(undefined));
   const msg = noticeActionMessage(n);
-  if (msg === undefined) return;
-  api.dispatch(uiSlice.actions.noticed(msg));
+  if (msg !== undefined) api.dispatch(uiSlice.actions.noticed(msg));
   if (n.kind === "task" && n.action === "done")
     api.dispatch(oraApi.util.invalidateTags(["Task"]));
 }

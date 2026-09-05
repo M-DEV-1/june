@@ -7,6 +7,7 @@ import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { ConversationSummary } from "./api";
+import { progress } from "./store";
 import { renderApp } from "./testing";
 
 afterEach(() => {
@@ -169,5 +170,77 @@ describe("the jump-to-a-chat palette", () => {
     await userEvent.click(within(palette).getByRole("option", { name: /The old one/ }));
     expect(store.getState().ui.conversationId).toBe("c2");
     expect(store.getState().ui.paletteOpen).toBe(false);
+  });
+});
+
+// A live notice — one that reached the window with no action yet — offers its own Done/1h/Evening/Tomorrow row, wired through POST /notices/{kind}/{id}/action (see internal/proactive/notify.go's Act, the same code a desktop notification's own buttons call).
+describe("a live notice's own buttons", () => {
+  it("posts the pressed button's action for that notice", async () => {
+    const { store, calls } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+      }),
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "1 h" }));
+
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "POST" && c.path === "/notices/task/task-42/action")?.body).toEqual({
+        title: "Still open",
+        body: "Send the invoice",
+        action: "hour",
+      }),
+    );
+  });
+
+  it("offers Done alongside the snooze buttons for a task, but only the snooze buttons for a routine", async () => {
+    const { store } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Done" })).toBeDefined();
+
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine" },
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Evening" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+  });
+
+  it("replaces the buttons with the rail line's own text once the daemon answers", async () => {
+    const { store } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+      }),
+    );
+    await screen.findByRole("button", { name: "1 h" });
+
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
+      }),
+    );
+
+    expect(await screen.findByText("Send the invoice: Done")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "1 h" })).toBeNull();
   });
 });

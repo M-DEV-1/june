@@ -814,6 +814,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	mux.HandleFunc("/tasks", auth(ipcServer.Tasks))
 	mux.HandleFunc("/tasks/{id}/done", auth(ipcServer.TaskDone))
 	mux.HandleFunc("/tasks/{id}", auth(ipcServer.TaskOwner)) // PATCH corrects whose task it is, by hand
+	// The window's own Done/1h/Evening/Tomorrow buttons on a live notice's rail line, answered through the same Act the desktop notification's own buttons call.
+	mux.HandleFunc("POST /notices/{kind}/{id}/action", auth(ipc.NoticeAction(scheduler.Act)))
 
 	mux.HandleFunc("/days", auth(ipcServer.Days))
 	mux.HandleFunc("/days/{date}", auth(ipcServer.Day))
