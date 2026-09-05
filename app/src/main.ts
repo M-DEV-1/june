@@ -116,11 +116,10 @@ let askId: string | undefined;
 /** The daemon's id for the computer-use job this window started with "do:", the same way askId tracks an ask's. Undefined until the POST /act reply lands, and again once the job is done — a fresh "do:" always starts a fresh job, never answers a stale one. */
 let jobId: string | undefined;
 
-/** How many columns wide the live-voice waveform is, in the composer's own small braille rows rather than the terminal client's full-width bar. */
-const VOICE_WAVE_WIDTH = 14;
+/** How many columns wide the live-voice waveform is, in the composer's own braille rows rather than the terminal client's full-width bar. There is no microphone grid to share the row with any more (see voiceWaveInnerHtml), so this is wider and more detailed than the old two-grid layout was, filling the composer row's free width instead of splitting it. */
+const VOICE_WAVE_WIDTH = 32;
 
-/** The mic's and the speaker's smoothed amplitude for the live-voice waveform, owned here rather than in the view: they update up to 20 times a second off the daemon's "level" events (see voiceEvent in state.ts), and running that through the full reducer-and-render path on every tick would rebuild the whole card that often for nothing. Reset to fresh (silent) instances every time a session starts, in dispatch's "voiceOn" case, so a new session never shows the tail end of the last one's bar. */
-let micWave = new Waveform(VOICE_WAVE_WIDTH);
+/** The speaker's smoothed amplitude for the live-voice waveform (Ora's voice, not the user's mic — see voiceWaveInnerHtml), owned here rather than in the view: it updates up to 20 times a second off the daemon's "level" events (see voiceEvent in state.ts), and running that through the full reducer-and-render path on every tick would rebuild the whole card that often for nothing. Reset to a fresh (silent) instance every time a session starts, in dispatch's "voiceOn" case, so a new session never shows the tail end of the last one's bar. */
 let speakerWave = new Waveform(VOICE_WAVE_WIDTH);
 
 /** Re-reads the daemon's token (it changes on every daemon restart), probes it, opens the event stream once, and loads the screen context. Input: none. Output: nothing; leaves daemonUp set and the view rendered either way. */
@@ -333,7 +332,7 @@ function stopStepTicker(): void {
   stepTicker = undefined;
 }
 
-/** The two-row braille bar for one voice channel (mic or speaker), read straight off its Waveform. Input: the Waveform to render. Output: the row markup, one ".vw-row" span per line. */
+/** The four-row braille bar for Ora's voice, read straight off the speaker Waveform. Input: the Waveform to render. Output: the row markup, one ".vw-row" span per line. */
 function voiceWaveRowsHtml(w: Waveform): string {
   return w
     .render()
@@ -341,16 +340,12 @@ function voiceWaveRowsHtml(w: Waveform): string {
     .join("");
 }
 
-/** The live-voice waveform's inner content — the mic's two rows always, and the speaker's beside them once it has anything to show — split out from voiceWaveHtml so a level event can patch just this in place (see scheduleVoiceWaveRepaint) instead of tearing down and rebuilding the ".vwave" span, title attribute included, on every one of up to 20 ticks a second. Input: none, reads the module's own micWave/speakerWave. Output: the inner HTML. */
+/** The live-voice waveform's inner content: Ora's own four rows, always — the silent centreline while she listens, animated once she speaks — split out from voiceWaveHtml so a level event can patch just this in place (see scheduleVoiceWaveRepaint) instead of tearing down and rebuilding the ".vwave" span, title attribute included, on every one of up to 20 ticks a second. There is no user-microphone grid: this is a hands-free session, so only Ora's voice is drawn, and it stays on screen for the session's whole length rather than appearing only once she starts speaking (gating it on speakerWave.smoothed > 0 made the row jump in and out). Input: none, reads the module's own speakerWave. Output: the inner HTML. */
 function voiceWaveInnerHtml(): string {
-  const spkHtml =
-    speakerWave.smoothed > 0
-      ? `<span class="vw-spk">${voiceWaveRowsHtml(speakerWave)}</span>`
-      : "";
-  return `<span class="vw-mic">${voiceWaveRowsHtml(micWave)}</span>${spkHtml}`;
+  return `<span class="vw-spk">${voiceWaveRowsHtml(speakerWave)}</span>`;
 }
 
-/** The live-voice waveform shown in the composer while a session runs, ported from the terminal client's own braille bar (see internal/ui/waveform.go and app/src/waveform.ts) since the hover has no microphone of its own to draw from. The title attribute repeats the "Shift+Space to stop" line the input's placeholder already shows while empty, since typing over that placeholder — the one other place that line lives — is exactly what live voice is for. Input: none. Output: the span's HTML, or "" when no session is running. */
+/** The live-voice waveform shown in the composer for the whole live session, ported from the terminal client's own braille bar (see internal/ui/waveform.go and app/src/waveform.ts). The title attribute repeats the "Shift+Space to stop" line the input's placeholder already shows while empty, since typing over that placeholder — the one other place that line lives — is exactly what live voice is for. Input: none. Output: the span's HTML, or "" when no session is running. */
 function voiceWaveHtml(v: View): string {
   if (!v.voice) return "";
   return `<span class="vwave" title="Live voice on · Shift+Space to stop">${voiceWaveInnerHtml()}</span>`;
@@ -605,7 +600,6 @@ function evidenceBlock(e: {
 export function dispatch(event: Parameters<typeof step>[1]): void {
   // A fresh session starts its waveform silent: reusing the smoothed values a just-ended session left behind would show a leftover bar for a moment before the first real level arrives.
   if (event.kind === "voiceOn") {
-    micWave = new Waveform(VOICE_WAVE_WIDTH);
     speakerWave = new Waveform(VOICE_WAVE_WIDTH);
   }
   const before = view.state;
@@ -622,10 +616,9 @@ export function dispatch(event: Parameters<typeof step>[1]): void {
     wasAsking &&
     view.state === "asking";
   const patched = stillRunning && patchLiveSteps(view);
-  // A "level" tick can arrive up to 20 times a second; it only ever moves the waveform, so it feeds the two Waveform instances directly and patches their rows in place (see scheduleVoiceWaveRepaint) instead of taking the full render() path below.
+  // A "level" tick can arrive up to 20 times a second; it only ever moves the waveform, so it feeds the Waveform instance directly and patches its rows in place (see scheduleVoiceWaveRepaint) instead of taking the full render() path below. The event still carries a mic reading (see renderLevelEvent in waveform.ts) — nothing draws it any more, so it is read into view.voiceLevel and left there unused rather than drawn, which is harmless.
   const isVoiceLevel = event.kind === "voiceEvent" && event.ev.type === "level";
   if (isVoiceLevel) {
-    micWave.update(view.voiceLevel?.mic ?? 0);
     speakerWave.update(view.voiceLevel?.speaker ?? 0);
   }
   // "asked" only writes down which conversation the daemon put the question in, which nothing on the card draws, so it is not worth a rebuild and a window resize mid-question.
