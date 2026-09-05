@@ -15,7 +15,7 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
   const dispatch = useAppDispatch();
   const [setStatus] = useSetTaskStatusMutation();
   const detail = taskDetail(task);
-  const meta = [detail, task.when ? shortWhen(task.when, now) : ""].filter(Boolean).join(" · ");
+  const when = task.when ? shortWhen(task.when, now) : "";
   // Only an action item Ora noticed can be dropped: the daemon answers 400 for a dropped task of the user's own, because user_tasks has nowhere to hold a third state.
   const droppable = task.source === "noticed";
 
@@ -39,16 +39,21 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
         e.preventDefault();
         dispatch(ui.taskOpened(task.id));
       }}
-      className={`group flex h-8 items-center gap-2.5 rounded-sm px-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${selected ? "bg-selected" : "hover:bg-hover"}`}
+      className={`group flex items-center gap-2.5 rounded-sm px-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${detail ? "h-11" : "h-8"} ${selected ? "bg-selected" : "hover:bg-hover"}`}
     >
       <TaskTick task={task} />
-      <div className={`min-w-0 flex-1 truncate text-ui ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`} title={task.title}>
-        {task.title}
-      </div>
-      {meta ? (
-        <div className="hidden max-w-[26ch] shrink-0 truncate text-meta text-muted-foreground sm:block" title={meta}>
-          {meta}
+      <div className="min-w-0 flex-1">
+        <div className={`truncate text-ui ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`} title={task.title}>
+          {task.title}
         </div>
+        {detail ? (
+          <div className="truncate text-meta text-muted-foreground" title={detail}>
+            {detail}
+          </div>
+        ) : null}
+      </div>
+      {when ? (
+        <div className="hidden shrink-0 whitespace-nowrap text-right text-meta text-muted-foreground tabular-nums sm:block">{when}</div>
       ) : null}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

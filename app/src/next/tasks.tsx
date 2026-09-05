@@ -37,6 +37,8 @@ export function TasksScreen() {
   const { data: view } = useConversationQuery(conversationId ?? "", { skip: !conversationId });
   const now = new Date();
   const mine = run && conversationId && run.conversationId === conversationId ? run : undefined;
+  const emptyLine = selected ? `Nothing said about “${selected.title}” yet.` : "Pick a task above to ask about it.";
+  const hasTalked = Boolean(view?.turns?.length) || Boolean(mine);
 
   /** Opens the conversation a noticed task never had, named after the task, and remembers the pairing. Input: none. Output: the new conversation's id, or undefined when the daemon would not open one. */
   const startTaskChat = async (): Promise<string | undefined> => {
@@ -76,7 +78,7 @@ export function TasksScreen() {
       </PageHeader>
 
       <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
-        <ResizablePanel id="list" defaultSize="55" minSize="25">
+        <ResizablePanel id="list" defaultSize="70" minSize="30">
           <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
             <Reading wide={wide}>
               <div className="flex flex-col gap-3">
@@ -101,23 +103,26 @@ export function TasksScreen() {
             </Reading>
           </Scroller>
         </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel id="about" defaultSize="45" minSize="25">
-          <div className="flex h-full min-h-0 flex-col">
-            <Thread
-              view={view}
-              up={!isError}
-              wide={wide}
-              sources={false}
-              empty={selected ? `Nothing said about “${selected.title}” yet.` : "Pick a task above to ask about it."}
-              hint={selected ? "Ask below and Ora answers with this task as the subject." : undefined}
-              run={mine}
-            />
+        <ResizableHandle withHandle />
+        <ResizablePanel id="about" defaultSize="30" minSize="10" collapsible collapsedSize={0}>
+          {/* A task with nothing said about it yet gets no centred empty state down here — the composer alone, with the same sentence as its placeholder, is the whole panel. */}
+          <div className="flex h-full min-h-0 flex-col justify-end">
+            {hasTalked ? (
+              <Thread
+                view={view}
+                up={!isError}
+                wide={wide}
+                sources={false}
+                empty={emptyLine}
+                hint={selected ? "Ask below and Ora answers with this task as the subject." : undefined}
+                run={mine}
+              />
+            ) : null}
             <Composer
               conversationId={conversationId}
               draftKey={selected?.id}
               brain={view?.brain}
-              placeholder={selected ? "Say something about this task…" : "Pick a task first"}
+              placeholder={hasTalked ? (selected ? "Say something about this task…" : "Pick a task first") : emptyLine}
               context={taskContext(selected)}
               start={selected ? startTaskChat : undefined}
               wide={wide}
