@@ -12,6 +12,7 @@ import (
 	"ora/internal/memory"
 	oratext "ora/internal/text"
 	"ora/internal/tracker"
+	"ora/internal/window"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2158,9 +2159,11 @@ func onceInput(open func(context.Context) (InputDevice, error)) func(context.Con
 	}
 }
 
-// WindowRaiser brings an already-running window of another application to the front, which switch_window tries before it falls back to driving the shell's own search from the keyboard: a *window.Raiser in production, talking to the bundled GNOME Shell extension over D-Bus (see internal/window), a fake in tests. Available says whether that extension is loaded and enabled in the running shell right now; ByTitle matches a window whose title contains the string and ByWmClass the class its windows carry, each returning whether it found and raised one.
+// WindowRaiser brings an already-running window of another application to the front, which switch_window tries before it falls back to driving the shell's own search from the keyboard: a *window.Raiser in production, talking to the bundled GNOME Shell extension over D-Bus (see internal/window), a fake in tests. Available says whether that extension is loaded and enabled in the running shell right now; List reports every open window with its pid, WM_CLASS, title and focus state; ByPid, ByTitle and ByWmClass each activate a window by one key and report whether they found and raised one.
 type WindowRaiser interface {
 	Available(ctx context.Context) (bool, error)
+	List(ctx context.Context) ([]window.Window, error)
+	ByPid(ctx context.Context, pid uint32) (bool, error)
 	ByTitle(ctx context.Context, substring string) (bool, error)
 	ByWmClass(ctx context.Context, wmClass string) (bool, error)
 }
@@ -2647,8 +2650,8 @@ func (a *Agent) switchWindow(ctx context.Context, app string) string {
 	if namesApp(before, app) {
 		return fmt.Sprintf("%q is already the window in front; nothing was pressed", before)
 	}
-	if a.raiseWindow(ctx, app) {
-		return a.switchOutcome(ctx, app, before, nil)
+	if ok, how := a.raiseWindow(ctx, app); ok {
+		return a.switchOutcome(ctx, app, before, how, nil)
 	}
 	dev, errText := a.inputDevice(ctx)
 	if errText != "" {
@@ -2670,30 +2673,42 @@ func (a *Agent) switchWindow(ctx context.Context, app string) string {
 	if err := dev.PressKey("Enter"); err != nil {
 		return toolError("could not press Enter on the desktop search: " + err.Error())
 	}
-	return a.switchOutcome(ctx, app, before, dev)
+	return a.switchOutcome(ctx, app, before, "", dev)
 }
 
-// raiseWindow asks the GNOME Shell extension to bring the application's window forward, by a window title holding the name and then by the class its windows carry. Input: a context bounding the D-Bus calls and the application name. Output: true when the extension says it raised a window; false when there is no extension wired up, it is not loaded in the running shell, it matched nothing, or the bus call failed — every one of which means the keyboard path is what is left.
-func (a *Agent) raiseWindow(ctx context.Context, app string) bool {
+// raiseWindow asks the GNOME Shell extension to bring the application's window forward. The pid of the process that owns a window is the most exact key there is, so List is read first and any open window whose class or title already names the app is raised by its pid; failing that (no extension, nothing in the list matched, or the pid activation itself did not land) it falls back to the looser text matches the extension does itself, WM_CLASS before title since a title is often a document name and not the app. Input: a context bounding the D-Bus calls and the application name. Output: true and the key that found it ("pid 1234", `wm_class "brave-browser"` or `title "Brave"`) when a window was raised; false and "" when there is no extension wired up, it is not loaded in the running shell, it matched nothing, or every call failed — every one of which means the keyboard path is what is left.
+func (a *Agent) raiseWindow(ctx context.Context, app string) (bool, string) {
 	if a.raiser == nil {
-		return false
+		return false, ""
 	}
-	// The extension answers from inside gnome-shell, so these three calls get a bound of their own rather than the whole turn's: a shell busy redrawing costs this tool a couple of seconds and then the keyboard path, not the ask.
+	// The extension answers from inside gnome-shell, so these calls get a bound of their own rather than the whole turn's: a shell busy redrawing costs this tool a couple of seconds and then the keyboard path, not the ask.
 	ctx, cancel := context.WithTimeout(ctx, raiserTimeout)
 	defer cancel()
 	if ok, err := a.raiser.Available(ctx); err != nil || !ok {
-		return false
+		return false, ""
+	}
+	if windows, err := a.raiser.List(ctx); err == nil {
+		for _, w := range windows {
+			if !namesApp(w.WmClass, app) && !namesApp(w.Title, app) {
+				continue
+			}
+			if ok, err := a.raiser.ByPid(ctx, w.Pid); err == nil && ok {
+				return true, fmt.Sprintf("pid %d", w.Pid)
+			}
+		}
+	}
+	if ok, err := a.raiser.ByWmClass(ctx, app); err == nil && ok {
+		return true, fmt.Sprintf("wm_class %q", app)
 	}
 	if ok, err := a.raiser.ByTitle(ctx, app); err == nil && ok {
-		return true
+		return true, fmt.Sprintf("title %q", app)
 	}
-	ok, err := a.raiser.ByWmClass(ctx, app)
-	return err == nil && ok
+	return false, ""
 }
 
-// switchOutcome reads which window is in front after a switch was attempted and says what happened in the words the model reads back. Input: a context, the application asked for, the window that was in front before, and the keyboard the search was typed on — nil when the extension did the raising and no search was ever opened. Output: the switch's result line, or a tool error when the front window cannot be read at all.
+// switchOutcome reads which window is in front after a switch was attempted and says what happened in the words the model reads back. Input: a context, the application asked for, the window that was in front before, the key that raised it ("pid 1234" and so on, from raiseWindow) or "" when the keyboard did the switching, and the keyboard the search was typed on — nil when the extension did the raising and no search was ever opened. Output: the switch's result line, or a tool error when the front window cannot be read at all.
 // A switch that did not land can leave the shell's search sitting over everything, so it is closed again with one Escape — but only when a live read says it is still up, since the same key sent at the user's own window discards whatever was in it. Whether that press lands changes nothing about the report, which is about the switch.
-func (a *Agent) switchOutcome(ctx context.Context, app, before string, dev InputDevice) string {
+func (a *Agent) switchOutcome(ctx context.Context, app, before, how string, dev InputDevice) string {
 	after := a.frontWindowAfterSwitch(ctx, app)
 	// Escape only while the overview is actually still up: sent at anything else it is a keystroke into the user's own window, where it discards a draft or closes a dialog.
 	if !namesApp(after, app) && dev != nil && a.overviewOpen(ctx) {
@@ -2702,6 +2717,9 @@ func (a *Agent) switchOutcome(ctx context.Context, app, before string, dev Input
 		after = a.frontWindowAfterSwitch(ctx, app)
 	}
 	if namesApp(after, app) {
+		if how != "" {
+			return fmt.Sprintf("switched to %q, raised by %s; call observe_screen to see it", after, how)
+		}
 		return fmt.Sprintf("switched to %q; call observe_screen to see it", after)
 	}
 	switch {

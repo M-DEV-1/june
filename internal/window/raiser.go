@@ -3,6 +3,7 @@ package window
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -39,11 +40,34 @@ func (r *Raiser) object() dbus.BusObject {
 
 // Available reports whether the extension is loaded and enabled in the running shell right now. Input: a context bounding the D-Bus round trip. Output: true if the extension answered, false plus the call's error if it did not (not loaded, not enabled, or no session bus).
 func (r *Raiser) Available(ctx context.Context) (bool, error) {
+	_, err := r.List(ctx)
+	return err == nil, err
+}
+
+// Window is one open window as the extension's List reports it. Input fields, filled from the extension's JSON: ID, the window's own id; Pid, the pid of the process that owns it; WmClass, its WM_CLASS (or app id on a Wayland-native client); Title, its title; Focused, whether it currently has focus.
+type Window struct {
+	ID      int64  `json:"id"`
+	Pid     uint32 `json:"pid"`
+	WmClass string `json:"wm_class"`
+	Title   string `json:"title"`
+	Focused bool   `json:"focused"`
+}
+
+// List asks the extension for every open window. Input: a context bounding the D-Bus round trip. Output: one Window per open window the extension reported, or an error if the D-Bus call itself failed or its JSON could not be parsed.
+func (r *Raiser) List(ctx context.Context) ([]Window, error) {
 	call := r.object().CallWithContext(ctx, ifaceName+".List", 0)
 	if call.Err != nil {
-		return false, call.Err
+		return nil, call.Err
 	}
-	return true, nil
+	var raw string
+	if err := call.Store(&raw); err != nil {
+		return nil, err
+	}
+	var windows []Window
+	if err := json.Unmarshal([]byte(raw), &windows); err != nil {
+		return nil, err
+	}
+	return windows, nil
 }
 
 // ByPid asks the extension to activate the window belonging to process pid. Input: the target process's pid. Output: true if a matching window was found and activated, false if none matched, or an error if the D-Bus call itself failed.

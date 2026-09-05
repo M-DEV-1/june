@@ -10,6 +10,7 @@ import (
 	"ora/internal/db"
 	"ora/internal/memory"
 	"ora/internal/tracker"
+	"ora/internal/window"
 	"os"
 	"path/filepath"
 	"slices"
@@ -2607,6 +2608,14 @@ func (b *blockingRaiser) Available(ctx context.Context) (bool, error) {
 	return false, ctx.Err()
 }
 
+func (b *blockingRaiser) List(ctx context.Context) ([]window.Window, error) {
+	return nil, ctx.Err()
+}
+
+func (b *blockingRaiser) ByPid(ctx context.Context, pid uint32) (bool, error) {
+	return false, ctx.Err()
+}
+
 func (b *blockingRaiser) ByTitle(ctx context.Context, substring string) (bool, error) {
 	return false, ctx.Err()
 }
@@ -2625,7 +2634,7 @@ func TestRaiseWindow_GivesUpOnAShellThatNeverAnswers(t *testing.T) {
 	a.UseWindowRaiser(raiser)
 
 	start := time.Now()
-	if a.raiseWindow(context.Background(), "Brave") {
+	if ok, _ := a.raiseWindow(context.Background(), "Brave"); ok {
 		t.Error("raiseWindow = true, want false from an extension that never answered")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -2655,9 +2664,10 @@ func TestSwitchWindow_IsDeclaredAndCarriedByEveryScreenToolList(t *testing.T) {
 	}
 }
 
-// fakeRaiser is a window raiser that records what it was asked to raise instead of moving the user's own windows, standing in for the GNOME Shell extension the daemon talks to (see internal/window).
+// fakeRaiser is a window raiser that records what it was asked to raise instead of moving the user's own windows, standing in for the GNOME Shell extension the daemon talks to (see internal/window). windows is what List answers with; raises says which keyed call ("pid 1234", "class Brave", "title Brave") should be reported found.
 type fakeRaiser struct {
 	available bool
+	windows   []window.Window
 	raises    map[string]bool
 	calls     []string
 }
@@ -2667,6 +2677,16 @@ func (f *fakeRaiser) Available(ctx context.Context) (bool, error) {
 		return false, errors.New("the ora extension is not loaded in this shell")
 	}
 	return true, nil
+}
+
+func (f *fakeRaiser) List(ctx context.Context) ([]window.Window, error) {
+	f.calls = append(f.calls, "list")
+	return f.windows, nil
+}
+
+func (f *fakeRaiser) ByPid(ctx context.Context, pid uint32) (bool, error) {
+	f.calls = append(f.calls, fmt.Sprintf("pid %d", pid))
+	return f.raises[fmt.Sprintf("pid %d", pid)], nil
 }
 
 func (f *fakeRaiser) ByTitle(ctx context.Context, substring string) (bool, error) {
@@ -2679,9 +2699,13 @@ func (f *fakeRaiser) ByWmClass(ctx context.Context, wmClass string) (bool, error
 	return f.raises["class "+wmClass], nil
 }
 
-// The extension raises the window the way the shell itself does, so when it is there and it worked, nothing is typed over the user's screen at all.
-func TestExecuteTool_SwitchWindow_RaisesThroughTheExtensionWithoutPressingAKey(t *testing.T) {
-	raiser := &fakeRaiser{available: true, raises: map[string]bool{"title Brave": true}}
+// The pid of the process behind a window is the most exact key there is, so when List already names a window as the app asked for, that window is raised by its pid rather than by a second, looser text match — and nothing is typed over the user's screen at all.
+func TestExecuteTool_SwitchWindow_RaisesByPidWhenListMatches(t *testing.T) {
+	raiser := &fakeRaiser{
+		available: true,
+		windows:   []window.Window{{Pid: 1234, WmClass: "brave-browser", Title: "Old title"}},
+		raises:    map[string]bool{"pid 1234": true},
+	}
 	a, in := switchingAgent(t, func() (string, string) {
 		if len(raiser.calls) > 0 {
 			return "Brave", "News"
@@ -2694,16 +2718,16 @@ func TestExecuteTool_SwitchWindow_RaisesThroughTheExtensionWithoutPressingAKey(t
 	if len(in.calls) != 0 {
 		t.Errorf("keyboard = %v, want nothing pressed when the extension raised the window", in.calls)
 	}
-	if !slices.Equal(raiser.calls, []string{"title Brave"}) {
-		t.Errorf("raiser = %v, want the title tried first and no more once it worked", raiser.calls)
+	if !slices.Equal(raiser.calls, []string{"list", "pid 1234"}) {
+		t.Errorf("raiser = %v, want the list read and the matching window raised by pid", raiser.calls)
 	}
-	if !strings.Contains(got, "switched to") || !strings.Contains(got, "Brave · News") {
-		t.Errorf("result = %q, want it to say which window came forward", got)
+	if !strings.Contains(got, "switched to") || !strings.Contains(got, "Brave · News") || !strings.Contains(got, "pid 1234") {
+		t.Errorf("result = %q, want it to say which window came forward and that pid 1234 raised it", got)
 	}
 }
 
-// An app whose window title says nothing about it is still raisable by the class its windows carry, so the class is tried before the keyboard is.
-func TestExecuteTool_SwitchWindow_FallsBackToTheWindowClass(t *testing.T) {
+// An app with no window in the list — the extension answered but nothing there names it, or Available itself said no windows are open — falls back to the class its windows carry before the title, since a title is often a document name and not the app.
+func TestExecuteTool_SwitchWindow_FallsBackToTheWindowClassWhenListIsEmpty(t *testing.T) {
 	raiser := &fakeRaiser{available: true, raises: map[string]bool{"class Brave": true}}
 	a, in := switchingAgent(t, func() (string, string) {
 		if len(raiser.calls) > 1 {
@@ -2713,12 +2737,35 @@ func TestExecuteTool_SwitchWindow_FallsBackToTheWindowClass(t *testing.T) {
 	})
 	a.UseWindowRaiser(raiser)
 	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
-	a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
-	if !slices.Equal(raiser.calls, []string{"title Brave", "class Brave"}) {
-		t.Errorf("raiser = %v, want the title then the class", raiser.calls)
+	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
+	if !slices.Equal(raiser.calls, []string{"list", "class Brave"}) {
+		t.Errorf("raiser = %v, want the empty list then the class", raiser.calls)
 	}
 	if len(in.calls) != 0 {
 		t.Errorf("keyboard = %v, want nothing pressed when the class raised the window", in.calls)
+	}
+	if !strings.Contains(got, "wm_class") {
+		t.Errorf("result = %q, want it to name wm_class as the key that raised it", got)
+	}
+}
+
+// A window whose class says nothing about the app is still raisable by its title, tried once the class has failed.
+func TestExecuteTool_SwitchWindow_FallsBackToTheWindowTitle(t *testing.T) {
+	raiser := &fakeRaiser{available: true, raises: map[string]bool{"title Brave": true}}
+	a, in := switchingAgent(t, func() (string, string) {
+		if len(raiser.calls) > 2 {
+			return "Brave", "News"
+		}
+		return "mail", "Inbox"
+	})
+	a.UseWindowRaiser(raiser)
+	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
+	a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
+	if !slices.Equal(raiser.calls, []string{"list", "class Brave", "title Brave"}) {
+		t.Errorf("raiser = %v, want the list, then the class, then the title", raiser.calls)
+	}
+	if len(in.calls) != 0 {
+		t.Errorf("keyboard = %v, want nothing pressed when the title raised the window", in.calls)
 	}
 }
 
