@@ -16,7 +16,7 @@ export function OwnerControl({ task }: { task: Task }) {
   const [setOwner] = useSetTaskOwnerMutation();
 
   const set = async (owner: TaskOwner) => {
-    if (owner === task.owner) return;
+    // Picking the class the minutes already guessed still writes it: task.owner is the derived guess, not a stored choice, and only a stored choice survives a later change to the user's identity.
     try {
       await setOwner({ id: task.id, owner }).unwrap();
     } catch {

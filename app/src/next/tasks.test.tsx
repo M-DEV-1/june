@@ -247,6 +247,14 @@ describe("Mine and Theirs", () => {
     await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/20")?.body).toEqual({ owner: "unclear" }));
   });
 
+  it("pins the owner even when the pick matches the meeting's guess, so a later identity change cannot move it", async () => {
+    const { calls } = renderApp({ tasks: withWatched }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Reopen Send the file" });
+    await userEvent.click(screen.getByRole("button", { name: /Send the file.*change who owns it/ }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
+    await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/20")?.body).toEqual({ owner: "me" }));
+  });
+
   it("does not offer an owner control on a task the user typed in, since there is nothing to correct", async () => {
     renderApp({ tasks: withWatched }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
