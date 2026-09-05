@@ -32,6 +32,8 @@ type BrainView struct {
 	Limits []brain.UsageLimit `json:"limits"`
 	// LimitsAt is when Limits was read, RFC 3339, and "" when there are none.
 	LimitsAt string `json:"limits_at"`
+	// LimitsNote explains an empty Limits when that emptiness was checked rather than merely never read — e.g. Grok's CLI has no usage reading to give at all — so the picker can show that fact instead of a plain "no usage data" placeholder. "" when Limits may yet be filled in.
+	LimitsNote string `json:"limits_note"`
 }
 
 // BrainLimits is where /brains reads a brain's allowance windows. Input: a context, so a lookup that has to ask a provider can be cut short, and the brain id. Output: the newest reading and true, or false when that brain exposes no allowance or none has been read yet. nil is the same as a lookup that always says false, which is what the tests and a daemon with no usage store pass.
@@ -142,11 +144,12 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 			Note:     "Gemini answers through the Antigravity command line when it is installed; the model comes from ora-config.json.",
 		},
 		{
-			ID:       "grok",
-			Name:     "Grok",
-			SignedIn: has("grok"),
-			Models:   []string{},
-			Note:     "The Grok command line exposes no model choice, so there is nothing to pick here.",
+			ID:         "grok",
+			Name:       "Grok",
+			SignedIn:   has("grok"),
+			Models:     []string{},
+			Note:       "The Grok command line exposes no model choice, so there is nothing to pick here.",
+			LimitsNote: brain.GrokNote(),
 		},
 		{
 			ID:       "ollama",
@@ -160,6 +163,10 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		list[i].Default = list[i].ID == def
 		list[i].Model = modelFor(list[i].ID, cfg, def)
 		list[i].Limits = []brain.UsageLimit{}
+		// The claude row's own usage bars come from an undocumented Anthropic endpoint (see internal/agent's RefreshClaudeUsage), which the user may turn off in Settings; when they have, no fetch runs and this says why rather than leaving the row looking like nothing has been read yet.
+		if list[i].ID == "claude" && !cfg.ClaudeUsageFromLoginEnabled() {
+			list[i].LimitsNote = "turned off in Settings"
+		}
 		if limitsFor == nil {
 			continue
 		}

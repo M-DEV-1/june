@@ -39,6 +39,8 @@ type SettingsView struct {
 	Version         string       `json:"version"`
 	Hotkey          string       `json:"hotkey"`
 	FirstRun        FirstRunView `json:"first_run"`
+	// ClaudeUsageFromLogin mirrors config.OraConfig.ClaudeUsageFromLoginEnabled: whether GET /brains is allowed to read the Claude row's usage bars from the undocumented Anthropic endpoint. POST /settings with this field set writes it back to the config.
+	ClaudeUsageFromLogin bool `json:"claude_usage_from_login"`
 }
 
 // FirstRunView is SettingsView's "first_run" field: which of the ways Ora can answer text are already set up on this machine, and — only when none of them are — plain one-line steps to fix that. Every signal is read live off the machine (an env var, a login file, the config) rather than a stored "setup complete" flag, so a first run that was interrupted keeps asking.
@@ -75,31 +77,56 @@ func firstRunSteps(v FirstRunView) []string {
 	}
 }
 
-// Settings builds the GET /settings handler. Input: the data directory to walk for disk usage, the loaded config, whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), and the time the daemon started. Output: a handler writing SettingsView as JSON.
-func Settings(dataDir string, cfg config.OraConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) http.HandlerFunc {
+// Settings builds the /settings handler. GET answers SettingsView as JSON, read off the live config. POST {"claude_usage_from_login": bool} writes that one setting, persists it with save so it survives a restart, and answers with the same view GET would — the same GET-plus-POST-on-one-route shape as /brains. Input: the data directory to walk for disk usage, a pointer to the loaded config shared with the rest of the daemon so a POST's change is visible everywhere, the function that persists a config to disk (config.SaveConfig in production, a stub in tests), whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), and the time the daemon started. Output: the handler.
+func Settings(dataDir string, cfg *config.OraConfig, save func(config.OraConfig) error, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		capture := true
-		if capturePaused != nil {
-			capture = !capturePaused()
+		switch r.Method {
+		case http.MethodGet:
+			writeSettings(w, dataDir, *cfg, meetingsEnabled, capturePaused, startedAt)
+		case http.MethodPost:
+			var req struct {
+				ClaudeUsageFromLogin bool `json:"claude_usage_from_login"`
+			}
+			if !DecodeJSON(w, r, &req) {
+				return
+			}
+			on := req.ClaudeUsageFromLogin
+			cfg.ClaudeUsageFromLogin = &on
+			if err := save(*cfg); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeSettings(w, dataDir, *cfg, meetingsEnabled, capturePaused, startedAt)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-		home, _ := os.UserHomeDir()
-		writeJSON(w, SettingsView{
-			DataDir:         dataDir,
-			StoreBytes:      storeBytes(dataDir),
-			RecordingsBytes: dirBytes(filepath.Join(dataDir, "recordings")),
-			ModelsBytes:     dirBytes(filepath.Join(dataDir, "models")),
-			VoiceModel:      config.VoiceModel,
-			Brain:           describeBrain(cfg.Brain),
-			EmbedModel:      embedModelName(cfg.Embed),
-			MeetingsEnabled: meetingsEnabled,
-			CaptureEnabled:  capture,
-			KeepAudioDays:   keepAudioNotConfigured,
-			DaemonStarted:   startedAt.Format(time.RFC3339),
-			Version:         noVersion,
-			Hotkey:          windowHotkey(),
-			FirstRun:        firstRun(cfg, home),
-		})
 	}
+}
+
+// writeSettings writes SettingsView as JSON, the body both GET and POST /settings answer with.
+func writeSettings(w http.ResponseWriter, dataDir string, cfg config.OraConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) {
+	capture := true
+	if capturePaused != nil {
+		capture = !capturePaused()
+	}
+	home, _ := os.UserHomeDir()
+	writeJSON(w, SettingsView{
+		DataDir:              dataDir,
+		StoreBytes:           storeBytes(dataDir),
+		RecordingsBytes:      dirBytes(filepath.Join(dataDir, "recordings")),
+		ModelsBytes:          dirBytes(filepath.Join(dataDir, "models")),
+		VoiceModel:           config.VoiceModel,
+		Brain:                describeBrain(cfg.Brain),
+		EmbedModel:           embedModelName(cfg.Embed),
+		MeetingsEnabled:      meetingsEnabled,
+		CaptureEnabled:       capture,
+		KeepAudioDays:        keepAudioNotConfigured,
+		DaemonStarted:        startedAt.Format(time.RFC3339),
+		Version:              noVersion,
+		Hotkey:               windowHotkey(),
+		FirstRun:             firstRun(cfg, home),
+		ClaudeUsageFromLogin: cfg.ClaudeUsageFromLoginEnabled(),
+	})
 }
 
 // hotkeyGOOS is runtime.GOOS, indirected so a test can exercise the non-Linux branch of windowHotkey on a Linux box.

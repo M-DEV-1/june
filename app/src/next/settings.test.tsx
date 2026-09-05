@@ -119,6 +119,15 @@ describe("Settings", () => {
     expect(screen.getByRole("button", { name: "sonnet" }).className).toContain("focus-visible:ring-2");
   });
 
+  it("shows the Claude usage toggle on by default and posts turning it off", async () => {
+    const { calls } = renderApp({ settings, brains }, { place: "settings" });
+    const toggle = await screen.findByLabelText("Show Claude plan usage");
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+    await userEvent.click(toggle);
+    await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/settings")?.body).toEqual({ claude_usage_from_login: false }));
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+  });
+
   it("says what the daemon is running and how much it has written down", async () => {
     renderApp({ settings }, { place: "settings" });
     expect(await screen.findByText("This machine")).toBeDefined();

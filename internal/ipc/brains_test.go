@@ -63,6 +63,9 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 	if byID["grok"].Models == nil || len(byID["grok"].Models) != 0 {
 		t.Errorf("grok models = %v, want an empty list — that CLI exposes no model choice", byID["grok"].Models)
 	}
+	if byID["grok"].LimitsNote == "" {
+		t.Errorf("grok limits_note is empty, want a sentence saying the CLI exposes no usage data")
+	}
 	if byID["gemini"].SignedIn {
 		t.Errorf("gemini reports signed in with no agy binary on PATH")
 	}
@@ -283,5 +286,34 @@ func TestBrainsCarriesTheUsageBars(t *testing.T) {
 	// The existing rows must be untouched by the new ones.
 	if len(out.Brains) != 5 || byID["claude"].Note == "" || byID["ollama"].Name == "" {
 		t.Errorf("the five rows lost a field: %+v", out.Brains)
+	}
+}
+
+// TestBrainsClaudeUsageNoteWhenTurnedOff checks the claude row explains an empty usage bar when the user turned the login-based fetch off in Settings, the same way GrokNote explains Grok's — rather than looking like nothing has been read yet.
+func TestBrainsClaudeUsageNoteWhenTurnedOff(t *testing.T) {
+	off := false
+	cfg := config.OraConfig{ClaudeUsageFromLogin: &off}
+
+	list := brainList(context.Background(), cfg, t.TempDir(), func(string) bool { return false }, nil)
+	byID := map[string]BrainView{}
+	for _, b := range list {
+		byID[b.ID] = b
+	}
+
+	if got := byID["claude"].LimitsNote; got != "turned off in Settings" {
+		t.Errorf("claude limits_note = %q, want the reason it was turned off", got)
+	}
+	if len(byID["claude"].Limits) != 0 {
+		t.Errorf("claude limits = %+v, want none while turned off", byID["claude"].Limits)
+	}
+}
+
+// TestBrainsClaudeUsageNoteAbsentWhenOn checks the default config — the setting unset — carries no note, so an ordinary machine's row reads as "nothing read yet" rather than "turned off".
+func TestBrainsClaudeUsageNoteAbsentWhenOn(t *testing.T) {
+	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return false }, nil)
+	for _, b := range list {
+		if b.ID == "claude" && b.LimitsNote != "" {
+			t.Errorf("claude limits_note = %q, want empty when the setting is on", b.LimitsNote)
+		}
 	}
 }
