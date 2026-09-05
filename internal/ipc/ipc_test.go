@@ -259,7 +259,7 @@ func TestHub_LevelBurstDoesNotDropStalledClient(t *testing.T) {
 		t.Fatalf("client was dropped by a burst of level events")
 	}
 
-	// At most levelQueueDepth stale levels sit ahead of the ordinary event, so draining a full buffer's worth must reach it.
+	// At most levelSkipQueueDepth stale levels sit ahead of the ordinary event, so draining a full buffer's worth must reach it.
 	found := false
 	for i := 0; i < clientBufferSize && !found; i++ {
 		if ev := mustEvent(t, stalled); ev.Type == "said" {
