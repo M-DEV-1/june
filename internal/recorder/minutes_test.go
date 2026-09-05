@@ -4,11 +4,14 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"ora/internal/db"
 )
 
 // SetBrain installs the brain the daemon meters against its shared Gemini quota; once installed, defaultBrain must call it rather than building its own unmetered brain from config.
 func TestDefaultBrain_UsesInstalledBrain(t *testing.T) {
-	r := New(t.TempDir(), &fakeStore{}, "")
+	r := New(context.Background(), t.TempDir(), &fakeStore{}, "")
 	<-r.swept
 	var gotPrompt string
 	r.SetBrain(func(ctx context.Context, prompt string) (string, error) {

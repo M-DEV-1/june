@@ -33,7 +33,9 @@ type fakeStore struct {
 	updates        map[int64]string
 	actions        []memory.ActionItem
 	closeSweeps    int
-	mu             sync.Mutex
+	// getNotesCalls counts the reads of every note in the store, which is the expensive call the backfill makes.
+	getNotesCalls int
+	mu            sync.Mutex
 }
 
 func (s *fakeStore) EpisodesInWindow(ctx context.Context, since, until time.Time, limit int) ([]db.Episode, error) {
@@ -82,6 +84,7 @@ func (s *fakeStore) UpdateNote(ctx context.Context, id int64, content string) er
 func (s *fakeStore) GetNotes(ctx context.Context) ([]db.Note, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.getNotesCalls++
 	out := make([]db.Note, 0, len(s.notes))
 	for i := len(s.notes) - 1; i >= 0; i-- {
 		out = append(out, db.Note{ID: int64(i + 1), Content: s.notes[i], Kind: s.kinds[i]})
@@ -107,7 +110,7 @@ func newTestRecorder(t *testing.T, store *fakeStore) (*Recorder, *fakeCapture, *
 	t.Helper()
 	cap := &fakeCapture{}
 	var notes []string
-	r := New(t.TempDir(), store, "")
+	r := New(context.Background(), t.TempDir(), store, "")
 	// The sweep New starts runs concurrently and would otherwise race the seams set below, and pick up recordings the test itself makes. Its data dir is empty, so this returns at once.
 	<-r.swept
 	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
@@ -748,8 +751,10 @@ func TestRecorder_RegeneratesMinutesFromAnExistingTranscript(t *testing.T) {
 		return "# Meeting minutes\n\n## Attendees\n", nil
 	}
 
+	// note-id.txt is what says this meeting was filed once already, which is what deleting minutes.md asks Ora to do again.
 	regen := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
 		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
+		"note-id.txt":   "1",
 		"mic.wav":       "",
 		"system.wav":    "",
 	})
@@ -1042,7 +1047,7 @@ func (s *fakeStore) CloseDoneActionItems(ctx context.Context, since time.Time) (
 // Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in. Every item is kept, the other people's included: whose an item is comes from its owner read against who the user is, so an "Vikram" bullet is something he is waiting for rather than something the store never heard.
 func TestFileMinutes_LiftsActionItems(t *testing.T) {
 	store := &fakeStore{}
-	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	r := New(context.Background(), t.TempDir(), store, "FAKE_API_KEY")
 	raised := time.Date(2026, 8, 28, 21, 36, 0, 0, time.UTC)
 
 	r.fileMinutes(context.Background(), t.TempDir(), `# Meeting minutes
@@ -1082,7 +1087,7 @@ func TestFileMinutes_LiftsActionItems(t *testing.T) {
 // A meeting with one item the user owes, one owed by somebody else and one nobody was named for files all three with their owners intact. Filing is not the place whose-is-it gets decided: the store answers that on every read, from the owner against who the user is, so the user's own list and the list of what he is waiting on both come out of the same rows.
 func TestFileMinutes_LiftsEveryItemWithItsOwner(t *testing.T) {
 	store := &fakeStore{}
-	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	r := New(context.Background(), t.TempDir(), store, "FAKE_API_KEY")
 
 	r.fileMinutes(context.Background(), t.TempDir(), `# Meeting minutes
 
@@ -1106,7 +1111,7 @@ func TestFileMinutes_LiftsEveryItemWithItsOwner(t *testing.T) {
 // Minutes with no action items file normally and lift nothing.
 func TestFileMinutes_NoActionItems(t *testing.T) {
 	store := &fakeStore{}
-	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	r := New(context.Background(), t.TempDir(), store, "FAKE_API_KEY")
 
 	r.fileMinutes(context.Background(), t.TempDir(), "# Meeting minutes\n\n## Key points\n- nothing was agreed.\n", time.Now(), time.Now())
 
@@ -1121,7 +1126,7 @@ func TestFileMinutes_NoActionItems(t *testing.T) {
 // fileMinutes appends the recording's wall-clock start and stop to the note it files, in RFC3339, since that is the only place the meeting's actual duration is known — the model writing the minutes is never told to report it.
 func TestFileMinutes_RecordsStartAndStop(t *testing.T) {
 	store := &fakeStore{}
-	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	r := New(context.Background(), t.TempDir(), store, "FAKE_API_KEY")
 	started := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 	stopped := started.Add(41 * time.Minute)
 
@@ -1142,7 +1147,7 @@ func TestFileMinutes_RecordsStartAndStop(t *testing.T) {
 // Correcting an already-filed meeting's minutes (the noteIDFile path) must also correct its duration marker, not leave the first run's stale start/stop behind.
 func TestFileMinutes_CorrectingANoteUpdatesTheDurationMarker(t *testing.T) {
 	store := &fakeStore{}
-	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	r := New(context.Background(), t.TempDir(), store, "FAKE_API_KEY")
 	dir := t.TempDir()
 	first := time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
 
@@ -1159,11 +1164,11 @@ func TestFileMinutes_CorrectingANoteUpdatesTheDurationMarker(t *testing.T) {
 	}
 }
 
-// A meeting filed before the duration marker existed has a note with nothing after its minutes text. The sweep must correct that note in place from the one thing on disk that still says how long the meeting ran: the size of the mic.wav next to it, read as wall-clock seconds from the directory's own timestamp.
-func TestPickup_BackfillsDurationForANoteFiledBeforeTheMarkerExisted(t *testing.T) {
+// A meeting filed before the duration marker existed has a note with nothing after its minutes text. The startup sweep must correct that note in place from the one thing on disk that still says how long the meeting ran: the size of the mic.wav next to it, read as wall-clock seconds from the directory's own timestamp.
+func TestBackfillDurations_FillsInANoteFiledBeforeTheMarkerExisted(t *testing.T) {
 	store := &fakeStore{notes: []string{"# Standup\n\n## Key points\n- shipped it.\n"}, kinds: []string{noteKind}}
 	dataDir := t.TempDir()
-	r := New(dataDir, store, "")
+	r := New(context.Background(), dataDir, store, "")
 	<-r.swept
 
 	started := time.Date(2026, 8, 20, 9, 0, 0, 0, time.Local)
@@ -1186,7 +1191,7 @@ func TestPickup_BackfillsDurationForANoteFiledBeforeTheMarkerExisted(t *testing.
 		t.Fatal(err)
 	}
 
-	r.pickup(context.Background())
+	r.backfillOnce(context.Background())
 
 	want := meetingDurationLine(started, started.Add(5*time.Second))
 	if !strings.Contains(store.notes[0], want) {
@@ -1195,10 +1200,10 @@ func TestPickup_BackfillsDurationForANoteFiledBeforeTheMarkerExisted(t *testing.
 }
 
 // A recording whose mic.wav is gone (deleted, or made before keepAudio existed) has nothing left on disk to say how long it ran, so the sweep must leave its note alone rather than write a wrong or zero-length marker that looks like real data.
-func TestPickup_LeavesDurationAloneWhenTheAudioIsGone(t *testing.T) {
+func TestBackfillDurations_LeavesADurationAloneWhenTheAudioIsGone(t *testing.T) {
 	store := &fakeStore{notes: []string{"# Standup\n"}, kinds: []string{noteKind}}
 	dataDir := t.TempDir()
-	r := New(dataDir, store, "")
+	r := New(context.Background(), dataDir, store, "")
 	<-r.swept
 
 	dir := filepath.Join(dataDir, "recordings", "2026-08-20T09-00-00")
@@ -1210,7 +1215,7 @@ func TestPickup_LeavesDurationAloneWhenTheAudioIsGone(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[me] shipped it\n"), 0o644)
 	// No mic.wav at all.
 
-	r.pickup(context.Background())
+	r.backfillOnce(context.Background())
 
 	if strings.Contains(store.notes[0], meetingDurationPrefix) {
 		t.Errorf("backfilled a duration with no audio to measure it from: %q", store.notes[0])
@@ -1389,5 +1394,161 @@ func TestRecorder_LiveSnapshot_WhileRecording(t *testing.T) {
 	}
 	if snap.Note == "" {
 		t.Error("Note should explain why SegmentsSoFar is empty")
+	}
+}
+
+// A recording directory is named to the second, so two recordings that start inside one second want the same name. os.MkdirAll is happy with a directory that already exists and newWAV truncates what it opens, so the second recording used to overwrite the first meeting's audio while that meeting was still waiting to be transcribed — and both sessions then carried the same directory, so the second was never summarised either.
+func TestMakeRecordingDir_NeverHandsOutADirectoryThatIsAlreadyARecording(t *testing.T) {
+	root := t.TempDir()
+
+	first, err := makeRecordingDir(root)
+	if err != nil {
+		t.Fatalf("makeRecordingDir: %v", err)
+	}
+	audio := filepath.Join(first, "mic.wav")
+	if err := os.WriteFile(audio, make([]byte, 100000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := makeRecordingDir(root)
+	if err != nil {
+		t.Fatalf("makeRecordingDir: %v", err)
+	}
+	if second == first {
+		t.Fatalf("both recordings got %s, so the second truncates the first meeting's audio", first)
+	}
+	if info, err := os.Stat(audio); err != nil || info.Size() != 100000 {
+		t.Fatalf("the first recording's mic.wav is %v (%v), want its 100000 bytes untouched", info, err)
+	}
+}
+
+// Start has to go through that, not around it: this is the case where the user stops one meeting from the tray and the next call starts inside the same second.
+func TestRecorder_StartNeverOpensInsideARecordingThatIsAlreadyThere(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	taken := filepath.Join(r.dataDir, "recordings", time.Now().Format(dirTimeLayout))
+	if err := os.MkdirAll(taken, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	audio := filepath.Join(taken, "mic.wav")
+	if err := os.WriteFile(audio, make([]byte, 100000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.stop()
+
+	if dir := r.liveDir(); dir == taken {
+		t.Errorf("the new recording opened its WAVs inside %s, which already holds a recording", taken)
+	}
+	if info, err := os.Stat(audio); err != nil || info.Size() != 100000 {
+		t.Fatalf("the earlier recording's mic.wav is %v (%v), want its 100000 bytes untouched", info, err)
+	}
+}
+
+// Whisper succeeded and the minutes call then failed, so the sweep retries the recording from the transcript already on disk. That retry is the first run that ever reaches minutes, and therefore the only chance this meeting has to say anything about the people in it. Gating the personal-context pass on where the transcript came from skipped it for good.
+func TestProcess_UpdatesPersonalContextOnTheRetryThatFirstFilesTheMinutes(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			return `{"updates":[{"subject":"priya-shah","content":"Priya Shah is a colleague at Acme."}]}`, nil
+		}
+		return "# Minutes\n\n- ship friday", nil
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[00:00:00] [me] shall we ship friday\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &session{dir: dir, startedAt: time.Now(), stoppedAt: time.Now(), fromTranscript: true}
+
+	if err := r.process(context.Background(), s); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if got := store.personalWrites["priya-shah"]; got == "" {
+		t.Error("a meeting whose first attempt failed never updated personal context, so what it taught Ora is lost for good")
+	}
+}
+
+// The same pass must not run twice for one meeting. A recording that has already been filed has its note id on disk, which is the evidence that a run got as far as minutes — deleting minutes.md to ask for a better summary re-summarises the meeting without re-proposing the same personal-context writes.
+func TestProcess_DoesNotUpdatePersonalContextForAMeetingAlreadyFiled(t *testing.T) {
+	store := &fakeStore{notes: []string{"# Minutes"}, kinds: []string{noteKind}}
+	r, _, _ := newTestRecorder(t, store)
+	asked := 0
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			asked++
+			return `{"updates":[]}`, nil
+		}
+		return "# Minutes\n\n- ship friday", nil
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[00:00:00] [me] shall we ship friday\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, noteIDFile), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &session{dir: dir, startedAt: time.Now(), stoppedAt: time.Now(), fromTranscript: true}
+
+	if err := r.process(context.Background(), s); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if asked != 0 {
+		t.Errorf("the personal-context pass ran %d times for a meeting already filed, re-proposing what it wrote the first time", asked)
+	}
+}
+
+// The retry loop lives as long as the daemon, and has to end with it: time.Tick's ticker is never stopped and never checks whether anyone is still listening, so the loop kept a recording being transcribed after the daemon had been told to quit.
+func TestRetryDeferred_EndsWithTheContextItWasGiven(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.retryDeferred(ctx)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retryDeferred is still running after its context was cancelled")
+	}
+}
+
+// The duration backfill corrects notes filed before the duration marker existed, which is a one-time job. It was reading every note in the store on every sweep — that is every two minutes, for the life of the daemon, to find nothing.
+func TestPickup_DoesNotReadEveryNoteInTheStoreOnEverySweep(t *testing.T) {
+	store := &fakeStore{notes: []string{"# Standup\n"}, kinds: []string{noteKind}}
+	r, _, _ := newTestRecorder(t, store)
+
+	dir := filepath.Join(r.dataDir, "recordings", "2026-08-20T09-00-00")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "note-id.txt"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "minutes.md"), []byte("# Standup\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[me] shipped it\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store.mu.Lock()
+	store.getNotesCalls = 0
+	store.mu.Unlock()
+
+	r.pickup(context.Background())
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.getNotesCalls != 0 {
+		t.Errorf("the sweep read every note in the store %d times, want none: the backfill runs once at startup", store.getNotesCalls)
 	}
 }

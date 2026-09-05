@@ -228,7 +228,8 @@ type Recorder struct {
 }
 
 // New returns a Recorder that writes under dataDir/recordings, reads desktop context from and files minutes into store, and summarises with the Gemini API key apiKey.
-func New(dataDir string, store Store, apiKey string) *Recorder {
+// ctx is the daemon's own context, and it bounds every background job the recorder starts here: the startup sweep, the retry loop, and the whisper run either of them starts. Under context.Background() a decode outlived the daemon that started it, kept the GPU, and was still running when the next daemon swept the same recording and started a second decode beside it.
+func New(ctx context.Context, dataDir string, store Store, apiKey string) *Recorder {
 	r := &Recorder{dataDir: dataDir, store: store, apiKey: apiKey}
 	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
 		c, err := audio.StartMeetingCapture(mic, system)
@@ -250,9 +251,11 @@ func New(dataDir string, store Store, apiKey string) *Recorder {
 	r.swept = make(chan struct{})
 	go func() {
 		defer close(r.swept)
-		r.pickup(context.Background())
+		r.pickup(ctx)
+		// The duration backfill corrects notes filed before the duration marker existed, so it has nothing to find once it has been through them: it runs here, at startup, rather than on every sweep.
+		r.backfillOnce(ctx)
 	}()
-	go r.retryDeferred(context.Background())
+	go r.retryDeferred(ctx)
 	return r
 }
 
@@ -293,6 +296,15 @@ func (r *Recorder) pickup(ctx context.Context) {
 			slog.Error("could not finish an unfinished meeting recording", "dir", dir, "error", err)
 		}
 	}
+}
+
+// backfillOnce runs the duration backfill over every recording on disk. Input: the daemon's context. Output: none — a recordings directory that cannot be read means there is nothing to correct.
+func (r *Recorder) backfillOnce(ctx context.Context) {
+	root := filepath.Join(r.dataDir, "recordings")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
 	r.backfillDurations(ctx, root, entries)
 }
 
@@ -325,7 +337,7 @@ func (r *Recorder) backfillDurations(ctx context.Context, root string, entries [
 		if !ok || note.Kind != noteKind || strings.Contains(note.Content, meetingDurationPrefix) {
 			continue
 		}
-		started, err := time.ParseInLocation(dirTimeLayout, e.Name(), time.Local)
+		started, err := dirStart(e.Name())
 		if err != nil {
 			continue
 		}
@@ -387,9 +399,16 @@ func (r *Recorder) claimedElsewhere(dir string) bool {
 
 // retryDeferred runs pickup every retryEvery for as long as the process lives, so a recording deferred to save the battery is transcribed within a few minutes of the charger going in.
 func (r *Recorder) retryDeferred(ctx context.Context) {
-	for range time.Tick(r.retryEvery) {
-		if r.onAC() {
-			r.pickup(ctx)
+	tick := time.NewTicker(r.retryEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if r.onAC() {
+				r.pickup(ctx)
+			}
 		}
 	}
 }
@@ -454,9 +473,49 @@ func unfinished(dir string) (*session, bool) {
 	return pickupSession(dir), true
 }
 
+// makeRecordingDir makes a fresh directory for a recording under root, named for the moment it starts. Input: the recordings root. Output: the directory it created, and an error if it could not create one.
+// The name has one-second resolution, so two recordings starting inside one second ask for the same name. os.Mkdir refuses a directory that already exists, where os.MkdirAll accepts it and the WAVs opened inside then truncate the earlier meeting's audio; the suffix gives the second recording its own directory instead.
+func makeRecordingDir(root string) (string, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", err
+	}
+	base := filepath.Join(root, time.Now().Format(dirTimeLayout))
+	for n := 1; n <= maxSameSecondRecordings; n++ {
+		dir := base
+		if n > 1 {
+			dir = fmt.Sprintf("%s-%d", base, n)
+		}
+		err := os.Mkdir(dir, 0o755)
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("%s and its suffixes are all taken", base)
+}
+
+// maxSameSecondRecordings bounds the search for a free name, so a directory that cannot be created for some reason os.Mkdir reports as ErrExist can never spin. Nothing on this machine starts nine recordings in one second.
+const maxSameSecondRecordings = 9
+
+// dirStart reads the time a recording started off its directory's name. Input: the base name, which is the start time and, for a recording that began in the same second as another, a "-2" or "-3" suffix. Output: the start time, or an error when the name is not a recording directory's.
+func dirStart(name string) (time.Time, error) {
+	t, err := time.ParseInLocation(dirTimeLayout, name, time.Local)
+	if err == nil {
+		return t, nil
+	}
+	if i := strings.LastIndex(name, "-"); i > 0 {
+		if t, suffixErr := time.ParseInLocation(dirTimeLayout, name[:i], time.Local); suffixErr == nil {
+			return t, nil
+		}
+	}
+	return t, err
+}
+
 // pickupSession dates a recording found on disk, since the original session's clocks died with the process that made it. The start comes from the directory's name, and the length from how much audio is in mic.wav — the file's own timestamp is not the end of the meeting, because anything that touches the file afterwards moves it, and the window is what decides which screens the summary is written from. With the audio gone, the last write to the transcript is the best guess left.
 func pickupSession(dir string) *session {
-	started, startErr := time.ParseInLocation(dirTimeLayout, filepath.Base(dir), time.Local)
+	started, startErr := dirStart(filepath.Base(dir))
 	stopped := modTime(filepath.Join(dir, "transcript.md"))
 	if d := audioDuration(filepath.Join(dir, "mic.wav")); d > 0 && startErr == nil {
 		stopped = started.Add(d)
@@ -606,8 +665,8 @@ func (r *Recorder) open() (err error) {
 		return errors.New("a meeting recording is already running")
 	}
 
-	dir := filepath.Join(r.dataDir, "recordings", time.Now().Format("2006-01-02T15-04-05"))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dir, err := makeRecordingDir(filepath.Join(r.dataDir, "recordings"))
+	if err != nil {
 		return fmt.Errorf("create recording dir: %w", err)
 	}
 	// A recording that never got its streams open leaves a directory of stub WAVs, which on disk is indistinguishable from a recording a crash abandoned — so the sweep would pick it up and try to transcribe silence on every tick.
@@ -743,11 +802,13 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	if err := os.WriteFile(filepath.Join(s.dir, "minutes.md"), []byte(text), 0o644); err != nil {
 		return fmt.Errorf("write minutes: %w", err)
 	}
+	// Whether this meeting has been filed before is read before fileMinutes files it, since that is the call that writes the note id.
+	filed := exists(filepath.Join(s.dir, noteIDFile))
 	r.fileMinutes(ctx, s.dir, text, s.startedAt, s.stoppedAt)
 
 	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
-	// Regenerating minutes from a transcript that has already been through this once (fromTranscript) must not run it again: the meeting taught Ora whatever it was going to teach it the first time, and running it again just re-proposes the same writes.
-	if !s.fromTranscript {
+	// It runs once per meeting, on the run that first files the minutes: re-summarising a meeting already filed would only re-propose the writes it made the first time. The evidence is the note id on disk rather than whether the transcript came off disk, because a meeting whose minutes failed the first time is retried from its own transcript — and gating on that skipped the pass on the only run that ever reached minutes.
+	if !filed {
 		r.updatePersonalContext(ctx, text, s.startedAt, s.stoppedAt)
 	}
 

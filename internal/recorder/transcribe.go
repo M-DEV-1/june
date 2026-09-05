@@ -49,13 +49,16 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	if err := repairWAV(path); err != nil {
 		return nil, fmt.Errorf("repair %s: %w", path, err)
 	}
-	args := []string{"-f", path, "-np", "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext, "-t", strconv.Itoa(transcribeThreads())}
-	if prompt != "" {
-		args = append(args, "--prompt", prompt)
-	}
 	// The model flags mean a real whisper.cpp run, which decodes on the GPU, where only one run fits at a time.
-	if extra := whisperCPPArgs(bin); extra != nil {
-		args = append(args, extra...)
+	gpu := whisperCPPArgs(bin)
+	unprimed := []string{"-f", path, "-np", "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext, "-t", strconv.Itoa(whisperThreads(gpu != nil))}
+	unprimed = append(unprimed, gpu...)
+	// The prompt goes on the end and nowhere else, because dropping it again for the unprimed redo below is done by running the arguments without it. Appending anything after it took the model flags away from that redo instead.
+	args := unprimed
+	if prompt != "" {
+		args = append(append([]string{}, unprimed...), "--prompt", prompt)
+	}
+	if gpu != nil {
 		GPURun.Lock()
 		defer GPURun.Unlock()
 		// Under the lock, so the other stream cannot slip its decode in while this one is still waiting for the card.
@@ -68,7 +71,7 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	// A primed run can lock onto a non-speech marker and print it for the whole file: on 2026-09-02 17:32 the call side came back as 308 lines of "[ Silence ]" and one invented sentence, while the same file unprimed gave 42 real lines. The prompt is only a spelling aid, so when the run is that loop it is redone without one.
 	if err == nil && prompt != "" && markerLooped(out) {
 		slog.Warn("whisper looped on a silence marker under the priming prompt, transcribing again without it", "file", filepath.Base(path))
-		out, errOut, err = run(ctx, bin, args[:len(args)-2])
+		out, errOut, err = run(ctx, bin, unprimed)
 	}
 	took := time.Since(started)
 	// audio and rate say how long the meeting itself runs and how many times faster than real time this machine transcribes it, so a run's log line is enough to predict how long N hours of meetings will take to catch up on.
@@ -139,7 +142,21 @@ func markerLooped(out string) bool {
 // promptEchoWindow is how far into a stream the priming prompt may still be echoed. Whisper conditions on the prompt for its first decoding window and prints it, if at all, as the first thing it emits; past this the stream is speech.
 const promptEchoWindow = 5 * time.Second
 
-// transcribeThreads is how many threads one transcription run may use. The two sides of a call are transcribed at the same time, so this is deliberately half of what a single run would take: whisper's own default is half the logical CPUs, and two runs at a quarter each add up to the same load rather than fighting over the same cores. Never less than one.
+// whisperThreads is how many threads one whisper run may use. Input: whether this run decodes on the GPU. Output: the thread count, never less than one.
+//
+// A GPU run holds GPURun for the whole decode, so the two streams of a call run one after the other however they were started — that run has the machine to itself and takes whisper's own default of half the logical CPUs. On the CPU path the two runs really do overlap, and each takes a quarter so they add up to the same load rather than fighting over the same cores.
+// An explicit $ORA_TRANSCRIBE_THREADS wins on either path, since the right number is a property of the machine.
+func whisperThreads(gpu bool) int {
+	if !gpu || os.Getenv("ORA_TRANSCRIBE_THREADS") != "" {
+		return transcribeThreads()
+	}
+	if n := runtime.NumCPU() / 2; n > 0 {
+		return n
+	}
+	return 1
+}
+
+// transcribeThreads is how many threads one background transcription run may use when it shares the machine with the other runs a meeting starts: a quarter of the logical CPUs, since whisper's own default is half and two runs at a quarter each add up to the same load. Never less than one. It is what the diarizer takes, and what a whisper run that decodes on the CPU takes.
 // $ORA_TRANSCRIBE_THREADS overrides it. The right number is a property of the machine and not of the code: on a hybrid CPU the logical count is a poor guide to how many threads actually run at full speed, and the only way to know is to time a real recording both ways.
 // ponytail: a quarter of the logical CPUs is a safe guess that never oversubscribes, not a tuned one. The knob is there so a machine that wants more can have it without a rebuild.
 func transcribeThreads() int {
