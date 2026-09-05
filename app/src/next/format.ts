@@ -230,6 +230,8 @@ export function taskDetail(task: Task): string {
   const detail = (task.detail ?? "").trim();
   if (!detail || !task.title) return "";
   if (detail === task.title || detail.includes(task.title)) return "";
+  // A task the user typed carries "you said" as its source; the row already reads as theirs, so the words add nothing.
+  if (detail === "you said") return "";
   return task.source === "noticed" ? `from ${detail}` : detail;
 }
 

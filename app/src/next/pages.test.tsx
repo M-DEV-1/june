@@ -1,37 +1,18 @@
 // @vitest-environment jsdom
 
-/** Tests for the two reading screens, each of which is one page with a picker in its header rather than a list beside the sidebar: Days, which is the page Ora wrote that night, and Meetings, which is one recording's minutes with what it left the user to do pinned above them. */
+/** Tests for the Meetings screen: one page with a picker in its header rather than a list beside the sidebar, which is one recording's minutes with what it left the user to do pinned above them. The Days screen these tests used to share this file with has its own days.test.tsx now, which is also where its raised list's tie to GET /tasks is tested. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import type { DaySummary, DayView, Meeting, Task } from "./api";
+import type { Meeting, Task } from "./api";
 import { openPicker, renderApp } from "./testing";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-
-const days: DaySummary[] = [
-  { date: "2026-09-04", title: "A long day of TCFD work.", has_page: true, seen: 366, meetings: 5, meeting_minutes: 140 },
-  { date: "2026-09-03", title: "", has_page: false, seen: 60, meetings: 1, meeting_minutes: 28 },
-  { date: "2026-08-30", title: "", has_page: false, seen: 0, meetings: 0, meeting_minutes: 0 },
-];
-
-const page: DayView = {
-  date: "2026-09-04",
-  brief: "",
-  close: "",
-  page: "You spent the morning on the TCFD statements.\nThe afternoon went to the flights.",
-  you: [],
-  tasks: [
-    { title: "Send the TCFD file", done: false },
-    { title: "Book the flight", done: true },
-  ],
-  heading: "366 things seen · 5 calls, 140 min",
-};
 
 const meetings: Meeting[] = [
   {
@@ -49,65 +30,9 @@ const meetings: Meeting[] = [
 
 /** One action item that meeting raised for the user and one raised somewhere else, as GET /tasks would answer them. */
 const meetingWork: Task[] = [
-  { id: "12", title: "send the file to legal", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "TCFD statement pattern analysis" },
-  { id: "13", title: "chase the standup notes", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "Daily AI Sprint Standup" },
+  { id: "12", title: "send the file to legal", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "TCFD statement pattern analysis", owner: "me" },
+  { id: "13", title: "chase the standup notes", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "Daily AI Sprint Standup", owner: "me" },
 ];
-
-describe("Days", () => {
-  it("offers the days that hold something in the header picker, grouped by month and with their counts", async () => {
-    renderApp({ days, pages: { "2026-09-04": page } }, { place: "days" });
-    await screen.findByText(/You spent the morning/);
-    const picker = await openPicker("Choose a day");
-    expect(picker.getByRole("option", { name: /Friday 4/ })).toBeDefined();
-    expect(picker.getByText("60 seen · 1 call, 28 min")).toBeDefined();
-    // The day with nothing recorded at all is left out, so two of the three are offered, both under the one month they fell in.
-    expect(picker.queryByText(/Sunday 30/)).toBeNull();
-    expect(picker.getAllByRole("option")).toHaveLength(2);
-  });
-
-  it("draws the day's own date, the daemon's line about it, and what it raised, with no list beside it", async () => {
-    renderApp({ days, pages: { "2026-09-04": page } }, { place: "days" });
-    expect(await screen.findByText(/You spent the morning/)).toBeDefined();
-    expect(screen.getByText("366 things seen · 5 calls, 140 min")).toBeDefined();
-    expect(screen.getByText("Raised that day")).toBeDefined();
-    expect(screen.getByLabelText("done")).toBeDefined();
-    expect(screen.getByRole("heading", { level: 2, name: /September/ })).toBeDefined();
-    // The sidebar is for chats: the day's own list lives in the header's picker and nowhere else.
-    expect(screen.queryByRole("listbox", { name: "Days" })).toBeNull();
-  });
-
-  it("opens another day from the picker", async () => {
-    const { store, calls } = renderApp({ days, pages: { "2026-09-04": page } }, { place: "days" });
-    await screen.findByText(/You spent the morning/);
-    const picker = await openPicker("Choose a day");
-    await userEvent.click(picker.getByRole("option", { name: /Thursday 3/ }));
-    expect(store.getState().ui.date).toBe("2026-09-03");
-    await waitFor(() => expect(calls.some((c) => c.path === "/days/2026-09-03")).toBe(true));
-  });
-
-  it("gives a bare day no rail at all, so its column is not pushed off centre by an empty one", async () => {
-    // Nothing the rail could carry: no line about the day, no brief, no close, and one part, which is too few for an outline.
-    const bare: DayView = { date: "2026-09-04", brief: "", close: "", page: "Quiet.", you: [], tasks: [], heading: "" };
-    renderApp({ days, pages: { "2026-09-04": bare } }, { place: "days", wide: true });
-    await screen.findByText("Quiet.");
-    expect(screen.queryByRole("complementary", { name: "About this day" })).toBeNull();
-    expect(document.querySelectorAll(".reading-wide").length).toBe(0);
-    // The header and the page, both on the plain centred measure.
-    expect(document.querySelectorAll(".measure-wide").length).toBe(2);
-  });
-
-  it("puts the header on the same grid as the page, so the picker starts where the day's first word does", async () => {
-    renderApp({ days, pages: { "2026-09-04": page } }, { place: "days", wide: true });
-    await screen.findByRole("complementary", { name: "About this day" });
-    expect(document.querySelectorAll(".reading-wide").length).toBe(2);
-    expect(document.querySelectorAll(".measure-wide").length).toBe(0);
-  });
-
-  it("says no days have been written rather than showing an empty page", async () => {
-    renderApp({}, { place: "days" });
-    expect(await screen.findByText("No days written yet.")).toBeDefined();
-  });
-});
 
 describe("Meetings", () => {
   it("names the recording in the header and says when it ran and who was there", async () => {
