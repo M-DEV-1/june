@@ -144,8 +144,8 @@ const clientBufferSize = 8
 // levelEventType is the type of the voice waveform's amplitude event, which a live session broadcasts every 50ms for as long as it runs (see levels in voice.go). It is the one event stream that keeps arriving whether or not anything on screen has changed, so broadcast treats it differently from everything else.
 const levelEventType = "level"
 
-// levelQueueDepth is how many "level" events may already be waiting in one client's buffer before broadcast skips further ones instead of queueing them. At one, a client only ever has the level it has not read yet: a new amplitude arriving on top of an unread one is dropped rather than queued, so a client that stalls its read for a moment neither fills its buffer with stale amplitudes nor loses its place in the stream, and the rest of the buffer stays free for events that carry something.
-const levelQueueDepth = 1
+// levelSkipQueueDepth is how many events of any kind may already be waiting in one client's buffer before broadcast skips a "level" event instead of queueing it. At one, a level is queued only for a client that has read everything so far: a client mid-way through a tool or notice event, or holding an unread level, is skipped rather than loaded with an amplitude it would draw late, so it neither fills its buffer nor loses its place in the stream. The window breathes on its own clock after 150ms without a level (see syncBreath in app/src/main.ts), which covers the stretch a burst of other events keeps levels out.
+const levelSkipQueueDepth = 1
 
 // hub fans out events from ongoing asks to every connected /events client.
 type hub struct {
@@ -195,12 +195,12 @@ func (s *Server) CloseStreams() {
 	s.hub.closeAll()
 }
 
-// broadcast sends ev to every subscribed client. A client whose buffer is full is dropped (removed and closed) instead of blocking this call, so one slow client cannot stall the rest. A "level" event is the exception: it is skipped for a client that already has levelQueueDepth of them waiting, and never drops anyone. A voice session emits twenty a second for its whole length, so without that a client that stalled its read for a few hundred milliseconds would be dropped mid-conversation over amplitudes it no longer needs, ending its /events stream and making it reconnect and refetch.
+// broadcast sends ev to every subscribed client. A client whose buffer is full is dropped (removed and closed) instead of blocking this call, so one slow client cannot stall the rest. A "level" event is the exception: it is skipped for a client that already has levelSkipQueueDepth of them waiting, and never drops anyone. A voice session emits twenty a second for its whole length, so without that a client that stalled its read for a few hundred milliseconds would be dropped mid-conversation over amplitudes it no longer needs, ending its /events stream and making it reconnect and refetch.
 func (h *hub) broadcast(ev Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.clients {
-		if ev.Type == levelEventType && len(ch) >= levelQueueDepth {
+		if ev.Type == levelEventType && len(ch) >= levelSkipQueueDepth {
 			continue
 		}
 		select {
