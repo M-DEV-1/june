@@ -24,6 +24,8 @@ export type Canned = {
   jobs?: Record<string, ActJob>;
   /** A job already under way when the page opens, for ?mock=1 to show a running job without a click: the conversation it is shown beside, its goal, and the steps it has taken so far. Read by installMock alone — daemonFetch answers GET /act/{id} from `jobs` regardless of this, and a test that wants a live job in the store dispatches progress.jobSent/jobAccepted/eventArrived itself, the same way it does for a live ask. */
   runningJob?: { id: string; conversationId: string; goal: string; steps: { text: string; expect?: string; outcome?: "pass" | "fail"; why?: string }[] };
+  /** What POST /dictate/stop answers with once a recording is stopped. Defaults to a fixed sentence, same as a daemon that transcribed something. */
+  dictateText?: string;
   /** The routes that should fail, each written "METHOD /path", so a test can see what the window says when a write does not go through. */
   fails?: string[];
 };
@@ -59,8 +61,10 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
   let tasks = [...(canned.tasks ?? [])];
   let routines = [...(canned.routines ?? [])];
   let nextRoutineID = routines.length + 1;
+  // What a tick on either screen last set a task to, kept apart from `tasks` itself because a dropped item falls out of that list — GET /tasks would not return it either — but a day that raised it still needs to say so.
+  const statusById = new Map<string, { done: boolean; status: string }>();
 
-  const answer = (method: string, path: string, body: unknown): { status: number; body: unknown } => {
+  const answer = (method: string, path: string, body: unknown, params: URLSearchParams): { status: number; body: unknown } => {
     const conversation = /^\/conversations\/([^/]+)$/.exec(path);
     const title = /^\/conversations\/([^/]+)\/title$/.exec(path);
     const day = /^\/days\/(.+)$/.exec(path);
@@ -97,17 +101,32 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
       return { status: 200, body: canned.jobs?.[decodeURIComponent(jobID[1])] ?? fallback };
     }
     if (method === "POST" && (jobStop || jobPause || jobResume || jobAnswer)) return { status: 204, body: null };
-    if (method === "GET" && path === "/tasks") return { status: 200, body: { tasks } };
+    if (method === "GET" && path === "/tasks") {
+      // Mirrors internal/ipc/tasks.go's listTasks: ?owner defaults to "me", "all" filters nothing out, anything else matches the row's own owner exactly.
+      const owner = params.get("owner") || "me";
+      const filtered = owner === "all" ? tasks : tasks.filter((t) => t.owner === owner);
+      return { status: 200, body: { tasks: filtered } };
+    }
     if (method === "POST" && path === "/tasks") return { status: 201, body: { id: "task-9", conversation_id: "c9" } };
     if (method === "POST" && done) {
       const status = typeof body === "object" && body !== null && "status" in body ? String((body as { status: unknown }).status) : "";
       const id = decodeURIComponent(done[1]);
+      statusById.set(id, { done: status === "done", status });
       if (status === "dropped") tasks = tasks.filter((t) => t.id !== id);
       else tasks = tasks.map((t) => (t.id === id ? { ...t, done: status === "done" } : t));
       return { status: 200, body: null };
     }
     if (method === "GET" && path === "/days") return { status: 200, body: { days: canned.days ?? [] } };
-    if (method === "GET" && day) return { status: 200, body: canned.pages?.[decodeURIComponent(day[1])] ?? { date: day[1], page: "", you: [], tasks: [], heading: "" } };
+    if (method === "GET" && day) {
+      const date = decodeURIComponent(day[1]);
+      const page = canned.pages?.[date] ?? { date, page: "", you: [], tasks: [], heading: "" };
+      // The day's raised list and GET /tasks are two views of the same rows: a tick made on either screen is read here off the same statusById a done toggle just wrote, so a fixture only has to say what a day raised, not repeat whatever it was last ticked to.
+      const raised = page.tasks.map((t) => {
+        const live = statusById.get(t.id);
+        return live ? { ...t, done: live.done, status: live.status } : t;
+      });
+      return { status: 200, body: { ...page, tasks: raised } };
+    }
     if (method === "GET" && path === "/meetings") return { status: 200, body: { meetings: canned.meetings ?? [] } };
     if (method === "GET" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
     if (method === "POST" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
@@ -131,6 +150,8 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     }
     if (method === "GET" && path === "/status") return { status: 200, body: { paused: canned.paused ?? false } };
     if (method === "POST" && (path === "/pause" || path === "/resume")) return { status: 200, body: "paused" };
+    if (method === "POST" && path === "/dictate/start") return { status: 202, body: { id: "dictate-1" } };
+    if (method === "POST" && path === "/dictate/stop") return { status: 200, body: { text: canned.dictateText ?? "send this thought" } };
     return { status: 404, body: null };
   };
 
@@ -145,7 +166,7 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     const body = sent ? JSON.parse(sent) : undefined;
     calls.push({ method, path: url.pathname, body });
     if (fails.has(`${method} ${url.pathname}`)) return new Response("no", { status: 500 });
-    const { status, body: out } = answer(method, url.pathname, body);
+    const { status, body: out } = answer(method, url.pathname, body, url.searchParams);
     if (out === null) return new Response(null, { status });
     if (typeof out === "string") return new Response(out, { status });
     return new Response(JSON.stringify(out), { status, headers: { "Content-Type": "application/json" } });
@@ -248,11 +269,14 @@ export const demo: Canned = {
     },
   },
   tasks: [
-    { id: "11", title: "Send the TCFD file to legal", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: "TCFD statement pattern analysis" },
-    { id: "12", title: "Book the Zurich flight before the 12th", source: "you", when: ago(0, 9, 0), done: false, conversation_id: "c1", detail: "" },
-    { id: "13", title: "Ask Priya for the numbers behind table 4", source: "noticed", when: ago(1, 17, 5), done: false, conversation_id: "", detail: "TCFD statement pattern analysis" },
-    { id: "14", title: "Rewrite the onboarding note without the second heading", source: "you", when: ago(3, 10, 20), done: false, conversation_id: "c4", detail: "" },
-    { id: "15", title: "Clear the disk the nightly loop filled", source: "you", when: ago(9, 22, 30), done: true, conversation_id: "c5", detail: "" },
+    { id: "11", title: "Send the TCFD file to legal", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(0)}`, owner: "me" },
+    { id: "12", title: "Book the Zurich flight before the 12th", source: "you", when: ago(0, 9, 0), done: false, conversation_id: "c1", detail: "you said", owner: "me" },
+    { id: "13", title: "Ask Priya for the numbers behind table 4", source: "noticed", when: ago(1, 17, 5), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(1)}`, owner: "me" },
+    { id: "14", title: "Rewrite the onboarding note without the second heading", source: "you", when: ago(3, 10, 20), done: false, conversation_id: "c4", detail: "you said", owner: "me" },
+    { id: "15", title: "Clear the disk the nightly loop filled", source: "you", when: ago(9, 22, 30), done: true, conversation_id: "c5", detail: "you said", owner: "me" },
+    // Raised by a meeting but not the user's own — this is the "Theirs, watching" section: one clearly someone else's, one nobody named.
+    { id: "16", title: "Re-run the source data once the register is updated", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(0)}`, owner: "them" },
+    { id: "17", title: "Write up what the cap was costing", source: "noticed", when: ago(1, 9, 45), done: false, conversation_id: "", detail: `Daily AI sprint standup, ${day(1)}`, owner: "unclear" },
   ],
   meetings: [
     {
@@ -321,9 +345,9 @@ export const demo: Canned = {
       ].join("\n"),
       you: [],
       tasks: [
-        { title: "Send the TCFD file to legal", done: false },
-        { title: "Ask Priya for the numbers behind table 4", done: false },
-        { title: "Book the Zurich flight", done: true },
+        { id: "11", title: "Send the TCFD file to legal", done: false, status: "open", owner: "me" },
+        { id: "13", title: "Ask Priya for the numbers behind table 4", done: false, status: "open", owner: "me" },
+        { id: "15", title: "Clear the disk the nightly loop filled", done: true, status: "done", owner: "me" },
       ],
     },
   },
@@ -340,7 +364,21 @@ export const demo: Canned = {
     { id: "3", text: "when Priya replies about the venue, tell me", schedule: "when Priya replies about the venue", enabled: true, last_run: "", last_answer: "" },
   ],
   brains: [
-    { id: "claude", name: "Claude", signed_in: true, account: "max", models: ["opus", "sonnet", "haiku"], model: "opus", note: "", default: true },
+    {
+      id: "claude",
+      name: "Claude",
+      signed_in: true,
+      account: "max",
+      models: ["opus", "sonnet", "haiku"],
+      model: "opus",
+      note: "",
+      default: true,
+      limits: [
+        { window: "5h", used_fraction: 0.42, resets_at: new Date(Date.now() + 3 * 3600000 + 56 * 60000).toISOString(), source: "claude-cli" },
+        { window: "weekly", used_fraction: 0.93, resets_at: new Date(Date.now() + 3 * 86400000).toISOString(), source: "claude-cli" },
+      ],
+      limits_at: new Date().toISOString(),
+    },
     { id: "codex", name: "Codex", signed_in: true, account: "plus", models: ["gpt-5.5", "gpt-5.5-mini"], model: "gpt-5.5", note: "", default: false },
     { id: "gemini", name: "Gemini", signed_in: false, account: "", models: [], model: "", note: "set GEMINI_API_KEY in ~/.config/ora/env", default: false },
   ],

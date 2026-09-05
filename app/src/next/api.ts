@@ -87,19 +87,23 @@ export type Turn = {
 /** One conversation and everything said in it, oldest first. Mirrors ipc.ConversationView. */
 export type ConversationView = { id: string; title: string; brain: string; turns: Turn[] };
 
-/** One thing to do on GET /tasks. Mirrors ipc.Task; source is "you" for a task the user typed in and "noticed" for an action item a meeting raised, and detail is the meeting or note a noticed one was raised from. */
+/** Whose task it is: "me" for the user's own, "them" for one a meeting left with someone else, "unclear" when nobody said — a task merely heard is not automatically owed, which is the whole point of the split. */
+export type TaskOwner = "me" | "them" | "unclear";
+
+/** What POST /tasks/{id}/done may set a task to. "dropped" is only for a task Ora noticed: the daemon answers 400 for a dropped task of the user's own, because user_tasks has no third state to hold it in. */
+export type TaskStatus = "open" | "done" | "dropped";
+
+/** One thing to do on GET /tasks. Mirrors ipc.Task; source is "you" for a task the user typed in and "noticed" for an action item a meeting raised. detail is where it came from: the meeting it was raised in and the date, for example "TCFD statement pattern analysis, 2026-09-01", or "you said" for one the user typed in. GET /tasks itself takes ?owner=me|them|unclear|all (default "me"), so which of these a given fetch returns depends on how it was called, not on anything in the row itself. */
 export type Task = {
   id: string;
   title: string;
   source: string;
+  owner: TaskOwner;
   when: string;
   done: boolean;
   conversation_id: string;
   detail: string;
 };
-
-/** What POST /tasks/{id}/done may set a task to. "dropped" is only for a task Ora noticed: the daemon answers 400 for a dropped task of the user's own, because user_tasks has no third state to hold it in. */
-export type TaskStatus = "open" | "done" | "dropped";
 
 /** One day that has anything in it, on GET /days. Mirrors ipc.DaySummary. */
 export type DaySummary = {
@@ -118,7 +122,8 @@ export type DayView = {
   brief: string;
   close: string;
   you: { when: string; text: string }[];
-  tasks: { title: string; done: boolean }[];
+  /** id is the same id POST /tasks/{id}/done takes, so ticking one here and ticking it on the Tasks screen are the same action on the same row. status is the item's full state, since done alone cannot tell a dropped item from an open one. */
+  tasks: { id: string; title: string; done: boolean; status: TaskStatus; owner: TaskOwner }[];
   heading: string;
 };
 
@@ -170,7 +175,10 @@ export type SettingsView = {
   first_run?: FirstRun;
 };
 
-/** One backend that can answer for Ora on GET /brains. Mirrors ipc.BrainView; model is the one last picked for this brain, "" when none ever was. */
+/** One allowance window a brain's provider reports for the user's own account: a five-hour or weekly subscription window, a daily request ceiling. Mirrors internal/agent.UsageLimit (aliased as brain.UsageLimit). used_fraction is 0 to 1; resets_at is RFC3339. */
+export type UsageLimit = { window: string; used_fraction: number; resets_at: string; source: string };
+
+/** One backend that can answer for Ora on GET /brains. Mirrors ipc.BrainView; model is the one last picked for this brain, "" when none ever was. limits and limits_at are optional so a daemon older than the field still parses; a brain with no allowance data reported sends limits as an empty list rather than leaving it out. */
 export type Brain = {
   id: string;
   name: string;
@@ -180,6 +188,8 @@ export type Brain = {
   model: string;
   note: string;
   default: boolean;
+  limits?: UsageLimit[];
+  limits_at?: string;
 };
 
 /** What one provider has cost in tokens over a window. Mirrors ipc.ProviderTotal. */
@@ -311,9 +321,15 @@ export const oraApi = createApi({
     answerJob: build.mutation<void, { id: string; text: string }>({
       query: ({ id, text }) => ({ url: `/act/${encodeURIComponent(id)}/answer`, method: "POST", body: { text } }),
     }),
-    /** The open action items and every task the user typed in. */
+    /** The user's own open work: every task typed in, and every action item a meeting raised for the user themselves (?owner defaults to "me" when left off, which is what this sends). */
     tasks: build.query<Task[], void>({
       query: () => "/tasks",
+      transformResponse: (r: { tasks: Task[] }) => r.tasks ?? [],
+      providesTags: ["Task"],
+    }),
+    /** Every task regardless of owner. The Tasks screen is the only reader: Mine and "Theirs, watching" are both read off this one list, split by owner client-side, rather than fetched as three separate calls for "me", "them" and "unclear" — one round trip covers every bucket the owner field can hold. Tagged the same as tasks, so ticking a row from either list refetches both. */
+    allTasks: build.query<Task[], void>({
+      query: () => "/tasks?owner=all",
       transformResponse: (r: { tasks: Task[] }) => r.tasks ?? [],
       providesTags: ["Task"],
     }),
@@ -327,18 +343,18 @@ export const oraApi = createApi({
       query: ({ id, status }) => ({ url: `/tasks/${encodeURIComponent(id)}/done`, method: "POST", body: { status } }),
       invalidatesTags: ["Task"],
       async onQueryStarted({ id, status }, { dispatch, queryFulfilled }) {
-        const patch = dispatch(
-          oraApi.util.updateQueryData("tasks", undefined, (draft) => {
-            const at = draft.findIndex((t) => t.id === id);
-            if (at < 0) return;
-            if (status === "dropped") draft.splice(at, 1);
-            else draft[at].done = status === "done";
-          }),
-        );
+        const move = (draft: Task[]) => {
+          const at = draft.findIndex((t) => t.id === id);
+          if (at < 0) return;
+          if (status === "dropped") draft.splice(at, 1);
+          else draft[at].done = status === "done";
+        };
+        // Both tasks and allTasks hold the same rows the daemon does; patching whichever of the two are actually cached (updateQueryData is a no-op on one that is not) keeps Mine and Theirs on the Tasks screen, and the Days page once it refetches, from showing three different answers to "is this done" between the click and the daemon's own reply.
+        const patches = [dispatch(oraApi.util.updateQueryData("tasks", undefined, move)), dispatch(oraApi.util.updateQueryData("allTasks", undefined, move))];
         try {
           await queryFulfilled;
         } catch {
-          patch.undo();
+          patches.forEach((p) => p.undo());
         }
       },
     }),
@@ -348,10 +364,10 @@ export const oraApi = createApi({
       transformResponse: (r: { days: DaySummary[] }) => r.days ?? [],
       providesTags: ["Day"],
     }),
-    /** One day's page, its questions and the work it raised. */
+    /** One day's page, its questions and the work it raised. Also tagged "Task", the same tag setTaskStatus invalidates, so ticking a task on the Tasks screen refetches whichever day is open and its raised list moves with it — the two screens read the same rows rather than two copies that can drift apart. */
     day: build.query<DayView, string>({
       query: (date) => `/days/${encodeURIComponent(date)}`,
-      providesTags: (_result, _error, date) => [{ type: "Day" as const, id: date }],
+      providesTags: (_result, _error, date) => [{ type: "Day" as const, id: date }, "Task"],
     }),
     /** Every recording the daemon kept, newest first. */
     meetings: build.query<Meeting[], void>({
@@ -412,6 +428,19 @@ export const oraApi = createApi({
       query: (id) => ({ url: `/routines/${encodeURIComponent(id)}/run`, method: "POST" }),
       invalidatesTags: ["Routine"],
     }),
+    /** Opens the daemon's own microphone (see internal/ipc/dictate.go), answering the id the "dictation" event and stopDictation both carry. The daemon records from PulseAudio itself, so this never touches the browser's microphone. */
+    startDictation: build.mutation<{ id: string }, void>({
+      query: () => ({ url: "/dictate/start", method: "POST" }),
+    }),
+    /** Closes the microphone and waits for the transcript. Input: the id startDictation returned. Output: the text, "" when the daemon has no such recording open any more — the silence gate or the two-minute cap already ended it and sent the text on the event stream instead, which is not an error worth showing. Any other failure is left to reject, same as every other mutation here. */
+    stopDictation: build.mutation<{ text: string }, string>({
+      async queryFn(id, _api, _extra, baseQuery) {
+        const result = await baseQuery({ url: "/dictate/stop", method: "POST", body: { id } });
+        if (result.error?.status === 404) return { data: { text: "" } };
+        if (result.error) return { error: result.error };
+        return { data: result.data as { text: string } };
+      },
+    }),
   }),
 });
 
@@ -428,6 +457,7 @@ export const {
   useSetJobPauseMutation,
   useAnswerJobMutation,
   useTasksQuery,
+  useAllTasksQuery,
   useCreateTaskMutation,
   useSetTaskStatusMutation,
   useDaysQuery,
@@ -443,6 +473,8 @@ export const {
   useCreateRoutineMutation,
   useDeleteRoutineMutation,
   useRunRoutineMutation,
+  useStartDictationMutation,
+  useStopDictationMutation,
 } = oraApi;
 
 /** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, and "act" is one line of a computer-use job's progress. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. */

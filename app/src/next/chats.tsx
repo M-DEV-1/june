@@ -1,7 +1,7 @@
 /** The Chats screen: the open conversation's turns, the question in flight while it runs, and the composer where the next one is typed. The thread and the composer are exported because the Tasks screen talks to a task through the same two pieces, with the task itself sent along as context. */
 
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Circle, CornerDownLeft, Pause, Play, Square, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Circle, CornerDownLeft, Mic, Pause, Play, Square, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -20,7 +20,9 @@ import {
   useJobQuery,
   useSetJobPauseMutation,
   useSettingsQuery,
+  useStartDictationMutation,
   useStartJobMutation,
+  useStopDictationMutation,
   useStopJobMutation,
   type ConversationView,
   type Evidence,
@@ -547,6 +549,8 @@ export function Composer({
   const [ask] = useAskMutation();
   const [startJob] = useStartJobMutation();
   const [answerJob] = useAnswerJobMutation();
+  const [startDictation] = useStartDictationMutation();
+  const [stopDictation] = useStopDictationMutation();
   const ready = Boolean(conversationId || start || fresh);
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -557,6 +561,51 @@ export function Composer({
     el.style.height = "0px";
     el.style.height = `${Math.min(el.scrollHeight, Math.round(window.innerHeight / 3))}px`;
   }, [draft]);
+
+  // The id of the recording open on the daemon, undefined while nothing is being dictated. A daemon error on start or stop is said on the composer's own placeholder for a few seconds rather than as a toast, since the box is exactly where the words were meant to land.
+  const [dictating, setDictating] = useState<string | undefined>(undefined);
+  const [dictateNotice, setDictateNotice] = useState<string | undefined>(undefined);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(noticeTimer.current), []);
+  const flashNotice = (text: string) => {
+    clearTimeout(noticeTimer.current);
+    setDictateNotice(text);
+    noticeTimer.current = setTimeout(() => setDictateNotice(undefined), 4000);
+  };
+
+  const toggleDictate = async () => {
+    if (dictating) {
+      const id = dictating;
+      setDictating(undefined);
+      try {
+        const { text } = await stopDictation(id).unwrap();
+        if (text && key) dispatch(ui.asked({ conversationId: key, text: draft ? `${draft} ${text}` : text }));
+      } catch {
+        flashNotice("Could not finish dictation");
+      }
+      return;
+    }
+    try {
+      const { id } = await startDictation().unwrap();
+      setDictating(id);
+    } catch {
+      flashNotice("Could not start dictation");
+    }
+  };
+
+  // Escape stops a dictation from anywhere, not only from inside the box, because the box is disabled for as long as one is open and so cannot be the thing carrying the keypress.
+  useEffect(() => {
+    if (!dictating) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        void toggleDictate();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dictating]);
 
   const send = async () => {
     const question = draft.trim();
@@ -628,13 +677,41 @@ export function Composer({
         rail={wide && railed ? <div aria-hidden /> : undefined}
       >
         <div className="flex items-end gap-1 rounded-xl border bg-card p-1.5 shadow-lg transition-shadow focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/40">
+          {dictating ? (
+            <button
+              type="button"
+              aria-label="Stop dictation"
+              onClick={() => void toggleDictate()}
+              className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-ui text-destructive"
+            >
+              <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-destructive" />
+              Listening…
+            </button>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  className="rounded-lg text-muted-foreground hover:text-foreground"
+                  aria-label="Dictate"
+                  disabled={!ready}
+                  onClick={() => void toggleDictate()}
+                >
+                  <Mic />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">Space dictates, on an empty box</TooltipContent>
+            </Tooltip>
+          )}
           <Textarea
             ref={box}
             rows={1}
             value={draft}
-            disabled={!ready}
+            disabled={!ready || Boolean(dictating)}
             placeholder={
-              ready ? placeholder : "Open a chat first, or start a new one"
+              dictateNotice ?? (ready ? placeholder : "Open a chat first, or start a new one")
             }
             aria-label="Ask Ora"
             className="min-h-0 resize-none border-0 bg-transparent px-2 py-1.5 text-read shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent dark:disabled:bg-transparent"
@@ -647,6 +724,12 @@ export function Composer({
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void send();
+                return;
+              }
+              // Space on an empty box is the same as clicking the mic, the same key the hover window has always used to start one; a modifier or a held-down key means something else, same as there.
+              if (e.key === " " && ready && !draft && !e.repeat && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                e.preventDefault();
+                void toggleDictate();
                 return;
               }
               // Escape gives up the draft — straight away when it is one line, because there is barely anything to lose, and behind a confirm once it runs past one, so a longer draft is not thrown away by a stray keypress. Handled here rather than left to fall through to the window's own Escape, which knows nothing about what is half-typed in this box.
