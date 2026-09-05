@@ -293,7 +293,7 @@ func TestRunSubtask_OffersOnlyQueryMemoryAndRecallToTheModel(t *testing.T) {
 			gotNames = append(gotNames, decl.Name)
 		}
 	}
-	want := map[string]bool{"query_memory": true, "recall": true, "get_recent": true}
+	want := map[string]bool{"query_memory": true, "recall": true}
 	if len(gotNames) != len(want) {
 		t.Fatalf("offered tools = %v, want exactly %v", gotNames, want)
 	}
@@ -635,5 +635,19 @@ func TestSubtaskTools_StripsBehavior(t *testing.T) {
 				t.Errorf("live declaration %q lost its NON_BLOCKING behavior", decl.Name)
 			}
 		}
+	}
+}
+
+// The live voice session lost web search when the voice model moved to a gemini-3 build: pairing Google Search with the Live API there closes the session on a quota error, so liveToolsFor stops attaching it. The system prompt still told Ora to search for prices and current events, so it reached for the only door left and opened the user's browser.
+// branch runs on the standard Gemini API rather than the Live one, where that pairing is fine, so this is where search belongs.
+func TestSubtaskTools_CarryWebSearch(t *testing.T) {
+	var found bool
+	for _, tool := range subtaskTools() {
+		if tool.GoogleSearch != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the background research path has no web search, so nothing in Ora can look anything up")
 	}
 }
