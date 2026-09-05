@@ -57,6 +57,10 @@ type Notifier interface {
 
 // noticeKey identifies one notice to a Notifier: kind and id together are what the window's rail line and its desktop banner both point at, and what ties a window press back to the exact banner it should also dismiss.
 func noticeKey(n Notice) string {
+	// A notice with no row of its own (a brief, the evening close, a routine) is told apart by its title instead, so its banner can still be closed from a window press; two same-titled briefs on one day are the same moment anyway.
+	if n.ID == "" {
+		return n.Kind + "|" + n.Title
+	}
 	return n.Kind + "|" + n.ID
 }
 
@@ -129,7 +133,7 @@ func (n *BusNotifier) Notify(noticeKey, title, body string, actions []Action, ch
 		return fmt.Errorf("notify: %w", err)
 	}
 	n.waiting[id] = chose
-	// A key with no id behind it ("meeting|", every package-level Notify) would make each such banner overwrite the last one's entry, so only a notice with a row of its own is remembered for Close.
+	// A key with nothing behind the kind (no id and no title) would make each such banner overwrite the last one's entry, so it is not remembered for Close.
 	if noticeKey != "" && !strings.HasSuffix(noticeKey, "|") {
 		n.keyed[noticeKey] = id
 	}
@@ -383,7 +387,7 @@ const taskNoticeWatermarkKind = "task-notice-watermark"
 // maxTaskNoticesPerMeeting caps how many task notices one meeting's newly-lifted action items raise at once. Five bullets from one meeting would otherwise be five banners in a row; the rest are folded into the last one's body as a count instead.
 const maxTaskNoticesPerMeeting = 3
 
-// maxTaskNoticesPerTick caps how many task notices one tick raises across every meeting, so a day of back-to-back meetings never turns into a wall of cards; whatever is over the cap waits, uncounted, for the next tick.
+// maxTaskNoticesPerTick caps how many task notices one tick raises across every meeting, so a day of back-to-back meetings never turns into a wall of cards; whatever is over the cap is counted into the last notice's "and N more in Tasks" line and is found in Tasks, not re-announced.
 const maxTaskNoticesPerTick = 5
 
 // maybeTaskNotices posts one task notice for each of the user's own action items a meeting has newly raised since the last tick, grouped by the meeting that raised them (Source), capped at maxTaskNoticesPerMeeting per meeting and maxTaskNoticesPerTick in all. Input: the tick's context. Output: nothing — a failed read is logged and retried next tick. The very first tick, with no watermark stored yet, announces nothing and only records the highest note id it sees, so a daemon meeting an old store does not raise a notice for every item already open. After that the watermark advances to the highest note id seen among the user's own items, whether or not it was announced, so a closed item is never rescanned; an item another person owned that is later handed to the user by hand (PATCH /tasks/{id}) is already under the watermark and is not announced either.
@@ -418,25 +422,28 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 		byMeeting[a.Source] = append(byMeeting[a.Source], a)
 	}
 
-	posted := 0
+	// Every item held back this tick, by either cap, is counted once and named once, on the last notice posted, so nothing is dropped without the user being told how much waited.
+	var out []Notice
+	held := 0
 	for _, meeting := range order {
-		group := byMeeting[meeting]
-		extra := len(group) - maxTaskNoticesPerMeeting
-		if extra > 0 {
+		whole := byMeeting[meeting]
+		group := whole
+		if len(group) > maxTaskNoticesPerMeeting {
 			group = group[:maxTaskNoticesPerMeeting]
 		}
-		if room := maxTaskNoticesPerTick - posted; len(group) > room {
-			// Over the tick's cap the rest of this meeting, and every meeting after it, waits: the watermark still moves, so they are not re-found next tick, which is the price of never flooding the desk.
+		if room := maxTaskNoticesPerTick - len(out); len(group) > room {
 			group = group[:room]
 		}
-		for i, a := range group {
-			posted++
-			body := a.Text
-			if i == len(group)-1 && extra > 0 {
-				body += fmt.Sprintf("\n\nand %d more in Tasks", extra)
-			}
-			s.say(Notice{Title: "New task from " + meeting, Body: body, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: "task"})
+		held += len(whole) - len(group)
+		for _, a := range group {
+			out = append(out, Notice{Title: "New task from " + meeting, Body: a.Text, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: "task"})
 		}
+	}
+	if held > 0 && len(out) > 0 {
+		out[len(out)-1].Body += fmt.Sprintf("\n\nand %d more in Tasks", held)
+	}
+	for _, n := range out {
+		s.say(n)
 	}
 
 	if max != watermark || seeding {
