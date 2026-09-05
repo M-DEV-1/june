@@ -99,21 +99,40 @@ describe("startMockVoice", () => {
     expect(document.querySelector(".vwave")).toBeNull();
   });
 
-  it("starts a fake session and animates the mic row off real 50ms ticks", async () => {
-    const { startMockVoice } = await import("./mock");
+  it(
+    "shows Ora's silent row while only the mic bursts, and animates it once the speaker's own (odd-cycle) burst lands",
+    async () => {
+      const { startMockVoice } = await import("./mock");
 
-    startMockVoice(new URLSearchParams("mock=1&voice=1"));
-    // startMockVoice's dynamic import("./main"), main.ts's own connect() (probe/context/matters/voiceStatus, all stubbed above) and a handful of real 50ms ticks all need actual turns of the event loop; the repaint itself is then coalesced to one per animation frame (see scheduleVoiceWaveRepaint in main.ts).
-    await new Promise((r) => setTimeout(r, 250));
-    await new Promise((r) => requestAnimationFrame(r));
+      startMockVoice(new URLSearchParams("mock=1&voice=1"));
+      // Index 1 is near-top (see waveform.ts's render(): far-top, near-top, near-bottom, far-bottom).
+      const nearTop = () =>
+        Array.from(document.querySelectorAll(".vw-spk .vw-row"))[1]
+          ?.textContent ?? "";
+      // Polls real wall-clock time rather than assuming a fixed number of the fake session's 50ms ticks have landed by some fixed wait: under a loaded test run, real setInterval ticks can lag behind wall-clock time, so a single fixed sleep is flaky. This instead waits, a real animation frame at a time, for whatever real time it actually takes.
+      const waitUntil = async (
+        cond: () => boolean,
+        budgetMs: number,
+      ): Promise<void> => {
+        const start = Date.now();
+        while (!cond()) {
+          if (Date.now() - start > budgetMs) return;
+          await new Promise((r) => setTimeout(r, 20));
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+      };
 
-    const micRows = () =>
-      Array.from(document.querySelectorAll(".vw-mic .vw-row")).map(
-        (el) => el.textContent ?? "",
-      );
-    const [top] = micRows();
-    // A few ticks of the 0.3-0.9 burst have landed by now, so the row is no longer the flat silent baseline.
-    expect(top).toBeTruthy();
-    expect(top).not.toBe("⣀".repeat(top.length));
-  });
+      // Ora's row exists and sits at its silent baseline the moment the session starts (this is the first, even cycle: the mic bursts, but there is no mic row left to show it on).
+      await waitUntil(() => nearTop() !== "", 2000);
+      const silentNearTop = nearTop();
+      expect(silentNearTop).toBeTruthy();
+      expect(silentNearTop).toBe("⣀".repeat(silentNearTop.length));
+      expect(document.querySelector(".vw-mic")).toBeNull();
+
+      // The second (odd) cycle bursts the speaker for its first second (see fakeLevelAt) — wait for that to actually show up in the row rather than assuming a fixed amount of wall-clock time reached it.
+      await waitUntil(() => nearTop() !== silentNearTop, 8000);
+      expect(nearTop()).not.toBe(silentNearTop);
+    },
+    10000,
+  );
 });

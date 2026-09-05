@@ -186,7 +186,7 @@ describe("the raw stream event needs no cast to reach the reducer", () => {
   });
 });
 
-// The waveform itself (buildVariation, the smoothing, the braille rows) is tested in waveform.test.ts; this only checks that a "level" event on a live session reaches the DOM at all, and reaches it as the row wide enough main.ts asked waveform.ts to build.
+// The waveform itself (buildVariation, the smoothing, the braille rows) is tested in waveform.test.ts; this only checks that a "level" event on a live session reaches the DOM at all, and reaches it as the row wide enough main.ts asked waveform.ts to build. There is no user-microphone grid any more — a live session is hands-free, so only Ora's own voice is ever drawn (see voiceWaveInnerHtml in main.ts).
 describe("the live-voice waveform", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -194,22 +194,26 @@ describe("the live-voice waveform", () => {
     document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
   });
 
-  it("shows the silent rows once voice starts, and changed rows once a level event reports a loud mic", async () => {
+  it("shows Ora's silent rows for the whole session, not just while she speaks, and animates once a level event reports her speaking", async () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
 
     dispatch({ kind: "voiceOn", id: "voice-1" });
     const rowText = () =>
-      Array.from(document.querySelectorAll(".vw-mic .vw-row")).map(
+      Array.from(document.querySelectorAll(".vw-spk .vw-row")).map(
         (el) => el.textContent ?? "",
       );
-    const [silentTop, silentBottom] = rowText();
-    expect(silentTop).toBeTruthy();
-    expect(silentTop).toBe("⣀".repeat(silentTop.length));
-    expect(silentBottom).toBe("⠉".repeat(silentBottom.length));
-    // The speaker is silent from the start, so its rows are not shown at all — only once it has something to say does it appear beside the mic.
-    expect(document.querySelector(".vw-spk")).toBeNull();
+    // Four rows top to bottom: far-top, near-top, near-bottom, far-bottom (see waveform.ts's render()).
+    const [silentFarTop, silentNearTop, silentNearBottom, silentFarBottom] = rowText();
+    expect(silentNearTop).toBeTruthy();
+    expect(silentFarTop).toBe("⠀".repeat(silentFarTop.length));
+    expect(silentNearTop).toBe("⣀".repeat(silentNearTop.length));
+    expect(silentNearBottom).toBe("⠉".repeat(silentNearBottom.length));
+    expect(silentFarBottom).toBe("⠀".repeat(silentFarBottom.length));
+    // No user-microphone grid exists at all, not even a hidden or empty one.
+    expect(document.querySelector(".vw-mic")).toBeNull();
 
+    // A loud mic reading alone (Ora still just listening) must not animate anything — there is nothing left on screen for the mic to drive.
     dispatch({
       kind: "voiceEvent",
       ev: {
@@ -218,12 +222,23 @@ describe("the live-voice waveform", () => {
         detail: JSON.stringify({ mic: 0.8, speaker: 0 }),
       },
     });
+    await new Promise((r) => requestAnimationFrame(r));
+    expect(rowText()[1]).toBe(silentNearTop);
+
+    dispatch({
+      kind: "voiceEvent",
+      ev: {
+        id: "voice-1",
+        type: "level",
+        detail: JSON.stringify({ mic: 0, speaker: 0.8 }),
+      },
+    });
     // The repaint is coalesced to at most one per animation frame rather than applied synchronously (see scheduleVoiceWaveRepaint in main.ts), so the DOM only reflects it after one has run.
     await new Promise((r) => requestAnimationFrame(r));
 
-    const [loudTop, loudBottom] = rowText();
-    expect(loudTop).not.toBe(silentTop);
-    expect(loudBottom).not.toBe(silentBottom);
+    const [, loudNearTop, loudNearBottom] = rowText();
+    expect(loudNearTop).not.toBe(silentNearTop);
+    expect(loudNearBottom).not.toBe(silentNearBottom);
   });
 });
 
