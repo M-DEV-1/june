@@ -10,6 +10,7 @@ import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import {
   dotClass,
   isJobLive,
+  noticeActionLine,
   NOTICE_MS,
   placeholder,
   placeholderMatter,
@@ -52,6 +53,7 @@ import {
   voiceStop,
 } from "./daemon";
 import { dictationKey, startDictation, stopDictation } from "./dictate";
+import { Waveform } from "./waveform";
 import {
   fitWindow as winplaceFitWindow,
   placementFor,
@@ -113,6 +115,13 @@ let askId: string | undefined;
 
 /** The daemon's id for the computer-use job this window started with "do:", the same way askId tracks an ask's. Undefined until the POST /act reply lands, and again once the job is done — a fresh "do:" always starts a fresh job, never answers a stale one. */
 let jobId: string | undefined;
+
+/** How many columns wide the live-voice waveform is, in the composer's own small braille rows rather than the terminal client's full-width bar. */
+const VOICE_WAVE_WIDTH = 14;
+
+/** The mic's and the speaker's smoothed amplitude for the live-voice waveform, owned here rather than in the view: they update up to 20 times a second off the daemon's "level" events (see voiceEvent in state.ts), and running that through the full reducer-and-render path on every tick would rebuild the whole card that often for nothing. Reset to fresh (silent) instances every time a session starts, in dispatch's "voiceOn" case, so a new session never shows the tail end of the last one's bar. */
+let micWave = new Waveform(VOICE_WAVE_WIDTH);
+let speakerWave = new Waveform(VOICE_WAVE_WIDTH);
 
 /** Re-reads the daemon's token (it changes on every daemon restart), probes it, opens the event stream once, and loads the screen context. Input: none. Output: nothing; leaves daemonUp set and the view rendered either way. */
 async function connect(): Promise<void> {
@@ -270,7 +279,12 @@ function renderNotice(v: View): void {
   }
   // A hover that opens at the top of the screen has its nearest edge above it, so its tail points up; the bottom and middle positions both hang off the dock below.
   noticeEl.className = storedHoverPosition() === "top" ? "N up" : "N down";
-  noticeEl.innerHTML = `<div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>`;
+  // A notice whose action is set is the desktop notification's own follow-up, not a fresh card: it shows what happened, one line, instead of the title and body drawn the first time.
+  const actionLine = noticeActionLine(n, new Date());
+  noticeEl.innerHTML =
+    actionLine !== undefined
+      ? `<div class="nt">${esc(actionLine)}</div>`
+      : `<div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>`;
 }
 
 /** The six seconds a notice stays up. Input: the view. Output: nothing; the timer is cleared and started again from the top whenever the notice itself changes, and left cleared while the pointer is over the card, which is what pauses it — the card then gets its full six seconds again when the pointer leaves. */
@@ -319,6 +333,29 @@ function stopStepTicker(): void {
   stepTicker = undefined;
 }
 
+/** The two-row braille bar for one voice channel (mic or speaker), read straight off its Waveform. Input: the Waveform to render. Output: the row markup, one ".vw-row" span per line. */
+function voiceWaveRowsHtml(w: Waveform): string {
+  return w
+    .render()
+    .map((row) => `<span class="vw-row">${esc(row)}</span>`)
+    .join("");
+}
+
+/** The live-voice waveform's inner content — the mic's two rows always, and the speaker's beside them once it has anything to show — split out from voiceWaveHtml so a level event can patch just this in place (see scheduleVoiceWaveRepaint) instead of tearing down and rebuilding the ".vwave" span, title attribute included, on every one of up to 20 ticks a second. Input: none, reads the module's own micWave/speakerWave. Output: the inner HTML. */
+function voiceWaveInnerHtml(): string {
+  const spkHtml =
+    speakerWave.smoothed > 0
+      ? `<span class="vw-spk">${voiceWaveRowsHtml(speakerWave)}</span>`
+      : "";
+  return `<span class="vw-mic">${voiceWaveRowsHtml(micWave)}</span>${spkHtml}`;
+}
+
+/** The live-voice waveform shown in the composer while a session runs, ported from the terminal client's own braille bar (see internal/ui/waveform.go and app/src/waveform.ts) since the hover has no microphone of its own to draw from. The title attribute repeats the "Shift+Space to stop" line the input's placeholder already shows while empty, since typing over that placeholder — the one other place that line lives — is exactly what live voice is for. Input: none. Output: the span's HTML, or "" when no session is running. */
+function voiceWaveHtml(v: View): string {
+  if (!v.voice) return "";
+  return `<span class="vwave" title="Live voice on · Shift+Space to stop">${voiceWaveInnerHtml()}</span>`;
+}
+
 /** The whole card: the input line, the thread of what has been asked so far, and the footer. Input: the view and the matter the turns belong to. Output: the card's HTML. */
 function cardHtml(v: View, m: Matter): string {
   const tag = daemonUp ? "daemon" : mockMode ? "mock" : "daemon offline";
@@ -328,11 +365,28 @@ function cardHtml(v: View, m: Matter): string {
       <span class="dot ${dotClass(v, daemonUp)}"></span>
       <input class="q" value="${esc(v.input)}" placeholder="${esc(placeholder(v))}" />
       <span class="wave"><i></i><i></i><i></i></span>
+      ${voiceWaveHtml(v)}
       ${v.contextChip ? `<span class="ctx">${esc(v.contextChip)}</span>` : ""}
     </div>
     ${threadHtml(v, m)}
     <div class="foot"><span>↵ ask</span><span>ctrl↵ new thread</span><span>esc close</span><span class="tag">${tag}</span></div>
   `;
+}
+
+/** Repaints just the live-voice waveform's rows in place, patching the ".vwave" span's own inner HTML rather than going through render()'s full card rebuild. Scheduled at most once per animation frame (see scheduleVoiceWaveRepaint), so however many "level" events arrive between two frames, the DOM only gets touched once. Input: none. Output: nothing; a no-op once the session has ended and render() has already removed the span. */
+function repaintVoiceWave(): void {
+  const el = root.querySelector<HTMLElement>(".vwave");
+  if (el) el.innerHTML = voiceWaveInnerHtml();
+}
+
+/** Coalesces a burst of "level" events (up to 20 a second) into at most one DOM write per animation frame. Input: none. Output: nothing; a repaint already pending for this frame is left to run rather than queuing a second one. */
+let voiceWaveFrame: number | undefined;
+function scheduleVoiceWaveRepaint(): void {
+  if (voiceWaveFrame !== undefined) return;
+  voiceWaveFrame = requestAnimationFrame(() => {
+    voiceWaveFrame = undefined;
+    repaintVoiceWave();
+  });
 }
 
 /** The check or cross a finished step's mark draws itself with (see the "draw" keyframe in styles.css) — an SVG stroke rather than a character so it can animate stroke-dashoffset instead of just popping in. Input: which one. Output: the svg's HTML; its colour comes from .step-mark's CSS via currentColor, the same way the old plain "✓"/"✕" text did. */
@@ -549,6 +603,11 @@ function evidenceBlock(e: {
 
 /** Applies an event to the pure state, re-renders, and carries out any effect it returns. Typing is the one event that skips the re-render, because the input element already holds the new value and rebuilding it on every keystroke would move the caret and resize the OS window each time. A "tool" or "status" event that leaves the ask still running patches the live step list in place instead (see patchLiveSteps), which is what keeps its shimmer and breathe animations from restarting on every single tool call. Input: the event. Output: nothing. */
 export function dispatch(event: Parameters<typeof step>[1]): void {
+  // A fresh session starts its waveform silent: reusing the smoothed values a just-ended session left behind would show a leftover bar for a moment before the first real level arrives.
+  if (event.kind === "voiceOn") {
+    micWave = new Waveform(VOICE_WAVE_WIDTH);
+    speakerWave = new Waveform(VOICE_WAVE_WIDTH);
+  }
   const before = view.state;
   const wasAsking = before === "asking";
   // A window that was only up to show a notice goes again with it, whether the six seconds ran out or the card was clicked through.
@@ -563,14 +622,22 @@ export function dispatch(event: Parameters<typeof step>[1]): void {
     wasAsking &&
     view.state === "asking";
   const patched = stillRunning && patchLiveSteps(view);
+  // A "level" tick can arrive up to 20 times a second; it only ever moves the waveform, so it feeds the two Waveform instances directly and patches their rows in place (see scheduleVoiceWaveRepaint) instead of taking the full render() path below.
+  const isVoiceLevel = event.kind === "voiceEvent" && event.ev.type === "level";
+  if (isVoiceLevel) {
+    micWave.update(view.voiceLevel?.mic ?? 0);
+    speakerWave.update(view.voiceLevel?.speaker ?? 0);
+  }
   // "asked" only writes down which conversation the daemon put the question in, which nothing on the card draws, so it is not worth a rebuild and a window resize mid-question.
   if (
     event.kind !== "type" &&
     event.kind !== "asked" &&
     !justFinished &&
-    !patched
+    !patched &&
+    !isVoiceLevel
   )
     render(view);
+  if (isVoiceLevel) scheduleVoiceWaveRepaint();
   // Only the notice's own events restart its six seconds: a brief that arrived while a question was being answered must not be held up by every tool event that follows.
   if (event.kind.startsWith("notice")) armNotice(view);
   if (wasNoticeAlone && !view.notice) hideWindow();

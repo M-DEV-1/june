@@ -15,6 +15,7 @@ import {
   step,
   stepIconKind,
   stepLabel,
+  noticeActionLine,
   stepsCollapsed,
   stepsSummaryLine,
   stepSeconds,
@@ -945,6 +946,40 @@ describe("voice", () => {
     expect(v.voiceState).toBe("idle");
   });
 
+  // main.ts smooths these into the braille bar itself; the reducer's whole job is to hand the raw reading back out unchanged.
+  it("a level event stores the mic and speaker reading", () => {
+    const v = step(live(), {
+      kind: "voiceEvent",
+      ev: {
+        id: "voice-1",
+        type: "level",
+        detail: JSON.stringify({ mic: 0.6, speaker: 0.2 }),
+      },
+    }).view;
+    expect(v.voiceLevel).toEqual({ mic: 0.6, speaker: 0.2 });
+  });
+
+  it("a malformed level reading is stored as silence rather than thrown", () => {
+    const v = step(live(), {
+      kind: "voiceEvent",
+      ev: { id: "voice-1", type: "level", detail: "not json" },
+    }).view;
+    expect(v.voiceLevel).toEqual({ mic: 0, speaker: 0 });
+  });
+
+  it("voiceOff clears the last level reading too", () => {
+    const withLevel = step(live(), {
+      kind: "voiceEvent",
+      ev: {
+        id: "voice-1",
+        type: "level",
+        detail: JSON.stringify({ mic: 0.6, speaker: 0.2 }),
+      },
+    }).view;
+    const v = step(withLevel, { kind: "voiceOff" }).view;
+    expect(v.voiceLevel).toBeUndefined();
+  });
+
   // The session outlives the window: hiding it is not a way to end it, because the user hides the window to get on with what they were doing while Ora is still listening.
   it("escape hides the window and leaves the session running", () => {
     const { view: next, effect } = step(live(), { kind: "escape" });
@@ -1311,6 +1346,41 @@ describe("notice", () => {
 
   it("a click with no card up asks for nothing", () => {
     expect(step(view(), { kind: "noticeClick" }).effect).toBeUndefined();
+  });
+});
+
+// noticeActionLine is what the desktop notification's own Done/snooze buttons turn a notice into, once the daemon sends the same notice back with that button's choice on it (see internal/proactive/notify.go's chose/snooze/markDone).
+describe("noticeActionLine", () => {
+  const now = new Date("2026-09-05T12:00:00");
+  const base: Notice = {
+    title: "Still open",
+    body: "Send the invoice",
+    place: "tasks",
+    id: "42",
+    kind: "task",
+  };
+
+  it("is undefined for a notice arriving fresh, which draws as it always has", () => {
+    expect(noticeActionLine({ ...base, action: "" }, now)).toBeUndefined();
+  });
+
+  it("is 'Done' for one dismissed outright", () => {
+    expect(noticeActionLine({ ...base, action: "done" }, now)).toBe("Done");
+  });
+
+  it("says the clock time for a snooze landing later the same day", () => {
+    const n = { ...base, action: "snoozed", until: "2026-09-05T18:00:00" };
+    expect(noticeActionLine(n, now)).toBe("Snoozed until 18:00");
+  });
+
+  it("says 'tomorrow' for a snooze that crosses midnight", () => {
+    const n = { ...base, action: "snoozed", until: "2026-09-06T09:00:00" };
+    expect(noticeActionLine(n, now)).toBe("Snoozed until tomorrow 09:00");
+  });
+
+  it("falls back to a bare 'Snoozed' for an until the daemon sent malformed", () => {
+    const n = { ...base, action: "snoozed", until: "not-a-date" };
+    expect(noticeActionLine(n, now)).toBe("Snoozed");
   });
 });
 
