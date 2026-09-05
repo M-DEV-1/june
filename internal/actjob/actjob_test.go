@@ -955,3 +955,11 @@ func TestFromPromptFunc_EstimatesWhatTheSeamDoesNotReport(t *testing.T) {
 		t.Errorf("usage = %+v, want claude-cli with 100 in and 10 out", usage)
 	}
 }
+
+// A type_text step that named no check at all stays empty rather than gaining a redacted value for a check that never existed.
+func TestRedactedExpect_LeavesAnEmptyCheckAlone(t *testing.T) {
+	got := redactedExpect("type_text", act.Check{})
+	if got.Value != "" || got.Kind != "" {
+		t.Errorf("redactedExpect(type_text, empty) = %+v, want it untouched", got)
+	}
+}

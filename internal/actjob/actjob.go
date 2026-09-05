@@ -819,6 +819,10 @@ func readVerdict(result string) (string, string) {
 
 // redactedExpect is what a step's Expect is stored and described as, in place of what the model actually wrote down, wherever it could otherwise repeat text StorableArgs already dropped from the same step's own arguments. A type_text step redacts its Value regardless of what kind of check it names, since the box just typed into is exactly what a check right after it is about. A field_holds check redacts its Value regardless of which tool the step named, since it can only be asking about a field something was just typed into. Kind is left alone either way, so the stored and emitted check still says what kind of thing was being verified. Input: the step's tool name and the expected change the model wrote down for it. Output: the expect to store and to describe; the live wait_for check must keep using the real one this came from.
 func redactedExpect(tool string, e act.Check) act.Check {
+	// A step with no check named has nothing to hide, and stamping the marker on it would record a check that never existed.
+	if e.Value == "" {
+		return e
+	}
 	if tool == "type_text" || e.Kind == act.FieldHolds {
 		e.Value = db.RedactedValue
 	}
