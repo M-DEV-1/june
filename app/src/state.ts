@@ -2,6 +2,7 @@
 
 import { truncateAtWord } from "./shared/errorline";
 import type { DaemonEvent, Notice } from "./daemon";
+import { renderLevelEvent, type LevelDetail } from "./waveform";
 
 export type Evidence = { title: string; meta: string; body?: string };
 
@@ -93,6 +94,8 @@ export type View = {
   voice?: string;
   /** What that session is doing; "idle" whenever `voice` is empty. */
   voiceState?: VoiceState;
+  /** The daemon's last "level" reading for this session, {mic, speaker} each 0-1 (see renderLevelEvent in waveform.ts), undefined whenever `voice` is empty. main.ts owns the Waveform instances that smooth these into the braille bar; this is just the latest raw reading, kept here only so it is visible to the reducer's own tests. */
+  voiceLevel?: LevelDetail;
   /** The notice card showing right now, undefined when none is. It is nothing to do with the ask on the rest of the card: a notice arriving mid-question leaves that question exactly as it was. */
   notice?: Notice;
   /** Whether the notice is the only thing on screen. True when the hover was not open when the notice arrived, so the card underneath has nothing on it worth showing; false when the user already had the hover open and the notice stacks above what is there. */
@@ -142,6 +145,21 @@ export type Event =
 
 /** How long a notice stays on screen before it goes by itself, in milliseconds. Long enough to read three lines, short enough that a card the user is not interested in is gone before it becomes something to dismiss. The timer itself runs in main.ts; the pointer being over the card pauses it (see noticeHeld). */
 export const NOTICE_MS = 6000;
+
+/** The one-line text a notice whose action is set shows instead of its usual title and body: "Snoozed until 18:00" for one snoozed from its own desktop notification's buttons, "Snoozed until tomorrow 09:00" once the snooze crosses midnight, or "Done" for one dismissed outright. Input: the notice, and the current moment, used only to tell whether until falls on today. Output: the line, or undefined for a notice with no action, which draws exactly as it always has (see renderNotice in main.ts). */
+export function noticeActionLine(n: Notice, now: Date): string | undefined {
+  if (n.action === "done") return "Done";
+  if (n.action !== "snoozed" || !n.until) return undefined;
+  const until = new Date(n.until);
+  if (isNaN(until.getTime())) return "Snoozed";
+  const hhmm = until.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const sameDay = until.toDateString() === now.toDateString();
+  return `Snoozed until ${sameDay ? hhmm : `tomorrow ${hhmm}`}`;
+}
 
 /** close hides the hover. openNotice opens the main app window at the screen and row the clicked notice named, which are empty when it named none and the window should just open. ask sends the question that has just gone on the card to the daemon, in the conversation named, or in a new one the daemon opens when none is named. */
 export type Effect =
@@ -901,6 +919,7 @@ export function step(
           ...view,
           voice: event.id,
           voiceState: "listening",
+          voiceLevel: undefined,
           dictating: false,
           hint,
           voiceHintShown: true,
@@ -910,7 +929,15 @@ export function step(
 
     case "voiceOff":
       // Clears the "Live voice started" hint too, if it is still up: the resting look shows no hint, only ever the standing placeholder.
-      return { view: { ...view, voice: "", voiceState: "idle", hint: "" } };
+      return {
+        view: {
+          ...view,
+          voice: "",
+          voiceState: "idle",
+          voiceLevel: undefined,
+          hint: "",
+        },
+      };
 
     // A notice is Ora speaking first, so every case below touches the notice fields and nothing else: a brief landing while a question is being answered must leave that question, its steps and the input exactly as they were.
     case "notice":
@@ -964,6 +991,10 @@ export function step(
           view: { ...view, voiceState: (ev.text as VoiceState) || "listening" },
         };
       }
+
+      // Ticks in every 50ms while a session runs; main.ts reads this straight back out to smooth into the braille bar (see its Waveform instances) without going through a full re-render.
+      if (ev.type === "level")
+        return { view: { ...view, voiceLevel: renderLevelEvent(ev.detail ?? "") } };
 
       const m = currentMatter(view);
       if (!m) return { view };

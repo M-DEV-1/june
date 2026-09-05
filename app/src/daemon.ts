@@ -82,19 +82,21 @@ export async function voiceStatus(): Promise<{
   }
 }
 
-/** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep. title is the card's bold first line and body the few lines under it; place names the app window's screen a click opens ("tasks", "days") and id the row to select there, both empty when the moment points at nothing in particular; kind names the moment ("brief", "close", "meeting", "note"). The shape is fixed by the Go side, see internal/ipc/notice.go. */
+/** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep. title is the card's bold first line and body the few lines under it; place names the app window's screen a click opens ("tasks", "days") and id the row to select there, both empty when the moment points at nothing in particular; kind names the moment ("brief", "close", "meeting", "note"). action and until are empty on a notice arriving fresh, and set when the user has since pressed a button on the desktop notification it was also posted as: action is "snoozed" or "done", and until is the RFC 3339 moment a snoozed notice comes back. The shape is fixed by the Go side, see internal/ipc/notice.go. */
 export type Notice = {
   title: string;
   body: string;
   place: string;
   id: string;
   kind: string;
+  action?: string;
+  until?: string;
 };
 
 /** The shape of every event on the daemon's SSE stream, whichever client reads it. The one place this is declared: a client-side copy that drifts from this adds a field the compiler cannot check against what the wire actually sends. */
 export type DaemonEvent = {
   id: string;
-  /** The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, "notice" is Ora speaking first, and "act" carries one line of a computer-use job's progress, its parts as JSON in detail (see internal/ipc/actjob.go). */
+  /** The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, and "act" carries one line of a computer-use job's progress, its parts as JSON in detail (see internal/ipc/actjob.go). */
   type:
     | "status"
     | "tool"
@@ -105,10 +107,11 @@ export type DaemonEvent = {
     | "heard"
     | "said"
     | "state"
+    | "level"
     | "notice"
     | "act";
   text?: string;
-  /** Carried on a "tool" event (a short summary of what that call is doing or found) and on an "act" event (the job progress, as JSON text — see internal/ipc/actjob.go's ActEmitter). */
+  /** Carried on a "tool" event (a short summary of what that call is doing or found), on an "act" event (the job progress, as JSON text — see internal/ipc/actjob.go's ActEmitter) and on a "level" event (the session's mic/speaker amplitude as JSON text, {"mic":0-1,"speaker":0-1} — see internal/ipc/voice.go's levels and waveform.ts's renderLevelEvent). */
   detail?: string;
   evidence?: { title: string; meta: string; body: string }[];
   /** Only carried on a "notice" event: the whole card. */

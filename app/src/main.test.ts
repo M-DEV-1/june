@@ -185,3 +185,84 @@ describe("the raw stream event needs no cast to reach the reducer", () => {
     expect(() => onEvent(notice)).not.toThrow();
   });
 });
+
+// The waveform itself (buildVariation, the smoothing, the braille rows) is tested in waveform.test.ts; this only checks that a "level" event on a live session reaches the DOM at all, and reaches it as the row wide enough main.ts asked waveform.ts to build.
+describe("the live-voice waveform", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("shows the silent rows once voice starts, and changed rows once a level event reports a loud mic", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "voiceOn", id: "voice-1" });
+    const rowText = () =>
+      Array.from(document.querySelectorAll(".vw-mic .vw-row")).map(
+        (el) => el.textContent ?? "",
+      );
+    const [silentTop, silentBottom] = rowText();
+    expect(silentTop).toBeTruthy();
+    expect(silentTop).toBe("⣀".repeat(silentTop.length));
+    expect(silentBottom).toBe("⠉".repeat(silentBottom.length));
+    // The speaker is silent from the start, so its rows are not shown at all — only once it has something to say does it appear beside the mic.
+    expect(document.querySelector(".vw-spk")).toBeNull();
+
+    dispatch({
+      kind: "voiceEvent",
+      ev: {
+        id: "voice-1",
+        type: "level",
+        detail: JSON.stringify({ mic: 0.8, speaker: 0 }),
+      },
+    });
+    // The repaint is coalesced to at most one per animation frame rather than applied synchronously (see scheduleVoiceWaveRepaint in main.ts), so the DOM only reflects it after one has run.
+    await new Promise((r) => requestAnimationFrame(r));
+
+    const [loudTop, loudBottom] = rowText();
+    expect(loudTop).not.toBe(silentTop);
+    expect(loudBottom).not.toBe(silentBottom);
+  });
+});
+
+// A notice sent back with its action filled in is the desktop notification's own Done/snooze buttons reaching this window (see internal/proactive/notify.go); it draws as one line instead of the title and body a fresh notice shows, reusing the same bubble and the same .nt/.nb markup.
+describe("a notice's action line replaces its title and body in the bubble", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("shows 'Done' alone for a notice dismissed from its own notification", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({
+      kind: "notice",
+      notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task", action: "done", until: "" },
+      hoverOpen: true,
+    });
+
+    const bubble = document.getElementById("n");
+    expect(bubble?.querySelector(".nt")?.textContent).toBe("Done");
+    expect(bubble?.querySelector(".nb")).toBeNull();
+  });
+
+  it("shows the snooze time for a notice snoozed from its own notification", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const until = new Date();
+    until.setHours(until.getHours() + 1, 0, 0, 0);
+    dispatch({
+      kind: "notice",
+      notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: until.toISOString() },
+      hoverOpen: true,
+    });
+
+    const bubble = document.getElementById("n");
+    expect(bubble?.querySelector(".nt")?.textContent).toContain("Snoozed until");
+    expect(bubble?.querySelector(".nb")).toBeNull();
+  });
+});
