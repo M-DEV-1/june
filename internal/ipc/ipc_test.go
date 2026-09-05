@@ -243,6 +243,35 @@ func TestHub_SlowClientDroppedWithoutBlockingFast(t *testing.T) {
 	h.unsubscribe(fast)
 }
 
+// TestHub_LevelBurstDoesNotDropStalledClient covers the one event type a live voice session sends twenty times a second for the whole session. A client that stalls its read for a few hundred milliseconds — a re-render, a layout pass — used to fill its buffer with stale amplitudes and be dropped for it, which ends its /events stream and makes the window reconnect and refetch mid-conversation. After a burst of 200 "level" events with nothing draining, the client must still be subscribed and must still receive a later ordinary event.
+func TestHub_LevelBurstDoesNotDropStalledClient(t *testing.T) {
+	h := newHub()
+	stalled := h.subscribe() // never drained during the burst, the way a busy window is not
+	for i := 0; i < 200; i++ {
+		h.broadcast(Event{ID: "voice-1", Type: levelEventType, Detail: `{"mic":0.5,"speaker":0}`})
+	}
+	h.broadcast(Event{ID: "voice-1", Type: "said", Text: "hello"})
+
+	h.mu.Lock()
+	_, present := h.clients[stalled]
+	h.mu.Unlock()
+	if !present {
+		t.Fatalf("client was dropped by a burst of level events")
+	}
+
+	// At most levelQueueDepth stale levels sit ahead of the ordinary event, so draining a full buffer's worth must reach it.
+	found := false
+	for i := 0; i < clientBufferSize && !found; i++ {
+		if ev := mustEvent(t, stalled); ev.Type == "said" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the ordinary event broadcast after the level burst never arrived")
+	}
+	h.unsubscribe(stalled)
+}
+
 // evidenceFor turns the agent's evidence rows into the window's evidence items: the title as it is, kind and when joined as the meta line, the excerpt as the body, in the agent's order; a turn with no evidence yields an empty, non-nil list so the JSON stays [] and never null.
 func TestEvidenceFor(t *testing.T) {
 	trace := agent.TurnTrace{Evidence: []agent.Evidence{
