@@ -1,4 +1,4 @@
-/** Seed data for the window: the venue matter's script, the CI-red matter already answered, and the lease stub. */
+/** Seed data for the window: the venue matter's script, the CI-red matter already answered, and the lease stub. Also owns the ?mock=1&voice=1 switch, which fakes a live-voice session (see startMockVoice) so the composer's braille waveform can be exercised and screenshotted with no daemon and no microphone. */
 import type { Evidence, Matter, View } from "./state";
 
 /** The one email both venue turns read from. Turn one leaves it collapsed; turn two is the same source, expanded. */
@@ -52,3 +52,49 @@ export function initialView(): View {
     contextText: "",
   };
 }
+
+/** The fake voice session's id fed to main.ts's dispatch, standing in for the id a real POST /voice/start would return. */
+const MOCK_VOICE_ID = "mock-voice";
+
+/** How often a "level" event ticks, matching the daemon's real cadence (see internal/ipc/voice.go's levels) so the mock exercises the same 20-times-a-second repaint path a live session does. */
+const TICK_MS = 50;
+
+/** How long each envelope cycle runs: a second of speech, then half a second of near-quiet, then the next cycle starts. */
+const BURST_MS = 1000;
+const CYCLE_MS = 1500;
+
+/** The mic/speaker reading a fake level event carries this many milliseconds into the session. Deterministic (a sine wave, not Math.random) so the same elapsed time always renders the same frame, which is what makes a headless screenshot at a given moment repeatable. Input: milliseconds since the fake session started. Output: {mic, speaker}, each 0-1 — the mic bursts between 0.3 and 0.9 for the first second of every 1.5s cycle and drops to near-silence for the half second after; the speaker rides its own 0.3-0.9 burst only on every other (odd-numbered) cycle, silent the rest of the time, so both rows get a turn on screen. */
+export function fakeLevelAt(ms: number): { mic: number; speaker: number } {
+  const cycle = Math.floor(ms / CYCLE_MS);
+  const within = ((ms % CYCLE_MS) + CYCLE_MS) % CYCLE_MS;
+  const inBurst = within < BURST_MS;
+  const tick = Math.floor(within / TICK_MS);
+  const burst = (phase: number) => 0.6 + 0.3 * Math.sin(tick * 0.9 + phase);
+  return {
+    mic: inBurst ? burst(0) : 0.03,
+    speaker: inBurst && cycle % 2 === 1 ? burst(1.5) : 0,
+  };
+}
+
+/** Wires ?mock=1&voice=1: starts a fake live-voice session so the hover's composer waveform can be driven and screenshotted without a daemon or a microphone. Input: the page's query params. Output: nothing; dispatches "voiceOn" and then a "level" event every 50ms straight into main.ts's real dispatch (see fakeLevelAt for the envelope), same as a live session's daemon events would. main.ts imports this module (for initialView/venueScript), so importing dispatch back from "./main" at the top of this file would be a circular static import — main.ts would still be mid-load, before its own view/root/Waveform locals exist, the moment this file's top level ran. A dynamic import() instead resolves once main.ts has actually finished loading (immediately, since by then it already has), sidestepping that. */
+export function startMockVoice(params: URLSearchParams): void {
+  if (!params.has("mock") || params.get("voice") !== "1") return;
+  void import("./main").then(({ dispatch }) => {
+    dispatch({ kind: "voiceOn", id: MOCK_VOICE_ID });
+    let elapsed = 0;
+    setInterval(() => {
+      elapsed += TICK_MS;
+      const { mic, speaker } = fakeLevelAt(elapsed);
+      dispatch({
+        kind: "voiceEvent",
+        ev: {
+          id: MOCK_VOICE_ID,
+          type: "level",
+          detail: JSON.stringify({ mic, speaker }),
+        },
+      });
+    }, TICK_MS);
+  });
+}
+
+startMockVoice(new URLSearchParams(location.search));
