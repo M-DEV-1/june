@@ -30,6 +30,7 @@ import {
   type Theme,
   type ToolStep,
   type View,
+  type VoiceState,
 } from "./state";
 // The key a clicked notice's target is left under is defined beside the code in the app window that reads it, so there is one spelling of it rather than two.
 import { OPEN_AT_KEY } from "./app/state";
@@ -116,8 +117,8 @@ let askId: string | undefined;
 /** The daemon's id for the computer-use job this window started with "do:", the same way askId tracks an ask's. Undefined until the POST /act reply lands, and again once the job is done — a fresh "do:" always starts a fresh job, never answers a stale one. */
 let jobId: string | undefined;
 
-/** How many columns wide the live-voice waveform is, in the composer's own braille rows rather than the terminal client's full-width bar. There is no microphone grid to share the row with any more (see voiceWaveInnerHtml), so this is wider and more detailed than the old two-grid layout was, filling the composer row's free width instead of splitting it. */
-const VOICE_WAVE_WIDTH = 32;
+/** How many columns wide the live-voice waveform is: the centrepiece grid of the voice-mode surface that takes over the whole card while a session runs (see cardHtml's v.voice branch), not a sliver beside the input any more. Roughly the terminal client's own width (see internal/ui/waveform.go) at the larger 16px type the surface reads at. */
+const VOICE_WAVE_WIDTH = 40;
 
 /** The speaker's smoothed amplitude for the live-voice waveform (Ora's voice, not the user's mic — see voiceWaveInnerHtml), owned here rather than in the view: it updates up to 20 times a second off the daemon's "level" events (see voiceEvent in state.ts), and running that through the full reducer-and-render path on every tick would rebuild the whole card that often for nothing. Reset to a fresh (silent) instance every time a session starts, in dispatch's "voiceOn" case, so a new session never shows the tail end of the last one's bar. */
 let speakerWave = new Waveform(VOICE_WAVE_WIDTH);
@@ -257,6 +258,9 @@ function render(v: View): void {
     const job = currentJobView();
     if (job) void actPauseResume(job.id, job.state !== "paused");
   });
+  root
+    .querySelector(".vs-stop")
+    ?.addEventListener("click", () => void toggleVoice());
 }
 
 /** The notice drawn into the bubble right now, so an unrelated render — a tool event landing while the notice is up — leaves it alone instead of rewriting its markup and replaying its entrance. The reducer builds a new view object for every event but only replaces the notice itself when the notice changes, so identity is what says whether anything has to be redrawn. */
@@ -345,22 +349,51 @@ function voiceWaveInnerHtml(): string {
   return `<span class="vw-spk">${voiceWaveRowsHtml(speakerWave)}</span>`;
 }
 
-/** The live-voice waveform shown in the composer for the whole live session, ported from the terminal client's own braille bar (see internal/ui/waveform.go and app/src/waveform.ts). The title attribute repeats the "Shift+Space to stop" line the input's placeholder already shows while empty, since typing over that placeholder — the one other place that line lives — is exactly what live voice is for. Input: none. Output: the span's HTML, or "" when no session is running. */
-function voiceWaveHtml(v: View): string {
-  if (!v.voice) return "";
-  return `<span class="vwave" title="Live voice on · Shift+Space to stop">${voiceWaveInnerHtml()}</span>`;
+/** The word shown above the voice-mode grid for what the session is doing right now, straight off the daemon's "state" events (see internal/ipc/voice.go's setState: "listening", "thinking" or "speaking" while a session runs, "idle" only once it has ended, at which point voiceOff has already taken the whole surface down). Input: the view's voiceState. Output: the word, defaulting to "Listening" for "idle" or anything unrecognised — a session with nothing to show yet is still just waiting to hear something. */
+function voiceStateWord(state: VoiceState | undefined): string {
+  if (state === "thinking") return "Thinking";
+  if (state === "speaking") return "Speaking";
+  return "Listening";
 }
 
-/** The whole card: the input line, the thread of what has been asked so far, and the footer. Input: the view and the matter the turns belong to. Output: the card's HTML. */
+/** The live transcript under the voice-mode grid: the last thing the user said and the last thing Ora said, one line each. Both come straight off the current matter's last turn — a live session's "heard" and "said" events already fold into a turn's q and a the same way a typed question and its answer do (see the voiceEvent case in state.ts) — so there is nothing new to store here, only to read. Input: the matter the session's turns are landing in. Output: the two lines' HTML, either one left out while it has nothing yet, or "" while neither does. */
+function voiceTranscriptHtml(m: Matter): string {
+  const last = m.turns[m.turns.length - 1];
+  const you = last?.q ? `<div class="vs-you">${esc(last.q)}</div>` : "";
+  const ora = last?.a ? `<div class="vs-ora">${esc(last.a)}</div>` : "";
+  return you || ora ? `<div class="vs-transcript">${you}${ora}</div>` : "";
+}
+
+/** The stop control's icon: a filled square, the universal "stop" glyph a recorder uses in place of its round record dot. Input: none. Output: the svg's HTML. */
+function voiceStopIcon(): string {
+  return `<svg viewBox="0 0 16 16" width="12" height="12"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>`;
+}
+
+/** The whole card while a live voice session runs, replacing the input and the thread entirely — the way Gemini Live and ChatGPT's own voice mode take over the screen instead of sharing it with the composer. Ora's braille rows (see voiceWaveInnerHtml) sit centred as the surface's centrepiece; the state word and transcript above and below it read off the same view and matter the resting card would; the stop control ends the session the same way Shift+Space does (see the click handler in render()). Input: the view and the matter the session's turns are landing in. Output: the surface's HTML. */
+function voiceSurfaceHtml(v: View, m: Matter): string {
+  return `
+    <div class="voicebox">
+      <div class="vs-state">${esc(voiceStateWord(v.voiceState))}</div>
+      <span class="vwave">${voiceWaveInnerHtml()}</span>
+      ${voiceTranscriptHtml(m)}
+      <div class="vs-ctl">
+        <button type="button" class="vs-stop" aria-label="Stop voice">${voiceStopIcon()}</button>
+        <span class="vs-hint">Shift+Space</span>
+      </div>
+    </div>
+  `;
+}
+
+/** The whole card: the input line, the thread of what has been asked so far, and the footer — or, for the whole length of a live voice session, the voice-mode surface instead (see voiceSurfaceHtml). Input: the view and the matter the turns belong to. Output: the card's HTML. */
 function cardHtml(v: View, m: Matter): string {
+  if (v.voice) return voiceSurfaceHtml(v, m);
   const tag = daemonUp ? "daemon" : mockMode ? "mock" : "daemon offline";
 
   return `
-    <div class="in${v.dictating ? " holding" : ""}${v.voice ? " live" : ""}">
+    <div class="in${v.dictating ? " holding" : ""}">
       <span class="dot ${dotClass(v, daemonUp)}"></span>
       <input class="q" value="${esc(v.input)}" placeholder="${esc(placeholder(v))}" />
       <span class="wave"><i></i><i></i><i></i></span>
-      ${voiceWaveHtml(v)}
       ${v.contextChip ? `<span class="ctx">${esc(v.contextChip)}</span>` : ""}
     </div>
     ${threadHtml(v, m)}
@@ -382,6 +415,14 @@ function scheduleVoiceWaveRepaint(): void {
     voiceWaveFrame = undefined;
     repaintVoiceWave();
   });
+}
+
+/** The amplitude fed to the voice-mode grid's Waveform for one "level" tick. A real reading above the noise floor drives it as-is; below that — Ora listening rather than speaking, which is most of a session — a small deterministic sine (0.05-0.12 at 0.4Hz, so one full breath takes about 2.5s) takes over instead, the same idle "breathing" a voice orb does, so the grid still reads as alive instead of flatlining the moment she stops talking. Input: the level event's speaker reading (0-1). Output: the amplitude to update the Waveform with. */
+function voiceGridAmplitude(speaker: number): number {
+  const BREATH_FLOOR = 0.02;
+  if (speaker > BREATH_FLOOR) return speaker;
+  const t = Date.now() / 1000;
+  return 0.085 + 0.035 * Math.sin(2 * Math.PI * 0.4 * t);
 }
 
 /** The check or cross a finished step's mark draws itself with (see the "draw" keyframe in styles.css) — an SVG stroke rather than a character so it can animate stroke-dashoffset instead of just popping in. Input: which one. Output: the svg's HTML; its colour comes from .step-mark's CSS via currentColor, the same way the old plain "✓"/"✕" text did. */
@@ -619,7 +660,7 @@ export function dispatch(event: Parameters<typeof step>[1]): void {
   // A "level" tick can arrive up to 20 times a second; it only ever moves the waveform, so it feeds the Waveform instance directly and patches its rows in place (see scheduleVoiceWaveRepaint) instead of taking the full render() path below. The event still carries a mic reading (see renderLevelEvent in waveform.ts) — nothing draws it any more, so it is read into view.voiceLevel and left there unused rather than drawn, which is harmless.
   const isVoiceLevel = event.kind === "voiceEvent" && event.ev.type === "level";
   if (isVoiceLevel) {
-    speakerWave.update(view.voiceLevel?.speaker ?? 0);
+    speakerWave.update(voiceGridAmplitude(view.voiceLevel?.speaker ?? 0));
   }
   // "asked" only writes down which conversation the daemon put the question in, which nothing on the card draws, so it is not worth a rebuild and a window resize mid-question.
   if (
