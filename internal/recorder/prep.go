@@ -160,25 +160,44 @@ func isCaselessLetter(r rune) bool {
 	return unicode.ToUpper(r) == unicode.ToLower(r)
 }
 
-// caselessScriptNames finds name candidates in text written in a script with no case, where the "one to four capitalised words" shape looksLikeName expects cannot apply because nothing in the script can be capitalised. Input: any screen text. Output: every run of two or more such letters, in the order found — one pass over the runes, not a regex, which is what keeps this as cheap as the ASCII pattern it sits beside.
+// caselessScriptNames finds name candidates in text written in a script with no case, where the "one to four capitalised words" shape looksLikeName expects cannot apply because nothing in the script can be capitalised. Input: any screen text. Output: the caseless runs found on the lines that are shaped like a roster line, in the order found.
+//
+// Only whole lines that are name-shaped are read, the way the roster and chat-sender passes beside this one only read a name off the start of its own line. A caseless script gives the shape rules nothing else to work with: with no capital to look for and no digits or colon on the line, every button label, chat line and app name on a Chinese or Hindi meeting window is exactly as name-shaped as a name is, so reading them out of the middle of running text turns the whole interface into participants.
+// ponytail: a single caseless word alone on its own line — a toolbar button in Chinese, say — still passes, since nothing but a contact list tells it from a one-word name; it stops being a participant once that person is in personal context, the same ceiling the Latin chrome-word check already has.
 func caselessScriptNames(text string) []string {
 	var out []string
-	runes := []rune(text)
+	for _, line := range strings.Split(text, "\n") {
+		if looksLikeName(strings.TrimSpace(line)) {
+			out = append(out, caselessRuns(line)...)
+		}
+	}
+	return out
+}
+
+// caselessRuns pulls the stretches of caseless-script writing out of one line. Input: a single line of screen text. Output: each run of two or more caseless letters, with the spaces inside a run kept so a two-word name in such a script arrives as one name rather than two candidates.
+func caselessRuns(line string) []string {
+	var out []string
+	runes := []rune(line)
 	start := -1
 	flush := func(end int) {
-		if start >= 0 && end-start >= 2 {
-			out = append(out, string(runes[start:end]))
+		if start >= 0 {
+			if s := strings.TrimSpace(string(runes[start:end])); len([]rune(s)) >= 2 {
+				out = append(out, s)
+			}
 		}
 		start = -1
 	}
 	for i, r := range runes {
-		if isCaselessLetter(r) {
+		switch {
+		case isCaselessLetter(r):
 			if start < 0 {
 				start = i
 			}
-			continue
+		case r == ' ' && start >= 0:
+			// A space inside a run is part of the name being read, so the run carries on; if nothing caseless follows, the trailing space is trimmed off when the run is flushed.
+		default:
+			flush(i)
 		}
-		flush(i)
 	}
 	flush(len(runes))
 	return out
