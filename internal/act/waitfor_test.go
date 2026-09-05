@@ -1,6 +1,9 @@
 package act
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestMatch is the whole matcher table: every check kind against a screen that satisfies it and one that does not, plus the two malformed checks a model can write.
 func TestMatch(t *testing.T) {
@@ -58,5 +61,18 @@ func TestCheckDescribe(t *testing.T) {
 		if got := tc.check.Describe(); got != tc.want {
 			t.Errorf("Describe(%+v) = %q, want %q", tc.check, got, tc.want)
 		}
+	}
+}
+
+// A field_holds verdict never repeats what the field holds, in either direction, because the field was just typed into and that text is what every other guard keeps off disk and off the stream.
+func TestMatch_FieldHoldsVerdictNeverEchoesTheField(t *testing.T) {
+	c := Check{Kind: FieldHolds, Value: "hunter2"}
+	ok, why := Match(c, "", nil, "hunter2correcthorse")
+	if !ok || strings.Contains(why, "hunter2") || strings.Contains(why, "correcthorse") {
+		t.Errorf("pass verdict = %v %q, want a pass that does not echo the field", ok, why)
+	}
+	ok, why = Match(c, "", nil, "secret sauce")
+	if ok || strings.Contains(why, "secret") {
+		t.Errorf("fail verdict = %v %q, want a fail that does not echo the field", ok, why)
 	}
 }
