@@ -1,0 +1,209 @@
+// delegate.go is the smallest first version of handing a bounded piece of work to another agent — Claude Code running as a real collaborator in a project directory, rather than the sandboxed, tool-less "answer this question" mode AskClaude runs its own asks in (claude.go). Everything here is self-contained: nothing outside this file is edited, and nothing here is wired into the tool table yet (see delegateTool/delegateHandler at the bottom).
+package agent
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"ora/internal/db"
+
+	"google.golang.org/genai"
+)
+
+// Delegation is one request to hand a goal to another agent. To names the target — "claude" is the only one this version runs. Brief is the goal in the user's own words. CWD is the project directory to run the delegate in, so it works in a real repo rather than Ora's own sandbox; empty means the daemon's own working directory. Wait says whether the caller blocks for the result; this version always waits, but the field is here so a later fire-and-forget version does not change the shape callers already build.
+type Delegation struct {
+	To    string
+	Brief string
+	CWD   string
+	Wait  bool
+}
+
+// Runner runs one delegate session to completion. Input: the working directory to run in, the system prompt (the brief) and the prompt (what to do). Output: the delegate's plain-text answer, or an error naming what went wrong. A test replaces this with a stub so Delegate runs without starting a CLI.
+type Runner interface {
+	Run(ctx context.Context, cwd, systemPrompt, prompt string) (string, error)
+}
+
+// claudeCodeBinary is the Claude Code command line, found on PATH — the same binary claude.go's ask path runs.
+const claudeCodeBinary = "claude"
+
+// ClaudeCodeRunner runs a delegate session through `claude -p` in the caller's own project directory, under the CLI's normal default permission mode — not the --restricted, no-tools sandbox AskClaude uses for its own asks, because a delegate call is a real hand-off to a collaborator working in a real project. --bare is never passed (it would bill the API key instead of the subscription, the same reason claude.go never passes it) and --dangerously-skip-permissions is never passed (a delegate with real tool access needs the CLI's own approval gate, not nobody watching).
+type ClaudeCodeRunner struct{}
+
+// Run starts one `claude -p` process in cwd. The system prompt goes to a 0600 file in a fresh temp directory rather than argv, the same reason writeClaudeAskFiles does it in claude.go: a single argv entry is capped at 128 KB on Linux and any local process can read another's argv via /proc/<pid>/cmdline. The prompt goes on stdin. Output: stdout, trimmed, as the result.
+func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt string) (string, error) {
+	dir, err := os.MkdirTemp("", "ora-delegate-")
+	if err != nil {
+		return "", fmt.Errorf("delegate: making the system prompt's temp dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	promptPath := filepath.Join(dir, "system-prompt.txt")
+	if err := os.WriteFile(promptPath, []byte(systemPrompt), 0o600); err != nil {
+		return "", fmt.Errorf("delegate: writing the system prompt: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, claudeCodeBinary, "-p", "--output-format", "text", "--system-prompt-file", promptPath, "--permission-mode", "default")
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	cmd.Stdin = strings.NewReader(prompt)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	// Killing the child does not kill its own children, and stdout stays open as long as any of them holds it — see runClaudeCLI in claude.go for the same reasoning.
+	cmd.WaitDelay = 2 * time.Second
+	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", errors.New("delegate: the run timed out")
+		}
+		return "", fmt.Errorf("delegate: %w: %s", err, claudeHead(stderr.String()))
+	}
+	text := strings.TrimSpace(out.String())
+	if text == "" {
+		return "", errors.New("delegate: the run returned no text")
+	}
+	return text, nil
+}
+
+// delegateThreadBudget bounds how much of the conversation thread a brief carries, in runes, newest kept — sized for a one-page brief rather than a full model prompt (compare maxHistoryBytes in ask.go, which bounds an ask's own thread the same way).
+const delegateThreadBudget = 4000
+
+// BuildBrief writes the one page handed to a delegate. Input: the goal in the user's own words, the conversation thread it grew out of (oldest first, as db.Store.ConversationTurns returns it — nil for none), and the personal-context block to include (as personalContextBlock renders it, "" for none). Output: the brief text: the goal, what Ora knows of the thread so far (the newest lines that fit delegateThreadBudget runes), the personal-context block, the constraints every delegate call carries, and where to report. A thread line naming a secret is dropped rather than included — see redactLine.
+func BuildBrief(goal string, thread []db.Turn, personal string) string {
+	var b strings.Builder
+	b.WriteString("Goal: " + strings.TrimSpace(goal) + "\n")
+
+	lines := make([]string, 0, len(thread))
+	for _, t := range thread {
+		if t.Kind == "error" {
+			continue
+		}
+		text := strings.TrimSpace(t.Text)
+		if text == "" {
+			continue
+		}
+		who := "ora:"
+		if t.Role == "you" {
+			who = "user:"
+		}
+		line := who + " " + text
+		if redactLine(line) {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	lines = keepNewestRunes(lines, delegateThreadBudget)
+
+	b.WriteString("\nWhat Ora knows:\n")
+	if len(lines) == 0 {
+		b.WriteString("(nothing said in this conversation yet)\n")
+	} else {
+		for _, l := range lines {
+			b.WriteString(l + "\n")
+		}
+	}
+
+	if p := strings.TrimSpace(personal); p != "" {
+		b.WriteString("\n" + p + "\n")
+	}
+
+	b.WriteString("\nConstraints: do not send, publish, pay for or delete anything. If the work needs one of those, stop and ask a question instead of doing it — report what you need and why. Report your result as plain text.\n")
+	b.WriteString("\nWhere to report: your plain-text reply is the whole result; it is filed as the answer to this delegation.\n")
+	return b.String()
+}
+
+// keepNewestRunes keeps the newest lines of lines that together fit within budget runes, measured backwards from the end so a thread over budget always loses its oldest part first — the same rule HistoryFromTurns applies to an ask's own thread (ask.go), in runes rather than bytes since a brief is read as text, not billed as tokens. The newest line is kept whatever its own size.
+func keepNewestRunes(lines []string, budget int) []string {
+	size, first := 0, len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		size += utf8.RuneCountInString(lines[i]) + 1
+		if size > budget && i < len(lines)-1 {
+			break
+		}
+		first = i
+	}
+	return lines[first:]
+}
+
+// redactLine reports whether line names a secret that must never leave the machine in a delegate brief: the field-label words secretPattern already gates screen actions on (password, card, cvv, otp, pin, account number — stopline.go), or one of the credential-file patterns isSensitivePath already gates file reads on (.ssh/, .env, id_rsa, a .pem/.key suffix, and so on — tools.go). A matching line is dropped whole rather than partially redacted, since guessing which part of a sentence is the secret is how the rest of it leaks anyway.
+func redactLine(line string) bool {
+	return secretPattern.MatchString(line) || isSensitivePath(line)
+}
+
+// delegateTimeout bounds one whole delegate call: long enough for a real Claude Code session to do a bounded piece of work, short enough that a stuck delegate does not hold its caller open indefinitely.
+// ponytail: one fixed budget, not per-call configurable; add a field on Delegation if a caller ever needs a shorter or longer wall clock than this.
+const delegateTimeout = 10 * time.Minute
+
+// Delegate hands one goal to another agent and waits for its answer. Input: the delegation (who to hand it to, the goal, the working directory) and the conversation thread it grew out of, oldest first, nil for none. Output: the delegate's plain-text answer, or an error naming what went wrong — including a timeout error once delegateTimeout has passed.
+func (a *Agent) Delegate(ctx context.Context, d Delegation, thread []db.Turn) (string, error) {
+	return a.delegate(ctx, ClaudeCodeRunner{}, d, thread)
+}
+
+// delegate is Delegate against the given runner, so a test can drive a whole delegate call without starting the CLI.
+func (a *Agent) delegate(ctx context.Context, run Runner, d Delegation, thread []db.Turn) (string, error) {
+	if strings.TrimSpace(d.Brief) == "" {
+		return "", errors.New("delegate: needs a brief")
+	}
+	ctx, cancel := context.WithTimeout(ctx, delegateTimeout)
+	defer cancel()
+
+	var personal string
+	if a.brain != nil {
+		if entries, err := a.brain.PersonalContext(ctx); err != nil {
+			slog.Warn("delegate: reading personal context failed, continuing without it", "error", err)
+		} else {
+			personal = personalContextBlock(entries)
+		}
+	}
+
+	brief := BuildBrief(d.Brief, thread, personal)
+	result, err := run.Run(ctx, d.CWD, brief, d.Brief)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("delegate: timed out after %s", delegateTimeout)
+		}
+		return "", err
+	}
+	return strings.TrimSpace(result), nil
+}
+
+// delegateTool is the declaration for a "delegate" tool, shaped exactly like every entry in toolDefinitions()'s slice (tools.go) — wiring it in is appending this value to that slice's FunctionDeclarations.
+var delegateTool = &genai.FunctionDeclaration{
+	Behavior: genai.BehaviorNonBlocking,
+	Name:     "delegate",
+	Description: "Hand a bounded piece of work to Claude Code running as a real collaborator in a project directory, and wait for its plain-text answer. Use this for actual coding or shell work in a project, not a memory question — query_memory/recall/branch answer those instead. " +
+		"The delegate sees this conversation's own thread and the user's personal context, nothing else; it cannot see the screen or the rest of Ora's memory.",
+	Parameters: &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"to":    {Type: genai.TypeString, Description: "Who to hand the work to. Only \"claude\" is supported today."},
+			"brief": {Type: genai.TypeString, Description: "The goal to hand over, in plain language — what the delegate should do and how to know it is done."},
+			"cwd":   {Type: genai.TypeString, Description: "The project directory to run the delegate in. Defaults to Ora's own working directory when left out."},
+		},
+		Required: []string{"brief"},
+	},
+}
+
+// delegateHandler runs the "delegate" tool: parses its arguments and hands the brief to Agent.Delegate, rendering the result the way every case in executeTool's switch does (tools.go). Shaped as `func(ctx, a, args) string` so wiring it in is one line: `case "delegate": return delegateHandler(ctx, a, args)`. This version has no conversation thread to attach — that needs executeTool's own signature to carry one, which is the caller's edit to make alongside registering the case.
+func delegateHandler(ctx context.Context, a *Agent, args map[string]any) string {
+	brief, ok := args["brief"].(string)
+	if !ok || strings.TrimSpace(brief) == "" {
+		return toolError("delegate needs a brief describing the work")
+	}
+	cwd, _ := args["cwd"].(string)
+	to, _ := args["to"].(string)
+	result, err := a.Delegate(ctx, Delegation{To: to, Brief: brief, CWD: cwd}, nil)
+	if err != nil {
+		slog.Error("delegate: failed", "error", err)
+		return toolError("that delegate call didn't come back — try again or narrow the brief")
+	}
+	return result
+}
