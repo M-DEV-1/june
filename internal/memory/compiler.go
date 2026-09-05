@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"ora/internal/config"
 	"ora/internal/obs"
+	oratext "ora/internal/text"
 	"ora/internal/tracker"
 	"strings"
 	"sync"
@@ -71,16 +72,51 @@ type Summarizer interface {
 	AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error)
 }
 
+// RequestGate refuses a Gemini request before it is made, so a shared daily quota can cover every direct call this summarizer makes, not only the Brain-wrapped call sites elsewhere in the daemon. Allow returns nil to let a call against model proceed, or an error to refuse it. Defined here rather than imported from internal/brain (whose QuotaState is the intended implementation, via a small adapter) because internal/brain imports internal/agent, which imports this package.
+type RequestGate interface {
+	Allow(model string) error
+}
+
 // GeminiSummarizer implements Summarizer via the genai SDK. Other providers can implement the same interface later.
 type GeminiSummarizer struct {
 	client *genai.Client
 	// identity, when set, returns who the user is (the personal-context "identity" entry) so the attribution prompt can say it. Without it the model reads a calendar entry naming the user and writes them up as somebody they met.
 	identity func(context.Context) string
+	// backendMu guards stateBackend, backgroundFallback and gate, which the daemon installs after the background goroutines that read them have already started.
+	backendMu sync.RWMutex
+	// stateBackend, when set, answers DeriveState's prompt instead of the Gemini API, so the unattended working-state job can run on the local llama-server and spend no metered quota. See SetStateBackend.
+	stateBackend TextBackend
+	// backgroundFallback, when set, answers a background prompt whose Gemini call came back 429 or 503. See SetBackgroundFallback.
+	backgroundFallback TextBackend
+	// gate, when set, is checked before every direct Gemini request this summarizer makes. See SetRequestGate.
+	gate RequestGate
 }
 
 // SetIdentity gives the summarizer a way to look up who the user is at prompt time. It is a lookup rather than a string because the entry can be corrected mid-session.
 func (g *GeminiSummarizer) SetIdentity(lookup func(context.Context) string) {
 	g.identity = lookup
+}
+
+// SetRequestGate installs the check every direct Gemini request runs first, so this summarizer's calls count against the same shared daily quota as the daemon's other Gemini-routed brains. A nil gate (the default) leaves every call unmetered.
+func (g *GeminiSummarizer) SetRequestGate(gate RequestGate) {
+	g.backendMu.Lock()
+	defer g.backendMu.Unlock()
+	g.gate = gate
+}
+
+// gateFn reads the installed request gate under the lock, for the same reason stateBackendFn does: a background goroutine must never race the daemon installing one.
+func (g *GeminiSummarizer) gateFn() RequestGate {
+	g.backendMu.RLock()
+	defer g.backendMu.RUnlock()
+	return g.gate
+}
+
+// allow checks the installed gate, if any, before a call spends a request on model. Output: nil when the call may proceed.
+func (g *GeminiSummarizer) allow(model string) error {
+	if gate := g.gateFn(); gate != nil {
+		return gate.Allow(model)
+	}
+	return nil
 }
 
 func NewGeminiSummarizer(apiKey string) (*GeminiSummarizer, error) {
@@ -132,10 +168,15 @@ Be deterministic. Do not invent facts. Merge wording when updating.`,
 		strings.Join(existingLines, "\n"),
 		strings.Join(candidates, "\n"))
 
+	model := config.BackgroundModel(config.JobPersonalContext)
 	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent.ReconcileNotes")
-	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), &genai.GenerateContentConfig{
-		ResponseMIMEType: "application/json",
-	})
+	var resp *genai.GenerateContentResponse
+	err := g.allow(model)
+	if err == nil {
+		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), &genai.GenerateContentConfig{
+			ResponseMIMEType: "application/json",
+		})
+	}
 	if err != nil {
 		genSpan.RecordError(err)
 		genSpan.End()
@@ -176,10 +217,15 @@ func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tr
 	}
 	prompt := AttributePrompt(activities, existing, identity)
 
+	model := config.BackgroundModel(config.JobEpisodeSummary)
 	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent.AttributeThreads")
-	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, genai.Text(prompt), &genai.GenerateContentConfig{
-		ResponseMIMEType: "application/json",
-	})
+	var resp *genai.GenerateContentResponse
+	err := g.allow(model)
+	if err == nil {
+		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), &genai.GenerateContentConfig{
+			ResponseMIMEType: "application/json",
+		})
+	}
 	if err != nil {
 		genSpan.RecordError(err)
 		genSpan.End()
@@ -223,9 +269,14 @@ func (g *GeminiSummarizer) AnalyzeScreen(ctx context.Context, png []byte) Screen
 	}
 	contents := []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}
 
-	resp, err := g.client.Models.GenerateContent(ctx, config.TextModel, contents, &genai.GenerateContentConfig{
-		ResponseMIMEType: "application/json",
-	})
+	model := config.BackgroundModel(config.JobScreenSight)
+	var resp *genai.GenerateContentResponse
+	err := g.allow(model)
+	if err == nil {
+		resp, err = g.client.Models.GenerateContent(ctx, model, contents, &genai.GenerateContentConfig{
+			ResponseMIMEType: "application/json",
+		})
+	}
 	if err != nil {
 		span.RecordError(err)
 		return ScreenSight{}
@@ -403,7 +454,7 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, sin
 		fallbackSummary := TaskSummary{
 			SameTask: false,
 			TaskName: "Raw Activity Log",
-			Summary:  truncateRunes(strings.TrimSpace(fallbackText.String()), fallbackSummaryMaxRunes),
+			Summary:  oratext.RunesEllipsis(strings.TrimSpace(fallbackText.String()), fallbackSummaryMaxRunes),
 		}
 		if err := c.store.LogSemanticNode(ctx, fallbackSummary); err != nil {
 			slog.Error("flush: LogSemanticNode (fallback) failed", "err", err)

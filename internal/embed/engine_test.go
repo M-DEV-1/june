@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"ora/internal/config"
 	"os"
 	"strconv"
 	"testing"
@@ -44,6 +45,9 @@ func TestEngineHelperProcess(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{{"embedding": []float32{0.5, 0.5}, "index": 0}},
 		})
+	})
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "the local reply"}}}})
 	})
 	http.ListenAndServe("127.0.0.1:"+port, mux)
 }
@@ -252,4 +256,27 @@ func TestEngineStopIfIdle(t *testing.T) {
 	if !e.running() {
 		t.Fatal("the pinned engine was stopped anyway")
 	}
+}
+
+// This machine has two Vulkan devices, the Intel iGPU whose memory is system RAM and an RTX 3050 with its own 4 GB. Without --device llama-server may spread the model across both, and the user wants the embedder on the discrete card only. An empty Device leaves llama-server's own choice alone.
+func TestNewEngine_PinsTheDeviceWhenConfigured(t *testing.T) {
+	with := NewEngine(config.EmbedConfig{LlamaServer: "llama-server", ModelPath: "m.gguf", Port: 1, Device: "Vulkan1"})
+	if !hasArgPair(with.args, "--device", "Vulkan1") {
+		t.Fatalf("args = %v, want --device Vulkan1", with.args)
+	}
+	without := NewEngine(config.EmbedConfig{LlamaServer: "llama-server", ModelPath: "m.gguf", Port: 1})
+	for _, a := range without.args {
+		if a == "--device" {
+			t.Fatalf("args = %v, must not pass --device when none is configured", without.args)
+		}
+	}
+}
+
+func hasArgPair(args []string, flag, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == val {
+			return true
+		}
+	}
+	return false
 }

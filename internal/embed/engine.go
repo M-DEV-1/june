@@ -67,6 +67,9 @@ func NewEngine(cfg config.EmbedConfig) *Engine {
 		"-ub", "2048",
 		"-ngl", "99",
 	}
+	if cfg.Device != "" {
+		args = append(args, "--device", cfg.Device)
+	}
 	return newEngine(cfg.LlamaServer, args, cfg.BaseURL(), config.LocalEmbedModel, cfg.IdleTimeout*time.Millisecond)
 }
 

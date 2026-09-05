@@ -27,6 +27,9 @@ const ActionNoteKind = "action"
 // UnknownOwner is who an action item belongs to when the minutes never named anybody, matching the "owner unclear" the minutes prompt asks the model to write.
 const UnknownOwner = "Owner unclear"
 
+// MeOwner is who an action item belongs to when the minutes prompt identifies it as the [me] speaker's own, matching the "Me" the minutes prompt asks the model to write for the user's own bullets.
+const MeOwner = "Me"
+
 // maxOwnerWords and maxOwnerLen are how long the text before the dash may be and still be a person's name. A name is one to four words; anything longer is a sentence that happens to contain a dash, and filing it as a person would have the brief read a sentence out as if it were somebody who owed work.
 const (
 	maxOwnerWords = 4
@@ -46,6 +49,12 @@ type ActionItem struct {
 	Priority string
 	Source   string
 	Raised   time.Time
+}
+
+// Mine reports whether this action item is the user's own to answer for. Input: none beyond the item itself. Output: true when the owner is "Me" (however the model cased or spaced it) or is unnamed ("Owner unclear"), since an item nobody was named for might still be the user's; false for anybody else's name.
+func (a ActionItem) Mine() bool {
+	owner := strings.TrimSpace(a.Owner)
+	return owner == UnknownOwner || strings.EqualFold(owner, MeOwner)
 }
 
 // looksLikeOwner reports whether s is short enough to be somebody's name rather than the first half of a sentence.

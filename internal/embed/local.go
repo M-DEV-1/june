@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	oratext "ora/internal/text"
 )
 
 // EmbeddingGemma is trained with these instruction prefixes and measurably loses retrieval quality without them, so they are applied here rather than left to callers. Source: the model card's "Prompt instructions" table (Retrieval-query and Retrieval-document rows).
@@ -80,13 +82,7 @@ func inputTooLong(status int, body string) bool {
 	if status < 500 {
 		return false
 	}
-	lower := strings.ToLower(body)
-	for _, s := range tooLongSignals {
-		if strings.Contains(lower, s) {
-			return true
-		}
-	}
-	return false
+	return oratext.ContainsAny(body, tooLongSignals...)
 }
 
 // embedOnce posts one already-prefixed string to the server and returns the vector it produced. The second return value says whether the failure was the server rejecting the input for its size, which is the only failure Embed retries with shorter text.
