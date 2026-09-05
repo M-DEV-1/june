@@ -1,0 +1,224 @@
+/* The drawing layer's page. Everything under it must show through, so nothing here paints a background and nothing here takes a pointer event; the window itself is click-through as well, set from Rust.
+ * The primitives are Clicky's, in Ora's colours: a small triangle buddy that flies to a thing and then draws on it, solid strokes for underlines and arrows, dashes for spotlights and drop areas, and a pill for words. There is no box around the element and nothing dims the rest of the screen. Every animation moves only transform, opacity and a dash offset, which a compositor can do on its own, so the drawing keeps to the screen's own frame rate. */
+
+:root {
+  /* The colour of everything Ora draws. The page sets it from the mood of the event: Ora's own purple when it is only looking, orange when it is showing you something, red when a press is coming, green when a thing is done. Every stroke carries a dark shadow and a light hairline so any of them reads on whatever is underneath. */
+  --ink: #7b68f5;
+  /* How long a change of mood takes to tween. */
+  --mood: 200ms;
+  --ink-shadow: drop-shadow(0 1px 2px rgb(0 0 0 / 45%)) drop-shadow(0 0 1px rgb(255 255 255 / 70%));
+  --plate: rgb(16 20 26 / 94%);
+  /* Out of a resting place and to a stop, with no straight stretch in the middle: the curve every entrance on this page uses. */
+  --settle: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+  user-select: none;
+  cursor: default;
+  font-family:
+    Onest,
+    -apple-system,
+    system-ui,
+    sans-serif;
+}
+
+#layer {
+  position: absolute;
+  inset: 0;
+}
+
+/* The ink layer covers the whole desk in its own coordinates, one SVG user unit to one CSS pixel, so a stroke can run from any pixel of the desk to any other. */
+#ink {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: var(--ink-shadow);
+}
+
+/* One line of ink: the underline under a row, the shaft of an arrow, the dashed circle round a button. The page sets its width and reveals it through a mask. */
+.stroke {
+  fill: none;
+  stroke: var(--ink);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke var(--mood) ease;
+}
+
+/* A spotlight or a drop area: the same stroke, in two-pixel dashes. */
+.dashed {
+  stroke-dasharray: 6 5;
+  stroke-linecap: butt;
+}
+
+/* The solid head at the end of an arrow, which has no length to be drawn along and so simply arrives. */
+.head {
+  fill: var(--ink);
+  stroke: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: fill var(--mood) ease;
+  animation: head-in 180ms var(--settle) backwards;
+}
+
+@keyframes head-in {
+  from {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* The line inside a stroke's mask. It is white, because a mask shows what is white and hides what is black, and it is dashed with the whole length of the path so sliding that dash off uncovers the stroke from one end to the other. */
+.mask-line {
+  fill: none;
+  stroke: #ffffff;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Everything that is text goes in here, so the pills can be laid out in ordinary CSS rather than in SVG. */
+#shapes {
+  position: absolute;
+  inset: 0;
+}
+
+/* The label: a small pill in the ink colour with bold white text and a tail pointing at what it names. It appears after the stroke has finished drawing. */
+.label {
+  position: absolute;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: #ffffff;
+  background-color: var(--ink);
+  border-radius: 6px;
+  padding: 3px 8px;
+  transition: background-color var(--mood) ease;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 30%),
+    0 2px 8px rgb(0 0 0 / 35%);
+  transform-origin: 14px 50%;
+  animation: settle-in 220ms var(--settle) backwards;
+}
+
+.label::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  border: 5px solid transparent;
+}
+
+.tail-down::after {
+  bottom: -9px;
+  border-top-color: var(--ink);
+}
+
+.tail-up::after {
+  top: -9px;
+  border-bottom-color: var(--ink);
+}
+
+/* The pen: a numbered pill at a rectangle's top left corner, nudged out by its margin rather than by a transform so its entrance is free to use one. Dark rather than warm, because a hundred and fifty of these in the ink colour would be a wall of orange. */
+.mark {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: 26px;
+  height: 24px;
+  margin: -5px 0 0 -5px;
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 700;
+  color: #ffffff;
+  background-color: var(--plate);
+  border: 1px solid var(--ink);
+  border-radius: 12px;
+  text-align: center;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 25%),
+    0 2px 8px rgb(0 0 0 / 45%);
+  animation: settle-in 200ms var(--settle) backwards;
+}
+
+@keyframes settle-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Ora's buddy: a small solid triangle in whatever colour the mood is, with a faint light outline and a soft shadow under it. No glow: it is what takes the eye to the target and draws the ink, not the thing the eye is meant to stop on. Its own coordinates have the point at 0,0, and the negative margins put that point wherever a transform translates the element to. */
+#pointer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin: -28px 0 0 -28px;
+  opacity: 0;
+  transform-origin: 50% 50%;
+  transition: opacity 380ms ease;
+  will-change: transform, opacity;
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%)) drop-shadow(0 3px 8px rgb(0 0 0 / 25%));
+}
+
+#pointer path {
+  fill: var(--ink);
+  stroke: rgb(255 255 255 / 85%);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+  transition: fill var(--mood) ease;
+}
+
+/* A tap ripple: a ring on the pointer's tip that grows to the size of the control being tapped and fades, twice over 120 ms apart. The page sets its width and height, which are 1.3 times the target's own height, so this is never a circle across somebody's screen. It is drawn at that full size and scaled down to start, so the growing costs a transform and not a layout. */
+.ripple {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 40%),
+    inset 0 0 0 1px rgb(255 255 255 / 40%);
+  /* Both ends are filled: nothing before the pointer lands, and nothing after the circle has spread, or a finished ripple would sit there as a solid disc until the ttl ran out. */
+  animation: ripple 380ms cubic-bezier(0.16, 0.84, 0.44, 1) both;
+}
+
+@keyframes ripple {
+  from {
+    transform: translate(-50%, -50%) scale(0.25);
+    opacity: 1;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0;
+  }
+}
+
+/* Someone who has asked for less movement gets the drawing without the flight, the ripple or the drawing-on: the pointer appears where it is needed and the ink is simply there. */
+@media (prefers-reduced-motion: reduce) {
+  .ripple {
+    display: none;
+  }
+
+  .head,
+  .label,
+  .mark {
+    animation: none;
+  }
+}
