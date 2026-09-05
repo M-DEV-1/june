@@ -2781,3 +2781,26 @@ func TestScreenRoundDeclarations_StayShort(t *testing.T) {
 		}
 	}
 }
+
+// TestDelegateTool_IsRegistered checks the delegate tool is declared, allowed for asks, and dispatched by executeTool, so a model that is offered it can actually call it.
+func TestDelegateTool_IsRegistered(t *testing.T) {
+	found := false
+	for _, tool := range toolDefinitions() {
+		for _, fd := range tool.FunctionDeclarations {
+			if fd.Name == "delegate" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("delegate tool declaration not found in toolDefinitions")
+	}
+	if !askAllowedTools["delegate"] {
+		t.Error("delegate is not in askAllowedTools, so an ask could never run it")
+	}
+	a := &Agent{}
+	got := a.executeTool(context.Background(), "delegate", map[string]any{})
+	if !strings.Contains(got, "brief") {
+		t.Errorf("executeTool(delegate) = %q, want the handler's own missing-brief error rather than the unknown-tool default", got)
+	}
+}
