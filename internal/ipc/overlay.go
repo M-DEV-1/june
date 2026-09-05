@@ -128,7 +128,7 @@ func (s *Server) Box(askID string, x, y, w, h int, label string) {
 	s.draw(askID, OverlayRequest{Kind: "box", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
 }
 
-// Circle draws a dashed circle inscribed in a rectangle for the default time, the way POST /overlay with kind circle would. Input and output are as Box; the extension draws the circle inscribed in the given rectangle rather than the rectangle itself.
+// Circle draws a dashed circle inscribed in a rectangle, timed by its ink like Box, the way POST /overlay with kind circle would. Input and output are as Box; the extension draws the circle inscribed in the given rectangle rather than the rectangle itself.
 func (s *Server) Circle(askID string, x, y, w, h int, label string) {
 	s.draw(askID, OverlayRequest{Kind: "circle", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
 }
