@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -18,27 +19,51 @@ import (
 	"ora/internal/db"
 )
 
-// voiceFakeMic is a Microphone that hands out a channel nobody writes to and records that it was closed, so a test can assert Stop frees the real device without opening one.
+// voiceFakeMic is a Microphone that hands out a channel nobody writes to and records that it was closed, so a test can assert Stop frees the real device without opening one. Its amplitude is settable under a mutex (sync/atomic has no Float64) so the level-ticker tests can drive what CurrentAmplitude reports without touching real hardware.
 type voiceFakeMic struct {
 	ch       chan []byte
 	captured atomic.Bool
 	closed   atomic.Bool
+	ampMu    sync.Mutex
+	amp      float64
 }
 
 func (m *voiceFakeMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.captured.Store(true)
 	return m.ch, nil
 }
-func (m *voiceFakeMic) CurrentAmplitude() float64 { return 0 }
-func (m *voiceFakeMic) Close() error              { m.closed.Store(true); return nil }
+func (m *voiceFakeMic) CurrentAmplitude() float64 {
+	m.ampMu.Lock()
+	defer m.ampMu.Unlock()
+	return m.amp
+}
+func (m *voiceFakeMic) setAmplitude(v float64) {
+	m.ampMu.Lock()
+	m.amp = v
+	m.ampMu.Unlock()
+}
+func (m *voiceFakeMic) Close() error { m.closed.Store(true); return nil }
 
-// voiceFakeSpeaker is a Speaker that discards audio and records that it was closed.
-type voiceFakeSpeaker struct{ closed atomic.Bool }
+// voiceFakeSpeaker is a Speaker that discards audio and records that it was closed. Its amplitude is settable the same way voiceFakeMic's is.
+type voiceFakeSpeaker struct {
+	closed atomic.Bool
+	ampMu  sync.Mutex
+	amp    float64
+}
 
-func (s *voiceFakeSpeaker) Play(pcm []byte) error     { return nil }
-func (s *voiceFakeSpeaker) Flush()                    {}
-func (s *voiceFakeSpeaker) CurrentAmplitude() float64 { return 0 }
-func (s *voiceFakeSpeaker) Close() error              { s.closed.Store(true); return nil }
+func (s *voiceFakeSpeaker) Play(pcm []byte) error { return nil }
+func (s *voiceFakeSpeaker) Flush()                {}
+func (s *voiceFakeSpeaker) CurrentAmplitude() float64 {
+	s.ampMu.Lock()
+	defer s.ampMu.Unlock()
+	return s.amp
+}
+func (s *voiceFakeSpeaker) setAmplitude(v float64) {
+	s.ampMu.Lock()
+	s.amp = v
+	s.ampMu.Unlock()
+}
+func (s *voiceFakeSpeaker) Close() error { s.closed.Store(true); return nil }
 
 // voiceFakeRunner is a voiceRunner that never dials anything: Run blocks until its context is cancelled, and the test drives the session's observable behaviour by writing to the same channels a real agent writes to.
 type voiceFakeRunner struct {
@@ -640,5 +665,121 @@ func TestStart_DoesNotHoldTheLockAcrossOpeningHardware(t *testing.T) {
 	close(proceed)
 	if err := <-startErr; err != nil {
 		t.Fatalf("POST /voice/start: %v", err)
+	}
+}
+
+// levelDetail decodes a "level" event's Detail JSON, so a test can assert on the mic/speaker numbers rather than the raw string.
+type levelDetail struct {
+	Mic     float64 `json:"mic"`
+	Speaker float64 `json:"speaker"`
+}
+
+// waitLevelEvent reads events off ch, skipping every type but "level", until one arrives or the wait times out. A running session interleaves "state" events with "level" ones, so a test wanting the latter cannot just take the next event off the stream.
+func waitLevelEvent(t *testing.T, ch <-chan Event) (Event, levelDetail) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("event stream closed before a level event arrived")
+			}
+			if ev.Type != "level" {
+				continue
+			}
+			var d levelDetail
+			if err := json.Unmarshal([]byte(ev.Detail), &d); err != nil {
+				t.Fatalf("level detail is not JSON: %v (%q)", err, ev.Detail)
+			}
+			return ev, d
+		case <-deadline:
+			t.Fatalf("timed out waiting for a level event")
+		}
+	}
+}
+
+// TestVoiceLevels_EmitsMicAndSpeakerAmplitude covers the shape the window's waveform needs: while a session runs, the mic's and the speaker's amplitude reach the stream as a "level" event carrying both, stamped with the session's own id like every other voice event.
+func TestVoiceLevels_EmitsMicAndSpeakerAmplitude(t *testing.T) {
+	srv, _, mic, spk, run := newVoiceServer(t)
+	events, closeSSE := readSSE(t, srv)
+	defer closeSSE()
+
+	mic.setAmplitude(0.6)
+	spk.setAmplitude(0.3)
+
+	start := voicePost(t, srv, "/voice/start")
+	var body struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(start.Body).Decode(&body)
+	start.Body.Close()
+	<-run.running
+
+	ev, d := waitLevelEvent(t, events)
+	if ev.ID != body.ID {
+		t.Fatalf("level event id = %q, want %q", ev.ID, body.ID)
+	}
+	if math.Abs(d.Mic-0.6) > 1e-9 || math.Abs(d.Speaker-0.3) > 1e-9 {
+		t.Fatalf("level = %+v, want mic=0.6 speaker=0.3", d)
+	}
+}
+
+// TestVoiceLevels_SkipsUnchangedReadings covers the cost guard: a session sitting in silence reads the same amplitude on every tick, and only the first reading may reach the stream — every later tick reporting the same numbers must be skipped, or a quiet session would still cost a "level" event twenty times a second.
+func TestVoiceLevels_SkipsUnchangedReadings(t *testing.T) {
+	srv, _, _, _, run := newVoiceServer(t)
+	events, closeSSE := readSSE(t, srv)
+	defer closeSSE()
+
+	start := voicePost(t, srv, "/voice/start")
+	start.Body.Close()
+	<-run.running
+
+	// The fakes default to amplitude 0 on both channels; left untouched for several ticks, only the first tick's reading is new.
+	time.Sleep(5 * levelTickInterval)
+
+	levels := 0
+loop:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type == "level" {
+				levels++
+			}
+		case <-time.After(75 * time.Millisecond):
+			break loop
+		}
+	}
+	if levels != 1 {
+		t.Fatalf("got %d level events for an unchanged silent reading, want exactly 1 (the first sample)", levels)
+	}
+}
+
+// TestVoiceLevels_StopsWhenSessionEnds covers the other half of the ticker's lifecycle: it must start with the session and also stop with it, or a session that has ended would keep sampling audio devices nobody is reading from any more (and, once Stop has closed them, would be reading from closed devices).
+func TestVoiceLevels_StopsWhenSessionEnds(t *testing.T) {
+	srv, _, mic, _, run := newVoiceServer(t)
+	events, closeSSE := readSSE(t, srv)
+	defer closeSSE()
+
+	mic.setAmplitude(0.4)
+	start := voicePost(t, srv, "/voice/start")
+	start.Body.Close()
+	<-run.running
+	waitLevelEvent(t, events) // the first sample, so the ticker is confirmed running before it is stopped.
+
+	stop := voicePost(t, srv, "/voice/stop")
+	stop.Body.Close()
+	<-run.ended
+
+	// Changed after teardown: if the ticker somehow survived Stop, this would produce a fresh level event.
+	mic.setAmplitude(0.9)
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type == "level" {
+				t.Fatalf("level event arrived after the session ended")
+			}
+		case <-time.After(3 * levelTickInterval):
+			return
+		}
 	}
 }
