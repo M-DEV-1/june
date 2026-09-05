@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Hover and app windows: show/hide from the frontend.",
+  "windows": [
+    "main",
+    "app"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-is-visible",
+    "core:window:allow-set-size",
+    "core:window:allow-center",
+    "core:window:allow-set-position"
+  ]
+}

@@ -1,0 +1,26 @@
+[package]
+name = "ora"
+version = "0.1.0"
+description = "Ora desktop surface (mock)"
+authors = ["mdev"]
+edition = "2021"
+
+[lib]
+name = "ora_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+
+# Same gtk/gdkx11 major.minor Tauri itself depends on for this target, so Cargo unifies to one copy instead of linking two GTK bindings.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+gdkx11 = "0.18"
+# The same X11 bindings gdkx11 already pulls in, asked for by name so that libX11 is linked: Ora sends the window manager two EWMH messages of its own, and gdk offers no way to send them. See send_wm_message in src/lib.rs.
+x11 = { version = "2", features = ["xlib"] }
