@@ -243,6 +243,121 @@ func TestPickMeetingNote_MatchesOnAParticipant(t *testing.T) {
 	}
 }
 
+// collectMeetingNames must read a real call window's roster without pulling in the interface around it: mute buttons, presence labels, "(Host)"/"(You)"/"(Presenting)" tags, and the app's own name. Fixtures are the flattened single-string shape an accessibility tree actually produces for a participants pane — one long run of text, not one name per line.
+func TestCollectMeetingNames_RostersFromRealApps(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		text  string
+		want  []string
+		deny  []string
+	}{
+		{
+			// Accessibility trees read one node's text per line; a participants pane is one name (or one button) per line, same as the chat log chatSenderPattern already assumes.
+			name:  "google meet",
+			title: "Meet - team-sync-call - Brave",
+			text:  "People (3)\nSam Iyer (Host)\nPriya Shah (Presenting)\nRohit Verma\nYou\nMute\nCamera\nPresent now\nMore options\nLeave call",
+			want:  []string{"Sam Iyer", "Priya Shah", "Rohit Verma"},
+			deny:  []string{"Mute", "Camera", "Present", "More", "Leave", "You", "Sam Iyer (Host)", "Priya Shah (Presenting)"},
+		},
+		{
+			name:  "teams",
+			title: "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams",
+			text:  "Participants (2)\nPriya Shah (Organizer)\nVikram Goel\nYou\nRaise Hand\nReact\nMore\nLeave",
+			want:  []string{"Priya Shah", "Vikram Goel"},
+			deny:  []string{"Microsoft Teams", "Raise Hand", "Chat", "More", "Leave", "You", "Priya Shah (Organizer)"},
+		},
+		{
+			name:  "zoom",
+			title: "Zoom Meeting",
+			text:  "Participants (2)\nKaran Mehta (Host, me)\nNeha Kapoor\nMute All\nUnmute\nStop Video\nShare Screen\nRecord\nEnd Meeting",
+			want:  []string{"Karan Mehta", "Neha Kapoor"},
+			deny:  []string{"Zoom Meeting", "Share Screen", "Mute All", "Stop Video", "End Meeting", "Karan Mehta (Host, me)"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := collectMeetingNames([]db.Episode{{Title: tc.title, ScreenText: tc.text}}, true, nil)
+			for _, w := range tc.want {
+				if !contains(got, w) {
+					t.Errorf("%s: got %v, want it to include %q", tc.name, got, w)
+				}
+			}
+			for _, d := range tc.deny {
+				if contains(got, d) {
+					t.Errorf("%s: got %v, must not include interface text %q", tc.name, got, d)
+				}
+			}
+		})
+	}
+}
+
+// The same person named twice — once tagged with a role in the roster, once as a chat sender with no tag — must collapse to one attendee, not two.
+func TestCollectMeetingNames_CollapsesDuplicatesAcrossRoleTags(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer (Host) Priya Shah"},
+		{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer: let's get started"},
+	}
+
+	got := collectMeetingNames(eps, true, nil)
+
+	count := 0
+	for _, n := range got {
+		if n == "Sam Iyer" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("collectMeetingNames = %v, want exactly one \"Sam Iyer\", got %d", got, count)
+	}
+}
+
+// A name already known from personal context is kept even when its shape would otherwise get it dropped — here a five-word name past the four-word limit ordinary candidates are held to.
+func TestCollectMeetingNames_KeepsAKnownNameEvenWhenUnusual(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - family catch-up - Brave", ScreenText: "Sri Lakshmi Venkata Subramaniam Iyer\nYou\nMute\nLeave call"},
+	}
+	known := personNamesFromContext([]db.PersonalEntry{{Subject: "sri-lakshmi-venkata-subramaniam-iyer", Content: "the user's aunt"}})
+
+	got := collectMeetingNames(eps, true, known)
+
+	if !contains(got, "Sri Lakshmi Venkata Subramaniam Iyer") {
+		t.Errorf("collectMeetingNames = %v, want the known long name kept", got)
+	}
+}
+
+// Two capitalised interface words strung together must never come out as a name, known or not — an app's toolbar is never a person, however name-shaped the phrase reads.
+func TestCollectMeetingNames_KnownInterfaceWordsNeverBecomeAName(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - standup - Brave", ScreenText: "Raise Hand\nMore Options\nShare Screen"},
+	}
+
+	got := collectMeetingNames(eps, true, nil)
+
+	if len(got) != 0 {
+		t.Errorf("collectMeetingNames = %v, want no names from pure interface text", got)
+	}
+}
+
+// A name written in a script without letter case has no "all caps" form, so the shouting check must leave it alone, while a Latin word in all caps is still interface furniture. The proper-noun matcher that feeds collectMeetingNames is Latin-only, so this checks the shape rule on its own.
+func TestLooksLikeName_ScriptsWithoutCaseAreNotShouting(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"प्रिया नायर", true},
+		{"田中 太郎", true},
+		{"Sam Iyer", true},
+		{"MUTE", false},
+		{"Share Screen 2", false},
+	}
+	for _, c := range cases {
+		if got := looksLikeName(c.name); got != c.want {
+			t.Errorf("looksLikeName(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // The word that only ever appears in one title is the one that names the meeting, and it matches on its own. The common word beside it is ignored rather than allowed to match everything.
 func TestPickMeetingNote_MatchesOnTheRareWordAndIgnoresTheCommonOne(t *testing.T) {
 	notes := append(twelveMeetingNotes(),

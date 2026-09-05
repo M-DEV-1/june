@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"ora/internal/audio"
+	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
 	"ora/internal/memory"
@@ -44,6 +45,26 @@ const failedMarker = "failed.txt"
 
 // failureRetryAfter is how old the failure marker must be before the sweep tries that recording again. A rate limit or a dead API key clears on the scale of an hour, not of the two minutes between sweeps.
 const failureRetryAfter = time.Hour
+
+// maxProcessAttempts is how many times a recording may fail before the sweep stops offering it. A summariser refusing for a reason that clears — a rate limit, a flat battery, a network — is back well inside six hours. One refusing for a reason that does not, such as a model name the API has never had, never comes back: the 2026-09-05T00-53-59 recording failed at 01:18 with a 404 and was retried hourly for the rest of the day, each retry running whisper again and taking the GPU out from under whatever else wanted it.
+const maxProcessAttempts = 6
+
+// failedAttemptsPrefix opens the first line of the failure marker, where the number of failed attempts is kept. It lives in the file rather than in memory because the sweep restarts with the daemon and the count has to survive that.
+const failedAttemptsPrefix = "attempts: "
+
+// failedAttempts returns how many times processing this recording has already failed. Input: the recording directory. Output: the count off the first line of its failure marker, and 0 when there is no marker or its first line does not carry one.
+func failedAttempts(dir string) int {
+	b, err := os.ReadFile(filepath.Join(dir, failedMarker))
+	if err != nil {
+		return 0
+	}
+	first, _, _ := strings.Cut(string(b), "\n")
+	n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(first, failedAttemptsPrefix)))
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 // noteIDFile is the file in a recording directory holding the id of the note its minutes were filed under, so summarising the same recording again corrects that note instead of filing a second copy of the meeting.
 const noteIDFile = "note-id.txt"
@@ -160,6 +181,14 @@ func hasSound(p []byte) bool {
 
 // Recorder owns at most one meeting recording at a time. Start and StopAndProcess are what the tray calls; everything after the stop runs in the background.
 type Recorder struct {
+	// minutesFallback is the brain a minutes call hands over to when Gemini answers 429 or 503, installed by the daemon through SetMinutesFallback; nil means no hand-over.
+	minutesFallback brain.Brain
+	// minutesFallbackMu guards minutesFallback, which the daemon may install while a meeting is already being written up.
+	minutesFallbackMu sync.RWMutex
+	// mainBrain is the brain minutes are written with, installed by the daemon through SetBrain so a meeting write-up spends from the same shared Gemini daily quota as everything else the daemon meters; nil means defaultBrain builds its own unmetered one from config, per meeting.
+	mainBrain brain.Brain
+	// mainBrainMu guards mainBrain, which the daemon may install while a meeting is already being written up.
+	mainBrainMu sync.RWMutex
 	// onStateChange, when set, is called after a recording starts or stops. The tray menu registers its redraw here, because the label reading "Start meeting recording" is wrong the moment anything other than the tray itself starts one — and since Ora began offering to record when it notices a call, that is the common case rather than a corner of it.
 	onStateChange func()
 
@@ -262,6 +291,52 @@ func (r *Recorder) pickup(ctx context.Context) {
 			slog.Error("could not finish an unfinished meeting recording", "dir", dir, "error", err)
 		}
 	}
+	r.backfillDurations(ctx, root, entries)
+}
+
+// backfillDurations corrects every already-filed meeting note that predates the duration marker (see meetingDurationLine): it was filed by a version of fileMinutes that never wrote one, so GET /meetings has nothing to read and reports it as a zero-length meeting. The one thing left on disk that still says how long such a meeting ran is the size of its mic.wav, still there because keepAudio keeps it — the directory's own name gives the start, and the audio's length gives the stop. A recording whose audio has since been removed is left exactly as it is: nothing else on file says how long that meeting took, so it keeps reporting zero rather than a guess. Input: the store's own context, the recordings directory, and the entries already read from it. Output: none — every note this corrects is logged, and a note or a directory this cannot make sense of is skipped rather than fatal, the same as everywhere else in this sweep.
+func (r *Recorder) backfillDurations(ctx context.Context, root string, entries []os.DirEntry) {
+	notes, err := r.store.GetNotes(ctx)
+	if err != nil {
+		slog.Warn("could not read notes to backfill meeting durations", "error", err)
+		return
+	}
+	byID := make(map[int64]db.Note, len(notes))
+	for _, n := range notes {
+		byID[n.ID] = n
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		raw, err := os.ReadFile(filepath.Join(dir, noteIDFile))
+		if err != nil {
+			continue
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		if err != nil {
+			continue
+		}
+		note, ok := byID[id]
+		if !ok || note.Kind != noteKind || strings.Contains(note.Content, meetingDurationPrefix) {
+			continue
+		}
+		started, err := time.ParseInLocation(dirTimeLayout, e.Name(), time.Local)
+		if err != nil {
+			continue
+		}
+		d := audioDuration(filepath.Join(dir, "mic.wav"))
+		if d <= 0 {
+			continue
+		}
+		if err := r.store.UpdateNote(ctx, id, withMeetingDuration(note.Content, started, started.Add(d))); err != nil {
+			slog.Warn("could not backfill a meeting note's duration", "dir", dir, "note_id", id, "error", err)
+			continue
+		}
+		slog.Info("backfilled a meeting note's duration from its recording's audio", "dir", dir, "note_id", id, "duration", d)
+	}
 }
 
 // liveDir returns the directory of the recording running right now, or "" when nothing is recording.
@@ -353,6 +428,10 @@ func readTrimmed(path string) string {
 // unfinished reports whether dir holds a recording that still needs processing, and returns the session to run it as. There are two cases: both WAVs present with no transcript.md, which is a recording a crash or a battery deferral left mid-flight, and a transcript.md with no minutes.md, which is either a crash between those two writes or the user deleting minutes.md to ask for the summary again. A no-speech marker means the recording is done with either way.
 func unfinished(dir string) (*session, bool) {
 	if exists(filepath.Join(dir, noSpeechMarker)) {
+		return nil, false
+	}
+	// A recording that has failed maxProcessAttempts times is not offered again: whatever is wrong with it is not the kind of thing another hour fixes, and the user has been told so in the meetings list. Deleting the marker is how they ask for another go.
+	if failedAttempts(dir) >= maxProcessAttempts {
 		return nil, false
 	}
 	// A recording whose last attempt failed is left alone until its marker is failureRetryAfter old, so a summariser that is refusing costs one call an hour instead of one every sweep. Deleting the marker is how the user asks for the retry now.
@@ -577,8 +656,14 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 		return nil
 	}
 	defer r.release(s.dir)
-	// How this attempt ended is recorded next to the recording, because on disk a recording that failed to summarise looks exactly like one that was never summarised at all.
-	defer func() { markOutcome(s.dir, err) }()
+	// How this attempt ended is recorded next to the recording, because on disk a recording that failed to summarise looks exactly like one that was never summarised at all. The attempt that reaches the cap also files a note, so a recording nobody is going to retry says so in the meetings list rather than only in the log.
+	// The context is captured here because the timeout one below replaces it, and by the time this runs that one is cancelled.
+	outer := ctx
+	defer func() {
+		if attempts := markOutcome(s.dir, err); err != nil && attempts >= maxProcessAttempts {
+			r.fileGivenUp(outer, s, err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(ctx, transcribeTimeout)
 	defer cancel()
@@ -599,7 +684,7 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	if err := os.WriteFile(filepath.Join(s.dir, "minutes.md"), []byte(text), 0o644); err != nil {
 		return fmt.Errorf("write minutes: %w", err)
 	}
-	r.fileMinutes(ctx, s.dir, text, s.startedAt)
+	r.fileMinutes(ctx, s.dir, text, s.startedAt, s.stoppedAt)
 
 	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
 	// Regenerating minutes from a transcript that has already been through this once (fromTranscript) must not run it again: the meeting taught Ora whatever it was going to teach it the first time, and running it again just re-proposes the same writes.
@@ -611,40 +696,67 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	return nil
 }
 
-// markOutcome records how an attempt at processing a recording ended: a success clears any failure marker, a failure writes one holding the error and the time, which keeps the sweep off this recording for failureRetryAfter. Input: the recording directory and the error the attempt returned, nil on success. Output: none — failing to write the marker is logged, since it only costs a wasted retry.
-func markOutcome(dir string, err error) {
+// markOutcome records how an attempt at processing a recording ended: a success clears any failure marker, a failure writes one holding the error, the time and how many attempts have now failed, which keeps the sweep off this recording for failureRetryAfter and off it for good once the count reaches maxProcessAttempts. Input: the recording directory and the error the attempt returned, nil on success. Output: how many attempts have now failed, 0 on success — failing to write the marker is logged, since it only costs a wasted retry.
+func markOutcome(dir string, err error) int {
 	path := filepath.Join(dir, failedMarker)
 	if err == nil {
 		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
 			slog.Warn("could not clear the failure marker of a recording that has now been processed", "dir", dir, "error", rmErr)
 		}
-		return
+		return 0
 	}
 	// A recording with no speech in it already has its own marker saying so, and unfinished() stops on that one first.
 	if exists(filepath.Join(dir, noSpeechMarker)) {
-		return
+		return 0
 	}
-	note := fmt.Sprintf("Processing this recording failed at %s:\n\n%v\n\nOra will try again in about an hour. Delete this file to have it try again straight away.\n", time.Now().Format(time.RFC3339), err)
+	attempts := failedAttempts(dir) + 1
+	next := "Ora will try again in about an hour. Delete this file to have it try again straight away."
+	if attempts >= maxProcessAttempts {
+		next = fmt.Sprintf("Ora has stopped retrying after %d attempts. Delete this file to have it try once more.", attempts)
+	}
+	note := fmt.Sprintf("%s%d\n\nProcessing this recording failed at %s:\n\n%v\n\n%s\n", failedAttemptsPrefix, attempts, time.Now().Format(time.RFC3339), err, next)
 	if wErr := os.WriteFile(path, []byte(note), 0o644); wErr != nil {
 		slog.Warn("could not record why processing a recording failed", "dir", dir, "error", wErr)
 	}
+	return attempts
 }
 
-// fileMinutes puts a recording's minutes into memory. If the recording was filed before, the note it was filed under is corrected in place; otherwise the minutes are filed as a new note and its id written to noteIDFile so the next run corrects this one. The minutes' action items are also lifted into their own tracked rows, which is what lets a thing somebody agreed to do outlive the few days the minutes themselves are read in. Input: the recording directory, the minutes text, and when the meeting started. Output: none — a memory that refuses the minutes is logged and shrugged off, because minutes.md on disk is the copy that matters.
-func (r *Recorder) fileMinutes(ctx context.Context, dir, text string, startedAt time.Time) {
+// fileGivenUp files the note that puts a recording the sweep has stopped retrying into the meetings list, where GET /meetings reads notes of this kind. Without it the only trace of a recording that never became minutes is an hourly error line in the log. Input: the store's own context, the recording's session and the error its last attempt returned. Output: none — the note is best effort, like every other write in this sweep, and filing it through fileMinutes means a later retry that succeeds replaces it in place rather than adding a second note for the same meeting.
+func (r *Recorder) fileGivenUp(ctx context.Context, s *session, cause error) {
+	text := fmt.Sprintf("# Meeting\n\n**Could not be summarised**\n\nOra tried %d times to turn this recording into minutes and has stopped. The audio is still in %s — delete %s in there to have it try again.\n\nLast error: %v\n", maxProcessAttempts, s.dir, failedMarker, cause)
+	slog.Warn("giving up on a meeting recording after too many failed attempts", "dir", s.dir, "attempts", maxProcessAttempts, "error", cause)
+	r.fileMinutes(ctx, s.dir, text, s.startedAt, s.stoppedAt)
+}
+
+// meetingDurationPrefix opens the machine-readable line fileMinutes appends to a meeting note's stored content, after the minutes text. GET /meetings (internal/ipc/reads.go) parses it back out and strips it before the minutes ever reach the window, so the user never sees it.
+const meetingDurationPrefix = "<!--ora:duration "
+
+// meetingDurationLine renders the wall-clock start and stop of a recording as the machine-readable line fileMinutes appends to a note's content. This is the one place that knows how long a meeting actually ran — the model writing the minutes is never asked to compute or report it, so it cannot be trusted to get it right — and it survives a restart because it travels with the note rather than living only in the recorder's own memory.
+func meetingDurationLine(startedAt, stoppedAt time.Time) string {
+	return fmt.Sprintf("%sstart=%s stop=%s-->", meetingDurationPrefix, startedAt.UTC().Format(time.RFC3339), stoppedAt.UTC().Format(time.RFC3339))
+}
+
+// withMeetingDuration appends the machine-readable duration line to a meeting's minutes text, for storing in the note. minutes.md on disk and the text lifted for action items stay exactly what the model wrote; only the copy filed as a note carries this.
+func withMeetingDuration(text string, startedAt, stoppedAt time.Time) string {
+	return text + "\n\n" + meetingDurationLine(startedAt, stoppedAt) + "\n"
+}
+
+// fileMinutes puts a recording's minutes into memory. If the recording was filed before, the note it was filed under is corrected in place; otherwise the minutes are filed as a new note and its id written to noteIDFile so the next run corrects this one. The minutes' action items are also lifted into their own tracked rows, which is what lets a thing somebody agreed to do outlive the few days the minutes themselves are read in. Input: the recording directory, the minutes text, and when the meeting started and stopped. Output: none — a memory that refuses the minutes is logged and shrugged off, because minutes.md on disk is the copy that matters.
+func (r *Recorder) fileMinutes(ctx context.Context, dir, text string, startedAt, stoppedAt time.Time) {
 	defer r.liftActionItems(ctx, text, startedAt)
+	stored := withMeetingDuration(text, startedAt, stoppedAt)
 	path := filepath.Join(dir, noteIDFile)
 	if b, err := os.ReadFile(path); err == nil {
 		if id, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil {
 			// UpdateNote reports a missing row rather than silently doing nothing, so a note the user has since deleted falls through to being filed afresh.
-			if uerr := r.store.UpdateNote(ctx, id, text); uerr == nil {
+			if uerr := r.store.UpdateNote(ctx, id, stored); uerr == nil {
 				return
 			} else {
 				slog.Warn("could not correct the note this recording was filed under, filing fresh minutes instead", "dir", dir, "note_id", id, "error", uerr)
 			}
 		}
 	}
-	id, err := r.store.LogNote(ctx, text, noteKind)
+	id, err := r.store.LogNote(ctx, stored, noteKind)
 	if err != nil {
 		slog.Warn("could not file meeting minutes as a note", "error", err)
 		return
@@ -654,10 +766,18 @@ func (r *Recorder) fileMinutes(ctx context.Context, dir, text string, startedAt 
 	}
 }
 
-// liftActionItems files the minutes' action items as their own rows. The minutes are left exactly as written — they are the record of what was said, and nothing may edit them to claim a task is finished; the lifted items are the live copy, the one the user closes or re-prioritises. Re-filing the same meeting adds nothing, because the store matches on the work itself rather than on the line it is rendered as.
+// liftActionItems files the minutes' action items as their own rows, keeping only the ones that might be the user's — the minutes prompt writes the user's own bullets as "Me", so anything owed by somebody else by name is dropped here rather than ever reaching the user's task list. The minutes are left exactly as written — they are the record of what was said, and nothing may edit them to claim a task is finished; the lifted items are the live copy, the one the user closes or re-prioritises. Re-filing the same meeting adds nothing, because the store matches on the work itself rather than on the line it is rendered as.
 func (r *Recorder) liftActionItems(ctx context.Context, minutes string, startedAt time.Time) {
-	items := memory.ParseMinutesActions(minutes, memory.MinutesLabel(minutes), startedAt)
-	items = memory.UserMeetingActions(items, r.identityText(ctx))
+	all := memory.ParseMinutesActions(minutes, memory.MinutesLabel(minutes), startedAt)
+	var items []memory.ActionItem
+	for _, a := range all {
+		if a.Mine() {
+			items = append(items, a)
+		}
+	}
+	if dropped := len(all) - len(items); dropped > 0 {
+		slog.Info("dropped action items owed by other people", "dropped", dropped)
+	}
 	if len(items) == 0 {
 		return
 	}
@@ -667,21 +787,6 @@ func (r *Recorder) liftActionItems(ctx context.Context, minutes string, startedA
 		return
 	}
 	slog.Info("filed action items from a meeting", "found", len(items), "new", added)
-}
-
-// identityText returns the personal-context entry that says who the user is, or "" when there is none. It is what tells an action item whether it is the user's, and it is the same entry the minutes prompt uses to identify the [me] speaker — the one thing on file that came from the user's own mouth rather than from inference.
-func (r *Recorder) identityText(ctx context.Context) string {
-	entries, err := r.store.PersonalContext(ctx)
-	if err != nil {
-		slog.Warn("could not read who the user is; filing no action items rather than filing other people's", "error", err)
-		return ""
-	}
-	for _, e := range entries {
-		if e.Subject == "identity" {
-			return e.Content
-		}
-	}
-	return ""
 }
 
 // transcriptFor returns the meeting's transcript. A recording the sweep found with its transcript already written just has it read back off disk, which is what makes deleting minutes.md a request for fresh minutes; anything else is transcribed with whisper and the result written to transcript.md.

@@ -217,6 +217,42 @@ func TestDropHallucinations_KeepsADoubleInsideOneSegment(t *testing.T) {
 	}
 }
 
+// Whisper's real loops drift: each decode window slides a little further into the repeated phrase, so consecutive segments carry the same sentence at a different word offset and are never byte-identical. This is verbatim (retimed) from the 2026-09-01 22:47 recording, where it ran for the full 15 minutes and none of the exact-match rules above caught a single copy of it.
+func TestDropHallucinations_DropsADriftingLoop(t *testing.T) {
+	segs := []Segment{
+		{Speaker: speakerCall, Text: "Now coming to the question which he asked."},
+		{Speaker: speakerCall, Text: "In X, if you saw that video, there is something called as positive engagement and negative engagement."},
+		{Speaker: speakerCall, Text: "That means that for example, you are not in a positive mood. You are in a positive mood. You are not in a positive mood. You are"},
+		{Speaker: speakerCall, Text: "not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are"},
+		{Speaker: speakerCall, Text: "not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are not in"},
+		{Speaker: speakerCall, Text: "a positive mood. You are not in a positive mood. You are not in a positive mood. You are"},
+	}
+	got := dropHallucinations(segs)
+	for _, s := range got {
+		if strings.Contains(s.Text, "positive mood") {
+			t.Fatalf("the drifting loop survived: %+v", got)
+		}
+	}
+	if len(got) == 0 || !strings.Contains(got[0].Text, "Now coming to the question") {
+		t.Errorf("the real opening sentence should have survived, got %+v", got)
+	}
+}
+
+// The same drift, with the loop's own wording sliding too: on the 2026-09-03 23:44 recording the loop reworded "55%" to "56%" and back between copies. A window of words away from the changed one still matches, so the loop goes even though no two copies agree on the number.
+func TestDropHallucinations_DropsADriftingLoopWithWordSubstitution(t *testing.T) {
+	segs := []Segment{
+		{Speaker: speakerMe, Text: "so now you have used a total of 56% right, yes, okay, so now you have used a total"},
+		{Speaker: speakerMe, Text: "of 56% right, so now you have used a total of 56% right, so now you have used a total"},
+		{Speaker: speakerMe, Text: "of 55% right, so now you have used a total of 56% right, so now you have used a total of 55% right, so now you have used a total"},
+	}
+	got := dropHallucinations(segs)
+	for _, s := range got {
+		if strings.Contains(s.Text, "used a total") {
+			t.Fatalf("the drifting loop survived: %+v", got)
+		}
+	}
+}
+
 // A line-per-segment transcript shreds both speakers into fragments. Consecutive segments from one stream are one turn, printed as one paragraph timestamped at its start.
 func TestRenderTranscript_MergesConsecutiveSegmentsIntoOneTurn(t *testing.T) {
 	segs := []Segment{
@@ -435,5 +471,31 @@ func TestMarkerLooped(t *testing.T) {
 	}
 	if markerLooped("") {
 		t.Error("empty output is not a loop")
+	}
+}
+
+// Whisper spells a name the way it is primed to. On 2026-09-03 a call with Sneha was primed with "Meeting notes. Terms: API." because the screen had nothing, and the transcript said "Ashar", which then became a person in memory. The names the store already knows are the cheapest priming there is, so they go into the prompt after the screen's own terms.
+func TestPrimingPromptFor_IncludesKnownPeople(t *testing.T) {
+	got := primingPromptFor(nil, []string{"Priya Shah", "Sneha"})
+	for _, want := range []string{"Priya Shah", "Sneha"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt %q lacks known person %q", got, want)
+		}
+	}
+	if len(got) > primingPromptBudget {
+		t.Errorf("prompt is %d chars, over the %d budget", len(got), primingPromptBudget)
+	}
+	if primingPrompt(nil) != primingPromptFor(nil, nil) {
+		t.Error("primingPrompt must stay the no-people form of primingPromptFor")
+	}
+}
+
+// personNamesFromContext turns the store's hyphenated person subjects into the names whisper should hear: "priya-shah" is "Priya Shah". Subjects that are not people (identity, preferences-*) are left out.
+func TestPersonNamesFromContext(t *testing.T) {
+	entries := []db.PersonalEntry{{Subject: "identity", Content: "x"}, {Subject: "priya-shah", Content: "x"}, {Subject: "preferences-notes", Content: "x"}, {Subject: "krish-littlebird", Content: "x"}}
+	got := personNamesFromContext(entries)
+	want := []string{"Priya Shah", "Krish Littlebird"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

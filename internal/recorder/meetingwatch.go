@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"ora/internal/db"
+	oratext "ora/internal/text"
 	"ora/internal/tracker"
 	"os/exec"
 	"path/filepath"
@@ -47,17 +48,25 @@ type pwNode struct {
 	} `json:"info"`
 }
 
-// micUsers returns the applications capturing from a microphone right now, excluding Ora's own recorder.
+// micUsers returns the applications capturing from a microphone right now, excluding Ora's own recorder, split into those that are in a call and those that are not.
 //
-// Input: the JSON pw-dump writes. Output: one name per application, in the order the dump listed them and without repeats, since a browser opens a separate stream per tab.
+// Input: the JSON pw-dump writes. Output: the names of the applications that capture and also play audio back, then the names of those that only capture; each list is in the order the dump listed them and without repeats, since a browser opens a separate stream per tab.
 //
 // A stream counts only when it is running and names an application. The audio server's own echo canceller is always present as an input stream and names no application, so requiring a name is what keeps it out; requiring "running" is what distinguishes a microphone being read from one merely being open.
-func micUsers(dump []byte) []string {
+//
+// A call plays the other side back through the same application that captures, so an application with a running input stream and a running output stream is in a call. One that only captures is dictating, recording or transcribing: Handy, a push-to-talk dictation tool, opens the microphone for every dictation and plays nothing back, and on 2026-09-03 it was asked about as a meeting five times in fifteen minutes.
+func micUsers(dump []byte) (calls, captureOnly []string) {
 	var nodes []pwNode
 	if err := json.Unmarshal(dump, &nodes); err != nil {
-		return nil
+		return nil, nil
 	}
-	var users []string
+	playing := map[string]bool{}
+	for _, n := range nodes {
+		p := n.Info.Props
+		if p.MediaClass == "Stream/Output/Audio" && n.Info.State == "running" {
+			playing[streamName(p.Binary, p.AppName)] = true
+		}
+	}
 	seen := map[string]bool{}
 	for _, n := range nodes {
 		p := n.Info.Props
@@ -72,9 +81,13 @@ func micUsers(dump []byte) []string {
 			continue
 		}
 		seen[name] = true
-		users = append(users, name)
+		if playing[name] {
+			calls = append(calls, name)
+		} else {
+			captureOnly = append(captureOnly, name)
+		}
 	}
-	return users
+	return calls, captureOnly
 }
 
 // streamName is the name to show a person for one capturing stream.
@@ -147,21 +160,26 @@ func describe(users []string, eps []db.Episode) []string {
 		} else {
 			name = withoutBrowserStatus(name)
 		}
-		if r := []rune(name); len(r) > maxNameRunes {
-			name = strings.TrimSpace(string(r[:maxNameRunes-1])) + "\u2026"
+		// A name over the cap keeps one rune of the budget for the ellipsis, and is trimmed before it so the marker does not follow a space.
+		if len([]rune(name)) > maxNameRunes {
+			name = strings.TrimSpace(oratext.Runes(name, maxNameRunes-1)) + "…"
 		}
 		named = append(named, name)
 	}
 	return named
 }
 
-// readMicUsers asks the audio server which applications are capturing. It returns nothing when pw-dump is missing or fails, which is also what a machine with no PipeWire reports, so the watcher simply never fires there.
+// readMicUsers asks the audio server which applications are in a call, and logs any that hold the microphone without playing anything back so the rule can be checked against the log. It returns nothing when pw-dump is missing or fails, which is also what a machine with no PipeWire reports, so the watcher simply never fires there.
 func readMicUsers(ctx context.Context) []string {
 	out, err := exec.CommandContext(ctx, "pw-dump").Output()
 	if err != nil {
 		return nil
 	}
-	return micUsers(out)
+	calls, captureOnly := micUsers(out)
+	if len(captureOnly) > 0 {
+		slog.Debug("holding the microphone without playing anything back, not a call", "processes", captureOnly)
+	}
+	return calls
 }
 
 // meetingWatch remembers enough between polls to ask about a call once and then leave it alone. The zero value is ready to use.
@@ -212,7 +230,7 @@ func askToRecord(ctx context.Context, users []string) bool {
 
 // WatchForMeetings asks whether to record whenever an application other than Ora holds the microphone for long enough to be a call, and starts recording if the answer is yes. It returns when ctx is cancelled.
 //
-// The microphone is the signal rather than a meeting app's window, because it is the one thing every call has in common: it needs no list of which applications count, and it does not fire for a meeting tab that is merely open. What it cannot tell on its own is a call from any other use of the microphone, which is why the default is to ask rather than to record.
+// The microphone is the signal rather than a meeting app's window, because it is the one thing every call has in common: it needs no list of which applications count, and it does not fire for a meeting tab that is merely open. Playback from the same application is what tells a call from dictation or a voice note. What the two together cannot tell is a call from, say, a voice message being listened to and answered, which is why the default is to ask rather than to record.
 //
 // With autoRecord set the question is skipped and recording starts on the same signal.
 func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {

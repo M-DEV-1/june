@@ -20,17 +20,19 @@ Decide whether the meeting changed anything in the store. Almost always the answ
   - Only durable things about people, relationships, preferences, and the user's life and work. What was decided in this meeting, what is being built this week, what someone is working on right now — none of that belongs here. That is kept elsewhere.
   - A preference earns an entry two ways only: the user stated it outright, or the same habit shows up on clearly separate occasions over time. Seen once, it is an observation, not a preference — leave it to ordinary memory; if it is real it will keep showing up. Tool choices, software configuration, and dev-environment details are never personal context regardless of repetition — that is working state, not a life.
   - A person earns an entry only with the same evidence the minutes needed: they spoke in the call, they were spoken TO by name during it, or the meeting app or a shared working surface showed them taking part (participant tile, presenting label, a message they sent in the meeting's chat or whiteboard while it ran). Someone merely talked about is not evidence. A username, commit author, ticket assignee, page owner or account name on screen is NEVER a person here.
+  - A person whose name is marked in the minutes as heard only, for example (heard as "Ashar"), has no evidence beyond the speech recogniser's guess, and on 2026-09-03 exactly such a guess became a permanent entry for a person who does not exist. Never create a new person from a heard-as name. Put it in "unsure" instead, and mark any update that rests on such a name with "heard_only": true.
   - Do not write an entry about the user themself. The "identity" subject already covers who they are.
   - When you update a person who is already stored, rewrite their whole entry: keep what still holds, fold in what is new, and keep it to a few sentences. Include when the user last worked with them, by date, so the entry says how current it is.
   - Different people share names. Before updating a stored person, check that the entry actually describes the person in this meeting — the relationship and context have to match, not just the name, and working in the same broad field is not a match. Unless the stored entry and the meeting clearly describe one person — same relationship to the user, same shared history — treat them as two: give the new one their own subject with a distinguishing word from their context, and make each entry's first sentence say which of the name-sharers it is. When it is genuinely unclear, separate them: a wrong split is easy to repair, a wrong merge corrupts both people.
   - Subjects are short and lowercase, hyphenated: a person's own name ("priya-shah"), or an area of preference ("preferences-communication").
 
-Reply with JSON and nothing else: {"updates":[{"subject":"...","content":"..."}]}. Write {"updates":[]} when the meeting changed nothing, which is the usual answer.`
+Reply with JSON and nothing else: {"updates":[{"subject":"...","content":"..."}],"unsure":["..."]}. Write {"updates":[]} when the meeting changed nothing, which is the usual answer.`
 
 // personalUpdate is one subject the model wants written, exactly as SetPersonalContext takes it.
 type personalUpdate struct {
-	Subject string `json:"subject"`
-	Content string `json:"content"`
+	Subject   string `json:"subject"`
+	Content   string `json:"content"`
+	HeardOnly bool   `json:"heard_only,omitempty"`
 }
 
 // personalUpdatePrompt assembles the updater's input: the bar, the store as it stands, the minutes, and the screen timeline the minutes were written from.
@@ -96,10 +98,23 @@ func parsePersonalUpdates(reply string) []personalUpdate {
 	}
 	var out struct {
 		Updates []personalUpdate `json:"updates"`
+		Unsure  []string         `json:"unsure"`
 	}
 	if err := json.Unmarshal([]byte(reply[start:end+1]), &out); err != nil {
 		slog.Warn("could not read the personal context updates from the model's reply", "error", err, "reply", reply)
 		return nil
 	}
-	return out.Updates
+	if len(out.Unsure) > 0 {
+		slog.Info("personal context updater was unsure; nothing written for these", "unsure", out.Unsure)
+	}
+	// An update resting on a heard-only name is a recogniser's guess about a person; it is logged and dropped rather than made permanent.
+	kept := out.Updates[:0]
+	for _, u := range out.Updates {
+		if u.HeardOnly {
+			slog.Info("personal context update skipped: the name was only heard, never seen", "subject", u.Subject)
+			continue
+		}
+		kept = append(kept, u)
+	}
+	return kept
 }
