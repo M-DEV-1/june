@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"ora/internal/config"
@@ -77,26 +78,60 @@ func firstRunSteps(v FirstRunView) []string {
 	}
 }
 
-// Settings builds the /settings handler. GET answers SettingsView as JSON, read off the live config. POST {"claude_usage_from_login": bool} writes that one setting, persists it with save so it survives a restart, and answers with the same view GET would — the same GET-plus-POST-on-one-route shape as /brains. Input: the data directory to walk for disk usage, a pointer to the loaded config shared with the rest of the daemon so a POST's change is visible everywhere, the function that persists a config to disk (config.SaveConfig in production, a stub in tests), whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), and the time the daemon started. Output: the handler.
-func Settings(dataDir string, cfg *config.OraConfig, save func(config.OraConfig) error, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) http.HandlerFunc {
+// LiveConfig is the daemon's loaded config as the request goroutines see it: every read hands back a copy of the struct taken under the lock, and the one field a request can change is written under that same lock, so POST /settings and the GET /brains and GET /usage handlers reading the same setting are not touching one struct from several goroutines at once. ponytail: one mutex over the whole config, not per-field — these are a handful of requests a minute. POST /brains still writes cfg.Brain on the same struct without taking this lock (see ipc.Brains); the upgrade path is handing Brains this accessor too.
+type LiveConfig struct {
+	mu   sync.Mutex
+	cfg  *config.OraConfig
+	save func(config.OraConfig) error
+}
+
+// NewLiveConfig wraps the daemon's config for use from request goroutines. Input: a pointer to the loaded config and the function that persists one to disk (config.SaveConfig in production, a stub in tests). Output: the accessor to hand Settings, and to read the config through anywhere else a request goroutine needs it.
+func NewLiveConfig(cfg *config.OraConfig, save func(config.OraConfig) error) *LiveConfig {
+	return &LiveConfig{cfg: cfg, save: save}
+}
+
+// Get returns a copy of the config taken under the lock, so the caller reads a consistent struct rather than one another request may be part-way through writing. Input: none. Output: the config by value.
+func (c *LiveConfig) Get() config.OraConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return *c.cfg
+}
+
+// ClaudeUsageEnabled reports whether the Claude row's usage bars may be read from the Anthropic usage endpoint. Input: none. Output: the config's ClaudeUsageFromLogin, read under the lock, which is on when the field was never set.
+func (c *LiveConfig) ClaudeUsageEnabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg.ClaudeUsageFromLoginEnabled()
+}
+
+// SetClaudeUsage writes ClaudeUsageFromLogin and persists the whole config, both under the lock, so no reader sees the struct between the write and the copy that goes to disk. Input: the new value. Output: whatever the save function returned.
+func (c *LiveConfig) SetClaudeUsage(on bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg.ClaudeUsageFromLogin = &on
+	return c.save(*c.cfg)
+}
+
+// Settings builds the /settings handler. GET answers SettingsView as JSON, read off the live config. POST {"claude_usage_from_login": bool} writes that one setting, persists it so it survives a restart, and answers with the same view GET would — the same GET-plus-POST-on-one-route shape as /brains. A POST body that does not carry the field changes nothing: the window sends the whole form back on any change, and a missing field means "not mentioned", not "off". Input: the data directory to walk for disk usage, the config accessor shared with the rest of the daemon so a POST's change is visible everywhere and no two request goroutines touch the struct at once, whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), and the time the daemon started. Output: the handler.
+func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeSettings(w, dataDir, *cfg, meetingsEnabled, capturePaused, startedAt)
+			writeSettings(w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt)
 		case http.MethodPost:
 			var req struct {
-				ClaudeUsageFromLogin bool `json:"claude_usage_from_login"`
+				ClaudeUsageFromLogin *bool `json:"claude_usage_from_login"`
 			}
 			if !DecodeJSON(w, r, &req) {
 				return
 			}
-			on := req.ClaudeUsageFromLogin
-			cfg.ClaudeUsageFromLogin = &on
-			if err := save(*cfg); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+			if req.ClaudeUsageFromLogin != nil {
+				if err := cfg.SetClaudeUsage(*req.ClaudeUsageFromLogin); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
-			writeSettings(w, dataDir, *cfg, meetingsEnabled, capturePaused, startedAt)
+			writeSettings(w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}

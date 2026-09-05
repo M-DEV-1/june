@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,7 +112,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			paused := c.paused
 			cfg := c.cfg
-			srv := httptest.NewServer(Settings(dataDir, &cfg, noopSave, c.meetingsEnabled, func() bool { return paused }, startedAt))
+			srv := httptest.NewServer(Settings(dataDir, NewLiveConfig(&cfg, noopSave), c.meetingsEnabled, func() bool { return paused }, startedAt))
 			defer srv.Close()
 
 			var got SettingsView
@@ -126,7 +127,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 func TestSettings_MissingDataDirGivesZeroSizes(t *testing.T) {
 	withFakeGsettings(t, noCustomKeybindings)
 	dataDir := filepath.Join(t.TempDir(), "does-not-exist")
-	srv := httptest.NewServer(Settings(dataDir, &config.OraConfig{}, noopSave, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(dataDir, NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -145,7 +146,7 @@ func TestSettings_ClaudeUsageFromLoginReflectsLiveConfig(t *testing.T) {
 	withFakeGsettings(t, noCustomKeybindings)
 	off := false
 	cfg := &config.OraConfig{ClaudeUsageFromLogin: &off}
-	srv := httptest.NewServer(Settings(t.TempDir(), cfg, noopSave, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, noopSave), false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -160,7 +161,7 @@ func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	withFakeGsettings(t, noCustomKeybindings)
 	cfg := &config.OraConfig{}
-	srv := httptest.NewServer(Settings(t.TempDir(), cfg, config.SaveConfig, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, config.SaveConfig), false, nil, time.Now()))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{"claude_usage_from_login":false}`))
@@ -183,6 +184,68 @@ func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
 	if reloaded.ClaudeUsageFromLoginEnabled() {
 		t.Errorf("claude_usage_from_login on disk is still enabled after turning it off")
 	}
+}
+
+// TestSettings_PostEmptyBodyLeavesClaudeUsageUnchanged checks a POST that names no setting changes none. The window sends the whole form back on any Settings change, so a body that happens to carry no claude_usage_from_login field must not read as "turn it off".
+func TestSettings_PostEmptyBodyLeavesClaudeUsageUnchanged(t *testing.T) {
+	withFakeGsettings(t, noCustomKeybindings)
+	withEmptyFirstRun(t)
+	on := true
+	cfg := &config.OraConfig{ClaudeUsageFromLogin: &on}
+	saves := 0
+	save := func(config.OraConfig) error { saves++; return nil }
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, save), false, nil, time.Now()))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST /settings: %v", err)
+	}
+	defer resp.Body.Close()
+	var got SettingsView
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.ClaudeUsageFromLogin {
+		t.Errorf("claude_usage_from_login = false after a POST that did not mention it, want true")
+	}
+	if !cfg.ClaudeUsageFromLoginEnabled() {
+		t.Errorf("the config itself was turned off by a POST that did not mention the setting")
+	}
+	if saves != 0 {
+		t.Errorf("save was called %d times for a POST that changed nothing, want 0", saves)
+	}
+}
+
+// TestSettings_ConcurrentPostAndClaudeUsageRead is the -race check on the config the request goroutines share: POST /settings writes ClaudeUsageFromLogin while GET /brains reads it through the same accessor (brainLimitsFrom in cmd/daemon.go), each on its own goroutine, so both sides have to go through the lock.
+func TestSettings_ConcurrentPostAndClaudeUsageRead(t *testing.T) {
+	withFakeGsettings(t, noCustomKeybindings)
+	withEmptyFirstRun(t)
+	live := NewLiveConfig(&config.OraConfig{}, noopSave)
+	srv := httptest.NewServer(Settings(t.TempDir(), live, false, nil, time.Now()))
+	defer srv.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"claude_usage_from_login":%t}`, i%2 == 0)
+			resp, err := http.Post(srv.URL, "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Errorf("POST /settings: %v", err)
+				return
+			}
+			resp.Body.Close()
+		}(i)
+		go func() {
+			defer wg.Done()
+			// What brainLimitsFrom reads on every GET /brains and GET /usage, plus the whole-struct copy GET /settings takes.
+			_ = live.ClaudeUsageEnabled()
+			_ = live.Get()
+		}()
+	}
+	wg.Wait()
 }
 
 // fakeGsettingsWithHotkey answers the exact three-call sequence windowHotkey makes when the machine has two custom keybindings, the second of which is ours, and returns the binding gsettings would actually print for it.
@@ -209,7 +272,7 @@ func fakeGsettingsWithHotkey(args ...string) (string, error) {
 // TestSettings_HotkeyFoundAmongOthers checks that the custom keybinding whose command names ora-window-toggle is picked out from among others, and its binding is unquoted.
 func TestSettings_HotkeyFoundAmongOthers(t *testing.T) {
 	withFakeGsettings(t, fakeGsettingsWithHotkey)
-	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -222,7 +285,7 @@ func TestSettings_HotkeyFoundAmongOthers(t *testing.T) {
 // TestSettings_HotkeyNoneConfigured checks that an empty custom-keybindings list reads as no hotkey rather than an error.
 func TestSettings_HotkeyNoneConfigured(t *testing.T) {
 	withFakeGsettings(t, noCustomKeybindings)
-	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -237,7 +300,7 @@ func TestSettings_HotkeyGsettingsUnavailable(t *testing.T) {
 	withFakeGsettings(t, func(args ...string) (string, error) {
 		return "", fmt.Errorf("gsettings: command not found")
 	})
-	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
@@ -254,7 +317,7 @@ func TestSettings_HotkeyNonLinux(t *testing.T) {
 	hotkeyGOOS = "darwin"
 	t.Cleanup(func() { hotkeyGOOS = prevGOOS })
 
-	srv := httptest.NewServer(Settings(t.TempDir(), &config.OraConfig{}, noopSave, false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
 	defer srv.Close()
 
 	var got SettingsView
