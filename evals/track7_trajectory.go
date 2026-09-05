@@ -4,7 +4,7 @@ package main
 //
 // This is the fix for track 5's blind spot. Track 5 froze the live session's tool results and handed them to the counterfactual model as evidence, which punished it whenever its own tool plan differed from the live one — there were no results for the plan it actually wanted. Here both arms run a real agentic loop with real tool execution, so a different tool choice produces different evidence and the whole trajectory is what gets compared.
 //
-// Everything runs against a VACUUM INTO snapshot of the live store. The read tools (query_memory, recall, get_recent) are the daemon's own, reached through agent.ExecuteTool exactly as the model's function calls reach them. Every other tool is stubbed: the call is recorded in the trajectory and a plausible success goes back to the model, so an arm that decides to save a note is scored on the decision while the store stays byte-identical.
+// Everything runs against a VACUUM INTO snapshot of the live store. The read tools (query_memory, query_store, recall, action_items) are the daemon's own, reached through agent.ExecuteTool exactly as the model's function calls reach them. Every other tool is stubbed: the call is recorded in the trajectory and a plausible success goes back to the model, so an arm that decides to save a note is scored on the decision while the store stays byte-identical.
 //
 // What this eval does not measure, because the harness diverges from the live daemon here: there is no voice or ASR (both arms are text), no handshake "[working]" activity block or focus hits (the eval has no tracker buffer), no Gemini native web search (it has no declaration to give the Claude arm, so neither arm gets it), and the Gemini arm runs generateContent on a text model rather than the Live API's native-audio model, which cannot do text function calling.
 
@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,8 +38,10 @@ type trajCall struct {
 	Raw *genai.Content
 }
 
-// trajTurn is one exchange in one arm's conversation: what the roleplay user said, the tools the arm ran, and what it replied.
+// trajTurn is one exchange in one arm's conversation: which user message it answers, what the roleplay user said, the tools the arm ran, and what it replied.
 type trajTurn struct {
+	// Msg is which of the run's user messages this turn answers, counting from 1. It is what pairs one arm's turn with the other arm's: a message the roleplay model failed to write is skipped for that arm and no turn is appended for it, so from that point on the two arms' slice positions no longer name the same point in the conversation.
+	Msg   int
 	User  string
 	Calls []trajCall
 	Reply string
@@ -48,12 +51,11 @@ type trajTurn struct {
 // armStep is the only place the two arms differ. Given the system prompt and the conversation so far (whose last turn is the one in progress, with the tool calls already run on it), it returns either the next tool call or the spoken reply. Both arms are stateless and rebuild everything from the turns each time, so neither carries hidden state the other lacks.
 type armStep func(ctx context.Context, sys string, turns []trajTurn) (*trajCall, string, error)
 
-// trajStubs are the tools track 7 records but never runs. Three reasons a tool is here: it writes to the store (save_note, update_note, delete_note, fix_thread, personal_context), it changes the machine or reaches the network (shell_exec, open_url, read_file, list_files, read_clipboard), or it would need a live session to work at all (branch spawns a sub-agent against the Live API). shell_exec and a sensitive read_file also block on human approval through a channel nothing is draining in the eval, so stubbing them is what keeps the loop from hanging.
+// trajStubs are the tools track 7 records but never runs. Three reasons a tool is here: it writes to the store (save_note, revise, personal_context), it changes the machine or reaches the network (shell_exec, open_url, read_file, list_files, read_clipboard, and the screen tools observe_screen through type_text, which drive the real desktop through the accessibility layer), or it would need a live session to work at all (branch spawns a sub-agent against the Live API). shell_exec and a sensitive read_file also block on human approval through a channel nothing is draining in the eval, so stubbing them is what keeps the loop from hanging.
+// Every declaration agent.ToolDeclarations hands the two arms has to be either a read tool below or a key here. A declared tool that is neither comes back as "there is no tool called X", which is the harness calling the model wrong about a tool the harness itself offered, and the arm that reached for it loses the round to a bug rather than to the other arm.
 var trajStubs = map[string]string{
 	"save_note":        "saved",
-	"update_note":      "note updated",
-	"delete_note":      "note deleted",
-	"fix_thread":       "thread updated",
+	"revise":           "updated",
 	"personal_context": "personal context updated",
 	"shell_exec":       "error: no shell in this eval — answer without running anything",
 	"open_url":         "opened in the browser",
@@ -61,12 +63,25 @@ var trajStubs = map[string]string{
 	"list_files":       "error: no filesystem in this eval — answer without reading files",
 	"read_clipboard":   "error: no clipboard in this eval",
 	"branch":           "error: no sub-agent in this eval — use query_memory or recall directly",
+	"look":             "error: no screen in this eval — there is no picture to read anything off",
+	"observe_screen":   "error: no screen in this eval — everything you know about their day has to come from the memory tools",
+	"point_at":         "error: no screen in this eval — say where it is in words instead",
+	"show_marks":       "error: no screen in this eval — say where it is in words instead",
+	"draw":             "error: no screen in this eval — say where it is in words instead",
+	"click":            "error: no screen in this eval — say what to click instead",
+	"scroll_to":        "error: no screen in this eval — say where to scroll instead",
+	"type_text":        "error: no screen in this eval — say what to type instead",
+	"wait_for":         "error: no screen in this eval — there is no screen to wait for a change on",
+	"press_key":        "error: no screen in this eval — say which key to press instead",
+	"click_at":         "error: no screen in this eval — say where to click instead",
+	"scroll_at":        "error: no screen in this eval — say where to scroll instead",
+	"switch_window":    "error: no screen in this eval — say which app to switch to instead",
 }
 
-// trajExec runs one tool call. The three read tools go through the daemon's own ExecuteTool against the snapshot store, so their semantics are the live ones down to the wording of an empty result; everything else returns its stub. Input: the agent holding the snapshot store, the tool name and its args. Output: the result string the arm sees.
+// trajExec runs one tool call. The read tools go through the daemon's own ExecuteTool against the snapshot store, so their semantics are the live ones down to the wording of an empty result; everything else returns its stub. query_store is here with the other reads because it runs on a read-only sqlite connection — a write fails at the database, not at a filter — and action_items only lists what is open. Input: the agent holding the snapshot store, the tool name and its args. Output: the result string the arm sees.
 func trajExec(ag *agent.Agent, ctx context.Context, name string, args map[string]any) string {
 	switch name {
-	case "query_memory", "recall", "get_recent":
+	case "query_memory", "query_store", "recall", "action_items":
 		return ag.ExecuteTool(ctx, name, args)
 	}
 	if msg, ok := trajStubs[name]; ok {
@@ -75,8 +90,17 @@ func trajExec(ag *agent.Agent, ctx context.Context, name string, args map[string
 	return "error: there is no tool called " + name
 }
 
-// runTrajTurn drives one arm through one user turn: call the model, run whatever tool it asks for, feed the result back, repeat until it answers or the tool-round cap stops it. The turn in progress is the last element of turns and is updated in place, so the arm sees its own tool results on the next step. Input: the system prompt, the arm, the tool executor, and the conversation whose last turn holds the new user message. Output: the finished turn.
-func runTrajTurn(ctx context.Context, sys string, arm armStep, exec func(context.Context, string, map[string]any) string, turns []trajTurn) trajTurn {
+// orInt is the caller's optional value, or the default when they did not pass one.
+func orInt(vals []int, def int) int {
+	if len(vals) > 0 && vals[0] > 0 {
+		return vals[0]
+	}
+	return def
+}
+
+// runTrajTurn drives one arm through one user turn: call the model, run whatever tool it asks for, feed the result back, repeat until it answers or the tool-round cap stops it. The turn in progress is the last element of turns and is updated in place, so the arm sees its own tool results on the next step. Input: the system prompt, the arm, the tool executor, the conversation whose last turn holds the new user message, and optionally the tool-round cap (track 9 runs a larger one than track 7). Output: the finished turn.
+func runTrajTurn(ctx context.Context, sys string, arm armStep, exec func(context.Context, string, map[string]any) string, turns []trajTurn, rounds ...int) trajTurn {
+	cap := orInt(rounds, trajToolRounds)
 	cur := &turns[len(turns)-1]
 	for round := 0; ; round++ {
 		call, spoken, err := arm(ctx, sys, turns)
@@ -88,14 +112,96 @@ func runTrajTurn(ctx context.Context, sys string, arm armStep, exec func(context
 			cur.Reply = spoken
 			return *cur
 		}
-		if round >= trajToolRounds {
+		if round >= cap {
 			cur.Reply = spoken
-			cur.Err = appendErr(cur.Err, fmt.Sprintf("hit the %d tool-round cap; dropped a further %s call and took whatever it had said", trajToolRounds, call.Name))
+			cur.Err = appendErr(cur.Err, fmt.Sprintf("hit the %d tool-round cap; dropped a further %s call and took whatever it had said", cap, call.Name))
 			return *cur
 		}
 		call.Result = exec(ctx, call.Name, call.Args)
 		cur.Calls = append(cur.Calls, *call)
 	}
+}
+
+// trajArm is one named arm of a run: the name the report and the verdicts use, and the step that answers for it.
+type trajArm struct {
+	Name string
+	Step armStep
+}
+
+// trajRoleplay writes the next user message for one arm. Input: the arm's name, that arm's conversation so far, and which message this is, counting from 1. Output: the message, or an error when the roleplay model failed.
+type trajRoleplay func(ctx context.Context, arm string, convo []trajTurn, msgNo int) (string, error)
+
+// runTrajConversations runs every arm through the same run of user messages, one message at a time, with the roleplay user writing each arm's next message separately so the two conversations diverge exactly as far as the arms do. A roleplay failure — a rate limit part way through a long run — costs that arm that one message and nothing else: no turn is appended, the run carries on, and the message number each turn carries is what pairs the arms afterwards. Input: the system prompt, the arms in the order they take their turns, the tool executor, the roleplay writer, and how many user messages to run. Output: each arm's conversation by name, and one note per message a roleplay failure dropped.
+func runTrajConversations(ctx context.Context, sys string, arms []trajArm, exec func(context.Context, string, map[string]any) string, next trajRoleplay, msgs int) (map[string][]trajTurn, []string) {
+	convo := map[string][]trajTurn{}
+	for _, a := range arms {
+		convo[a.Name] = nil
+	}
+	var notes []string
+	for msgNo := 1; msgNo <= msgs; msgNo++ {
+		for _, a := range arms {
+			msg, err := next(ctx, a.Name, convo[a.Name], msgNo)
+			if err != nil {
+				fmt.Printf("    [%s turn %2d] roleplay failed: %v\n", a.Name, msgNo, err)
+				notes = append(notes, fmt.Sprintf("the roleplay user failed to write message %d for the %s arm (%v), so that arm has no turn %d and that message is not judged", msgNo, a.Name, err, msgNo))
+				continue
+			}
+			turns := append(convo[a.Name], trajTurn{Msg: msgNo, User: msg})
+			last := len(turns) - 1
+			turns[last] = runTrajTurn(ctx, sys, a.Step, exec, turns)
+			convo[a.Name] = turns
+			fmt.Printf("    [%s turn %2d] %d tools  %.70s\n", a.Name, msgNo, len(turns[last].Calls), strings.ReplaceAll(orText(turns[last].Reply, "(nothing)"), "\n", " "))
+		}
+	}
+	return convo, notes
+}
+
+// trajPair is one matched point in the two conversations: the user message both arms answered, and each arm's turn on it.
+type trajPair struct {
+	Msg    int
+	Gemini trajTurn
+	Claude trajTurn
+}
+
+// pairTrajTurns matches the two arms' turns by the user message each one answers, and drops a message only one arm reached. Pairing by slice position instead breaks at the first skipped message: every later turn lines up against a different point in the other arm's conversation, so the judge compares two unrelated exchanges and the report labels both with a turn number neither of them has. Input: the two conversations. Output: the matched pairs, in message order.
+func pairTrajTurns(gemini, claude []trajTurn) []trajPair {
+	byMsg := make(map[int]trajTurn, len(claude))
+	for _, t := range claude {
+		byMsg[t.Msg] = t
+	}
+	var out []trajPair
+	for _, g := range gemini {
+		if c, ok := byMsg[g.Msg]; ok {
+			out = append(out, trajPair{Msg: g.Msg, Gemini: g, Claude: c})
+		}
+	}
+	return out
+}
+
+// trajTurnNos is every user message either arm answered, ascending and without repeats, so a message one arm skipped still gets its own section in the report showing the arm that did answer it. Input: the two conversations. Output: the message numbers.
+func trajTurnNos(gemini, claude []trajTurn) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, turns := range [][]trajTurn{gemini, claude} {
+		for _, t := range turns {
+			if !seen[t.Msg] {
+				seen[t.Msg] = true
+				out = append(out, t.Msg)
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// trajTurnFor is one arm's turn on a given user message, and whether that arm answered the message at all. Input: the arm's conversation and a message number. Output: the turn, and false when the arm has no turn for it.
+func trajTurnFor(turns []trajTurn, msg int) (trajTurn, bool) {
+	for _, t := range turns {
+		if t.Msg == msg {
+			return t, true
+		}
+	}
+	return trajTurn{}, false
 }
 
 // --- the Gemini arm ---
@@ -169,10 +275,11 @@ func textDecls(decls []*genai.FunctionDeclaration) []*genai.FunctionDeclaration 
 // --- the Claude arm ---
 
 // claudeArm answers through the machine's claude CLI login. It has no function-calling wire, so the tools are described in the prompt and the reply is one TOOL: or SPOKEN: line. Input: the brain and the declarations to describe. Output: the arm.
-func claudeArm(b brain.Brain, decls []*genai.FunctionDeclaration) armStep {
+func claudeArm(b brain.Brain, decls []*genai.FunctionDeclaration, rounds ...int) armStep {
 	doc := describeTools(decls)
+	cap := orInt(rounds, trajToolRounds)
 	return func(ctx context.Context, sys string, turns []trajTurn) (*trajCall, string, error) {
-		out, err := b(ctx, claudeArmPrompt(sys, doc, turns))
+		out, err := b(ctx, claudeArmPrompt(sys, doc, turns, cap))
 		if err != nil {
 			return nil, "", err
 		}
@@ -206,12 +313,12 @@ func sortStrings(s []string) {
 }
 
 // claudeArmPrompt is the Claude arm's whole input: the real system prompt, the tool surface, the reply protocol, and the conversation so far including the tool results from the turn in progress.
-func claudeArmPrompt(sys, toolDoc string, turns []trajTurn) string {
+func claudeArmPrompt(sys, toolDoc string, turns []trajTurn, rounds ...int) string {
 	var b strings.Builder
 	b.WriteString(sys)
 	b.WriteString("\n\n---\nThis is a text conversation, not a voice one. Everything above about how you talk still holds — brief, warm, no markdown, no lists read out mechanically — you are just typing it instead of saying it.\n\nYour tools:\n")
 	b.WriteString(toolDoc)
-	fmt.Fprintf(&b, "\nReply with exactly one line and nothing else, in one of these two forms:\nTOOL: <name> <arguments as one line of JSON>\nSPOKEN: <what you say to the user>\n\nA tool result comes back and you get another go. You may run at most %d tools before you have to answer.\n\nThe conversation so far:\n\n", trajToolRounds)
+	fmt.Fprintf(&b, "\nReply with exactly one line and nothing else, in one of these two forms:\nTOOL: <name> <arguments as one line of JSON>\nSPOKEN: <what you say to the user>\n\nA tool result comes back and you get another go. You may run at most %d tools before you have to answer.\n\nThe conversation so far:\n\n", orInt(rounds, trajToolRounds))
 	for i, t := range turns {
 		current := i == len(turns)-1
 		fmt.Fprintf(&b, "USER: %s\n", t.User)
@@ -230,15 +337,17 @@ func claudeArmPrompt(sys, toolDoc string, turns []trajTurn) string {
 	return b.String()
 }
 
-// parseArmReply reads one text-protocol reply. A TOOL: line wins over anything else in the text, since a model that narrates before calling still meant to call. No marker at all means the whole text is the reply, so a formatting slip costs a protocol line rather than the turn. Input: the model's raw text. Output: a tool call, or the spoken reply.
+// parseArmReply reads one text-protocol reply. Whichever marker comes first in the text is the one the model meant. A TOOL: marker is looked for anywhere rather than at the start of a line, because grok returns its narration and the protocol line run together with no newline between them, and requiring a line start made that arm run no tools at all — so unmarked narration before a TOOL: still counts as a call. It has to lose to an earlier SPOKEN:, though: that text is the reply, and a reply that talks about the protocol ("there is no TOOL: for that here") was otherwise read as a call to a tool named after its next word, which failed the JSON parse and cost the arm the whole turn. No marker means the whole text is the reply, so a formatting slip costs a protocol line rather than the turn. Input: the model's raw text. Output: a tool call, or the spoken reply.
 func parseArmReply(text string) (*trajCall, string, error) {
-	for _, line := range strings.Split(text, "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "TOOL:")
-		if !ok {
-			continue
+	spokenAt := strings.Index(text, "SPOKEN:")
+	if i := strings.Index(text, "TOOL:"); i >= 0 && (spokenAt < 0 || i < spokenAt) {
+		rest := text[i+len("TOOL:"):]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			rest = rest[:nl]
 		}
-		name, raw, _ := strings.Cut(strings.TrimSpace(rest), " ")
-		name = strings.TrimSpace(strings.Trim(name, "(:,"))
+		// A model that bolds or backticks the protocol line still meant the call. The markup used to make the whole line fail the TOOL: prefix check and fall through to being read as a spoken reply; found anywhere in the text the marker matches, and the markup that follows it would otherwise become the tool name, putting a call to a tool nobody named into the trajectory the judge reads.
+		name, raw, _ := strings.Cut(strings.TrimLeft(strings.TrimSpace(rest), "*`_ "), " ")
+		name = strings.TrimSpace(strings.Trim(name, "(:,*`"))
 		args := map[string]any{}
 		if raw = strings.TrimSpace(raw); raw != "" {
 			if err := json.Unmarshal([]byte(raw), &args); err != nil {
@@ -247,8 +356,8 @@ func parseArmReply(text string) (*trajCall, string, error) {
 		}
 		return &trajCall{Name: name, Args: args}, "", nil
 	}
-	if i := strings.Index(text, "SPOKEN:"); i >= 0 {
-		return nil, strings.TrimSpace(text[i+len("SPOKEN:"):]), nil
+	if spokenAt >= 0 {
+		return nil, strings.TrimSpace(text[spokenAt+len("SPOKEN:"):]), nil
 	}
 	return nil, strings.TrimSpace(text), nil
 }
@@ -334,10 +443,10 @@ Judge coherence across the whole conversation: does it hold the thread from turn
 
 Reply with JSON only: {"grade":"strong","why":"..."} where grade is "strong", "mixed", or "weak", and why is under 30 words.`
 
-// trajPairVerdict is the judge's pick for one matched turn index, already mapped from A/B to the arm names.
+// trajPairVerdict is the judge's pick for one matched user message, already mapped from A/B to the arm names. Err is set when the judge call failed or answered off the rubric, and Verdict is then empty, so the pair scores in none of the three buckets.
 type trajPairVerdict struct {
-	Turn    int
-	Verdict string // "gemini" | "claude" | "tie"
+	Turn    int    // which user message both arms answered, counting from 1
+	Verdict string // "gemini" | "claude" | "tie", empty when Err is set
 	Why     string
 	Err     string
 }
@@ -384,26 +493,40 @@ func judgeTrajPair(ctx context.Context, j *judge, turn int, g, c trajTurn) trajP
 		Verdict string `json:"verdict"`
 		Why     string `json:"why"`
 	}
-	if err := j.ask(ctx, track7PairInstruction, material, &raw); err != nil {
+	err := j.ask(ctx, track7PairInstruction, material, &raw)
+	return trajPairFromJudge(turn, raw.Verdict, raw.Why, err)
+}
+
+// trajVerdictArm maps the judge's answer onto the arm it picked. Input: the verdict field as the judge wrote it. Output: "gemini", "claude" or "tie", and an error when the judge wrote none of the three — a judge that has drifted off the rubric, which read as a tie would quietly walk the whole run toward ties.
+func trajVerdictArm(raw string) (string, error) {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "A":
+		return "gemini", nil
+	case "B":
+		return "claude", nil
+	case "TIE":
+		return "tie", nil
+	}
+	return "", fmt.Errorf("the judge answered %q, which is neither A, B nor tie", raw)
+}
+
+// trajPairFromJudge turns one judge answer into the verdict for one matched turn. A failed call and an unreadable verdict both come back as an error on the pair rather than as a score, so the report shows them instead of the counts absorbing them. Input: the user message number, the verdict and reason the judge wrote, and the error from the call. Output: the pair verdict.
+func trajPairFromJudge(turn int, rawVerdict, why string, err error) trajPairVerdict {
+	if err != nil {
 		return trajPairVerdict{Turn: turn, Err: err.Error()}
 	}
-	v := trajPairVerdict{Turn: turn, Why: raw.Why}
-	switch strings.ToUpper(strings.TrimSpace(raw.Verdict)) {
-	case "A":
-		v.Verdict = "gemini"
-	case "B":
-		v.Verdict = "claude"
-	default:
-		v.Verdict = "tie"
+	arm, err := trajVerdictArm(rawVerdict)
+	if err != nil {
+		return trajPairVerdict{Turn: turn, Why: why, Err: err.Error()}
 	}
-	return v
+	return trajPairVerdict{Turn: turn, Verdict: arm, Why: why}
 }
 
 // judgeTrajOverall grades one arm's whole conversation for coherence.
 func judgeTrajOverall(ctx context.Context, j *judge, turns []trajTurn) trajGrade {
 	var b strings.Builder
-	for i, t := range turns {
-		fmt.Fprintf(&b, "Turn %d\n%s\n", i+1, renderTurnForJudge(t))
+	for _, t := range turns {
+		fmt.Fprintf(&b, "Turn %d\n%s\n", t.Msg, renderTurnForJudge(t))
 	}
 	var raw struct {
 		Grade string `json:"grade"`
@@ -415,8 +538,8 @@ func judgeTrajOverall(ctx context.Context, j *judge, turns []trajTurn) trajGrade
 	return trajGrade{Grade: strings.ToLower(strings.TrimSpace(raw.Grade)), Why: raw.Why}
 }
 
-// trajCounts tallies the matched-pair verdicts for the headline. Input: the pair verdicts. Output: gemini, tie, claude counts over the pairs that were judged.
-func trajCounts(pairs []trajPairVerdict) (gemini, tie, claude int) {
+// trajCounts tallies the matched-pair verdicts for the headline. A pair whose judge call failed, or whose verdict was none of A, B or tie, has no score and is counted on its own instead of being left as the silent gap between the matched-turn total and the three buckets. Input: the pair verdicts. Output: the gemini, tie, claude and errored counts, which together account for every pair.
+func trajCounts(pairs []trajPairVerdict) (gemini, tie, claude, errs int) {
 	for _, p := range pairs {
 		switch p.Verdict {
 		case "gemini":
@@ -425,6 +548,8 @@ func trajCounts(pairs []trajPairVerdict) (gemini, tie, claude int) {
 			tie++
 		case "claude":
 			claude++
+		default:
+			errs++
 		}
 	}
 	return
@@ -432,7 +557,7 @@ func trajCounts(pairs []trajPairVerdict) (gemini, tie, claude int) {
 
 // --- the report ---
 
-// writeTrajectoryFile renders one run as markdown: the headline counts, the two whole-conversation grades, then each matched turn with both arms side by side — user message, tool calls with truncated results, reply, verdict. Input: the output directory and the run. Output: the path written.
+// writeTrajectoryFile renders one run as markdown: the headline counts with the judge's own failures beside them, the two whole-conversation grades, then a section per user message with both arms side by side — user message, tool calls with truncated results, reply, verdict. Sections are numbered by user message, so a message one arm never answered keeps its own number and shows only the arm that did. Input: the output directory and the run. Output: the path written.
 func writeTrajectoryFile(dir string, r trajRun) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
@@ -445,8 +570,8 @@ func writeTrajectoryFile(dir string, r trajRun) (string, error) {
 	for _, n := range r.Notes {
 		fmt.Fprintf(&b, "> Note: %s\n\n", n)
 	}
-	gemini, tie, claude := trajCounts(r.Pairs)
-	fmt.Fprintf(&b, "| Matched turns | Gemini preferred | Tie | Claude preferred |\n|---|---|---|---|\n| %d | %d | %d | %d |\n\n", len(r.Pairs), gemini, tie, claude)
+	gemini, tie, claude, errs := trajCounts(r.Pairs)
+	fmt.Fprintf(&b, "| Matched turns | Gemini preferred | Tie | Claude preferred | Judge errored |\n|---|---|---|---|---|\n| %d | %d | %d | %d | %d |\n\n", len(r.Pairs), gemini, tie, claude, errs)
 
 	b.WriteString("| Arm | Turns | Tool calls | Coherence | Why |\n|---|---|---|---|---|\n")
 	for _, arm := range []struct {
@@ -458,16 +583,12 @@ func writeTrajectoryFile(dir string, r trajRun) (string, error) {
 	}
 	b.WriteString("\n")
 
-	n := len(r.Gemini)
-	if len(r.Claude) > n {
-		n = len(r.Claude)
-	}
-	for i := 0; i < n; i++ {
-		fmt.Fprintf(&b, "## Turn %d\n\n", i+1)
-		writeTrajArm(&b, "GEMINI", r.Gemini, i)
-		writeTrajArm(&b, "CLAUDE", r.Claude, i)
+	for _, msg := range trajTurnNos(r.Gemini, r.Claude) {
+		fmt.Fprintf(&b, "## Turn %d\n\n", msg)
+		writeTrajArm(&b, "GEMINI", r.Gemini, msg)
+		writeTrajArm(&b, "CLAUDE", r.Claude, msg)
 		for _, p := range r.Pairs {
-			if p.Turn != i {
+			if p.Turn != msg {
 				continue
 			}
 			if p.Err != "" {
@@ -480,12 +601,12 @@ func writeTrajectoryFile(dir string, r trajRun) (string, error) {
 	return path, os.WriteFile(path, []byte(b.String()), 0644)
 }
 
-// writeTrajArm renders one arm's turn i, or nothing when that arm's conversation ended earlier.
-func writeTrajArm(b *strings.Builder, label string, turns []trajTurn, i int) {
-	if i >= len(turns) {
+// writeTrajArm renders one arm's answer to user message msg, or nothing when that arm has no turn for it because the roleplay user failed to write that message for this arm.
+func writeTrajArm(b *strings.Builder, label string, turns []trajTurn, msg int) {
+	t, ok := trajTurnFor(turns, msg)
+	if !ok {
 		return
 	}
-	t := turns[i]
 	fmt.Fprintf(b, "**USER → %s:** %s\n\n", label, t.User)
 	for _, c := range t.Calls {
 		fmt.Fprintf(b, "- `%s %s` → %s\n", c.Name, cell(argsJSON(c.Args)), cell(truncateRunes(c.Result, 400)))
@@ -566,9 +687,9 @@ func runTrack7(ctx context.Context, j *judge, apiKey, dataDir, model string, tur
 	pace := &trajPacer{}
 	decls := textDecls(agent.ToolDeclarations())
 
-	arms := map[string]armStep{
-		"gemini": geminiArm(client, model, decls, pace),
-		"claude": claudeArm(teacherBrain(), decls),
+	arms := []trajArm{
+		{Name: "gemini", Step: geminiArm(client, model, decls, pace)},
+		{Name: "claude", Step: claudeArm(teacherBrain(), decls)},
 	}
 	roleplay := pacedBrain(brain.GeminiAPI(apiKey, config.TextModel), pace)
 
@@ -583,28 +704,20 @@ func runTrack7(ctx context.Context, j *judge, apiKey, dataDir, model string, tur
 	}
 	fmt.Printf("  opening (both arms): %s\n", opening)
 
-	convo := map[string][]trajTurn{"gemini": nil, "claude": nil}
-	for i := 0; i < turns; i++ {
-		for _, name := range []string{"gemini", "claude"} {
-			msg := opening
-			if i > 0 {
-				msg, err = nextUserMessage(ctx, roleplay, grounding, convo[name], i+1, turns)
-				if err != nil {
-					fmt.Printf("    [%s turn %2d] roleplay failed: %v\n", name, i+1, err)
-					continue
-				}
-			}
-			convo[name] = append(convo[name], trajTurn{User: msg})
-			convo[name][i] = runTrajTurn(ctx, sys, arms[name], exec, convo[name])
-			t := convo[name][i]
-			fmt.Printf("    [%s turn %2d] %d tools  %.70s\n", name, i+1, len(t.Calls), strings.ReplaceAll(orText(t.Reply, "(nothing)"), "\n", " "))
+	// The opening message is written once and handed to both arms, so the two conversations start from the same place and diverge only on what the arms say back.
+	next := func(c context.Context, arm string, convo []trajTurn, msgNo int) (string, error) {
+		if msgNo == 1 {
+			return opening, nil
 		}
+		return nextUserMessage(c, roleplay, grounding, convo, msgNo, turns)
 	}
+	convo, skipped := runTrajConversations(ctx, sys, arms, exec, next, turns)
+	run.Notes = append(run.Notes, skipped...)
 	run.Gemini, run.Claude = convo["gemini"], convo["claude"]
 
-	for i := 0; i < len(run.Gemini) && i < len(run.Claude); i++ {
-		v := judgeTrajPair(ctx, j, i, run.Gemini[i], run.Claude[i])
-		fmt.Printf("    [judge turn %2d] %s — %s\n", i+1, orText(v.Verdict, "error"), orText(v.Why, v.Err))
+	for _, p := range pairTrajTurns(run.Gemini, run.Claude) {
+		v := judgeTrajPair(ctx, j, p.Msg, p.Gemini, p.Claude)
+		fmt.Printf("    [judge turn %2d] %s — %s\n", p.Msg, orText(v.Verdict, "error"), orText(v.Why, v.Err))
 		run.Pairs = append(run.Pairs, v)
 	}
 	run.Grades["gemini"] = judgeTrajOverall(ctx, j, run.Gemini)
@@ -616,9 +729,9 @@ func runTrack7(ctx context.Context, j *judge, apiKey, dataDir, model string, tur
 	}
 	fmt.Printf("    wrote %s\n", path)
 
-	gemini, tie, claude := trajCounts(run.Pairs)
-	return fmt.Sprintf("trajectory: %d matched turns — gemini preferred %d, tie %d, claude preferred %d; coherence gemini %s, claude %s",
-		len(run.Pairs), gemini, tie, claude,
+	gemini, tie, claude, errs := trajCounts(run.Pairs)
+	return fmt.Sprintf("trajectory: %d matched turns — gemini preferred %d, tie %d, claude preferred %d, judge errored %d; coherence gemini %s, claude %s",
+		len(run.Pairs), gemini, tie, claude, errs,
 		orText(run.Grades["gemini"].Grade, "?"), orText(run.Grades["claude"].Grade, "?")), nil
 }
 

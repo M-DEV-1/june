@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -94,8 +95,8 @@ func TestTrajExec_ReadsRealMemoryAndStubsEveryWrite(t *testing.T) {
 	if got := trajExec(ag, ctx, "query_memory", map[string]any{"query": "oat milk"}); !strings.Contains(got, "oat milk lattes") {
 		t.Errorf("query_memory should reach the real store, got %q", got)
 	}
-	if got := trajExec(ag, ctx, "get_recent", map[string]any{}); got == "" {
-		t.Error("get_recent returned nothing at all")
+	if got := trajExec(ag, ctx, "recall", map[string]any{}); got == "" {
+		t.Error("recall returned nothing at all")
 	}
 
 	before := hashFile(t, path)
@@ -127,6 +128,52 @@ func TestTrajExec_ReadsRealMemoryAndStubsEveryWrite(t *testing.T) {
 	}
 }
 
+// TestTrajExec_AnswersEveryDeclaredTool walks the real declarations both arms are handed and asserts every one of them is handled here, either by the daemon's own read path or by a stub. The loop above can only ever check the stubs against themselves; this is the check that notices a tool the harness declares and then does not answer, which tells the model "there is no tool called X" and costs the arm that reached for it a round it lost to the harness rather than to the other arm. The store still has to be byte-identical when the sweep is done.
+func TestTrajExec_AnswersEveryDeclaredTool(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "db")
+	store, err := db.New(path)
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if _, err := store.LogNote(ctx, "the user prefers oat milk lattes", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+	ag := agent.NewAgent(nil, nil, store, nil, "FAKE_API_KEY")
+
+	args := map[string]map[string]any{
+		"query_memory": {"query": "oat milk"},
+		"query_store":  {"query": "SELECT count(*) AS n FROM notes"},
+		"recall":       {},
+		"action_items": {},
+		"save_note":    {"content": "a fabricated note"},
+		"revise":       {"ref": "note#1", "remove": true},
+		"shell_exec":   {"command": "rm -rf /"},
+		"type_text":    {"text": "rm -rf /", "enter": true},
+		"click":        {"n": float64(1)},
+	}
+
+	before := hashFile(t, path)
+	for _, d := range agent.ToolDeclarations() {
+		got := trajExec(ag, ctx, d.Name, args[d.Name])
+		if strings.Contains(got, "there is no tool called") {
+			t.Errorf("%s is declared to both arms but the eval has no executor for it: %q", d.Name, got)
+		}
+	}
+	if after := hashFile(t, path); after != before {
+		t.Errorf("the declared-tool sweep wrote to the store: %s -> %s", before, after)
+	}
+
+	// The read tools have to be the daemon's own, not a stub: query_store answers with the column header it built from the query, and action_items with the store's own empty-list sentinel.
+	if got := trajExec(ag, ctx, "query_store", args["query_store"]); !strings.HasPrefix(got, "n\n") {
+		t.Errorf("query_store should run against the snapshot, got %q", got)
+	}
+	if got := trajExec(ag, ctx, "action_items", nil); !strings.Contains(got, "nothing outstanding") {
+		t.Errorf("action_items should reach the real store, got %q", got)
+	}
+}
+
 // TestParseArmReply covers the Claude arm's text protocol: a tool line wins over surrounding narration, a spoken reply survives its own newlines, and a reply with no marker at all is kept whole rather than lost.
 func TestParseArmReply(t *testing.T) {
 	call, spoken, err := parseArmReply("TOOL: query_memory {\"query\":\"riddler\"}")
@@ -147,6 +194,34 @@ func TestParseArmReply(t *testing.T) {
 	call, _, _ = parseArmReply("TOOL: read_clipboard")
 	if call == nil || call.Name != "read_clipboard" || len(call.Args) != 0 {
 		t.Errorf("a no-argument tool call: %+v", call)
+	}
+}
+
+// TestParseArmReply_SpokenKeepsAMarkerInsideItsOwnText pins the edge of the anywhere-in-the-text scan. Looking for TOOL: anywhere is what lets a model that runs its narration and its protocol line together still be read as a call, but it must not reach inside a reply that has already declared itself spoken: a refusal that mentions the marker is a reply, not a call for a tool named "for".
+func TestParseArmReply_SpokenKeepsAMarkerInsideItsOwnText(t *testing.T) {
+	call, spoken, err := parseArmReply("SPOKEN: I can't run that here — there is no TOOL: for it in this eval.")
+	if err != nil || call != nil {
+		t.Fatalf("a spoken reply that mentions the marker became %+v (err %v)", call, err)
+	}
+	if spoken != "I can't run that here — there is no TOOL: for it in this eval." {
+		t.Errorf("spoken: %q", spoken)
+	}
+	// The shape the anywhere-scan was added for — narration and the protocol line with no newline between them — still has to parse as a call.
+	call, _, err = parseArmReply(`I'll pull this week up.TOOL: recall {"since":"today"}`)
+	if err != nil || call == nil || call.Name != "recall" || call.Args["since"] != "today" {
+		t.Errorf("narration run together with the protocol line: %+v %v", call, err)
+	}
+}
+
+// TestParseArmReply_IgnoresMarkupAroundTheMarker is the other edge of the anywhere-scan. A model that bolds the protocol line used to fail the "TOOL:" prefix check and fall through to being read as a spoken reply; found anywhere in the text, the marker now matches and the next word — the markup, not the tool — became the tool name, so the trajectory carried a call to a tool nobody named and the judge saw the arm reaching for a tool that does not exist.
+func TestParseArmReply_IgnoresMarkupAroundTheMarker(t *testing.T) {
+	call, _, err := parseArmReply(`**TOOL:** recall {"since":"today"}`)
+	if err != nil || call == nil || call.Name != "recall" || call.Args["since"] != "today" {
+		t.Errorf("a bolded protocol line: %+v %v", call, err)
+	}
+	call, _, err = parseArmReply("TOOL: `query_memory` {\"query\":\"riddler\"}")
+	if err != nil || call == nil || call.Name != "query_memory" {
+		t.Errorf("a quoted tool name: %+v %v", call, err)
 	}
 }
 
@@ -173,23 +248,27 @@ func TestClaudeArmPrompt_CarriesTheHarness(t *testing.T) {
 	}
 }
 
-// TestWriteTrajectoryFile_SideBySideShape checks the report: named for the run's start, headline counts, a per-arm coherence row, and both arms' tool calls and replies under each matched turn with the verdict.
+// TestWriteTrajectoryFile_SideBySideShape checks the report: named for the run's start, headline counts with the judge errors alongside them, a per-arm coherence row, and both arms' tool calls and replies under each matched turn with the verdict. The gemini arm is missing message 3, so the section for it holds only the arm that answered and the sections are numbered by user message rather than by position — numbering by position relabelled every turn after a skip.
 func TestWriteTrajectoryFile_SideBySideShape(t *testing.T) {
 	run := trajRun{
 		Started: time.Date(2026, 8, 30, 16, 4, 5, 0, time.Local),
 		Model:   "gemini-3.5-flash-lite",
 		Notes:   []string{"a note about the run"},
 		Gemini: []trajTurn{
-			{User: "what was I doing yesterday", Calls: []trajCall{{Name: "recall", Args: map[string]any{"since": "2026-08-29"}, Result: "the eval harness"}}, Reply: "the harness"},
-			{User: "and my meeting?", Reply: "nothing about that"},
+			{Msg: 1, User: "what was I doing yesterday", Calls: []trajCall{{Name: "recall", Args: map[string]any{"since": "2026-08-29"}, Result: "the eval harness"}}, Reply: "the harness"},
+			{Msg: 2, User: "and my meeting?", Reply: "nothing about that"},
+			{Msg: 4, User: "remember I moved desks", Reply: "got it"},
 		},
 		Claude: []trajTurn{
-			{User: "what was I doing yesterday", Calls: []trajCall{{Name: "query_memory", Args: map[string]any{"query": "yesterday"}, Result: "the eval harness"}}, Reply: "eval harness, all day"},
-			{User: "who was in the standup?", Reply: "no minutes in there", Err: "judge: boom"},
+			{Msg: 1, User: "what was I doing yesterday", Calls: []trajCall{{Name: "query_memory", Args: map[string]any{"query": "yesterday"}, Result: "the eval harness"}}, Reply: "eval harness, all day"},
+			{Msg: 2, User: "who was in the standup?", Reply: "no minutes in there", Err: "judge: boom"},
+			{Msg: 3, User: "what did I say to mira", Reply: "nothing in there about mira"},
+			{Msg: 4, User: "remember I moved desks", Reply: "saved"},
 		},
 		Pairs: []trajPairVerdict{
-			{Turn: 0, Verdict: "claude", Why: "more specific"},
-			{Turn: 1, Verdict: "tie", Why: "both said nothing was there"},
+			{Turn: 1, Verdict: "claude", Why: "more specific"},
+			{Turn: 2, Verdict: "tie", Why: "both said nothing was there"},
+			{Turn: 4, Err: `the judge answered "whichever", which is neither A, B nor tie`},
 		},
 		Grades: map[string]trajGrade{
 			"gemini": {Grade: "mixed", Why: "repeated a lookup"},
@@ -204,15 +283,17 @@ func TestWriteTrajectoryFile_SideBySideShape(t *testing.T) {
 	if filepath.Base(path) != "2026-08-30T16-04-05.md" {
 		t.Errorf("file name: %s", filepath.Base(path))
 	}
-	body, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	body := string(raw)
 	for _, want := range []string{
 		"> Note: a note about the run",
-		"| 2 | 0 | 1 | 1 |",
-		"| gemini | 2 | 1 | mixed | repeated a lookup |",
-		"| claude | 2 | 1 | strong | held the thread |",
+		"| Matched turns | Gemini preferred | Tie | Claude preferred | Judge errored |",
+		"| 3 | 0 | 1 | 1 | 1 |",
+		"| gemini | 3 | 1 | mixed | repeated a lookup |",
+		"| claude | 4 | 1 | strong | held the thread |",
 		"## Turn 1",
 		"**USER → GEMINI:** what was I doing yesterday",
 		"`recall {\"since\":\"2026-08-29\"}`",
@@ -223,10 +304,22 @@ func TestWriteTrajectoryFile_SideBySideShape(t *testing.T) {
 		"## Turn 2",
 		"Error: judge: boom",
 		"Verdict: **tie** — both said nothing was there",
+		"## Turn 3",
+		"## Turn 4",
+		`Judge error: the judge answered "whichever", which is neither A, B nor tie`,
 	} {
-		if !strings.Contains(string(body), want) {
+		if !strings.Contains(body, want) {
 			t.Errorf("trajectory file missing %q", want)
 		}
+	}
+
+	// Message 3 is the one the gemini arm never answered. Its section has to show the claude side alone rather than borrowing the gemini turn that came after the skip.
+	three := body[strings.Index(body, "## Turn 3"):strings.Index(body, "## Turn 4")]
+	if strings.Contains(three, "GEMINI") {
+		t.Errorf("the skipped message pulled in a gemini turn that answered something else:\n%s", three)
+	}
+	if !strings.Contains(three, "**CLAUDE:** nothing in there about mira") {
+		t.Errorf("the skipped message lost the arm that did answer it:\n%s", three)
 	}
 }
 
@@ -290,5 +383,130 @@ func TestGeminiContents_ReplaysTheSignedFunctionCall(t *testing.T) {
 	}
 	if string(got[1].Parts[0].ThoughtSignature) != "signed" {
 		t.Error("the thought signature was dropped")
+	}
+}
+
+// trajReplyArm is an arm that answers straight away with a fixed line and never runs a tool, so a conversation test moves one turn per message.
+func trajReplyArm(reply string) armStep {
+	return func(ctx context.Context, sys string, turns []trajTurn) (*trajCall, string, error) {
+		return nil, reply + " to " + turns[len(turns)-1].User, nil
+	}
+}
+
+// trajNoExec fails the test if an arm runs a tool it was not supposed to run.
+func trajNoExec(t *testing.T) func(context.Context, string, map[string]any) string {
+	return func(ctx context.Context, name string, args map[string]any) string {
+		t.Fatalf("no tool should have run, got %s", name)
+		return ""
+	}
+}
+
+// TestRunTrajConversations_ARoleplayFailureSkipsOneMessageAndTheRunCarriesOn is the rate-limit path. The roleplay model fails on one arm's third message, so that arm never gets a turn for it and its conversation ends up shorter than the message count. The run has to finish anyway — indexing the loop counter into the short slice panicked and killed the rest of a paid run — and every turn has to carry the message number it answered, because after a skip that is the only thing that still lines the two arms up.
+func TestRunTrajConversations_ARoleplayFailureSkipsOneMessageAndTheRunCarriesOn(t *testing.T) {
+	arms := []trajArm{
+		{Name: "gemini", Step: trajReplyArm("gemini")},
+		{Name: "claude", Step: trajReplyArm("claude")},
+	}
+	next := func(ctx context.Context, arm string, convo []trajTurn, msgNo int) (string, error) {
+		if arm == "gemini" && msgNo == 3 {
+			return "", fmt.Errorf("429 out of quota")
+		}
+		return fmt.Sprintf("%s message %d", arm, msgNo), nil
+	}
+
+	convo, notes := runTrajConversations(context.Background(), "SYS", arms, trajNoExec(t), next, 4)
+
+	if got := trajTestMsgNos(convo["gemini"]); !slices.Equal(got, []int{1, 2, 4}) {
+		t.Errorf("the gemini arm should be missing only the message that failed, got %v", got)
+	}
+	if got := trajTestMsgNos(convo["claude"]); !slices.Equal(got, []int{1, 2, 3, 4}) {
+		t.Errorf("the claude arm should have every message, got %v", got)
+	}
+	last := convo["gemini"][len(convo["gemini"])-1]
+	if last.User != "gemini message 4" || last.Reply != "gemini to gemini message 4" {
+		t.Errorf("the turn after the skip is the wrong one: %+v", last)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "gemini") || !strings.Contains(notes[0], "out of quota") {
+		t.Errorf("a skipped message should leave a note saying so, got %v", notes)
+	}
+}
+
+// trajTestMsgNos reads the message number off each turn, so a test can say which messages an arm actually answered.
+func trajTestMsgNos(turns []trajTurn) []int {
+	out := make([]int, 0, len(turns))
+	for _, t := range turns {
+		out = append(out, t.Msg)
+	}
+	return out
+}
+
+// TestPairTrajTurns_PairsByMessageNumberNotIndex is the skip that used to poison every later verdict. The gemini arm is missing message 3, so from that point on the slice indexes disagree: index pairing put gemini's message 4 against claude's message 3 and labelled the row with neither. Pairing by message number keeps every matched turn matched and drops the one only one arm answered.
+func TestPairTrajTurns_PairsByMessageNumberNotIndex(t *testing.T) {
+	gemini := []trajTurn{{Msg: 1, User: "g1"}, {Msg: 2, User: "g2"}, {Msg: 4, User: "g4"}}
+	claude := []trajTurn{{Msg: 1, User: "c1"}, {Msg: 2, User: "c2"}, {Msg: 3, User: "c3"}, {Msg: 4, User: "c4"}}
+
+	pairs := pairTrajTurns(gemini, claude)
+	if len(pairs) != 3 {
+		t.Fatalf("want the three messages both arms answered, got %d: %+v", len(pairs), pairs)
+	}
+	for i, want := range []int{1, 2, 4} {
+		if pairs[i].Msg != want {
+			t.Errorf("pair %d is message %d, want %d", i, pairs[i].Msg, want)
+		}
+		if pairs[i].Gemini.User != fmt.Sprintf("g%d", want) || pairs[i].Claude.User != fmt.Sprintf("c%d", want) {
+			t.Errorf("pair %d compares two different points: %q vs %q", i, pairs[i].Gemini.User, pairs[i].Claude.User)
+		}
+	}
+}
+
+// TestTrajVerdictArm_OnlyAOrBOrTie pins the judge's answer to the three the rubric asks for. Anything else is a judge that has drifted off the rubric, and it has to come back as an error: scoring it a tie quietly walks the whole run toward ties.
+func TestTrajVerdictArm_OnlyAOrBOrTie(t *testing.T) {
+	for raw, want := range map[string]string{"A": "gemini", " b ": "claude", "tie": "tie", "TIE": "tie"} {
+		got, err := trajVerdictArm(raw)
+		if err != nil || got != want {
+			t.Errorf("%q: got %q %v, want %q", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"", "Assistant A", "both", "neither", "A is better"} {
+		if got, err := trajVerdictArm(raw); err == nil {
+			t.Errorf("%q should not have scored %q", raw, got)
+		}
+	}
+}
+
+// TestTrajPairFromJudge_AnUnreadableVerdictIsAnErrorNotATie checks the whole mapping from one judge answer to one pair verdict, including the two failure paths: the call itself failing, and the call coming back with a verdict that is none of A, B or tie.
+func TestTrajPairFromJudge_AnUnreadableVerdictIsAnErrorNotATie(t *testing.T) {
+	v := trajPairFromJudge(3, "B", "more specific", nil)
+	if v.Turn != 3 || v.Verdict != "claude" || v.Why != "more specific" || v.Err != "" {
+		t.Errorf("a clean verdict: %+v", v)
+	}
+	v = trajPairFromJudge(3, "whichever", "hard to call", nil)
+	if v.Verdict != "" {
+		t.Errorf("an unrecognised verdict scored %q instead of erroring", v.Verdict)
+	}
+	if !strings.Contains(v.Err, "whichever") {
+		t.Errorf("the error should quote what the judge actually said, got %q", v.Err)
+	}
+	v = trajPairFromJudge(3, "A", "", fmt.Errorf("429 out of quota"))
+	if v.Verdict != "" || !strings.Contains(v.Err, "out of quota") {
+		t.Errorf("a failed judge call: %+v", v)
+	}
+}
+
+// TestTrajCounts_ErrorsAreTheirOwnBucket is the headline that used to lie. An errored pair counts in the matched-turn total and in none of the three buckets, so a run whose judge failed four times out of ten reported six verdicts under a total of ten and said nothing about the gap.
+func TestTrajCounts_ErrorsAreTheirOwnBucket(t *testing.T) {
+	pairs := []trajPairVerdict{
+		{Turn: 1, Verdict: "gemini"},
+		{Turn: 2, Verdict: "tie"},
+		{Turn: 3, Err: "429 out of quota"},
+		{Turn: 4, Err: "the judge answered \"whichever\""},
+		{Turn: 5, Verdict: "claude"},
+	}
+	gemini, tie, claude, errs := trajCounts(pairs)
+	if gemini != 1 || tie != 1 || claude != 1 || errs != 2 {
+		t.Errorf("got gemini %d, tie %d, claude %d, errors %d", gemini, tie, claude, errs)
+	}
+	if gemini+tie+claude+errs != len(pairs) {
+		t.Error("the buckets should account for every pair")
 	}
 }

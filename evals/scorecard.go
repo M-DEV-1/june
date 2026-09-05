@@ -69,9 +69,10 @@ func summary(c scorecard) string {
 	return b.String()
 }
 
+// ranTracks names the tracks this run selected, in track order, for the scorecard's header line. Input: the set the -tracks flag was parsed into. Output: the selected track numbers joined by commas, or "none" when the set names no track the runner can run. Every track main.go can run has to be listed here, or a run of it reports "none" and reads as a run that measured nothing.
 func ranTracks(sel map[string]bool) string {
 	var out []string
-	for _, t := range []string{"1", "2", "3", "5", "6", "7"} {
+	for _, t := range []string{"1", "2", "3", "5", "6", "7", "8", "9", "10", "11"} {
 		if sel[t] {
 			out = append(out, t)
 		}

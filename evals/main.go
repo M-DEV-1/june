@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	tracks := flag.String("tracks", "1,2,3", "which tracks to run, comma separated: 1 memory replay, 2 conversation judge, 3 minutes judge, 5 counterfactual replay, 6 distillation study, 7 trajectory eval")
+	tracks := flag.String("tracks", "1,2,3", "which tracks to run, comma separated: 1 memory replay, 2 conversation judge, 3 minutes judge, 5 counterfactual replay, 6 distillation study, 7 trajectory eval, 9 gold set, 10 computer-use eval, 11 long-task job eval")
 	session := flag.String("session", "", "track 5: replay only sessions whose start time begins with this prefix (e.g. 2026-08-30); empty means the most recent 3")
 	turnCap := flag.Int("turns", 40, "track 2: score at most this many of the most recent turn pairs")
 	trajTurns := flag.Int("traj-turns", 10, "track 7: how many user messages the roleplay user sends in each arm's conversation")
@@ -62,10 +62,6 @@ type scorecard struct {
 func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool, session string, trajTurns int, trajModel string) error {
 	// The API key lives in the repo's .env, the same file cmd/root.go loads at startup.
 	_ = godotenv.Load()
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("GEMINI_API_KEY is not set (expected in .env)")
-	}
 
 	ctx := context.Background()
 	sel := map[string]bool{}
@@ -74,9 +70,18 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 	}
 	card := scorecard{Started: time.Now(), SHA: gitSHA(), Ran: sel}
 
-	j, err := newJudge(ctx, apiKey)
-	if err != nil {
-		return err
+	// Every track but 10 either calls Gemini itself or scores its material with the Gemini judge, so the key and the judge are built only when one of those is selected: track 10 alone talks to nothing but the running daemon.
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	var j *judge
+	if needsGeminiKey(sel) {
+		if apiKey == "" {
+			return fmt.Errorf("GEMINI_API_KEY is not set (expected in .env)")
+		}
+		var err error
+		j, err = newJudge(ctx, apiKey)
+		if err != nil {
+			return err
+		}
 	}
 
 	dataDir := config.DataDir()
@@ -215,6 +220,39 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 		fmt.Println("  " + note)
 	}
 
+	if sel["9"] {
+		fmt.Println("track 9 — gold set")
+		// The gold track's own flags live beside it in track9_gold.go, so adding it cost this switch six lines rather than four more parameters on run().
+		note, err := runTrack9(ctx, dataDir, apiKey, *goldPath, *goldArmNames, outDir)
+		if err != nil {
+			return fmt.Errorf("track 9: %w", err)
+		}
+		card.Notes = append(card.Notes, note)
+		fmt.Println("  " + note)
+	}
+
+	if sel["10"] {
+		fmt.Println("track 10 — computer-use eval")
+		// The screen-task table and its own --brain flag live beside it in track10_act.go.
+		note, err := runTrack10(ctx, daemonAddr)
+		if err != nil {
+			return fmt.Errorf("track 10: %w", err)
+		}
+		card.Notes = append(card.Notes, note)
+		fmt.Println("  " + note)
+	}
+
+	if sel["11"] {
+		fmt.Println("track 11 — long-task job eval")
+		// The job task table and its own -act11-tasks selector live beside it in track11_actjob.go; it shares track 10's -brain flag and daemon plumbing.
+		note, err := runTrack11(ctx, daemonAddr)
+		if err != nil {
+			return fmt.Errorf("track 11: %w", err)
+		}
+		card.Notes = append(card.Notes, note)
+		fmt.Println("  " + note)
+	}
+
 	path, err := writeScorecard(card, outDir)
 	if err != nil {
 		return err
@@ -222,6 +260,16 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 	fmt.Printf("\nscorecard: %s\n", path)
 	fmt.Print(summary(card))
 	return nil
+}
+
+// needsGeminiKey reports whether the selected tracks need a Gemini API key and the Gemini judge built from it. Input: the set of track names the run selected. Output: false only when tracks 10 and 11 are the only ones selected — both drive the running daemon over HTTP and score each task against a fixed rule, so neither calls Gemini directly and both must still run on a day the Gemini quota is spent.
+func needsGeminiKey(sel map[string]bool) bool {
+	for track := range sel {
+		if track != "10" && track != "11" {
+			return true
+		}
+	}
+	return false
 }
 
 // teacherBrain is the Claude teacher tracks 5 and 6 both study against: the machine's own login, sonnet unless the config's brain block pins a claude-cli model. Sonnet is the deliberate default: both tracks make many per-turn or per-file calls.
