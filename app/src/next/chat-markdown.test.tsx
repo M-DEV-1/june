@@ -5,8 +5,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Provider } from "react-redux";
 
 import { ReplyMarkdown } from "./chat-markdown";
+import { makeStore } from "./store";
+import { mockDaemon } from "./testing";
 
 afterEach(cleanup);
 
@@ -39,12 +42,19 @@ describe("ReplyMarkdown", () => {
     expect(w.__ran).toBeUndefined();
   });
 
-  it("opens a link through the system browser and never through window.location", async () => {
+  it("opens a link by posting to the daemon's /open route, never through window.open or window.location", async () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
     const originalHref = window.location.href;
-    render(<ReplyMarkdown text="[Ora](https://ora.example/about)" />);
+    const calls = mockDaemon();
+    const store = makeStore();
+    render(
+      <Provider store={store}>
+        <ReplyMarkdown text="[Ora](https://ora.example/about)" />
+      </Provider>,
+    );
     await userEvent.click(screen.getByRole("link", { name: "Ora" }));
-    expect(openSpy).toHaveBeenCalledWith("https://ora.example/about", "_blank", "noopener,noreferrer");
+    expect(calls).toContainEqual({ method: "POST", path: "/open", body: { url: "https://ora.example/about" } });
+    expect(openSpy).not.toHaveBeenCalled();
     expect(window.location.href).toBe(originalHref);
     openSpy.mockRestore();
   });

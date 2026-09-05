@@ -6,9 +6,11 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
-/** Opens a link in the system browser rather than this window. A chat pane is somewhere to read, not somewhere to navigate away from, so a click never touches window.location — the same reasoning that keeps every other outbound link in Ora off this webview. Input: the href clicked. Output: nothing. */
-function openLink(href: string): void {
-  window.open(href, "_blank", "noopener,noreferrer");
+import { useOpenUrlMutation } from "./api";
+
+/** Opens a link in the system browser rather than this window, by posting to the daemon's POST /open route (see internal/ipc/open.go) instead of calling window.open: a Tauri WebKitGTK webview does not reliably hand window.open off to the real browser, and a chat pane is somewhere to read, not somewhere to navigate away from, so a click never touches window.location either. Input: the openUrl mutation trigger from useOpenUrlMutation, and the href clicked. Output: nothing. */
+function openLink(openUrl: ReturnType<typeof useOpenUrlMutation>[0], href: string): void {
+  openUrl(href);
 }
 
 /** Every tag react-markdown may ask for, mapped onto the window's own type scale and surfaces rather than the browser's defaults — a heading tops out at `text-doc`, the same size a page's own section heading uses, because a reply is a paragraph in a thread and not a document of its own. */
@@ -22,19 +24,22 @@ const components: Components = {
   p: (p) => <p className="whitespace-pre-wrap" {...p} />,
   ul: (p) => <ul className="ml-5 list-disc [&>li]:mt-1" {...p} />,
   ol: (p) => <ol className="ml-5 list-decimal [&>li]:mt-1" {...p} />,
-  a: ({ href, children, ...p }) => (
-    <a
-      href={href}
-      className="text-accent underline underline-offset-2"
-      onClick={(e) => {
-        e.preventDefault();
-        if (href) openLink(href);
-      }}
-      {...p}
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children, ...p }) => {
+    const [openUrl] = useOpenUrlMutation();
+    return (
+      <a
+        href={href}
+        className="text-accent underline underline-offset-2"
+        onClick={(e) => {
+          e.preventDefault();
+          if (href) openLink(openUrl, href);
+        }}
+        {...p}
+      >
+        {children}
+      </a>
+    );
+  },
   pre: (p) => <pre className="mt-2 overflow-x-auto rounded-md bg-sunken p-3 font-mono text-meta" {...p} />,
   code: ({ className, children, ...p }) => {
     // A fenced block's own <code> sits inside the <pre> above and only needs the mono face; a bare `code` span is inline text and gets the subtle surface and padding the design calls "sunken". remark tags a fenced block's code with `language-xxx` only when the fence names one — a fence with no language (rare in practice, since every real reply names one) falls back to the inline styling nested inside the pre's own background, which is a harmless doubling rather than a wrong render. ponytail: className-sniffing, not full inline/block tracking — fine while every real fence in the daemon's replies names a language.
