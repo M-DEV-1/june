@@ -189,6 +189,62 @@ func TestTaskDoneUnknownID(t *testing.T) {
 	}
 }
 
+// TestPatchTaskOwner checks that PATCH /tasks/{id} lets the user correct whose task a noticed item really is, and that the new class is what GET /tasks reports afterwards — hearing about a thing in a meeting does not make it his, and the user is the one who can say so.
+func TestPatchTaskOwner(t *testing.T) {
+	store := newReadStore(t)
+	ctx := context.Background()
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "look into the vendor's new pricing", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
+		t.Fatalf("seed action item: %v", err)
+	}
+	_, srv := newWindowServer(t, &fakeAsker{}, store)
+
+	var list struct{ Tasks []Task }
+	getJSON(t, srv, "/tasks?owner=all", &list)
+	if len(list.Tasks) != 1 {
+		t.Fatalf("tasks = %d, want the one seeded action item", len(list.Tasks))
+	}
+	id := list.Tasks[0].ID
+
+	if code := patchJSON(t, srv, "/tasks/"+id, `{"owner":"them"}`); code != http.StatusOK {
+		t.Fatalf("PATCH /tasks/%s owner=them = %d, want 200", id, code)
+	}
+	getJSON(t, srv, "/tasks?owner=them", &list)
+	if len(list.Tasks) != 1 || list.Tasks[0].ID != id || list.Tasks[0].Owner != memory.OwnerThem {
+		t.Fatalf("after PATCH owner=them, GET /tasks?owner=them = %+v", list.Tasks)
+	}
+	getJSON(t, srv, "/tasks", &list)
+	if len(list.Tasks) != 0 {
+		t.Errorf("the moved item is still on the default (mine) list: %+v", list.Tasks)
+	}
+}
+
+// TestPatchTaskOwner_Rejects checks the three ways PATCH /tasks/{id} refuses a request: a value that is not me/them/unclear, an id naming no action item, and a "task-N" id, since a task the user typed in is always his and has nothing to correct.
+func TestPatchTaskOwner_Rejects(t *testing.T) {
+	store := newReadStore(t)
+	ctx := context.Background()
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "renew the domain", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
+		t.Fatalf("seed action item: %v", err)
+	}
+	_, srv := newWindowServer(t, &fakeAsker{}, store)
+
+	var list struct{ Tasks []Task }
+	getJSON(t, srv, "/tasks", &list)
+	id := list.Tasks[0].ID
+
+	if code := patchJSON(t, srv, "/tasks/"+id, `{"owner":"sideways"}`); code != http.StatusBadRequest {
+		t.Errorf("PATCH /tasks/%s owner=sideways = %d, want 400", id, code)
+	}
+	if code := patchJSON(t, srv, "/tasks/9999999", `{"owner":"them"}`); code != http.StatusNotFound {
+		t.Errorf("PATCH /tasks/9999999 owner=them = %d, want 404", code)
+	}
+
+	var created struct{ ID string }
+	postJSON(t, srv, "/tasks", `{"title":"book the flight"}`, &created)
+	if code := patchJSON(t, srv, "/tasks/"+created.ID, `{"owner":"them"}`); code != http.StatusBadRequest {
+		t.Errorf("PATCH /tasks/%s owner=them = %d, want 400 — a typed task is always yours", created.ID, code)
+	}
+}
+
 // TestTasksEmptyListIsNotNull guards the shape the window renders directly.
 func TestTasksEmptyListIsNotNull(t *testing.T) {
 	store := newReadStore(t)

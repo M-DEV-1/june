@@ -69,6 +69,7 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     const title = /^\/conversations\/([^/]+)\/title$/.exec(path);
     const day = /^\/days\/(.+)$/.exec(path);
     const done = /^\/tasks\/([^/]+)\/done$/.exec(path);
+    const ownerPatch = /^\/tasks\/([^/]+)$/.exec(path);
     const routineRun = /^\/routines\/([^/]+)\/run$/.exec(path);
     const routineID = /^\/routines\/([^/]+)$/.exec(path);
     const jobID = /^\/act\/([^/]+)$/.exec(path);
@@ -114,6 +115,13 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
       statusById.set(id, { done: status === "done", status });
       if (status === "dropped") tasks = tasks.filter((t) => t.id !== id);
       else tasks = tasks.map((t) => (t.id === id ? { ...t, done: status === "done" } : t));
+      return { status: 200, body: null };
+    }
+    if (method === "PATCH" && ownerPatch) {
+      // Mirrors internal/ipc.TaskOwner: writes the owner the user just picked onto that row, so the next GET /tasks reads it back the same way the daemon would.
+      const owner = typeof body === "object" && body !== null && "owner" in body ? String((body as { owner: unknown }).owner) : "";
+      const id = decodeURIComponent(ownerPatch[1]);
+      tasks = tasks.map((t) => (t.id === id ? { ...t, owner: owner as Task["owner"] } : t));
       return { status: 200, body: null };
     }
     if (method === "GET" && path === "/days") return { status: 200, body: { days: canned.days ?? [] } };

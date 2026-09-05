@@ -358,6 +358,11 @@ export const oraApi = createApi({
         }
       },
     }),
+    /** Corrects whose task a noticed item really is — hearing about a thing in a meeting does not make it the user's own. The daemon answers 400 for a task the user typed in, since those are always his. Invalidates Task so both the tasks and allTasks lists, and whichever day raised it, pick up the new owner on the next read. */
+    setTaskOwner: build.mutation<void, { id: string; owner: TaskOwner }>({
+      query: ({ id, owner }) => ({ url: `/tasks/${encodeURIComponent(id)}`, method: "PATCH", body: { owner } }),
+      invalidatesTags: ["Task"],
+    }),
     /** The last sixty days that have anything in them, newest first. */
     days: build.query<DaySummary[], void>({
       query: () => "/days",
@@ -460,6 +465,7 @@ export const {
   useAllTasksQuery,
   useCreateTaskMutation,
   useSetTaskStatusMutation,
+  useSetTaskOwnerMutation,
   useDaysQuery,
   useDayQuery,
   useMeetingsQuery,

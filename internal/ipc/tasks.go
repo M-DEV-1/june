@@ -211,3 +211,37 @@ func (s *Server) TaskDone(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 }
+
+// TaskOwner handles PATCH /tasks/{id} with body {"owner":"me"|"them"|"unclear"}: the user saying by hand whose task this really is, overriding whatever the meeting's minutes read as. Only a noticed task carries an owner to correct — a task the user typed in is always his by definition, so a "task-N" id is 400. A bad owner value is 400, and an id that names no action item is 404.
+func (s *Server) TaskOwner(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Owner string `json:"owner"`
+	}
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	if !memory.ValidOwnerClass(req.Owner) {
+		http.Error(w, "owner must be me, them or unclear", http.StatusBadRequest)
+		return
+	}
+
+	raw := r.PathValue("id")
+	if strings.HasPrefix(raw, userTaskPrefix) {
+		http.Error(w, "a task you typed in is always yours", http.StatusBadRequest)
+		return
+	}
+	noteID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		http.Error(w, "no such task", http.StatusNotFound)
+		return
+	}
+	if err := s.store.SetOwnerClass(r.Context(), noteID, req.Owner); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}

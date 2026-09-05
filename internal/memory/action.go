@@ -55,6 +55,8 @@ type ActionItem struct {
 	DoneSource string
 	// Created is when the notes row was written, set when the store reads the item back and zero for one just parsed out of minutes. It is the date the window shows, since an item parsed out of minutes has a raised date only when the minutes named one.
 	Created time.Time
+	// OwnerOverride is the class the user picked by hand on the Tasks screen, overriding whatever OwnerClass would otherwise read from Owner and Text. Empty when nobody has corrected it, set when the store reads the item back from its owner_class column.
+	OwnerOverride string
 }
 
 // The three answers to "whose task is this?". They are worked out from the owner the minutes named and from who the user is, not stored: every action row already carries an owner name, so classifying it on read means old rows and new ones are read the same way and nothing has to be rewritten.
@@ -69,7 +71,11 @@ var selfOwners = []string{"me", "you", "i", "i'll", "myself"}
 
 // OwnerClass says whose task this is. Input: the personal-context identity entry, which names the user and every form they are written down as ("Alex Rivera — goes by Alex") and names nobody else. Output: "me" when the owner is the user, "them" when it is somebody else, "unclear" when nobody can be made out.
 // An item the minutes left unowned is read a second time, from its own text: a name in front of "will", "to" or "should", or a "Person — work" prefix the bullet parser could not split, all name somebody who is not the user. With no identity on file the user's own name reads as somebody else's, which is deliberate — guessing here would put another person's work on his list.
+// A class the user picked by hand always wins: hearing about a thing in a meeting does not make it his, and the user is the one person who actually knows whose work it is.
 func (a ActionItem) OwnerClass(identity string) string {
+	if a.OwnerOverride != "" {
+		return a.OwnerOverride
+	}
 	owner := strings.TrimSpace(a.Owner)
 	if slices.Contains(selfOwners, strings.ToLower(owner)) || OwnedByUser(owner, identity) {
 		return OwnerMe
@@ -281,6 +287,11 @@ func ValidStatus(s string) bool {
 
 func ValidPriority(p string) bool {
 	return p == PriorityHigh || p == PriorityNormal || p == PriorityLow
+}
+
+// ValidOwnerClass reports whether class is one of the three answers to "whose task is this?" — the only values PATCH /tasks/{id} and OwnerOverride may ever hold.
+func ValidOwnerClass(class string) bool {
+	return class == OwnerMe || class == OwnerThem || class == OwnerUnclear
 }
 
 // MinutesLabel names the meeting a set of minutes covers, for the provenance an action item carries. Input: the minutes markdown. Output: the meeting's name, or "" when the minutes open straight into their sections without a title line. It reads the first ordinary line before any section heading — the minutes prompt puts the meeting's name and time there — and keeps the part before the dash or comma that separates the name from when it happened.
