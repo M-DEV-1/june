@@ -62,36 +62,50 @@ describe("Scroller staying put", () => {
 describe("UsageBar", () => {
   const limit = (used_fraction: number, resets_at: string, window = "5h"): UsageLimit => ({ window, used_fraction, resets_at, source: "test" });
 
-  it("labels a window that resets within a day as minutes away, rounded to the minute, with the percent only in the title", () => {
+  it("names the window in sentence case and gives the relative reset with its percent when it turns over within a day", () => {
     const now = new Date();
-    const resets = new Date(now.getTime() + (3 * 60 + 56) * 60000);
-    render(<UsageBar limit={limit(0.42, resets.toISOString())} now={now} />);
-    expect(screen.getByText("5h · resets in 3 h 56 min")).toBeDefined();
-    expect(screen.getByTitle("42%")).toBeDefined();
+    const resets = new Date(now.getTime() + (3 * 60 + 3) * 60000);
+    render(<UsageBar limit={limit(0.92, resets.toISOString())} now={now} />);
+    expect(screen.getByText("5-hour")).toBeDefined();
+    expect(screen.getByText("Resets in 3 hr 3 min · 92%")).toBeDefined();
   });
 
-  it("labels a window past a day away by the clock time it resets at", () => {
+  it("names weekly, daily and monthly windows in sentence case", () => {
+    const now = new Date();
+    const soon = new Date(now.getTime() + 60000).toISOString();
+    const { unmount: u1 } = render(<UsageBar limit={limit(0.1, soon, "weekly")} now={now} />);
+    expect(screen.getByText("Weekly")).toBeDefined();
+    u1();
+    const { unmount: u2 } = render(<UsageBar limit={limit(0.1, soon, "daily")} now={now} />);
+    expect(screen.getByText("Daily")).toBeDefined();
+    u2();
+    render(<UsageBar limit={limit(0.1, soon, "monthly")} now={now} />);
+    expect(screen.getByText("Monthly")).toBeDefined();
+  });
+
+  it("drops the percent and gives the weekday and clock once the reset is more than a day away", () => {
     const now = new Date();
     const resets = new Date(now.getTime() + 30 * 3600000);
+    const weekday = resets.toLocaleDateString(undefined, { weekday: "short" });
     const clock = `${String(resets.getHours()).padStart(2, "0")}:${String(resets.getMinutes()).padStart(2, "0")}`;
     render(<UsageBar limit={limit(0.1, resets.toISOString(), "weekly")} now={now} />);
-    expect(screen.getByText(`weekly · resets at ${clock}`)).toBeDefined();
+    expect(screen.getByText(`Resets ${weekday} ${clock}`)).toBeDefined();
   });
 
-  it("turns the fill amber once used_fraction passes 0.9, and stays the accent colour at or below it", () => {
+  it("turns the fill the danger colour at or above 90% used, and keeps it the accent colour below that", () => {
     const now = new Date();
     const resets = new Date(now.getTime() + 3600000).toISOString();
-    const { container: over, unmount } = render(<UsageBar limit={limit(0.95, resets, "daily")} now={now} />);
-    expect(over.querySelector(".bg-work")).not.toBeNull();
+    const { container: over, unmount } = render(<UsageBar limit={limit(0.9, resets, "monthly")} now={now} />);
+    expect(over.querySelector(".bg-destructive")).not.toBeNull();
     expect(over.querySelector(".bg-primary")).toBeNull();
     unmount();
-    const { container: under } = render(<UsageBar limit={limit(0.9, resets, "daily")} now={now} />);
+    const { container: under } = render(<UsageBar limit={limit(0.89, resets, "monthly")} now={now} />);
     expect(under.querySelector(".bg-primary")).not.toBeNull();
-    expect(under.querySelector(".bg-work")).toBeNull();
+    expect(under.querySelector(".bg-destructive")).toBeNull();
   });
 });
 
-describe("the brain picker's usage bars", () => {
+describe("the brain picker's usage rows", () => {
   const brains: Brain[] = [
     {
       id: "claude",
@@ -108,6 +122,7 @@ describe("the brain picker's usage bars", () => {
       ],
     },
     { id: "codex", name: "Codex", signed_in: true, account: "plus", models: ["gpt"], model: "gpt", note: "", default: false },
+    { id: "gemini", name: "Gemini", signed_in: false, account: "", models: [], model: "", note: "", default: false },
   ];
 
   function renderPicker() {
@@ -120,27 +135,34 @@ describe("the brain picker's usage bars", () => {
     );
   }
 
-  it("draws one bar per limit under a brain that reports them, and none for a brain with no limits", async () => {
+  it("draws one row per limit under a brain that reports them, labelled in sentence case", async () => {
     renderPicker();
     await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
     const menu = within(await screen.findByRole("menu"));
     const claudeItem = (await menu.findByRole("menuitem", { name: /Claude/ })) as HTMLElement;
-    expect(within(claudeItem).getByText(/5h · resets in/)).toBeDefined();
-    expect(within(claudeItem).getByText(/weekly · resets in/)).toBeDefined();
-    const codexItem = menu.getByRole("menuitem", { name: /Codex/ }) as HTMLElement;
-    expect(within(codexItem).queryByTitle(/%$/)).toBeNull();
+    expect(within(claudeItem).getByText("5-hour")).toBeDefined();
+    expect(within(claudeItem).getByText("Weekly")).toBeDefined();
   });
 
-  it("leaves a limit-less row the same height as a bare row", async () => {
+  it("shows 'No usage data' for a signed-in brain with no limits, and 'Not signed in' for one that isn't", async () => {
     renderPicker();
     await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
     const menu = within(await screen.findByRole("menu"));
     const codexItem = menu.getByRole("menuitem", { name: /Codex/ }) as HTMLElement;
-    // A row with nothing extra to draw holds only its one line of text and no bar block.
+    expect(within(codexItem).getByText("No usage data")).toBeDefined();
     expect(codexItem.querySelector(".bg-muted")).toBeNull();
+    const geminiItem = menu.getByRole("menuitem", { name: /Gemini/ }) as HTMLElement;
+    expect(within(geminiItem).getByText("Not signed in")).toBeDefined();
   });
 
-  it("stays keyboard navigable: opening focuses the first row, with the bars adding no focusable stop of their own, and the arrow key walks to the next row", async () => {
+  it("separates each brain's section from the next with a hairline", async () => {
+    renderPicker();
+    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
+    const menu = await screen.findByRole("menu");
+    expect(menu.querySelectorAll("[role=separator]").length).toBe(brains.length - 1);
+  });
+
+  it("stays keyboard navigable: opening focuses the first row, with the rows adding no focusable stop of their own, and the arrow key walks to the next row", async () => {
     renderPicker();
     const trigger = screen.getByRole("button", { name: /Brain: Claude/ });
     trigger.focus();

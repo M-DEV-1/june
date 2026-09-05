@@ -5,7 +5,7 @@ import { ChevronDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
@@ -349,28 +349,44 @@ export function Picker({
   );
 }
 
-/** "resets in 3 h 56 min" for a window that turns over within a day, "resets at 18:00" past that — rounded to the minute either way. Input: the limit's own resets_at (RFC3339) and the moment to measure it from. Output: the phrase, or "" when resets_at does not parse. */
+/** What a limit's own window reads as in sentence case: "5-hour" for the ones Codex reports in hours, "Daily", "Weekly" and "Monthly" for the named ones, and whatever the provider called it, capitalised, for anything else. Input: the window as the daemon sent it ("5h", "daily", "weekly", "monthly", or a provider's own name). Output: the label. */
+function windowLabel(window: string): string {
+  const hours = /^(\d+)h$/i.exec(window);
+  if (hours) return `${hours[1]}-hour`;
+  if (window === "daily") return "Daily";
+  if (window === "weekly") return "Weekly";
+  if (window === "monthly") return "Monthly";
+  const word = window.replace(/_/g, " ");
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/** "Resets in 3 hr 3 min" for a window that turns over within a day, rounded to the minute; "Resets Mon 18:33" past that, naming the weekday it falls on since a person is not tracking which day it is by then. Input: the limit's own resets_at (RFC3339) and the moment to measure it from. Output: the phrase, or "" when resets_at does not parse. */
 function resetLabel(resetsAt: string, now: Date): string {
   const at = new Date(resetsAt);
   if (Number.isNaN(at.getTime())) return "";
   const ms = at.getTime() - now.getTime();
-  if (ms >= 86400000) return `resets at ${hhmm(resetsAt)}`;
+  if (ms >= 86400000) return `Resets ${at.toLocaleDateString(undefined, { weekday: "short" })} ${hhmm(resetsAt)}`;
   const mins = Math.max(0, Math.round(ms / 60000));
   const h = Math.floor(mins / 60);
   const m = mins % 60;
-  return h > 0 ? `resets in ${h} h ${m} min` : `resets in ${m} min`;
+  return h > 0 ? `Resets in ${h} hr ${m} min` : `Resets in ${m} min`;
 }
 
-/** One allowance window drawn as a mini meter under a brain's row in the picker: a 2px bar, the accent colour under 90% used and the work-in-flight amber past it, on a track in the muted colour, with a label naming the window and when it resets. The percent itself is said only in a title attribute, so the row reads as a shape rather than another number to parse. Input: the limit, and the moment "resets in" is measured from (now, always, except in a test). Output: the bar and its label, stacked. */
+/** One allowance window drawn as a row under a brain's section in the picker, the way Claude Code's own usage widget lays one out: the window's name on the left, when it resets on the right — with the percent used tacked on while the reset is still close enough to say relatively — and underneath, spanning the row, a 3px bar in the accent colour that turns the danger colour once used_fraction reaches 0.9. Input: the limit, and the moment "resets in" is measured from (now, always, except in a test). Output: the row. */
 export function UsageBar({ limit, now = new Date() }: { limit: UsageLimit; now?: Date }) {
   const pct = Math.round(limit.used_fraction * 100);
-  const hot = limit.used_fraction > 0.9;
+  const hot = limit.used_fraction >= 0.9;
+  const reset = resetLabel(limit.resets_at, now);
+  const right = reset.startsWith("Resets in") ? `${reset} · ${pct}%` : reset;
   return (
-    <div className="flex flex-col gap-0.5" title={`${pct}%`}>
-      <div className="h-0.5 w-full overflow-hidden rounded-full bg-muted">
-        <div className={`h-full rounded-full ${hot ? "bg-work" : "bg-primary"}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline justify-between gap-3 text-meta text-muted-foreground">
+        <span>{windowLabel(limit.window)}</span>
+        <span title={`${pct}%`}>{right}</span>
       </div>
-      <span className="text-meta text-muted-foreground">{`${limit.window.replace(/_/g, " ")} · ${resetLabel(limit.resets_at, now)}`}</span>
+      <div className="h-[3px] w-full overflow-hidden rounded-full bg-muted">
+        <div className={`h-full rounded-full ${hot ? "bg-destructive" : "bg-primary"}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+      </div>
     </div>
   );
 }
@@ -398,24 +414,29 @@ export function BrainPicker({ current, brains }: { current: string; brains: Brai
           <ChevronDown className="opacity-60" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      <DropdownMenuContent align="end" className="w-[340px]">
         {brains.length === 0 ? (
           <DropdownMenuLabel className="font-normal text-muted-foreground">No brains reported</DropdownMenuLabel>
         ) : (
-          brains.map((b) => (
-            <DropdownMenuItem key={b.id} disabled={!b.signed_in} onClick={() => void pick(b)} className="flex-col items-stretch gap-1">
-              <div className="flex items-center justify-between gap-6">
-                <span className={chosen && b.id === chosen.id ? "font-medium" : undefined}>{b.name}</span>
-                <span className="text-meta text-muted-foreground">{b.signed_in ? b.model || b.models?.[0] || "" : "not signed in"}</span>
-              </div>
-              {b.limits && b.limits.length > 0 ? (
-                <div className="flex flex-col gap-1">
-                  {b.limits.map((l) => (
-                    <UsageBar key={l.window} limit={l} />
-                  ))}
+          brains.map((b, i) => (
+            <div key={b.id}>
+              {i > 0 ? <DropdownMenuSeparator /> : null}
+              <DropdownMenuItem disabled={!b.signed_in} onClick={() => void pick(b)} className="flex-col items-stretch gap-2 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className={chosen && b.id === chosen.id ? "font-medium" : undefined}>{b.name}</span>
+                  <span className="text-meta text-muted-foreground">{b.signed_in ? b.model || b.models?.[0] || "" : "not signed in"}</span>
                 </div>
-              ) : null}
-            </DropdownMenuItem>
+                {b.limits && b.limits.length > 0 ? (
+                  <div className="flex flex-col gap-2">
+                    {b.limits.map((l) => (
+                      <UsageBar key={l.window} limit={l} />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-meta text-muted-foreground">{b.signed_in ? "No usage data" : "Not signed in"}</p>
+                )}
+              </DropdownMenuItem>
+            </div>
           ))
         )}
       </DropdownMenuContent>
