@@ -241,13 +241,16 @@ func (s *Scheduler) snooze(ctx context.Context, n Notice, key string) {
 	sendNotice(n)
 }
 
-// markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is Ora reporting, not work owed — so all this records is that the user cleared it. Input: the notice. Output: nothing.
+// markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is Ora reporting, not work owed — so all this records is that the user cleared it. Either way, any snooze still pending for this notice is cancelled, so a Done pressed while a snooze is in flight — from the original notice or from a re-fired one, both carrying the same kind and id — stops it firing again. Input: the notice. Output: nothing.
 func (s *Scheduler) markDone(ctx context.Context, n Notice) {
 	if n.Kind == "task" && n.ID != "" && s.taskDone != nil {
 		if err := s.taskDone(ctx, n.ID); err != nil {
 			slog.Warn("could not close a task from its notification", "id", n.ID, "error", err)
 			return
 		}
+	}
+	if _, err := s.store.CancelSnoozes(ctx, n.Kind, n.ID); err != nil {
+		slog.Warn("could not cancel a done notice's pending snooze", "kind", n.Kind, "id", n.ID, "error", err)
 	}
 	slog.Info("notice cleared from its notification", "kind", n.Kind, "id", n.ID)
 	n.Action = "done"

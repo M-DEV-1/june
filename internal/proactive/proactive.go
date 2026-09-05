@@ -55,6 +55,7 @@ type Store interface {
 	AddSnooze(ctx context.Context, kind, noticeID, title, body string, due time.Time) (int64, error)
 	DueSnoozes(ctx context.Context, now time.Time) ([]db.Snooze, error)
 	MarkSnoozeFired(ctx context.Context, id int64) error
+	CancelSnoozes(ctx context.Context, kind, noticeID string) (int, error)
 }
 
 // Scheduler owns the two daily proactive duties. Construct with New and run with Run; both duties key their once-per-day state off the diary table itself (the close is done when today's kind='day' row exists, the brief when today's kind='brief' row does), so a daemon restart never repeats or loses a delivery.
