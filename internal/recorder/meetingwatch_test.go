@@ -44,20 +44,22 @@ func TestMeetingWatch_AsksOncePerCall(t *testing.T) {
 	var w meetingWatch
 	chrome := []string{"Google Chrome"}
 
-	if w.step(chrome, false) {
+	if ask, _ := w.step(chrome, false); ask {
 		t.Error("asked on the first poll, which cannot tell a call from a voice note")
 	}
-	if !w.step(chrome, false) {
+	if ask, _ := w.step(chrome, false); !ask {
 		t.Fatal("did not ask once the microphone had been held across polls")
 	}
-	if w.step(chrome, false) || w.step(chrome, false) {
+	third, _ := w.step(chrome, false)
+	fourth, _ := w.step(chrome, false)
+	if third || fourth {
 		t.Error("asked twice about the same call")
 	}
 
 	// The call ends, and a later one is a new question.
 	w.step(nil, false)
 	w.step(chrome, false)
-	if !w.step(chrome, false) {
+	if ask, _ := w.step(chrome, false); !ask {
 		t.Error("did not ask about a second call after the microphone was released")
 	}
 }
@@ -68,13 +70,13 @@ func TestMeetingWatch_SilentWhileRecording(t *testing.T) {
 	chrome := []string{"Google Chrome"}
 
 	for i := 0; i < 4; i++ {
-		if w.step(chrome, true) {
+		if ask, _ := w.step(chrome, true); ask {
 			t.Fatal("asked while already recording")
 		}
 	}
 	w.step(nil, false)
 	w.step(chrome, false)
-	if !w.step(chrome, false) {
+	if ask, _ := w.step(chrome, false); !ask {
 		t.Error("stopped asking after a recording ended")
 	}
 }
@@ -200,10 +202,12 @@ func TestDescribe_CutsTheBrowsersOwnStatusOffTheEnd(t *testing.T) {
 }
 
 // Ora's voice assistant holds the microphone for as long as the user is talking to it, and the audio library names a stream after the running binary by default: application.name "ora", application.process.binary the full path it was launched from. Comparing that path against "ora" never matched, so Ora noticed itself talking and offered to record the conversation.
+// Live voice mode speaks back through the same process that captures, so Ora has a running output stream too. That is exactly the shape micUsers reads as a call, which is what makes this fixture test the self-exclusion rather than the capture-and-playback rule: without the exclusion Ora lands in calls and offers to record its own conversation with the user.
 func TestMicUsers_IgnoresOrasOwnVoiceMode(t *testing.T) {
 	dump := []byte(`[
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"ora","application.process.binary":"/home/user/Desktop/Code/projects/ora/ora"}}},
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Ora voice","application.process.binary":"./ora"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"Ora voice","application.process.binary":"./ora"}}},
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}},
 	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}}
 	]`)
@@ -248,5 +252,69 @@ func TestDescribe_CutsOnlyWhatIsTooLongAndAlwaysMarksTheCut(t *testing.T) {
 	}
 	if n := len([]rune(got)); n > maxNameRunes {
 		t.Errorf("cut name is %d runes, want at most %d", n, maxNameRunes)
+	}
+}
+
+// A recording Ora started on its own has to end on its own. The evidence that ends a call is the evidence that started it — the call's audio streams going away — so the same number of quiet polls stops the recording. Without this, auto-record kept the microphone and the speakers open for the rest of the day at 64 kB of audio a second.
+func TestMeetingWatch_StopsTheRecordingItStartedWhenTheCallEnds(t *testing.T) {
+	var w meetingWatch
+	chrome := []string{"Google Chrome"}
+
+	w.step(chrome, false)
+	if ask, _ := w.step(chrome, false); !ask {
+		t.Fatal("did not ask about the call")
+	}
+	w.started()
+
+	if _, stop := w.step(chrome, true); stop {
+		t.Error("stopped the recording while the call was still holding the microphone")
+	}
+	if _, stop := w.step(nil, true); stop {
+		t.Error("stopped on the first poll with no call, which cannot tell a finished call from a moment of silence")
+	}
+	if _, stop := w.step(nil, true); !stop {
+		t.Fatal("never stopped the recording it started, so capture runs on after the call")
+	}
+	if _, stop := w.step(nil, true); stop {
+		t.Error("asked to stop a second time, which would report a failure for a recording already stopped")
+	}
+}
+
+// A recording the user started from the tray is theirs to stop: they may be recording something that never opens a call stream at all, and having it end itself under them is worse than a recording left running.
+func TestMeetingWatch_LeavesARecordingTheUserStartedAlone(t *testing.T) {
+	var w meetingWatch
+
+	for i := 0; i < 6; i++ {
+		if _, stop := w.step(nil, true); stop {
+			t.Fatalf("poll %d stopped a recording the watcher did not start", i)
+		}
+	}
+}
+
+// The recording Ora started is stopped from the tray instead, and the user then starts one of their own. That one is not Ora's to end: what makes a recording the watcher's is having started it, and the last one it started is over.
+func TestMeetingWatch_ForgetsItsRecordingOnceThatRecordingHasEnded(t *testing.T) {
+	var w meetingWatch
+
+	w.started()
+	// The tray stops it, so a poll finds nothing recording.
+	w.step(nil, false)
+
+	for i := 0; i < 4; i++ {
+		if _, stop := w.step(nil, true); stop {
+			t.Fatalf("poll %d stopped a recording the user started after Ora's own had ended", i)
+		}
+	}
+}
+
+// A call that drops one poll's worth of streams — a browser reopening its capture on a device change — must not end the recording, so the quiet polls have to be consecutive.
+func TestMeetingWatch_ACallThatComesBackResetsTheQuietCount(t *testing.T) {
+	var w meetingWatch
+	chrome := []string{"Google Chrome"}
+
+	w.started()
+	w.step(nil, true)
+	w.step(chrome, true)
+	if _, stop := w.step(nil, true); stop {
+		t.Error("stopped after one quiet poll either side of a call that was still there")
 	}
 }

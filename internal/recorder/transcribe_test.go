@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -497,5 +498,100 @@ func TestPersonNamesFromContext(t *testing.T) {
 	want := []string{"Priya Shah", "Krish Littlebird"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// fakeWhisperLogging is fakeWhisper with a model file beside it, so whisperCPPArgs treats it as a real whisper.cpp build, and with every invocation's arguments appended to a log file. Input: what the script should print to stdout. Output: the script's path and the path of the argument log, one line per run.
+func fakeWhisperLogging(t *testing.T, stdout string) (bin, argLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin = filepath.Join(dir, "fake-whisper")
+	argLog = filepath.Join(dir, "args.log")
+	body := "#!/bin/sh\necho \"$@\" >> " + argLog + "\ncat <<'EOF'\n" + stdout + "\nEOF\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake whisper: %v", err)
+	}
+	// whisperCPPArgs only adds the model flags when the model sits beside the binary, so the file has to be there for this to be the GPU path. Nothing reads its contents.
+	if err := os.WriteFile(filepath.Join(dir, whisperCPPModelName), []byte("not a model"), 0o644); err != nil {
+		t.Fatalf("write fake model: %v", err)
+	}
+	return bin, argLog
+}
+
+// runArgs returns the arguments of each run the fake whisper logged, in order.
+func runArgs(t *testing.T, argLog string) []string {
+	t.Helper()
+	b, err := os.ReadFile(argLog)
+	if err != nil {
+		t.Fatalf("read the fake whisper's argument log: %v", err)
+	}
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// The priming prompt is a spelling aid, and whisper sometimes reads it back as the first thing said in the meeting: on 2026-08-31 the transcript opened with "Participants: Rohit Verma, Claude Artifact." at 00:00:00, which the minutes model then took as evidence about who was in the call. stripPromptEcho is what removes it, and this is the test that it is actually wired into the run rather than merely defined.
+func TestTranscribeWAV_DropsThePromptWhisperReadBackAsSpeech(t *testing.T) {
+	prompt := "A meeting recording. Participants: Rohit Verma, Claude Artifact."
+	bin := fakeWhisper(t, "[00:00:00.000 --> 00:00:02.000]   Participants: Rohit Verma, Claude Artifact.\n[00:00:03.000 --> 00:00:05.000]   shall we ship on friday", "")
+
+	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerCall, prompt, 0)
+	if err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+	if len(segs) != 1 || segs[0].Text != "shall we ship on friday" {
+		t.Fatalf("got %+v, want only the spoken segment: the echoed prompt is still in the transcript", segs)
+	}
+}
+
+// A run that loops on a silence marker is redone without the prompt, and the redo has to keep everything else the first run had — above all the model flags, without which whisper-cli looks for a model that is not there and the whole meeting fails. Dropping the last two arguments only removed the prompt while the prompt was last, which it stopped being the moment the model flags were appended after it.
+func TestTranscribeWAV_TheUnprimedRetryKeepsTheModelFlags(t *testing.T) {
+	looped := "[00:00:00.000 --> 00:00:01.000]   [ Silence ]\n[00:00:01.000 --> 00:00:02.000]   [ Silence ]\n[00:00:02.000 --> 00:00:03.000]   hello"
+	bin, argLog := fakeWhisperLogging(t, looped)
+
+	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "Participants: Priya Shah.", 0); err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+
+	runs := runArgs(t, argLog)
+	if len(runs) != 2 {
+		t.Fatalf("whisper ran %d times, want 2: the primed run and the unprimed redo\n%v", len(runs), runs)
+	}
+	if !strings.Contains(runs[0], "--prompt") {
+		t.Errorf("the first run carried no prompt: %s", runs[0])
+	}
+	if strings.Contains(runs[1], "--prompt") {
+		t.Errorf("the redo still carried the prompt it was redone to drop: %s", runs[1])
+	}
+	for i, args := range runs {
+		if !strings.Contains(args, "-m ") {
+			t.Errorf("run %d lost the model flags, so whisper has no model to load: %s", i, args)
+		}
+	}
+}
+
+// A whisper run that decodes on the GPU holds GPURun for the whole decode, so the two streams of a call run one after the other and each has the machine to itself. Splitting the cores four ways there leaves three quarters of them idle for the length of every meeting. Only the CPU path really overlaps.
+func TestWhisperThreads_AGPURunGetsMoreThanACPURunBecauseItIsAlone(t *testing.T) {
+	cpu, gpu := whisperThreads(false), whisperThreads(true)
+	if cpu < 1 || gpu < 1 {
+		t.Fatalf("whisperThreads = %d on the CPU and %d on the GPU, want at least one thread either way", cpu, gpu)
+	}
+	if runtime.NumCPU() >= 4 && gpu <= cpu {
+		t.Errorf("whisperThreads = %d on the GPU and %d on the CPU of %d cores, want the serialised GPU run to get more", gpu, cpu, runtime.NumCPU())
+	}
+	if max := runtime.NumCPU()/2 + 1; gpu > max {
+		t.Errorf("a GPU run asked for %d threads on %d cores, want no more than %d", gpu, runtime.NumCPU(), max)
+	}
+}
+
+// The thread count is a property of the machine, so an explicit setting wins on either path.
+func TestWhisperThreads_HonoursTheOverrideOnEitherPath(t *testing.T) {
+	t.Setenv("ORA_TRANSCRIBE_THREADS", "6")
+	if cpu, gpu := whisperThreads(false), whisperThreads(true); cpu != 6 || gpu != 6 {
+		t.Errorf("whisperThreads = %d on the CPU and %d on the GPU, want the configured 6 either way", cpu, gpu)
 	}
 }

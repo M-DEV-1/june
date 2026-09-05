@@ -140,6 +140,8 @@ type dbusMenuLayout struct {
 //	4 = separator
 //	5 = Quit Ora
 type dbusMenu struct {
+	// The daemon's own context, handed to a stop from the tray so the transcription it starts ends with the daemon instead of outliving it on the GPU.
+	ctx     context.Context
 	quitCh  chan<- struct{}
 	conn    *dbus.Conn // needed to emit LayoutUpdated when pause label changes
 	rec     *recorder.Recorder
@@ -281,7 +283,7 @@ func (m *dbusMenu) toggleMeeting() {
 		return
 	}
 	if m.rec.Active() {
-		if _, err := m.rec.StopAndProcess(context.Background()); err != nil {
+		if _, err := m.rec.StopAndProcess(m.ctx); err != nil {
 			slog.Error("failed to stop meeting recording", "error", err)
 		}
 		return
@@ -431,7 +433,7 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	}
 
 	// Export dbusmenu at /MenuBar.
-	menu := &dbusMenu{quitCh: quitCh, conn: conn, rec: meetingRecorder}
+	menu := &dbusMenu{ctx: ctx, quitCh: quitCh, conn: conn, rec: meetingRecorder}
 	// The menu's own clicks redraw it themselves; this covers a recording started or stopped by anything else, which since the microphone watcher landed is how most of them begin.
 	if meetingRecorder != nil {
 		meetingRecorder.SetOnStateChange(menu.refresh)

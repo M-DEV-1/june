@@ -251,7 +251,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	brainUsage := brain.NewUsageStore(config.DataDir())
 	agent.SetUsageRecorder(brainUsage)
 
-	meetingRecorder = recorder.New(config.DataDir(), store, apiKey)
+	meetingRecorder = recorder.New(ctx, config.DataDir(), store, apiKey)
 	// A meeting write-up that hits a spent daily allowance is finished by Codex instead of being dropped.
 	meetingRecorder.SetMinutesFallback(backgroundFallbackBrain())
 

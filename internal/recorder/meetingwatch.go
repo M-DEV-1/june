@@ -182,28 +182,51 @@ func readMicUsers(ctx context.Context) []string {
 	return calls
 }
 
-// meetingWatch remembers enough between polls to ask about a call once and then leave it alone. The zero value is ready to use.
+// meetingWatch remembers enough between polls to ask about a call once, then leave it alone, and then end the recording it started when the call goes away. The zero value is ready to use.
 type meetingWatch struct {
 	held  int
 	asked bool
+	// ours is true while a recording this watcher started is still running, which is the only kind it may stop. A recording the user started from the tray is theirs to stop, since it may be recording something that never opens a call stream at all.
+	ours bool
+	// gone counts the consecutive polls that have found no call while a recording of ours is running.
+	gone int
 }
 
-// step folds one poll into the watch and reports whether this is the moment to ask about a meeting.
+// started records that the watcher's own Start succeeded, which is what makes the recording one this watcher may stop again.
+func (w *meetingWatch) started() { w.ours = true }
+
+// step folds one poll into the watch and reports what to do about it.
 //
-// Input: the applications holding the microphone, and whether Ora is already recording. Output: true exactly once per call, on the poll where the microphone has been held long enough to be a call and no question has been asked yet.
+// Input: the applications holding the microphone, and whether Ora is already recording. Output: ask, true exactly once per call, on the poll where the microphone has been held long enough to be a call and no question has been asked yet; and stop, true once for a recording this watcher started after asksAfterPolls consecutive polls with no call.
 //
-// Releasing the microphone is what ends a call, so the next one is asked about again.
-func (w *meetingWatch) step(users []string, recording bool) bool {
+// Releasing the microphone is what ends a call, so the next one is asked about again — and it is also what ends a recording Ora started on its own. The evidence is the same in both directions, and so is the number of polls: one poll without a call stream is a browser reopening its capture, and two is the call being over.
+func (w *meetingWatch) step(users []string, recording bool) (ask, stop bool) {
 	if recording || len(users) == 0 {
 		w.held, w.asked = 0, false
-		return false
 	}
-	w.held++
-	if w.held < asksAfterPolls || w.asked {
-		return false
+	if !recording {
+		// Nothing is recording, so the watcher has no recording of its own left to stop — whatever starts next is the user's until this watcher starts one itself.
+		w.gone, w.ours = 0, false
+		if len(users) == 0 {
+			return false, false
+		}
+		w.held++
+		if w.held < asksAfterPolls || w.asked {
+			return false, false
+		}
+		w.asked = true
+		return true, false
 	}
-	w.asked = true
-	return true
+	if !w.ours || len(users) > 0 {
+		w.gone = 0
+		return false, false
+	}
+	w.gone++
+	if w.gone < asksAfterPolls {
+		return false, false
+	}
+	w.ours, w.gone = false, 0
+	return false, true
 }
 
 // askBody is the line under the prompt's title. It names the application holding the microphone, because "Chrome is using your microphone" is a question a person can answer and "in a meeting?" on its own is a guess.
@@ -247,7 +270,15 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 			return
 		case <-ticker.C:
 			users := readMicUsers(ctx)
-			if !w.step(users, rec.Active()) {
+			ask, stop := w.step(users, rec.Active())
+			if stop {
+				slog.Info("the call Ora was recording has released the microphone, stopping the recording")
+				if _, err := rec.StopAndProcess(ctx); err != nil {
+					slog.Error("failed to stop the meeting recording Ora started", "error", err)
+				}
+				continue
+			}
+			if !ask {
 				continue
 			}
 			// The prompt names the window rather than the process wherever one can be found, since a call in a browser tab is "chrome" and so is everything else in that browser.
@@ -268,7 +299,10 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 			}
 			if err := rec.Start(); err != nil {
 				slog.Error("failed to start the meeting recording Ora offered", "error", err)
+				continue
 			}
+			// Only a recording that actually started is one this watcher will stop again when the call goes away.
+			w.started()
 		}
 	}
 }
