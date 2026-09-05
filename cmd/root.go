@@ -2,14 +2,19 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"ora/internal/config"
+	"ora/internal/ipctoken"
 	"ora/internal/obs"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,7 +31,8 @@ var rootCmd = &cobra.Command{
 		isDaemon, _ := cmd.Flags().GetBool("daemon")
 		autostart, _ := cmd.Flags().GetString("autostart")
 		workdir, _ := cmd.Flags().GetString("workdir")
-		runRoot(isDaemon, autostart, workdir)
+		forceTUI, _ := cmd.Flags().GetBool("tui")
+		runRoot(isDaemon, autostart, workdir, forceTUI)
 	},
 }
 
@@ -41,10 +47,11 @@ func init() {
 	rootCmd.PersistentFlags().Bool("daemon", false, "Run as background daemon")
 	rootCmd.PersistentFlags().String("autostart", "", "Turn start-on-login on or off, persist it to the config, and exit (on|off)")
 	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because ORA loads .env relative to the working directory and a session manager launches from an arbitrary one")
+	rootCmd.PersistentFlags().Bool("tui", false, "Force the terminal UI even when a desktop window is available")
 }
 
-// runRoot is the root command's behaviour: with no flags it starts the TUI against a get-or-create daemon, --daemon runs the background daemon itself, and --autostart flips start-on-login and returns.
-func runRoot(isDaemon bool, autostart, workdir string) {
+// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows Ora's desktop window if one is built and wanted, falling back to the terminal UI otherwise; --tui forces the terminal UI regardless; --daemon runs the background daemon itself; --autostart flips start-on-login and returns.
+func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 	// Must happen before anything reads a relative path (.env — every ora-db/data path now resolves through config.DataDir(), independent of cwd).
 	if workdir != "" {
 		if err := os.Chdir(workdir); err != nil {
@@ -119,10 +126,102 @@ func runRoot(isDaemon bool, autostart, workdir string) {
 		}
 	}
 
+	// A live daemon is what a desktop window needs — one that failed to spawn has nothing to show a window in front of, so the terminal UI is the only option left.
+	if !forceTUI && (daemonStatus == "connected" || daemonStatus == "started") {
+		if offerWindow(daemonStatus == "started") {
+			return
+		}
+	}
+
 	// start tui
 	if err := runClient(ctx, shutdownObs, daemonStatus, buildMismatch); err != nil {
 		slog.Error("Client crashed", "error", err)
 	}
+}
+
+// freshDaemonOpenAttempts is how many times offerWindow retries the show instruction when this process just spawned the daemon itself.
+const freshDaemonOpenAttempts = 5
+
+// openRetryInterval is the pause between those retries. A var, not a const, so a test can shrink it instead of actually waiting out four real pauses.
+var openRetryInterval = 400 * time.Millisecond
+
+// offerWindow decides whether this invocation of `ora` should show the desktop window instead of the terminal UI, and does so when it can. Input: freshDaemon is true when this same process just spawned the daemon (as opposed to finding one already running) — its window child, if any, was only just started and needs a moment to launch and subscribe to the daemon's event stream before it can act on the show instruction. Output: true when it took over startup and there is nothing left for the caller to do (it already printed a line explaining what happened); false when the caller should still open the terminal UI, because the config has the window turned off or no window is built.
+func offerWindow(freshDaemon bool) bool {
+	appConfig := config.LoadConfig()
+	if !appConfig.Window {
+		return false
+	}
+	path, tried, err := windowBinary()
+	if err != nil {
+		fmt.Printf("No desktop window binary found (looked at: %s). Set ORA_WINDOW=/path/to/it, or build one in app/, and `ora` will open it instead of the terminal UI.\n", strings.Join(tried, ", "))
+		return false
+	}
+
+	attempts := 1
+	if freshDaemon {
+		// ponytail: a fixed retry budget standing in for a real "the window is listening" signal, which nothing here exposes over IPC yet — upgrade path is a server-side subscriber check the daemon could answer instead of this guess. Comfortably longer than a Tauri window normally takes to launch and open its event stream, and harmless to repeat since the daemon just rebroadcasts "open" to whoever is listening.
+		attempts = freshDaemonOpenAttempts
+	}
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(openRetryInterval)
+		}
+		authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
+	}
+
+	hotkey := formatHotkey(fetchWindowHotkey())
+	if hotkey == "" {
+		hotkey = "your Ora shortcut"
+	}
+	fmt.Printf("Ora is running (window: %s). It starts hidden — showing it now; if it doesn't appear, press %s or run `ora --tui` for the terminal UI instead.\n", path, hotkey)
+	return true
+}
+
+// fetchWindowHotkey asks the daemon's own /settings for the GNOME accelerator that shows the window (see internal/ipc.windowHotkey). Output: the raw accelerator, e.g. "<Control><Alt>space", or "" on any failure — this only ever feeds a hint line, never something startup can block or fail on.
+func fetchWindowHotkey() string {
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+DaemonPort+"/settings", nil)
+	if err != nil {
+		return ""
+	}
+	attachIPCToken(req, ipctoken.DefaultPath)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var body struct {
+		Hotkey string `json:"hotkey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ""
+	}
+	return body.Hotkey
+}
+
+// hotkeyModifier matches one "<Name>" modifier segment of a GNOME accelerator string.
+var hotkeyModifier = regexp.MustCompile(`<([^>]+)>`)
+
+// formatHotkey turns a GNOME accelerator like "<Control><Alt>space" into the plain "Ctrl+Alt+Space" a terminal hint can print. Input: the raw accelerator, or "". Output: the formatted string, or "" when there was nothing to format.
+func formatHotkey(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var parts []string
+	for _, m := range hotkeyModifier.FindAllStringSubmatch(raw, -1) {
+		mod := m[1]
+		if mod == "Control" {
+			mod = "Ctrl"
+		}
+		parts = append(parts, mod)
+	}
+	if key := hotkeyModifier.ReplaceAllString(raw, ""); key != "" {
+		parts = append(parts, strings.ToUpper(key[:1])+key[1:])
+	}
+	return strings.Join(parts, "+")
 }
 
 // pingDaemon sends a single /ping with a short timeout.

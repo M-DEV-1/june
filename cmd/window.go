@@ -22,19 +22,34 @@ const windowStopGrace = 3 * time.Second
 // errNoWindow says the desktop window binary could not be found, which is normal on a machine running only the daemon.
 var errNoWindow = errors.New("no desktop window binary found")
 
-// windowBinary finds the desktop window to run. Input: none; it reads ORA_WINDOW and the daemon's own location. Output: the path to run, or errNoWindow when there is none. It looks at ORA_WINDOW first so a developer can point at any build, then beside the daemon binary as an installed copy would sit, then at the two paths a checkout builds into.
-func windowBinary() (string, error) {
+// windowBinary finds the desktop window to run. Input: none; it reads ORA_WINDOW, the daemon's own location, and the current working directory. Output: the path to run, the full list of candidates it checked (so a caller with nothing to run can tell the user exactly where it looked), and errNoWindow when there is none. It looks at ORA_WINDOW first so a developer can point at any build, then beside the daemon binary as an installed copy would sit, then at the two paths a checkout builds into, then at those same two paths under the working directory — `go build -o ora . && ./ora` from the repo root leaves the daemon binary sitting next to nothing, but app/src-tauri/target still hangs off the checkout's own working directory.
+func windowBinary() (string, []string, error) {
 	var candidates []string
+	seen := map[string]bool{}
+	add := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		candidates = append(candidates, path)
+	}
 	if set := os.Getenv("ORA_WINDOW"); set != "" {
-		candidates = append(candidates, set)
+		add(set)
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(dir, "ora-window"),
-			filepath.Join(dir, "app", "src-tauri", "target", "release", "ora"),
-			filepath.Join(dir, "app", "src-tauri", "target", "debug", "ora"),
-		)
+		add(filepath.Join(dir, "ora-window"))
+		add(filepath.Join(dir, "app", "src-tauri", "target", "release", "ora"))
+		add(filepath.Join(dir, "app", "src-tauri", "target", "debug", "ora"))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		add(filepath.Join(cwd, "app", "src-tauri", "target", "release", "ora"))
+		add(filepath.Join(cwd, "app", "src-tauri", "target", "debug", "ora"))
+		if matches, err := filepath.Glob(filepath.Join(cwd, "dist", "*", "ora-window")); err == nil {
+			for _, m := range matches {
+				add(m)
+			}
+		}
 	}
 	for _, path := range candidates {
 		info, err := os.Stat(path)
@@ -45,9 +60,9 @@ func windowBinary() (string, error) {
 		if same, err := sameFile(path); err == nil && same {
 			continue
 		}
-		return path, nil
+		return path, candidates, nil
 	}
-	return "", errNoWindow
+	return "", candidates, errNoWindow
 }
 
 // sameFile reports whether path is this running program. Input: a candidate path. Output: true when it is the daemon's own binary, so it is never launched as the window.
@@ -148,7 +163,7 @@ func runWindow(ctx context.Context, want bool) {
 		slog.Info("the desktop window is turned off in the config, running the daemon alone")
 		return
 	}
-	path, err := windowBinary()
+	path, _, err := windowBinary()
 	if err != nil {
 		slog.Info("no desktop window to run, running the daemon alone", "hint", "build it in app/ or point ORA_WINDOW at it")
 		return
