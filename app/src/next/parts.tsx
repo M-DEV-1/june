@@ -1,6 +1,6 @@
 /** The small pieces more than one screen draws: the reading column every page sets its text in, the scrolling region that keeps its scrollbar out of the way, the bar across the top of a screen, what an empty list and an empty pane say, the heading that opens a section, the card a group of settings rows sits in, the picker in the header of Tasks, Meetings and Days, and the brain picker in the header of Chats and Tasks. The rules these follow are in DESIGN.md. */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -351,6 +351,7 @@ export function Picker({
 
 /** What a limit's own window reads as in sentence case: "5-hour" for the ones Codex reports in hours, "Daily", "Weekly" and "Monthly" for the named ones, and whatever the provider called it, capitalised, for anything else. Input: the window as the daemon sent it ("5h", "daily", "weekly", "monthly", or a provider's own name). Output: the label. */
 function windowLabel(window: string): string {
+  if (!window) return "Limit";
   const hours = /^(\d+)h$/i.exec(window);
   if (hours) return `${hours[1]}-hour`;
   if (window === "daily") return "Daily";
@@ -391,6 +392,13 @@ export function UsageBar({ limit, now = new Date() }: { limit: UsageLimit; now?:
   );
 }
 
+/** The muted line's text when a brain reports no limits but the daemon gave a reason: everything before the note's first colon, sentence-cased, so "grok exposes no usage data: ..." reads as "Grok exposes no usage data" while the full sentence stays on the row's title. A note with no colon is used whole. Input: the note, "" when the daemon sent none. Output: the clause, or "" when there is no note. */
+function noteClause(note: string): string {
+  if (!note) return "";
+  const clause = note.split(":")[0].trim();
+  return clause.charAt(0).toUpperCase() + clause.slice(1);
+}
+
 /** The brain control in the header of Chats and Tasks: which backend answers this conversation, and the list to pick another from. Input: the brain the conversation names, which is "" when it was opened without one, and every brain the daemon reported. Output: the control. A brain that is not signed in is shown greyed and cannot be picked; picking one writes the choice through POST /brains, which is what makes it the daemon's default rather than something this window remembers. */
 export function BrainPicker({ current, brains }: { current: string; brains: Brain[] }) {
   const dispatch = useAppDispatch();
@@ -419,7 +427,7 @@ export function BrainPicker({ current, brains }: { current: string; brains: Brai
           <DropdownMenuLabel className="font-normal text-muted-foreground">No brains reported</DropdownMenuLabel>
         ) : (
           brains.map((b, i) => (
-            <div key={b.id}>
+            <Fragment key={b.id}>
               {i > 0 ? <DropdownMenuSeparator /> : null}
               <DropdownMenuItem disabled={!b.signed_in} onClick={() => void pick(b)} className="flex-col items-stretch gap-2 py-2">
                 <div className="flex items-center justify-between gap-3">
@@ -428,15 +436,21 @@ export function BrainPicker({ current, brains }: { current: string; brains: Brai
                 </div>
                 {b.limits && b.limits.length > 0 ? (
                   <div className="flex flex-col gap-2">
-                    {b.limits.map((l) => (
-                      <UsageBar key={l.window} limit={l} />
+                    {b.limits.map((l, j) => (
+                      <UsageBar key={`${j}-${l.window}`} limit={l} />
                     ))}
                   </div>
+                ) : !b.signed_in ? (
+                  <p className="text-meta text-muted-foreground">Not signed in</p>
+                ) : b.limits_note ? (
+                  <p className="text-meta text-muted-foreground" title={b.limits_note}>
+                    {noteClause(b.limits_note)}
+                  </p>
                 ) : (
-                  <p className="text-meta text-muted-foreground">{b.signed_in ? "No usage data" : "Not signed in"}</p>
+                  <p className="text-meta text-muted-foreground">No usage data</p>
                 )}
               </DropdownMenuItem>
-            </div>
+            </Fragment>
           ))
         )}
       </DropdownMenuContent>
