@@ -39,12 +39,20 @@ type BrainView struct {
 // BrainLimits is where /brains reads a brain's allowance windows. Input: a context, so a lookup that has to ask a provider can be cut short, and the brain id. Output: the newest reading and true, or false when that brain exposes no allowance or none has been read yet. nil is the same as a lookup that always says false, which is what the tests and a daemon with no usage store pass.
 type BrainLimits func(ctx context.Context, brainID string) (brain.UsageSnapshot, bool)
 
-// Brains builds the /brains handler. GET answers the five brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk with save so it survives a restart, and answers with the same list GET would. An id outside the five known ones is 400 and changes nothing. Input: a pointer to the loaded config, shared with the rest of the daemon so a POST's change is visible everywhere, and the function that persists a config to disk (config.SaveConfig in production, a stub in tests). Output: the handler.
-func Brains(cfg *config.OraConfig, save func(config.OraConfig) error, limitsFor BrainLimits) http.HandlerFunc {
+// Update changes the config in place and persists it, both under the lock, so no request goroutine reads the struct between the change and the copy that goes to disk. Input: a function that edits the config it is handed. Output: whatever the save function returned.
+func (c *LiveConfig) Update(fn func(*config.OraConfig)) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fn(c.cfg)
+	return c.save(*c.cfg)
+}
+
+// Brains builds the /brains handler. GET answers the five brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would. An id outside the five known ones is 400 and changes nothing. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
+func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeBrains(r.Context(), w, *cfg, limitsFor)
+			writeBrains(r.Context(), w, cfg.Get(), limitsFor)
 		case http.MethodPost:
 			var req struct {
 				Brain string `json:"brain"`
@@ -58,17 +66,19 @@ func Brains(cfg *config.OraConfig, save func(config.OraConfig) error, limitsFor 
 				http.Error(w, "unknown brain: "+req.Brain, http.StatusBadRequest)
 				return
 			}
-			cfg.Brain.Provider = provider
-			cfg.Brain.Model = req.Model
-			if cfg.BrainModels == nil {
-				cfg.BrainModels = map[string]string{}
-			}
-			cfg.BrainModels[req.Brain] = req.Model
-			if err := save(*cfg); err != nil {
+			err := cfg.Update(func(c *config.OraConfig) {
+				c.Brain.Provider = provider
+				c.Brain.Model = req.Model
+				if c.BrainModels == nil {
+					c.BrainModels = map[string]string{}
+				}
+				c.BrainModels[req.Brain] = req.Model
+			})
+			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			writeBrains(r.Context(), w, *cfg, limitsFor)
+			writeBrains(r.Context(), w, cfg.Get(), limitsFor)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}

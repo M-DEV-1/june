@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,7 +94,7 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 // TestBrainsHandlerShape checks the route itself answers with the list the window reads, never null.
 func TestBrainsHandlerShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Brains(&config.OraConfig{}, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
+	Brains(NewLiveConfig(&config.OraConfig{}, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /brains = %d, want 200", rec.Code)
 	}
@@ -120,7 +121,7 @@ func TestBrainsPostUnknownID(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	cfg := &config.OraConfig{}
 	rec := httptest.NewRecorder()
-	Brains(cfg, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"chatgpt","model":"whatever"}`)))
+	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"chatgpt","model":"whatever"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("POST /brains with an unknown id = %d, want 400", rec.Code)
 	}
@@ -162,7 +163,7 @@ func TestBrainsPostPersists(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	cfg := &config.OraConfig{}
 	rec := httptest.NewRecorder()
-	Brains(cfg, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
+	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /brains = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
@@ -196,7 +197,7 @@ func TestBrainsPostCodexPersistsItsOwnProvider(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	cfg := &config.OraConfig{}
 	rec := httptest.NewRecorder()
-	Brains(cfg, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"codex","model":"gpt-5.5"}`)))
+	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"codex","model":"gpt-5.5"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /brains = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
@@ -247,7 +248,7 @@ func TestBrainsCarriesTheUsageBars(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	Brains(&config.OraConfig{}, config.SaveConfig, limitsFor)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
+	Brains(NewLiveConfig(&config.OraConfig{}, config.SaveConfig), limitsFor)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /brains = %d, want 200", rec.Code)
 	}
@@ -315,5 +316,28 @@ func TestBrainsClaudeUsageNoteAbsentWhenOn(t *testing.T) {
 		if b.ID == "claude" && b.LimitsNote != "" {
 			t.Errorf("claude limits_note = %q, want empty when the setting is on", b.LimitsNote)
 		}
+	}
+}
+
+// TestBrains_ConcurrentPostAndRead runs POST /brains against reads of the same config under the race detector, which is what a brain pick while the picker refetches looks like.
+func TestBrains_ConcurrentPostAndRead(t *testing.T) {
+	live := NewLiveConfig(&config.OraConfig{}, func(config.OraConfig) error { return nil })
+	h := Brains(live, nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			h(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
+		}()
+		go func() {
+			defer wg.Done()
+			_ = live.Get().Brain.Model
+		}()
+	}
+	wg.Wait()
+	if got := live.Get().Brain.Model; got != "opus" {
+		t.Errorf("model after the posts = %q, want opus", got)
 	}
 }
