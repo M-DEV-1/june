@@ -21,6 +21,7 @@ import {
   startOf,
   ttlFor,
   keepsPrevious,
+  nextCursor,
   NO_ASK,
   POINTER_HEADING,
   SETTLE_MS,
@@ -50,6 +51,9 @@ const LABEL_LAG = 80;
 
 /** How long a gap to leave between one stroke finishing and the next one starting, in milliseconds, so several strokes sent in one event draw one after another instead of all landing at once. */
 const STROKE_GAP_MS = 100;
+
+/** The most staggering may push a later stroke's start out by, in milliseconds, before strokes stop waiting for one another and start landing together instead. Without this a "marks" or "box" event with MARK_CAP strokes staggers every one of them, so the last stroke — and the removal timer that waits for it — lands further out the more strokes an event carries, with no bound at all. */
+const STAGGER_BUDGET_MS = 3000;
 
 /** How a stroke draws itself on: quick at first, easing off as it reaches the end, the way a hand slows at the end of a line. */
 const INK_EASING = "cubic-bezier(0.33, 0, 0.2, 1)";
@@ -121,7 +125,7 @@ function render(shapes: Shape[], arrival = 0, keep = false): number {
     }
     el.style.opacity = "";
   }
-  // Whatever this drawing's predecessor still had queued for the pointer is now stale: the pointer has one job at a time, and it is about to become this drawing's.
+  // The pointer has one job at a time, and it is about to become this drawing's: whatever was queued for it already — a predecessor's on a replace, or this same drawing's own earlier strokes on a keep — is cleared before this render schedules its own.
   traceTimers.forEach((t) => clearTimeout(t));
   traceTimers = [];
 
@@ -160,8 +164,8 @@ function render(shapes: Shape[], arrival = 0, keep = false): number {
       }
     }
     shaftEnd = cursor + ms;
-    // The next stroke waits for this one to land, plus a short gap; stillness asks for no stagger, so the gap drops out and the whole diagram still lands together.
-    cursor = shaftEnd + (stillness() ? 0 : STROKE_GAP_MS);
+    // The next stroke waits for this one to land, plus a short gap; stillness asks for no stagger, so the gap drops out and the whole diagram still lands together. Past STAGGER_BUDGET_MS of staggering, remaining strokes land together too, so a diagram with many strokes cannot push its last stroke's landing out indefinitely.
+    cursor = nextCursor(shaftEnd, cursor, STAGGER_BUDGET_MS, stillness() ? 0 : STROKE_GAP_MS);
   }
   const inkEnd = shaftEnd;
 
@@ -279,6 +283,9 @@ function ripple(at: Point, size: number, delay: number): void {
 
 /** Takes the whole drawing off the screen, gently. Input: none. Output: nothing. */
 function fadeOut(): void {
+  // A stroke trace queued by draw() may still be waiting on its timer; left armed, it would fire mid-fade and re-animate the pointer this fade just set to opacity 0.
+  traceTimers.forEach((t) => clearTimeout(t));
+  traceTimers = [];
   pointer.style.opacity = "0";
   const going = [shapesEl, inkEl].map((el) =>
     el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: FADE_MS, easing: "ease", fill: "forwards" }),
