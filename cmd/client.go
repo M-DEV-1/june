@@ -70,6 +70,8 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	store.SetVectorIndex(newHTTPVectorIndex())
 	// The client runs its own HybridSearch against the daemon's index, so it needs the same embedder-matched cosine floor the daemon uses.
 	store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
+	// The act run reference block is looked up on this side too, and its floor is a cosine on the same embedder's scale.
+	store.SetActRunSimilarityFloor(appConfig.Embed.ActRunFloor())
 
 	orchestrator := agent.NewAgent(mic, speaker, store, nil, apiKey)
 	// The client process has no in-process compiler (that only exists in the daemon), so the handshake's "[working]" current-activity context was always dead here — wire it over the daemon's /buffer IPC instead (F2).
