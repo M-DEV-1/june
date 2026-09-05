@@ -1,0 +1,216 @@
+/* The window. One rounded opaque card floating on a transparent OS window, which draws nothing itself. Light is the "Soft" look, dark is the "Ink" look; the same rules read both through tokens. Nothing on this page is smaller than 13px, and anything meant to be read runs at line-height 1.5.
+   The tokens below are copied from src/next/DESIGN.md (the values live in src/next/index.css) so this window and the redesigned main window read as one product. This file does not import next/index.css, which would pull Tailwind into a page that has none. */
+@import "@fontsource-variable/geist";
+:root {
+  --body: "Geist Variable", system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif;
+  --mono: ui-monospace, "Source Code Pro", "DejaVu Sans Mono", monospace;
+  /* bg/fg/mute/line/well are DESIGN.md's raised/text/muted text/hairline/sunken, light values. */
+  --bg: #ffffff; --fg: #17181c; --mute: #61646d; --line: rgba(0, 0, 0, .075); --well: rgba(0, 0, 0, .035);
+  /* busy/bad are DESIGN.md's "work in flight" and "something wrong"; ok and mark are outside DESIGN.md's covered palette (a connection dot and a search highlight) and keep their own colour. */
+  --ok: #2f9e5f; --busy: #a3660a; --bad: #c3372b; --mark: #fde68a;
+  --accent: #5a45ea; /* DESIGN.md's accent; used for the live-voice status line so it reads as a distinct mode, not just another muted placeholder */
+  --radius: 12px; --card-radius: 16px;
+  /* DESIGN.md's shadow-lg, for a dialog or composer, plus the hairline ring it is always paired with. */
+  --shadow: 0 16px 40px -12px rgba(0, 0, 0, .20), 0 0 0 1px var(--line);
+  /* The gutter every block inside the card keeps. */
+  --pad: 20px 24px;
+}
+/* Theme: the system setting decides unless the user picks one in settings, which stamps data-theme on the root. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #232529; --fg: #e8e9ec; --mute: #979ba4; --line: rgba(255, 255, 255, .09); --well: rgba(255, 255, 255, .05);
+    --busy: #e0b341; --bad: #f08279; --mark: #5c4a12;
+    --accent: #9d90ff;
+    --shadow: 0 16px 40px -12px rgba(0, 0, 0, .6), 0 0 0 1px var(--line);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #232529; --fg: #e8e9ec; --mute: #979ba4; --line: rgba(255, 255, 255, .09); --well: rgba(255, 255, 255, .05);
+  --busy: #e0b341; --bad: #f08279; --mark: #5c4a12;
+  --accent: #9d90ff;
+  --shadow: 0 16px 40px -12px rgba(0, 0, 0, .6), 0 0 0 1px var(--line);
+}
+* { box-sizing: border-box; }
+/* The OS window is transparent; only .W paints. The body's padding is the room the card's shadow needs, and main.ts reads the bottom value back when it sizes the window. */
+html, body { height: auto; margin: 0; background: transparent; }
+body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
+
+.W {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  box-shadow: var(--shadow);
+}
+
+.W .in { display: flex; align-items: center; gap: 14px; padding: var(--pad); border-bottom: 1px solid var(--line); }
+.W .in .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
+.W .in .dot.on { background: var(--busy); }
+.W .in .dot.ok { background: var(--ok); }
+.W .in .dot.off { background: var(--bad); }
+/* DESIGN.md's text-lead: the size a document's opening paragraph reads at, used here for the composer's own typed line, at the 500 weight the design system uses to pick a line out rather than just read it. */
+.W .in .q { flex: 1; font-size: 17px; line-height: 1.55; font-weight: 500; letter-spacing: -.008em; min-width: 0; border: 0; outline: 0; background: transparent; color: inherit; font-family: inherit; padding: 0; }
+.W .in .q::placeholder { color: var(--mute); font-weight: 400; }
+/* While a live voice session is on, the status line (the placeholder text) reads in the accent colour instead of the resting mute grey, so the mode is unmistakable even at a glance and not just on close reading. */
+.W .in.live .q::placeholder { color: var(--accent); }
+/* The context chip is a label saying what is on screen, not a button: no fill, no border, no code font, just muted proportional text that gives way to the input when the window title is long. DESIGN.md's text-ui: every control's size. */
+.W .in .ctx { font: 400 13px/1.45 var(--body); color: var(--mute); white-space: nowrap; max-width: 38%; overflow: hidden; text-overflow: ellipsis; flex: none; }
+
+/* The empty state before anything is asked: one calm row, about 64px tall. No divider and no footer until there is text in the input or a turn on screen (see .bare in main.ts's hasContent). */
+.W.bare .in { padding: 17px 24px; border-bottom: none; }
+.W.bare .foot { display: none; }
+
+.W .thread { padding: var(--pad); display: grid; gap: 10px; }
+/* The answer is the loudest thing on the card: DESIGN.md's text-lead, the size an opening paragraph reads at, and full-strength colour. */
+.W .a { font-size: 17px; line-height: 1.55; letter-spacing: -.008em; color: var(--fg); }
+.W .a b { font-weight: 600; }
+/* The question the answer on screen belongs to, and above it every earlier turn folded to a grey question-and-answer pair. DESIGN.md's text-read: what a person reads a sentence of. */
+.W .qq { color: var(--mute); font-size: 15px; line-height: 1.62; letter-spacing: -.003em; }
+/* A job's running seconds, next to its goal on the qq line — same size and tabular numerals as a step's own time, since tickSteps updates the two the same way. */
+.W .qq .elapsed { font: 400 12px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+.W .qq .confirm { color: var(--bad); }
+
+/* Stop and Pause/Resume, the two controls on a live job's card — the same keycap look the footer's own hints use, but clickable. */
+.W .jobctl { display: flex; gap: 8px; }
+.W .jobctl button { font: 500 11px/1.3 var(--body); letter-spacing: .02em; text-transform: uppercase; color: var(--mute); background: var(--well); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+.W .jobctl button:hover { color: var(--fg); }
+
+/* The cost line a finished job ends on: rounds and tokens, in the same quiet meta size the step time reads at. */
+.W .spend { font: 400 12px/1.4 var(--mono); color: var(--mute); }
+
+/* The one question a stuck job is waiting on — the same size and weight an answer reads at, since it is the one thing on the card asking for a reply right now. */
+.W .jobq { font-size: 17px; line-height: 1.55; letter-spacing: -.008em; color: var(--fg); }
+.W .prev { color: var(--mute); font-size: 15px; line-height: 1.62; letter-spacing: -.003em; display: grid; gap: 4px; opacity: .75; }
+.W .prev b { font-weight: 500; color: var(--fg); opacity: .75; }
+
+/* The live step list, shown in place of the answer while an ask is still running (see main.ts's stepsHtml) — one row per tool call, in the order they ran. Every row plays a brief slide-and-fade entrance on mount (step-in), once: main.ts patches a running turn's list in place (see patchLiveSteps) rather than rebuilding it on every event, so a finished row is appended exactly once and never touched again, and this only plays for the row it is actually new for. */
+.W .steps { display: grid; gap: 8px; }
+/* DESIGN.md's text-read, the same size and rhythm every step row in the main window's own document view reads at. */
+.W .step { display: flex; align-items: center; gap: 10px; font-size: 15px; line-height: 1.62; letter-spacing: -.003em; color: var(--fg); animation: step-in 180ms ease-out; }
+.W .step.ok, .W .step.err { color: var(--mute); }
+@keyframes step-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+.W .step-ic { width: 14px; flex: none; text-align: center; opacity: .7; }
+/* The running step's icon breathes in place of a spinner — scale and opacity, nothing that triggers layout. */
+.W .step.run .step-ic { animation: breathe 1.2s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { transform: scale(1); opacity: .7; } 50% { transform: scale(1.08); opacity: 1; } }
+
+.W .step-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The running step's label shimmers — a bright band sweeping through otherwise-muted text — the same read Claude's and ChatGPT's own "thinking" states use. background-clip: text is the one property in this file that is not transform/opacity: there is no compositor-only way to paint a moving gradient through glyphs. main.ts keeps this element itself alive across every tool event and every tick of the elapsed-time clock (see updateLiveRow / patchLiveSteps), which is what this animation needs to actually read as one continuous sweep instead of restarting every time something on the card changes; linear and a position that starts and ends off the two opposite edges is what keeps the loop point itself invisible. The opacity transition is what the row's label cross-fades through when the text underneath it changes without the animation missing a beat. */
+.W .step.run .step-label {
+  background-image: linear-gradient(90deg, var(--mute) 25%, var(--fg) 50%, var(--mute) 75%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.8s linear infinite;
+  transition: opacity 150ms ease;
+}
+@keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+
+/* The "Thinking…" row's three dots, standing in for a static ellipsis, animating in sequence the same way the microphone's .wave bars stagger below. */
+.W .dots i { font-style: normal; opacity: .2; animation: dotfade 1.4s ease-in-out infinite; }
+.W .dots i:nth-child(2) { animation-delay: .2s; }
+.W .dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes dotfade { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+
+.W .step-mark { flex: none; display: inline-flex; }
+.W .step.ok .step-mark { color: var(--ok); }
+.W .step.err .step-mark { color: var(--bad); }
+/* A finished step's check or cross draws itself: the path starts fully hidden behind its own dash and slides into view rather than popping in already drawn. stroke-dashoffset is paint-only, not layout, so it costs about what an opacity change does. */
+.W .mark-svg path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 24; stroke-dashoffset: 24; animation: draw 240ms ease-out forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+
+/* DESIGN.md's text-meta: the size a time beside a row reads at. */
+.W .step-time { flex: none; font: 400 12px/1.4 var(--mono); color: var(--mute); min-width: 2.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.W .step-err { font-size: 13px; line-height: 1.45; color: var(--bad); padding-left: 24px; }
+/* One glyph per tool kind, named from stepIconKind; a bare dot for the tools this card has no icon of its own for. */
+.W .step-ic::before { content: "•"; }
+.W .step-ic.look::before { content: "◎"; }
+.W .step-ic.point::before { content: "➤"; }
+.W .step-ic.click::before { content: "●"; }
+.W .step-ic.type::before { content: "▤"; }
+.W .step-ic.scroll::before { content: "↕"; }
+.W .step-ic.note::before { content: "✎"; }
+.W .step-ic.search::before { content: "⌕"; }
+.W .step-ic.open::before { content: "↗"; }
+
+/* A finished turn's steps collapse to this one line ("4 steps · 6.2 s"), the same fold-out affordance the evidence line and the error detail use (.tw). The 200ms height transition itself is played from main.ts (collapseStepsThenRender) against the .steps element still on screen: this line and that list are two different pieces of markup swapped in on the next render, not one element a CSS transition alone could animate between. */
+/* DESIGN.md's text-ui, the one interface size controls and rows are told apart from prose with. */
+.W .stepsum { display: flex; align-items: center; gap: 12px; font-size: 13px; line-height: 1.45; color: var(--mute); cursor: pointer; }
+.W .stepsum .tw { margin-left: auto; font: 400 13px/1.45 var(--mono); flex: none; }
+
+/* Shimmer and breathing are the two continuous, looping motions here — the ones reduced motion exists for. The row's entrance and the check/cross draw-in are short one-shot state changes and stay on. */
+@media (prefers-reduced-motion: reduce) {
+  .W .step.run .step-ic, .W .step.run .step-label, .W .dots i { animation: none; }
+  .W .step.run .step-label { background: none; color: var(--fg); }
+  .W .dots i { opacity: 1; }
+}
+
+.W .evd { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--well); }
+.W .evd .h { display: flex; align-items: center; gap: 12px; padding: 14px 16px; font-size: 15px; line-height: 1.62; letter-spacing: -.003em; color: var(--mute); cursor: pointer; }
+.W .evd .h b { color: var(--fg); font-weight: 500; }
+.W .evd .h .tw { margin-left: auto; font: 400 13px/1.45 var(--mono); flex: none; }
+/* An answer can cite eight sources; the list scrolls inside the fold-out rather than growing the window past the bottom of the screen. */
+.W .evd .items { max-height: 300px; overflow-y: auto; }
+.W .evd .body { padding: 14px 16px; font-size: 15px; line-height: 1.62; letter-spacing: -.003em; color: var(--fg); border-top: 1px solid var(--line); }
+.W .evd .body .im { font-size: 13px; line-height: 1.45; color: var(--mute); margin-bottom: 6px; }
+.W .evd .body .im b { color: var(--fg); font-weight: 500; }
+.W .evd mark { background: var(--mark); color: inherit; padding: 0 2px; border-radius: 3px; }
+
+/* The footer is the quietest line on the card: smallest type allowed, muted colour. */
+.W .foot { display: flex; align-items: center; gap: 6px; padding: 12px 24px 14px; font: 400 13px/1.45 var(--mono); color: var(--mute); border-top: 1px solid var(--line); }
+/* The daemon tag sits alone at the right end of the footer, in the same mono/13px the tag always read at. */
+.W .foot .tag { margin-left: auto; flex: none; font-family: var(--mono); }
+/* The three key hints ("↵ ask", "ctrl↵ new thread", "esc close") are drawn as keycaps: DESIGN.md's text-micro, uppercase, on the sunken wash, the same rounded-xs chip the main window's own hotkey row (settings.tsx) uses for a shortcut. */
+.W .foot span:not(.tag) { font: 500 11px/1.3 var(--body); letter-spacing: .02em; text-transform: uppercase; color: var(--mute); background: var(--well); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+
+/* The three bars that stand for the microphone while the space bar is held. They sit in the input row all the time and only show once main.ts puts .holding on it, which it does without rebuilding the card so the key release still reaches the listener that started the recording. */
+.W .in .wave { display: none; align-items: center; gap: 3px; height: 18px; flex: none; }
+.W .in.holding .wave { display: flex; }
+.W .in .wave i { width: 3px; height: 7px; border-radius: 2px; background: var(--busy); animation: wave 900ms ease-in-out infinite; }
+.W .in .wave i:nth-child(2) { animation-delay: 150ms; }
+.W .in .wave i:nth-child(3) { animation-delay: 300ms; }
+@keyframes wave { 0%, 100% { height: 7px; } 50% { height: 17px; } }
+/* The dot breathes for the whole time a live voice session is running, amber while listening or thinking and green while speaking, so the session stays visible at a glance rather than only readable by its steady colour. */
+.W .in .dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) {
+  .W .in .wave i, .W .in .dot.pulse { animation: none; }
+}
+
+/* The notice bubble: one of Ora's own moments — the morning brief, the evening close, a meeting prep — arriving on the daemon's event stream and shown above the card. It is Ora talking rather than part of the window's own surface, so it keeps one flat green fill in both themes with white text on it, and it is a speech bubble: a tail on the side facing the nearest screen edge, which is the dock the hover is anchored to. Deep enough a green that white 13px type sits at 5.4:1 on it. */
+:root { --notice: #16794b; }
+.N {
+  position: relative;
+  width: fit-content;
+  max-width: 420px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--notice);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  animation: notice-in 160ms ease-out;
+}
+/* The title carries the moment ("Morning brief"), the body the few lines under it, cut off after three: a card is something read in a glance on the way past, and the whole text is one click away in the app window. */
+.N .nt { font-weight: 600; }
+.N .nb { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+/* The tail, drawn as one triangle out of borders so the bubble stays a single element: down for a hover that opens at the bottom or the middle of the screen, up for one that opens at the top. Its 8px of margin on that side is the room it hangs in. */
+.N.down { margin-bottom: 8px; }
+.N.up { margin-top: 8px; }
+.N::after { content: ""; position: absolute; left: 22px; width: 0; height: 0; border: 8px solid transparent; }
+.N.down::after { top: 100%; border-top-color: var(--notice); border-bottom: 0; }
+.N.up::after { bottom: 100%; border-bottom-color: var(--notice); border-top: 0; }
+@keyframes notice-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+/* A notice that arrived while the hover was shut shows on its own: the card underneath has nothing on it but an empty input, and the window is up only to say this one thing. A notice that arrived while the hover was already open leaves the card where it is and stacks above it. */
+body.alone .W { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .N { animation: none; }
+}

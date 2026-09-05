@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ora</title>
+    <!-- Geist Variable is bundled with the app (see styles.css's @import) rather than fetched, the same as the main window, so nothing here depends on the network. -->
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <!-- The notice bubble: what Ora says when it speaks first. Empty and hidden until a "notice" event arrives on the daemon's stream, and above the card in the flow so a notice that lands while a question is on screen stacks over that question instead of replacing it. -->
+    <div class="N" id="n" hidden></div>
+    <!-- The whole window is this one card; main.ts rebuilds its contents from state on every event. -->
+    <div class="W" id="w"></div>
+  </body>
+</html>
