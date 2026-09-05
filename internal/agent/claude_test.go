@@ -8,12 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"ora/internal/db"
@@ -525,5 +529,135 @@ func TestClaudeHead_CutsOnARuneBoundary(t *testing.T) {
 func TestClaudeHead_FlattensAndLeavesShortTextAlone(t *testing.T) {
 	if got := claudeHead("  error:\n  could not\tstart\n"); got != "error: could not start" {
 		t.Errorf("claudeHead = %q, want the words on one line", got)
+	}
+}
+
+// recordedUsage is a UsageRecorder that keeps what it was handed, so a test can check what a refresh recorded.
+type recordedUsage struct {
+	mu     sync.Mutex
+	byName map[string][]UsageLimit
+}
+
+func (r *recordedUsage) Record(provider string, limits []UsageLimit) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byName == nil {
+		r.byName = map[string][]UsageLimit{}
+	}
+	r.byName[provider] = limits
+}
+
+// writeClaudeCredentials writes a stand-in for ~/.claude/.credentials.json holding token as the subscription's OAuth access token, and returns its path.
+func writeClaudeCredentials(t *testing.T, token string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".credentials.json")
+	body := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q,"refreshToken":"rt","expiresAt":9999999999999,"subscriptionType":"max"}}`, token)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+	return path
+}
+
+// TestClaudeUsage_ReadsTheOAuthUsageEndpoint checks the subscription's own usage windows are read the way Claude Code's /usage reads them, and become the bars the picker draws. The endpoint, its headers and its response shape are the undocumented OAuth usage API recorded at https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor/issues/202: GET https://api.anthropic.com/api/oauth/usage with Authorization: Bearer <oauth access token>, anthropic-beta: oauth-2025-04-20 and User-Agent: claude-code/<version>, answering {"five_hour":{"utilization":65,"resets_at":"..."},"seven_day":{...},"seven_day_opus":null,"seven_day_sonnet":{...}} where utilization is a percentage from 0 to 100.
+func TestClaudeUsage_ReadsTheOAuthUsageEndpoint(t *testing.T) {
+	const token = "sk-ant-oat-do-not-leak"
+	var gotAuth, gotBeta, gotAgent, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotBeta, gotAgent, gotPath = r.Header.Get("Authorization"), r.Header.Get("anthropic-beta"), r.Header.Get("User-Agent"), r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{
+			"five_hour": {"utilization": 65, "resets_at": "2026-09-05T17:56:00Z"},
+			"seven_day": {"utilization": 37, "resets_at": "2026-09-08T09:00:00Z"},
+			"seven_day_opus": null,
+			"seven_day_sonnet": {"utilization": 12.5, "resets_at": "2026-09-08T09:00:00Z"},
+			"extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null, "utilization": null}
+		}`)
+	}))
+	defer srv.Close()
+
+	limits, err := claudeUsage(context.Background(), srv.Client(), srv.URL+"/api/oauth/usage", writeClaudeCredentials(t, token))
+	if err != nil {
+		t.Fatalf("claudeUsage: %v", err)
+	}
+	if gotPath != "/api/oauth/usage" {
+		t.Errorf("path = %q, want the oauth usage route", gotPath)
+	}
+	if gotAuth != "Bearer "+token {
+		t.Errorf("the request did not carry the subscription's bearer token")
+	}
+	if gotBeta != claudeOAuthBeta {
+		t.Errorf("anthropic-beta = %q, want %q", gotBeta, claudeOAuthBeta)
+	}
+	if !strings.HasPrefix(gotAgent, "claude-code/") {
+		t.Errorf("User-Agent = %q, want claude-code/<version>: the endpoint rate-limits anything else hard", gotAgent)
+	}
+
+	if len(limits) != 3 {
+		t.Fatalf("limits = %+v, want the five-hour, weekly and weekly-sonnet windows and not the null opus one", limits)
+	}
+	if limits[0].Window != "5h" || limits[0].UsedFraction != 0.65 {
+		t.Errorf("five-hour window = %+v, want 5h at 0.65", limits[0])
+	}
+	if want := time.Date(2026, 9, 5, 17, 56, 0, 0, time.UTC); !limits[0].ResetsAt.Equal(want) {
+		t.Errorf("five-hour window resets at %v, want %v", limits[0].ResetsAt, want)
+	}
+	if limits[1].Window != "weekly" || limits[1].UsedFraction != 0.37 {
+		t.Errorf("weekly window = %+v, want weekly at 0.37", limits[1])
+	}
+	if limits[2].Window != "weekly_sonnet" || limits[2].UsedFraction != 0.125 {
+		t.Errorf("per-model weekly window = %+v, want weekly_sonnet at 0.125", limits[2])
+	}
+}
+
+// TestRefreshClaudeUsage_NeverLogsTheToken checks the failure path says what went wrong without the access token in it: this is the one place in Ora that reads ~/.claude/.credentials.json, and a token in ora.log would outlive the run.
+func TestRefreshClaudeUsage_NeverLogsTheToken(t *testing.T) {
+	const token = "sk-ant-oat-do-not-leak"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A refusal that echoes the request back is the worst case: the body an error message might quote holds the token.
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, `{"error":{"message":"invalid bearer %s"}}`, r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+
+	var logged bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(restore)
+
+	rec := &recordedUsage{}
+	refreshClaudeUsage(context.Background(), srv.Client(), srv.URL+"/api/oauth/usage", writeClaudeCredentials(t, token), rec)
+
+	if strings.Contains(logged.String(), token) {
+		t.Fatalf("the access token reached a log line: %s", logged.String())
+	}
+	if len(rec.byName) != 0 {
+		t.Errorf("a failed read recorded %+v, want nothing so the last good reading stands", rec.byName)
+	}
+}
+
+// TestRefreshClaudeUsage_PollsAtMostEveryTenMinutes checks a window polling /brains every few seconds does not poll Anthropic with it.
+func TestRefreshClaudeUsage_PollsAtMostEveryTenMinutes(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		io.WriteString(w, `{"five_hour":{"utilization":1,"resets_at":"2026-09-05T17:56:00Z"}}`)
+	}))
+	defer srv.Close()
+
+	claudeUsagePolled.Lock()
+	claudeUsagePolled.at = time.Time{}
+	claudeUsagePolled.Unlock()
+
+	rec := &recordedUsage{}
+	creds := writeClaudeCredentials(t, "sk-ant-oat-do-not-leak")
+	for range 3 {
+		refreshClaudeUsage(context.Background(), srv.Client(), srv.URL+"/api/oauth/usage", creds, rec)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("three refreshes made %d requests, want 1", got)
+	}
+	if len(rec.byName[ProviderClaude]) != 1 {
+		t.Errorf("recorded %+v, want the one window the endpoint named", rec.byName)
 	}
 }

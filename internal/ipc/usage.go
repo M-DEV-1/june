@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"ora/internal/brain"
 	"ora/internal/db"
 	strtrunc "ora/internal/text"
 )
@@ -93,16 +94,23 @@ type UsageCall struct {
 	Question   string `json:"question"`
 }
 
-// UsageView is GET /usage. Today is since midnight this morning and Week is the last seven days counting today; Days is one column per day over that same week, oldest first, with a zero column for a day nothing was spent on; Recent is the last calls, newest first. No list is ever null — the window renders these shapes directly.
-type UsageView struct {
-	Today  UsageWindow `json:"today"`
-	Week   UsageWindow `json:"week"`
-	Days   []UsageDay  `json:"days"`
-	Recent []UsageCall `json:"recent"`
+// ProviderLimits is one brain's allowance windows on GET /usage — the same reading GET /brains carries on its row — so the settings page can draw the bars beside the token spend. LimitsAt is when they were read, RFC 3339.
+type ProviderLimits struct {
+	Limits   []brain.UsageLimit `json:"limits"`
+	LimitsAt string             `json:"limits_at"`
 }
 
-// Usage builds the GET /usage handler. Input: the store's token ledger, and the daily budget set for a provider (config.OraConfig.DailyTokenBudgetFor; nil is the same as a config with no budgets set). Output: a handler writing UsageView as JSON, or 500 when the ledger cannot answer — an empty answer would read as "you have spent nothing", which is a different thing from "the store is broken".
-func Usage(ledger TokenLedger, budgetFor func(provider string) int) http.HandlerFunc {
+// UsageView is GET /usage. Today is since midnight this morning and Week is the last seven days counting today; Days is one column per day over that same week, oldest first, with a zero column for a day nothing was spent on; Recent is the last calls, newest first; Limits is the allowance windows each brain's provider exposes, keyed by brain id and holding only the brains that expose any. No list is ever null — the window renders these shapes directly.
+type UsageView struct {
+	Today  UsageWindow               `json:"today"`
+	Week   UsageWindow               `json:"week"`
+	Days   []UsageDay                `json:"days"`
+	Recent []UsageCall               `json:"recent"`
+	Limits map[string]ProviderLimits `json:"limits"`
+}
+
+// Usage builds the GET /usage handler. Input: the store's token ledger, the daily budget set for a provider (config.OraConfig.DailyTokenBudgetFor; nil is the same as a config with no budgets set), and optionally the same allowance lookup GET /brains uses, so the settings page can draw the providers' own usage bars beside the token spend. Output: a handler writing UsageView as JSON, or 500 when the ledger cannot answer — an empty answer would read as "you have spent nothing", which is a different thing from "the store is broken".
+func Usage(ledger TokenLedger, budgetFor func(provider string) int, limitsFor ...BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		today := startOfToday(time.Now())
@@ -136,8 +144,23 @@ func Usage(ledger TokenLedger, budgetFor func(provider string) int) http.Handler
 			Week:   usageWindow(weekTotals),
 			Days:   daySeries(days, today),
 			Recent: usageCalls(recent),
+			Limits: providerLimits(ctx, limitsFor),
 		})
 	}
+}
+
+// providerLimits collects each brain's allowance windows for the settings page. Input: the request's context and the optional lookup Usage was given. Output: a map from brain id to its windows, holding only the brains that have any, and empty rather than null when no lookup was given.
+func providerLimits(ctx context.Context, limitsFor []BrainLimits) map[string]ProviderLimits {
+	out := map[string]ProviderLimits{}
+	if len(limitsFor) == 0 || limitsFor[0] == nil {
+		return out
+	}
+	for _, id := range brainIDs {
+		if snap, ok := limitsFor[0](ctx, id); ok && len(snap.Limits) > 0 {
+			out[id] = ProviderLimits{Limits: snap.Limits, LimitsAt: rfc3339(snap.At)}
+		}
+	}
+	return out
 }
 
 // applyBudgets sets BudgetUsedFraction on each of today's provider rows, in place. Input: today's provider totals and the budget lookup Usage was given, nil meaning no budgets are set at all. Output: none; a provider budgetFor reports 0 for is left at the zero value, the same as "spent nothing".

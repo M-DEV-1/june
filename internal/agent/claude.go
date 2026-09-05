@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -475,4 +476,154 @@ func (b CodexThenClaude) AskText(ctx context.Context, question string) (TurnTrac
 		return b.Agent.AskClaude(ctx, question)
 	}
 	return tr, err
+}
+
+const (
+	// claudeUsageURL is the OAuth usage endpoint Claude Code's own /usage screen reads: it answers with the subscription's five-hour and seven-day windows for the account the access token belongs to. It is undocumented; the request and response shapes are recorded at https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor/issues/202.
+	claudeUsageURL = "https://api.anthropic.com/api/oauth/usage"
+	// claudeOAuthBeta is the beta header the OAuth routes require.
+	claudeOAuthBeta = "oauth-2025-04-20"
+	// claudeUsageAgent is the user agent the endpoint expects. Anything that does not look like Claude Code lands in a much smaller rate-limit bucket and gets 429s, so the version is sent even though it is not the one installed here.
+	// ponytail: a pinned version string; read it from `claude --version` if the endpoint ever starts checking it.
+	claudeUsageAgent = "claude-code/2.1.261"
+	// claudeUsagePoll is the shortest gap between two reads of that endpoint, so a window polling /brains every few seconds does not poll Anthropic with it.
+	claudeUsagePoll = 10 * time.Minute
+	// claudeUsageTimeout bounds one read, so a slow endpoint cannot hold up the brain picker.
+	claudeUsageTimeout = 5 * time.Second
+)
+
+// claudeCredentialsPath is where Claude Code keeps the subscription login this file reads the access token out of, the same way codexAuthPath names Codex's.
+func claudeCredentialsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", ".credentials.json")
+}
+
+// claudeCredentials is the part of ~/.claude/.credentials.json this file reads: the OAuth block Claude Code writes the subscription login into. Only the access token is taken, and it is never logged, never written anywhere, and never leaves the Authorization header of the one request below — the same rule loadCodexAuth follows for Codex's own auth file.
+type claudeCredentials struct {
+	OAuth struct {
+		AccessToken string `json:"accessToken"`
+	} `json:"claudeAiOauth"`
+}
+
+// loadClaudeToken reads the subscription's OAuth access token out of the credentials file at path. Output: the token, or an error naming the file when it is missing, is not the file Claude Code writes, or holds no token. The error never carries the file's contents.
+func loadClaudeToken(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("claude login: %w", err)
+	}
+	var creds claudeCredentials
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		return "", fmt.Errorf("claude login: %s is not the credentials file Claude Code writes", path)
+	}
+	if creds.OAuth.AccessToken == "" {
+		return "", fmt.Errorf("claude login: %s has no subscription access token; run `claude auth` first", path)
+	}
+	return creds.OAuth.AccessToken, nil
+}
+
+// claudeUsageWindow is one allowance window the usage endpoint reports: utilization is a percentage from 0 to 100, and resets_at is when the window starts again.
+type claudeUsageWindow struct {
+	Utilization float64   `json:"utilization"`
+	ResetsAt    time.Time `json:"resets_at"`
+}
+
+// claudeUsageResponse is the endpoint's body. A window the account has no limit on comes back as null, which is why every field is a pointer.
+type claudeUsageResponse struct {
+	FiveHour       *claudeUsageWindow `json:"five_hour"`
+	SevenDay       *claudeUsageWindow `json:"seven_day"`
+	SevenDayOpus   *claudeUsageWindow `json:"seven_day_opus"`
+	SevenDaySonnet *claudeUsageWindow `json:"seven_day_sonnet"`
+}
+
+// claudeUsage reads the subscription's allowance windows from the OAuth usage endpoint. Input: a context, the HTTP client to use, the endpoint (the test points this at a stub), and the credentials file to take the access token from. Output: one UsageLimit per window the account has, in the order the picker draws them, or an error. The error never carries the token or the response body.
+func claudeUsage(ctx context.Context, client *http.Client, url, credsPath string) ([]UsageLimit, error) {
+	token, err := loadClaudeToken(credsPath)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-beta", claudeOAuthBeta)
+	req.Header.Set("User-Agent", claudeUsageAgent)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("claude usage: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		// The body is dropped rather than quoted: a refusal from this endpoint can echo the Authorization header back.
+		return nil, fmt.Errorf("claude usage: HTTP %d", resp.StatusCode)
+	}
+	var body claudeUsageResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&body); err != nil {
+		return nil, fmt.Errorf("claude usage: the endpoint did not answer with the usage windows: %w", err)
+	}
+	var limits []UsageLimit
+	for _, w := range []struct {
+		name   string
+		field  string
+		window *claudeUsageWindow
+	}{
+		{"5h", "five_hour", body.FiveHour},
+		{"weekly", "seven_day", body.SevenDay},
+		{"weekly_opus", "seven_day_opus", body.SevenDayOpus},
+		{"weekly_sonnet", "seven_day_sonnet", body.SevenDaySonnet},
+	} {
+		if w.window == nil {
+			continue
+		}
+		limits = append(limits, UsageLimit{
+			Window:       w.name,
+			UsedFraction: w.window.Utilization / 100,
+			ResetsAt:     w.window.ResetsAt,
+			Source:       "api/oauth/usage " + w.field,
+		})
+	}
+	return limits, nil
+}
+
+// claudeUsagePolled is when the usage endpoint was last read, so refreshClaudeUsage can hold itself to claudeUsagePoll however often it is called.
+var claudeUsagePolled struct {
+	sync.Mutex
+	at time.Time
+}
+
+// refreshClaudeUsage reads the usage endpoint and records what it says, at most once every claudeUsagePoll however often it is called. Input: a context, the HTTP client, the endpoint, the credentials file, and where to record the reading. Output: none — a failure is logged with what went wrong and nothing else, and leaves the last good reading standing.
+func refreshClaudeUsage(ctx context.Context, client *http.Client, url, credsPath string, rec UsageRecorder) {
+	claudeUsagePolled.Lock()
+	if time.Since(claudeUsagePolled.at) < claudeUsagePoll {
+		claudeUsagePolled.Unlock()
+		return
+	}
+	claudeUsagePolled.at = time.Now()
+	claudeUsagePolled.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, claudeUsageTimeout)
+	defer cancel()
+	limits, err := claudeUsage(ctx, client, url, credsPath)
+	if err != nil {
+		slog.Debug("claude: could not read the subscription's usage windows", "error", err)
+		return
+	}
+	if rec != nil && len(limits) > 0 {
+		rec.Record(ProviderClaude, limits)
+	}
+}
+
+// RefreshClaudeUsage reads the Claude subscription's allowance windows into the recorder set by SetUsageRecorder, at most once every ten minutes. GET /brains calls it, so the endpoint is only ever read while someone is looking at the picker. Input: a context. Output: none.
+func RefreshClaudeUsage(ctx context.Context) {
+	usageRecorder.Lock()
+	to := usageRecorder.to
+	usageRecorder.Unlock()
+	if to == nil {
+		return
+	}
+	refreshClaudeUsage(ctx, http.DefaultClient, claudeUsageURL, claudeCredentialsPath(), to)
 }

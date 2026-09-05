@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"ora/internal/brain"
 	"ora/internal/config"
 )
 
@@ -25,7 +28,7 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 	cfg := config.OraConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}}
 	onPath := func(name string) bool { return name == "grok" }
 
-	list := brainList(cfg, home, onPath)
+	list := brainList(context.Background(), cfg, home, onPath, nil)
 	byID := map[string]BrainView{}
 	for _, b := range list {
 		byID[b.ID] = b
@@ -87,7 +90,7 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 // TestBrainsHandlerShape checks the route itself answers with the list the window reads, never null.
 func TestBrainsHandlerShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Brains(&config.OraConfig{}, config.SaveConfig)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
+	Brains(&config.OraConfig{}, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /brains = %d, want 200", rec.Code)
 	}
@@ -114,7 +117,7 @@ func TestBrainsPostUnknownID(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	cfg := &config.OraConfig{}
 	rec := httptest.NewRecorder()
-	Brains(cfg, config.SaveConfig)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"chatgpt","model":"whatever"}`)))
+	Brains(cfg, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"chatgpt","model":"whatever"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("POST /brains with an unknown id = %d, want 400", rec.Code)
 	}
@@ -156,7 +159,7 @@ func TestBrainsPostPersists(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	cfg := &config.OraConfig{}
 	rec := httptest.NewRecorder()
-	Brains(cfg, config.SaveConfig)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
+	Brains(cfg, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /brains = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
@@ -190,7 +193,7 @@ func TestBrainsPostCodexPersistsItsOwnProvider(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	cfg := &config.OraConfig{}
 	rec := httptest.NewRecorder()
-	Brains(cfg, config.SaveConfig)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"codex","model":"gpt-5.5"}`)))
+	Brains(cfg, config.SaveConfig, nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"codex","model":"gpt-5.5"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /brains = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
@@ -219,5 +222,66 @@ func TestBrainsPostCodexPersistsItsOwnProvider(t *testing.T) {
 	}
 	if reloaded.Brain.Provider == config.BrainGeminiAPI {
 		t.Errorf("provider on disk is the Gemini provider, codex must persist its own")
+	}
+}
+
+// TestBrainsCarriesTheUsageBars checks each brain row carries whatever allowance windows its provider exposes, with the moment they were read, and an empty array — never null — for a brain that exposes none. This is what the picker draws its mini bars from.
+func TestBrainsCarriesTheUsageBars(t *testing.T) {
+	read := time.Date(2026, 9, 5, 14, 0, 0, 0, time.UTC)
+	limitsFor := func(_ context.Context, id string) (brain.UsageSnapshot, bool) {
+		switch id {
+		case "codex":
+			return brain.UsageSnapshot{At: read, Limits: []brain.UsageLimit{
+				{Window: "5h", UsedFraction: 0.65, ResetsAt: read.Add(3*time.Hour + 56*time.Minute), Source: "x-codex-primary-*"},
+				{Window: "weekly", UsedFraction: 0.37, ResetsAt: read.Add(76 * time.Hour), Source: "x-codex-secondary-*"},
+			}}, true
+		case "gemini":
+			return brain.UsageSnapshot{At: read, Limits: []brain.UsageLimit{
+				{Window: "daily", UsedFraction: 0.25, ResetsAt: read.Add(10 * time.Hour), Source: "brain_quota.json gemini-3.5-flash"},
+			}}, true
+		}
+		return brain.UsageSnapshot{}, false
+	}
+
+	rec := httptest.NewRecorder()
+	Brains(&config.OraConfig{}, config.SaveConfig, limitsFor)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /brains = %d, want 200", rec.Code)
+	}
+	var out struct{ Brains []BrainView }
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byID := map[string]BrainView{}
+	for _, b := range out.Brains {
+		byID[b.ID] = b
+	}
+
+	codex := byID["codex"]
+	if len(codex.Limits) != 2 {
+		t.Fatalf("codex limits = %+v, want the five-hour and weekly windows", codex.Limits)
+	}
+	if codex.Limits[0].Window != "5h" || codex.Limits[0].UsedFraction != 0.65 {
+		t.Errorf("codex first limit = %+v, want 5h at 0.65", codex.Limits[0])
+	}
+	if codex.LimitsAt != read.Format(time.RFC3339) {
+		t.Errorf("codex limits_at = %q, want %q", codex.LimitsAt, read.Format(time.RFC3339))
+	}
+	if byID["gemini"].Limits[0].Window != "daily" {
+		t.Errorf("gemini limits = %+v, want the daily request ceiling", byID["gemini"].Limits)
+	}
+	for _, id := range []string{"grok", "ollama", "claude"} {
+		row := byID[id]
+		if row.Limits == nil {
+			t.Errorf("%s limits are null, want an empty array", id)
+		}
+		if len(row.Limits) != 0 || row.LimitsAt != "" {
+			t.Errorf("%s reports limits %+v at %q, want none: nothing exposes an allowance for it here", id, row.Limits, row.LimitsAt)
+		}
+	}
+
+	// The existing rows must be untouched by the new ones.
+	if len(out.Brains) != 5 || byID["claude"].Note == "" || byID["ollama"].Name == "" {
+		t.Errorf("the five rows lost a field: %+v", out.Brains)
 	}
 }
