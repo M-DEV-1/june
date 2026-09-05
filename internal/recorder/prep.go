@@ -152,6 +152,38 @@ func looksLikeName(name string) bool {
 	return true
 }
 
+// isCaselessLetter reports whether r belongs to a script that has no upper or lower form — Devanagari, Tamil, Kannada, Arabic, CJK and the like — as opposed to Latin, Greek or Cyrillic, which do and are read by the capitalised-word rule instead. A combining mark (a Devanagari or Tamil vowel sign, say) counts too, since it attaches to the letter before it rather than standing as a word on its own. Input: one rune. Output: true when it can be part of a caseless-script name.
+func isCaselessLetter(r rune) bool {
+	if !unicode.IsLetter(r) && !unicode.IsMark(r) {
+		return false
+	}
+	return unicode.ToUpper(r) == unicode.ToLower(r)
+}
+
+// caselessScriptNames finds name candidates in text written in a script with no case, where the "one to four capitalised words" shape looksLikeName expects cannot apply because nothing in the script can be capitalised. Input: any screen text. Output: every run of two or more such letters, in the order found — one pass over the runes, not a regex, which is what keeps this as cheap as the ASCII pattern it sits beside.
+func caselessScriptNames(text string) []string {
+	var out []string
+	runes := []rune(text)
+	start := -1
+	flush := func(end int) {
+		if start >= 0 && end-start >= 2 {
+			out = append(out, string(runes[start:end]))
+		}
+		start = -1
+	}
+	for i, r := range runes {
+		if isCaselessLetter(r) {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		flush(i)
+	}
+	flush(len(runes))
+	return out
+}
+
 // collectMeetingNames pulls people's names off the meeting's own window. withTitle includes the window title as a source, which is right when the names are only a hint to search past minutes with and wrong when they are counted. known is who Ora already knows about from personal context; a candidate already known by that name is kept regardless of shape, since a real name Ora has already confirmed outranks a heuristic guessing whether something is one.
 func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []string {
 	knownSet := map[string]bool{}
@@ -181,7 +213,7 @@ func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []str
 				}
 				if !knownSet[key] {
 					// The app's own name is written on its window as prominently as anybody's: a Teams window reads "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams", where two of the three capitalised phrases are the software. What names the window cannot also name a person in it. Nor can its own toolbar, or anything that is not shaped like a name in the first place.
-					// ponytail: a person whose whole name is a chrome word ("Chat", "Hand") is dropped here until Ora knows them from personal context; a per-app roster position check would fix that if it ever bites.
+					// ponytail: a person whose whole name is a chrome word ("Chat", "Hand") is dropped here. Telling the toolbar button "Chat" from a person named Chat needs knowing the user's contacts, which is exactly what the knownSet check above already grants to anyone in personal context; it stops being dropped once that person is known too, not by refining this heuristic further.
 					if tracker.IsMeetingWindow("", name) || hasChromeWord(name) || !looksLikeName(name) {
 						return
 					}
@@ -193,8 +225,11 @@ func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []str
 				add(m[1])
 			}
 			// A meeting window writes the people in the call as plain capitalised names, separated however the app likes — before a colon in a chat log, between pipes in a title bar. Reading them as proper nouns covers every separator without knowing any of them.
-			// ponytail: properNounPattern only matches Latin capitalised words, so names in scripts without case never reach add; a Unicode letter class would fix that if a call ever shows them.
 			for _, m := range properNounPattern.FindAllString(text, -1) {
+				add(m)
+			}
+			// properNounPattern only sees capitalisation, so it never finds a name written in a script with no upper or lower form to capitalise — Devanagari, Tamil, Kannada, Arabic, CJK — which is what this pass is for.
+			for _, m := range caselessScriptNames(text) {
 				add(m)
 			}
 		}
