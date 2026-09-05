@@ -444,3 +444,16 @@ func TestCollectMeetingNames_CaselessRosterLineIsOneWholeName(t *testing.T) {
 		t.Errorf("collectMeetingNames = %v, want no half of the name on its own", got)
 	}
 }
+
+// The same Chinese meeting window without a single colon on it: a line of chat text, a toolbar button and a pane heading, each alone on its own line. Han is written without spaces between words, so every one of those lines is one unbroken run of letters exactly as a Chinese name would be, and nothing in the shape of "我马上加入会议" ("I'll join the meeting shortly") tells it from a person. None of the three is a participant.
+func TestCollectMeetingNames_CJKScreenTextWithoutAColonIsNotAParticipant(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - team-sync - Brave", ScreenText: "我马上加入会议\n静音\n参会者"},
+	}
+
+	got := collectMeetingNames(eps, true, nil)
+
+	if len(got) != 0 {
+		t.Errorf("collectMeetingNames = %v, want no names from unspaced screen text with no colon on it", got)
+	}
+}

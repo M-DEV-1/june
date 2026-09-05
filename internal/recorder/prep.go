@@ -160,15 +160,31 @@ func isCaselessLetter(r rune) bool {
 	return unicode.ToUpper(r) == unicode.ToLower(r)
 }
 
-// caselessScriptNames finds name candidates in text written in a script with no case, where the "one to four capitalised words" shape looksLikeName expects cannot apply because nothing in the script can be capitalised. Input: any screen text. Output: the caseless runs found on the lines that are shaped like a roster line, in the order found.
+// caselessNameRuneCap is the longest a run of caseless writing may be and still be read as a person's name. A name is a few runes long and a sentence is not, which is the only thing left to judge by once capitalisation, digits and colons have all been used up. It is set at 16 rather than lower because a Devanagari name carries its vowels as combining marks and so counts long for its size: "राहुल शर्मा" is already 11 runes, and a three-word name in the same script would not fit under a tighter cap.
+const caselessNameRuneCap = 16
+
+// isUnspacedLetter reports whether r belongs to a script written without spaces between words — Han, the two Japanese kana, Hangul and Thai. Input: one rune. Output: true when a run of such letters is a whole clause rather than a single word.
+func isUnspacedLetter(r rune) bool {
+	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul, unicode.Thai)
+}
+
+// caselessScriptNames finds name candidates in text written in a script with no case, where the "one to four capitalised words" shape looksLikeName expects cannot apply because nothing in the script can be capitalised. Input: any screen text. Output: the caseless runs found on the lines that are shaped like a roster line, short enough to be a name and written in a script that puts spaces between its words, in the order found.
 //
 // Only whole lines that are name-shaped are read, the way the roster and chat-sender passes beside this one only read a name off the start of its own line. A caseless script gives the shape rules nothing else to work with: with no capital to look for and no digits or colon on the line, every button label, chat line and app name on a Chinese or Hindi meeting window is exactly as name-shaped as a name is, so reading them out of the middle of running text turns the whole interface into participants.
-// ponytail: a single caseless word alone on its own line — a toolbar button in Chinese, say — still passes, since nothing but a contact list tells it from a one-word name; it stops being a participant once that person is in personal context, the same ceiling the Latin chrome-word check already has.
+// A script written without spaces between words is dropped outright rather than capped, because in it a run of letters is a whole clause and not a word: "我马上加入会议" is a sentence, "静音" is the mute button and a Chinese name is two or three runes, and no measurement of the run tells the three apart.
+// ponytail: that means a name in Chinese, Japanese, Korean or Thai is never read off the screen at all, not even for someone already in personal context, since the candidate has to exist before the known-name check can keep it; reading those needs a contact list to match against rather than a better shape rule.
+// ponytail: a single caseless word alone on its own line in a spaced script — a toolbar button in Hindi, say — still passes, since nothing but a contact list tells it from a one-word name; it stops being a participant once that person is in personal context, the same ceiling the Latin chrome-word check already has.
 func caselessScriptNames(text string) []string {
 	var out []string
 	for _, line := range strings.Split(text, "\n") {
-		if looksLikeName(strings.TrimSpace(line)) {
-			out = append(out, caselessRuns(line)...)
+		if !looksLikeName(strings.TrimSpace(line)) {
+			continue
+		}
+		for _, run := range caselessRuns(line) {
+			if len([]rune(run)) > caselessNameRuneCap || strings.ContainsFunc(run, isUnspacedLetter) {
+				continue
+			}
+			out = append(out, run)
 		}
 	}
 	return out
