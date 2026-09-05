@@ -76,11 +76,12 @@ func yesProbes() Probes {
 	}
 }
 
-// newRunner builds a Runner on the fake brain with the clock pinned to now.
+// newRunner builds a Runner on the fake brain with the clock pinned to now. The retention numbers are pinned too, so no test reads or writes the machine's real config file on its way through the pruning stage.
 func newRunner(store *db.Store, b *fakeBrain, probes Probes, now time.Time) *Runner {
 	r := New(store, b.fn, probes, 23, 9)
 	r.now = func() time.Time { return now }
 	r.watchEvery = time.Hour
+	r.retention = func() (int, time.Duration) { return testActRunKeep, testFailedGrace }
 	return r
 }
 
@@ -221,7 +222,7 @@ func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 		t.Errorf("asked = %v, want the understanding rewrite followed by the diary-writing call", asked)
 	}
 	run, _, _ := store.DreamRun(ctx, night)
-	if !run.Finished || run.StagesDone != "hyp und compact" {
+	if !run.Finished || run.StagesDone != "hyp und compact procedures prune" {
 		t.Errorf("run = %+v, want finished with the remaining stages done", run)
 	}
 	if entry, _ := store.DiaryEntry(ctx, night, "dream"); !strings.Contains(entry, "already committed on an earlier wake") {
@@ -582,6 +583,7 @@ func TestWatcher_DoesNotPreemptOnEpisodeWhileInputStaysIdle(t *testing.T) {
 	r := New(store, wrapped, probes, 23, 9)
 	r.now = func() time.Time { return at(23, 30) }
 	r.watchEvery = time.Millisecond
+	r.retention = func() (int, time.Duration) { return testActRunKeep, testFailedGrace }
 
 	r.Tick(ctx)
 
