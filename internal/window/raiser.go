@@ -38,7 +38,7 @@ func (r *Raiser) object() dbus.BusObject {
 	return r.conn.Object(busName, objectPath)
 }
 
-// Available reports whether the extension is loaded and enabled in the running shell right now. Input: a context bounding the D-Bus round trip. Output: true if the extension answered, false plus the call's error if it did not (not loaded, not enabled, or no session bus).
+// Available reports whether the extension is loaded and enabled in the running shell right now, and answers List in the shape this package reads. Input: a context bounding the D-Bus round trip. Output: true if the extension answered with a window list that parsed, false plus the error if it did not (not loaded, not enabled, no session bus, or an older extension whose List reply is not a JSON array of windows).
 func (r *Raiser) Available(ctx context.Context) (bool, error) {
 	_, err := r.List(ctx)
 	return err == nil, err
