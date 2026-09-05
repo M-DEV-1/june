@@ -246,7 +246,7 @@ func TestReplayStage_BudgetCutoffWritesPartialArtifactAndToken(t *testing.T) {
 	}
 }
 
-// End to end: with a shadow brain configured, one full Tick runs every stage in order, and the replay stage's token lands last in stages_done, after compact.
+// End to end: with a shadow brain configured, one full Tick runs every stage in order, and the replay stage's token lands in stages_done after compact and before procedures.
 func TestTick_ReplayRunsLastAfterCompact(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
@@ -269,8 +269,8 @@ func TestTick_ReplayRunsLastAfterCompact(t *testing.T) {
 	if !ok || !run.Finished {
 		t.Fatalf("run not finished: %+v ok=%v", run, ok)
 	}
-	if run.StagesDone != "hyp und compact replay" {
-		t.Errorf("stages_done = %q, want replay last after compact", run.StagesDone)
+	if run.StagesDone != "hyp und compact replay procedures prune" {
+		t.Errorf("stages_done = %q, want replay after compact and the pruning stage last", run.StagesDone)
 	}
 	entry, _ := store.DiaryEntry(ctx, night, "dream")
 	if !strings.Contains(entry, "I replayed 1 items into 1 piles.") {

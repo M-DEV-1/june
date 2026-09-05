@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	oratext "ora/internal/text"
 	"os"
 	"path/filepath"
 	"slices"
@@ -80,6 +81,8 @@ type Store interface {
 	CommitUnderstandingStage(ctx context.Context, night, understanding string) error
 	CommitCompactStage(ctx context.Context, night string, comps []db.DiaryCompaction, done bool) error
 	CommitReplayStage(ctx context.Context, night string) error
+	CommitProceduresStage(ctx context.Context, night string) error
+	CommitPruneStage(ctx context.Context, night string) error
 
 	// The hypothesis ledger the night tests against the week's evidence and adds to.
 	OpenHypotheses(ctx context.Context) ([]db.Hypothesis, error)
@@ -89,6 +92,16 @@ type Store interface {
 	DiaryEntry(ctx context.Context, day, kind string) (string, error)
 	DiaryDays(ctx context.Context, from, to string) ([]db.DiaryDay, error)
 	DiaryEntriesThrough(ctx context.Context, kind, through string) ([]db.DiaryDay, error)
+
+	// The screen-tool runs the procedures stage reads back, and the note path it writes each goal's procedure through.
+	ActRuns(ctx context.Context, limit int) ([]db.ActRun, error)
+	LogNote(ctx context.Context, content, kind string) (int64, error)
+
+	// The two retention passes the pruning stage runs, and the counts of what each one's policy held back, so the night can log what it kept as well as what it took.
+	ProtectedConversations(ctx context.Context, olderThan time.Duration) (int64, error)
+	PruneEmptyConversations(ctx context.Context, olderThan time.Duration) (int64, error)
+	ProtectedActRuns(ctx context.Context, failedGrace time.Duration) (withNotes, failedYoung int64, err error)
+	PruneActRuns(ctx context.Context, keep int, failedGrace time.Duration) (int64, error)
 
 	// The grounded evidence the judging calls read, plus the store's own notion of "now" so a night is not measured against the wrong day.
 	SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
@@ -109,6 +122,8 @@ type Runner struct {
 	now func() time.Time
 	// watchEvery paces the preemption watcher. Tests shorten it.
 	watchEvery time.Duration
+	// retention reports the two act run retention numbers the pruning stage obeys — the count cap and the failed-run grace — read from the config file rather than chosen here, so the policy is editable. Replaceable in tests, like now above.
+	retention func() (keep int, failedGrace time.Duration)
 
 	// ForceMarker is the path of a file whose presence makes the next tick dream immediately, bypassing the window and away-gates — the way to watch a dream run without leaving the machine. The marker is consumed, and a forced run arms no preemption watcher, since the user being present is the whole point.
 	ForceMarker string
@@ -134,7 +149,7 @@ type Runner struct {
 
 // New builds a Runner from the store, a one-shot brain, the machine probes, and the two local hours that bound the window.
 func New(store Store, b brain.Brain, probes Probes, dreamHour, briefHour int) *Runner {
-	return &Runner{store: store, brain: b, probes: probes, dreamHour: dreamHour, briefHour: briefHour, now: time.Now, watchEvery: defaultWatchEvery}
+	return &Runner{store: store, brain: b, probes: probes, dreamHour: dreamHour, briefHour: briefHour, now: time.Now, watchEvery: defaultWatchEvery, retention: configRetention}
 }
 
 // nightKey returns the night a moment belongs to: the current local day once the dream hour has passed, otherwise the day before — so 23:30 and 02:00 the next morning are the same night.
@@ -331,6 +346,35 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		}
 		replay = &rep
 		slog.Info("dreaming: replay stage finished", "night", night, "skipped", rep.skipped, "partial", rep.partial, "items", rep.items, "piles", rep.piles)
+	}
+
+	// The procedures stage now carries a stages_done token like the other stages, so a night that already ran it does not re-read the act runs on a later wake. Its error handling stays soft, though: a stage failure (or a failed commit) is only logged and the night carries on — a missing procedure note must not cost the night its morning report the way a failed hypothesis or understanding stage does.
+	if !slices.Contains(done, "procedures") {
+		if proc, err := r.proceduresStage(ctx, night); err != nil {
+			slog.Warn("dreaming: procedures stage failed", "night", night, "error", err)
+		} else {
+			slog.Info("dreaming: procedures stage finished", "night", night, "runs", proc.runs, "goals", proc.goals, "written", proc.written, "skipped", proc.skipped)
+			if proc.written > 0 {
+				notes = append(notes, procedureLine(proc))
+			}
+			if err := r.store.CommitProceduresStage(ctx, night); err != nil {
+				slog.Warn("dreaming: procedures stage did not commit its token", "night", night, "error", err)
+			}
+		}
+	}
+
+	// The pruning stage goes last, after the procedures stage has taken what it wanted from the act runs: a run only becomes safe from the count cap once the note written from it exists. Its error handling is the procedures stage's — a store that could not be reached is logged, the token is left off so the next wake retries, and the night still gets its morning report.
+	if !slices.Contains(done, "prune") {
+		if p, err := r.pruneStage(ctx); err != nil {
+			slog.Warn("dreaming: pruning stage failed, nothing was pruned tonight", "night", night, "error", err)
+		} else {
+			slog.Info("dreaming: pruning stage finished", "night", night,
+				"conversations_removed", p.conversationsRemoved, "conversations_kept", p.conversationsProtected,
+				"act_runs_removed", p.runsRemoved, "act_runs_kept_for_notes", p.runsKeptForNotes, "act_runs_kept_failed", p.runsKeptFailedYoung)
+			if err := r.store.CommitPruneStage(ctx, night); err != nil {
+				slog.Warn("dreaming: pruning stage did not commit its token", "night", night, "error", err)
+			}
+		}
 	}
 
 	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, comp, replay, notes); err != nil {
@@ -550,7 +594,7 @@ func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bo
 
 	if fallback {
 		start := r.windowStart(night)
-		dayStart := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.Local)
+		dayStart := db.DayStart(start)
 		summaries, err := r.store.SummaryTimeline(ctx, dayStart, now)
 		if err != nil {
 			return ev, err
@@ -638,7 +682,7 @@ func workLine(w db.WindowSummary) (string, bool) {
 		}
 		text = t.Task + " — " + t.Summary
 	}
-	return w.CreatedAt.Local().Format("Jan 2 15:04") + " " + strings.Join(strings.Fields(text), " "), true
+	return w.CreatedAt.Local().Format("Jan 2 15:04") + " " + oratext.OneLine(text), true
 }
 
 // headLines returns the first n lines of s, which is how much of one meeting's minutes the evidence carries.
