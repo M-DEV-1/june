@@ -49,19 +49,6 @@ func main() {
 		return
 	}
 
-	identity := ""
-	if entries, err := store.PersonalContext(ctx); err == nil {
-		for _, e := range entries {
-			if e.Subject == "identity" {
-				identity = e.Content
-			}
-		}
-	}
-	if identity == "" {
-		fmt.Fprintln(os.Stderr, "no identity on file; cannot tell whose items these are")
-		os.Exit(1)
-	}
-
 	notes, err := store.GetNotes(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "read notes:", err)
@@ -74,7 +61,7 @@ func main() {
 			continue
 		}
 		items := memory.ParseMinutesActions(n.Content, memory.MinutesLabel(n.Content), n.CreatedAt)
-		kept := memory.UserMeetingActions(items, identity)
+		kept := filterMine(items)
 		if len(kept) == 0 && len(items) > 0 {
 			fmt.Printf("\nnote #%d — %q: %d items, none the user's — meeting skipped\n", n.ID, memory.MinutesLabel(n.Content), len(items))
 		}
@@ -100,6 +87,17 @@ func main() {
 	if !*write {
 		fmt.Println("Dry run. Re-run with -write to file them.")
 	}
+}
+
+// filterMine keeps only the action items that might be the user's own, the same per-item rule internal/recorder/recorder.go's liftActionItems applies to a meeting's minutes as it is written, so a backfill rerun files the same rows the daemon would have filed on the day of the meeting. Input: every action item parsed out of one meeting's minutes. Output: the ones owed by "Me" or by nobody named at all.
+func filterMine(items []memory.ActionItem) []memory.ActionItem {
+	var out []memory.ActionItem
+	for _, a := range items {
+		if a.Mine() {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // applyCorrections sets the status and priority of the named action items, which is what the user's own reading of the morning brief amounts to before the conversational tool exists to say it out loud.
