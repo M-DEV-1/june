@@ -160,7 +160,8 @@ func (r *Recorder) desktopTimeline(ctx context.Context, since, until time.Time) 
 		}
 		text = oratext.RunesEllipsis(oratext.OneLine(text), budget)
 
-		fmt.Fprintf(&b, "  %s  %s — %s\n", e.CreatedAt.Format("15:04"), e.App, e.Title)
+		// Episodes come back from SQLite in UTC and the line above states the meeting's own clock in local time, so the row is converted here to keep both on the clock the user was watching.
+		fmt.Fprintf(&b, "  %s  %s — %s\n", e.CreatedAt.Local().Format("15:04"), e.App, e.Title)
 		if text != "" {
 			fmt.Fprintf(&b, "      on screen: %s\n", text)
 		}

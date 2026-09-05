@@ -39,3 +39,23 @@ func TestMinutesInstruction_NamesTheThreeOwners(t *testing.T) {
 		}
 	}
 }
+
+// The prompt states the meeting's own clock in local time, so the screen timeline under it has to be on the same clock: episodes come back from SQLite in UTC, and a row printed straight from CreatedAt reads hours away from the meeting it belongs to.
+func TestBuildPrompt_StampsTheTimelineInLocalTime(t *testing.T) {
+	saved := time.Local
+	time.Local = time.FixedZone("IST", 5*3600+30*60)
+	t.Cleanup(func() { time.Local = saved })
+
+	at := time.Date(2026, 9, 5, 10, 47, 0, 0, time.UTC)
+	store := &fakeStore{episodes: []db.Episode{{App: "Brave", Title: "Meet - abc-defg-hij", ScreenText: "Priya Shah (Presenting)", CreatedAt: at}}}
+	r, _, _ := newTestRecorder(t, store)
+
+	prompt := r.buildPrompt(context.Background(), "[me] hello", at.Add(-time.Minute), at.Add(time.Minute))
+
+	if !strings.Contains(prompt, "16:17  Brave — Meet - abc-defg-hij") {
+		t.Errorf("timeline row is not on the user's clock (want 16:17):\n%s", prompt)
+	}
+	if strings.Contains(prompt, "10:47") {
+		t.Errorf("timeline row is still stamped in UTC:\n%s", prompt)
+	}
+}

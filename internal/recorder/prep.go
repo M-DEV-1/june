@@ -93,22 +93,16 @@ func (r *Recorder) prepMeeting() {
 	r.notify(head, text)
 }
 
-// meetingTitle returns the most recent window title belonging to a call, which is what actually says which meeting this is. It is not simply the last title captured: on 2026-08-31 the user spent a standup in ClickUp and a terminal, so the newest title was "New Tab - Brave" and naming the meeting from it would have been wrong. Falling back to the newest title of any kind is deliberate — a meeting app the pattern does not know is still better named by its window than not at all.
+// meetingTitle returns the most recent window title belonging to a call, which is what actually says which meeting this is. Input: the episodes captured over the last few minutes. Output: the newest title that is a meeting window, and "" when none of them is.
+// It is not simply the last title captured: on 2026-08-31 the user spent a standup in ClickUp and a terminal, so the newest title was "New Tab - Brave" and naming the meeting from it would have been wrong. There is no falling back to the newest title of any kind either — a call in an app the pattern does not list leaves nothing on screen naming the meeting, and the last window that was there is an inbox or an editor, which prep would then announce ("Before you join: Gmail — Inbox (12)") and search past minutes for. An app the list misses is fixed by adding it to internal/tracker's meetingWindow, not by naming the meeting after whatever else was open.
 func meetingTitle(eps []db.Episode) string {
-	var newest string
 	for i := len(eps) - 1; i >= 0; i-- {
 		t := strings.TrimSpace(eps[i].Title)
-		if t == "" {
-			continue
-		}
-		if isMeetingWindow(eps[i].App, t) {
+		if t != "" && isMeetingWindow(eps[i].App, t) {
 			return t
 		}
-		if newest == "" {
-			newest = t
-		}
 	}
-	return newest
+	return ""
 }
 
 // meetingParticipants pulls candidate names for who is on the call out of recent screen text, using the same pattern primingPrompt mines a chat sender's name from in transcribe.go: a name written immediately before a colon at the start of its own line, which is how a chat window labels who is talking. Unlike primingPrompt, which runs after the meeting to prime whisper, this runs the moment the meeting is detected, against whatever the tracker has already captured, before a single word of transcript exists.
