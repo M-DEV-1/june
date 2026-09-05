@@ -255,7 +255,7 @@ func TestDelegate_NoBriefIsAnError(t *testing.T) {
 	}
 }
 
-// A runner error surfaces as-is, except when the context's own deadline is what ended the run, which is reported as a timeout naming delegateTimeout.
+// A runner error surfaces as-is, except when the context's own deadline is what ended the run, which is reported as a timeout saying how long it ran.
 func TestDelegate_RunnerErrorSurfaces(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	run := &fakeRunner{err: errors.New("boom")}
@@ -307,5 +307,15 @@ func TestDelegate_RedactsTheGoalOnStdin(t *testing.T) {
 	}
 	if strings.Contains(run.gotSystemPrompt, "hunter2") {
 		t.Errorf("secret goal reached the system prompt: %s", run.gotSystemPrompt)
+	}
+}
+
+// A run a short deadline ended says how long it actually ran, in milliseconds, never "0s".
+func TestDelegate_TimeoutNamesTheRealRunTime(t *testing.T) {
+	if got := ranFor(20 * time.Millisecond); got.String() != "20ms" {
+		t.Errorf("ranFor(20ms) = %s", got)
+	}
+	if got := ranFor(90*time.Second + 400*time.Millisecond); got.String() != "1m30s" {
+		t.Errorf("ranFor(90.4s) = %s", got)
 	}
 }
