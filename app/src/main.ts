@@ -59,8 +59,9 @@ import { dictationKey, startDictation, stopDictation } from "./dictate";
 import { Waveform } from "./waveform";
 import {
   fitWindow as winplaceFitWindow,
-  placementFor,
+  noticePlacement,
   resolveContext,
+  threadMaxHeight,
   storedHoverPosition,
   toggleWindow,
   type Desktop,
@@ -289,7 +290,27 @@ function renderNotice(v: View): void {
   noticeEl.innerHTML =
     actionLine !== undefined
       ? `<div class="nt">${esc(actionLine)}</div>`
-      : `<div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>`;
+      : `<div class="nh">Ora</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml()}`;
+}
+
+/** The buttons every fresh notice carries, in the order the desktop banner offered them, so the card is dealt with where it appears. Input: none. Output: the row's HTML. */
+function noticeButtonsHtml(): string {
+  const acts: [string, string][] = [["done", "Done"], ["hour", "In an hour"], ["evening", "This evening"], ["tomorrow", "Tomorrow"], ["open", "Open"]];
+  return `<div class="nr">${acts.map(([act, label]) => `<button class="na" data-act="${act}" type="button">${label}</button>`).join("")}</div>`;
+}
+
+/** Sends one of the card's buttons to the daemon's notice route, the same one the desktop banner's buttons and the app window's rail line use. Input: the notice and the button pressed ("done", "hour", "evening" or "tomorrow"). Output: nothing; a daemon that cannot be reached leaves the notice as it was, and it will come back on the next tick. */
+function actOnNotice(n: Notice, act: string): void {
+  const { base, token } = endpoint();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers[TOKEN_HEADER] = token;
+  void fetch(`${base}/notices/${encodeURIComponent(n.kind)}/${encodeURIComponent(n.id || "-")}/action`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ title: n.title, body: n.body, action: act }),
+  }).catch(() => {
+    /* the daemon is gone; the notice comes back on its own */
+  });
 }
 
 /** The six seconds a notice stays up. Input: the view. Output: nothing; the timer is cleared and started again from the top whenever the notice itself changes, and left cleared while the pointer is over the card, which is what pauses it — the card then gets its full six seconds again when the pointer leaves. */
@@ -308,7 +329,11 @@ noticeEl.addEventListener("pointerenter", () =>
 noticeEl.addEventListener("pointerleave", () =>
   dispatch({ kind: "noticeRelease" }),
 );
-noticeEl.addEventListener("click", () => dispatch({ kind: "noticeClick" }));
+noticeEl.addEventListener("click", (e) => {
+  // A press on one of the card's own buttons is that button; a press anywhere else on the card is still the click that opens the app window.
+  const act = (e.target as HTMLElement).closest<HTMLElement>("button.na")?.dataset.act;
+  dispatch(act ? { kind: "noticeAct", act } : { kind: "noticeClick" });
+});
 
 /** Opens the main app window at what the clicked notice was about. The window is opened through the daemon, which broadcasts the instruction the Rust side acts on (see internal/ipc/window.go), and the screen and row are left in the localStorage both windows share, under a key beside the theme and the hover position, for the app window to read when it opens. Input: the notice's place ("tasks", "days") and row id, either of which may be empty when the notice pointed at nothing in particular. Output: nothing; a daemon that cannot be reached simply leaves the window shut. */
 function openNotice(place: string, id: string): void {
@@ -690,6 +715,8 @@ export function dispatch(event: Parameters<typeof step>[1]): void {
   if (result.effect?.kind === "close") hideWindow();
   if (result.effect?.kind === "openNotice")
     openNotice(result.effect.place, result.effect.id);
+  if (result.effect?.kind === "noticeAct")
+    actOnNotice(result.effect.notice, result.effect.act);
   if (result.effect?.kind === "ask") {
     startAsk(result.effect.question, result.effect.conversation);
     startStepTicker();
@@ -969,15 +996,22 @@ try {
     await winplaceFitWindow(win, size, changed, placeCtx);
     return size;
   };
+  // The thread's ceiling is a share of the screen it is on, so it is set from the placement each open resolves; the stylesheet reads it as --thread-max and scrolls the thread inside itself past it.
+  const capThread = (ctx: PlaceContext | null): void => {
+    if (ctx) document.body.style.setProperty("--thread-max", `${threadMaxHeight(ctx.work, ctx.scale)}px`);
+  };
   showNotice = async (n) => {
     const open = await win.isVisible();
     // A hover already on screen keeps the position it opened at; one that is shut is placed for this notice the same way the hotkey path places it, before anything is shown.
     if (!open) placeCtx = await resolveContext(desktop, storedHoverPosition());
+    capThread(placeCtx);
     dispatch({ kind: "notice", notice: n, hoverOpen: open });
     if (open) return;
     const size = await fitWindow();
     if (placeCtx) {
-      const at = placementFor(placeCtx, size);
+      // A window up only to show a notice sits where desktop notifications do, under the top bar at the right, not where the hover opens for a question.
+      const physical = { width: size.width * placeCtx.scale, height: size.height * placeCtx.scale };
+      const at = noticePlacement(placeCtx.work, physical, placeCtx.scale);
       await win.setPosition(new PhysicalPosition(at.x, at.y));
     }
     // show() and nothing else. No raise(), no setFocus(): the user is typing in another window and a notice must not take the keyboard off them.
@@ -992,6 +1026,7 @@ try {
       openContext: async () => {
         // The position is re-read from storage on every open, so choosing a different one on the Settings screen takes effect on the next hotkey press without a restart.
         placeCtx = await resolveContext(desktop, storedHoverPosition());
+        capThread(placeCtx);
         return placeCtx;
       },
       sizeToContent: fitWindow,

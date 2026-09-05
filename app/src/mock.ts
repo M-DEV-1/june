@@ -130,3 +130,18 @@ export function startMockVoice(params: URLSearchParams): void {
 }
 
 startMockVoice(new URLSearchParams(location.search));
+
+/** Wires ?mock=1&notice=1 (a notice on its own, the card underneath hidden) and ?mock=1&notice=stack (a notice above an open card), so the notice card can be looked at and screenshotted with no daemon. Input: the page's query params. Output: nothing; one "notice" event goes into main.ts's real dispatch once it has loaded, for the same reason startMockVoice imports it dynamically. */
+export function startMockNotice(params: URLSearchParams): void {
+  const mode = params.get("notice");
+  if (!params.has("mock") || (mode !== "1" && mode !== "stack")) return;
+  void import("./main").then(({ dispatch }) => {
+    dispatch({
+      kind: "notice",
+      notice: { title: "New task from Daily AI Sprint Standup", body: "Continue the TCFD-style formatting research for the generated statements and bring a first draft on Monday.", place: "tasks", id: "42", kind: "task" },
+      hoverOpen: mode === "stack",
+    });
+  });
+}
+
+startMockNotice(new URLSearchParams(location.search));

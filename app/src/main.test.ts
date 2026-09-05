@@ -399,3 +399,52 @@ describe("the shortcut hints beside the input", () => {
     expect(ctx?.textContent).toBe("⎵ dictate · ⇧⎵ voice");
   });
 });
+
+// A fresh notice is a card with its answers on it: the user deals with it where it appears instead of going to the app window or to a desktop banner asking the same thing.
+describe("a notice card carries its own buttons", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("offers Done, the three snoozes and Open, and sends a pressed snooze to the daemon's notice route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({
+        kind: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" },
+        hoverOpen: true,
+      });
+      const bubble = document.getElementById("n")!;
+      const acts = [...bubble.querySelectorAll<HTMLButtonElement>("button.na")].map((b) => b.dataset.act);
+      expect(acts).toEqual(["done", "hour", "evening", "tomorrow", "open"]);
+      expect(bubble.querySelector(".nt")?.textContent).toBe("Still open");
+
+      bubble.querySelector<HTMLButtonElement>('button.na[data-act="hour"]')!.click();
+      const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/notices/task/42/action"));
+      expect(call).toBeDefined();
+      expect(call![1].method).toBe("POST");
+      expect(JSON.parse(call![1].body)).toEqual({ title: "Still open", body: "Send the invoice", action: "hour" });
+      expect(document.getElementById("n")?.hidden).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses '-' for a notice with no row of its own, the way the daemon's route expects", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({ kind: "notice", notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief" }, hoverOpen: true });
+      document.querySelector<HTMLButtonElement>('#n button.na[data-act="done"]')!.click();
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/notices/brief/-/action"))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

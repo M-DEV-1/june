@@ -157,6 +157,23 @@ export async function resolveContext(desk: Desktop, position: HoverPosition): Pr
   return { work: usableArea(monitor), scale: monitor.scaleFactor || 1, dock, position };
 }
 
+/** How far under the top bar a notice-only window starts, in logical pixels. */
+const NOTICE_GAP = 8;
+
+/** Where a window showing nothing but a notice goes: flush with the right edge of the work area and just under the top bar, which is where the desktop's own notifications sit and where the user looks for one. Input: the monitor's usable area and the window's size in physical pixels, and the monitor's scale. Output: the window's top-left corner in physical desktop coordinates. */
+export function noticePlacement(work: Rect, win: { width: number; height: number }, scale: number): { x: number; y: number } {
+  return { x: work.x + work.width - win.width, y: work.y + NOTICE_GAP * scale };
+}
+
+/** How much of the work area the card's thread may take. */
+const THREAD_SHARE = 0.6;
+
+/** The tallest the card's thread may grow before it scrolls inside itself, so an answer that keeps coming grows the card to this and no further. Input: the monitor's usable area in physical pixels and its scale. Output: the cap in logical pixels, six tenths of the usable height. */
+export function threadMaxHeight(work: Rect, scale: number): number {
+  const s = scale > 0 ? scale : 1;
+  return Math.floor((work.height / s) * THREAD_SHARE);
+}
+
 /**
  * Resizes the window to fit new content height, and while it is visible moves it so it stays where it opened: a bottom-positioned hover that grows has to move up by the amount it grew, or it would push its own bottom edge through the dock, and a centred one has to move up by half.
  * While hidden this only records the new size, because `toggleWindow` places the window in full the next time it is shown and moving a hidden window would be wasted work.
