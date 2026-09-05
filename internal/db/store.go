@@ -398,6 +398,103 @@ func (s *Store) createSchema() error {
 	-- for "vector-hits" that column is repurposed to accumulate the raw count of
 	-- surviving vector candidates instead (see recordVectorContribution) rather than
 	-- add a second table for one integer. See internal/tally for the reader/writer.
+	-- conversations, conversation_turns and user_tasks are the desktop window's own rows: the threads of question and answer the window keeps, every turn inside one, and the tasks the user types in themselves. Deliberately outside notes and nodes — a turn is a record of what was said in the window, not a fact about the user, and nothing in retrieval, consolidation or the dreaming loop should ever see one. Action items stay where they are, as notes of kind 'action'.
+	CREATE TABLE IF NOT EXISTS conversations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL DEFAULT '',
+		brain TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE TABLE IF NOT EXISTS conversation_turns (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+		role TEXT NOT NULL,
+		text TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'ask',
+		-- evidence and tools are stored as the JSON the window reads: the supporting rows behind an answer, and the names of the tools the agent called on the way to it.
+		evidence TEXT NOT NULL DEFAULT '',
+		tools TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_conversation_turns_conv ON conversation_turns(conversation_id, id);
+	CREATE INDEX IF NOT EXISTS idx_conversation_turns_created ON conversation_turns(created_at);
+	CREATE TABLE IF NOT EXISTS user_tasks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		done INTEGER NOT NULL DEFAULT 0,
+		conversation_id INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- routines: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Priya replies about the venue, tell me". schedule is left as the free text the user typed; internal/proactive parses it into when to check. last_answer holds what the model said the last time it ran, "NOTHING" included, so the window can show what happened without re-running it. Not memory — never indexed, never searched.
+	CREATE TABLE IF NOT EXISTS routines (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		text TEXT NOT NULL,
+		schedule TEXT NOT NULL,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		last_run DATETIME,
+		last_answer TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- snoozes holds the notices the user pushed to later from a notification's own buttons ("In an hour", "This evening", "Tomorrow"). notice_kind and notice_id are the notice's own, carried so a re-fired snooze can still act on what it was about; title and body are the text to post again; fired_at is NULL until the scheduler has posted it, which is what stops one snooze firing twice. Not memory — never indexed, never searched.
+	CREATE TABLE IF NOT EXISTS snoozes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		notice_kind TEXT NOT NULL DEFAULT '',
+		notice_id TEXT NOT NULL DEFAULT '',
+		title TEXT NOT NULL DEFAULT '',
+		body TEXT NOT NULL DEFAULT '',
+		due_at DATETIME NOT NULL,
+		fired_at DATETIME,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_snoozes_due ON snoozes(fired_at, due_at);
+
+	-- act_runs records every ask whose trace called a screen tool (observe_screen, point_at, click, scroll_to, type_text), for the later "watch me once" replay learning. steps_json is the JSON array of ActStep: each tool hop's name, args and the first 300 runes of its result; type_text's own text argument (whatever the user dictated) is dropped before it ever reaches this column. Not memory itself, and never searched except by SimilarActRuns (act_reference.go) — but a run's rendered steps do reach a model, either folded into a nightly "How I did X" note (internal/dream/procedures.go) or straight into a new screen ask's prompt (internal/agent/act_reference.go); see act_runs.go's header for the full path.
+	CREATE TABLE IF NOT EXISTS act_runs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		question TEXT NOT NULL,
+		model TEXT NOT NULL DEFAULT '',
+		outcome TEXT NOT NULL,
+		answer TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL DEFAULT '',
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		steps_json TEXT NOT NULL DEFAULT '[]',
+		job_id TEXT NOT NULL DEFAULT '',
+		job_state TEXT NOT NULL DEFAULT '',
+		job_json TEXT NOT NULL DEFAULT ''
+	);
+
+	-- act_run_vectors holds the embedding of each act run's question, as little-endian float32s (see encodeActRunVector), written when the run is stored and read only by SimilarActRuns to score how close a new question is to that one.
+	-- Its own table rather than a column on act_runs for two reasons. A blob column would ride along in every "SELECT * FROM act_runs" the query tool writes, putting kilobytes of binary into a prompt. And these vectors are deliberately not in the chromem index that backs memory search: HybridSearch searches that index whole, so an act run put in it would come back as a memory hit, which act_runs.go's header says must never happen.
+	-- The row dies with its run: foreign keys are on for every connection (see the DSN), so PruneActRuns deleting a run takes its vector with it.
+	CREATE TABLE IF NOT EXISTS act_run_vectors (
+		run_id INTEGER PRIMARY KEY REFERENCES act_runs(id) ON DELETE CASCADE,
+		vec BLOB NOT NULL
+	);
+
+	-- token_use records one row per model call so the user can see what each provider is costing them. Separate from tally, which holds one counter row per day per provider and so can answer neither "which model" nor "which call": this table keeps the call itself, with the model slug the call actually reached, the channel it came through, the tokens each side of it, and the first 200 runes of the question so a row can be recognised in a log view. Not memory — never indexed, never searched, never fed to a model.
+	CREATE TABLE IF NOT EXISTS token_use (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		provider TEXT NOT NULL,
+		model TEXT NOT NULL DEFAULT '',
+		channel TEXT NOT NULL DEFAULT '',
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		-- cached_tokens is how much of input_tokens the provider answered out of its own prompt cache rather than reading afresh; part of input_tokens, not extra to it. rounds is how many model calls the question took, since the counts above are already summed over them.
+		cached_tokens INTEGER NOT NULL DEFAULT 0,
+		rounds INTEGER NOT NULL DEFAULT 0,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		question TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	-- Every read of this table is a time window — since an instant, or the last n days — grouped by provider, so the index leads with the timestamp the window scans and carries the provider along with it.
+	CREATE INDEX IF NOT EXISTS idx_token_use_created_at ON token_use(created_at, provider);
+
 	CREATE TABLE IF NOT EXISTS tally (
 		day TEXT NOT NULL,
 		provider TEXT NOT NULL,

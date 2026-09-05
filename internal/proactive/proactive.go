@@ -50,6 +50,11 @@ type Store interface {
 	SetRoutineRun(ctx context.Context, id int64, when time.Time, answer string) error
 	TryStart(id int64) bool
 	Finish(id int64)
+
+	// The notices the user pushed to later from a notification's own buttons, and the per-minute check that brings the due ones back. See notify.go.
+	AddSnooze(ctx context.Context, kind, noticeID, title, body string, due time.Time) (int64, error)
+	DueSnoozes(ctx context.Context, now time.Time) ([]db.Snooze, error)
+	MarkSnoozeFired(ctx context.Context, id int64) error
 }
 
 // Scheduler owns the two daily proactive duties. Construct with New and run with Run; both duties key their once-per-day state off the diary table itself (the close is done when today's kind='day' row exists, the brief when today's kind='brief' row does), so a daemon restart never repeats or loses a delivery.
@@ -68,6 +73,12 @@ type Scheduler struct {
 	weeklyStudy func(ctx context.Context, now time.Time) error
 	// routineAsk puts a due routine's instruction to the daemon's own ask path; unset disables the routine runner entirely. See SetRoutineAsk.
 	routineAsk func(ctx context.Context, question string) (string, error)
+	// notifier posts a notice as a desktop notification carrying the Open/Done/snooze buttons, and calls back with whichever the user pressed; unset falls back to notify, which has none. See SetNotifier and notify.go.
+	notifier Notifier
+	// openWindow is what "Open in Ora" and a click on the notification body do; unset, they do nothing. See SetOpenWindow.
+	openWindow func()
+	// taskDone closes one task through the daemon's own task-done path when "Done" is pressed on a task notice; unset, Done only records the dismissal. See SetTaskDone.
+	taskDone func(ctx context.Context, id string) error
 }
 
 // New builds a Scheduler from the store, a one-shot brain, a desktop-notification func (NotifySend in production), and the proactive config, whose zero hours resolve to the defaults.
@@ -107,6 +118,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	s.maybeClose(ctx)
 	s.maybeWeeklyStudy(ctx)
 	s.maybeRoutines(ctx)
+	s.maybeSnoozes(ctx)
 }
 
 // maybeClose writes the day's diary entry once the close hour has passed, provided today has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
@@ -551,13 +563,15 @@ func notifyArgs(icon, title, body string) []string {
 	return append(args, title, body)
 }
 
-// Notice is one moment Ora has something to say about, drawn by the desktop window as its own card instead of being handed to GNOME. Title is the card's first line and Body the few lines under it. Place and ID say what a click on the card opens — Place names one of the app window's screens ("tasks", "days") and ID the row to select there, both empty when the moment points at nothing in particular. Kind names the moment: "brief", "close", "meeting" or "note".
+// Notice is one moment Ora has something to say about, drawn by the desktop window as its own card instead of being handed to GNOME. Title is the card's first line and Body the few lines under it. Place and ID say what a click on the card opens — Place names one of the app window's screens ("tasks", "days") and ID the row to select there, both empty when the moment points at nothing in particular. Kind names the moment: "brief", "close", "meeting", "task", "routine" or "note". Action and Until are empty on the notice itself and set only when the user has since dealt with it from its own notification: Action is "snoozed" or "done", and Until is the RFC 3339 moment a snoozed notice comes back, so the window can say "snoozed until 18:00" instead of drawing the card again.
 type Notice struct {
-	Title string
-	Body  string
-	Place string
-	ID    string
-	Kind  string
+	Title  string
+	Body   string
+	Place  string
+	ID     string
+	Kind   string
+	Action string
+	Until  string
 }
 
 // noticeSend is the desktop window's notice channel, wired once at startup by cmd/daemon.go and read from whichever goroutine a notification happens to be on, which is what noticeMu guards. Nil means nothing has been wired and every notification goes to notify-send.
@@ -586,7 +600,7 @@ func (s *Scheduler) say(n Notice) {
 	if sendNotice(n) {
 		return
 	}
-	s.notify(n.Title, n.Body)
+	s.post(n)
 }
 
 // noticeKinds names the moment behind a notification from the icon it was posted with, which is the only thing such a call carries that says what it is about: the recorder posts everything it has to say about a meeting under the microphone icon, its "Before you join" prep included, and this package's own daily moments carry the calendar.
