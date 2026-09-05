@@ -1,0 +1,62 @@
+package act
+
+import "testing"
+
+// TestMatch is the whole matcher table: every check kind against a screen that satisfies it and one that does not, plus the two malformed checks a model can write.
+func TestMatch(t *testing.T) {
+	items := []Item{
+		{N: 1, Role: "push button", Label: "Reload"},
+		{N: 2, Role: "entry", Label: "example.com"},
+		{N: 3, Role: "list item", Label: "S16 E8 The Last Ride"},
+	}
+	cases := []struct {
+		name    string
+		check   Check
+		title   string
+		focused string
+		want    bool
+	}{
+		{"title contains, hit", Check{Kind: TitleContains, Value: "S16 E8"}, "Watching S16 E8 — Netflix", "", true},
+		{"title contains, case folded", Check{Kind: TitleContains, Value: "s16 e8"}, "Watching S16 E8 — Netflix", "", true},
+		{"title contains, miss", Check{Kind: TitleContains, Value: "S16 E9"}, "Watching S16 E8 — Netflix", "", false},
+		{"item present, hit", Check{Kind: ItemPresent, Value: "Reload"}, "Netflix", "", true},
+		{"item present, partial label", Check{Kind: ItemPresent, Value: "Last Ride"}, "Netflix", "", true},
+		{"item present, miss", Check{Kind: ItemPresent, Value: "Stop"}, "Netflix", "", false},
+		{"item absent, hit", Check{Kind: ItemAbsent, Value: "Stop"}, "Netflix", "", true},
+		{"item absent, miss", Check{Kind: ItemAbsent, Value: "Reload"}, "Netflix", "", false},
+		{"field holds, hit", Check{Kind: FieldHolds, Value: "example.com"}, "Netflix", "example.com", true},
+		{"field holds, miss", Check{Kind: FieldHolds, Value: "example.com"}, "Netflix", "", false},
+		{"unknown kind", Check{Kind: "vibes", Value: "good"}, "Netflix", "", false},
+		{"no text to look for", Check{Kind: TitleContains}, "Netflix", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, why := Match(tc.check, tc.title, items, tc.focused)
+			if got != tc.want {
+				t.Errorf("Match(%+v) = %v (%s), want %v", tc.check, got, why, tc.want)
+			}
+			if why == "" {
+				t.Error("Match returned no sentence saying what it found")
+			}
+		})
+	}
+}
+
+// TestCheckDescribe checks a check reads back as the plain sentence a step record and a prompt both carry.
+func TestCheckDescribe(t *testing.T) {
+	cases := []struct {
+		check Check
+		want  string
+	}{
+		{Check{Kind: TitleContains, Value: "S16 E8"}, `the title contains "S16 E8"`},
+		{Check{Kind: ItemPresent, Value: "Reload"}, `an item labelled "Reload" is showing`},
+		{Check{Kind: ItemAbsent, Value: "Reload"}, `no item labelled "Reload" is showing`},
+		{Check{Kind: FieldHolds, Value: "example.com"}, `the focused field holds "example.com"`},
+		{Check{}, "nothing in particular"},
+	}
+	for _, tc := range cases {
+		if got := tc.check.Describe(); got != tc.want {
+			t.Errorf("Describe(%+v) = %q, want %q", tc.check, got, tc.want)
+		}
+	}
+}
