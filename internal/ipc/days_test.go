@@ -116,6 +116,23 @@ func TestDayPage(t *testing.T) {
 	if len(page.Tasks) != 1 || page.Tasks[0].Title != "send the deck" || page.Tasks[0].Done {
 		t.Errorf("tasks = %+v, want the day's open action item", page.Tasks)
 	}
+	// The day's list and the tasks page have to be the same rows, or ticking one leaves the other stale: the id is what POST /tasks/{id}/done is called with, and the status and owner are what the row is drawn from.
+	if page.Tasks[0].ID == "" {
+		t.Errorf("a raised item came back with no id, so the window cannot tick it: %+v", page.Tasks[0])
+	}
+	if page.Tasks[0].Status != memory.StatusOpen {
+		t.Errorf("status = %q, want %q", page.Tasks[0].Status, memory.StatusOpen)
+	}
+	if page.Tasks[0].Owner == "" {
+		t.Errorf("a raised item came back with no owner: %+v", page.Tasks[0])
+	}
+	if code := postJSON(t, srv, "/tasks/"+page.Tasks[0].ID+"/done", `{"done":true}`, nil); code != http.StatusOK {
+		t.Fatalf("POST /tasks/%s/done = %d, want the day's id to be the tasks page's id", page.Tasks[0].ID, code)
+	}
+	getJSON(t, srv, "/days/"+today, &page)
+	if len(page.Tasks) != 1 || !page.Tasks[0].Done {
+		t.Errorf("after ticking it through /tasks the day still shows %+v", page.Tasks)
+	}
 }
 
 // TestDayPageCarriesBriefAndClose checks that GET /days/{date} reports the morning brief and evening close as their own fields, alongside the existing page (which stays the close text, unchanged from before these fields existed).

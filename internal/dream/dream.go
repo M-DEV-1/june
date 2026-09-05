@@ -97,6 +97,9 @@ type Store interface {
 	ActRuns(ctx context.Context, limit int) ([]db.ActRun, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 
+	// CloseDoneActionItems closes the open tasks that a meeting, a day's page or a compiled note says are finished, and reports how many moved.
+	CloseDoneActionItems(ctx context.Context, since time.Time) (int, error)
+
 	// The two retention passes the pruning stage runs, and the counts of what each one's policy held back, so the night can log what it kept as well as what it took.
 	ProtectedConversations(ctx context.Context, olderThan time.Duration) (int64, error)
 	PruneEmptyConversations(ctx context.Context, olderThan time.Duration) (int64, error)
@@ -153,6 +156,9 @@ func New(store Store, b brain.Brain, probes Probes, dreamHour, briefHour int) *R
 }
 
 // nightKey returns the night a moment belongs to: the current local day once the dream hour has passed, otherwise the day before — so 23:30 and 02:00 the next morning are the same night.
+// closingEvidenceWindow is how far back the nightly sweep reads for writing that says a task is finished. A week, so a task closed in a meeting the daemon was down for still gets picked up, without re-reading every meeting ever recorded each night.
+const closingEvidenceWindow = 7 * 24 * time.Hour
+
 func (r *Runner) nightKey(now time.Time) string {
 	if now.Hour() >= r.dreamHour {
 		return now.Format(dayFormat)
@@ -361,6 +367,13 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 				slog.Warn("dreaming: procedures stage did not commit its token", "night", night, "error", err)
 			}
 		}
+	}
+
+	// The tasks the day's meetings and pages say are finished are closed before the night's report, so the morning brief is not read out a list of work that was already done. Soft like the stages below it and carrying no token: the sweep only ever closes what evidence names, so running it twice closes nothing twice.
+	if closed, err := r.store.CloseDoneActionItems(ctx, r.now().Add(-closingEvidenceWindow)); err != nil {
+		slog.Warn("dreaming: could not close the tasks the week's writing says are finished", "night", night, "error", err)
+	} else if closed > 0 {
+		slog.Info("dreaming: closed tasks the week's writing says are finished", "night", night, "closed", closed)
 	}
 
 	// The pruning stage goes last, after the procedures stage has taken what it wanted from the act runs: a run only becomes safe from the count cap once the note written from it exists. Its error handling is the procedures stage's — a store that could not be reached is logged, the token is left off so the next wake retries, and the night still gets its morning report.

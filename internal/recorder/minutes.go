@@ -76,7 +76,11 @@ Every piece of owed work from this meeting in one list, the user's own included,
 An item belongs here only when the transcript shows work was clearly owed — someone agreed to do something, or was directly asked for something and did not decline. A topic that was merely discussed, a possibility floated, or a "we should sit down and decide" is not owed work; leave it out rather than turning the discussion into a task.
 Write each one on its own bullet in exactly this shape, with an em dash between the owner and the work:
 - **Owner Name** — what they agreed to do, and by when if a date was said.
-The owner is one person's name and nothing else: no role, no parenthetical, no "(recording)". For anything the [me] speaker owes, write the owner as "Me" exactly, never their own name — for example "- **Me** — send the deck by Friday". Everyone else keeps their own name. Write "Owner unclear" as the owner only when work was clearly owed but the transcript never names who owes it — never for an item you are unsure even counts as owed work; when it is that unclear, drop the item instead.
+The owner is one of exactly three things, and nothing else — no role, no parenthetical, no "(recording)":
+  - "Me", for anything the [me] speaker owes. Write it exactly, never their own name — for example "- **Me** — send the deck by Friday". "About the person recording" above names them; that name in the transcript is this person, so "<their name> will send the deck", "you'll send the deck" and "I'll send the deck" are all "Me".
+  - One other person's name, for anything somebody else owes. Everyone but the [me] speaker keeps their own name.
+  - "Owner unclear", and only when work was clearly owed but the transcript never names who owes it — never for an item you are unsure even counts as owed work; when it is that unclear, drop the item instead.
+The user's list is built from the "Me" items alone, so an item filed under the wrong one of the three either buries his own work or puts somebody else's on his plate.
 
 ## Attendees
 Two lists, and every name goes in exactly one of them.

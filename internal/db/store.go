@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +30,10 @@ type Store struct {
 	embedsAreFree bool
 	// vectorSimilarityFloor overrides minVectorSimilarity for embedders whose cosine scale differs from Gemini's. Zero means use the default. See SetVectorSimilarityFloor.
 	vectorSimilarityFloor float32
+	// actRunSimilarityFloor overrides DefaultActRunSimilarity, the cosine a past screen run's question must reach to be offered as reference. Zero means use the default. See SetActRunSimilarityFloor.
+	actRunSimilarityFloor float64
+	// actRunBackfilling is held for the length of one background pass that embeds act run questions written before they were embedded, so several asks in a row start one pass between them rather than one each. See backfillActRunVectors.
+	actRunBackfilling atomic.Bool
 
 	// framesDir is ora-db/frames next to the sqlite file. Empty for :memory: stores — vision JPEGs are skipped.
 	framesDir string
@@ -39,12 +44,17 @@ type Store struct {
 	roOnce sync.Once
 	roDB   *sql.DB
 	roErr  error
+
+	// routineMu guards routineRunning, the in-flight set TryStart/Finish use so the scheduler tick and a POST /routines/{id}/run landing on the same routine at once don't both ask and both write its result. See routines.go.
+	routineMu      sync.Mutex
+	routineRunning map[int64]bool
 }
 
 // constructor, return pointer to struct and err
 func New(path string) (*Store, error) {
 	// WAL lets multiple connections read/write concurrently (daemon LogEpisode + tool HybridSearch); busy_timeout makes them wait instead of erroring SQLITE_BUSY immediately.
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	// foreign_keys is off by default in SQLite and is a property of a connection, not of the database, so it has to be in the DSN: the driver replays every _pragma here on each connection the pool opens, which a one-off Exec after sql.Open would not. Without it every ON DELETE CASCADE below is dead text — deleting a conversation left its turns behind, deleting an episode or a thread left dangling rows in episode_threads, and a turn could be written against a conversation id that names nothing. See foreign_keys_test.go.
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 
 	if path != ":memory:" {
 		dir := filepath.Dir(path)
@@ -154,6 +164,17 @@ func (s *Store) createSchema() error {
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
+
+	-- notes_archive: facts that consolidation merged away. The merge is a model's summary; these rows are the source it summarised, kept so a wrong merge can be traced and undone. Never searched, never shown to the consolidator.
+	CREATE TABLE IF NOT EXISTS notes_archive (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		note_id INTEGER NOT NULL,
+		content TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		created_at DATETIME,
+		updated_at DATETIME,
+		archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
 
 	-- personal_context: the small set of things known for certain about the
 	-- user -- who they are, the people in their life, preferences they stated.
@@ -322,7 +343,7 @@ func (s *Store) createSchema() error {
 		INSERT INTO episodes_fts(episodes_fts, rowid, screen_text) VALUES ('delete', OLD.id, OLD.screen_text);
 	END;
 
-	-- AgeEpisodes (Cycle 5) updates screen_text in place to reclaim space; this
+	-- An update that rewrites or clears screen_text must not leave the old text searchable; this
 	-- trigger keeps the FTS mirror from continuing to surface the cleared text.
 	CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
 		INSERT INTO episodes_fts(episodes_fts, rowid, screen_text) VALUES ('delete', OLD.id, OLD.screen_text);
@@ -536,6 +557,19 @@ func (s *Store) createSchema() error {
 	}
 	if err := s.ensureColumn("tally", "reply_chars", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	// token_use gained cached_tokens and rounds on 2026-09-05 in the create statement only, so an existing database kept the old shape.
+	if err := s.ensureColumn("token_use", "cached_tokens", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("token_use", "rounds", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// act_runs gained the three job columns on 2026-09-05 for the computer-use job checkpoints (act_jobs.go), again in the create statement only.
+	for _, col := range []struct{ name, decl string }{{"job_id", "TEXT NOT NULL DEFAULT ''"}, {"job_state", "TEXT NOT NULL DEFAULT ''"}, {"job_json", "TEXT NOT NULL DEFAULT ''"}} {
+		if err := s.ensureColumn("act_runs", col.name, col.decl); err != nil {
+			return err
+		}
 	}
 
 	// Migration for DBs written before nodes_ai_summary extracted $.summary: their summary rows still hold the raw marshalled TaskSummary, so the JSON keys stay searchable until the text is rewritten. Idempotent — a rewritten row is no longer JSON, so the guard skips it on every later run.

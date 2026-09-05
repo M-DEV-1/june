@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,11 +51,14 @@ func TestTasksListsBothSources(t *testing.T) {
 	if yours.Title != "book the flight" || yours.ConversationID != created.ConversationID {
 		t.Errorf("your task = %+v", *yours)
 	}
-	if yours.Detail != "" {
-		t.Errorf("a task you typed in carries a detail = %q, want none", yours.Detail)
+	if yours.Detail != "you said" {
+		t.Errorf("a task you typed in has detail = %q, want %q", yours.Detail, "you said")
 	}
-	if noticed.Title != "send the deck" || noticed.Detail != "Lodestone sync" {
-		t.Errorf("noticed task = %+v, want its detail to be the meeting it was raised from", *noticed)
+	if yours.Owner != memory.OwnerMe {
+		t.Errorf("a task you typed in has owner = %q, want %q", yours.Owner, memory.OwnerMe)
+	}
+	if noticed.Title != "send the deck" || !strings.HasPrefix(noticed.Detail, "Lodestone sync") {
+		t.Errorf("noticed task = %+v, want its detail to name the meeting it was raised from", *noticed)
 	}
 	if noticed.Done {
 		t.Errorf("an open action item came back done")
@@ -222,5 +226,53 @@ func TestTasksListsOnlyTheUsersOwnNoticedItems(t *testing.T) {
 	getJSON(t, srv, "/tasks", &body)
 	if len(body.Tasks) != 1 || body.Tasks[0].Title != "push the PR" {
 		t.Fatalf("tasks = %+v, want only the item owed by Me", body.Tasks)
+	}
+}
+
+// TestTasksOwnerFilter checks the three lists behind one page: his own work by default, other people's work on request, and everything at once. Before this, the default list was the exact opposite — his own items were hidden because they carry his name, and every item nobody was named for was shown as his.
+func TestTasksOwnerFilter(t *testing.T) {
+	store := newReadStore(t)
+	ctx := context.Background()
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera — goes by Alex."); err != nil {
+		t.Fatal(err)
+	}
+	items := []memory.ActionItem{
+		{Owner: "Alex Rivera", Text: "raise the PR", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
+		{Owner: "Priya Shah", Text: "send the workbook", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
+		{Owner: memory.UnknownOwner, Text: "clean up the lockfile situation", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
+	}
+	if _, err := store.AddActionItems(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	_, srv := newWindowServer(t, &fakeAsker{}, store)
+
+	for _, c := range []struct {
+		query string
+		title string
+		owner string
+	}{
+		{"/tasks", "raise the PR", memory.OwnerMe},
+		{"/tasks?owner=me", "raise the PR", memory.OwnerMe},
+		{"/tasks?owner=them", "send the workbook", memory.OwnerThem},
+		{"/tasks?owner=unclear", "clean up the lockfile situation", memory.OwnerUnclear},
+	} {
+		var body struct {
+			Tasks []Task `json:"tasks"`
+		}
+		getJSON(t, srv, c.query, &body)
+		if len(body.Tasks) != 1 || body.Tasks[0].Title != c.title {
+			t.Fatalf("GET %s = %+v, want only %q", c.query, body.Tasks, c.title)
+		}
+		if body.Tasks[0].Owner != c.owner {
+			t.Errorf("GET %s owner = %q, want %q", c.query, body.Tasks[0].Owner, c.owner)
+		}
+	}
+
+	var all struct {
+		Tasks []Task `json:"tasks"`
+	}
+	getJSON(t, srv, "/tasks?owner=all", &all)
+	if len(all.Tasks) != 3 {
+		t.Fatalf("GET /tasks?owner=all = %d tasks, want 3", len(all.Tasks))
 	}
 }

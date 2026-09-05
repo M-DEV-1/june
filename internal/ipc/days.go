@@ -44,10 +44,14 @@ type Said struct {
 	Text string `json:"text"`
 }
 
-// DayTask is one action item raised on a day, with whether it has since been closed.
+// DayTask is one action item raised on a day, with whether it has since been closed. It is the same row GET /tasks lists, and ID is the same id POST /tasks/{id}/done takes, so ticking it here and ticking it there are one act rather than two lists that drift apart.
+// Status is the item's full state ("open", "done" or "dropped") since Done cannot tell a dropped item from an open one, and Owner is whose task it is ("me", "them" or "unclear").
 type DayTask struct {
-	Title string `json:"title"`
-	Done  bool   `json:"done"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Done   bool   `json:"done"`
+	Status string `json:"status"`
+	Owner  string `json:"owner"`
 }
 
 // DayView is GET /days/{date}: what Ora wrote about the day, what the user asked that day, and the work the day raised. Heading is the day's activity summarised as one line, for example "60 things seen · 1 call, 28 min", or "" for a day with nothing in it. Brief is the morning brief delivered that day and Close the evening close entry, both "" when that day had none — Page carries the same close text when there is one, falling back to the day's digest when there is not, so a caller that only wants the reading page can keep using it unchanged.
@@ -154,19 +158,24 @@ func (s *Server) Day(w http.ResponseWriter, r *http.Request) {
 		you = append(you, Said{When: rfc3339(t.When), Text: t.Text})
 	}
 
-	notes, err := s.store.NotesOfKindSince(ctx, memory.ActionNoteKind, day)
+	items, err := s.store.ActionItemsByOwner(ctx, allOwners)
 	if err != nil {
 		fail(w, err, http.StatusInternalServerError)
 		return
 	}
+	identity := s.store.Identity(ctx)
 	tasks := []DayTask{}
-	for _, n := range notes {
-		if n.CreatedAt.After(end) {
+	for _, a := range items {
+		if a.Created.Before(day) || a.Created.After(end) {
 			continue
 		}
-		if a, ok := memory.ParseAction(n.Content); ok {
-			tasks = append(tasks, DayTask{Title: a.Text, Done: a.Status == memory.StatusDone})
-		}
+		tasks = append(tasks, DayTask{
+			ID:     strconv.FormatInt(a.NoteID, 10),
+			Title:  a.Text,
+			Done:   a.Status == memory.StatusDone,
+			Status: a.Status,
+			Owner:  a.OwnerClass(identity),
+		})
 	}
 
 	seen, err := s.store.EpisodeCountsByDay(ctx, day, end)
