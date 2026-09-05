@@ -7,17 +7,20 @@ import (
 	"testing"
 )
 
-// The fixture is a real pw-dump from this machine, cut down to the two input streams it contained: the system's own echo canceller, which is always present and names no application, and a recorder that was actually capturing. Anything that reads a microphone appears in this same shape.
+// The fixture is a real pw-dump from this machine, cut down to the two input streams it contained: the system's own echo canceller, which is always present and names no application, and a recorder that was actually capturing. Anything that reads a microphone appears in this same shape. The recorder plays nothing back, so it is reported as holding the microphone without being in a call.
 func TestMicUsers_OnlyRunningStreamsThatNameAnApp(t *testing.T) {
 	dump, err := os.ReadFile("testdata/pw-dump.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got := micUsers(dump)
+	calls, quiet := micUsers(dump)
 
-	if len(got) != 1 || got[0] != "pw-cat" {
-		t.Fatalf("micUsers = %v, want [pw-cat]", got)
+	if len(calls) != 0 {
+		t.Fatalf("calls = %v, want none: a recorder that plays nothing back is not a call", calls)
+	}
+	if len(quiet) != 1 || quiet[0] != "pw-cat" {
+		t.Fatalf("capture-only = %v, want [pw-cat]", quiet)
 	}
 }
 
@@ -25,10 +28,11 @@ func TestMicUsers_OnlyRunningStreamsThatNameAnApp(t *testing.T) {
 func TestMicUsers_IgnoresOraItself(t *testing.T) {
 	dump := []byte(`[
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Ora meeting recorder"}}},
-	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Google Chrome"}}}
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Google Chrome"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"Google Chrome"}}}
 	]`)
 
-	got := micUsers(dump)
+	got, _ := micUsers(dump)
 
 	if len(got) != 1 || got[0] != "Google Chrome" {
 		t.Fatalf("micUsers = %v, want [Google Chrome] with Ora's own stream dropped", got)
@@ -86,10 +90,12 @@ func TestAskBody_NamesTheApp(t *testing.T) {
 func TestMicUsers_NamesTheProcessNotTheAudioEngine(t *testing.T) {
 	dump := []byte(`[
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}},
-	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Brave Input","application.process.binary":"brave"}}}
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Brave Input","application.process.binary":"brave"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"Brave","application.process.binary":"brave"}}}
 	]`)
 
-	got := micUsers(dump)
+	got, _ := micUsers(dump)
 
 	if len(got) != 2 || got[0] != "Discord" || got[1] != "Brave" {
 		t.Fatalf("micUsers = %v, want [Discord Brave]", got)
@@ -100,10 +106,12 @@ func TestMicUsers_NamesTheProcessNotTheAudioEngine(t *testing.T) {
 func TestMicUsers_ShowsTheProcessAndOtherwiseTheNameVerbatim(t *testing.T) {
 	dump := []byte(`[
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Brave input","application.process.binary":"brave"}}},
-	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"pw-cat"}}}
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"pw-cat"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"Brave","application.process.binary":"brave"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"pw-cat"}}}
 	]`)
 
-	got := micUsers(dump)
+	got, _ := micUsers(dump)
 
 	if len(got) != 2 || got[0] != "Brave" || got[1] != "pw-cat" {
 		t.Fatalf("micUsers = %v, want [Brave pw-cat]", got)
@@ -114,10 +122,11 @@ func TestMicUsers_ShowsTheProcessAndOtherwiseTheNameVerbatim(t *testing.T) {
 func TestMicUsers_IgnoresOraByEitherName(t *testing.T) {
 	dump := []byte(`[
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Ora meeting recorder","application.process.binary":"ora"}}},
-	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}}
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}}
 	]`)
 
-	got := micUsers(dump)
+	got, _ := micUsers(dump)
 
 	if len(got) != 1 || got[0] != "Discord" {
 		t.Fatalf("micUsers = %v, want [Discord] with Ora's own stream dropped", got)
@@ -195,12 +204,49 @@ func TestMicUsers_IgnoresOrasOwnVoiceMode(t *testing.T) {
 	dump := []byte(`[
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"ora","application.process.binary":"/home/user/Desktop/Code/projects/ora/ora"}}},
 	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Ora voice","application.process.binary":"./ora"}}},
-	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}}
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}}
 	]`)
 
-	got := micUsers(dump)
+	got, _ := micUsers(dump)
 
 	if len(got) != 1 || got[0] != "Discord" {
 		t.Fatalf("micUsers = %v, want [Discord] with both of Ora's own streams dropped", got)
+	}
+}
+
+// Handy is a push-to-talk dictation tool: it opens the microphone for each dictation and plays nothing back, and on 2026-09-03 Ora asked "In a meeting?" for five dictations in fifteen minutes. A call plays the other side back through the same application that captures, so an application that only captures is dictating or recording, not in a call. The Handy stream here is the one pw-dump reported on this machine: it speaks through the ALSA layer and names no process.
+func TestMicUsers_ACallPlaysBackAndADictationDoesNot(t *testing.T) {
+	dump := []byte(`[
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"PipeWire ALSA [handy]"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Google Chrome","application.process.binary":"chrome"}}},
+	  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"Google Chrome","application.process.binary":"chrome"}}},
+	  {"info":{"state":"idle","props":{"media.class":"Stream/Output/Audio","application.name":"PipeWire ALSA [handy]"}}}
+	]`)
+
+	calls, quiet := micUsers(dump)
+
+	if len(calls) != 1 || calls[0] != "Chrome" {
+		t.Fatalf("calls = %v, want [Chrome]: the browser both captures and plays back", calls)
+	}
+	if len(quiet) != 1 || quiet[0] != "PipeWire ALSA [handy]" {
+		t.Fatalf("capture-only = %v, want [PipeWire ALSA [handy]]: a dictation tool plays nothing back", quiet)
+	}
+}
+
+// TestDescribe_CutsOnlyWhatIsTooLongAndAlwaysMarksTheCut pins the two edges of the name cap: a name of exactly maxNameRunes is shown whole and unmarked, and a name one rune longer is cut and ends in an ellipsis so the reader can see it was shortened. A cut that silently drops the last character without a marker reads as the window's real title.
+func TestDescribe_CutsOnlyWhatIsTooLongAndAlwaysMarksTheCut(t *testing.T) {
+	exact := strings.Repeat("a", maxNameRunes)
+	if got := describe([]string{exact}, nil); got[0] != exact {
+		t.Errorf("a name of exactly %d runes came back as %q (%d runes), want it unchanged", maxNameRunes, got[0], len([]rune(got[0])))
+	}
+
+	over := strings.Repeat("b", maxNameRunes+1)
+	got := describe([]string{over}, nil)[0]
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("a name of %d runes came back as %q, want it to end in an ellipsis", maxNameRunes+1, got)
+	}
+	if n := len([]rune(got)); n > maxNameRunes {
+		t.Errorf("cut name is %d runes, want at most %d", n, maxNameRunes)
 	}
 }

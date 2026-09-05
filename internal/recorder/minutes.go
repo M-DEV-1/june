@@ -10,6 +10,7 @@ import (
 	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
+	oratext "ora/internal/text"
 )
 
 // minutesInstruction tells the model what to make of the transcript. The microphone side is [me]; the system-audio side is [call], a single pooled label covering every remote voice, and the model's job is to put names to it from the screen context and from what was said.
@@ -40,7 +41,10 @@ Rules for naming:
   - Name everyone you can. Work at it: a name used once in the whole meeting, a person thanked at the end, a name in the meeting chat on screen, someone answering when addressed — all of these bind a name to a voice, and a name you can support is always better than a description.
   - When you genuinely cannot name someone, never leave them as a bare label. Describe them in a sentence or two that would let the reader work out who it was: what they were responsible for, what they talked about, who they answered to or were answering, when in the meeting they spoke, whether they were presenting. "The person who demoed the emissions upload and kept asking about custom emission factors" is useful. "A second participant" is not — it tells the reader nothing they could act on or recognise.
   - The transcript comes from speech recognition, so names in it may be misspelled. Where the screen context has the same name spelled properly, use that spelling.
+  - A name or acronym that appears only in the transcript, with no match on screen and none in "About the person recording", is a guess by the recogniser. Write it once as heard and marked so, for example a contact (heard as "Ashar") or the (heard as "PSP") task, and do not turn it into a fact about who someone is. On 2026-09-03 the recogniser turned Sneha into Ashar and PFP into PSP, and both were written into memory as true.
   - For the [me] speaker: this is always the same one person, the owner of this computer. What the user has told Ora about themselves is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
+
+A section with nothing to report is a section you omit — heading and all — rather than fill in with a sentence that says so. Never write "Nothing recoverable", "Nothing was decided", "None beyond the above" or anything to that effect: a reader learns nothing from being told a section is empty that they would not already conclude from its absence. This applies to every section below, including a bullet inside "Your part" that would otherwise have nothing to fill it.
 
 Write markdown with these sections, in this order.
 
@@ -54,30 +58,32 @@ This line is read back by the rest of the system to say which meeting a piece of
 ## Your part
 This section is about the [me] speaker only, and it is the reason the user opened this file. Three bullets, in this order, and each one only if it happened:
 - **You said** — the update, position or argument [me] actually gave. Their own words compressed, not a description that they spoke.
-- **You heard back** — what was said TO [me] in response: feedback, a correction, a question, a redirection, an agreement, a request. Name who it came from when you can. This is the part the user is most likely to have half-missed at the time, so do not skip it because it was brief.
-- **You now owe** — what [me] committed to, or was asked for, with any date or deadline said out loud. One bullet per thing. If nothing was asked of them, write that plainly rather than inventing a task.
+- **Said to you** — what was said TO [me] in response: feedback, a correction, a question, a redirection, an agreement, a request. Name who it came from when you can. This is the part the user is most likely to have half-missed at the time, so do not skip it because it was brief.
+- **You now owe** — what [me] committed to, or was asked for, with any date or deadline said out loud. One bullet per thing. If nothing was asked of them, omit this bullet rather than inventing a task or writing that nothing was asked.
 If [me] barely spoke, say so in one line and move on. Never pad this section to make it look substantial.
 
 ## What the meeting covered
 The threads of the meeting, one bullet per thread, in the order they came up. A thread is a topic somebody opened and the room discussed — not every sentence. Attribute to named people where the evidence allows. This is where everything that was not about [me] goes.
 
 ## What others committed to
-One bullet per person per commitment: who said they would do what, and by when if a date was said. Only things somebody actually agreed to, not things that were merely suggested. If nobody committed to anything, say so.
+One bullet per person per commitment: who said they would do what, and by when if a date was said. Only things somebody actually agreed to, not things that were merely suggested. Omit this section entirely if nobody committed to anything.
 
 ## Decisions
-What was actually settled, and who settled it. If nothing was decided, say so in one line.
+What was actually settled, and who settled it. Omit this section entirely if nothing was decided.
 
 ## Action items
-Every piece of owed work from this meeting in one list, the user's own included, so nothing agreed to is only recorded inside a paragraph. Repeat here what the sections above already said rather than leaving it out.
+Every piece of owed work from this meeting in one list, the user's own included, so nothing agreed to is only recorded inside a paragraph. Repeat here what the sections above already said rather than leaving it out. Omit this section entirely if nothing was clearly owed.
+An item belongs here only when the transcript shows work was clearly owed — someone agreed to do something, or was directly asked for something and did not decline. A topic that was merely discussed, a possibility floated, or a "we should sit down and decide" is not owed work; leave it out rather than turning the discussion into a task.
 Write each one on its own bullet in exactly this shape, with an em dash between the owner and the work:
 - **Owner Name** — what they agreed to do, and by when if a date was said.
-The owner is one person's name and nothing else: no role, no parenthetical, no "(recording)". Write the user by their own name like anybody else. When nobody was named, write "Owner unclear" as the owner rather than dropping the item.
+The owner is one person's name and nothing else: no role, no parenthetical, no "(recording)". For anything the [me] speaker owes, write the owner as "Me" exactly, never their own name — for example "- **Me** — send the deck by Friday". Everyone else keeps their own name. Write "Owner unclear" as the owner only when work was clearly owed but the transcript never names who owes it — never for an item you are unsure even counts as owed work; when it is that unclear, drop the item instead.
 
 ## Attendees
 Two lists, and every name goes in exactly one of them.
-**In the meeting** — only people with evidence they were in the call: they spoke, they were spoken TO by name during it, or the meeting app or a shared working surface showed them taking part (participant tile, "presenting" label, a message they sent in the meeting's chat or shared whiteboard while it ran). Say which of those it was. Being talked ABOUT is not presence: an instruction, plan, or errand involving someone who never speaks and is never spoken to puts them under Mentioned, however often their name comes up. The recording person is one entry here once you know their name, written as "Their Name (recording)" — never also a separate "the person recording" bullet.
+**In the meeting** — attendance requires that the person spoke or were named: either they have a line in the transcript, or someone named them during the call (addressed them, introduced them, thanked them). A participant tile, a "presenting" label, or a chat message on its own is not enough by itself to put someone here — it has to come with the person actually speaking or being named, not merely displayed. Use that evidence to decide the list, but do not write it out: one line per person, their name and a few words on their role in this call, nothing about where the name came from. Being talked ABOUT is not presence: an instruction, plan, or errand involving someone who never speaks and is never spoken to puts them under Mentioned, however often their name comes up. The recording person is one entry here once you know their name, written as "Their Name (recording)" — never also a separate "the person recording" bullet.
 **Mentioned or on screen only** — names that came up in talk or on screen with nothing showing they were in the call: a commit author, a ticket assignee, an account name, someone discussed. Drop this list if there are none.
 A name you can only hedge about ("referenced via screen context") goes in the second list, never the first.
+A window title or chat header such as "Chat | A, B | Microsoft Teams" names the members of a chat thread, not the people on the call: a chat header is not attendance. Someone named only there goes in the second list unless they also spoke or were spoken to.
 Every distinct voice gets an entry here even when it has no name: describe the person the way the naming rules above require, so an unnamed attendee is still a recognisable one. Do not write "unclear" and stop.
 
 Be concise. Do not pad. Do not repeat the transcript back.`
@@ -148,7 +154,7 @@ func (r *Recorder) desktopTimeline(ctx context.Context, since, until time.Time) 
 		if isMeetingWindow(e.App, e.Title) {
 			budget = meetingTextBudget
 		}
-		text = truncate(strings.Join(strings.Fields(text), " "), budget)
+		text = oratext.RunesEllipsis(oratext.OneLine(text), budget)
 
 		fmt.Fprintf(&b, "  %s  %s — %s\n", e.CreatedAt.Format("15:04"), e.App, e.Title)
 		if text != "" {
@@ -191,19 +197,45 @@ func sampleTimeline(eps []db.Episode, n int) []db.Episode {
 	return out
 }
 
-// truncate shortens s to at most n runes, marking that it was cut.
-func truncate(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
+// defaultBrain is the default minutes seam: one one-shot text call to whichever backend the config's brain block names, which is the Gemini API unless the user has pointed it at a CLI they are already paying a subscription for.
+// When the daemon has installed a brain through SetBrain, that one is used instead, so a meeting write-up is metered against the same shared daily quota as the rest of the daemon's unattended work.
+// Without an installed brain, the config is read on each call rather than at construction, so changing provider takes effect on the next meeting instead of at the next daemon restart. On the Gemini API the model is then the one config.BackgroundModel names for the meeting-minutes job, so an unattended write-up spends the large per-day request allowance rather than the small one the user's own asks need.
+// When Gemini answers 429 or 503 the write-up is handed to the fallback brain the daemon installed, so a spent daily allowance costs the meeting its speed rather than its minutes.
+func (r *Recorder) defaultBrain(ctx context.Context, prompt string) (string, error) {
+	primary := r.installedBrain()
+	if primary == nil {
+		cfg := config.BackgroundBrainConfig(config.LoadConfig().Brain, config.JobMeetingMinutes)
+		primary = brain.FromConfig(cfg, r.apiKey)
 	}
-	return string(r[:n]) + "…"
+	return brain.WithCodexFallback(primary, r.minutesFallbackBrain())(ctx, prompt)
 }
 
-// defaultBrain is the default minutes seam: one one-shot text call to whichever backend the config's brain block names, which is the Gemini API unless the user has pointed it at a CLI they are already paying a subscription for.
-// The config is read on each call rather than at construction, so changing provider takes effect on the next meeting instead of at the next daemon restart.
-func (r *Recorder) defaultBrain(ctx context.Context, prompt string) (string, error) {
-	return brain.FromConfig(config.LoadConfig().Brain, r.apiKey)(ctx, prompt)
+// SetBrain installs the brain meeting minutes are written with — in the daemon, the same brain the main brain and dream stages are metered against, so an unattended write-up spends the shared free-tier allowance rather than one of its own. Input: the brain to use; nil reverts to defaultBrain building its own per meeting.
+func (r *Recorder) SetBrain(b brain.Brain) {
+	r.mainBrainMu.Lock()
+	defer r.mainBrainMu.Unlock()
+	r.mainBrain = b
+}
+
+// installedBrain reads the installed brain under the lock, since the daemon may install it after a meeting is already in flight.
+func (r *Recorder) installedBrain() brain.Brain {
+	r.mainBrainMu.RLock()
+	defer r.mainBrainMu.RUnlock()
+	return r.mainBrain
+}
+
+// SetMinutesFallback installs the brain a failed minutes call hands over to — in the daemon, Codex under the user's ChatGPT login, which the recorder cannot build for itself because that needs an *agent.Agent. Input: the fallback brain; nil turns the hand-over off.
+func (r *Recorder) SetMinutesFallback(b brain.Brain) {
+	r.minutesFallbackMu.Lock()
+	defer r.minutesFallbackMu.Unlock()
+	r.minutesFallback = b
+}
+
+// minutesFallbackBrain reads the installed fallback under the lock, since the daemon may install it after a meeting is already in flight.
+func (r *Recorder) minutesFallbackBrain() brain.Brain {
+	r.minutesFallbackMu.RLock()
+	defer r.minutesFallbackMu.RUnlock()
+	return r.minutesFallback
 }
 
 // primingPrompt reads the desktop episodes recorded during the meeting and turns them into the initial prompt for whisper. It is best-effort: a store that cannot answer costs the transcript its spelling hints, not the transcript.
@@ -213,5 +245,9 @@ func (r *Recorder) primingPrompt(ctx context.Context, since, until time.Time) st
 		slog.Warn("could not read desktop context to prime whisper", "error", err)
 		return ""
 	}
-	return primingPrompt(episodes)
+	var people []string
+	if entries, err := r.store.PersonalContext(ctx); err == nil {
+		people = personNamesFromContext(entries)
+	}
+	return primingPromptFor(episodes, people)
 }

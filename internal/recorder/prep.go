@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -44,8 +45,13 @@ func (r *Recorder) prepMeeting() {
 		return
 	}
 
+	var known []string
+	if entries, err := r.store.PersonalContext(ctx); err == nil {
+		known = personNamesFromContext(entries)
+	}
+
 	title := meetingTitle(episodes)
-	participants := meetingParticipants(episodes)
+	participants := meetingParticipants(episodes, known)
 	fragments := meetingTitleFragments(title)
 	if len(participants) == 0 && len(fragments) == 0 {
 		slog.Debug("meeting prep: nothing on screen names the meeting or its attendees", "title", title)
@@ -106,17 +112,52 @@ func meetingTitle(eps []db.Episode) string {
 }
 
 // meetingParticipants pulls candidate names for who is on the call out of recent screen text, using the same pattern primingPrompt mines a chat sender's name from in transcribe.go: a name written immediately before a colon at the start of its own line, which is how a chat window labels who is talking. Unlike primingPrompt, which runs after the meeting to prime whisper, this runs the moment the meeting is detected, against whatever the tracker has already captured, before a single word of transcript exists.
-func meetingParticipants(eps []db.Episode) []string {
-	return collectMeetingNames(eps, true)
+// known is who Ora already knows about the user's life, from personal context; a candidate matching one of these names is kept even if its shape or wording would otherwise get it dropped as interface chrome.
+func meetingParticipants(eps []db.Episode, known []string) []string {
+	return collectMeetingNames(eps, true, known)
 }
 
 // meetingParticipantsInBody is meetingParticipants without the window title as a source. The title names the conversation rather than the people in it, which is a name in a one-to-one call and a meeting's name in a group one, and nothing tells the two apart.
 func meetingParticipantsInBody(eps []db.Episode) []string {
-	return collectMeetingNames(eps, false)
+	return collectMeetingNames(eps, false, nil)
 }
 
-// collectMeetingNames pulls people's names off the meeting's own window. withTitle includes the window title as a source, which is right when the names are only a hint to search past minutes with and wrong when they are counted.
-func collectMeetingNames(eps []db.Episode, withTitle bool) []string {
+// meetingRoleSuffix strips the role or presence tag a meeting app hangs off a name in its own roster — "Sam Iyer (Host)", "Priya Shah (Presenting)", "Karan Mehta (Host, me)" — so the name underneath can be read and deduplicated on its own. It only strips a trailing parenthetical that actually names a role; a surname that happens to end in a parenthetical of something else is left alone.
+var meetingRoleSuffix = regexp.MustCompile(`(?i)\s*\([^()]*\b(?:host|co-?host|organizer|organiser|presenting|guest|you|me)\b[^()]*\)\s*$`)
+
+// hasCase reports whether w contains at least one letter that has upper and lower forms, so the all-caps check in looksLikeName only applies to scripts where all caps means anything; Devanagari or CJK words have no case and must not be mistaken for shouting. Input: one word. Output: true when a cased letter is present.
+func hasCase(w string) bool {
+	for _, r := range w {
+		if unicode.ToUpper(r) != unicode.ToLower(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeName reports whether a candidate has the shape a person's name has: one to four capitalised words, no digit, no colon, and no word written in all capitals — a toolbar shouts "MUTE", a time reads "3:45 PM", a name does neither.
+func looksLikeName(name string) bool {
+	words := strings.Fields(name)
+	if len(words) == 0 || len(words) > 4 {
+		return false
+	}
+	for _, w := range words {
+		if strings.ContainsAny(w, "0123456789:") {
+			return false
+		}
+		if len(w) > 1 && hasCase(w) && w == strings.ToUpper(w) {
+			return false
+		}
+	}
+	return true
+}
+
+// collectMeetingNames pulls people's names off the meeting's own window. withTitle includes the window title as a source, which is right when the names are only a hint to search past minutes with and wrong when they are counted. known is who Ora already knows about from personal context; a candidate already known by that name is kept regardless of shape, since a real name Ora has already confirmed outranks a heuristic guessing whether something is one.
+func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []string {
+	knownSet := map[string]bool{}
+	for _, k := range known {
+		knownSet[strings.ToLower(strings.TrimSpace(k))] = true
+	}
 	var names []string
 	seen := map[string]bool{}
 	for _, e := range eps {
@@ -130,17 +171,29 @@ func collectMeetingNames(eps []db.Episode, withTitle bool) []string {
 		}
 		for _, text := range sources {
 			add := func(name string) {
-				// The app's own name is written on its window as prominently as anybody's: a Teams window reads "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams", where two of the three capitalised phrases are the software. What names the window cannot also name a person in it.
-				if seen[name] || tracker.IsMeetingWindow("", name) || hasChromeWord(name) {
+				name = strings.TrimSpace(meetingRoleSuffix.ReplaceAllString(name, ""))
+				if name == "" {
 					return
 				}
-				seen[name] = true
+				key := strings.ToLower(name)
+				if seen[key] {
+					return
+				}
+				if !knownSet[key] {
+					// The app's own name is written on its window as prominently as anybody's: a Teams window reads "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams", where two of the three capitalised phrases are the software. What names the window cannot also name a person in it. Nor can its own toolbar, or anything that is not shaped like a name in the first place.
+					// ponytail: a person whose whole name is a chrome word ("Chat", "Hand") is dropped here until Ora knows them from personal context; a per-app roster position check would fix that if it ever bites.
+					if tracker.IsMeetingWindow("", name) || hasChromeWord(name) || !looksLikeName(name) {
+						return
+					}
+				}
+				seen[key] = true
 				names = append(names, name)
 			}
 			for _, m := range chatSenderPattern.FindAllStringSubmatch(text, -1) {
 				add(m[1])
 			}
 			// A meeting window writes the people in the call as plain capitalised names, separated however the app likes — before a colon in a chat log, between pipes in a title bar. Reading them as proper nouns covers every separator without knowing any of them.
+			// ponytail: properNounPattern only matches Latin capitalised words, so names in scripts without case never reach add; a Unicode letter class would fix that if a call ever shows them.
 			for _, m := range properNounPattern.FindAllString(text, -1) {
 				add(m)
 			}

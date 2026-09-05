@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	oratext "ora/internal/text"
 	"ora/internal/tracker"
 )
 
@@ -55,8 +56,8 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	// The model flags mean a real whisper.cpp run, which decodes on the GPU, where only one run fits at a time.
 	if extra := whisperCPPArgs(bin); extra != nil {
 		args = append(args, extra...)
-		gpuRun.Lock()
-		defer gpuRun.Unlock()
+		GPURun.Lock()
+		defer GPURun.Unlock()
 		// Under the lock, so the other stream cannot slip its decode in while this one is still waiting for the card.
 		if err := waitForGPU(ctx); err != nil {
 			return nil, err
@@ -126,7 +127,7 @@ func markerLooped(out string) bool {
 		if text == "" {
 			continue
 		}
-		if nonSpeech.MatchString(text) {
+		if oratext.NonSpeechLine.MatchString(text) {
 			markers++
 		} else {
 			words++
@@ -191,7 +192,7 @@ func parseSegments(out, speaker string, offset time.Duration) []Segment {
 			continue
 		}
 		text := strings.TrimSpace(m[9])
-		if text == "" || nonSpeech.MatchString(text) {
+		if text == "" || oratext.NonSpeechLine.MatchString(text) {
 			continue
 		}
 		segs = append(segs, Segment{
@@ -208,14 +209,16 @@ func parseSegments(out, speaker string, offset time.Duration) []Segment {
 // minLoopRun is how many identical segments in a row it takes before the run is a loop rather than someone saying the same short thing twice.
 // minScatteredRepeats is how many times one sentence has to appear across the whole stream before it is treated as invented.
 // loopPhraseMinWords and loopPhraseMaxWords bound what counts as a loopable sentence: below the floor it is an acknowledgement people really do repeat all meeting ("Okay.", "Yeah."), above the ceiling nobody produces the same wording by chance and it is more likely a real repeated reading.
+// loopShingleWords is the width of the word window suppressDriftingLoop matches on; see that function for why a loop needs this rather than an exact match.
 const (
 	minLoopRun          = 3
 	minScatteredRepeats = 3
 	loopPhraseMinWords  = 4
 	loopPhraseMaxWords  = 12
+	loopShingleWords    = 4
 )
 
-// dropHallucinations removes whisper's repetition artefacts from one stream's segments, which is most of what makes a transcript of a quiet call unreadable. It does three things, in order, and nothing else: it drops every copy of a sentence that appears minScatteredRepeats times or more across the stream, it collapses a run of minLoopRun or more identical consecutive segments down to the first, and it collapses a sentence repeated minLoopRun times or more inside a single segment's text down to one copy.
+// dropHallucinations removes whisper's repetition artefacts from one stream's segments, which is most of what makes a transcript of a quiet call unreadable. It does four things, in order: it drops every copy of a sentence that appears minScatteredRepeats times or more across the stream, it collapses a run of minLoopRun or more identical consecutive segments down to the first, it collapses a sentence repeated minLoopRun times or more inside a single segment's text down to one copy, and it runs suppressDriftingLoop over what is left to catch the same loop when no two copies of it were byte-identical.
 // The order matters: the scattered pass usually leaves the acknowledgements that were interleaved with the invented sentence sitting next to each other, and the run pass then collapses them.
 func dropHallucinations(segs []Segment) []Segment {
 	counts := make(map[string]int, len(segs))
@@ -244,6 +247,66 @@ func dropHallucinations(segs []Segment) []Segment {
 			out = append(out, kept[i:j]...)
 		}
 		i = j
+	}
+	return suppressDriftingLoop(out)
+}
+
+// suppressDriftingLoop catches the loop the exact-match rules above miss: whisper's self-conditioning does not repeat a sentence byte for byte, it slides a decode window a little further into it each time and sometimes swaps or drops a word ("55%" for "56%", "in a positive mood" for "not in a positive mood"), so no two copies of a real hallucination loop are identical. Two 2026-09 recordings show both kinds of drift, one after the other, for most of a 15-minute and a 90-minute call.
+// It pools every remaining segment's words into one stream and counts each run of loopShingleWords consecutive words (lower-cased, punctuation trimmed). A word covered by a run that recurs minScatteredRepeats times or more anywhere in the stream is dropped outright — a repeat that far apart is the decoder, not someone repeating themselves that many times verbatim — and a segment left with no surviving words is dropped here, not passed back empty for the caller to filter.
+// Input: segments already past the three exact-match rules. Output: the same segments with looped words removed and empty ones gone.
+func suppressDriftingLoop(segs []Segment) []Segment {
+	type word struct {
+		segIdx int
+		raw    string
+		key    string
+	}
+	var words []word
+	for i, s := range segs {
+		for _, w := range strings.Fields(s.Text) {
+			words = append(words, word{i, w, strings.ToLower(strings.Trim(w, ".,!?;:\"'()"))})
+		}
+	}
+	if len(words) < loopShingleWords {
+		return segs
+	}
+
+	shingle := func(i int) string {
+		keys := make([]string, loopShingleWords)
+		for j := range keys {
+			keys[j] = words[i+j].key
+		}
+		return strings.Join(keys, " ")
+	}
+	counts := make(map[string]int, len(words))
+	for i := 0; i+loopShingleWords <= len(words); i++ {
+		counts[shingle(i)]++
+	}
+
+	drop := make([]bool, len(words))
+	for i := 0; i+loopShingleWords <= len(words); i++ {
+		if counts[shingle(i)] >= minScatteredRepeats {
+			for j := i; j < i+loopShingleWords; j++ {
+				drop[j] = true
+			}
+		}
+	}
+
+	bySeg := make(map[int][]string, len(segs))
+	for i, w := range words {
+		if drop[i] {
+			continue
+		}
+		bySeg[w.segIdx] = append(bySeg[w.segIdx], w.raw)
+	}
+
+	var out []Segment
+	for i, s := range segs {
+		surviving, ok := bySeg[i]
+		if !ok {
+			continue
+		}
+		s.Text = strings.Join(surviving, " ")
+		out = append(out, s)
 	}
 	return out
 }
@@ -282,9 +345,6 @@ func collapseRepeatedPhrases(text string) string {
 	}
 	return strings.TrimSpace(strings.Join(kept, ""))
 }
-
-// nonSpeech matches whisper's markers for a stretch with no words in it — "[BLANK_AUDIO]", "(upbeat music)", "[SOUND]". A silent stream is otherwise nothing but these, and the microphone side of a call is silent most of the time.
-var nonSpeech = regexp.MustCompile(`^[\[(][^)\]]*[)\]]$`)
 
 // hmsToDuration turns one whisper timestamp into a duration. frac is the fractional-seconds digits exactly as printed, so its length is its scale: "64" means 640ms, "640" means 640ms, and anything past three digits is finer than this cares about and is cut.
 func hmsToDuration(h, m, s, frac string) time.Duration {
@@ -355,18 +415,26 @@ var properNounPattern = regexp.MustCompile(`\b[A-Z][a-z]+(?: [A-Z][a-z0-9]+)+\b`
 // chatSenderPattern matches a name written the way a chat window writes it: at the start of its own line, immediately before a colon, as in "Priya Shah: ok sure ping me". The line anchor is what keeps it off the labels an app puts mid-sentence ("Industry Division: Health Care"), which look identical without it.
 var chatSenderPattern = regexp.MustCompile(`(?m)^\s*([A-Z][a-z]+(?: [A-Z][a-z]+| [A-Z]{2,4})+):`)
 
-// promptChrome is the capitalised furniture every browser and app window carries regardless of what the meeting is about. A candidate term is thrown away if any of its words is in here, which is what keeps "Insights Settings Private Branches" and "Datepicker All" out of a prompt that is supposed to be about climate risk scoring.
-// ponytail: a hand-written word list, extended when a new app's furniture shows up in a prompt. The principled version would rank a term by how unusual it is for this user's screens rather than by a fixed list, which needs a corpus of episodes from outside the meeting window to compare against.
-var promptChrome = map[string]bool{
-	"about": true, "actions": true, "activity": true, "add": true, "all": true, "branches": true,
-	"browser": true, "chrome": true, "close": true, "code": true, "commit": true, "commits": true,
-	"contribute": true, "created": true, "custom": true, "datepicker": true, "edit": true,
-	"file": true, "filter": true, "folders": true, "guided": true, "home": true, "insights": true,
-	"into": true, "issues": true, "latest": true, "menu": true, "more": true, "no": true,
-	"open": true, "packages": true, "private": true, "projects": true, "pull": true,
-	"readme": true, "requests": true, "resources": true, "search": true, "security": true,
-	"selected": true, "settings": true, "share": true, "sort": true, "tab": true, "tags": true,
-	"tour": true, "turn": true, "view": true, "wiki": true,
+// chromeWords is the capitalised furniture every browser, app window and meeting-call toolbar carries regardless of what the meeting is about. A candidate term or roster name is thrown away if any of its words is in here, which is what keeps "Insights Settings Private Branches" and "Datepicker All" out of a prompt about climate risk scoring, and "Mute", "Share Screen" or "Raise Hand" out of a participant list.
+// ponytail: a hand-written word list, extended when a new app's furniture shows up in a prompt or a roster. The principled version would rank a word by how unusual it is for this user's screens rather than by a fixed list, which needs a corpus of episodes from outside the meeting window to compare against.
+var chromeWords = map[string]bool{
+	"about": true, "actions": true, "activity": true, "add": true, "admit": true, "all": true,
+	"apps": true, "audio": true, "background": true, "branches": true, "breakout": true,
+	"browser": true, "call": true, "camera": true, "captions": true, "chat": true, "chrome": true,
+	"close": true, "code": true, "cohost": true, "commit": true, "commits": true, "contribute": true,
+	"created": true, "custom": true, "datepicker": true, "edit": true, "effects": true, "end": true,
+	"file": true, "filter": true, "folders": true, "gallery": true, "grid": true, "guest": true,
+	"guided": true, "hand": true, "home": true, "host": true, "insights": true, "into": true,
+	"invite": true, "issues": true, "latest": true, "layout": true, "leave": true, "lobby": true,
+	"menu": true, "meeting": true, "microphone": true, "more": true, "mute": true, "no": true, "now": true,
+	"off": true, "on": true, "open": true, "options": true, "organiser": true, "organizer": true,
+	"packages": true, "participants": true, "pin": true, "polls": true, "present": true,
+	"presenting": true, "private": true, "projects": true, "pull": true, "raise": true,
+	"readme": true, "reactions": true, "record": true, "recording": true, "requests": true,
+	"resources": true, "room": true, "rooms": true, "screen": true, "search": true, "security": true,
+	"selected": true, "settings": true, "share": true, "sort": true, "speaker": true, "spotlight": true,
+	"start": true, "stop": true, "tab": true, "tags": true, "tour": true, "turn": true, "unmute": true,
+	"video": true, "view": true, "waiting": true, "whiteboard": true, "wiki": true, "you": true,
 }
 
 // isMeetingWindow reports whether an episode was captured from the window of a call rather than from whatever else was on screen. Everything that claims to name a participant is checked against this first: a screen during a meeting is mostly not the meeting. The tracker owns the test, since it is the same one it uses to decide which window to capture on its own clock.
@@ -377,7 +445,46 @@ func isMeetingWindow(app, title string) bool {
 // primingPrompt builds the text whisper is primed with, out of what the desktop tracker recorded on screen while the meeting ran. Priming biases whisper's spelling towards the words in the prompt, so feeding it the meeting's own acronyms and proper nouns is what turns "ND game and GRDI" into "INFORM and GDIS".
 // The prompt is deliberately written as capitalised, punctuated English. Whisper continues the prompt's register as well as its vocabulary: primed with a raw lowercase chat log it returns the whole transcript lowercase and unpunctuated, which is worse to read and worse to summarise from.
 // Input: the episodes captured during the recording window. Output: one line of text, capped at primingPromptBudget characters, or "" when there was nothing on screen to learn from.
-func primingPrompt(eps []db.Episode) string {
+func primingPrompt(eps []db.Episode) string { return primingPromptFor(eps, nil) }
+
+// personNamesFromContext turns the store's person subjects into names whisper can be primed with. Input: the personal-context entries. Output: one display name per person subject, hyphens to spaces and each word capitalised, in store order; the identity entry and preference entries are skipped.
+func personNamesFromContext(entries []db.PersonalEntry) []string {
+	var names []string
+	for _, e := range entries {
+		if !db.IsPersonSubject(e.Subject) {
+			continue
+		}
+		names = append(names, db.PersonSubjectName(e.Subject))
+	}
+	return names
+}
+
+// primingPromptFor is primingPrompt with the people the store already knows added after the screen's own terms, within the same budget. Whisper spells a name the way it is primed to: on 2026-09-03 a call primed only with "Terms: API." wrote "Ashar" for Sneha, and that guess became a person in memory. People go last because the prompt is cut from the front when it is too long.
+func primingPromptFor(eps []db.Episode, people []string) string {
+	base := primingPromptBody(eps)
+	if len(people) == 0 {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSuffix(base, "."))
+	written := 0
+	for _, name := range people {
+		if b.Len()+len(name)+len(" People: ")+2 > primingPromptBudget {
+			break
+		}
+		if written == 0 {
+			b.WriteString(". People: ")
+		} else {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		written++
+	}
+	b.WriteString(".")
+	return b.String()
+}
+
+func primingPromptBody(eps []db.Episode) string {
 	counts := map[string]int{}
 	first := map[string]string{} // lower-cased term to the spelling it was first seen with
 	var senders []string
@@ -493,7 +600,7 @@ func primingPrompt(eps []db.Episode) string {
 // hasChromeWord reports whether any word of a candidate term is app furniture rather than something the meeting is about.
 func hasChromeWord(term string) bool {
 	for _, w := range strings.Fields(term) {
-		if promptChrome[strings.ToLower(w)] {
+		if chromeWords[strings.ToLower(w)] {
 			return true
 		}
 	}

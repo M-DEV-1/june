@@ -101,3 +101,15 @@ func TestMinutesPipeline_UpdatesPersonalContext(t *testing.T) {
 		t.Errorf("processing a meeting did not update personal context, writes: %v", store.personalWrites)
 	}
 }
+
+// A person whose name exists only in the transcript is a recogniser's guess, and on 2026-09-03 one such guess ("Ashar" for Sneha) became a permanent personal-context entry. The updater is told so, and the code refuses any new person subject whose evidence the model marks as heard-only, logging it as unsure instead.
+func TestPersonalUpdate_HeardOnlyNamesAreNotWritten(t *testing.T) {
+	if !strings.Contains(personalUpdateInstruction, "heard as") {
+		t.Fatal("updater instruction must explain that a name marked heard-as in the minutes is not evidence for a new person")
+	}
+	out := `{"updates":[{"subject":"ashar","content":"Contact of Alex's (heard as \"Ashar\")","heard_only":true},{"subject":"priya-shah","content":"Colleague; last worked 3 Sep"}],"unsure":["ashar: name heard only in speech"]}`
+	updates := parsePersonalUpdates(out)
+	if len(updates) != 1 || updates[0].Subject != "priya-shah" {
+		t.Fatalf("updates = %+v, want only the screen-backed entry", updates)
+	}
+}

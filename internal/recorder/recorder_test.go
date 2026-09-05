@@ -947,15 +947,6 @@ func TestBuildPrompt_NoUserBlockWithoutPersonalContext(t *testing.T) {
 	}
 }
 
-// TestMinutesInstruction_AttendeesSplitByEvidence covers the shape the attendee list has to have: two lists split on whether there is evidence the person was in the call, and the recording person appearing once, under their own name.
-func TestMinutesInstruction_AttendeesSplitByEvidence(t *testing.T) {
-	for _, want := range []string{"In the meeting", "Mentioned or on screen only", "(recording)"} {
-		if !strings.Contains(minutesInstruction, want) {
-			t.Errorf("the attendees instruction never says %q", want)
-		}
-	}
-}
-
 // The two sides of a call are independent files, and transcribing them one after the other doubles the wall time of every meeting for no reason. They have to run at the same time.
 // The test is a barrier: each stream announces itself and then waits for the other, so a pipeline that runs them in sequence can never get past the first one.
 func TestTranscriptFor_TranscribesBothStreamsAtTheSameTime(t *testing.T) {
@@ -1039,9 +1030,9 @@ func (s *fakeStore) AddActionItems(ctx context.Context, items []memory.ActionIte
 	return len(items), nil
 }
 
-// Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in.
+// Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in. Only the user's own work is kept: the minutes write the user's bullets as "Me", so an "Vikram" bullet never lands on the user's list.
 func TestFileMinutes_LiftsActionItems(t *testing.T) {
-	store := &fakeStore{personal: []db.PersonalEntry{{Subject: "identity", Content: "The user is Alex Rivera — goes by Alex."}}}
+	store := &fakeStore{}
 	r := New(t.TempDir(), store, "FAKE_API_KEY")
 	raised := time.Date(2026, 8, 28, 21, 36, 0, 0, time.UTC)
 
@@ -1051,24 +1042,47 @@ func TestFileMinutes_LiftsActionItems(t *testing.T) {
 
 ## Action items
 - **Vikram** — carry PR #13 through CI and merge.
-- **Alex** — compare these minutes against his own agent's output.
-`, raised)
+- **Me** — compare these minutes against his own agent's output.
+`, raised, raised.Add(90*time.Minute))
 
-	if len(store.actions) != 2 {
-		t.Fatalf("want 2 action items lifted, got %d: %+v", len(store.actions), store.actions)
+	if len(store.actions) != 1 {
+		t.Fatalf("want 1 action item lifted, got %d: %+v", len(store.actions), store.actions)
 	}
-	if store.actions[0].Owner != "Vikram" || store.actions[0].Text != "carry PR #13 through CI and merge." {
-		t.Errorf("first item = %+v", store.actions[0])
+	if store.actions[0].Owner != "Me" || store.actions[0].Text != "compare these minutes against his own agent's output." {
+		t.Errorf("lifted item = %+v", store.actions[0])
 	}
 	if store.actions[0].Source != "md x mf tool" || !store.actions[0].Raised.Equal(raised) {
 		t.Errorf("provenance = %q / %v", store.actions[0].Source, store.actions[0].Raised)
 	}
-	if store.actions[1].Status != memory.StatusOpen {
-		t.Errorf("lifted item is not open: %q", store.actions[1].Status)
+	if store.actions[0].Status != memory.StatusOpen {
+		t.Errorf("lifted item is not open: %q", store.actions[0].Status)
 	}
 	// The minutes themselves must still be filed unchanged: they are the record of what was said and nothing may edit them.
 	if len(store.notes) != 1 || !strings.Contains(store.notes[0], "## Action items") {
 		t.Errorf("the minutes were not filed intact: %+v", store.notes)
+	}
+}
+
+// A meeting with one item the user owes, one owed by somebody else, and one nobody was named for lifts only the two that might be the user's — theirs and the unclear one — and drops the other person's.
+func TestFileMinutes_LiftsOnlyTheUsersOwnItems(t *testing.T) {
+	store := &fakeStore{}
+	r := New(t.TempDir(), store, "FAKE_API_KEY")
+
+	r.fileMinutes(context.Background(), t.TempDir(), `# Meeting minutes
+
+## Action items
+- **Me** — send the deck by Friday.
+- **Sandeep** — add battery optimisation to the app.
+- **Owner unclear** — trial attaching walkthrough videos to PRs.
+`, time.Now(), time.Now())
+
+	if len(store.actions) != 2 {
+		t.Fatalf("want 2 action items lifted, got %d: %+v", len(store.actions), store.actions)
+	}
+	for _, a := range store.actions {
+		if a.Owner == "Sandeep" {
+			t.Errorf("kept an item owed by somebody else: %+v", a)
+		}
 	}
 }
 
@@ -1077,7 +1091,7 @@ func TestFileMinutes_NoActionItems(t *testing.T) {
 	store := &fakeStore{}
 	r := New(t.TempDir(), store, "FAKE_API_KEY")
 
-	r.fileMinutes(context.Background(), t.TempDir(), "# Meeting minutes\n\n## Key points\n- nothing was agreed.\n", time.Now())
+	r.fileMinutes(context.Background(), t.TempDir(), "# Meeting minutes\n\n## Key points\n- nothing was agreed.\n", time.Now(), time.Now())
 
 	if len(store.actions) != 0 {
 		t.Errorf("lifted %d items from minutes with no action section", len(store.actions))
@@ -1087,9 +1101,9 @@ func TestFileMinutes_NoActionItems(t *testing.T) {
 	}
 }
 
-// A meeting the user only sat in on leaves nothing on their list, however many action items it produced. The minutes are still filed in full — they are the record of what was said — but none of that work is the user's to answer for.
-func TestFileMinutes_SkipsAMeetingTheUserOnlySatInOn(t *testing.T) {
-	store := &fakeStore{personal: []db.PersonalEntry{{Subject: "identity", Content: "The user is Alex Rivera — goes by Alex."}}}
+// A meeting the user did not owe anything in but sat in on still surfaces its unowned item, since "Owner unclear" might turn out to be the user's; only the item clearly owed by somebody else is dropped. The minutes are still filed in full — they are the record of what was said — but that work stays off the user's list.
+func TestFileMinutes_DropsOtherPeoplesItemsButKeepsUnclearOnes(t *testing.T) {
+	store := &fakeStore{}
 	r := New(t.TempDir(), store, "FAKE_API_KEY")
 
 	r.fileMinutes(context.Background(), t.TempDir(), `# Meeting minutes
@@ -1099,13 +1113,115 @@ func TestFileMinutes_SkipsAMeetingTheUserOnlySatInOn(t *testing.T) {
 ## Action items
 - **Sandeep** — add battery optimisation to the app.
 - **Owner unclear** — trial attaching walkthrough videos to PRs.
-`, time.Now())
+`, time.Now(), time.Now())
 
-	if len(store.actions) != 0 {
-		t.Errorf("put %d of someone else's items on the user's list: %+v", len(store.actions), store.actions)
+	if len(store.actions) != 1 {
+		t.Fatalf("want 1 action item lifted, got %d: %+v", len(store.actions), store.actions)
+	}
+	if store.actions[0].Owner != memory.UnknownOwner {
+		t.Errorf("put someone else's item on the user's list: %+v", store.actions[0])
 	}
 	if len(store.notes) != 1 {
 		t.Errorf("the minutes themselves must still be filed: %+v", store.notes)
+	}
+}
+
+// fileMinutes appends the recording's wall-clock start and stop to the note it files, in RFC3339, since that is the only place the meeting's actual duration is known — the model writing the minutes is never told to report it.
+func TestFileMinutes_RecordsStartAndStop(t *testing.T) {
+	store := &fakeStore{}
+	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	started := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	stopped := started.Add(41 * time.Minute)
+
+	r.fileMinutes(context.Background(), t.TempDir(), "# Standup\n\n## Key points\n- shipped it.\n", started, stopped)
+
+	if len(store.notes) != 1 {
+		t.Fatalf("want 1 note filed, got %d", len(store.notes))
+	}
+	want := "<!--ora:duration start=2026-09-04T10:00:00Z stop=2026-09-04T10:41:00Z-->"
+	if !strings.Contains(store.notes[0], want) {
+		t.Errorf("filed note missing duration marker %q, got %q", want, store.notes[0])
+	}
+	if !strings.Contains(store.notes[0], "## Key points\n- shipped it.") {
+		t.Errorf("filed note lost the minutes text: %q", store.notes[0])
+	}
+}
+
+// Correcting an already-filed meeting's minutes (the noteIDFile path) must also correct its duration marker, not leave the first run's stale start/stop behind.
+func TestFileMinutes_CorrectingANoteUpdatesTheDurationMarker(t *testing.T) {
+	store := &fakeStore{}
+	r := New(t.TempDir(), store, "FAKE_API_KEY")
+	dir := t.TempDir()
+	first := time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
+
+	r.fileMinutes(context.Background(), dir, "# Standup\n", first, first.Add(10*time.Minute))
+	second := time.Date(2026, 9, 4, 9, 5, 0, 0, time.UTC)
+	r.fileMinutes(context.Background(), dir, "# Standup, corrected\n", second, second.Add(20*time.Minute))
+
+	if len(store.notes) != 1 {
+		t.Fatalf("correcting the same recording must not file a second note, got %d", len(store.notes))
+	}
+	want := "<!--ora:duration start=2026-09-04T09:05:00Z stop=2026-09-04T09:25:00Z-->"
+	if !strings.Contains(store.notes[0], want) {
+		t.Errorf("corrected note missing updated duration marker %q, got %q", want, store.notes[0])
+	}
+}
+
+// A meeting filed before the duration marker existed has a note with nothing after its minutes text. The sweep must correct that note in place from the one thing on disk that still says how long the meeting ran: the size of the mic.wav next to it, read as wall-clock seconds from the directory's own timestamp.
+func TestPickup_BackfillsDurationForANoteFiledBeforeTheMarkerExisted(t *testing.T) {
+	store := &fakeStore{notes: []string{"# Standup\n\n## Key points\n- shipped it.\n"}, kinds: []string{noteKind}}
+	dataDir := t.TempDir()
+	r := New(dataDir, store, "")
+	<-r.swept
+
+	started := time.Date(2026, 8, 20, 9, 0, 0, 0, time.Local)
+	dir := filepath.Join(dataDir, "recordings", started.Format(dirTimeLayout))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "note-id.txt"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "minutes.md"), []byte(store.notes[0]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[me] shipped it\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 5 seconds of 16kHz mono 16-bit silence after the header, matching audioDuration's own arithmetic.
+	wav := make([]byte, wavHeaderSize+5*2*sampleRate)
+	if err := os.WriteFile(filepath.Join(dir, "mic.wav"), wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r.pickup(context.Background())
+
+	want := meetingDurationLine(started, started.Add(5*time.Second))
+	if !strings.Contains(store.notes[0], want) {
+		t.Errorf("backfilled note = %q, want it to contain %q", store.notes[0], want)
+	}
+}
+
+// A recording whose mic.wav is gone (deleted, or made before keepAudio existed) has nothing left on disk to say how long it ran, so the sweep must leave its note alone rather than write a wrong or zero-length marker that looks like real data.
+func TestPickup_LeavesDurationAloneWhenTheAudioIsGone(t *testing.T) {
+	store := &fakeStore{notes: []string{"# Standup\n"}, kinds: []string{noteKind}}
+	dataDir := t.TempDir()
+	r := New(dataDir, store, "")
+	<-r.swept
+
+	dir := filepath.Join(dataDir, "recordings", "2026-08-20T09-00-00")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "note-id.txt"), []byte("1"), 0o644)
+	os.WriteFile(filepath.Join(dir, "minutes.md"), []byte(store.notes[0]), 0o644)
+	os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[me] shipped it\n"), 0o644)
+	// No mic.wav at all.
+
+	r.pickup(context.Background())
+
+	if strings.Contains(store.notes[0], meetingDurationPrefix) {
+		t.Errorf("backfilled a duration with no audio to measure it from: %q", store.notes[0])
 	}
 }
 
@@ -1191,5 +1307,51 @@ func TestRecorder_NoSilenceWarningWhileMicKeepsArriving(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if got.contains("audio") {
 		t.Errorf("a recording whose microphone is still capturing speech must not warn, got %v", got.sent)
+	}
+}
+
+// TestRecorder_GivesUpOnARecordingThatKeepsFailing pins the retry cap. The recording of 2026-09-05T00-53-59 failed its first summary at 01:18 and was retried once an hour for the rest of the day — sixteen more identical 404s, each one holding the GPU at a moment a dictation might start. After maxProcessAttempts the sweep stops, and what happened is filed as a meeting note so the user sees it in the meetings list instead of only in the log.
+func TestRecorder_GivesUpOnARecordingThatKeepsFailing(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	<-r.swept
+	calls := 0
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			return `{"updates":[]}`, nil
+		}
+		calls++
+		return "", errors.New("404 models/gpt-5.5 is not found for API version v1beta")
+	}
+	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-09-05T00-53-59"), map[string]string{
+		"transcript.md": "[00:00:00] [me] shall we ship friday\n",
+	})
+	marker := filepath.Join(dir, failedMarker)
+
+	// Twice as many sweeps as the cap allows attempts, each one an hour after the last as far as the backoff can tell.
+	for i := 0; i < 2*maxProcessAttempts; i++ {
+		r.pickup(context.Background())
+		if exists(marker) {
+			old := time.Now().Add(-2 * failureRetryAfter)
+			if err := os.Chtimes(marker, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	if calls != maxProcessAttempts {
+		t.Errorf("the summariser was called %d times, want the cap of %d", calls, maxProcessAttempts)
+	}
+	store.mu.Lock()
+	notes, kinds := append([]string(nil), store.notes...), append([]string(nil), store.kinds...)
+	store.mu.Unlock()
+	if len(notes) != 1 {
+		t.Fatalf("giving up filed %d notes, want exactly one so the meeting shows in the list", len(notes))
+	}
+	if kinds[0] != noteKind {
+		t.Errorf("the note was filed as kind %q, want %q so GET /meetings picks it up", kinds[0], noteKind)
+	}
+	if !strings.Contains(notes[0], "gpt-5.5") {
+		t.Errorf("the note does not say why the recording failed: %q", notes[0])
 	}
 }
