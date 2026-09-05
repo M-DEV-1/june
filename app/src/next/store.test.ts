@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ConversationSummary, DaemonEvent } from "./api";
-import { oraApi } from "./api";
+import { events, oraApi } from "./api";
 import { conversationsUi, escaped, makeStore, progress, settings, ui } from "./store";
 
 describe("what the window is showing", () => {
@@ -258,5 +258,147 @@ describe("the event stream", () => {
     store.dispatch(progress.askSent({ conversationId: "c1", question: "a question" }));
     onEvent(event({ type: "status", text: "Checking." }));
     expect(store.getState().progress.run?.status).toBe("Checking.");
+  });
+});
+
+// A "notice" event with its action set is the daemon sending back a task or routine notice once the user has pressed Done or a snooze button on its own desktop notification (see internal/proactive/notify.go). It says so on the sidebar's rail line, the one place every notice already surfaces (see ui.notice and its other callers in routines.tsx and App.tsx), rather than growing a second display of its own.
+describe("a notice's action reaching the window", () => {
+  it("says a task done from its own notification on the rail line", () => {
+    const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
+    const store = makeStore(undefined, open);
+    store.dispatch(progress.streamOpened());
+    const onEvent = open.mock.calls[0][0];
+
+    onEvent(
+      event({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
+      }),
+    );
+    expect(store.getState().ui.notice).toBe("Send the invoice: Done");
+  });
+
+  it("tells the Tasks cache to read the list again for a task closed this way", () => {
+    const invalidate = vi.spyOn(oraApi.util, "invalidateTags");
+    const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
+    const store = makeStore(undefined, open);
+    store.dispatch(progress.streamOpened());
+    const onEvent = open.mock.calls[0][0];
+
+    onEvent(
+      event({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
+      }),
+    );
+    expect(invalidate).toHaveBeenCalledWith(["Task"]);
+    invalidate.mockRestore();
+  });
+
+  it("says a snooze on the rail line, and does not touch the Tasks cache for a routine", () => {
+    const invalidate = vi.spyOn(oraApi.util, "invalidateTags");
+    const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
+    const store = makeStore(undefined, open);
+    store.dispatch(progress.streamOpened());
+    const onEvent = open.mock.calls[0][0];
+
+    onEvent(
+      event({
+        id: "",
+        type: "notice",
+        notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: "2026-09-05T18:00:00" },
+      }),
+    );
+    expect(store.getState().ui.notice).toBe("Priya replied about the venue.: Snoozed until 18:00");
+    expect(invalidate).not.toHaveBeenCalledWith(["Task"]);
+    invalidate.mockRestore();
+  });
+
+  it("reacts the same way when eventArrived is dispatched directly, the way the ?mock=1 fixture in mock.ts does it, without a live stream", () => {
+    const store = makeStore();
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
+      }),
+    );
+    expect(store.getState().ui.notice).toBe("Send the invoice: Done");
+  });
+
+  it("leaves the rail line alone for a notice arriving fresh, with no action yet", () => {
+    const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
+    const store = makeStore(undefined, open);
+    store.dispatch(progress.streamOpened());
+    const onEvent = open.mock.calls[0][0];
+
+    onEvent(
+      event({
+        id: "",
+        type: "notice",
+        notice: { title: "Morning brief", body: "Two things are still open.", place: "tasks", id: "", kind: "brief" },
+      }),
+    );
+    expect(store.getState().ui.notice).toBeUndefined();
+  });
+});
+
+describe("the stream coming back", () => {
+  it("does not call back on the first open, and calls back on every open that follows a drop", async () => {
+    const opened: FakeSource[] = [];
+    class FakeSource {
+      onopen: (() => void) | null = null;
+      onmessage: ((e: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(readonly url: string) {
+        opened.push(this as unknown as FakeSource);
+      }
+      close() {}
+    }
+    vi.stubGlobal("EventSource", FakeSource);
+    // These reducer tests run without a DOM, and reading the token falls back to the page's own URL when there is no Tauri to ask.
+    vi.stubGlobal("location", { port: "", search: "" });
+    vi.useFakeTimers();
+    const back = vi.fn();
+    const stop = events(() => {}, back);
+
+    // The window's very first stream: every query is already fetching, so an open here is nothing to react to.
+    await vi.advanceTimersByTimeAsync(1);
+    opened[0].onopen?.();
+    expect(back).not.toHaveBeenCalled();
+
+    // A daemon restart: the stream drops, the retry two to three seconds later (there is up to a second of jitter) succeeds, and that is the moment the cache is stale.
+    opened[0].onerror?.();
+    await vi.advanceTimersByTimeAsync(3000);
+    opened[1].onopen?.();
+    expect(back).toHaveBeenCalledTimes(1);
+
+    // A second restart in the same session must be caught the same way, which it only is if the drop was cleared on the way back in.
+    opened[1].onerror?.();
+    await vi.advanceTimersByTimeAsync(3000);
+    opened[2].onopen?.();
+    expect(back).toHaveBeenCalledTimes(2);
+
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("tells the cache to read every screen again once the stream is back", async () => {
+    const invalidate = vi.spyOn(oraApi.util, "invalidateTags");
+    let reopen: (() => void) | undefined;
+    const store = makeStore(undefined, (_onEvent, onReopen) => {
+      reopen = onReopen;
+      return () => {};
+    });
+    store.dispatch(progress.streamOpened());
+    await Promise.resolve();
+    invalidate.mockClear();
+
+    reopen?.();
+    expect(invalidate).toHaveBeenCalledWith(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]);
+    invalidate.mockRestore();
   });
 });
