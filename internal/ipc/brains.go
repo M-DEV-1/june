@@ -4,6 +4,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -69,10 +70,13 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 			err := cfg.Update(func(c *config.OraConfig) {
 				c.Brain.Provider = provider
 				c.Brain.Model = req.Model
-				if c.BrainModels == nil {
-					c.BrainModels = map[string]string{}
+				// Get hands out shallow copies that share this map, and a GET may be reading one of them right now, so the map is replaced rather than written into: a Go map read and written at once is a fatal runtime error, not a race a lock elsewhere could tolerate.
+				models := maps.Clone(c.BrainModels)
+				if models == nil {
+					models = map[string]string{}
 				}
-				c.BrainModels[req.Brain] = req.Model
+				models[req.Brain] = req.Model
+				c.BrainModels = models
 			})
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
