@@ -643,10 +643,11 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			continue
 		}
 
-		// The arguments are kept as the act runs keep them (see db.StorableArgs): what the user dictated into type_text is dropped here, before the step is ever written to disk or described on the event stream. The tool itself is still called with what the model actually said.
-		step := Step{N: len(job.Steps) + 1, Tool: d.Tool, Args: db.StorableArgs(d.Tool, d.Args), Expect: d.Expect}
+		// The arguments are kept as the act runs keep them (see db.StorableArgs): what the user dictated into type_text is dropped here, before the step is ever written to disk or described on the event stream. Expect gets the same treatment (see redactedExpect): a field_holds check right after a type_text step would otherwise repeat the typed text StorableArgs just dropped, this time under Expect.Value rather than under an argument. The tool itself is still called with what the model actually said, and the live wait_for check below still verifies against the real, unredacted Expect.
+		storedExpect := redactedExpect(d.Tool, d.Expect)
+		step := Step{N: len(job.Steps) + 1, Tool: d.Tool, Args: db.StorableArgs(d.Tool, d.Args), Expect: storedExpect}
 		l.set(func(j *Job) { j.State = Stepping })
-		r.emit(Event{Job: job.ID, Kind: "step", State: Stepping, Step: step.N, Text: describeAction(d), Expect: d.Expect.Describe()})
+		r.emit(Event{Job: job.ID, Kind: "step", State: Stepping, Step: step.N, Text: describeAction(d), Expect: storedExpect.Describe()})
 
 		result := r.exec.ExecuteAskTool(ctx, d.Tool, d.Args)
 		step.Result = capRunes(result, resultCap)
@@ -814,6 +815,14 @@ func readVerdict(result string) (string, string) {
 		return "fail", rest
 	}
 	return "fail", strings.TrimSpace(result)
+}
+
+// redactedExpect is what a step's Expect is stored and described as, in place of what the model actually wrote down, wherever it could otherwise repeat text StorableArgs already dropped from the same step's own arguments. A type_text step redacts its Value regardless of what kind of check it names, since the box just typed into is exactly what a check right after it is about. A field_holds check redacts its Value regardless of which tool the step named, since it can only be asking about a field something was just typed into. Kind is left alone either way, so the stored and emitted check still says what kind of thing was being verified. Input: the step's tool name and the expected change the model wrote down for it. Output: the expect to store and to describe; the live wait_for check must keep using the real one this came from.
+func redactedExpect(tool string, e act.Check) act.Check {
+	if tool == "type_text" || e.Kind == act.FieldHolds {
+		e.Value = db.RedactedValue
+	}
+	return e
 }
 
 // describeAction renders one decision as the line a hover shows while the step runs. The fallback for a decision that wrote no words for itself is the tool and its arguments, redacted as the checkpoint redacts them, so what the user dictated into type_text never goes out on the event stream either.
