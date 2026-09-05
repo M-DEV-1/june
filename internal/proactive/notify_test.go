@@ -577,7 +577,26 @@ func TestMaybeTaskNotices_CapsPerTick(t *testing.T) {
 	}
 	s.maybeTaskNotices(ctx)
 	if f.count() != maxTaskNoticesPerTick {
-		t.Errorf("posted %d task notices, want the per-tick cap of %d", f.count(), maxTaskNoticesPerTick)
+		t.Fatalf("posted %d task notices, want the per-tick cap of %d", f.count(), maxTaskNoticesPerTick)
+	}
+	// Nine items, five shown: the last notice says how many were held back, once, so nothing vanishes untold.
+	if !strings.Contains(f.sent[4].body, "and 4 more in Tasks") {
+		t.Errorf("last notice body = %q, want it to count the 4 items held back", f.sent[4].body)
+	}
+	for _, p := range f.sent[:4] {
+		if strings.Contains(p.body, "more in Tasks") {
+			t.Errorf("an earlier notice carries the count: %q", p.body)
+		}
+	}
+}
+
+// TestNoticeKey_IdLessNoticesUseTheTitle checks a brief or a routine, which has no row id, still gets a key its banner can be closed by.
+func TestNoticeKey_IdLessNoticesUseTheTitle(t *testing.T) {
+	if got := noticeKey(Notice{Kind: "brief", Title: "Morning brief"}); got != "brief|Morning brief" {
+		t.Errorf("noticeKey = %q", got)
+	}
+	if got := noticeKey(Notice{Kind: "task", ID: "42", Title: "Still open"}); got != "task|42" {
+		t.Errorf("noticeKey with an id = %q", got)
 	}
 }
 
