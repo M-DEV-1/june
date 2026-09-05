@@ -1005,10 +1005,14 @@ export function step(
     case "noticeAct": {
       const notice = view.notice;
       if (!notice) return { view };
-      const down = { ...view, notice: undefined, noticeAlone: false, noticeHeld: false };
-      // Open is the click the card has always answered; everything else goes to the daemon, whose follow-up event brings the one-line confirmation back.
-      if (event.act === "open") return { view: down, effect: { kind: "openNotice", place: notice.place, id: notice.id } };
-      return { view: down, effect: { kind: "noticeAct", notice, act: event.act } };
+      // Open is the click the card has always answered, and it takes the card down because it leaves for the app window.
+      if (event.act === "open")
+        return {
+          view: { ...view, notice: undefined, noticeAlone: false, noticeHeld: false },
+          effect: { kind: "openNotice", place: notice.place, id: notice.id },
+        };
+      // Done and the snoozes go to the daemon and leave the card standing, because the daemon can refuse them (a store it cannot write answers 500) and a card dropped at the press would show a refusal as done. The daemon's follow-up event, the same notice with its action filled in, is what replaces it with the one-line confirmation, and the six-second timer takes it away if nothing comes back.
+      return { view, effect: { kind: "noticeAct", notice, act: event.act } };
     }
 
     case "voiceEvent": {

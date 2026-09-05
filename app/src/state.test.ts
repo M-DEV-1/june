@@ -1631,21 +1631,23 @@ describe("the conversation the hover asks in", () => {
   });
 });
 
-// The notice card's own buttons: Done and the three snoozes go to the daemon, Open goes to the app window, and each takes the card down at once; the daemon's follow-up event (the same notice with its action filled in) is what shows the one-line confirmation afterwards.
+// The notice card's own buttons: Done and the three snoozes go to the daemon and leave the card standing, because the daemon can refuse them (a locked store answers 500) and a card taken down at the press would show a refusal as done; the daemon's follow-up event, the same notice with its action filled in, is what replaces it with the one-line confirmation. Open is the one that takes the card down at the press, because it leaves for the app window.
 describe("noticeAct", () => {
   const task = { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" };
 
-  it("hands Done and the snoozes to the daemon and takes the card away", () => {
+  it("hands Done and the snoozes to the daemon and leaves the card up until the daemon answers", () => {
     const up = step(view(), { kind: "notice", notice: task, hoverOpen: false }).view;
     const { view: next, effect } = step(up, { kind: "noticeAct", act: "hour" });
     expect(effect).toEqual({ kind: "noticeAct", notice: task, act: "hour" });
-    expect(next.notice).toBeUndefined();
-    expect(next.noticeAlone).toBe(false);
+    expect(next.notice).toEqual(task);
+    expect(next.noticeAlone).toBe(true);
   });
 
-  it("treats Open as the click it always was", () => {
+  it("treats Open as the click it always was, and takes the card down with it", () => {
     const up = step(view(), { kind: "notice", notice: task, hoverOpen: false }).view;
-    expect(step(up, { kind: "noticeAct", act: "open" }).effect).toEqual({ kind: "openNotice", place: "tasks", id: "42" });
+    const { view: next, effect } = step(up, { kind: "noticeAct", act: "open" });
+    expect(effect).toEqual({ kind: "openNotice", place: "tasks", id: "42" });
+    expect(next.notice).toBeUndefined();
   });
 
   it("does nothing with no card up", () => {

@@ -160,9 +160,15 @@ export async function resolveContext(desk: Desktop, position: HoverPosition): Pr
 /** How far under the top bar a notice-only window starts, in logical pixels. */
 const NOTICE_GAP = 8;
 
-/** Where a window showing nothing but a notice goes: flush with the right edge of the work area and just under the top bar, which is where the desktop's own notifications sit and where the user looks for one. Input: the monitor's usable area and the window's size in physical pixels, and the monitor's scale. Output: the window's top-left corner in physical desktop coordinates. */
-export function noticePlacement(work: Rect, win: { width: number; height: number }, scale: number): { x: number; y: number } {
-  return { x: work.x + work.width - win.width, y: work.y + NOTICE_GAP * scale };
+/** Where a window showing nothing but a notice goes: flush with the right edge of the usable area and just under the top bar, beside the tray where Ora's own indicator sits, which is where the user asked for it. The dock is taken off the same way the hover's placement takes it off, so an auto-hiding dock on the right edge does not end up with the card under it, and everything the window cannot fit inside resolves to the top-left of that area. Input: the placement context captured when the window was shown, and the window's logical size. Output: the window's top-left corner in physical desktop coordinates. */
+export function noticePlacement(ctx: PlaceContext, logical: { width: number; height: number }): { x: number; y: number } {
+  const scale = ctx.scale > 0 ? ctx.scale : 1;
+  const win = { width: logical.width * scale, height: logical.height * scale };
+  const area = dockedArea(ctx.work, { edge: ctx.dock.edge, clearance: ctx.dock.clearance * scale });
+  return {
+    x: clamp(area.x + area.width - win.width, area.x, area.x + area.width - win.width),
+    y: clamp(area.y + NOTICE_GAP * scale, area.y, area.y + area.height - win.height),
+  };
 }
 
 /** How much of the work area the card's thread may take. */

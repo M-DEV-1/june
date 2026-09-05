@@ -186,7 +186,7 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
   .W .in .wave i, .W .in .dot.pulse { animation: none; }
 }
 
-/* The notice card: one of Ora's own moments — the morning brief, the evening close, a task lifted from a meeting — arriving on the daemon's event stream. It is the same surface as the card under it, with its answers on it, so it is dealt with where it appears: no separate desktop banner, nowhere else to go. Shown on its own it sits under the top bar at the right, where the desktop's own notifications sit (see noticePlacement in winplace.ts). */
+/* The notice card: one of Ora's own moments — the morning brief, the evening close, a task lifted from a meeting — arriving on the daemon's event stream. It is the same surface as the card under it, with its answers on it, so it is dealt with where it appears: no separate desktop banner, nowhere else to go. Shown on its own it sits under the top bar at the right, beside the tray where Ora's indicator is, which is where the user asked for it (see noticePlacement in winplace.ts). */
 .N {
   position: relative;
   width: fit-content;
@@ -212,6 +212,8 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .N .na { font: 500 12px/1.4 var(--body); color: var(--fg); background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
 .N .na:hover { background: var(--well); border-color: var(--line); }
 .N .na:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* One muted line under the buttons when a press did not take: the daemon answered with an error or could not be reached, and the card stays up to be pressed again (see actOnNotice in main.ts). */
+.N .nf { color: var(--mute); margin-top: 6px; }
 /* Stacked over an open card the notice sits above it with a little air; on its own it has the body's padding around it and nothing else. */
 .N.down { margin-bottom: 8px; }
 .N.up { margin-top: 8px; }
