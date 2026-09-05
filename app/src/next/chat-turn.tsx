@@ -15,6 +15,7 @@ import {
   useReading,
 } from "./parts";
 import type { JobRun, Run } from "./store";
+import { ReplyMarkdown } from "./chat-markdown";
 import { ReplyMeta } from "./chat-reply";
 import { ThreadRail } from "./chat-rail";
 import { JobTurn } from "./chat-job";
@@ -195,7 +196,7 @@ export function Thread({
                           : ""
                       }
                     >
-                      <p className="whitespace-pre-wrap">{turnText(t)}</p>
+                      <ReplyMarkdown text={turnText(t)} />
                       <ReplyMeta turn={t} folded={!wide || !sources} />
                     </div>
                   )}
