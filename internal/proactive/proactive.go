@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"ora/internal/brain"
@@ -43,6 +44,12 @@ type Store interface {
 	NotesOfKindSince(ctx context.Context, kind string, since time.Time) ([]db.Note, error)
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	MemoryAsOf(ctx context.Context, source string) (time.Time, error)
+
+	// Routines and SetRoutineRun back the routine runner (see routine.go): every routine to check, and where each due one's result is recorded. TryStart/Finish are the in-flight guard shared with POST /routines/{id}/run so the two never run the same routine at once.
+	Routines(ctx context.Context) ([]db.Routine, error)
+	SetRoutineRun(ctx context.Context, id int64, when time.Time, answer string) error
+	TryStart(id int64) bool
+	Finish(id int64)
 }
 
 // Scheduler owns the two daily proactive duties. Construct with New and run with Run; both duties key their once-per-day state off the diary table itself (the close is done when today's kind='day' row exists, the brief when today's kind='brief' row does), so a daemon restart never repeats or loses a delivery.
@@ -59,6 +66,8 @@ type Scheduler struct {
 	now func() time.Time
 	// weeklyStudy runs the Sunday-only weekly system log + distillation study pass; unset (the zero value) disables the trigger entirely. See SetWeeklyStudy.
 	weeklyStudy func(ctx context.Context, now time.Time) error
+	// routineAsk puts a due routine's instruction to the daemon's own ask path; unset disables the routine runner entirely. See SetRoutineAsk.
+	routineAsk func(ctx context.Context, question string) (string, error)
 }
 
 // New builds a Scheduler from the store, a one-shot brain, a desktop-notification func (NotifySend in production), and the proactive config, whose zero hours resolve to the defaults.
@@ -97,6 +106,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	s.maybeBrief(ctx)
 	s.maybeClose(ctx)
 	s.maybeWeeklyStudy(ctx)
+	s.maybeRoutines(ctx)
 }
 
 // maybeClose writes the day's diary entry once the close hour has passed, provided today has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
@@ -158,7 +168,7 @@ func (s *Scheduler) closeDay(ctx context.Context, now time.Time, day string) err
 	if err := s.store.SetDiaryEntry(ctx, day, "day", entry); err != nil {
 		return err
 	}
-	s.notify("Day's written down", firstLine(entry))
+	s.say(Notice{Title: "Day's written down", Body: firstLine(entry), Place: "days", ID: day, Kind: "close"})
 	return nil
 }
 
@@ -176,7 +186,7 @@ Principles:
 
 // composeDiaryPrompt assembles the diary brain call's input: the instruction, then today's summary timeline, today's meeting minutes, the current understanding doc, yesterday's entry, and the personal context. Every section is always present, "(none)" when empty, so the model never guesses whether material was withheld or just absent.
 func (s *Scheduler) composeDiaryPrompt(ctx context.Context, now time.Time) (string, error) {
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	dayStart := db.DayStart(now)
 	summaries, err := s.store.SummaryTimeline(ctx, dayStart, now)
 	if err != nil {
 		return "", err
@@ -345,10 +355,10 @@ func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string)
 	if err := s.store.SetDiaryEntry(ctx, day, "brief", brief); err != nil {
 		return err
 	}
-	s.notify("Morning brief", brief)
-	// Only the user's own work is theirs to report progress on. Somebody else's item still shows in the brief — they are waiting on it — but being asked "any progress?" about a task another person owes is a question they cannot answer.
-	if mine := firstOwnedByUser(ask, s.identityText(ctx)); mine != nil {
-		go s.askAbout(ctx, *mine)
+	s.say(Notice{Title: "Morning brief", Body: brief, Place: "tasks", Kind: "brief"})
+	// ask came from OpenActionItems, which already keeps only the user's own work ("Me" or an unnamed owner) — asking about the first one needs no further ownership check here.
+	if len(ask) > 0 {
+		go s.askAbout(ctx, ask[0])
 	}
 	return nil
 }
@@ -360,32 +370,9 @@ var askAnswers = []struct{ key, label, status, priority string }{
 	{"low", "Not urgent", "", memory.PriorityLow},
 }
 
-// identityText returns the personal-context entry naming the user, or "" when there is none.
-func (s *Scheduler) identityText(ctx context.Context) string {
-	entries, err := s.store.PersonalContext(ctx)
-	if err != nil {
-		slog.Debug("could not read who the user is", "error", err)
-		return ""
-	}
-	for _, e := range entries {
-		if e.Subject == "identity" {
-			return e.Content
-		}
-	}
-	return ""
-}
-
-// firstOwnedByUser returns the first item the user themselves owes, or nil when none of them is theirs.
-func firstOwnedByUser(items []memory.ActionItem, identity string) *memory.ActionItem {
-	for _, a := range items {
-		if memory.OwnedByUser(a.Owner, identity) {
-			return &a
-		}
-	}
-	return nil
-}
-
 // askAbout puts one stale action item to the user as a notification they can answer with a click, and applies whatever they choose. Dismissing it changes nothing and the item is simply asked about again another morning. Runs in its own goroutine because the notification blocks until it is answered, which can be hours.
+//
+// This one stays with notify-send while the four telling moments moved to the window's own card: the answer is the whole point of it, and the card has no buttons to answer with.
 //
 // ponytail: re-asks every morning until answered. If that grates, stamp the item with the day it was last asked about and leave a gap.
 func (s *Scheduler) askAbout(ctx context.Context, a memory.ActionItem) {
@@ -564,9 +551,62 @@ func notifyArgs(icon, title, body string) []string {
 	return append(args, title, body)
 }
 
+// Notice is one moment Ora has something to say about, drawn by the desktop window as its own card instead of being handed to GNOME. Title is the card's first line and Body the few lines under it. Place and ID say what a click on the card opens — Place names one of the app window's screens ("tasks", "days") and ID the row to select there, both empty when the moment points at nothing in particular. Kind names the moment: "brief", "close", "meeting" or "note".
+type Notice struct {
+	Title string
+	Body  string
+	Place string
+	ID    string
+	Kind  string
+}
+
+// noticeSend is the desktop window's notice channel, wired once at startup by cmd/daemon.go and read from whichever goroutine a notification happens to be on, which is what noticeMu guards. Nil means nothing has been wired and every notification goes to notify-send.
+var (
+	noticeMu   sync.Mutex
+	noticeSend func(Notice) bool
+)
+
+// SetNoticeSender wires the channel every notification in this package prefers over notify-send. Input: a func that offers one notice to the desktop window and reports whether a window was there to draw it — the daemon passes one that asks the ipc hub whether any window has been reading the event stream lately — or nil to send everything through notify-send again. Output: nothing.
+func SetNoticeSender(send func(Notice) bool) {
+	noticeMu.Lock()
+	defer noticeMu.Unlock()
+	noticeSend = send
+}
+
+// sendNotice offers one moment to the desktop window. Input: the notice. Output: true when a window took it, and false when no sender is wired or no window is listening, in which case the caller falls back to notify-send.
+func sendNotice(n Notice) bool {
+	noticeMu.Lock()
+	send := noticeSend
+	noticeMu.Unlock()
+	return send != nil && send(n)
+}
+
+// say delivers one of the scheduler's own moments: to the desktop window when a window is there to draw it, and to notify-send when none is. Input: the notice. Output: nothing.
+func (s *Scheduler) say(n Notice) {
+	if sendNotice(n) {
+		return
+	}
+	s.notify(n.Title, n.Body)
+}
+
+// noticeKinds names the moment behind a notification from the icon it was posted with, which is the only thing such a call carries that says what it is about: the recorder posts everything it has to say about a meeting under the microphone icon, its "Before you join" prep included, and this package's own daily moments carry the calendar.
+var noticeKinds = map[string]string{"audio-input-microphone": "meeting", "x-office-calendar": "day"}
+
+// noticeKind is the kind a package-level Notify sends its notice under. Input: the icon the notification was posted with. Output: the moment's name, or "note" for an icon this package has no moment for.
+func noticeKind(icon string) string {
+	if kind, ok := noticeKinds[icon]; ok {
+		return kind
+	}
+	return "note"
+}
+
 // Notify posts a desktop notification through notify-send, which GNOME provides. A long body also gets a "Read in full" button that opens the whole text in a zenity window, because GNOME's banner truncates it. Failure is logged and ignored: a missing notification must never take down the work that produced it.
 // The long form waits in the background for the button, up to an hour, so the caller never blocks on it.
+// The desktop window gets first refusal: it draws the same text as a card of Ora's own, which is not cut off after two lines and can be clicked through to what it is about, so notify-send is only reached when no window is listening.
 func Notify(icon, title, body string) {
+	if sendNotice(Notice{Title: title, Body: body, Kind: noticeKind(icon)}) {
+		return
+	}
 	args := notifyArgs(icon, title, body)
 	if len([]rune(body)) <= longBodyRunes {
 		if err := exec.Command("notify-send", args...).Run(); err != nil {
