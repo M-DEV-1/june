@@ -54,14 +54,26 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 /* DESIGN.md's text-lead: the size a document's opening paragraph reads at, used here for the composer's own typed line, at the 500 weight the design system uses to pick a line out rather than just read it. */
 .W .in .q { flex: 1; font-size: 17px; line-height: 1.55; font-weight: 500; letter-spacing: -.008em; min-width: 0; border: 0; outline: 0; background: transparent; color: inherit; font-family: inherit; padding: 0; }
 .W .in .q::placeholder { color: var(--mute); font-weight: 400; }
-/* While a live voice session is on, the status line (the placeholder text) reads in the accent colour instead of the resting mute grey, so the mode is unmistakable even at a glance and not just on close reading. */
-.W .in.live .q::placeholder { color: var(--accent); }
 /* The context chip is a label saying what is on screen, not a button: no fill, no border, no code font, just muted proportional text that gives way to the input when the window title is long. DESIGN.md's text-ui: every control's size. */
 .W .in .ctx { font: 400 13px/1.45 var(--body); color: var(--mute); white-space: nowrap; max-width: 38%; overflow: hidden; text-overflow: ellipsis; flex: none; }
-/* The live-voice waveform (see waveform.ts): Ora's own four braille rows, in the accent purple (WaveOra), the whole session long — a hands-free session has no user-microphone grid to show beside it. Monospace so the braille cells line up column for column the way they were built to. Four rows at 9px/1.0 line-height stack to exactly 36px, so the block sits within the composer row's height. */
-.W .in .vwave { display: flex; align-items: center; flex: none; font-family: var(--mono); font-size: 9px; line-height: 1; }
+
+/* The voice-mode surface (see main.ts's voiceSurfaceHtml): replaces the input and the thread entirely for the whole length of a live voice session, the way Gemini Live and ChatGPT's own voice mode take over the screen instead of sharing it with the composer. */
+.W .voicebox { display: grid; justify-items: center; gap: 16px; padding: 32px 24px 20px; }
+.W .vs-state { font: 600 11px/1.3 var(--body); letter-spacing: .08em; text-transform: uppercase; color: var(--mute); }
+/* Ora's own four braille rows (see waveform.ts), the surface's centrepiece rather than a sliver beside the input: 16px monospace at line-height 1, in the accent purple (about 40 columns × 4 rows). */
+.W .vwave { font-family: var(--mono); font-size: 16px; line-height: 1; }
 .W .vw-spk { display: flex; flex-direction: column; color: var(--accent); }
 .W .vw-row { white-space: pre; }
+/* The last thing the user said and the last thing Ora said, one line each, clipped rather than wrapped — a live session's transcript is a glance, not something to read in full here. */
+.W .vs-transcript { display: grid; gap: 4px; justify-items: center; max-width: 100%; }
+.W .vs-you, .W .vs-ora { font-size: 14px; line-height: 1.5; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.W .vs-you { color: var(--mute); }
+.W .vs-ora { color: var(--fg); }
+/* The stop control sits at the surface's bottom right, same as a recorder's own stop button, with the key that does the same thing named beside it. */
+.W .vs-ctl { justify-self: end; display: flex; align-items: center; gap: 8px; }
+.W .vs-stop { width: 30px; height: 30px; padding: 0; border-radius: 50%; border: 1px solid var(--line); background: var(--well); color: var(--bad); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.W .vs-stop svg { fill: currentColor; }
+.W .vs-hint { font: 500 11px/1.3 var(--body); letter-spacing: .02em; text-transform: uppercase; color: var(--mute); }
 
 /* The empty state before anything is asked: one calm row, about 64px tall. No divider and no footer until there is text in the input or a turn on screen (see .bare in main.ts's hasContent). */
 .W.bare .in { padding: 17px 24px; border-bottom: none; }

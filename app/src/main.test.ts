@@ -186,15 +186,58 @@ describe("the raw stream event needs no cast to reach the reducer", () => {
   });
 });
 
-// The waveform itself (buildVariation, the smoothing, the braille rows) is tested in waveform.test.ts; this only checks that a "level" event on a live session reaches the DOM at all, and reaches it as the row wide enough main.ts asked waveform.ts to build. There is no user-microphone grid any more — a live session is hands-free, so only Ora's own voice is ever drawn (see voiceWaveInnerHtml in main.ts).
-describe("the live-voice waveform", () => {
+// The waveform itself (buildVariation, the smoothing, the braille rows) is tested in waveform.test.ts. These check the voice-mode surface built around it (see voiceSurfaceHtml in main.ts): while a session runs it replaces the input and the thread entirely, the way Gemini Live and ChatGPT's own voice mode take over the screen.
+describe("live voice mode", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
     document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
   });
 
-  it("shows Ora's silent rows for the whole session, not just while she speaks, and animates once a level event reports her speaking", async () => {
+  it("replaces the input with the voice surface, and brings the input back once the stop control ends the session", async () => {
+    const { voiceStop } = await import("./daemon");
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(document.querySelector(".q")).toBeTruthy();
+    expect(document.querySelector(".voicebox")).toBeNull();
+
+    dispatch({ kind: "voiceOn", id: "voice-1" });
+
+    expect(document.querySelector(".q")).toBeNull();
+    expect(document.querySelector(".voicebox")).toBeTruthy();
+    expect(document.querySelector(".vs-state")?.textContent).toBe("Listening");
+    expect(document.querySelectorAll(".vw-spk .vw-row").length).toBe(4);
+    const stopBtn = document.querySelector<HTMLButtonElement>(".vs-stop");
+    expect(stopBtn).toBeTruthy();
+
+    stopBtn?.click();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(voiceStop).toHaveBeenCalled();
+    expect(document.querySelector(".voicebox")).toBeNull();
+    expect(document.querySelector(".q")).toBeTruthy();
+  });
+
+  it("shows the state word the daemon's 'state' events report", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "voiceOn", id: "voice-1" });
+    dispatch({
+      kind: "voiceEvent",
+      ev: { id: "voice-1", type: "state", text: "thinking" },
+    });
+    expect(document.querySelector(".vs-state")?.textContent).toBe("Thinking");
+
+    dispatch({
+      kind: "voiceEvent",
+      ev: { id: "voice-1", type: "state", text: "speaking" },
+    });
+    expect(document.querySelector(".vs-state")?.textContent).toBe("Speaking");
+  });
+
+  it("breathes gently while Ora is silent, and lets a real level take over once she speaks", async () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
 
@@ -203,28 +246,22 @@ describe("the live-voice waveform", () => {
       Array.from(document.querySelectorAll(".vw-spk .vw-row")).map(
         (el) => el.textContent ?? "",
       );
-    // Four rows top to bottom: far-top, near-top, near-bottom, far-bottom (see waveform.ts's render()).
-    const [silentFarTop, silentNearTop, silentNearBottom, silentFarBottom] = rowText();
-    expect(silentNearTop).toBeTruthy();
-    expect(silentFarTop).toBe("⠀".repeat(silentFarTop.length));
-    expect(silentNearTop).toBe("⣀".repeat(silentNearTop.length));
-    expect(silentNearBottom).toBe("⠉".repeat(silentNearBottom.length));
-    expect(silentFarBottom).toBe("⠀".repeat(silentFarBottom.length));
-    // No user-microphone grid exists at all, not even a hidden or empty one.
-    expect(document.querySelector(".vw-mic")).toBeNull();
+    const silentNearTop = rowText()[1];
 
-    // A loud mic reading alone (Ora still just listening) must not animate anything — there is nothing left on screen for the mic to drive.
+    // A silent ("speaker": 0) level tick still moves the grid — the idle breathing — instead of leaving it flat.
     dispatch({
       kind: "voiceEvent",
       ev: {
         id: "voice-1",
         type: "level",
-        detail: JSON.stringify({ mic: 0.8, speaker: 0 }),
+        detail: JSON.stringify({ mic: 0, speaker: 0 }),
       },
     });
     await new Promise((r) => requestAnimationFrame(r));
-    expect(rowText()[1]).toBe(silentNearTop);
+    const breathingNearTop = rowText()[1];
+    expect(breathingNearTop).not.toBe(silentNearTop);
 
+    // A real speaker reading takes over from the breathing once she actually speaks.
     dispatch({
       kind: "voiceEvent",
       ev: {
@@ -233,12 +270,34 @@ describe("the live-voice waveform", () => {
         detail: JSON.stringify({ mic: 0, speaker: 0.8 }),
       },
     });
-    // The repaint is coalesced to at most one per animation frame rather than applied synchronously (see scheduleVoiceWaveRepaint in main.ts), so the DOM only reflects it after one has run.
     await new Promise((r) => requestAnimationFrame(r));
+    expect(rowText()[1]).not.toBe(breathingNearTop);
+  });
 
-    const [, loudNearTop, loudNearBottom] = rowText();
-    expect(loudNearTop).not.toBe(silentNearTop);
-    expect(loudNearBottom).not.toBe(silentNearBottom);
+  it("shows the last thing the user said and the last thing Ora said", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "voiceOn", id: "voice-1" });
+    expect(document.querySelector(".vs-you")).toBeNull();
+    expect(document.querySelector(".vs-ora")).toBeNull();
+
+    dispatch({
+      kind: "voiceEvent",
+      ev: { id: "voice-1", type: "heard", text: "what's the weather" },
+    });
+    expect(document.querySelector(".vs-you")?.textContent).toBe(
+      "what's the weather",
+    );
+    expect(document.querySelector(".vs-ora")).toBeNull();
+
+    dispatch({
+      kind: "voiceEvent",
+      ev: { id: "voice-1", type: "said", text: "Sunny today." },
+    });
+    expect(document.querySelector(".vs-ora")?.textContent).toBe(
+      "Sunny today.",
+    );
   });
 });
 

@@ -1,4 +1,4 @@
-/** Seed data for the window: the venue matter's script, the CI-red matter already answered, and the lease stub. Also owns the ?mock=1&voice=1 switch, which fakes a live-voice session (see startMockVoice) so the composer's braille waveform can be exercised and screenshotted with no daemon and no microphone. */
+/** Seed data for the window: the venue matter's script, the CI-red matter already answered, and the lease stub. Also owns the ?mock=1&voice=1 switch, which fakes a live-voice session (see startMockVoice) so the voice-mode surface can be exercised and screenshotted with no daemon and no microphone. */
 import type { Evidence, Matter, View } from "./state";
 
 /** The one email both venue turns read from. Turn one leaves it collapsed; turn two is the same source, expanded. */
@@ -76,12 +76,15 @@ export function fakeLevelAt(ms: number): { mic: number; speaker: number } {
   };
 }
 
-/** Wires ?mock=1&voice=1: starts a fake live-voice session so the hover's composer waveform can be driven and screenshotted without a daemon or a microphone. Input: the page's query params. Output: nothing; dispatches "voiceOn" and then a "level" event every 50ms straight into main.ts's real dispatch (see fakeLevelAt for the envelope), same as a live session's daemon events would. main.ts imports this module (for initialView/venueScript), so importing dispatch back from "./main" at the top of this file would be a circular static import — main.ts would still be mid-load, before its own view/root/Waveform locals exist, the moment this file's top level ran. A dynamic import() instead resolves once main.ts has actually finished loading (immediately, since by then it already has), sidestepping that. */
+/** Wires ?mock=1&voice=1: starts a fake live-voice session so the hover's voice-mode surface can be driven and screenshotted without a daemon or a microphone. Input: the page's query params. Output: nothing; dispatches "voiceOn" and then, straight into main.ts's real dispatch, a "level" event every 50ms (see fakeLevelAt for the envelope) plus a fixed one-off script — a "heard" transcript line, then "thinking", then "speaking" with a "said" reply — timed against that same envelope so a capture at 1300ms (still in the first, speaker-silent cycle) shows the surface listening with a breathing grid, and one at 2000ms (the second cycle's speaker burst, cycle 1 of fakeLevelAt) shows it mid-reply with the grid driven by the real reading. main.ts imports this module (for initialView/venueScript), so importing dispatch back from "./main" at the top of this file would be a circular static import — main.ts would still be mid-load, before its own view/root/Waveform locals exist, the moment this file's top level ran. A dynamic import() instead resolves once main.ts has actually finished loading (immediately, since by then it already has), sidestepping that. */
 export function startMockVoice(params: URLSearchParams): void {
   if (!params.has("mock") || params.get("voice") !== "1") return;
   void import("./main").then(({ dispatch }) => {
     dispatch({ kind: "voiceOn", id: MOCK_VOICE_ID });
     let elapsed = 0;
+    let heard = false;
+    let thinking = false;
+    let speaking = false;
     setInterval(() => {
       elapsed += TICK_MS;
       const { mic, speaker } = fakeLevelAt(elapsed);
@@ -93,6 +96,35 @@ export function startMockVoice(params: URLSearchParams): void {
           detail: JSON.stringify({ mic, speaker }),
         },
       });
+      if (!heard && elapsed >= 400) {
+        heard = true;
+        dispatch({
+          kind: "voiceEvent",
+          ev: { id: MOCK_VOICE_ID, type: "heard", text: "what's the weather" },
+        });
+      }
+      if (!thinking && elapsed >= 1600) {
+        thinking = true;
+        dispatch({
+          kind: "voiceEvent",
+          ev: { id: MOCK_VOICE_ID, type: "state", text: "thinking" },
+        });
+      }
+      if (!speaking && elapsed >= 1800) {
+        speaking = true;
+        dispatch({
+          kind: "voiceEvent",
+          ev: { id: MOCK_VOICE_ID, type: "state", text: "speaking" },
+        });
+        dispatch({
+          kind: "voiceEvent",
+          ev: {
+            id: MOCK_VOICE_ID,
+            type: "said",
+            text: "Sunny and 24 degrees.",
+          },
+        });
+      }
     }, TICK_MS);
   });
 }
