@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,7 +129,8 @@ func (n *BusNotifier) Notify(noticeKey, title, body string, actions []Action, ch
 		return fmt.Errorf("notify: %w", err)
 	}
 	n.waiting[id] = chose
-	if noticeKey != "" {
+	// A key with no id behind it ("meeting|", every package-level Notify) would make each such banner overwrite the last one's entry, so only a notice with a row of its own is remembered for Close.
+	if noticeKey != "" && !strings.HasSuffix(noticeKey, "|") {
 		n.keyed[noticeKey] = id
 	}
 	return nil
@@ -183,6 +185,12 @@ func (n *BusNotifier) finish(id uint32, key string) {
 	n.mu.Lock()
 	chose := n.waiting[id]
 	delete(n.waiting, id)
+	// The banner is gone, so the key that pointed at it goes too; otherwise the map grows for the life of the daemon and a later Close aims at a dead id.
+	for k, v := range n.keyed {
+		if v == id {
+			delete(n.keyed, k)
+		}
+	}
 	n.mu.Unlock()
 	if chose != nil {
 		chose(key)
@@ -274,16 +282,17 @@ func (s *Scheduler) chose(ctx context.Context, n Notice, key string) {
 	}
 }
 
-// snooze puts a notice away until later and tells the window it has gone. Input: the notice and the pressed snooze button's key. Output: nothing.
-func (s *Scheduler) snooze(ctx context.Context, n Notice, key string) {
+// snooze puts a notice away until later and tells the window it has gone. Input: the notice and the pressed snooze button's key. Output: the store's error when the snooze could not be written, so the route that asked answers with a failure instead of a 200 that snoozed nothing; nil once it is stored.
+func (s *Scheduler) snooze(ctx context.Context, n Notice, key string) error {
 	due := snoozeUntil(s.now(), key)
 	if _, err := s.store.AddSnooze(ctx, n.Kind, n.ID, n.Title, n.Body, due); err != nil {
 		slog.Warn("could not snooze a notice", "kind", n.Kind, "id", n.ID, "error", err)
-		return
+		return err
 	}
 	n.Action = "snoozed"
 	n.Until = due.Format(time.RFC3339)
 	sendNotice(n)
+	return nil
 }
 
 // markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is Ora reporting, not work owed — so all this records is that the user cleared it. Either way, any snooze still pending for this notice is cancelled, so a Done pressed while a snooze is in flight — from the original notice or from a re-fired one, both carrying the same kind and id — stops it firing again. Input: the notice. Output: whatever closing the task returned when that failed — ErrTaskGone when the id no longer names one — otherwise nil; cancelling the pending snooze is best-effort and only logged on failure, since the notice itself is already closed by then.
@@ -308,7 +317,7 @@ var ErrBadNoticeAction = errors.New("not a notice action")
 // ErrTaskGone is what Act returns for "done" on a task notice whose task no longer exists. The taskDone func wired with SetTaskDone (cmd/daemon.go's loopback call to its own POST /tasks/{id}/done) is what recognises the 404 that route answers with and wraps this in.
 var ErrTaskGone = errors.New("the task this notice named no longer exists")
 
-// Act applies one notice button exactly as pressing it on the desktop notification would. POST /notices/{kind}/{id}/action calls this directly, and chose (a D-Bus press) calls it too, for Done and the three snooze buttons — the one path both surfaces answer through, so a task closed or snoozed from either takes the same code. Input: kind and id name the notice ("" for one with no task or place behind it, such as a brief), title and body are what a snooze needs to re-fire the notice later, and action is "done", "hour", "evening" or "tomorrow". Output: ErrBadNoticeAction for any other action string, whatever markDone returned (ErrTaskGone included) for "done", else nil.
+// Act applies one notice button exactly as pressing it on the desktop notification would. POST /notices/{kind}/{id}/action calls this directly, and chose (a D-Bus press) calls it too, for Done and the three snooze buttons — the one path both surfaces answer through, so a task closed or snoozed from either takes the same code. Input: kind and id name the notice ("" for one with no task or place behind it, such as a brief), title and body are what a snooze needs to re-fire the notice later, and action is "done", "hour", "evening" or "tomorrow". Output: ErrBadNoticeAction for any other action string, whatever markDone returned (ErrTaskGone included) for "done", the store's error when a snooze could not be written, else nil.
 // Once the action is applied, this also closes the notice's own desktop banner, if any: without it, a done or snoozed task answered from the window would leave its notification sitting on screen asking the same question a second time. A D-Bus press closing its own already-closing banner a second time this way is harmless — Close is a no-op once the key is gone.
 func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action string) error {
 	n := Notice{Title: title, Body: body, Kind: kind, ID: id}
@@ -317,7 +326,7 @@ func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action strin
 	case actionDone:
 		err = s.markDone(ctx, n)
 	case actionHour, actionEvening, actionTomorrow:
-		s.snooze(ctx, n, action)
+		err = s.snooze(ctx, n, action)
 	default:
 		return ErrBadNoticeAction
 	}
@@ -374,9 +383,10 @@ const taskNoticeWatermarkKind = "task-notice-watermark"
 // maxTaskNoticesPerMeeting caps how many task notices one meeting's newly-lifted action items raise at once. Five bullets from one meeting would otherwise be five banners in a row; the rest are folded into the last one's body as a count instead.
 const maxTaskNoticesPerMeeting = 3
 
-// maybeTaskNotices posts one task notice for each of the user's own action items a meeting has newly raised since the last tick, grouped by the meeting that raised them (Source) and capped at maxTaskNoticesPerMeeting per meeting. Input: the tick's context. Output: nothing — a failed read is logged and retried next tick, and the watermark only advances to the highest note id actually seen this run, whether or not it was announced, so a closed or someone-else's item never gets rescanned forever.
-//
-// ponytail: the watermark starts at zero, so the very first tick after this ships announces every already-open "me" item as if newly raised. Seed it to the current max note id before deploying if that one-time backfill noise matters.
+// maxTaskNoticesPerTick caps how many task notices one tick raises across every meeting, so a day of back-to-back meetings never turns into a wall of cards; whatever is over the cap waits, uncounted, for the next tick.
+const maxTaskNoticesPerTick = 5
+
+// maybeTaskNotices posts one task notice for each of the user's own action items a meeting has newly raised since the last tick, grouped by the meeting that raised them (Source), capped at maxTaskNoticesPerMeeting per meeting and maxTaskNoticesPerTick in all. Input: the tick's context. Output: nothing — a failed read is logged and retried next tick. The very first tick, with no watermark stored yet, announces nothing and only records the highest note id it sees, so a daemon meeting an old store does not raise a notice for every item already open. After that the watermark advances to the highest note id seen among the user's own items, whether or not it was announced, so a closed item is never rescanned; an item another person owned that is later handed to the user by hand (PATCH /tasks/{id}) is already under the watermark and is not announced either.
 func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 	mark, err := s.store.DiaryEntry(ctx, "", taskNoticeWatermarkKind)
 	if err != nil {
@@ -384,6 +394,7 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 		return
 	}
 	watermark, _ := strconv.ParseInt(mark, 10, 64)
+	seeding := mark == ""
 
 	items, err := s.store.ActionItemsByOwner(ctx, memory.OwnerMe)
 	if err != nil {
@@ -398,7 +409,7 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 		if a.NoteID > max {
 			max = a.NoteID
 		}
-		if a.NoteID <= watermark || a.Status != memory.StatusOpen {
+		if seeding || a.NoteID <= watermark || a.Status != memory.StatusOpen {
 			continue
 		}
 		if _, ok := byMeeting[a.Source]; !ok {
@@ -407,13 +418,19 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 		byMeeting[a.Source] = append(byMeeting[a.Source], a)
 	}
 
+	posted := 0
 	for _, meeting := range order {
 		group := byMeeting[meeting]
 		extra := len(group) - maxTaskNoticesPerMeeting
 		if extra > 0 {
 			group = group[:maxTaskNoticesPerMeeting]
 		}
+		if room := maxTaskNoticesPerTick - posted; len(group) > room {
+			// Over the tick's cap the rest of this meeting, and every meeting after it, waits: the watermark still moves, so they are not re-found next tick, which is the price of never flooding the desk.
+			group = group[:room]
+		}
 		for i, a := range group {
+			posted++
 			body := a.Text
 			if i == len(group)-1 && extra > 0 {
 				body += fmt.Sprintf("\n\nand %d more in Tasks", extra)
@@ -422,7 +439,7 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 		}
 	}
 
-	if max != watermark {
+	if max != watermark || seeding {
 		if err := s.store.SetDiaryEntry(ctx, "", taskNoticeWatermarkKind, strconv.FormatInt(max, 10)); err != nil {
 			slog.Warn("task notices: writing the watermark failed", "error", err)
 		}

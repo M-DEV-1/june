@@ -405,6 +405,8 @@ func TestMaybeTaskNotices_WindowUp_SendsOnlyToTheWindow(t *testing.T) {
 	var sent []Notice
 	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
 	t.Cleanup(func() { SetNoticeSender(nil) })
+	// The first tick only seeds the watermark, so the item added after it counts as newly raised.
+	s.maybeTaskNotices(ctx)
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
 		{Owner: "Me", Text: "Send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
 	}); err != nil {
@@ -480,6 +482,8 @@ func TestMaybeTaskNotices_CapsPerMeetingAndSkipsOthers(t *testing.T) {
 	ctx := context.Background()
 	s, store, f := testScheduler(t)
 
+	// The first tick only seeds the watermark, so the items added after it count as newly raised.
+	s.maybeTaskNotices(ctx)
 	items := []memory.ActionItem{
 		{Owner: "Me", Text: "Send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
 		{Owner: "Me", Text: "Book the venue", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
@@ -527,5 +531,74 @@ func assertNoSnoozes(t *testing.T, ctx context.Context, store *db.Store) {
 	}
 	if len(due) != 0 {
 		t.Errorf("snoozes = %+v, want none", due)
+	}
+}
+
+// TestMaybeTaskNotices_FirstTickSeedsTheWatermark checks a daemon meeting a store full of open items announces none of them on its first tick and only records where it got to, so an old store does not flood the desk, and that an item raised after that is announced.
+func TestMaybeTaskNotices_FirstTickSeedsTheWatermark(t *testing.T) {
+	ctx := context.Background()
+	s, store, f := testScheduler(t)
+	old := []memory.ActionItem{{Owner: "Me", Text: "Send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()}}
+	if _, err := store.AddActionItems(ctx, old); err != nil {
+		t.Fatalf("AddActionItems: %v", err)
+	}
+
+	s.maybeTaskNotices(ctx)
+	if f.count() != 0 {
+		t.Fatalf("first tick posted %d task notices, want none", f.count())
+	}
+	if mark, _ := store.DiaryEntry(ctx, "", taskNoticeWatermarkKind); mark == "" {
+		t.Fatal("first tick left no watermark behind")
+	}
+
+	fresh := []memory.ActionItem{{Owner: "Me", Text: "Book the venue", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Planning", Raised: time.Now()}}
+	if _, err := store.AddActionItems(ctx, fresh); err != nil {
+		t.Fatalf("AddActionItems: %v", err)
+	}
+	s.maybeTaskNotices(ctx)
+	if f.count() != 1 || !strings.Contains(f.sent[0].body, "Book the venue") {
+		t.Errorf("second tick posted %d notices (%+v), want the one new item", f.count(), f.sent)
+	}
+}
+
+// TestMaybeTaskNotices_CapsPerTick checks three meetings each raising three items produce five notices in one tick, not nine.
+func TestMaybeTaskNotices_CapsPerTick(t *testing.T) {
+	ctx := context.Background()
+	s, store, f := testScheduler(t)
+	s.maybeTaskNotices(ctx)
+	var items []memory.ActionItem
+	for _, meeting := range []string{"Standup", "Planning", "Review"} {
+		for i := 0; i < 3; i++ {
+			items = append(items, memory.ActionItem{Owner: "Me", Text: fmt.Sprintf("%s item %d", meeting, i), Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: meeting, Raised: time.Now()})
+		}
+	}
+	if _, err := store.AddActionItems(ctx, items); err != nil {
+		t.Fatalf("AddActionItems: %v", err)
+	}
+	s.maybeTaskNotices(ctx)
+	if f.count() != maxTaskNoticesPerTick {
+		t.Errorf("posted %d task notices, want the per-tick cap of %d", f.count(), maxTaskNoticesPerTick)
+	}
+}
+
+// TestAct_Snooze_StoreFailureIsReturned checks a snooze the store could not write comes back as an error, so the route answers with a failure instead of a 200 that snoozed nothing.
+func TestAct_Snooze_StoreFailureIsReturned(t *testing.T) {
+	ctx := context.Background()
+	s, store, _ := testScheduler(t)
+	store.Close()
+	if err := s.Act(ctx, "task", "42", "Still open", "Send the invoice", actionEvening); err == nil {
+		t.Error("Act returned nil for a snooze the store refused")
+	}
+}
+
+// TestBusNotifier_FinishForgetsTheKey checks a pressed or dismissed banner takes its key with it, so the keyed map does not grow for the life of the daemon and a later Close does not aim at a dead id.
+func TestBusNotifier_FinishForgetsTheKey(t *testing.T) {
+	n := &BusNotifier{waiting: map[uint32]func(string){7: func(string) {}}, keyed: map[string]uint32{"task|42": 7, "task|43": 8}}
+	n.finish(7, "done")
+	if _, still := n.keyed["task|42"]; still {
+		t.Error("finished banner's key is still in keyed")
+	}
+	if n.keyed["task|43"] != 8 {
+		t.Error("an unrelated banner's key was dropped")
 	}
 }
