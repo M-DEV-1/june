@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "../shared/tokens.css";
 /* Geist is bundled with the app rather than fetched, so the window has one face on every machine and does not fall back to Cantarell, which is what made the page read as a GTK dialog. */
 @import "@fontsource-variable/geist";
 
@@ -104,81 +105,11 @@
     --shadow-xl: 0 16px 40px -12px var(--shade-3), 0 0 0 1px var(--border);
 }
 
-/* One accent, a cool neutral ramp, and depth built from lightness rather than from drawn lines. Nothing outside these two blocks names a colour. */
-:root {
-    --background: #ffffff;
-    --foreground: #17181c;
-    --card: #ffffff;
-    --card-foreground: #17181c;
-    --popover: #ffffff;
-    --popover-foreground: #17181c;
-    --primary: #5a45ea;
-    --primary-foreground: #ffffff;
-    --secondary: #f2f2f4;
-    --secondary-foreground: #17181c;
-    --muted: rgba(0, 0, 0, .035);
-    --muted-foreground: #61646d;
-    --accent: rgba(0, 0, 0, .045);
-    --accent-foreground: #17181c;
-    --destructive: #c3372b;
-    /* #a3660a read at 4.40:1 against the sidebar's #f7f7f9, under the 4.5:1 AA floor for normal text; this shade clears it (4.87:1) while staying the same amber. */
-    --work: #996009;
-    --border: rgba(0, 0, 0, .075);
-    --border-strong: rgba(0, 0, 0, .13);
-    --input: rgba(0, 0, 0, .13);
-    --ring: #5a45ea;
-    --hover: rgba(0, 0, 0, .045);
-    --selected: rgba(0, 0, 0, .075);
-    --sunken: rgba(0, 0, 0, .035);
-    --shade-1: rgba(0, 0, 0, .06);
-    --shade-2: rgba(0, 0, 0, .10);
-    --shade-3: rgba(0, 0, 0, .20);
-    --radius: 12px;
-    --sidebar: #f7f7f9;
-    --sidebar-foreground: #17181c;
-    --sidebar-primary: #5a45ea;
-    --sidebar-primary-foreground: #ffffff;
-    --sidebar-accent: rgba(0, 0, 0, .045);
-    --sidebar-accent-foreground: #17181c;
-    --sidebar-border: rgba(0, 0, 0, .075);
-    --sidebar-ring: #5a45ea;
-}
+/* The raw colour and shadow tokens (the :root and [data-theme="dark"] custom properties) live in ../shared/tokens.css, shared with the hover window's src/styles.css. Nothing outside that file names a colour. */
 
-[data-theme="dark"] {
-    --background: #191a1d;
-    --foreground: #e8e9ec;
-    --card: #202226;
-    --card-foreground: #e8e9ec;
-    --popover: #232529;
-    --popover-foreground: #e8e9ec;
-    --primary: #9d90ff;
-    --primary-foreground: #17142e;
-    --secondary: #26282d;
-    --secondary-foreground: #e8e9ec;
-    --muted: rgba(255, 255, 255, .05);
-    --muted-foreground: #979ba4;
-    --accent: rgba(255, 255, 255, .055);
-    --accent-foreground: #e8e9ec;
-    --destructive: #f08279;
-    --work: #e0b341;
-    --border: rgba(255, 255, 255, .09);
-    --border-strong: rgba(255, 255, 255, .16);
-    --input: rgba(255, 255, 255, .16);
-    --ring: #9d90ff;
-    --hover: rgba(255, 255, 255, .055);
-    --selected: rgba(255, 255, 255, .09);
-    --sunken: rgba(255, 255, 255, .05);
-    --shade-1: rgba(0, 0, 0, .3);
-    --shade-2: rgba(0, 0, 0, .45);
-    --shade-3: rgba(0, 0, 0, .6);
-    --sidebar: #141518;
-    --sidebar-foreground: #e8e9ec;
-    --sidebar-primary: #9d90ff;
-    --sidebar-primary-foreground: #17142e;
-    --sidebar-accent: rgba(255, 255, 255, .055);
-    --sidebar-accent-foreground: #e8e9ec;
-    --sidebar-border: rgba(255, 255, 255, .09);
-    --sidebar-ring: #9d90ff;
+/* A selected sidebar row is told apart by weight as well as its wash; Geist is a variable face so 590 reads as a real step up from the row beside it rather than a fake bold. Light mode already separates a selected row well enough on its wash alone. */
+[data-theme="dark"] [data-active="true"] {
+    font-weight: 590;
 }
 
 @layer base {
@@ -270,7 +201,7 @@
     line-height: 1.35;
     font-weight: 600;
     letter-spacing: -0.008em;
-    margin-top: 32px;
+    margin-top: 24px;
     margin-bottom: -8px;
     }
   /* The bold phrase the daemon opens a "Your part" line with — "You said", "Said to you" — set apart from the sentence it introduces rather than left running into it. */
