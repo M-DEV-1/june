@@ -19,16 +19,12 @@ import { ReplyMarkdown } from "./chat-markdown";
 import { ReplyMeta } from "./chat-reply";
 import { ThreadRail } from "./chat-rail";
 import { JobTurn } from "./chat-job";
+import { WorkingGrid } from "./working-grid";
 
-/** What the question in flight shows while it runs: the tools called so far as a list of steps down a rule, and under them one amber line — the working line while there is nothing to read, and "still writing" once the answer has started arriving. Input: the run. Output: the block. A tool step already says what it did, so the line above the steps is left off rather than repeating the last one, which is what keeps it to one amber line and not two. */
+/** What the question in flight shows while it runs: the tools called so far as a list of steps down a rule, and under them the dot grid — the one shape that means Ora is busy, whether nothing has arrived yet or the answer is still streaming in. Input: the run. Output: the block. A tool step already says what it did, so the run's status words are left off when they only repeat the last one. */
 function Working({ run }: { run: Run }) {
   const last = run.steps[run.steps.length - 1];
-  const line =
-    run.status && run.status !== last?.detail
-      ? run.status
-      : run.steps.length
-        ? ""
-        : "working…";
+  const line = run.status && run.status !== last?.detail ? run.status : "";
   return (
     <>
       {run.steps.length ? (
@@ -47,11 +43,16 @@ function Working({ run }: { run: Run }) {
       {run.answer ? (
         <div>
           <p className="whitespace-pre-wrap">{run.answer}</p>
-          <div className="mt-1.5 text-meta text-work">still writing</div>
+          <div className="mt-1.5">
+            <WorkingGrid />
+          </div>
         </div>
-      ) : line ? (
-        <p className="text-work">{line}</p>
-      ) : null}
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {line ? <p className="text-muted-foreground">{line}</p> : null}
+          <WorkingGrid />
+        </div>
+      )}
     </>
   );
 }
