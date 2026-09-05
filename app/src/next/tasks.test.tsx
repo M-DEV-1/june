@@ -146,7 +146,7 @@ describe("changing a task's status", () => {
     expect(calls.find((c) => c.path === "/tasks/task-1/done")).toBeUndefined();
   });
 
-  it("holds the circle filled while the change is in flight, and sends nothing when it is clicked again in that time", async () => {
+  it("holds the circle filled while the change is in flight, says the tick is disabled for as long as that lasts, and sends nothing when it is clicked again in that time", async () => {
     const { calls } = renderApp({ tasks }, { place: "tasks" });
     const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     // The fake daemon answers at once, so the round trip is held open here: the status change waits for `answer` to be called, everything else the window reads answers as usual, and `sent` counts the status changes that actually went out.
@@ -166,6 +166,8 @@ describe("changing a task's status", () => {
     await userEvent.click(tick);
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
+    // The click below does nothing whatever the tick looks like, so the tick has to say so rather than swallow it in silence.
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Reopen Book the flight" }).getAttribute("aria-disabled")).toBe("true"));
     await userEvent.click(screen.getByRole("checkbox", { name: "Reopen Book the flight" }));
     await new Promise((r) => setTimeout(r, 500));
     expect(sent).toHaveLength(1);
@@ -173,6 +175,7 @@ describe("changing a task's status", () => {
     answer();
     await waitFor(() => expect(calls.find((c) => c.path === "/tasks/task-1/done")?.body).toEqual({ status: "done" }));
     expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Reopen Book the flight" }).getAttribute("aria-disabled")).not.toBe("true"));
   });
 
   it("moves the tick back and says so when the daemon refuses the change", async () => {
