@@ -127,6 +127,25 @@ describe("changing a task's status", () => {
     expect(within(menu).queryByRole("menuitem", { name: "Drop it" })).toBeNull();
   });
 
+  it("fills the circle at once but waits for the undo window before telling the daemon", async () => {
+    const { calls } = renderApp({ tasks }, { place: "tasks" });
+    const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    await userEvent.click(tick);
+    expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
+    expect(calls.find((c) => c.path === "/tasks/task-1/done")).toBeUndefined();
+    await waitFor(() => expect(calls.find((c) => c.path === "/tasks/task-1/done")?.body).toEqual({ status: "done" }));
+  });
+
+  it("cancels for nothing when a second click lands inside the undo window", async () => {
+    const { calls } = renderApp({ tasks }, { place: "tasks" });
+    const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    await userEvent.click(tick);
+    await userEvent.click(await screen.findByRole("checkbox", { name: "Reopen Book the flight" }));
+    expect(await screen.findByRole("checkbox", { name: "Mark Book the flight done" })).toBeDefined();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(calls.find((c) => c.path === "/tasks/task-1/done")).toBeUndefined();
+  });
+
   it("moves the tick back and says so when the daemon refuses the change", async () => {
     renderApp({ tasks, fails: ["POST /tasks/task-1/done"] }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
@@ -180,11 +199,12 @@ describe("talking to a task", () => {
     await waitFor(() => expect(store.getState().ui.taskChats["12"]).toBe("new"));
   });
 
-  it("says nothing has been said about a task that has no conversation yet", async () => {
+  it("shows only the composer, with the empty line as its placeholder, for a task that has no conversation yet", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     await userEvent.click(list().getByText("Send the TCFD file"));
-    expect(await screen.findByText("Nothing said about “Send the TCFD file” yet.")).toBeDefined();
+    expect(await screen.findByPlaceholderText("Nothing said about “Send the TCFD file” yet.")).toBeDefined();
+    expect(screen.queryByText("Pick a task above to ask about it.")).toBeNull();
   });
 });
 
