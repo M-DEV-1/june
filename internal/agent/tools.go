@@ -1075,11 +1075,26 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if total > 40 {
 			items = items[:40]
 		}
-		a.Marks(items)
-		if len(items) < total {
-			return fmt.Sprintf("marked %d of %d elements on the screen", len(items), total)
+		// The marks are drawn where each element is now, not where the listing said it was: after a scroll the numbers would otherwise sit over whatever moved into those rectangles, and the numbers are what the model then clicks by. An element that is no longer showing gets no mark, the same rule point_at follows.
+		fresh := make([]act.Item, 0, len(items))
+		gone := 0
+		for _, it := range items {
+			x, y, w, h, errText := a.freshRect(ctx, it)
+			if errText != "" {
+				gone++
+				continue
+			}
+			it.X, it.Y, it.W, it.H = x, y, w, h
+			fresh = append(fresh, it)
 		}
-		return fmt.Sprintf("marked %d element(s) on the screen", len(items))
+		a.Marks(fresh)
+		switch {
+		case gone > 0:
+			return fmt.Sprintf("marked %d of %d elements on the screen; %d are no longer showing", len(fresh), total, gone)
+		case len(fresh) < total:
+			return fmt.Sprintf("marked %d of %d elements on the screen", len(fresh), total)
+		}
+		return fmt.Sprintf("marked %d element(s) on the screen", len(fresh))
 
 	case "draw":
 		if a.Draw == nil {

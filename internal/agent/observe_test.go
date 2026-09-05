@@ -443,3 +443,28 @@ func TestExecuteTool_ObserveScreen_SendsTheWholeListWhenTheWindowChanged(t *test
 		t.Errorf("a new window is not unchanged: %q", got)
 	}
 }
+
+// After a scroll the listing's rectangles are stale, so show_marks draws each number where the element is now and leaves out one that is no longer showing, the same way point_at refuses to ring a moved or vanished element.
+func TestExecuteTool_ShowMarks_UsesFreshRectsAndDropsTheGone(t *testing.T) {
+	a, _ := observingAgent(t)
+	var marked []act.Item
+	a.Marks = func(items []act.Item) { marked = items }
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+	seen := a.seen(context.Background())
+	if len(seen) != 2 {
+		t.Fatalf("seen = %d items, want 2", len(seen))
+	}
+	a.extents = func(ctx context.Context, ref string) (int, int, int, int, error) {
+		if ref == seen[0].Ref {
+			return 500, 600, 70, 20, nil
+		}
+		return 0, 0, 0, 0, nil
+	}
+	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
+	if len(marked) != 1 || marked[0].N != 1 || marked[0].X != 500 || marked[0].Y != 600 {
+		t.Errorf("marked = %+v, want only item 1 at its fresh rectangle 500,600", marked)
+	}
+	if !strings.Contains(got, "1 of 2") || !strings.Contains(got, "no longer showing") {
+		t.Errorf("result = %q, want it to say one of two was marked and one is gone", got)
+	}
+}
