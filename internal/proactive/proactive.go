@@ -37,6 +37,8 @@ type Store interface {
 	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
 	SetActionStatus(ctx context.Context, noteID int64, status string) error
 	SetActionPriority(ctx context.Context, noteID int64, priority string) error
+	// ActionItemsByOwner is what maybeTaskNotices (see notify.go) reads to find the user's own action items, oldest first and note id included, so it can tell a meeting's newly-lifted items from ones already announced.
+	ActionItemsByOwner(ctx context.Context, owner string) ([]memory.ActionItem, error)
 
 	// The day's material the close writes from, plus the store's own notion of "now".
 	SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
@@ -120,6 +122,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	s.maybeWeeklyStudy(ctx)
 	s.maybeRoutines(ctx)
 	s.maybeSnoozes(ctx)
+	s.maybeTaskNotices(ctx)
 }
 
 // maybeClose writes the day's diary entry once the close hour has passed, provided today has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
@@ -596,11 +599,9 @@ func sendNotice(n Notice) bool {
 	return send != nil && send(n)
 }
 
-// say delivers one of the scheduler's own moments: to the desktop window when a window is there to draw it, and to notify-send when none is. Input: the notice. Output: nothing.
+// say delivers one of the scheduler's own moments both to the desktop window, as a card of its own, and to the desktop notification with the full set of buttons — always both, since either surface can be the one on screen when the user acts: a window left open all day still wants the notification's Done/snooze buttons, and a notification answered from the message tray still wants the window's rail line to update. Input: the notice. Output: nothing.
 func (s *Scheduler) say(n Notice) {
-	if sendNotice(n) {
-		return
-	}
+	sendNotice(n)
 	s.post(n)
 }
 
@@ -615,24 +616,32 @@ func noticeKind(icon string) string {
 	return "note"
 }
 
-// Notify posts a desktop notification through notify-send, which GNOME provides. A long body also gets a "Read in full" button that opens the whole text in a zenity window, because GNOME's banner truncates it. Failure is logged and ignored: a missing notification must never take down the work that produced it.
+// openOnlyActions is the single button a moment posted outside the scheduler's own notices carries: a meeting's "Before you join" or "Recording saved" has nothing to complete and nowhere to push to later, only somewhere to open.
+var openOnlyActions = []Action{{actionOpen, "Open in Ora"}}
+
+// Notify posts a desktop notification through the same wired notifier the scheduler's own notices use — carrying an "Open in Ora" button — falling back to bare notify-send only when no notifier has been wired (SetNotifier never called, or its own post failed). A long body also gets a "Read in full" button that opens the whole text in a zenity window, because GNOME's banner truncates it; that path is unaffected, since a notification already open in zenity has somewhere to read the whole thing and does not need the bus notifier's button too. Failure is logged and ignored: a missing notification must never take down the work that produced it.
 // The long form waits in the background for the button, up to an hour, so the caller never blocks on it.
-// The desktop window gets first refusal: it draws the same text as a card of Ora's own, which is not cut off after two lines and can be clicked through to what it is about, so notify-send is only reached when no window is listening.
+// The desktop window gets first refusal: it draws the same text as a card of Ora's own, which is not cut off after two lines and can be clicked through to what it is about, so the notifier (and notify-send) are only reached when no window is listening.
 func Notify(icon, title, body string) {
-	if sendNotice(Notice{Title: title, Body: body, Kind: noticeKind(icon)}) {
+	n := Notice{Title: title, Body: body, Kind: noticeKind(icon)}
+	if sendNotice(n) {
 		return
 	}
-	args := notifyArgs(icon, title, body)
 	if len([]rune(body)) <= longBodyRunes {
+		if notifyThroughBus(n) {
+			return
+		}
+		args := notifyArgs(icon, title, body)
 		if err := exec.Command("notify-send", args...).Run(); err != nil {
 			slog.Debug("notify-send failed", "title", title, "error", err)
 		}
 		return
 	}
+	longArgs := notifyArgs(icon, title, body)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "notify-send", args...).Output()
+		out, err := exec.CommandContext(ctx, "notify-send", longArgs...).Output()
 		if err != nil {
 			slog.Debug("notify-send failed", "title", title, "error", err)
 			return
@@ -651,6 +660,26 @@ func Notify(icon, title, body string) {
 			exec.Command("xdg-open", f.Name()).Run()
 		}
 	}()
+}
+
+// notifyThroughBus offers a short notice to the wired bus notifier with a single "Open in Ora" button — for moments outside the scheduler's own (meeting prep, "Recording saved") that have nothing to complete and nowhere to snooze to. Input: the notice. Output: whether the notifier took it; false when none is wired or the desktop refused it, in which case the caller falls back to notify-send.
+func notifyThroughBus(n Notice) bool {
+	noticeMu.Lock()
+	notifier, open := noticeNotifier, noticeOpen
+	noticeMu.Unlock()
+	if notifier == nil {
+		return false
+	}
+	err := notifier.Notify(noticeKey(n), n.Title, n.Body, openOnlyActions, func(key string) {
+		if key == actionOpen && open != nil {
+			open()
+		}
+	})
+	if err != nil {
+		slog.Debug("could not post a notification through the bus, falling back to notify-send", "title", n.Title, "error", err)
+		return false
+	}
+	return true
 }
 
 // NotifySend posts a calendar-icon notification; the recorder uses Notify with its own microphone icon.

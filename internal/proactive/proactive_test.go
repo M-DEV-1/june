@@ -535,9 +535,9 @@ func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 	}
 }
 
-// The four moments now go to Ora's own card in the desktop window, which is the whole point of the change: GNOME's banner cut every one of them off after two lines and there was nothing to click. notify-send stays as the fallback for when no window is listening.
+// The four moments go to Ora's own card in the desktop window AND to the desktop notification, always: GNOME's banner cut every one of them off after two lines with nothing to click, but a window that has been closed all day still needs the notification's own buttons, and a notification answered from the message tray still needs the window's rail line to update — whichever surface the user is looking at has to work.
 
-// TestScheduler_Brief_GoesToTheWindow checks the morning brief is handed to the window as a notice — title, body, the place a click opens and the moment it came from — and that notify-send is not also used when the window took it.
+// TestScheduler_Brief_GoesToTheWindow checks the morning brief is handed to the window as a notice — title, body, the place a click opens and the moment it came from — and is also posted as a desktop notification, since say() now always does both regardless of whether a window is listening.
 func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
@@ -562,8 +562,8 @@ func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 	if len(sent) != 1 || sent[0] != want {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
-	if len(notes) != 0 {
-		t.Errorf("notify-send was used as well as the window: %+v", notes)
+	if len(notes) != 1 || notes[0].title != want.Title || notes[0].body != want.Body {
+		t.Errorf("desktop notifications = %+v, want the brief posted there too", notes)
 	}
 }
 
@@ -590,7 +590,7 @@ func TestScheduler_Brief_FallsBackToNotifySend(t *testing.T) {
 	}
 }
 
-// TestScheduler_Close_GoesToTheWindow checks the evening close is handed over as a notice pointing at the day it just wrote, so clicking the card opens that day's page.
+// TestScheduler_Close_GoesToTheWindow checks the evening close is handed over as a notice pointing at the day it just wrote, so clicking the card opens that day's page, and is also posted as a desktop notification alongside it.
 func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
@@ -615,8 +615,8 @@ func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
 	if len(sent) != 1 || sent[0] != want {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
-	if len(notes) != 0 {
-		t.Errorf("notify-send was used as well as the window: %+v", notes)
+	if len(notes) != 1 || notes[0].title != want.Title || notes[0].body != want.Body {
+		t.Errorf("desktop notifications = %+v, want the close posted there too", notes)
 	}
 }
 
