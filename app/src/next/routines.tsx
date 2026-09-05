@@ -1,9 +1,10 @@
 /** The Routines screen: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Priya replies about the venue, tell me" — added as free text plus a schedule, and a list of what is running with what each last said, a way to run one right now, and a way to drop it. */
 
-import { Play, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { MoreHorizontal, Play, Trash2 } from "lucide-react";
+import { useId, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
   useCreateRoutineMutation,
@@ -30,6 +31,9 @@ function NewRoutine() {
   const [text, setText] = useState("");
   const [schedule, setSchedule] = useState("");
   const [createRoutine, { isLoading }] = useCreateRoutineMutation();
+  const textId = useId();
+  const scheduleId = useId();
+  const hintId = useId();
 
   const add = async () => {
     const t = text.trim();
@@ -45,38 +49,52 @@ function NewRoutine() {
   };
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-      <Input
-        value={text}
-        aria-label="Instruction"
-        placeholder="What should Ora tell you? “Tell me the one thing I must do today”"
-        onChange={(e) => setText(e.target.value)}
-      />
-      <div className="flex gap-2">
+    <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={textId} className="text-meta text-muted-foreground">
+          Instruction
+        </label>
         <Input
-          value={schedule}
-          aria-label="Schedule"
-          className="flex-1"
-          placeholder="When? “weekdays at 8”, “every 3 hours”, “when Priya replies about the venue”"
-          onChange={(e) => setSchedule(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key !== "Enter") return;
-            e.preventDefault();
-            void add();
-          }}
+          id={textId}
+          value={text}
+          placeholder="Tell me the one thing I must do today"
+          onChange={(e) => setText(e.target.value)}
         />
-        <Button
-          disabled={!text.trim() || !schedule.trim() || isLoading}
-          onClick={() => void add()}
-        >
-          Add
-        </Button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={scheduleId} className="text-meta text-muted-foreground">
+          When
+        </label>
+        <div className="flex gap-2">
+          <Input
+            id={scheduleId}
+            value={schedule}
+            className="flex-1"
+            placeholder="weekdays at 8"
+            aria-describedby={hintId}
+            onChange={(e) => setSchedule(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              void add();
+            }}
+          />
+          <Button
+            disabled={!text.trim() || !schedule.trim() || isLoading}
+            onClick={() => void add()}
+          >
+            Add
+          </Button>
+        </div>
+        <p id={hintId} className="text-meta text-muted-foreground">
+          A clock time, an interval, or something to wait for: “weekdays at 8”, “every 3 hours”, “when Priya replies about the venue”.
+        </p>
       </div>
     </div>
   );
 }
 
-/** One routine's row: its instruction and schedule, what it last said or that it has never run, and the run-now and delete actions. Input: the routine. Output: the row. */
+/** One routine's row: its instruction and schedule, what it last said or that it has never run, a run-now button, and an overflow menu holding the one destructive action so it is not adjacent to the safe one at the same weight. Input: the routine. Output: the row. */
 function RoutineRow({ routine }: { routine: Routine }) {
   const dispatch = useAppDispatch();
   const [runRoutine, { isLoading: running }] = useRunRoutineMutation();
@@ -124,14 +142,25 @@ function RoutineRow({ routine }: { routine: Routine }) {
           >
             <Play />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={`Remove "${routine.text}"`}
-            onClick={() => void remove()}
-          >
-            <Trash2 />
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={`More for "${routine.text}"`}
+              >
+                <MoreHorizontal />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                variant="destructive"
+                onClick={() => void remove()}
+              >
+                <Trash2 /> Remove
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
       <p className="text-meta text-muted-foreground">{last}</p>

@@ -51,7 +51,7 @@ describe("adding one", () => {
     const { calls } = renderApp({}, { place: "routines" });
     await screen.findByText("No routines yet. Write one above.");
     await userEvent.type(screen.getByLabelText("Instruction"), "tell me the one thing I must do today");
-    await userEvent.type(screen.getByLabelText("Schedule"), "weekdays at 8");
+    await userEvent.type(screen.getByLabelText("When"), "weekdays at 8");
     await userEvent.click(screen.getByRole("button", { name: "Add" }));
     await waitFor(() =>
       expect(calls.find((c) => c.method === "POST" && c.path === "/routines")?.body).toEqual({
@@ -60,7 +60,7 @@ describe("adding one", () => {
       }),
     );
     expect((screen.getByLabelText("Instruction") as HTMLInputElement).value).toBe("");
-    expect((screen.getByLabelText("Schedule") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("When") as HTMLInputElement).value).toBe("");
   });
 
   it("keeps the button off until both fields are filled in", async () => {
@@ -69,7 +69,7 @@ describe("adding one", () => {
     expect(screen.getByRole("button", { name: "Add" }).hasAttribute("disabled")).toBe(true);
     await userEvent.type(screen.getByLabelText("Instruction"), "tell me something");
     expect(screen.getByRole("button", { name: "Add" }).hasAttribute("disabled")).toBe(true);
-    await userEvent.type(screen.getByLabelText("Schedule"), "every 3 hours");
+    await userEvent.type(screen.getByLabelText("When"), "every 3 hours");
     expect(screen.getByRole("button", { name: "Add" }).hasAttribute("disabled")).toBe(false);
   });
 });
@@ -95,7 +95,9 @@ describe("dropping one", () => {
   it("removes it from the list", async () => {
     const { calls } = renderApp({ routines }, { place: "routines" });
     await screen.findByText("tell me the one thing I must do today");
-    await userEvent.click(screen.getByRole("button", { name: /Remove "tell me the one thing I must do today"/ }));
+    // Removing is behind the row's overflow menu now, so it takes two presses rather than one adjacent to Run.
+    await userEvent.click(screen.getByRole("button", { name: /More for "tell me the one thing I must do today"/ }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Remove" }));
     await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path === "/routines/1")).toBe(true));
     await waitFor(() => expect(list().queryByText("tell me the one thing I must do today")).toBeNull());
   });
