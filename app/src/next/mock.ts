@@ -1,7 +1,7 @@
 /** The fake daemon: one fetch function that answers every route api.ts calls, out of a plain object of canned answers. It is imported by the tests in this folder through testing.tsx, and by the ?mock=1 browser mode below, so a screen and its test and a screenshot all read the same fixtures. Nothing here imports vitest or React.
  */
 
-import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, Meeting, Routine, SettingsView, Task, Usage } from "./api";
+import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, Meeting, Notice, Routine, SettingsView, Task, Usage } from "./api";
 
 /** What the fake daemon holds. Anything left out answers as an empty list or an empty object, which is what a daemon with nothing recorded would say. */
 export type Canned = {
@@ -24,6 +24,8 @@ export type Canned = {
   jobs?: Record<string, ActJob>;
   /** A job already under way when the page opens, for ?mock=1 to show a running job without a click: the conversation it is shown beside, its goal, and the steps it has taken so far. Read by installMock alone — daemonFetch answers GET /act/{id} from `jobs` regardless of this, and a test that wants a live job in the store dispatches progress.jobSent/jobAccepted/eventArrived itself, the same way it does for a live ask. */
   runningJob?: { id: string; conversationId: string; goal: string; steps: { text: string; expect?: string; outcome?: "pass" | "fail"; why?: string }[] };
+  /** A notice already dealt with from its own desktop notification when the page opens, for ?mock=1 to show the rail line it turns into (see noticeActionMessage in format.ts and reactToNotice in store.ts) without a click. title and place are the hover window's own concern and left out here since this window never reads them. */
+  notice?: Pick<Notice, "body" | "id" | "kind" | "action" | "until">;
   /** What POST /dictate/stop answers with once a recording is stopped. Defaults to a fixed sentence, same as a daemon that transcribed something. */
   dictateText?: string;
   /** The routes that should fail, each written "METHOD /path", so a test can see what the window says when a write does not go through. */
@@ -536,6 +538,21 @@ export function installMock(loc: { search: string } = location): boolean {
             store.dispatch(progress.eventArrived({ id: job.id, type: "act", detail: JSON.stringify({ kind: "verified", state: "stepping", text: step.why ?? "", outcome: step.outcome }) }));
           }
         }
+      }, 300);
+    });
+  }
+  // A notice's action is likewise store state rather than a fetch answer, and is fed in as the same "notice" event the real stream would carry, so a capture shows the exact rail line reactToNotice in store.ts produces.
+  if (canned.notice) {
+    const n = canned.notice;
+    void import("./store").then(({ progress, store }) => {
+      setTimeout(() => {
+        store.dispatch(
+          progress.eventArrived({
+            id: "",
+            type: "notice",
+            notice: { title: "", body: n.body, place: "", id: n.id, kind: n.kind, action: n.action, until: n.until },
+          }),
+        );
       }, 300);
     });
   }

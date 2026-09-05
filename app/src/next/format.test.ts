@@ -35,6 +35,7 @@ import {
   meetingWho,
   meetingsShown,
   minutesLines,
+  noticeActionMessage,
   pageHeading,
   shortWhen,
   sourcedTurns,
@@ -122,6 +123,14 @@ describe("clock and date labels", () => {
     expect(hhmm("2026-09-04T09:07:00")).toBe("09:07");
     expect(hhmm("not a time")).toBe("not a time");
     expect(hhmm("")).toBe("");
+  });
+
+  it("turns a notice's action into the rail-line message, and leaves a fresh notice alone", () => {
+    expect(noticeActionMessage({ body: "Send the invoice", action: "done", until: "" }, now)).toBe("Send the invoice: Done");
+    expect(noticeActionMessage({ body: "Send the invoice", action: "snoozed", until: "2026-09-04T18:00:00" }, now)).toBe("Send the invoice: Snoozed until 18:00");
+    expect(noticeActionMessage({ body: "Send the invoice", action: "snoozed", until: "2026-09-05T09:00:00" }, now)).toBe("Send the invoice: Snoozed until tomorrow 09:00");
+    expect(noticeActionMessage({ body: "Send the invoice", action: "snoozed", until: "not a time" }, now)).toBe("Send the invoice: Snoozed");
+    expect(noticeActionMessage({ body: "Send the invoice", action: "", until: "" }, now)).toBeUndefined();
   });
 
   it("says the time for today, the weekday within the week, and the date beyond it", () => {

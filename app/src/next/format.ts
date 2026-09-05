@@ -6,6 +6,7 @@ import type {
   DaySummary,
   DayView,
   Meeting,
+  Notice,
   Spend,
   Task,
   Turn,
@@ -16,6 +17,19 @@ export function hhmm(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso || "";
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** The rail-line message a notice becomes once the user has pressed Done or a snooze button on the desktop notification it was also posted as (see internal/proactive/notify.go's chose/snooze/markDone, which send the same notice back with action and until filled in). body is the routine's or task's own text for those two kinds, so the line reads "Send the invoice: Done" or "Priya replied about the venue.: Snoozed until 18:00". Input: the notice, and the moment to compare its until against. Output: the message, or undefined for a notice with no action, which this window does not show at all. */
+export function noticeActionMessage(
+  n: Pick<Notice, "body" | "action" | "until">,
+  now: Date = new Date(),
+): string | undefined {
+  if (n.action === "done") return `${n.body}: Done`;
+  if (n.action !== "snoozed" || !n.until) return undefined;
+  const until = new Date(n.until);
+  if (Number.isNaN(until.getTime())) return `${n.body}: Snoozed`;
+  const sameDay = until.toDateString() === now.toDateString();
+  return `${n.body}: Snoozed until ${sameDay ? hhmm(n.until) : `tomorrow ${hhmm(n.until)}`}`;
 }
 
 /** The short label a list row shows beside its title. Input: a timestamp and the moment to compare it against. Output: "15:12" for today, the weekday name within the last week, and "2 Sep" for anything older. */
