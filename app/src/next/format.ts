@@ -1,6 +1,15 @@
 /** Every pure function the React window's screens need to turn what the daemon sent into what a person reads: the date labels, the sidebar's groups, the searches over each list, the minutes reader, and the number formats. Nothing here touches React, Redux or the network — data in, a string or a list out — which is what makes it testable on its own and shared by every screen. The behaviour is the current window's, taken from src/app/render.ts rather than invented again. */
 
-import type { ConversationSummary, DaySummary, DayView, Meeting, Spend, Task, Turn } from "./api";
+import { truncateAtWord } from "../shared/errorline";
+import type {
+  ConversationSummary,
+  DaySummary,
+  DayView,
+  Meeting,
+  Spend,
+  Task,
+  Turn,
+} from "./api";
 
 /** Formats a timestamp as a 24-hour clock time. Input: an RFC3339 string. Output: "HH:MM", or the input unchanged when it does not parse. */
 export function hhmm(iso: string): string {
@@ -15,7 +24,8 @@ export function shortWhen(iso: string, now: Date = new Date()): string {
   if (Number.isNaN(d.getTime())) return iso || "";
   if (d.toDateString() === now.toDateString()) return hhmm(iso);
   const days = (now.getTime() - d.getTime()) / 86400000;
-  if (days >= 0 && days < 7) return d.toLocaleDateString(undefined, { weekday: "long" });
+  if (days >= 0 && days < 7)
+    return d.toLocaleDateString(undefined, { weekday: "long" });
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
@@ -23,7 +33,11 @@ export function shortWhen(iso: string, now: Date = new Date()): string {
 export function dayHeading(iso: string, now: Date = new Date()): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso || "";
-  const label = d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  const label = d.toLocaleDateString(undefined, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
   return d.toDateString() === now.toDateString() ? `${label} · today` : label;
 }
 
@@ -31,7 +45,11 @@ export function dayHeading(iso: string, now: Date = new Date()): string {
 export function pageHeading(date: string): string {
   const d = new Date(`${date}T00:00:00`);
   if (Number.isNaN(d.getTime())) return date || "";
-  return d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  return d.toLocaleDateString(undefined, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
 }
 
 /** Formats a day's date the compact way the rail on the left shows it. Input: a YYYY-MM-DD date. Output: "Friday 4", or the input unchanged when it does not parse. */
@@ -43,7 +61,11 @@ export function dayShort(date: string): string {
 
 /** How many whole calendar days back a timestamp is. Input: the date and the moment to count from. Output: 0 for today, 1 for yesterday, and so on; a date in the future counts as 0. */
 function daysBack(d: Date, now: Date): number {
-  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const midnight = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  ).getTime();
   const its = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   return Math.max(0, Math.round((midnight - its) / 86400000));
 }
@@ -75,12 +97,18 @@ function groupBy<T>(rows: T[], label: (row: T) => string): Group<T>[] {
 }
 
 /** Buckets the conversation list into the sidebar's headed groups. Input: the conversations as the daemon sent them, newest first, and the moment to compare against. Output: one entry per heading in the order the headings first appear. */
-export function groupConversations(convs: ConversationSummary[], now: Date = new Date()): Group<ConversationSummary>[] {
+export function groupConversations(
+  convs: ConversationSummary[],
+  now: Date = new Date(),
+): Group<ConversationSummary>[] {
   return groupBy(convs, (c) => groupLabel(c.updated, now));
 }
 
 /** Buckets meetings into one group per stretch of time, the same headings a conversation gets. Input: the meetings, newest first, and the moment to compare against. Output: one entry per heading. */
-export function groupMeetings(list: Meeting[], now: Date = new Date()): Group<Meeting>[] {
+export function groupMeetings(
+  list: Meeting[],
+  now: Date = new Date(),
+): Group<Meeting>[] {
   return groupBy(list, (m) => groupLabel(m.when, now));
 }
 
@@ -88,9 +116,14 @@ export function groupMeetings(list: Meeting[], now: Date = new Date()): Group<Me
 export function activeDays(days: DaySummary[]): DaySummary[] {
   return days.filter((d) => {
     if (d.has_page) return true;
-    const counted = d.seen !== undefined || d.meetings !== undefined || d.meeting_minutes !== undefined;
+    const counted =
+      d.seen !== undefined ||
+      d.meetings !== undefined ||
+      d.meeting_minutes !== undefined;
     if (!counted) return true;
-    return (d.seen ?? 0) > 0 || (d.meetings ?? 0) > 0 || (d.meeting_minutes ?? 0) > 0;
+    return (
+      (d.seen ?? 0) > 0 || (d.meetings ?? 0) > 0 || (d.meeting_minutes ?? 0) > 0
+    );
   });
 }
 
@@ -98,7 +131,9 @@ export function activeDays(days: DaySummary[]): DaySummary[] {
 export function groupDays(days: DaySummary[]): Group<DaySummary>[] {
   return groupBy(days, (d) => {
     const date = new Date(`${d.date}T00:00:00`);
-    return Number.isNaN(date.getTime()) ? "Earlier" : date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    return Number.isNaN(date.getTime())
+      ? "Earlier"
+      : date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
   });
 }
 
@@ -115,26 +150,30 @@ export function dayCounts(d: DaySummary): string {
 
 /** Reads a GNOME accelerator as the keys to draw. Input: a binding such as "<Control><Alt>space", or "". Output: ["Ctrl", "Alt", "Space"], or an empty list when nothing is bound. */
 export function hotkeyKeys(accel: string): string[] {
-  const names: Record<string, string> = { control: "Ctrl", ctrl: "Ctrl", primary: "Ctrl", alt: "Alt", shift: "Shift", super: "Super", meta: "Super", space: "Space" };
+  const names: Record<string, string> = {
+    control: "Ctrl",
+    ctrl: "Ctrl",
+    primary: "Ctrl",
+    alt: "Alt",
+    shift: "Shift",
+    super: "Super",
+    meta: "Super",
+    space: "Space",
+  };
   return String(accel ?? "")
     .replace(/[<>]/g, " ")
     .trim()
     .split(/\s+/)
     .filter(Boolean)
-    .map((k) => names[k.toLowerCase()] ?? (k.length === 1 ? k.toUpperCase() : k));
+    .map(
+      (k) => names[k.toLowerCase()] ?? (k.length === 1 ? k.toUpperCase() : k),
+    );
 }
 
 /** How much of a failed ask's message is shown before it is folded away. The daemon stores the provider's whole error, which runs past a thousand characters. */
-const ERROR_LINE_CAP = 150;
-
-/** The one line a failed ask reads as. Input: the turn's stored text, which is the provider's whole error. Output: its first line, cut at 150 characters on a word boundary with an ellipsis, and whether anything was left out. */
+/** The one line a failed ask reads as. Input: the turn's stored text, which is the provider's whole error. Output: its first line, cut at 150 characters on a word boundary with an ellipsis, and whether anything was left out; the same cut the hover makes, from shared/errorline.ts. */
 export function errorLine(text: string): { line: string; more: boolean } {
-  const first = (text ?? "").split("\n")[0].trim();
-  if (first.length <= ERROR_LINE_CAP && first === (text ?? "").trim()) return { line: first, more: false };
-  if (first.length <= ERROR_LINE_CAP) return { line: first, more: true };
-  const cut = first.slice(0, ERROR_LINE_CAP);
-  const space = cut.lastIndexOf(" ");
-  return { line: `${(space > 40 ? cut.slice(0, space) : cut).trimEnd()}…`, more: true };
+  return truncateAtWord(text ?? "");
 }
 
 /** What one of Ora's turns reads as. Input: the turn. Output: its text, replaced for a failed ask by the daemon's own plain sentence, or by one line of the provider's error when the daemon sent none. */
@@ -153,7 +192,9 @@ export function bytes(n: number): string {
     value /= 1024;
     unit += 1;
   }
-  return unit === 0 ? `${Math.round(value)} B` : `${value.toFixed(1)} ${units[unit]}`;
+  return unit === 0
+    ? `${Math.round(value)} B`
+    : `${value.toFixed(1)} ${units[unit]}`;
 }
 
 /** Writes a token count in full, digits grouped in threes. Input: a count. Output: "1,020"; anything that is not a finite positive number reads as "0", so a missing field never draws NaN. */
@@ -167,7 +208,8 @@ export function tokens(n: number): string {
 /** Shortens a token count to what fits on a bar. Input: a count. Output: "940", "12.4k", "1.3M" — one decimal place under a hundred of the unit, none above it. */
 export function compact(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
-  const unit = (value: number, suffix: string) => `${value < 100 ? value.toFixed(1) : Math.round(value)}${suffix}`;
+  const unit = (value: number, suffix: string) =>
+    `${value < 100 ? value.toFixed(1) : Math.round(value)}${suffix}`;
   if (n >= 1e6) return unit(n / 1e6, "M");
   if (n >= 1000) return unit(n / 1000, "k");
   return String(Math.round(n));
@@ -200,12 +242,20 @@ export function meetingLength(seconds: number): string {
 }
 
 /** Who was in a meeting, as one line. Input: the attendees the daemon read out of the minutes. Output: their names joined by commas, with a name the recogniser only heard marked "(heard)"; "" when nobody was named. */
-export function meetingWho(attendees: { name: string; heard_only: boolean }[]): string {
-  return (attendees ?? []).map((a) => (a.heard_only ? `${a.name} (heard)` : a.name)).join(", ");
+export function meetingWho(
+  attendees: { name: string; heard_only: boolean }[],
+): string {
+  return (attendees ?? [])
+    .map((a) => (a.heard_only ? `${a.name} (heard)` : a.name))
+    .join(", ");
 }
 
 /** One line of the minutes as it should be drawn. kind is "h" for one of the minutes' own headings, "bullet" for a list item, "label" for a line that names the items indented under it, and "text" for a paragraph. lead is the bold phrase the daemon opens some bullets with — "You said", "Said to you", a person's name — which names whose part the line is and is set in medium weight ahead of the text rather than left inside it. */
-export type MinutesLine = { kind: "h" | "bullet" | "label" | "text"; text: string; lead?: string };
+export type MinutesLine = {
+  kind: "h" | "bullet" | "label" | "text";
+  text: string;
+  lead?: string;
+};
 
 /** How long a top-level bullet may run before it stops being a list item. The daemon's "Your part" section writes a whole briefing into one bullet — the real ones run to 1,300 characters — and a paragraph that long with a marker beside it reads as a wall rather than as a list, so past this it is drawn as a paragraph. An indented bullet is exempt: it belongs to the label above it and stays in that list at any length. */
 const LONG_BULLET = 300;
@@ -227,7 +277,10 @@ export function minutesLines(minutes: string, title = ""): MinutesLine[] {
     const heading = /^#{1,6}\s+(.*)$/.exec(line);
     const bullet = /^[-*]\s+(.*)$/.exec(line);
     // A bullet with more deeply indented lines under it names them rather than standing beside them, so it is drawn as a label with no marker and they follow as its list.
-    const labels = Boolean(bullet) && at + 1 < rows.length && indent(rows[at + 1]) > indent(raw);
+    const labels =
+      Boolean(bullet) &&
+      at + 1 < rows.length &&
+      indent(rows[at + 1]) > indent(raw);
     const whole = heading?.[1] ?? bullet?.[1] ?? line;
     // Only a phrase that is bold and followed by a dash is a lead; a dash in the middle of a sentence is punctuation.
     const led = /^\*\*(.+?)\*\*\s*[—–-]\s+(.+)$/s.exec(whole);
@@ -235,7 +288,13 @@ export function minutesLines(minutes: string, title = ""): MinutesLine[] {
     const lead = led ? led[1].replace(/\*\*/g, "").trim() : undefined;
     if (!body) continue;
     if (out.length === 0 && title && body.startsWith(title)) continue;
-    const kind = heading ? "h" : labels ? "label" : bullet && (nested || body.length <= LONG_BULLET) ? "bullet" : "text";
+    const kind = heading
+      ? "h"
+      : labels
+        ? "label"
+        : bullet && (nested || body.length <= LONG_BULLET)
+          ? "bullet"
+          : "text";
     out.push(lead ? { kind, text: body, lead } : { kind, text: body });
   }
   return out;
@@ -246,7 +305,12 @@ export function minutesLines(minutes: string, title = ""): MinutesLine[] {
  * The Chats page and its composer each have to decide whether there is a rail before either of them is drawn, and they have to reach the same answer or the box you type in does not line up with the words above it. This is that one answer.
  */
 export function sourcedTurns(turns: Turn[]): Turn[] {
-  return (turns ?? []).filter((t) => t.role !== "you" && ((t.evidence ?? []).length > 0 || (t.tools ?? []).filter(Boolean).length > 0));
+  return (turns ?? []).filter(
+    (t) =>
+      t.role !== "you" &&
+      ((t.evidence ?? []).length > 0 ||
+        (t.tools ?? []).filter(Boolean).length > 0),
+  );
 }
 
 /** The goal of a "do:" question, which starts a computer-use job instead of an ask. Input: the text typed into the composer. Output: the goal with the prefix and any leading space stripped, or undefined for text that does not start with it — including "do:" with nothing after it, which names no goal to run. Case-insensitive, so "Do: reload the page" works the same as "do:". */
@@ -257,7 +321,12 @@ export function jobGoal(text: string): string | undefined {
 
 /** Whether a job's own state word is one it may still take a step from. Input: the state, straight off the wire (see actjob.State). Output: false for "done", "stopped", "failed" and "" (no job yet), true for every other word a daemon sends. */
 export function isJobLive(state: string): boolean {
-  return state !== "" && state !== "done" && state !== "stopped" && state !== "failed";
+  return (
+    state !== "" &&
+    state !== "done" &&
+    state !== "stopped" &&
+    state !== "failed"
+  );
 }
 
 /** The plain word a job's state reads as: the line above its live step list, and the sidebar row's subtitle while it runs. Input: the state. Output: the word. */
@@ -294,7 +363,9 @@ export function costLine(spend: Spend): string {
   ];
   const models = Object.entries(spend.by_model ?? {});
   if (models.length > 1) {
-    const per = models.map(([name, u]) => `${name} ${compact(u.input + u.output)}`).join(", ");
+    const per = models
+      .map(([name, u]) => `${name} ${compact(u.input + u.output)}`)
+      .join(", ");
     return `${parts.join(" · ")} (${per})`;
   }
   return parts.join(" · ");
@@ -306,26 +377,41 @@ export function costLine(spend: Spend): string {
  */
 export function dayRailed(page: DayView): boolean {
   const close = (page.close ?? "").trim();
-  return Boolean((page.heading ?? "").trim() || (page.brief ?? "").trim() || (close && close !== page.page) || page.tasks?.length);
+  return Boolean(
+    (page.heading ?? "").trim() ||
+    (page.brief ?? "").trim() ||
+    (close && close !== page.page) ||
+    page.tasks?.length,
+  );
 }
 
 /** How near the end of a thread a reader has to be for it to keep following the newest turn. 120px — about one turn — so somebody reading the last answer while the next one lands stays with it, and somebody who has scrolled up to read something is left where they are. */
 export const STICK = 120;
 
 /** Whether a thread that has just grown should be pulled back to its newest turn. Input: the scrolling region's own three numbers. Output: true while the end of the thread is in view or within STICK pixels below it, which includes a thread too short to scroll at all. */
-export function atBottom(view: { scrollHeight: number; scrollTop: number; clientHeight: number }): boolean {
+export function atBottom(view: {
+  scrollHeight: number;
+  scrollTop: number;
+  clientHeight: number;
+}): boolean {
   return view.scrollHeight - view.scrollTop - view.clientHeight <= STICK;
 }
 
 /** Whether a row matches what was typed into a search field. Input: the query and the row's own text — its title, the line under it, whatever the field is meant to search. Output: true when the query is blank, and otherwise true when any one field contains it, ignoring case and surrounding spaces. */
-export function hits(query: string, ...fields: (string | undefined)[]): boolean {
+export function hits(
+  query: string,
+  ...fields: (string | undefined)[]
+): boolean {
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return true;
   return fields.some((f) => (f ?? "").toLowerCase().includes(q));
 }
 
 /** The conversations a search leaves showing, matched on title and on the line under it. Input: the whole list and the query. Output: the ones that match, in the order they came. */
-export function chatsShown(convs: ConversationSummary[], query: string): ConversationSummary[] {
+export function chatsShown(
+  convs: ConversationSummary[],
+  query: string,
+): ConversationSummary[] {
   return convs.filter((c) => hits(query, c.title, c.last));
 }
 
@@ -349,7 +435,9 @@ export function meetingsShown(list: Meeting[], query: string): Meeting[] {
 export function meetingTasks(tasks: Task[], meeting: Meeting): Task[] {
   const title = (meeting?.title ?? "").trim();
   if (!title) return [];
-  return tasks.filter((t) => t.source === "noticed" && (t.detail ?? "").trim() === title);
+  return tasks.filter(
+    (t) => t.source === "noticed" && (t.detail ?? "").trim() === title,
+  );
 }
 
 /** What the composer on the Tasks page sends alongside a question, so the answer is about the task rather than about nothing. Input: the task. Output: one short passage naming the task and where it came from, or "" when there is no task. The conversation the question goes into carries the rest of the context by itself, which is why none of it is repeated here.
@@ -357,18 +445,24 @@ export function meetingTasks(tasks: Task[], meeting: Meeting): Task[] {
 export function taskContext(task?: Task): string {
   if (!task?.title) return "";
   const from = (task.detail ?? "").trim();
-  const raised = task.source === "noticed" ? `Ora noticed it${from ? ` in ${from}` : ""}.` : "The user set it themselves.";
+  const raised =
+    task.source === "noticed"
+      ? `Ora noticed it${from ? ` in ${from}` : ""}.`
+      : "The user set it themselves.";
   return `This is about one thing on the user's list: "${task.title}". ${raised}`;
 }
 
 /** What one question costs on average over a window of the ledger. Input: the tokens spent in that window and the number of calls that spent them. Output: the tokens one call cost, rounded; 0 when nothing has been called, so a machine that has asked nothing reads as nothing rather than dividing by zero. */
 export function perQuestion(totalTokens: number, calls: number): number {
-  if (!Number.isFinite(totalTokens) || !Number.isFinite(calls) || calls <= 0) return 0;
+  if (!Number.isFinite(totalTokens) || !Number.isFinite(calls) || calls <= 0)
+    return 0;
   return Math.round(totalTokens / calls);
 }
 
 /** How much of the input a provider answered out of its own cache, over the calls that reported the figure at all. Input: the calls. Output: the cached tokens, the input tokens they were part of, and whether any call reported a cached figure; a daemon that does not send the field yet reports has:false and the window then says nothing about caching rather than claiming nothing was cached. */
-export function cachedInput(calls: { input_tokens: number; cached_input_tokens?: number }[]): { cached: number; input: number; has: boolean } {
+export function cachedInput(
+  calls: { input_tokens: number; cached_input_tokens?: number }[],
+): { cached: number; input: number; has: boolean } {
   let cached = 0;
   let input = 0;
   let has = false;

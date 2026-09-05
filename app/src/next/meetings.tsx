@@ -36,8 +36,8 @@ function Owed({ tasks, inRail }: { tasks: Task[]; inRail?: boolean }) {
 /** One block of the minutes as it is drawn: a heading, a paragraph, a label naming the list beneath it, or a run of bullets gathered into one list. */
 export type MinutesBlock = { kind: "h" | "label" | "text"; text: string; lead?: string } | { kind: "list"; items: MinutesLine[] };
 
-/** Gathers the lines the minutes reader produced into the blocks a document is made of, so a run of bullets becomes one list rather than a paragraph each. Input: the lines. Output: headings and paragraphs as they came, and each run of bullets as one list. */
-export function minutesBlocks(lines: MinutesLine[]): MinutesBlock[] {
+/** Gathers the lines the minutes reader produced into the blocks a document is made of, so a run of bullets becomes one list rather than a paragraph each. Input: the lines. Output: headings and paragraphs as they came, and each run of bullets as one list. Not exported: it belongs to this screen alone (nothing outside meetings.tsx builds a MinutesBlock), and exporting it beside MeetingsScreen was the only thing tripping react-doctor's only-export-components rule in this file. */
+function minutesBlocks(lines: MinutesLine[]): MinutesBlock[] {
   const out: MinutesBlock[] = [];
   for (const line of lines) {
     const last = out[out.length - 1];

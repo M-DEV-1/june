@@ -24,7 +24,10 @@ const chat = asked.get("chat");
 // The theme the user last picked, shared with the old window through one localStorage key, seeded into the store and stamped on the root element before the first paint so the page never flashes the wrong colours.
 const chosen: Theme = theme === "light" || theme === "dark" ? theme : readTheme();
 store.dispatch(settings.themePicked(chosen));
-void applyTheme(chosen).then((resolved) => store.dispatch(settings.themeResolved(resolved)));
+// The very first call this page makes, so applyTheme's own stale-resolution guard never actually fires here — checked anyway because a later, quicker theme change is what the guard exists for elsewhere (see App.tsx), and the return type says it can happen.
+void applyTheme(chosen).then((resolved) => {
+  if (resolved) store.dispatch(settings.themeResolved(resolved));
+});
 
 // Writes the choice back whenever it changes, so the next open of either window starts on the same theme.
 let lastTheme: Theme = chosen;
