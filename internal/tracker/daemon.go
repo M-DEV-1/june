@@ -24,6 +24,26 @@ const (
 // meetingCaptureInterval is how often a call in progress is read on its own, regardless of what has focus. A meeting window's participant list and presenter label change on the scale of a minute, and reading it costs one AT-SPI walk, so once a minute keeps the whole call in the timeline without crowding out the user's actual activity.
 const meetingCaptureInterval = time.Minute
 
+// Bounds for the three calls the capture path makes outside this process. Every one of them used to carry the daemon's own context, which has no deadline, so a peer that accepted the request and then stopped answering held the tick goroutine for as long as it liked: no window polling, no dwell emission, no recapture, and the ticker's one-slot buffer drops every tick missed meanwhile. They are three different numbers because they are three different calls — two messages to programs on this machine and one request over the internet — and one number would be either too short for the model or useless for the local ones.
+const (
+	// mediaProbeTimeout bounds the MPRIS read: ListNames on the session bus, then one PlaybackStatus property Get per media player registered on it. Measured on this desktop at 0.6-3.2 ms with a player running. Two seconds is not a performance budget, it is a floor under "this player is never answering" — godbus's own reply timeout is 25 seconds, ten times the tick interval, so without this a browser restarting mid-poll costs a dozen ticks.
+	mediaProbeTimeout = 2 * time.Second
+	// screenshotTimeout bounds the screen grab: a Screenshot call to gnome-shell, which writes the PNG to a temp file, plus reading that file back. Measured on this desktop at 510-527 ms for a 424 KB full-screen PNG. Five seconds is ten times that, which covers a compositor busy redrawing a second monitor, and stops short of the portal fallback's consent dialog: a dialog nobody is looking at should expire rather than hold the loop open.
+	screenshotTimeout = 5 * time.Second
+	// textReadTimeout bounds the accessibility read. On Linux that read states and enforces its own 2.5-second budget over the whole operation, dialling the bus included, and measured 7-13 ms on the focused window here; this sits half a second above that budget so it never pre-empts a read doing its job. It exists for the platforms whose reader has no budget of its own — the Windows path spawns a PowerShell process per read and waits on it with nothing bounding the wait.
+	textReadTimeout = 3 * time.Second
+	// visionTimeout bounds the vision model call: a few hundred kilobytes of PNG uploaded to the model and a structured reply generated from it, which is a network round trip and normally several seconds. It gets tens of seconds where the local calls get single digits because that is what the call costs when it is working, and it can afford them: minVisionInterval already limits it to one call per ninety seconds, so a slow one delays no other vision capture. Forty-five seconds covers a poor uplink and one internal retry and still returns before the next attempt is due.
+	visionTimeout = 45 * time.Second
+)
+
+// captureBounds holds those three deadlines on the Daemon so a test can shrink them, rather than a test having to wait out the real ones.
+type captureBounds struct {
+	text       time.Duration
+	media      time.Duration
+	screenshot time.Duration
+	vision     time.Duration
+}
+
 type Daemon struct {
 	eye       Tracker
 	interval  time.Duration
@@ -33,6 +53,46 @@ type Daemon struct {
 	capturer  func() string // injectable for tests; nil = real capture
 	visionFn  func(ctx context.Context, png []byte) Sight
 	paused    atomic.Bool
+
+	// The three calls the capture path makes outside this process, held as fields so a test can stand in one that never answers and prove the caller still comes back. NewDaemon points them at the real ones.
+	text       func() (string, error)
+	media      func(ctx context.Context) bool
+	screenshot func(ctx context.Context) ([]byte, error)
+	bounds     captureBounds
+
+	// capturing is held for the whole of one capture, so only one runs at a time. The per-tier "last text" trackers are plain variables owned by the capture, and a second concurrent capture would race them as well as paying twice for the expensive tier.
+	capturing atomic.Bool
+	// lastCapture is when a capture last read the screen, as Unix nanoseconds, because the tick loop reads it while a capture goroutine writes it.
+	lastCapture atomic.Int64
+}
+
+// withBudget runs work and returns what it produced, or the zero value once ctx's deadline passes, whichever happens first. Input: a context carrying the deadline and a function doing the work. Output: the work's value, or the zero value when the deadline won.
+// Work that overran keeps running on its own goroutine — nothing can stop a call that is not watching its context — but the caller gets its goroutine back, which is the thing the tick loop needs. Every use of this is either a call that does honour its context, in which case the goroutine ends by itself moments later, or a D-Bus dial, which ends when its socket does.
+func withBudget[T any](ctx context.Context, work func() T) T {
+	done := make(chan T, 1)
+	go func() { done <- work() }()
+	select {
+	case v := <-done:
+		return v
+	case <-ctx.Done():
+		var zero T
+		return zero
+	}
+}
+
+// shot is one screenshot attempt's bytes and error together, so the two-value call can pass through withBudget.
+type shot struct {
+	png []byte
+	err error
+}
+
+// lastCaptureAt reports when the capture path last read the screen. Output: the zero time when no capture has run yet.
+func (d *Daemon) lastCaptureAt() time.Time {
+	n := d.lastCapture.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
 }
 
 // Pause suspends activity emission. The polling loop still runs so Resume takes effect promptly.
@@ -96,6 +156,19 @@ func normalizeAppIdentifier(s string) string {
 	return s
 }
 
+// skipReason names why the window just polled is not the user's activity, or "" when it is one to record. The three cases: a window nothing could identify, which carries zero information and would pollute every later summary with "Unknown | Unknown" lines; Ora's own window, because recording the hover files the assistant as an episode and pushes the window the user came from out of the live buffer, so /context answers with Ora itself; and an application on the blocklist.
+func (d *Daemon) skipReason(act Activity) string {
+	switch {
+	case act.App == "Unknown" && act.Title == "Unknown":
+		return "unidentified"
+	case IsOraWindow(act.App, act.Title):
+		return "ora"
+	case MatchesBlocklist(act.App, d.blocklist):
+		return "blocked"
+	}
+	return ""
+}
+
 func NewDaemon(eye Tracker, interval time.Duration, dwellTime time.Duration, blocklist []string, eventChan chan Activity) *Daemon {
 	if interval <= 0 {
 		interval = 2 * time.Second // default polling
@@ -104,7 +177,11 @@ func NewDaemon(eye Tracker, interval time.Duration, dwellTime time.Duration, blo
 		dwellTime = 3 * time.Second // default dwell time
 	}
 
-	return &Daemon{eye: eye, interval: interval, dwellTime: dwellTime, blocklist: blocklist, eventChan: eventChan}
+	return &Daemon{
+		eye: eye, interval: interval, dwellTime: dwellTime, blocklist: blocklist, eventChan: eventChan,
+		text: extractText, media: mediaPlaying, screenshot: grabScreen,
+		bounds: captureBounds{text: textReadTimeout, media: mediaProbeTimeout, screenshot: screenshotTimeout, vision: visionTimeout},
+	}
 }
 
 func (d *Daemon) Start(ctx context.Context) {
@@ -115,18 +192,18 @@ func (d *Daemon) Start(ctx context.Context) {
 	var pendingActivity *Activity
 	var pendingSince time.Time
 	var emittedCurrent bool
-	var lastCaptureTime time.Time
 
 	// use injected capturer (tests) or default to tiered capture with diff tracking. The default path needs the current activity so vision can skip the bare desktop; the test capturer ignores it.
 	// lastA11yText/lastVisionText are tracked separately (not one shared "last text") so a tier switch on an
 	// unchanged screen doesn't compare one tier's text against the other's and falsely look like a change.
+	// These are read and written only by the capture, which runs one at a time, so they need no lock of their own.
 	var lastA11yText, lastVisionText string
 	var lastVisionTime time.Time
 	capture := func(act Activity) captureOut {
 		if d.capturer != nil {
 			return captureOut{text: d.capturer()}
 		}
-		return d.tieredCapture(ctx, act, &lastA11yText, &lastVisionText, &lastCaptureTime, &lastVisionTime)
+		return d.tieredCapture(ctx, act, &lastA11yText, &lastVisionText, &lastVisionTime)
 	}
 
 	tracer := obs.GetTracer(ctx, "ora.tracker")
@@ -147,9 +224,8 @@ func (d *Daemon) Start(ctx context.Context) {
 
 			_, span := tracer.Start(ctx, "Tracker.PollActiveWindow")
 
-			// A locked screen is not the user's activity: capturing through the shield files the lock clock and "press a key to unlock" as episodes, which then surface in summaries as the day's doings.
+			// A locked screen is not the user's activity: capturing through the shield files the lock clock and "press a key to unlock" as episodes, which then surface in summaries as the day's doings. The pending activity is left alone for the same reason as a skipped window below — the user comes back to the window they locked the screen in.
 			if sessionLocked != nil && sessionLocked() {
-				pendingActivity = nil
 				span.SetAttributes(attribute.Bool("tracker.locked", true))
 				span.End()
 				continue
@@ -163,18 +239,9 @@ func (d *Daemon) Start(ctx context.Context) {
 				continue
 			}
 
-			// A window nothing could identify carries zero information; filing it pollutes every later summary with "Unknown | Unknown" lines.
-			if activity.App == "Unknown" && activity.Title == "Unknown" {
-				pendingActivity = nil
-				span.End()
-				continue
-			}
-
-			blocked := MatchesBlocklist(activity.App, d.blocklist)
-
-			if blocked {
-				span.SetAttributes(attribute.Bool("tracker.blocked", true))
-				pendingActivity = nil
+			// A window that is not the user's activity is a transient skip, and the pending activity is deliberately left as it was. The user is glancing at Ora's hover or a password manager and comes straight back to the window they were in; the loop then sees that window as unchanged, and only a pending activity can be emitted, so clearing it here meant a window with a steady title was never recorded for as long as the user stayed in it.
+			if reason := d.skipReason(*activity); reason != "" {
+				span.SetAttributes(attribute.String("tracker.skipped", reason))
 				span.End()
 				continue
 			}
@@ -198,17 +265,9 @@ func (d *Daemon) Start(ctx context.Context) {
 						attribute.String("tracker.state", "emitted"),
 					)
 
-					ev := *pendingActivity
-					applyCapture(&ev, capture(*pendingActivity))
-
-					slog.Info("activity tracked", "app", ev.App, "title", ev.Title)
-
-					select {
-					case d.eventChan <- ev:
+					// Handed to a goroutine of its own, so a capture that takes seconds costs this loop nothing. emittedCurrent is set now rather than after the send, because the capture will do the send itself; a capture already in flight leaves it unset, so the next tick tries again.
+					if d.captureAndEmit(ctx, *pendingActivity, capture, false) {
 						emittedCurrent = true
-					case <-ctx.Done():
-						span.End()
-						return
 					}
 				} else {
 					span.SetAttributes(
@@ -216,21 +275,9 @@ func (d *Daemon) Start(ctx context.Context) {
 						attribute.String("tracker.state", "dwelling"),
 					)
 				}
-			} else if emittedCurrent && d.capturer == nil && time.Since(lastCaptureTime) >= recaptureInterval {
-				// periodic re-capture: same window, 5 min elapsed
-				out := capture(*lastActivity)
-				if out.text != "" {
-					ev := *lastActivity
-					applyCapture(&ev, out)
-					select {
-					case d.eventChan <- ev:
-					case <-ctx.Done():
-						span.End()
-						return
-					default:
-						// drop if channel full — next tick will retry
-					}
-				}
+			} else if emittedCurrent && d.capturer == nil && time.Since(d.lastCaptureAt()) >= recaptureInterval {
+				// periodic re-capture: same window, 5 min elapsed. Also off this goroutine, and dropped when the screen has not changed.
+				d.captureAndEmit(ctx, *lastActivity, capture, true)
 				span.SetAttributes(
 					attribute.Bool("tracker.changed", false),
 					attribute.String("tracker.state", "idle"),
@@ -245,6 +292,37 @@ func (d *Daemon) Start(ctx context.Context) {
 			span.End()
 		}
 	}
+}
+
+// captureAndEmit reads the screen for one activity and puts the result on the activity channel, on a goroutine of its own so the tick loop keeps polling while a slow screenshot or model call is in flight. Input: the context that ends at shutdown, the activity to capture for, the capture function, and whether a capture that found nothing new should be dropped rather than emitted. Output: false when a capture was already in flight and this one was skipped, true when one was started.
+// Only one capture runs at a time, and the flag is held across the send as well as the capture, so the events two captures produce reach the channel in the order the loop asked for them.
+func (d *Daemon) captureAndEmit(ctx context.Context, ev Activity, capture func(Activity) captureOut, dropIfUnchanged bool) bool {
+	if !d.capturing.CompareAndSwap(false, true) {
+		return false
+	}
+	go func() {
+		defer d.capturing.Store(false)
+		out := capture(ev)
+		if dropIfUnchanged && out.text == "" {
+			return
+		}
+		applyCapture(&ev, out)
+		slog.Info("activity tracked", "app", ev.App, "title", ev.Title)
+		if dropIfUnchanged {
+			// Periodic re-capture: nothing is waiting on this send, so a full channel (the consumer busy, or stalled) must drop the event rather than hold this goroutine — the next re-capture is five minutes away regardless, but a blocked send here would also wedge d.capturing and stop every dwell-triggered capture behind it.
+			select {
+			case d.eventChan <- ev:
+			default:
+				slog.Debug("dropped a periodic recapture, the activity channel was full")
+			}
+			return
+		}
+		select {
+		case d.eventChan <- ev:
+		case <-ctx.Done():
+		}
+	}()
+	return true
 }
 
 // watchMeetingWindow reads the window of a call in progress once a minute, whether or not it has focus, and emits it as an activity of its own.
@@ -305,27 +383,45 @@ func applyCapture(ev *Activity, out captureOut) {
 
 // tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen.
 // Returns empty text when content is unchanged since the last capture, so callers never re-emit the same screen. Vision is gated behind thinTextThreshold and minVisionInterval to keep cost down.
-func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, lastVisionText *string, lastCaptureTime, lastVisionTime *time.Time) captureOut {
-	text, err := extractText()
-	if err != nil {
-		text = ""
-	}
-	*lastCaptureTime = time.Now()
+func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, lastVisionText *string, lastVisionTime *time.Time) captureOut {
+	// The accessibility read takes no context — the platform readers each open their own connection — so it is bounded from out here instead.
+	textCtx, cancelText := context.WithTimeout(ctx, d.bounds.text)
+	text := withBudget(textCtx, func() string {
+		t, err := d.text()
+		if err != nil {
+			return ""
+		}
+		return t
+	})
+	cancelText()
+	d.lastCapture.Store(time.Now().UnixNano())
 
 	// vision only escalates for a real foreground app, never the bare desktop — or we'd snap and describe the wallpaper on a loop while the user is idle.
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
-	mediaActive := mediaPlaying(ctx)
+
+	mediaCtx, cancelMedia := context.WithTimeout(ctx, d.bounds.media)
+	mediaActive := withBudget(mediaCtx, func() bool { return d.media(mediaCtx) })
+	cancelMedia()
+
 	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
 		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
 	}
 
-	png, err := grabScreen(ctx)
-	if err != nil || len(png) == 0 {
+	shotCtx, cancelShot := context.WithTimeout(ctx, d.bounds.screenshot)
+	grab := withBudget(shotCtx, func() shot {
+		png, err := d.screenshot(shotCtx)
+		return shot{png: png, err: err}
+	})
+	cancelShot()
+	if grab.err != nil || len(grab.png) == 0 {
 		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
 	}
+	png := grab.png
 	*lastVisionTime = time.Now()
 
-	sight := d.visionFn(ctx, png)
+	visionCtx, cancelVision := context.WithTimeout(ctx, d.bounds.vision)
+	sight := withBudget(visionCtx, func() Sight { return d.visionFn(visionCtx, png) })
+	cancelVision()
 	// Vision capture: drop a11y entirely. Browser/TUI chrome is why screenshots of Ora itself polluted memory.
 	// Searchable text is only the model's structured description (or the window title if the model returned nothing).
 	desc := sight.Text()

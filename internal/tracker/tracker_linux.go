@@ -279,6 +279,9 @@ func walkSwayNodes(n *swayNode) *swayNode {
 	return nil
 }
 
+// hyprSocketTimeout bounds the dial and the whole exchange with Hyprland's IPC socket, which answers in well under a millisecond when it answers at all.
+const hyprSocketTimeout = time.Second
+
 // hyprWindow queries the active window via Hyprland's IPC socket.
 func (t *linuxTracker) hyprWindow() (*Activity, error) {
 	sig := os.Getenv("HYPRLAND_INSTANCE_SIGNATURE")
@@ -289,11 +292,13 @@ func (t *linuxTracker) hyprWindow() (*Activity, error) {
 		sockPath = fmt.Sprintf("%s/hypr/%s/.socket.sock", runtime, sig)
 	}
 
-	conn, err := net.Dial("unix", sockPath)
+	conn, err := net.DialTimeout("unix", sockPath, hyprSocketTimeout)
 	if err != nil {
 		return Normalize("Unknown", "Unknown"), nil
 	}
 	defer conn.Close()
+	// The tracker samples on a fixed interval, so a compositor that stops answering must cost one missed sample, not a hung loop.
+	_ = conn.SetDeadline(time.Now().Add(hyprSocketTimeout))
 
 	if _, err := conn.Write([]byte("j/activewindow")); err != nil {
 		return Normalize("Unknown", "Unknown"), nil
