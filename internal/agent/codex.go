@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -669,6 +670,8 @@ func (c *codexClient) round(ctx context.Context, instructions string, input []an
 		}
 	}
 	defer resp.Body.Close()
+	// Every response carries the account's allowance windows in its headers, the refusals included, so the picker's bars come from the calls Ora already makes rather than a call of their own.
+	recordUsage(ProviderCodex, codexRateLimits(resp.Header, time.Now()))
 	if resp.StatusCode/100 != 2 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		wait, _ := netx.ParseRetryAfter(resp.Header, time.Now())
@@ -951,4 +954,90 @@ func (b CodexBrain) AskText(ctx context.Context, question string) (TurnTrace, er
 // AskTextWith answers the question with the conversation so far, so the ipc server can hand a "codex" ask its thread exactly as it hands one to the default brain. Input: the prior turns and the question. Output: the turn trace from AskCodexWith.
 func (b CodexBrain) AskTextWith(ctx context.Context, history History, question string) (TurnTrace, error) {
 	return b.Agent.AskCodexWith(ctx, history, question)
+}
+
+// UsageLimit is one allowance window a provider reports for the user's own account: which window it is, how much of it is spent, when it resets, and where the reading came from.
+// It is declared in this package rather than in internal/brain, where the store that keeps it lives, because internal/brain imports this package (see internal/brain/codex.go) and so this package cannot import it back; internal/brain aliases this type.
+type UsageLimit struct {
+	// Window names the allowance: "5h", "daily", "weekly", "monthly", or the provider's own name for it.
+	Window string `json:"window"`
+	// UsedFraction is how much of the window is spent, 0 to 1, so the window can draw it as a bar without knowing the provider's units.
+	UsedFraction float64 `json:"used_fraction"`
+	// ResetsAt is when the window starts again, and is the zero time when the provider named no reset.
+	ResetsAt time.Time `json:"resets_at"`
+	// Source names the field or header the reading came from, so a number on screen can be traced back.
+	Source string `json:"source"`
+}
+
+// UsageRecorder keeps the newest usage reading for one provider. internal/brain.UsageStore is the implementation, and the daemon hands one in at startup. Input to Record: the provider id ("codex", "claude"), and its windows; a call with no windows must leave the last good reading alone.
+type UsageRecorder interface {
+	Record(provider string, limits []UsageLimit)
+}
+
+// usageRecorder is where every response's usage reading goes, guarded because asks run concurrently with the startup that sets it. Nil means nothing is recorded, which is what a test or a daemon that never called SetUsageRecorder gets.
+var usageRecorder struct {
+	sync.Mutex
+	to UsageRecorder
+}
+
+// SetUsageRecorder tells this package where to record the usage windows providers report on the calls Ora already makes. Input: the store, or nil to record nothing. Output: none.
+func SetUsageRecorder(r UsageRecorder) {
+	usageRecorder.Lock()
+	defer usageRecorder.Unlock()
+	usageRecorder.to = r
+}
+
+// recordUsage hands one provider's windows to the recorder, and does nothing when there is no recorder or no window to record. Input: the provider id and its windows. Output: none.
+func recordUsage(provider string, limits []UsageLimit) {
+	if len(limits) == 0 {
+		return
+	}
+	usageRecorder.Lock()
+	to := usageRecorder.to
+	usageRecorder.Unlock()
+	if to != nil {
+		to.Record(provider, limits)
+	}
+}
+
+// codexRateLimits reads the account's allowance windows off one Codex response's headers. The backend answers with its own x-codex-* family rather than the usual x-ratelimit-* one: x-codex-primary-used-percent, x-codex-primary-window-minutes and x-codex-primary-reset-at (older backends: x-codex-primary-reset-after-seconds), and the same three for secondary. The primary window is the five-hour one and the secondary the weekly one on a ChatGPT plan.
+// Input: the response headers and the moment the response arrived, which a reset-after-seconds header counts forward from. Output: one UsageLimit per window the headers named, primary first, and none when they named neither.
+func codexRateLimits(h http.Header, now time.Time) []UsageLimit {
+	var limits []UsageLimit
+	for _, prefix := range []string{"primary", "secondary"} {
+		percent, err := strconv.ParseFloat(strings.TrimSpace(h.Get("x-codex-"+prefix+"-used-percent")), 64)
+		if err != nil {
+			continue
+		}
+		minutes, _ := strconv.Atoi(strings.TrimSpace(h.Get("x-codex-" + prefix + "-window-minutes")))
+		var resets time.Time
+		if at, err := strconv.ParseInt(strings.TrimSpace(h.Get("x-codex-"+prefix+"-reset-at")), 10, 64); err == nil && at > 0 {
+			resets = time.Unix(at, 0).UTC()
+		} else if after, err := strconv.ParseInt(strings.TrimSpace(h.Get("x-codex-"+prefix+"-reset-after-seconds")), 10, 64); err == nil && after > 0 {
+			resets = now.Add(time.Duration(after) * time.Second)
+		}
+		limits = append(limits, UsageLimit{
+			Window:       codexWindowName(minutes, prefix),
+			UsedFraction: percent / 100,
+			ResetsAt:     resets,
+			Source:       "x-codex-" + prefix + "-*",
+		})
+	}
+	return limits
+}
+
+// codexWindowName is the label a window of that length is drawn under. Input: the window in minutes as the backend reported it, 0 when it reported none, and the name to fall back to. Output: "1h" through "23h" for a window shorter than a day (299 minutes, the five-hour window, rounds up to "5h"), "daily" for one about a day, "weekly" for one about a week, "monthly" for anything longer, and the fallback when the length is unknown.
+func codexWindowName(minutes int, fallback string) string {
+	switch {
+	case minutes <= 0:
+		return fallback
+	case minutes < 1380:
+		return fmt.Sprintf("%dh", (minutes+59)/60)
+	case minutes < 2880:
+		return "daily"
+	case minutes < 20160:
+		return "weekly"
+	default:
+		return "monthly"
+	}
 }

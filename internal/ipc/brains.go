@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"ora/internal/brain"
 	"ora/internal/config"
 )
 
@@ -27,14 +28,21 @@ type BrainView struct {
 	Model    string   `json:"model"`
 	Note     string   `json:"note"`
 	Default  bool     `json:"default"`
+	// Limits are the allowance windows this brain's provider exposes for the user's own account — a five-hour or weekly subscription window, a daily request ceiling — which is what the picker draws a mini bar from. Empty, never null, for a provider that exposes none or that nothing has been read from yet.
+	Limits []brain.UsageLimit `json:"limits"`
+	// LimitsAt is when Limits was read, RFC 3339, and "" when there are none.
+	LimitsAt string `json:"limits_at"`
 }
 
+// BrainLimits is where /brains reads a brain's allowance windows. Input: a context, so a lookup that has to ask a provider can be cut short, and the brain id. Output: the newest reading and true, or false when that brain exposes no allowance or none has been read yet. nil is the same as a lookup that always says false, which is what the tests and a daemon with no usage store pass.
+type BrainLimits func(ctx context.Context, brainID string) (brain.UsageSnapshot, bool)
+
 // Brains builds the /brains handler. GET answers the five brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk with save so it survives a restart, and answers with the same list GET would. An id outside the five known ones is 400 and changes nothing. Input: a pointer to the loaded config, shared with the rest of the daemon so a POST's change is visible everywhere, and the function that persists a config to disk (config.SaveConfig in production, a stub in tests). Output: the handler.
-func Brains(cfg *config.OraConfig, save func(config.OraConfig) error) http.HandlerFunc {
+func Brains(cfg *config.OraConfig, save func(config.OraConfig) error, limitsFor BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeBrains(w, *cfg)
+			writeBrains(r.Context(), w, *cfg, limitsFor)
 		case http.MethodPost:
 			var req struct {
 				Brain string `json:"brain"`
@@ -58,7 +66,7 @@ func Brains(cfg *config.OraConfig, save func(config.OraConfig) error) http.Handl
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			writeBrains(w, *cfg)
+			writeBrains(r.Context(), w, *cfg, limitsFor)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -66,9 +74,9 @@ func Brains(cfg *config.OraConfig, save func(config.OraConfig) error) http.Handl
 }
 
 // writeBrains writes the five brain rows for cfg as JSON, the body both GET and POST /brains answer with.
-func writeBrains(w http.ResponseWriter, cfg config.OraConfig) {
+func writeBrains(ctx context.Context, w http.ResponseWriter, cfg config.OraConfig, limitsFor BrainLimits) {
 	home, _ := os.UserHomeDir()
-	writeJSON(w, map[string]any{"brains": brainList(cfg, home, onPath)})
+	writeJSON(w, map[string]any{"brains": brainList(ctx, cfg, home, onPath, limitsFor)})
 }
 
 // providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every one of the five ids gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's still falls back to the Gemini API inside FromConfig because no CLI backend for it exists yet, but its own provider constant is what lands on disk, not gemini's. ok is false when id names none of the five brains Ora knows about, and the caller must leave the config untouched in that case.
@@ -89,14 +97,17 @@ func providerForBrainID(id string) (provider string, ok bool) {
 	}
 }
 
+// brainIDs are the brains Ora knows about, in the order the picker draws them. GET /usage keys its per-provider allowance windows by the same ids, so the settings page and the picker name a brain the same way.
+var brainIDs = []string{"claude", "codex", "gemini", "grok", "ollama"}
+
 // onPath reports whether a binary of that name can be run from this process's PATH.
 func onPath(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
 }
 
-// brainList builds the five rows. Input: the config (for the default brain and the Gemini model), the home directory the login files live under, and the PATH check — both injected so the tests read a temporary home and never shell out. Output: the rows in the order the window draws them.
-func brainList(cfg config.OraConfig, home string, has func(string) bool) []BrainView {
+// brainList builds the five rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them.
+func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(string) bool, limitsFor BrainLimits) []BrainView {
 	def := defaultBrainID(cfg.Brain.Provider)
 	claudeAccount := plainField(filepath.Join(home, ".claude", ".credentials.json"), "claudeAiOauth", "subscriptionType")
 	codexAccount := plainField(filepath.Join(home, ".codex", "auth.json"), "", "auth_mode")
@@ -148,6 +159,14 @@ func brainList(cfg config.OraConfig, home string, has func(string) bool) []Brain
 	for i := range list {
 		list[i].Default = list[i].ID == def
 		list[i].Model = modelFor(list[i].ID, cfg, def)
+		list[i].Limits = []brain.UsageLimit{}
+		if limitsFor == nil {
+			continue
+		}
+		if snap, ok := limitsFor(ctx, list[i].ID); ok && len(snap.Limits) > 0 {
+			list[i].Limits = snap.Limits
+			list[i].LimitsAt = rfc3339(snap.At)
+		}
 	}
 	return list
 }

@@ -247,6 +247,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	geminiQuota := brain.NewQuotaState(config.DataDir())
 	geminiQuotaOpts := brain.DefaultQuotaOptions()
 
+	// brainUsage keeps what each provider says about the user's own allowance, so the brain picker can draw a bar per brain. Codex fills it from the rate-limit headers of every response Ora already makes; Claude is read from its OAuth usage endpoint when the picker is opened; Gemini's is computed from geminiQuota below. It persists under the data dir beside brain_quota.json, so the bars are there the moment the window opens after a restart.
+	brainUsage := brain.NewUsageStore(config.DataDir())
+	agent.SetUsageRecorder(brainUsage)
+
 	meetingRecorder = recorder.New(config.DataDir(), store, apiKey)
 	// A meeting write-up that hits a spent daily allowance is finished by Codex instead of being dropped.
 	meetingRecorder.SetMinutesFallback(backgroundFallbackBrain())
@@ -810,10 +814,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	mux.HandleFunc("/routines", auth(ipcServer.Routines))
 	mux.HandleFunc("/routines/{id}", auth(ipcServer.RoutineDelete))
 	mux.HandleFunc("/routines/{id}/run", auth(ipcServer.RoutineRun))
-	mux.HandleFunc("/brains", auth(ipc.Brains(&appConfig, config.SaveConfig)))
+	brainLimits := brainLimitsFrom(brainUsage, geminiQuota, &appConfig, geminiQuotaOpts)
+	mux.HandleFunc("/brains", auth(ipc.Brains(&appConfig, config.SaveConfig, brainLimits)))
 	mux.HandleFunc("/overlay", auth(ipcServer.Overlay))
 	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), appConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
-	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor)))
+	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, brainLimits)))
 
 	server := &http.Server{
 		Handler: mux,
@@ -865,4 +870,21 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	return stop, daemon, nil
+}
+
+// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the live config (for the Gemini model those requests are metered under) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker, Codex's whatever its last response's headers said, and nothing at all for Grok and Ollama, which expose no allowance to read.
+func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *config.OraConfig, opts brain.QuotaOptions) ipc.BrainLimits {
+	return func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
+		switch id {
+		case "gemini":
+			model, ok := brain.GeminiModelFor(cfg.Brain)
+			if !ok {
+				model = config.TextModel
+			}
+			return brain.GeminiDaily(quota, model, opts, time.Now())
+		case "claude":
+			agent.RefreshClaudeUsage(ctx)
+		}
+		return usage.Get(id)
+	}
 }

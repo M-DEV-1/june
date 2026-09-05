@@ -1288,3 +1288,68 @@ func TestActionHops_CountsOnlyToolsThatChangedSomething(t *testing.T) {
 		t.Fatalf("four actions counted as %d", got)
 	}
 }
+
+// TestCodexRateLimits_ReadsTheHeadersTheBackendSends checks the x-codex-* rate-limit headers become the two usage windows the picker draws. The header names and their meaning are codex-rs/codex-api/src/rate_limits.rs on openai/codex main as of 2026-09: https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/rate_limits.rs, which parses x-codex-primary-used-percent, x-codex-primary-window-minutes and x-codex-primary-reset-at into the RateLimitWindow{used_percent, window_minutes, resets_at} of https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs. The window lengths below, 299 and 10079 minutes, are the five-hour and weekly windows a ChatGPT plan reports.
+func TestCodexRateLimits_ReadsTheHeadersTheBackendSends(t *testing.T) {
+	now := time.Date(2026, 9, 5, 14, 0, 0, 0, time.UTC)
+	h := http.Header{}
+	h.Set("x-codex-primary-used-percent", "65")
+	h.Set("x-codex-primary-window-minutes", "299")
+	h.Set("x-codex-primary-reset-at", fmt.Sprint(now.Add(3*time.Hour+56*time.Minute).Unix()))
+	h.Set("x-codex-secondary-used-percent", "37.5")
+	h.Set("x-codex-secondary-window-minutes", "10079")
+	h.Set("x-codex-secondary-reset-at", fmt.Sprint(now.Add(76*time.Hour).Unix()))
+
+	got := codexRateLimits(h, now)
+	if len(got) != 2 {
+		t.Fatalf("codexRateLimits = %+v, want a primary and a secondary window", got)
+	}
+	if got[0].Window != "5h" || got[0].UsedFraction != 0.65 {
+		t.Errorf("primary = %+v, want the 5h window at 0.65 spent", got[0])
+	}
+	if want := now.Add(3*time.Hour + 56*time.Minute); !got[0].ResetsAt.Equal(want) {
+		t.Errorf("primary resets at %v, want %v", got[0].ResetsAt, want)
+	}
+	if got[0].Source != "x-codex-primary-*" {
+		t.Errorf("primary source = %q, want the headers it was read from", got[0].Source)
+	}
+	if got[1].Window != "weekly" || got[1].UsedFraction != 0.375 {
+		t.Errorf("secondary = %+v, want the weekly window at 0.375 spent", got[1])
+	}
+}
+
+// TestCodexRateLimits_TakesTheOlderResetAfterSpelling checks the delay-shaped header an older backend sends is read too, since the two spellings are both in the wild: x-codex-primary-reset-after-seconds counts forward from now, x-codex-primary-reset-at is an absolute unix second. Source: https://github.com/headroomlabs-ai/headroom/issues/577 lists the reset-after-seconds family, and https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/rate_limits.rs the reset-at one.
+func TestCodexRateLimits_TakesTheOlderResetAfterSpelling(t *testing.T) {
+	now := time.Date(2026, 9, 5, 14, 0, 0, 0, time.UTC)
+	h := http.Header{}
+	h.Set("x-codex-primary-used-percent", "10")
+	h.Set("x-codex-primary-window-minutes", "299")
+	h.Set("x-codex-primary-reset-after-seconds", "17940")
+
+	got := codexRateLimits(h, now)
+	if len(got) != 1 {
+		t.Fatalf("codexRateLimits = %+v, want the one window the headers named", got)
+	}
+	if want := now.Add(17940 * time.Second); !got[0].ResetsAt.Equal(want) {
+		t.Errorf("resets at %v, want %v", got[0].ResetsAt, want)
+	}
+}
+
+// TestCodexRateLimits_SaysNothingWhenTheHeadersAreAbsent checks a response with no rate-limit headers reports no windows rather than a window at zero, which would draw an empty bar over a real reading.
+func TestCodexRateLimits_SaysNothingWhenTheHeadersAreAbsent(t *testing.T) {
+	if got := codexRateLimits(http.Header{}, time.Now()); len(got) != 0 {
+		t.Fatalf("codexRateLimits on bare headers = %+v, want none", got)
+	}
+}
+
+// TestCodexWindowName checks the label each window length gets, so a five-hour window reads as "5h" and a seven-day one as "weekly" whichever exact minute count the backend names.
+func TestCodexWindowName(t *testing.T) {
+	for _, c := range []struct {
+		minutes int
+		want    string
+	}{{299, "5h"}, {300, "5h"}, {60, "1h"}, {1440, "daily"}, {10079, "weekly"}, {10080, "weekly"}, {43200, "monthly"}, {0, "session"}} {
+		if got := codexWindowName(c.minutes, "session"); got != c.want {
+			t.Errorf("codexWindowName(%d) = %q, want %q", c.minutes, got, c.want)
+		}
+	}
+}
