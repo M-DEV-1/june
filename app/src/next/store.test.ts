@@ -298,6 +298,9 @@ describe("a notice's action reaching the window", () => {
   });
 
   it("says a snooze on the rail line, and does not touch the Tasks cache for a routine", () => {
+    // The label says "until 18:00" only while the snooze lands on the same calendar day as the clock, so the clock is pinned to that day rather than left to roll past midnight mid-run.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T12:00:00"));
     const invalidate = vi.spyOn(oraApi.util, "invalidateTags");
     const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
     const store = makeStore(undefined, open);
@@ -314,6 +317,7 @@ describe("a notice's action reaching the window", () => {
     expect(store.getState().ui.notice).toBe("Priya replied about the venue.: Snoozed until 18:00");
     expect(invalidate).not.toHaveBeenCalledWith(["Task"]);
     invalidate.mockRestore();
+    vi.useRealTimers();
   });
 
   it("reacts the same way when eventArrived is dispatched directly, the way the ?mock=1 fixture in mock.ts does it, without a live stream", () => {
