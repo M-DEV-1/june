@@ -1347,3 +1347,47 @@ func TestRecorder_GivesUpOnARecordingThatKeepsFailing(t *testing.T) {
 		t.Errorf("the note does not say why the recording failed: %q", notes[0])
 	}
 }
+
+// With nothing recording, LiveSnapshot has nothing to report.
+func TestRecorder_LiveSnapshot_NoneRunning(t *testing.T) {
+	r, _, _ := newTestRecorder(t, &fakeStore{})
+	if _, ok := r.LiveSnapshot(context.Background()); ok {
+		t.Error("LiveSnapshot should report false when no meeting is being recorded")
+	}
+}
+
+// While a meeting is running, LiveSnapshot reads the window and participants off the same screen text prep.go uses, and reports that nothing has been transcribed yet: whisper only ever runs once, after the recording stops, so there is no transcript to show mid-call.
+func TestRecorder_LiveSnapshot_WhileRecording(t *testing.T) {
+	store := &fakeStore{episodes: []db.Episode{
+		{CreatedAt: time.Now(), Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"},
+	}}
+	r, _, _ := newTestRecorder(t, store)
+	before := time.Now()
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer r.stop()
+
+	snap, ok := r.LiveSnapshot(context.Background())
+	if !ok {
+		t.Fatal("LiveSnapshot should report true while a meeting is being recorded")
+	}
+	if snap.StartedAt.Before(before) || snap.StartedAt.After(time.Now()) {
+		t.Errorf("StartedAt = %v, want between %v and now", snap.StartedAt, before)
+	}
+	if snap.Window != "Meet - abc-defg-hij - Brave" {
+		t.Errorf("Window = %q, want the meeting window's title", snap.Window)
+	}
+	if len(snap.Participants) != 1 || snap.Participants[0] != "Priya Shah" {
+		t.Errorf("Participants = %v, want [Priya Shah]", snap.Participants)
+	}
+	if len(snap.SegmentsSoFar) != 0 {
+		t.Errorf("SegmentsSoFar = %v, want empty: transcription is one pass at stop, not incremental", snap.SegmentsSoFar)
+	}
+	if !snap.TranscribedThrough.IsZero() {
+		t.Errorf("TranscribedThrough = %v, want zero: nothing has been transcribed yet", snap.TranscribedThrough)
+	}
+	if snap.Note == "" {
+		t.Error("Note should explain why SegmentsSoFar is empty")
+	}
+}
