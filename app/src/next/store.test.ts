@@ -2,7 +2,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { DaemonEvent } from "./api";
+import type { ConversationSummary, DaemonEvent } from "./api";
+import { oraApi } from "./api";
 import { conversationsUi, escaped, makeStore, progress, settings, ui } from "./store";
 
 describe("what the window is showing", () => {
@@ -174,6 +175,73 @@ describe("the question in flight", () => {
     store.dispatch(progress.askSent({ conversationId: "c1", question: "a question" }));
     store.dispatch(progress.askFailed());
     expect(store.getState().progress.run).toBeUndefined();
+  });
+});
+
+describe("a computer-use job in flight", () => {
+  it("folds its steps, its question and its closing spend into the job", () => {
+    const store = makeStore();
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    expect(store.getState().progress.job).toMatchObject({ conversationId: "c1", goal: "reorder the slides", state: "planning", steps: [] });
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    expect(store.getState().progress.job?.id).toBe("act-1");
+
+    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4", expect: "Risk showing" }) }));
+    expect(store.getState().progress.job?.steps).toMatchObject([{ n: 1, text: "Clicking Slide 4", expect: "Risk showing" }]);
+    expect(store.getState().progress.job?.state).toBe("stepping");
+
+    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "verified", state: "stepping", text: "found it", outcome: "pass" }) }));
+    expect(store.getState().progress.job?.steps[0]).toMatchObject({ outcome: "pass", why: "found it" });
+
+    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "question", state: "stuck", text: "Which deck?" }) }));
+    expect(store.getState().progress.job?.question).toBe("Which deck?");
+    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "answered", state: "stepping", text: "the review one" }) }));
+    expect(store.getState().progress.job?.question).toBeUndefined();
+
+    store.dispatch(
+      progress.eventArrived({
+        id: "act-1",
+        type: "act",
+        detail: JSON.stringify({ kind: "done", state: "done", text: "Done.", spend: { rounds: 2, input: 100, cached: 40, output: 20 } }),
+      }),
+    );
+    expect(store.getState().progress.job).toMatchObject({ state: "done", say: "Done.", spend: { rounds: 2, input: 100, cached: 40, output: 20 } });
+  });
+
+  it("ignores an event carrying another job's id, or arriving with no job in flight", () => {
+    const store = makeStore();
+    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "x" }) }));
+    expect(store.getState().progress.job).toBeUndefined();
+
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    store.dispatch(progress.eventArrived({ id: "act-2", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "somebody else's" }) }));
+    expect(store.getState().progress.job?.steps).toEqual([]);
+  });
+
+  it("gives up on a job the daemon never accepted", () => {
+    const store = makeStore();
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobFailed());
+    expect(store.getState().progress.job).toBeUndefined();
+  });
+
+  it("patches the sidebar's own row with the job's state word while it runs, since the daemon knows nothing about a job being tied to a conversation", async () => {
+    const store = makeStore();
+    const rows: ConversationSummary[] = [{ id: "c1", title: "Reordering the slide deck", brain: "claude", last: "", updated: new Date().toISOString() }];
+    // upsertQueryData is a thunk that writes the cache asynchronously, unlike every plain action above.
+    await store.dispatch(oraApi.util.upsertQueryData("conversations", undefined, rows));
+
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    expect(oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0].last).toBe("Planning…");
+
+    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4" }) }));
+    expect(oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0].last).toBe("Working…");
+
+    // A job with nothing tying it to a row in the list — a fresh draft's, before its first message opened one — patches nothing.
+    const untouched = oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0];
+    store.dispatch(progress.jobSent({ conversationId: "__draft__", goal: "x" }));
+    expect(oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0]).toEqual(untouched);
   });
 });
 
