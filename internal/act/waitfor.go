@@ -83,10 +83,11 @@ func Match(c Check, title string, items []Item, focused string) (bool, string) {
 		}
 		return true, fmt.Sprintf("%q has gone from the list of %d items", c.Value, len(items))
 	case FieldHolds:
+		// The field's own contents never go into the verdict: a field_holds check right after type_text is asking about text the checkpoint and the event stream were built not to carry, and the caller already knows what it was looking for.
 		if strings.Contains(strings.ToLower(focused), value) {
-			return true, fmt.Sprintf("the focused field holds %q", focused)
+			return true, "the focused field holds what was expected"
 		}
-		return false, fmt.Sprintf("the focused field holds %q", focused)
+		return false, fmt.Sprintf("the focused field holds %d other characters", len([]rune(focused)))
 	}
 	return false, fmt.Sprintf("there is no check called %q", c.Kind)
 }
