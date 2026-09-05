@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,7 +24,7 @@ func writeExecutable(t *testing.T, path string) string {
 func TestWindowBinary_PrefersTheEnvironmentOverride(t *testing.T) {
 	want := writeExecutable(t, filepath.Join(t.TempDir(), "some-build", "ora"))
 	t.Setenv("ORA_WINDOW", want)
-	got, err := windowBinary()
+	got, _, err := windowBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +49,7 @@ func TestWindowBinary_SkipsWhatCannotBeRun(t *testing.T) {
 		"nothing of the name": filepath.Join(dir, "missing"),
 	} {
 		t.Setenv("ORA_WINDOW", path)
-		if got, err := windowBinary(); err == nil && got == path {
+		if got, _, err := windowBinary(); err == nil && got == path {
 			t.Errorf("%s: windowBinary returned %q, which cannot be run", name, got)
 		}
 	}
@@ -61,7 +62,7 @@ func TestWindowBinary_NeverReturnsTheDaemonItself(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ORA_WINDOW", exe)
-	got, err := windowBinary()
+	got, _, err := windowBinary()
 	if err == nil && got == exe {
 		t.Fatalf("windowBinary returned the daemon's own binary %q", got)
 	}
@@ -70,8 +71,40 @@ func TestWindowBinary_NeverReturnsTheDaemonItself(t *testing.T) {
 // A machine with no window built runs the daemon alone rather than failing to start.
 func TestWindowBinary_ReportsWhenThereIsNoneToRun(t *testing.T) {
 	t.Setenv("ORA_WINDOW", filepath.Join(t.TempDir(), "not-here"))
-	if _, err := windowBinary(); err == nil {
+	if _, _, err := windowBinary(); err == nil {
 		t.Error("expected an error when there is no window binary to run")
+	}
+}
+
+// The hint printed when nothing is found needs every path windowBinary actually tried, so it must come back even when none of them panned out — and it must include a candidate built from the working directory, since `go build -o ora . && ./ora` from a checkout is the path that never has anything beside the executable.
+func TestWindowBinary_ReturnsCandidatesTriedEvenOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldwd)
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORA_WINDOW", "")
+
+	_, tried, err := windowBinary()
+	if err == nil {
+		t.Fatal("expected no window binary to be found in an empty directory")
+	}
+	if len(tried) == 0 {
+		t.Fatal("expected windowBinary to report the candidates it tried")
+	}
+	wantSuffix := filepath.Join("app", "src-tauri", "target", "release", "ora")
+	found := false
+	for _, c := range tried {
+		if strings.HasSuffix(c, wantSuffix) && strings.HasPrefix(c, dir) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a working-directory candidate ending in %q, got %v", wantSuffix, tried)
 	}
 }
 
