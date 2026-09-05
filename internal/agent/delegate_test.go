@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -117,15 +118,99 @@ func TestBuildBrief_DropsErrorAndEmptyTurns(t *testing.T) {
 	}
 }
 
+// A secret in the goal itself — not just the thread — never reaches the brief.
+func TestBuildBrief_RedactsGoalLine(t *testing.T) {
+	brief := BuildBrief("my password is hunter2", nil, "")
+	if strings.Contains(brief, "hunter2") {
+		t.Errorf("secret goal leaked: %s", brief)
+	}
+}
+
+// A secret line inside the personal-context block never reaches the brief, while the rest of the block survives.
+func TestBuildBrief_RedactsPersonalContextLine(t *testing.T) {
+	personal := "Personal context — things known for certain about the user:\n  password: hunter2\n  works on ora"
+	brief := BuildBrief("goal", nil, personal)
+	if strings.Contains(brief, "hunter2") {
+		t.Errorf("secret personal-context line leaked: %s", brief)
+	}
+	if !strings.Contains(brief, "works on ora") {
+		t.Errorf("non-secret personal-context line should survive: %s", brief)
+	}
+}
+
+// A "to" other than "" or "claude" is refused before the runner is ever called, rather than silently run as claude.
+func TestDelegate_RejectsUnknownTo(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	run := &fakeRunner{result: "done"}
+	_, err := a.delegate(t.Context(), run, Delegation{To: "codex", Brief: "do it"}, nil)
+	if err == nil || !strings.Contains(err.Error(), `"codex" is not a delegate Ora can run`) {
+		t.Errorf("err = %v", err)
+	}
+	if run.gotPrompt != "" {
+		t.Errorf("runner should never have been called for an unsupported target")
+	}
+}
+
+// delegateHandler's error message carries the underlying error, not a generic line — so a made-up cwd tells the model the path was wrong instead of "try again". The cwd-existence check (tested below at the delegate level) means this never has to start the real claude binary to see an error.
+func TestDelegateHandler_ErrorIncludesUnderlyingError(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	got := delegateHandler(t.Context(), a, map[string]any{"brief": "do it", "cwd": "/home/x/proj-does-not-exist"})
+	if !strings.Contains(got, "/home/x/proj-does-not-exist") {
+		t.Errorf("got = %q, want the underlying error naming the bad cwd", got)
+	}
+}
+
+// A cwd that does not exist, or is not a directory, fails before the runner is ever started, naming the problem.
+func TestDelegate_RejectsMissingCWD(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	run := &fakeRunner{result: "done"}
+	_, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: "/no/such/project/dir"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "/no/such/project/dir") {
+		t.Errorf("err = %v, want it to name the missing cwd", err)
+	}
+	if run.gotPrompt != "" {
+		t.Errorf("runner should never have been called for a missing cwd")
+	}
+}
+
+// A regular file given as cwd is rejected the same way a missing one is, rather than being handed to the runner.
+func TestDelegate_RejectsCWDThatIsAFile(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	run := &fakeRunner{result: "done"}
+	file := t.TempDir() + "/not-a-dir"
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: file}, nil)
+	if err == nil {
+		t.Fatal("expected an error for a cwd that is a file")
+	}
+}
+
+// The delegate's own child process runs in its own process group so cmd.Cancel can kill the whole group, not just the direct child, once the wall-clock budget or caller context ends the run.
+func TestNewDelegateCmd_RunsInOwnProcessGroupAndCancelKillsIt(t *testing.T) {
+	cmd := newDelegateCmd(context.Background(), "", "/tmp/does-not-matter")
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Errorf("cmd.SysProcAttr = %+v, want Setpgid true", cmd.SysProcAttr)
+	}
+	if cmd.Cancel == nil {
+		t.Errorf("cmd.Cancel is nil, want a group-kill on cancel")
+	}
+	if cmd.WaitDelay != 2*time.Second {
+		t.Errorf("cmd.WaitDelay = %s, want 2s kept", cmd.WaitDelay)
+	}
+}
+
 // Delegate passes the delegation's CWD straight through to the runner, unchanged.
 func TestDelegate_PassesCWDThrough(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	run := &fakeRunner{result: "done"}
-	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: "/some/project"}, nil); err != nil {
+	dir := t.TempDir()
+	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: dir}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if run.gotCWD != "/some/project" {
-		t.Errorf("cwd = %q, want /some/project", run.gotCWD)
+	if run.gotCWD != dir {
+		t.Errorf("cwd = %q, want %q", run.gotCWD, dir)
 	}
 }
 
@@ -134,7 +219,7 @@ func TestDelegate_SendsTheBriefAsSystemPromptAndGoalAsPrompt(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	run := &fakeRunner{result: "done"}
 	thread := []db.Turn{{Role: "you", Text: "earlier thing", Kind: "ask"}}
-	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "fix the bug", CWD: "/repo"}, thread); err != nil {
+	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "fix the bug", CWD: t.TempDir()}, thread); err != nil {
 		t.Fatal(err)
 	}
 	if run.gotPrompt != "fix the bug" {

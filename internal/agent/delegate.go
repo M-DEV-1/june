@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -35,8 +36,20 @@ type Runner interface {
 // claudeCodeBinary is the Claude Code command line, found on PATH — the same binary claude.go's ask path runs.
 const claudeCodeBinary = "claude"
 
-// ClaudeCodeRunner runs a delegate session through `claude -p` in the caller's own project directory, under the CLI's normal default permission mode — not the --restricted, no-tools sandbox AskClaude uses for its own asks, because a delegate call is a real hand-off to a collaborator working in a real project. --bare is never passed (it would bill the API key instead of the subscription, the same reason claude.go never passes it) and --dangerously-skip-permissions is never passed (a delegate with real tool access needs the CLI's own approval gate, not nobody watching).
+// ClaudeCodeRunner runs a delegate session through `claude -p` in the caller's own project directory, under the CLI's normal default permission mode — not the --restricted, no-tools sandbox AskClaude uses for its own asks, because a delegate call is a real hand-off to a collaborator working in a real project. --bare is never passed (it would bill the API key instead of the subscription, the same reason claude.go never passes it) and --dangerously-skip-permissions is never passed: in this headless `-p` run there is nobody to answer a permission prompt, so under --permission-mode default an approval-gated tool is simply denied rather than run unsupervised — that denial, plus the "do not send, publish, pay for or delete" line BuildBrief writes into every brief, is the actual guard, not a live approval gate.
 type ClaudeCodeRunner struct{}
+
+// newDelegateCmd builds (without starting) the `claude -p` command for one delegate run. Input: the context whose deadline bounds the run, the working directory (cwd, "" for the caller's own), and the path of the system-prompt file already written to disk. Output: the exec.Cmd, not yet given stdin/stdout/stderr — a test can inspect its process-group and cancel wiring without ever starting the real claude binary. The child runs in its own process group (SysProcAttr.Setpgid) and Cancel kills the whole group, not just the direct child, so a `npm run dev` or watcher the delegate started does not outlive the ten-minute wall or the caller's own context — killing only the direct process leaves such grandchildren running with nobody to stop them. WaitDelay still bounds how long Run waits for stdout to close once Cancel has fired.
+func newDelegateCmd(ctx context.Context, cwd, promptPath string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, claudeCodeBinary, "-p", "--output-format", "text", "--system-prompt-file", promptPath, "--permission-mode", "default")
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 2 * time.Second
+	return cmd
+}
 
 // Run starts one `claude -p` process in cwd. The system prompt goes to a 0600 file in a fresh temp directory rather than argv, the same reason writeClaudeAskFiles does it in claude.go: a single argv entry is capped at 128 KB on Linux and any local process can read another's argv via /proc/<pid>/cmdline. The prompt goes on stdin. Output: stdout, trimmed, as the result.
 func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt string) (string, error) {
@@ -50,16 +63,11 @@ func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt strin
 		return "", fmt.Errorf("delegate: writing the system prompt: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, claudeCodeBinary, "-p", "--output-format", "text", "--system-prompt-file", promptPath, "--permission-mode", "default")
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
+	cmd := newDelegateCmd(ctx, cwd, promptPath)
 	cmd.Stdin = strings.NewReader(prompt)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
-	// Killing the child does not kill its own children, and stdout stays open as long as any of them holds it — see runClaudeCLI in claude.go for the same reasoning.
-	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", errors.New("delegate: the run timed out")
@@ -76,10 +84,10 @@ func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt strin
 // delegateThreadBudget bounds how much of the conversation thread a brief carries, in runes, newest kept — sized for a one-page brief rather than a full model prompt (compare maxHistoryBytes in ask.go, which bounds an ask's own thread the same way).
 const delegateThreadBudget = 4000
 
-// BuildBrief writes the one page handed to a delegate. Input: the goal in the user's own words, the conversation thread it grew out of (oldest first, as db.Store.ConversationTurns returns it — nil for none), and the personal-context block to include (as personalContextBlock renders it, "" for none). Output: the brief text: the goal, what Ora knows of the thread so far (the newest lines that fit delegateThreadBudget runes), the personal-context block, the constraints every delegate call carries, and where to report. A thread line naming a secret is dropped rather than included — see redactLine.
+// BuildBrief writes the one page handed to a delegate. Input: the goal in the user's own words, the conversation thread it grew out of (oldest first, as db.Store.ConversationTurns returns it — nil for none), and the personal-context block to include (as personalContextBlock renders it, "" for none). Output: the brief text: the goal, what Ora knows of the thread so far (the newest lines that fit delegateThreadBudget runes), the personal-context block, the constraints every delegate call carries, and where to report. Every one of those three sources — goal, thread, personal context — is filtered line by line through redactLine before it is written; see that function's own comment for exactly what it catches and what still gets through.
 func BuildBrief(goal string, thread []db.Turn, personal string) string {
 	var b strings.Builder
-	b.WriteString("Goal: " + strings.TrimSpace(goal) + "\n")
+	b.WriteString("Goal: " + strings.TrimSpace(redactBlock(goal)) + "\n")
 
 	lines := make([]string, 0, len(thread))
 	for _, t := range thread {
@@ -111,7 +119,7 @@ func BuildBrief(goal string, thread []db.Turn, personal string) string {
 		}
 	}
 
-	if p := strings.TrimSpace(personal); p != "" {
+	if p := strings.TrimSpace(redactBlock(personal)); p != "" {
 		b.WriteString("\n" + p + "\n")
 	}
 
@@ -133,9 +141,22 @@ func keepNewestRunes(lines []string, budget int) []string {
 	return lines[first:]
 }
 
-// redactLine reports whether line names a secret that must never leave the machine in a delegate brief: the field-label words secretPattern already gates screen actions on (password, card, cvv, otp, pin, account number — stopline.go), or one of the credential-file patterns isSensitivePath already gates file reads on (.ssh/, .env, id_rsa, a .pem/.key suffix, and so on — tools.go). A matching line is dropped whole rather than partially redacted, since guessing which part of a sentence is the secret is how the rest of it leaks anyway.
+// redactLine reports whether line names a secret that must never leave the machine in a delegate brief: the field-label words secretPattern matches (password, card, cvv, cvc, otp, pin, account number — stopline.go), or one of the credential-file patterns isSensitivePath matches (.ssh/, .env, id_rsa, a .pem/.key suffix, and so on — tools.go). A matching line is dropped whole rather than partially redacted, since guessing which part of a sentence is the secret is how the rest of it leaks anyway. What it does not catch: a bare secret with no label word and no path shape — a raw API key or token pasted with nothing around it — passes through untouched, since both patterns key off a label or a path, not the shape of the value itself.
 func redactLine(line string) bool {
 	return secretPattern.MatchString(line) || isSensitivePath(line)
+}
+
+// redactBlock filters s line by line through redactLine, dropping any matching line and rejoining what is left with newlines. Input: any block of text bound for a delegate brief (the goal, or the personal-context block) — not just a conversation thread. Output: the same text with every secret-naming line removed.
+func redactBlock(s string) string {
+	lines := strings.Split(s, "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		if redactLine(l) {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // delegateTimeout bounds one whole delegate call: long enough for a real Claude Code session to do a bounded piece of work, short enough that a stuck delegate does not hold its caller open indefinitely.
@@ -151,6 +172,18 @@ func (a *Agent) Delegate(ctx context.Context, d Delegation, thread []db.Turn) (s
 func (a *Agent) delegate(ctx context.Context, run Runner, d Delegation, thread []db.Turn) (string, error) {
 	if strings.TrimSpace(d.Brief) == "" {
 		return "", errors.New("delegate: needs a brief")
+	}
+	if d.To != "" && d.To != "claude" {
+		return "", fmt.Errorf("delegate: %q is not a delegate Ora can run", d.To)
+	}
+	if d.CWD != "" {
+		info, err := os.Stat(d.CWD)
+		if err != nil {
+			return "", fmt.Errorf("delegate: cwd %q: %w", d.CWD, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("delegate: cwd %q is not a directory", d.CWD)
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, delegateTimeout)
 	defer cancel()
@@ -203,7 +236,7 @@ func delegateHandler(ctx context.Context, a *Agent, args map[string]any) string 
 	result, err := a.Delegate(ctx, Delegation{To: to, Brief: brief, CWD: cwd}, nil)
 	if err != nil {
 		slog.Error("delegate: failed", "error", err)
-		return toolError("that delegate call didn't come back — try again or narrow the brief")
+		return toolError("that delegate call failed: " + err.Error())
 	}
 	return result
 }
