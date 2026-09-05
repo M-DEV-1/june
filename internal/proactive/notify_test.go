@@ -235,6 +235,63 @@ func TestDismissal_LeavesNothingBehind(t *testing.T) {
 	assertNoSnoozes(t, ctx, store)
 }
 
+// TestDone_CancelsAPendingSnooze checks that pressing Done while a snooze is still pending for the same notice stops that snooze coming back, closing the gap where a snoozed notice fires again even after the user has already dealt with it.
+func TestDone_CancelsAPendingSnooze(t *testing.T) {
+	ctx := context.Background()
+	s, store, f := testScheduler(t)
+	now := time.Date(2026, 9, 5, 9, 15, 0, 0, time.Local)
+	s.now = func() time.Time { return now }
+
+	s.say(Notice{Title: "Still open", Body: "Send the invoice", Kind: "task", ID: "42"})
+	f.press(t, 0, "hour")
+	f.press(t, 0, "done")
+
+	assertNoSnoozes(t, ctx, store)
+}
+
+// TestDone_OnARefiredSnooze_CancelsIt checks the chain that matters most: a notice is snoozed, the scheduler tick re-fires it, and Done on that re-fired notification still cancels it — proving the re-fired notice carries the same kind and id as the original rather than minting a new one.
+func TestDone_OnARefiredSnooze_CancelsIt(t *testing.T) {
+	ctx := context.Background()
+	s, store, f := testScheduler(t)
+	now := time.Date(2026, 9, 5, 9, 15, 0, 0, time.Local)
+	s.now = func() time.Time { return now }
+
+	s.say(Notice{Title: "Still open", Body: "Send the invoice", Kind: "task", ID: "42"})
+	f.press(t, 0, "hour")
+
+	now = now.Add(time.Hour)
+	s.tick(ctx)
+	if f.count() != 2 {
+		t.Fatalf("posted %d notifications after the tick, want 2 (the original and the re-fired one)", f.count())
+	}
+
+	f.press(t, 1, "done")
+	assertNoSnoozes(t, ctx, store)
+}
+
+// TestSnooze_OnARefiredSnooze_ReplacesIt checks that snoozing again from a re-fired notification pushes the same notice further out rather than leaving two snoozes pending for it.
+func TestSnooze_OnARefiredSnooze_ReplacesIt(t *testing.T) {
+	ctx := context.Background()
+	s, store, f := testScheduler(t)
+	now := time.Date(2026, 9, 5, 9, 15, 0, 0, time.Local)
+	s.now = func() time.Time { return now }
+
+	s.say(Notice{Title: "Still open", Body: "Send the invoice", Kind: "task", ID: "42"})
+	f.press(t, 0, "hour")
+
+	now = now.Add(time.Hour)
+	s.tick(ctx)
+	f.press(t, 1, "hour")
+
+	due, err := store.DueSnoozes(ctx, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("DueSnoozes: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("DueSnoozes = %+v, want exactly one pending snooze for the notice, not one per snooze button pressed", due)
+	}
+}
+
 // assertNoSnoozes fails the test when anything was put away for later.
 func assertNoSnoozes(t *testing.T, ctx context.Context, store *db.Store) {
 	t.Helper()
