@@ -76,6 +76,7 @@ var trajStubs = map[string]string{
 	"click_at":         "error: no screen in this eval — say where to click instead",
 	"scroll_at":        "error: no screen in this eval — say where to scroll instead",
 	"switch_window":    "error: no screen in this eval — say which app to switch to instead",
+	"delegate":         "error: no other agent in this eval — do the work yourself with the tools you have",
 }
 
 // trajExec runs one tool call. The read tools go through the daemon's own ExecuteTool against the snapshot store, so their semantics are the live ones down to the wording of an empty result; everything else returns its stub. query_store is here with the other reads because it runs on a read-only sqlite connection — a write fails at the database, not at a filter — and action_items only lists what is open. Input: the agent holding the snapshot store, the tool name and its args. Output: the result string the arm sees.
