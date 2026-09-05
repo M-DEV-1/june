@@ -56,7 +56,7 @@ import {
   voiceStop,
 } from "./daemon";
 import { dictationKey, startDictation, stopDictation } from "./dictate";
-import { Waveform } from "./waveform";
+import { Waveform, workingRow } from "./waveform";
 import {
   fitWindow as winplaceFitWindow,
   noticePlacement,
@@ -352,11 +352,12 @@ function openNotice(place: string, id: string): void {
   );
 }
 
-/** Ticks the live step list's elapsed-seconds numbers up once a second while an ask is running; nothing else re-renders on its own between daemon events, so a slow tool call would otherwise sit on a stale number until the next one arrives. Input: none. Output: nothing. */
+/** Ticks the live step list's elapsed-seconds numbers up and advances its braille working grid while an ask is running; nothing else re-renders on its own between daemon events, so a slow tool call would otherwise sit on a stale number and a frozen grid until the next one arrives. It runs ten times a second because that is the rate the grid needs to read as motion; the seconds numbers, which only ever changed once a second, cost nothing extra for being written more often. Input: none. Output: nothing. */
+const STEP_TICK_MS = 100;
 let stepTicker: ReturnType<typeof setInterval> | undefined;
 function startStepTicker(): void {
   stopStepTicker();
-  stepTicker = setInterval(tickSteps, 1000);
+  stepTicker = setInterval(tickSteps, STEP_TICK_MS);
 }
 function stopStepTicker(): void {
   clearInterval(stepTicker);
@@ -454,6 +455,30 @@ function scheduleVoiceWaveRepaint(): void {
   });
 }
 
+/** When the last real "level" event arrived, in milliseconds since the epoch, so the breath below knows whether the daemon is still driving the grid. */
+let lastLevelAt = 0;
+
+/** How long the grid waits after the last level event before breathing on its own, in milliseconds: three of the daemon's 50 ms ticks, so a real reading always wins. */
+const BREATH_AFTER_MS = 150;
+
+/** The timer that keeps the voice grid breathing while the daemon is quiet. The daemon skips a level tick when nothing changed (see levelChangeThreshold in internal/ipc/voice.go), which is exactly the silent stretch the breath exists for, so the breath cannot be driven off the daemon's events and runs on this window's own clock instead. */
+let breathTimer: ReturnType<typeof setInterval> | undefined;
+
+/** Starts or stops the breath with the session. Input: whether a live voice session is on. Output: nothing. Under reduced motion the grid holds still, so nothing is started. */
+function syncBreath(voiceOn: boolean): void {
+  if (voiceOn && breathTimer === undefined && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    breathTimer = setInterval(() => {
+      if (Date.now() - lastLevelAt < BREATH_AFTER_MS) return;
+      speakerWave.update(voiceGridAmplitude(0));
+      scheduleVoiceWaveRepaint();
+    }, 100);
+  }
+  if (!voiceOn && breathTimer !== undefined) {
+    clearInterval(breathTimer);
+    breathTimer = undefined;
+  }
+}
+
 /** The amplitude fed to the voice-mode grid's Waveform for one "level" tick. A real reading above the noise floor drives it as-is; below that — Ora listening rather than speaking, which is most of a session — a small deterministic sine (0.05-0.12 at 0.4Hz, so one full breath takes about 2.5s) takes over instead, the same idle "breathing" a voice orb does, so the grid still reads as alive instead of flatlining the moment she stops talking. Input: the level event's speaker reading (0-1). Output: the amplitude to update the Waveform with. */
 function voiceGridAmplitude(speaker: number): number {
   const BREATH_FLOOR = 0.02;
@@ -481,18 +506,23 @@ function stepRowHtml(s: ToolStep, now: number): string {
     </div>${s.error ? `<div class="step-err">${esc(s.error)}</div>` : ""}`;
 }
 
-/** The words the live row shows before the first tool call starts, and what it falls back to between one tool call finishing and the next starting. Shared between stepsHtml's first render of a turn and updateLiveRow's later in-place patches so the two produce byte-identical markup — that sameness is what lets updateLiveRow tell "nothing changed" from "the step just moved on" with one string comparison. */
-const THINKING_LABEL = `Thinking<span class="dots"><i>.</i><i>.</i><i>.</i></span>`;
+/** How many braille cells wide the live row's working grid is drawn. */
+const WORKING_CELLS = 24;
 
-/** The placeholder row shown before any tool call has started. Same four children a real step's row has — icon, mark, time, all empty — as stepRowHtml, not the bare icon-and-label pair this used to be: that structural parity is what lets the live row survive the change from this placeholder to the first real step in place (see patchLiveSteps) instead of being swapped for a differently-shaped element, which was one more place the shimmer used to restart. Input: none. Output: the row's HTML. */
-function thinkingRowHtml(): string {
-  return `<div class="step run"><span class="step-ic"></span><span class="step-label">${THINKING_LABEL}</span><span class="step-mark"></span><span class="step-time"></span></div>`;
+/** What the live row shows before the first tool call starts, and what it falls back to between one tool call finishing and the next starting: one row of the same braille dot grid live voice draws, which is Ora's single signature for "listening or working". It replaces the words that used to sit here. Input: none, reads the clock. Output: the row's characters — a fixed first frame under reduced motion, since nothing repaints it there. */
+function workingGridText(): string {
+  return workingRow(WORKING_CELLS, reduce ? 0 : Date.now());
 }
 
-/** The live step list shown in place of an answer while an ask is still running. A "Thinking…" row — three dots animating in sequence, same shimmer as any running label — stands in until the first tool call arrives, so the daemon's own "Checking." status text is never what the user sees — that hardcoded, unchanging line was the entire complaint this replaces. Only ever builds the list from scratch, for the first render of a turn; every event after that patches this same markup in place instead (see patchLiveSteps), which is what keeps the running row's animations from restarting on every tool call. Input: the turn's steps so far. Output: the list's HTML. */
+/** The placeholder row shown before any tool call has started. Same four children a real step's row has — icon, mark, time, all empty — as stepRowHtml, not the bare icon-and-label pair this used to be: that structural parity is what lets the live row survive the change from this placeholder to the first real step in place (see patchLiveSteps) instead of being swapped for a differently-shaped element, which was one more place the shimmer used to restart. The label carries the "work" class while it holds the grid, which is what turns the shimmer off for it in styles.css. Input: none. Output: the row's HTML. */
+function gridRowHtml(): string {
+  return `<div class="step run"><span class="step-ic"></span><span class="step-label work">${workingGridText()}</span><span class="step-mark"></span><span class="step-time"></span></div>`;
+}
+
+/** The live step list shown in place of an answer while an ask is still running. A row of the braille dot grid stands in until the first tool call arrives, so the daemon's own "Checking." status text is never what the user sees — that hardcoded, unchanging line was the entire complaint this replaces. Only ever builds the list from scratch, for the first render of a turn; every event after that patches this same markup in place instead (see patchLiveSteps), which is what keeps the running row's animations from restarting on every tool call. Input: the turn's steps so far. Output: the list's HTML. */
 function stepsHtml(steps: ToolStep[]): string {
   if (steps.length === 0)
-    return `<div class="steps">${thinkingRowHtml()}</div>`;
+    return `<div class="steps">${gridRowHtml()}</div>`;
   const now = Date.now();
   return `<div class="steps">${steps.map((s) => stepRowHtml(s, now)).join("")}</div>`;
 }
@@ -510,15 +540,25 @@ function crossFadeText(el: HTMLElement, html: string): void {
   }, 150);
 }
 
-/** Updates the one live step row in place: the icon's kind and the label's text (cross-faded, see crossFadeText), and only when either actually changed — a "status" event that leaves the running step exactly as it was must touch nothing, or it would blank the ticking elapsed-time number for no reason (see tickSteps) and cross-fade text that never changed. Input: the row element, kept alive across the whole turn by patchLiveSteps, and the step it should now show, or undefined for the idle "Thinking" look before the first tool call or between one finishing and the next starting. Output: nothing. */
+/** Updates the one live step row in place: the icon's kind and the label's text (cross-faded, see crossFadeText), and only when either actually changed — a "status" event that leaves the running step exactly as it was must touch nothing, or it would blank the ticking elapsed-time number for no reason (see tickSteps) and cross-fade text that never changed. With no step running the label holds the braille grid instead, which repaints from the clock ten times a second (see tickSteps) and so is rewritten rather than cross-faded: a fade on every frame would be a flicker, not a transition. Input: the row element, kept alive across the whole turn by patchLiveSteps, and the step it should now show, or undefined for the grid before the first tool call or between one finishing and the next starting. Output: nothing. */
 function updateLiveRow(row: HTMLElement, s: ToolStep | undefined): void {
   const iconEl = row.querySelector<HTMLElement>(".step-ic");
   const labelEl = row.querySelector<HTMLElement>(".step-label");
   if (!iconEl || !labelEl) return;
-  const html = s ? esc(stepLabel(s.name, s.detail)) : THINKING_LABEL;
-  if (labelEl.innerHTML === html) return;
-  iconEl.className = `step-ic${s ? " " + stepIconKind(s.name) : ""}`;
   const timeEl = row.querySelector<HTMLElement>(".step-time");
+  if (!s) {
+    if (!labelEl.classList.contains("work")) {
+      iconEl.className = "step-ic";
+      labelEl.classList.add("work");
+      if (timeEl) timeEl.textContent = "";
+    }
+    labelEl.textContent = workingGridText();
+    return;
+  }
+  const html = esc(stepLabel(s.name, s.detail));
+  if (!labelEl.classList.contains("work") && labelEl.innerHTML === html) return;
+  labelEl.classList.remove("work");
+  iconEl.className = `step-ic ${stepIconKind(s.name)}`;
   if (timeEl) timeEl.textContent = "";
   crossFadeText(labelEl, html);
 }
@@ -551,6 +591,14 @@ function patchLiveSteps(v: View): boolean {
 function tickSteps(): void {
   const turns = view.matters[view.current]?.turns ?? [];
   const last = turns[turns.length - 1];
+
+  // The braille row standing in while no tool call is running is drawn from the clock, so this is the only thing that moves it; under reduced motion it stays on the frame it was built with.
+  if (!reduce) {
+    const gridEl = root.querySelector<HTMLElement>(
+      ".steps .step.run .step-label.work",
+    );
+    if (gridEl) gridEl.textContent = workingGridText();
+  }
 
   // A live job's title line carries its own running seconds, next to the goal — ticked here in place for the same reason a step's own time is: rebuilding the row on every tick would restart its animations.
   if (last?.job && isJobLive(last.job.state)) {
@@ -686,6 +734,7 @@ export function dispatch(event: Parameters<typeof step>[1]): void {
   const wasNoticeAlone = view.notice !== undefined && view.noticeAlone === true;
   const result = step(view, event);
   view = result.view;
+  syncBreath(Boolean(view.voice));
   // The moment an ask finishes gets its own render below (see collapseStepsThenRender), timed to land after the 200ms shrink instead of snapping the step list down immediately.
   const justFinished = wasAsking && view.state !== "asking";
   const stillRunning =
@@ -697,6 +746,7 @@ export function dispatch(event: Parameters<typeof step>[1]): void {
   // A "level" tick can arrive up to 20 times a second; it only ever moves the waveform, so it feeds the Waveform instance directly and patches its rows in place (see scheduleVoiceWaveRepaint) instead of taking the full render() path below. The event still carries a mic reading (see renderLevelEvent in waveform.ts) — nothing draws it any more, so it is read into view.voiceLevel and left there unused rather than drawn, which is harmless.
   const isVoiceLevel = event.kind === "voiceEvent" && event.ev.type === "level";
   if (isVoiceLevel) {
+    lastLevelAt = Date.now();
     speakerWave.update(voiceGridAmplitude(view.voiceLevel?.speaker ?? 0));
   }
   // "asked" only writes down which conversation the daemon put the question in, which nothing on the card draws, so it is not worth a rebuild and a window resize mid-question.

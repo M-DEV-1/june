@@ -113,3 +113,18 @@ export function renderLevelEvent(detail: string): LevelDetail {
     return { mic: 0, speaker: 0 };
   }
 }
+
+/** How long one travel of the working wave takes, in milliseconds: slow enough to read as breathing rather than loading. */
+export const WORKING_PERIOD_MS = 2400;
+
+/** One row of the braille grid for "Ora is working": a slow wave travelling along the row, each cell filled upward from its bottom edge by 0 to 4 dots (ROW0_LEVELS, the masks that grow from the bottom). It is the same signature as the voice grid with nothing to measure, so it is drawn from the clock alone. Input: the row's width in cells and the moment in milliseconds. Output: the row as a string of braille characters, identical for the same moment and back where it started after WORKING_PERIOD_MS. */
+export function workingRow(width: number, tMs: number): string {
+  const phase = (2 * Math.PI * (tMs % WORKING_PERIOD_MS)) / WORKING_PERIOD_MS;
+  let out = "";
+  for (let x = 0; x < width; x++) {
+    const wave = Math.sin((2 * Math.PI * x) / width - phase);
+    const level = Math.round(2 + 1.6 * wave);
+    out += String.fromCodePoint(ROW0_LEVELS[Math.max(0, Math.min(4, level))]);
+  }
+  return out;
+}

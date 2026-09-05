@@ -119,11 +119,8 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 }
 @keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
 
-/* The "Thinking…" row's three dots, standing in for a static ellipsis, animating in sequence the same way the microphone's .wave bars stagger below. */
-.W .dots i { font-style: normal; opacity: .2; animation: dotfade 1.4s ease-in-out infinite; }
-.W .dots i:nth-child(2) { animation-delay: .2s; }
-.W .dots i:nth-child(3) { animation-delay: .4s; }
-@keyframes dotfade { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+/* The braille row the live step row shows while no tool call is running (see main.ts's workingGridText), in place of the words that used to sit here: the same dot grid live voice draws, one row of it, muted. It carries no shimmer — the row itself is already the moving thing, redrawn from the clock ten times a second, and a gradient sweeping through it would be two motions where the design asks for one. */
+.W .step.run .step-label.work { font: 400 15px/1.62 var(--mono); color: var(--mute); background: none; animation: none; }
 
 .W .step-mark { flex: none; display: inline-flex; }
 .W .step.ok .step-mark { color: var(--ok); }
@@ -153,9 +150,8 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 
 /* Shimmer and breathing are the two continuous, looping motions here — the ones reduced motion exists for. The row's entrance and the check/cross draw-in are short one-shot state changes and stay on. */
 @media (prefers-reduced-motion: reduce) {
-  .W .step.run .step-ic, .W .step.run .step-label, .W .dots i { animation: none; }
+  .W .step.run .step-ic, .W .step.run .step-label { animation: none; }
   .W .step.run .step-label { background: none; color: var(--fg); }
-  .W .dots i { opacity: 1; }
 }
 
 .W .evd { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--well); }
