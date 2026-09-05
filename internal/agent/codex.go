@@ -884,7 +884,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 			if a.Draw == nil {
 				return
 			}
-			// maxDrawShapes caps a call the same way drawShapeList does, so a call over the limit does not draw the excess off the stream before the finished call ever gets to refuse it.
+			// The stream stops at maxDrawShapes: a call over the limit has its first maxDrawShapes shapes inked from here, and the finished call then refuses the rest through drawShapeList while still reporting these as drawn (see the early block in executeTool's draw case), so the model hears exactly what is on screen.
 			if len(early[itemID]) >= maxDrawShapes {
 				return
 			}

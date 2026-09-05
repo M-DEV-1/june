@@ -1,4 +1,4 @@
-// delegate.go is the smallest first version of handing a bounded piece of work to another agent — Claude Code running as a real collaborator in a project directory, rather than the sandboxed, tool-less "answer this question" mode AskClaude runs its own asks in (claude.go). Everything here is self-contained: nothing outside this file is edited, and nothing here is wired into the tool table yet (see delegateTool/delegateHandler at the bottom).
+// delegate.go is the smallest first version of handing a bounded piece of work to another agent — Claude Code running as a real collaborator in a project directory, rather than the sandboxed, tool-less "answer this question" mode AskClaude runs its own asks in (claude.go). Everything here is self-contained: nothing outside this file is edited, and the tool table reaches it through delegateTool and delegateHandler at the bottom (registered in tools.go; see see delegateTool/delegateHandler at the bottom).
 package agent
 
 import (
@@ -198,10 +198,13 @@ func (a *Agent) delegate(ctx context.Context, run Runner, d Delegation, thread [
 	}
 
 	brief := BuildBrief(d.Brief, thread, personal)
-	result, err := run.Run(ctx, d.CWD, brief, d.Brief)
+	// The goal goes to the delegate twice, inside the brief and as the prompt itself, so it is redacted on both paths: a secret the user pasted must not reach the child on stdin after the system prompt stripped it.
+	started := time.Now()
+	result, err := run.Run(ctx, d.CWD, brief, redactBlock(d.Brief))
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("delegate: timed out after %s", delegateTimeout)
+			// The deadline that fired may be the delegate's own budget or a shorter one the caller set, so the message says how long it actually ran rather than naming a budget that may not have been the one that ended it.
+			return "", fmt.Errorf("delegate: timed out after %s", time.Since(started).Round(time.Second))
 		}
 		return "", err
 	}
@@ -213,7 +216,7 @@ var delegateTool = &genai.FunctionDeclaration{
 	Behavior: genai.BehaviorNonBlocking,
 	Name:     "delegate",
 	Description: "Hand a bounded piece of work to Claude Code running as a real collaborator in a project directory, and wait for its plain-text answer. Use this for actual coding or shell work in a project, not a memory question — query_memory/recall/branch answer those instead. " +
-		"The delegate sees this conversation's own thread and the user's personal context, nothing else; it cannot see the screen or the rest of Ora's memory.",
+		"The delegate sees the user's personal context and nothing else; it cannot see this conversation, the screen or the rest of Ora's memory, so the brief has to carry everything it needs.",
 	Parameters: &genai.Schema{
 		Type: genai.TypeObject,
 		Properties: map[string]*genai.Schema{
