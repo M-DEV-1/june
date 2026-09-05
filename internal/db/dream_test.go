@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -199,6 +201,36 @@ func TestDiaryDays(t *testing.T) {
 	}
 	if len(days) != 2 || days[0].Day != "2026-08-27" || days[1].Day != "2026-08-29" {
 		t.Errorf("DiaryDays = %+v, want the 27th and 29th in order", days)
+	}
+}
+
+// CommitProceduresStage records the 'procedures' token, and calling it again on an already-marked night is idempotent: the token stays discoverable by the same field-membership check the runner uses to decide whether the stage still needs to run, and a second commit never errors.
+func TestCommitProceduresStage(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.StartDreamRun(ctx, "2026-08-30"); err != nil {
+		t.Fatalf("StartDreamRun: %v", err)
+	}
+
+	run, _, _ := store.DreamRun(ctx, "2026-08-30")
+	if strings.Contains(run.StagesDone, "procedures") {
+		t.Fatalf("stages_done = %q before any commit, want no procedures token", run.StagesDone)
+	}
+
+	if err := store.CommitProceduresStage(ctx, "2026-08-30"); err != nil {
+		t.Fatalf("CommitProceduresStage: %v", err)
+	}
+	run, _, _ = store.DreamRun(ctx, "2026-08-30")
+	if !slices.Contains(strings.Fields(run.StagesDone), "procedures") {
+		t.Errorf("stages_done = %q, want it to carry the procedures token", run.StagesDone)
+	}
+
+	if err := store.CommitProceduresStage(ctx, "2026-08-30"); err != nil {
+		t.Fatalf("second CommitProceduresStage: %v", err)
+	}
+	run, _, _ = store.DreamRun(ctx, "2026-08-30")
+	if !slices.Contains(strings.Fields(run.StagesDone), "procedures") {
+		t.Errorf("stages_done = %q after a second commit, still want the procedures token", run.StagesDone)
 	}
 }
 

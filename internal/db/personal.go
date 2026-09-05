@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"ora/internal/obs"
 )
@@ -84,6 +85,26 @@ func (s *Store) PersonalContext(ctx context.Context) ([]PersonalEntry, error) {
 		return nil, fmt.Errorf("iterate personal context: %w", err)
 	}
 	return entries, nil
+}
+
+// nonPersonSubjects are the personal-context subjects that are not somebody: the user themself, and the bucket the meeting updater parks a name it could not stand behind.
+var nonPersonSubjects = map[string]bool{"identity": true, "unsure": true}
+
+// IsPersonSubject reports whether a personal-context subject names a person rather than the user, an unconfirmed guess, or an area of preference. Input: the entry's subject. Output: true for a person.
+func IsPersonSubject(subject string) bool {
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	return subject != "" && !nonPersonSubjects[subject] && !strings.HasPrefix(subject, "preference")
+}
+
+// PersonSubjectName turns a personal-context subject into the name to show or speak. Input: a hyphenated (or underscore/space separated) lowercase subject such as "priya-shah". Output: "Priya Shah".
+func PersonSubjectName(subject string) string {
+	words := strings.FieldsFunc(subject, func(r rune) bool { return r == '-' || r == '_' || r == ' ' })
+	for i, word := range words {
+		r := []rune(word)
+		r[0] = unicode.ToUpper(r[0])
+		words[i] = string(r)
+	}
+	return strings.Join(words, " ")
 }
 
 // identityEntry is the clean prose the identity note becomes when it moves into personal context.

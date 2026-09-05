@@ -26,7 +26,8 @@ func chunkText(s string, size, overlap int) []string {
 		return nil
 	}
 	runes := []rune(s)
-	if len(runes) <= size {
+	// A size of zero or less has no window to advance: the loop below appended an empty passage and then reset start to where it already was, growing the output until memory ran out, and a negative size sliced runes[start:start-1] and panicked. There is no sensible split at that geometry, so the whole text comes back as one passage.
+	if size <= 0 || len(runes) <= size {
 		return []string{s}
 	}
 	if overlap >= size {

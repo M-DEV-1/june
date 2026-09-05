@@ -34,7 +34,8 @@ func (s *Store) AddActionItems(ctx context.Context, items []memory.ActionItem) (
 	return added, nil
 }
 
-// OpenActionItems returns the action items still owed, oldest first. Deliberately unwindowed: an owed task does not stop being owed because the meeting that raised it was a while ago, which is the whole reason action items live outside the minutes that mention them.
+// OpenActionItems returns the action items still owed by the user, oldest first. Deliberately unwindowed: an owed task does not stop being owed because the meeting that raised it was a while ago, which is the whole reason action items live outside the minutes that mention them.
+// Rows filed under somebody else's name are skipped even though they are on file — a row added before this filter existed, or added despite it by a hand edit, must not surface everywhere action items are read just because it exists.
 func (s *Store) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {
 	all, err := s.actionItems(ctx)
 	if err != nil {
@@ -42,7 +43,7 @@ func (s *Store) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error
 	}
 	var open []memory.ActionItem
 	for _, a := range all {
-		if a.Status == memory.StatusOpen {
+		if a.Status == memory.StatusOpen && a.Mine() {
 			open = append(open, a)
 		}
 	}

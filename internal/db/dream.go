@@ -268,6 +268,17 @@ func (s *Store) CommitReplayStage(ctx context.Context, night string) error {
 	})
 }
 
+// CommitProceduresStage marks the night's procedures token done so the stage runs once a night. The procedures stage's deliverable is the "How I did X" notes it writes directly through LogNote, not a row this transaction owns, so like CommitReplayStage there is nothing else to write here — the token alone is what tells the next wake the night's procedures stage is not to be redone.
+func (s *Store) CommitProceduresStage(ctx context.Context, night string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.CommitProceduresStage")
+	defer span.End()
+
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		return markStageDone(ctx, tx, night, "procedures")
+	})
+}
+
 // FinishDreamRun closes the night in one transaction: the morning report becomes the diary kind='dream' row (FTS-indexed via the diary triggers on purpose — "what did you dream last night" must find it), and the run row gets its one-line report and finished_at stamp.
 func (s *Store) FinishDreamRun(ctx context.Context, night, entry, line string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
