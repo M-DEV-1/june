@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ora
+Comment=Ora
+Exec=ora --daemon
+Icon=ora
+Terminal=false
+StartupWMClass=ora
+Categories=Utility;
