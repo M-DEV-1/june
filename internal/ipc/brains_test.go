@@ -319,7 +319,7 @@ func TestBrainsClaudeUsageNoteAbsentWhenOn(t *testing.T) {
 	}
 }
 
-// TestBrains_ConcurrentPostAndRead runs POST /brains against reads of the same config under the race detector, which is what a brain pick while the picker refetches looks like.
+// TestBrains_ConcurrentPostAndRead runs POST /brains against GET /brains under the race detector, which is what a brain pick while the picker refetches looks like; the GET reads the BrainModels map, so a shared map would be caught here.
 func TestBrains_ConcurrentPostAndRead(t *testing.T) {
 	live := NewLiveConfig(&config.OraConfig{}, func(config.OraConfig) error { return nil })
 	h := Brains(live, nil)
@@ -333,7 +333,9 @@ func TestBrains_ConcurrentPostAndRead(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			_ = live.Get().Brain.Model
+			// A real GET, which reads the BrainModels map five times after the lock is released, is what a picker refetch does while a pick is being written.
+			rec := httptest.NewRecorder()
+			h(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
 		}()
 	}
 	wg.Wait()
