@@ -6,7 +6,10 @@ fn prefer_x11_backend() {
     if std::env::var_os("GDK_BACKEND").is_some() {
         return;
     }
-    if std::env::var("DISPLAY").map(|d| !d.is_empty()).unwrap_or(false) {
+    if std::env::var("DISPLAY")
+        .map(|d| !d.is_empty())
+        .unwrap_or(false)
+    {
         std::env::set_var("GDK_BACKEND", "x11");
     }
 }

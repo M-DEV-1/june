@@ -105,7 +105,10 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
     let mut status = String::new();
     reader.read_line(&mut status)?;
     if !status.contains(" 200 ") {
-        return Err(std::io::Error::other(format!("events answered {}", status.trim())));
+        return Err(std::io::Error::other(format!(
+            "events answered {}",
+            status.trim()
+        )));
     }
     let mut chunked = false;
     loop {
@@ -116,7 +119,11 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
         if header.trim().is_empty() {
             break;
         }
-        if header.to_ascii_lowercase().starts_with("transfer-encoding:") && header.to_ascii_lowercase().contains("chunked") {
+        if header
+            .to_ascii_lowercase()
+            .starts_with("transfer-encoding:")
+            && header.to_ascii_lowercase().contains("chunked")
+        {
             chunked = true;
         }
     }
@@ -168,14 +175,20 @@ mod tests {
     #[test]
     fn one_whole_event_is_read() {
         let mut buffer = String::from("data: {\"type\":\"overlay\"}\n\n");
-        assert_eq!(sse_payloads(&mut buffer), vec!["{\"type\":\"overlay\"}".to_string()]);
+        assert_eq!(
+            sse_payloads(&mut buffer),
+            vec!["{\"type\":\"overlay\"}".to_string()]
+        );
         assert_eq!(buffer, "");
     }
 
     #[test]
     fn several_events_in_one_read_are_all_returned() {
         let mut buffer = String::from("data: one\n\ndata: two\n\n");
-        assert_eq!(sse_payloads(&mut buffer), vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(
+            sse_payloads(&mut buffer),
+            vec!["one".to_string(), "two".to_string()]
+        );
     }
 
     #[test]
