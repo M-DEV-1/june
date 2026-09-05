@@ -294,3 +294,18 @@ func TestDelegateHandler_BlankBriefReturnsToolError(t *testing.T) {
 		t.Errorf("got = %q, want an error: prefixed message", got)
 	}
 }
+
+// The goal reaches the delegate twice, in the brief and as the prompt on stdin, and a secret in it is stripped from both.
+func TestDelegate_RedactsTheGoalOnStdin(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	run := &fakeRunner{result: "done"}
+	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "my password is hunter2, fix the migration", CWD: t.TempDir()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(run.gotPrompt, "hunter2") {
+		t.Errorf("secret goal reached the delegate's stdin: %q", run.gotPrompt)
+	}
+	if strings.Contains(run.gotSystemPrompt, "hunter2") {
+		t.Errorf("secret goal reached the system prompt: %s", run.gotSystemPrompt)
+	}
+}
