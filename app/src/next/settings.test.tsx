@@ -48,7 +48,12 @@ describe("the first run", () => {
     const steps = ["Set GEMINI_API_KEY in ~/.config/ora/env.", "Or sign in with the Claude CLI: run claude login."];
     const { calls } = renderApp({ settings: { ...settings, first_run: { gemini_key: false, codex_login: false, claude_cli: false, local_model: false, steps } } }, { place: "settings" });
     expect(await screen.findByText("Ora cannot answer yet")).toBeDefined();
-    for (const step of steps) expect(screen.getByText(step)).toBeDefined();
+    // Each step reads verbatim as the daemon's own sentence — the tokens in it a person would actually type are just marked as code inside it.
+    const drawn = Array.from(document.querySelectorAll("li")).map((li) => li.textContent);
+    for (const step of steps) expect(drawn).toContain(step);
+    expect(screen.getByText("GEMINI_API_KEY").tagName).toBe("CODE");
+    expect(screen.getByText("~/.config/ora/env").tagName).toBe("CODE");
+    expect(screen.getByText("claude login").tagName).toBe("CODE");
     const before = calls.filter((c) => c.path === "/settings").length;
     await userEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(calls.filter((c) => c.path === "/settings").length).toBeGreaterThan(before));
@@ -101,11 +106,13 @@ describe("Settings", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/pause")).toBe(true));
   });
 
+  // A switch that cannot move still reads as a switch someone could work if they tried. The config file decides this one, so the row states it as a fact.
   it("shows whether meetings are being recorded but does not offer to change it", async () => {
     renderApp({ settings }, { place: "settings" });
-    const recording = await screen.findByLabelText("Recording meetings");
-    await waitFor(() => expect(recording.getAttribute("aria-checked")).toBe("true"));
-    expect(recording.hasAttribute("disabled")).toBe(true);
+    expect(await screen.findByText("Recording meetings")).toBeDefined();
+    // The row reads "Off" until /settings answers, so this waits for the daemon's own value.
+    expect(await screen.findByText("On")).toBeDefined();
+    expect(screen.queryByLabelText("Recording meetings")).toBeNull();
   });
 
   it("says which brains are signed in and writes the model that is picked", async () => {
@@ -135,6 +142,15 @@ describe("Settings", () => {
     expect(screen.getByText(/21\.0 MB of memory/)).toBeDefined();
     expect(screen.getByText("nothing — search is words only")).toBeDefined();
     expect(screen.getByText("as long as you leave it there")).toBeDefined();
+  });
+
+  it("sets the model, the path and other machine values in code, and leaves an ordinary sentence as prose", async () => {
+    renderApp({ settings }, { place: "settings" });
+    await screen.findByText("This machine");
+    expect(screen.getByText(settings.brain as string).tagName).toBe("CODE");
+    expect(screen.getByText("/home/you/.ora").tagName).toBe("CODE");
+    // Search falling back to words only is a sentence about the setting, not a model id, so it stays plain.
+    expect(screen.getByText("nothing — search is words only").tagName).not.toBe("CODE");
   });
 });
 

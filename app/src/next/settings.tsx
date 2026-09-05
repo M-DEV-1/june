@@ -6,7 +6,6 @@ import { RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HOVER_POSITION_KEY, storedHoverPosition, type HoverPosition } from "../winplace";
 import { useBrainsQuery, usePickBrainMutation, useSetCaptureMutation, useSetClaudeUsageFromLoginMutation, useSettingsQuery, useTrackerQuery, useUsageQuery, type SettingsView, type Usage, type UsageWindow } from "./api";
 import { bytes, cachedInput, compact, hhmm, hotkeyKeys, perQuestion, tokens, took } from "./format";
@@ -15,6 +14,28 @@ import { settings as settingsUi, ui, useAppDispatch, useAppSelector, type Theme 
 
 /** The keys the installer registers, drawn when the daemon reports no accelerator of its own. */
 const INSTALLED_HOTKEY = ["Ctrl", "Alt", "Space"];
+
+/** A machine value inside an otherwise plain sentence: an ALL_CAPS environment variable, a path starting with ~/ or /, or a `claude login`-style command. Three client-side rules rather than markup the daemon would have to start sending, since the steps are its own sentences read verbatim. */
+const CODE_TOKEN = /\b[A-Z][A-Z_]{3,}\b|(?:~\/|\/)\S*[^\s.,;:]|\bclaude \w+\b/g;
+
+/** Wraps the machine-specific tokens in a sentence — an env var, a path, a command — in <code>, so a person can tell what to type apart from the sentence telling them to type it. Input: the sentence. Output: the same text, split around each match, with the match itself in a <code> element. */
+function codeSpans(text: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const re = new RegExp(CODE_TOKEN);
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(
+      <code key={m.index} className="font-mono text-[0.92em]">
+        {m[0]}
+      </code>,
+    );
+    last = m.index + m[0].length;
+  }
+  out.push(text.slice(last));
+  return out;
+}
 
 /** What to do before Ora can answer at all, drawn only while the daemon still says none of the four ways of answering text is set up. Input: none — it reads GET /settings itself, so it can sit at the top of Settings and inside the empty Chats pane without either of them passing it anything. Output: the panel, or nothing once the daemon reports an empty step list. "Check again" re-reads /settings, which is what a person does after running one of the commands in another window.
  *
@@ -25,18 +46,18 @@ export function FirstRunPanel() {
   const steps = daemon?.first_run?.steps ?? [];
   if (!steps.length) return null;
   return (
-    <Group className="border-work/40 bg-work/5">
+    <Group>
       <div className="px-4 py-3.5">
         <h2 className="text-doc text-foreground">Ora cannot answer yet</h2>
-        <p className="mt-1.5 text-read text-muted-foreground">It needs one way to answer text. Any one of these is enough.</p>
+        <p className="mt-1.5 text-read text-muted-foreground">Ora needs a model before it can answer. Any one of these will do.</p>
         <ul className="mt-3 list-disc pl-5 text-read marker:text-muted-foreground">
           {steps.map((s) => (
             <li key={s} className="mt-1.5">
-              {s}
+              {codeSpans(s)}
             </li>
           ))}
         </ul>
-        <Button variant="outline" size="sm" className="mt-4" disabled={isFetching} onClick={() => void refetch()}>
+        <Button size="sm" className="mt-4" disabled={isFetching} onClick={() => void refetch()}>
           <RotateCcw /> Check again
         </Button>
       </div>
@@ -57,15 +78,24 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   );
 }
 
-/** One label-and-value line in the machine block. Input: the label and the value. Output: the line, or nothing when there is no value, so a field the daemon could not fill draws no row. */
-function Fact({ label, value }: { label: string; value: string }) {
+/** One label-and-value line in the machine block, shaped like a settings Row: a noun for a label, the sentence fragment that used to be the label as the subtitle under it, and the value on the right. Input: the label, the phrase under it when there is one, the value, and whether the value is something the machine chose rather than prose. Output: the line, or nothing when there is no value, so a field the daemon could not fill draws no row. */
+function Fact({ label, hint, value, mono }: { label: string; hint?: string; value: string; mono?: boolean }) {
   if (!value) return null;
   return (
-    <div className="flex justify-between gap-6 px-3.5 py-2 text-ui">
-      <span className="shrink-0 text-muted-foreground">{label}</span>
-      <span className="max-w-[62%] truncate text-right" title={value}>
-        {value}
-      </span>
+    <div className="flex items-baseline justify-between gap-6 px-3.5 py-2">
+      <div className="min-w-0 shrink-0">
+        <div className="text-ui">{label}</div>
+        {hint ? <div className="mt-0.5 text-meta text-muted-foreground">{hint}</div> : null}
+      </div>
+      {mono ? (
+        <code className="max-w-[62%] truncate text-right font-mono text-[0.92em]" title={value}>
+          {value}
+        </code>
+      ) : (
+        <span className="max-w-[62%] truncate text-right text-ui" title={value}>
+          {value}
+        </span>
+      )}
     </div>
   );
 }
@@ -73,15 +103,17 @@ function Fact({ label, value }: { label: string; value: string }) {
 /** What the daemon is running and what it has written down. Input: the /settings answer. Output: the block. */
 function Machine({ s }: { s: SettingsView }) {
   const started = new Date(s.daemon_started);
+  // With no embedding model the value is a sentence about what search falls back to, not a model id, so it stays in the body face.
+  const noEmbeddings = s.embed_model === "none";
   return (
     <section className="mt-10">
       <SectionHeading>This machine</SectionHeading>
       <Group>
         <div className="divide-y">
-          <Fact label="Answers with" value={s.brain} />
-          <Fact label="Understands meaning with" value={s.embed_model === "none" ? "nothing — search is words only" : s.embed_model} />
-          <Fact label="Hears with" value={s.voice_model} />
-          <Fact label="Everything is kept in" value={s.data_dir} />
+          <Fact label="Model" hint="answers with" value={s.brain} mono />
+          <Fact label="Embeddings" hint="understands meaning with" value={noEmbeddings ? "nothing — search is words only" : s.embed_model} mono={!noEmbeddings} />
+          <Fact label="Speech to text" hint="hears with" value={s.voice_model} mono />
+          <Fact label="Location" hint="everything is kept in" value={s.data_dir} mono />
           <Fact label="What it has written" value={`${bytes(s.store_bytes)} of memory · ${bytes(s.recordings_bytes)} of audio · ${bytes(s.models_bytes)} of models`} />
           <Fact label="Audio kept for" value={s.keep_audio_days < 0 ? "as long as you leave it there" : `${s.keep_audio_days} days`} />
           <Fact label="Running since" value={Number.isNaN(started.getTime()) ? "" : `${hhmm(s.daemon_started)}, build ${s.version}`} />
@@ -344,51 +376,47 @@ export function SettingsScreen() {
               <FirstRunPanel />
             </div>
           ) : null}
-          <Group>
-            <div className="divide-y">
-              <Row label="Look">
-                {/* Manual activation: an arrow key moves along the three without changing the window's colours until Enter or Space picks one. */}
-                <Tabs value={theme} activationMode="manual" onValueChange={(v) => dispatch(settingsUi.themePicked(v as Theme))}>
-                  <TabsList aria-label="Look">
-                    <TabsTrigger value="light">Light</TabsTrigger>
-                    <TabsTrigger value="dark">Dark</TabsTrigger>
-                    <TabsTrigger value="system">System</TabsTrigger>
-                  </TabsList>
-                </Tabs>
-              </Row>
-              <Row label="Position" hint="where the hover opens on screen">
-                <Tabs value={hoverPosition} activationMode="manual" onValueChange={(v) => pickPosition(v as HoverPosition)}>
-                  <TabsList aria-label="Position">
-                    <TabsTrigger value="top">Top</TabsTrigger>
-                    <TabsTrigger value="center">Center</TabsTrigger>
-                    <TabsTrigger value="bottom">Bottom</TabsTrigger>
-                  </TabsList>
-                </Tabs>
-              </Row>
-              <Row label="Hotkey" hint="the GNOME shortcut that opens this window">
-                <div className="flex gap-1">
-                  {keys.map((k) => (
-                    <kbd key={k} className="rounded-xs border bg-muted px-1.5 py-0.5 text-micro text-muted-foreground uppercase">
-                      {k}
-                    </kbd>
-                  ))}
-                </div>
-              </Row>
-              <Row label="Watching the screen" hint="what Ora sees is what it can remember">
-                <Switch checked={watching} aria-label="Watching the screen" onCheckedChange={(on) => void watch(on)} />
-              </Row>
-              <Row label="Recording meetings" hint="turned on in the config file, not from here">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span>
-                      <Switch checked={daemon?.meetings_enabled ?? false} disabled aria-label="Recording meetings" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="left">The daemon reads this from its config; there is no route to change it from the window.</TooltipContent>
-                </Tooltip>
-              </Row>
-            </div>
-          </Group>
+          <section>
+            <SectionHeading>This window</SectionHeading>
+            <Group>
+              <div className="divide-y">
+                <Row label="Look">
+                  {/* Manual activation: an arrow key moves along the three without changing the window's colours until Enter or Space picks one. */}
+                  <Tabs value={theme} activationMode="manual" onValueChange={(v) => dispatch(settingsUi.themePicked(v as Theme))}>
+                    <TabsList aria-label="Look">
+                      <TabsTrigger value="light">Light</TabsTrigger>
+                      <TabsTrigger value="dark">Dark</TabsTrigger>
+                      <TabsTrigger value="system">System</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                </Row>
+                <Row label="Position" hint="where the hover opens on screen">
+                  <Tabs value={hoverPosition} activationMode="manual" onValueChange={(v) => pickPosition(v as HoverPosition)}>
+                    <TabsList aria-label="Position">
+                      <TabsTrigger value="top">Top</TabsTrigger>
+                      <TabsTrigger value="center">Center</TabsTrigger>
+                      <TabsTrigger value="bottom">Bottom</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                </Row>
+                <Row label="Hotkey" hint="the GNOME shortcut that opens this window">
+                  <div className="flex gap-1">
+                    {keys.map((k) => (
+                      <kbd key={k} className="rounded-xs border border-hairline-strong px-1.5 py-0.5 text-micro text-muted-foreground uppercase">
+                        {k}
+                      </kbd>
+                    ))}
+                  </div>
+                </Row>
+                <Row label="Watching the screen" hint="what Ora sees is what it can remember">
+                  <Switch checked={watching} aria-label="Watching the screen" onCheckedChange={(on) => void watch(on)} />
+                </Row>
+                <Row label="Recording meetings" hint="turned on in the config file, not from here">
+                  <span className="text-ui text-muted-foreground">{daemon?.meetings_enabled ? "On" : "Off"}</span>
+                </Row>
+              </div>
+            </Group>
+          </section>
 
           <section className="mt-10">
             <SectionHeading>Brain</SectionHeading>
