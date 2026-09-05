@@ -794,6 +794,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	mux.HandleFunc("/matters", auth(ipcServer.Matters))
 	mux.HandleFunc("/today", auth(ipcServer.Today))
 	mux.HandleFunc("/meetings", auth(ipcServer.Meetings))
+	mux.HandleFunc("/meetings/live", auth(ipc.MeetingLive(meetingRecorder)))
 	mux.HandleFunc("/memory/search", auth(ipcServer.MemorySearch))
 	mux.HandleFunc("/people", auth(ipcServer.People))
 

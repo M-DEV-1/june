@@ -528,6 +528,63 @@ func (r *Recorder) Active() bool {
 	return r.live != nil
 }
 
+// LiveSegment is one line of transcript already known while a meeting is still being recorded. Nothing in this package produces one today — see the doc comment on LiveSnapshot.
+type LiveSegment struct {
+	At      time.Time
+	Speaker string
+	Text    string
+}
+
+// LiveSnapshot is what a meeting recording looks like while it is still running, for a caller — another agent, or the desktop window — that wants to know what is happening before StopAndProcess has produced minutes.
+type LiveSnapshot struct {
+	StartedAt time.Time
+	// Window is the meeting window's title, read the same way prep.go names it for the "before you join" notification. Empty when nothing on screen has named it yet.
+	Window string
+	// Participants are the names read off the meeting window so far, using the same heuristic prep.go uses before the call starts. It can only grow as more of the call appears on screen.
+	Participants []string
+	// SegmentsSoFar is always empty today: transcription is one pass at stop (see transcriptFor), not incremental, so there is nothing said in the meeting yet to hand over.
+	SegmentsSoFar []LiveSegment
+	// TranscribedThrough is the zero time until SegmentsSoFar carries real transcription.
+	TranscribedThrough time.Time
+	// Note explains why SegmentsSoFar is empty, since an empty list alone reads as "nobody has said anything" rather than "nothing is transcribed yet."
+	Note string
+}
+
+// noIncrementalTranscriptionNote is LiveSnapshot's Note while whisper only ever runs once, after the recording stops.
+const noIncrementalTranscriptionNote = "transcribed at the end: this build runs whisper once, after the recording stops, so nothing said so far is available yet"
+
+// LiveSnapshot reports what is known about the meeting recording running right now. Input: a context, used only for the screen-context read. Output: the snapshot and true, or a zero LiveSnapshot and false when nothing is being recorded.
+func (r *Recorder) LiveSnapshot(ctx context.Context) (LiveSnapshot, bool) {
+	r.mu.Lock()
+	live := r.live
+	r.mu.Unlock()
+	if live == nil {
+		return LiveSnapshot{}, false
+	}
+
+	snap := LiveSnapshot{
+		StartedAt:     live.startedAt,
+		SegmentsSoFar: []LiveSegment{},
+		Note:          noIncrementalTranscriptionNote,
+	}
+	eps, err := r.store.EpisodesInWindow(ctx, live.startedAt, time.Now(), episodeLimit)
+	if err != nil {
+		slog.Debug("live meeting snapshot: could not read screen context", "error", err)
+		snap.Participants = []string{}
+		return snap, true
+	}
+	var known []string
+	if entries, err := r.store.PersonalContext(ctx); err == nil {
+		known = personNamesFromContext(entries)
+	}
+	snap.Window = meetingTitle(eps)
+	snap.Participants = meetingParticipants(eps, known)
+	if snap.Participants == nil {
+		snap.Participants = []string{}
+	}
+	return snap, true
+}
+
 // Start opens both audio streams and begins writing mic.wav and system.wav under a fresh timestamped directory.
 func (r *Recorder) Start() error {
 	if err := r.open(); err != nil {
