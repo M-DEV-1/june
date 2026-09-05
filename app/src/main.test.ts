@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 /** Regression test for the "stuttering" status line: main.ts used to rebuild the whole card's innerHTML on every daemon event while an ask was running (and once a second besides, from the elapsed-time ticker), tearing down and recreating the live step row on every one of them. A CSS animation restarts from its first frame whenever the element carrying it is removed and recreated, so the shimmer and breathe never got to run a full pass — that restart, not the animations themselves, was the stutter. patchLiveSteps (see main.ts) now patches that row in place instead. This checks the fix holds: the row survives a run of daemon events as the same DOM node instead of being swapped for a fresh one. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { DaemonEvent } from "./daemon";
 
 // jsdom does not implement matchMedia at all; main.ts reads prefers-reduced-motion at module load.
 if (!window.matchMedia) {
@@ -140,5 +141,47 @@ describe("a computer-use job started with do:", () => {
 
     dispatch({ kind: "escape" });
     expect(actStop).toHaveBeenCalledWith("act-1");
+  });
+});
+
+describe("the raw stream event needs no cast to reach the reducer", () => {
+  // connect() used to read the stream through `raw as DaemonEvent`, casting into state.ts's own separately-declared type — which agreed with daemon.ts's by hand, not by the compiler. daemon.ts now declares the one DaemonEvent both sides read, so a literal built against it, with no cast, has to type-check all the way from the events() callback through to the DOM for this test to even compile.
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("carries a real 'act' event from the stream callback to the step list, and a real 'notice' event through the same callback without throwing", async () => {
+    const { events, actStart } = await import("./daemon");
+    vi.mocked(actStart).mockResolvedValue("act-1");
+    let onEvent: (ev: DaemonEvent) => void = () => {};
+    vi.mocked(events).mockImplementation((cb) => {
+      onEvent = cb;
+      return () => {};
+    });
+
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "type", value: "do: reload the page" });
+    dispatch({ kind: "enter" });
+    // Lets the mocked actStart's promise resolve and jobStarted attach the id, so the "act" event below matches it.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const act: DaemonEvent = {
+      id: "act-1",
+      type: "act",
+      detail: JSON.stringify({ kind: "step", state: "stepping", text: "clicking Reload" }),
+    };
+    onEvent(act);
+    expect(document.querySelector(".steps .step.run .step-label")?.textContent).toBe("clicking Reload");
+
+    const notice: DaemonEvent = {
+      id: "",
+      type: "notice",
+      notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief" },
+    };
+    expect(() => onEvent(notice)).not.toThrow();
   });
 });

@@ -82,9 +82,19 @@ export async function voiceStatus(): Promise<{
   }
 }
 
+/** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep. title is the card's bold first line and body the few lines under it; place names the app window's screen a click opens ("tasks", "days") and id the row to select there, both empty when the moment points at nothing in particular; kind names the moment ("brief", "close", "meeting", "note"). The shape is fixed by the Go side, see internal/ipc/notice.go. */
+export type Notice = {
+  title: string;
+  body: string;
+  place: string;
+  id: string;
+  kind: string;
+};
+
+/** The shape of every event on the daemon's SSE stream, whichever client reads it. The one place this is declared: a client-side copy that drifts from this adds a field the compiler cannot check against what the wire actually sends. */
 export type DaemonEvent = {
   id: string;
-  /** The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, and "act" carries one line of a computer-use job's progress, its parts as JSON in detail (see internal/ipc/actjob.go). */
+  /** The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, "notice" is Ora speaking first, and "act" carries one line of a computer-use job's progress, its parts as JSON in detail (see internal/ipc/actjob.go). */
   type:
     | "status"
     | "tool"
@@ -95,10 +105,14 @@ export type DaemonEvent = {
     | "heard"
     | "said"
     | "state"
+    | "notice"
     | "act";
   text?: string;
+  /** Carried on a "tool" event (a short summary of what that call is doing or found) and on an "act" event (the job progress, as JSON text — see internal/ipc/actjob.go's ActEmitter). */
+  detail?: string;
   evidence?: { title: string; meta: string; body: string }[];
-  actions?: { label: string; key: string }[];
+  /** Only carried on a "notice" event: the whole card. */
+  notice?: Notice;
 };
 
 /** Swappable for tests: what to construct an EventSource with. Defaults to the real browser class, read lazily so importing this module doesn't require EventSource to exist (it doesn't in the test/node environment). */
@@ -109,7 +123,7 @@ export function setEventSourceCtor(
   eventSourceCtor = ctor;
 }
 
-/** Posts a question to the daemon. Input: the question text, the current context chip text, and the conversation to append the question to, or undefined to have the daemon open one. Output: the daemon's id for the resulting turn, and the conversation the question was stored in — the one that was named, or the one the daemon opened for a question that named none. Naming a conversation is what puts the turns already in it in front of the model, which is how a follow-up like "again" has anything to refer to. */
+/** Posts a question to the daemon. Input: the question text, the current context chip text, and the conversation to append the question to, or undefined to have the daemon open one. Output: the daemon's id for the resulting turn, and the conversation the question was stored in — the one that was named, or the one the daemon opened for a question that named none. Naming a conversation is what puts the turns already in it in front of the model, which is how a follow-up like "again" has anything to refer to. Throws on anything but a 2xx, same as a daemon that could not be reached — the caller's own catch already has to handle that case, so a 4xx/5xx body (which is not this shape) lands there too instead of being parsed as if it were. */
 export async function ask(
   question: string,
   context: string,
@@ -128,6 +142,7 @@ export async function ask(
       conversation_id: conversation ?? "",
     }),
   });
+  if (!res.ok) throw new Error(`ask failed: ${res.status}`);
   const body = (await res.json()) as { id: string; conversation_id?: string };
   return { id: body.id, conversationId: body.conversation_id ?? "" };
 }

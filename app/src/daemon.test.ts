@@ -39,7 +39,7 @@ afterEach(() => {
 
 describe("ask", () => {
   it("posts the question and context, and hands back the ids the daemon answered with", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ id: "abc123", conversation_id: "70" }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "abc123", conversation_id: "70" }) });
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await ask("is the venue sorted?", "Mail · Priya Nair");
@@ -57,7 +57,7 @@ describe("ask", () => {
   });
 
   it("names the conversation to append to when it is given one, which is what makes a question a follow-up", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ id: "abc124", conversation_id: "70" }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "abc124", conversation_id: "70" }) });
     vi.stubGlobal("fetch", fetchMock);
 
     await ask("again", "", "70");
@@ -69,9 +69,17 @@ describe("ask", () => {
 
   // An older daemon answers with the turn id alone, and a hover that read undefined as a conversation would then name "undefined" on the next ask.
   it("reads a missing conversation as none rather than as one", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ id: "abc125" }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "abc125" }) });
     vi.stubGlobal("fetch", fetchMock);
     expect(await ask("q", "ctx")).toEqual({ id: "abc125", conversationId: "" });
+    vi.unstubAllGlobals();
+  });
+
+  // react-doctor's no-fetch-response-used-without-status-check: every other call in this file already checks res.ok before parsing the body; ask() did not, so a 4xx/5xx was parsed as if it were {id, conversation_id} instead of failing like the daemon-unreachable case its own caller already handles.
+  it("throws instead of parsing an error body as a success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ error: "boom" }) });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(ask("q", "ctx")).rejects.toThrow();
     vi.unstubAllGlobals();
   });
 });
@@ -123,7 +131,7 @@ describe("events", () => {
 
 describe("token", () => {
   it("ask sends no token header when none is set", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ id: "x" }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "x" }) });
     vi.stubGlobal("fetch", fetchMock);
     await ask("q", "ctx");
     const [, opts] = fetchMock.mock.calls[0];
@@ -132,7 +140,7 @@ describe("token", () => {
   });
 
   it("ask sends the token header once set", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ id: "x" }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "x" }) });
     vi.stubGlobal("fetch", fetchMock);
     setToken("secret123");
     await ask("q", "ctx");

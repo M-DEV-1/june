@@ -23,7 +23,6 @@ import {
   THEME_KEY,
   themeChoice,
   themeFromStorage,
-  type DaemonEvent,
   type JobMeta,
   type Matter,
   type Notice,
@@ -47,6 +46,7 @@ import {
   probe,
   setPort,
   setToken,
+  TOKEN_HEADER,
   voiceStart,
   voiceStatus,
   voiceStop,
@@ -126,9 +126,7 @@ async function connect(): Promise<void> {
   if (daemonUp) {
     if (!eventsStarted) {
       eventsStarted = true;
-      events((raw) => {
-        // daemon.ts describes the stream as the pages before this one needed it; this window reads it through its own event type, which knows about the notice as well.
-        const ev = raw as DaemonEvent;
+      events((ev) => {
         // Ora speaking first, which is nobody's answer and belongs to no session: taken before every filter below, all of which are about matching an event to something this window asked for.
         if (ev.type === "notice" && ev.notice) {
           void showNotice(ev.notice);
@@ -309,9 +307,6 @@ function openNotice(place: string, id: string): void {
     },
   );
 }
-
-/** The header the daemon authenticates a call with, the same one daemon.ts sends. */
-const TOKEN_HEADER = "X-Ora-Token";
 
 /** Ticks the live step list's elapsed-seconds numbers up once a second while an ask is running; nothing else re-renders on its own between daemon events, so a slow tool call would otherwise sit on a stale number until the next one arrives. Input: none. Output: nothing. */
 let stepTicker: ReturnType<typeof setInterval> | undefined;

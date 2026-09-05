@@ -1,5 +1,8 @@
 /** Pure state model for the window. No DOM here — main.ts renders View, this file only computes it. */
 
+import { truncateAtWord } from "./shared/errorline";
+import type { DaemonEvent, Notice } from "./daemon";
+
 export type Evidence = { title: string; meta: string; body?: string };
 
 /** One tool call's row in the live step list. Opened by the "tool" event that starts it (name is the daemon's tool name, detail is that event's Detail — the argument summary, e.g. a quoted query) and closed by the next "tool" event, which sets finishedAt and nothing else: the finish event's own Detail is just a generic result word ("done", "3 hits") that the row's icon already conveys by turning into a check, so there is nothing worth overwriting the label with. error is set instead of finishedAt completing normally when the daemon's whole ask fails while this step was still open, so its spinner has something to turn into besides a check. */
@@ -32,37 +35,8 @@ export type Turn = {
   steps?: ToolStep[];
   job?: JobMeta;
 };
-/** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep. title is the card's bold first line and body the few lines under it; place names the app window's screen a click opens ("tasks", "days") and id the row to select there, both empty when the moment points at nothing in particular; kind names the moment ("brief", "close", "meeting", "note"). The shape is fixed by the Go side, see internal/ipc/notice.go. */
-export type Notice = {
-  title: string;
-  body: string;
-  place: string;
-  id: string;
-  kind: string;
-};
-
-export type DaemonEvent = {
-  id: string;
-  /** The first five are an ask's own events; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, "notice" is Ora speaking first, and "act" is one line of a computer-use job's progress, its parts carried as JSON text in detail (see internal/ipc/actjob.go's ActEmitter). */
-  type:
-    | "status"
-    | "tool"
-    | "answer"
-    | "done"
-    | "error"
-    | "dictation"
-    | "heard"
-    | "said"
-    | "state"
-    | "notice"
-    | "act";
-  text?: string;
-  /** Only carried on a "tool" event: a short summary of what that tool call is doing (before it runs) or found (after), for the live progress line. */
-  detail?: string;
-  evidence?: Evidence[];
-  /** Only carried on a "notice" event: the whole card. */
-  notice?: Notice;
-};
+// Notice and DaemonEvent are the daemon's wire shapes, not this window's own state, so daemon.ts (the module that actually talks to the wire) declares them once and this file only re-exports them — the point being that main.ts's events() callback and this reducer read the very same type instead of two same-named declarations that happened to agree by hand.
+export type { DaemonEvent, Notice };
 
 export type Matter = {
   id: string;
@@ -239,21 +213,10 @@ function patchPendingTurn(view: View, patch: Partial<Turn>): Matter[] {
   return patchCurrent(view, { turns });
 }
 
-/** How much of a failed ask the answer slot takes before the rest is folded away. The answer slot is 20px type in a window that sizes itself to its content, and a provider's own error runs past a thousand characters, so this is what stops one failure filling the screen. */
-const ERROR_LINE_CAP = 150;
-
-/** The one line a failed ask reads as. Input: the message the daemon sent, which may be a provider's whole error. Output: line, its first line cut at ERROR_LINE_CAP characters on a word boundary with an ellipsis, and detail, the whole message when anything was left out of the line and undefined when nothing was. */
+/** The one line a failed ask reads as. Input: the message the daemon sent, which may be a provider's whole error. Output: line, its first line cut on a word boundary with an ellipsis (see truncateAtWord's ERROR_LINE_CAP), and detail, the whole message when anything was left out of the line and undefined when nothing was. */
 export function errorLine(text: string): { line: string; detail?: string } {
-  const whole = (text ?? "").trim();
-  const first = whole.split("\n")[0].trim();
-  if (first === whole && first.length <= ERROR_LINE_CAP) return { line: first };
-  if (first.length <= ERROR_LINE_CAP) return { line: first, detail: text };
-  const cut = first.slice(0, ERROR_LINE_CAP);
-  const space = cut.lastIndexOf(" ");
-  return {
-    line: `${(space > 40 ? cut.slice(0, space) : cut).trimEnd()}…`,
-    detail: text,
-  };
+  const { line, more } = truncateAtWord(text);
+  return more ? { line, detail: text } : { line };
 }
 
 /** Turns an RFC3339 timestamp into a short readable date and leaves anything else untouched. Input: one part of an evidence meta line. Output: "31 Aug 2026" for a timestamp, the part unchanged otherwise. */
