@@ -73,7 +73,7 @@ func (v *VoiceSession) levels(ctx context.Context, id string, mic audio.Micropho
 			}
 			lastMic, lastSpeaker = m, s
 			detail, _ := json.Marshal(map[string]float64{"mic": m, "speaker": s})
-			v.hub.broadcast(Event{ID: id, Type: "level", Detail: string(detail), Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
+			v.hub.broadcast(Event{ID: id, Type: levelEventType, Detail: string(detail), Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 		}
 	}
 }

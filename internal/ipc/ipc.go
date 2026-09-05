@@ -141,6 +141,12 @@ func (s *Server) recordTokenUse(trace agent.TurnTrace, channel string) {
 // clientBufferSize bounds how many unread events a single /events client may queue before it is dropped, so one stalled listener never backs up the others.
 const clientBufferSize = 8
 
+// levelEventType is the type of the voice waveform's amplitude event, which a live session broadcasts every 50ms for as long as it runs (see levels in voice.go). It is the one event stream that keeps arriving whether or not anything on screen has changed, so broadcast treats it differently from everything else.
+const levelEventType = "level"
+
+// levelQueueDepth is how many "level" events may already be waiting in one client's buffer before broadcast skips further ones instead of queueing them. At one, a client only ever has the level it has not read yet: a new amplitude arriving on top of an unread one is dropped rather than queued, so a client that stalls its read for a moment neither fills its buffer with stale amplitudes nor loses its place in the stream, and the rest of the buffer stays free for events that carry something.
+const levelQueueDepth = 1
+
 // hub fans out events from ongoing asks to every connected /events client.
 type hub struct {
 	mu      sync.Mutex
@@ -189,11 +195,14 @@ func (s *Server) CloseStreams() {
 	s.hub.closeAll()
 }
 
-// broadcast sends ev to every subscribed client. A client whose buffer is full is dropped (removed and closed) instead of blocking this call, so one slow client cannot stall the rest.
+// broadcast sends ev to every subscribed client. A client whose buffer is full is dropped (removed and closed) instead of blocking this call, so one slow client cannot stall the rest. A "level" event is the exception: it is skipped for a client that already has levelQueueDepth of them waiting, and never drops anyone. A voice session emits twenty a second for its whole length, so without that a client that stalled its read for a few hundred milliseconds would be dropped mid-conversation over amplitudes it no longer needs, ending its /events stream and making it reconnect and refetch.
 func (h *hub) broadcast(ev Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.clients {
+		if ev.Type == levelEventType && len(ch) >= levelQueueDepth {
+			continue
+		}
 		select {
 		case ch <- ev:
 		default:
