@@ -18,6 +18,8 @@ import (
 type fakeExec struct {
 	mu    sync.Mutex
 	calls []string
+	// waitValues is the "value" argument wait_for was actually called with, one per call, so a test can check the real text still reached verification even where the checkpoint and the events carry a redacted one.
+	waitValues []string
 	// verdicts is the answer wait_for gives, one per call, the last one repeating once the list runs out.
 	verdicts []bool
 	// block, when non-nil, is closed by the test to release a tool call that is standing in for a slow action.
@@ -27,6 +29,10 @@ type fakeExec struct {
 func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[string]any) string {
 	f.mu.Lock()
 	f.calls = append(f.calls, name)
+	if name == "wait_for" {
+		value, _ := args["value"].(string)
+		f.waitValues = append(f.waitValues, value)
+	}
 	n := 0
 	for _, c := range f.calls {
 		if c == "wait_for" {
@@ -69,6 +75,13 @@ func (f *fakeExec) names() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
+}
+
+// waitValuesSeen returns the "value" argument wait_for was actually called with, one per call, in call order.
+func (f *fakeExec) waitValuesSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.waitValues...)
 }
 
 // script is a Model that answers with the replies given, in order, and repeats the last one for ever after.
@@ -663,6 +676,108 @@ func TestRunner_TypedTextIsNeverCheckpointed(t *testing.T) {
 	line := describeAction(decision{Tool: "type_text", Args: map[string]any{"text": "hunter2correcthorse"}})
 	if strings.Contains(line, "hunter2correcthorse") {
 		t.Errorf("the hover line carries what was typed: %q", line)
+	}
+}
+
+// TestRedactedExpect checks the rule for when a step's Expect.Value must be swapped for db.RedactedValue before it is stored or described: a type_text step redacts regardless of what kind of check it wrote down, and a field_holds check redacts regardless of which tool the step named, since either one can carry back out what StorableArgs already dropped from the step's own arguments. Any other combination is left alone.
+func TestRedactedExpect(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		kind string
+		want bool
+	}{
+		{"type_text with title_contains", "type_text", act.TitleContains, true},
+		{"click with field_holds", "click", act.FieldHolds, true},
+		{"type_text with field_holds", "type_text", act.FieldHolds, true},
+		{"click with title_contains", "click", act.TitleContains, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := redactedExpect(c.tool, act.Check{Kind: c.kind, Value: "hunter2correcthorse"})
+			redacted := got.Value == db.RedactedValue
+			if redacted != c.want {
+				t.Errorf("redactedExpect(%q, {%q, ...}) = %+v, want redacted=%v", c.tool, c.kind, got, c.want)
+			}
+			if got.Kind != c.kind {
+				t.Errorf("redactedExpect changed Kind to %q, want it left at %q", got.Kind, c.kind)
+			}
+			if !c.want && got.Value != "hunter2correcthorse" {
+				t.Errorf("redactedExpect changed a value it should have left alone: %q", got.Value)
+			}
+		})
+	}
+}
+
+// TestRunner_FieldHoldsExpectOfTypedTextIsRedacted checks the case the plain type_text redaction above cannot reach on its own: a step's Expect naming field_holds with the same text just typed, which otherwise lands in the checkpoint and on the event stream even though StorableArgs already dropped it from the step's own arguments. The live wait_for check must still see the real text, since only that lets the step actually pass.
+func TestRunner_FieldHoldsExpectOfTypedTextIsRedacted(t *testing.T) {
+	const secret string = "hunter2correcthorse"
+	typeReply, _ := json.Marshal(map[string]any{
+		"tool":   "type_text",
+		"args":   map[string]any{"text": secret, "n": 1},
+		"expect": map[string]string{"kind": act.FieldHolds, "value": secret},
+	})
+	r, store, events := newRunner(t, &fakeExec{}, script(string(typeReply), doneReply("Typed it.")))
+	id, err := r.Start(context.Background(), "type the passphrase", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Done, Failed, Stuck)
+	if len(job.Steps) != 1 {
+		t.Fatalf("steps = %+v, want the one type_text step", job.Steps)
+	}
+	if job.Steps[0].Expect.Value != db.RedactedValue {
+		t.Errorf("job.Steps[0].Expect.Value = %q, want the redaction marker", job.Steps[0].Expect.Value)
+	}
+	row, err := store.ActJob(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ActJob: %v", err)
+	}
+	if strings.Contains(string(row.Checkpoint), secret) {
+		t.Errorf("the typed text reached the checkpoint on disk via Expect: %s", row.Checkpoint)
+	}
+	for _, ev := range events() {
+		if strings.Contains(ev.Expect, secret) {
+			t.Errorf("event %+v carries the typed text in its Expect", ev)
+		}
+	}
+}
+
+// TestRunner_ResumeAfterRedactedFieldHoldsStepDoesNotReverify checks a checkpointed step whose Expect was already redacted comes back through resume the same way any other finished step does: never checked again, only described. A daemon that saved this checkpoint has already recorded pass or fail for it, so a resumed run must ask the model for a fresh decision rather than re-running wait_for against the marker text.
+func TestRunner_ResumeAfterRedactedFieldHoldsStepDoesNotReverify(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer store.Close()
+
+	saved := Job{
+		ID: "act-9", Goal: "type the passphrase", Brain: "fake", State: Stepping,
+		Steps:  []Step{{N: 1, Tool: "type_text", Outcome: "pass", Expect: act.Check{Kind: act.FieldHolds, Value: db.RedactedValue}}},
+		Budget: DefaultBudget(),
+	}
+	blob, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := store.SaveActJob(context.Background(), db.ActJobRow{ID: saved.ID, Goal: saved.Goal, Brain: "fake", State: string(Stepping), Checkpoint: blob}); err != nil {
+		t.Fatalf("SaveActJob: %v", err)
+	}
+
+	exec := &fakeExec{}
+	r := New(store, exec, map[string]Model{"fake": script(doneReply("Playing."))}, "fake", func(Event) {})
+	if err := r.Resume(context.Background(), "act-9", Budget{}); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	job := waitState(t, r, "act-9", Done, Failed, Stuck)
+	if job.State != Done {
+		t.Fatalf("state = %q (%s), want done", job.State, job.Err)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].Outcome != "pass" {
+		t.Fatalf("steps = %+v, want the checkpointed step kept as is, still passed", job.Steps)
+	}
+	if calls := exec.names(); strings.Join(calls, ",") != "observe_screen" {
+		t.Errorf("tool calls = %v, want only the fresh observe before the model's own decision, no re-verification of the checkpointed step", calls)
 	}
 }
 

@@ -78,6 +78,9 @@ func (s *Store) MaxActJobNumber(ctx context.Context) (uint64, error) {
 // StorableArgs is this package's own argument redaction (see storableArgs in act_runs.go) for a caller outside it: a long-running job checkpoints its steps through the same rule an act run's steps go through, so type_text's typed text is dropped rather than written to disk in the clear. Input: the tool's name and the arguments the model called it with. Output: a new map, or nil when the step had none.
 func StorableArgs(name string, args map[string]any) map[string]any { return storableArgs(name, args) }
 
+// RedactedValue is what a caller outside this package puts in place of a value StorableArgs would have dropped outright, for the one spot that cannot simply omit a key the way StorableArgs omits an argument: a job step's own Expect, which the UI still has to describe as some kind of check on some value. A job checkpoints Expect.Value verbatim, so when a step is type_text, or its Expect is a field_holds check, the value can just be whatever the same typed text StorableArgs already dropped from that step's own arguments was, and the caller swaps it for this marker before it reaches disk or an event.
+const RedactedValue = "[redacted]"
+
 // ActJob reads one job's row back. Input: the job id. Output: the row, or sql.ErrNoRows when nothing was ever saved under that id.
 func (s *Store) ActJob(ctx context.Context, id string) (ActJobRow, error) {
 	var job ActJobRow
