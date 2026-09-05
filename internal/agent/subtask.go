@@ -27,23 +27,23 @@ type subtaskModel interface {
 var subtaskAllowedTools = map[string]bool{
 	"query_memory": true,
 	"recall":       true,
-	"get_recent":   true,
 }
 
 // subtaskTools filters toolDefinitions() (the single source of truth for every tool's schema) down to subtaskAllowedTools, so the subtask model is only ever offered — not just guarded against calling — the safe subset.
-// Each declaration is copied with Behavior cleared: NON_BLOCKING is a Live-session-only field, and generateContent (which runSubtask calls) rejects the entire request with "FunctionDeclaration.behavior only supported by BidiGenerateContent". That 400 is what made every branch() call fail silently.
+// The declarations go through stripLiveOnlyFields because runSubtask calls generateContent, which refuses a Live-session-only field.
 func subtaskTools() []*genai.Tool {
 	var decls []*genai.FunctionDeclaration
 	for _, tool := range toolDefinitions() {
 		for _, decl := range tool.FunctionDeclarations {
 			if subtaskAllowedTools[decl.Name] {
-				copied := *decl
-				copied.Behavior = ""
-				decls = append(decls, &copied)
+				decls = append(decls, decl)
 			}
 		}
 	}
-	return []*genai.Tool{{FunctionDeclarations: decls}}
+	decls = stripLiveOnlyFields(decls)
+	// Google Search rides along here and not on the live session. Pairing it with the Live API on a gemini-3 model closes the session with a quota error before the first word, so liveToolsFor leaves it out — which quietly removed Ora's only way to look anything up, while the prompt went on telling it to search for prices and current events. It reached for open_url instead and opened the user's browser.
+	// branch runs on the standard Gemini API, where that pairing is ordinary, so the capability comes back here without a new tool.
+	return []*genai.Tool{{FunctionDeclarations: decls}, {GoogleSearch: &genai.GoogleSearch{}}}
 }
 
 // tryReserveBranchSlot atomically claims one of maxBranchesPerSession branch slots for the current session, returning false once they're exhausted.
