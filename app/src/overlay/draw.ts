@@ -40,14 +40,14 @@ export type Flight = { from: Point; to: Point; control: Point; ms: number };
 /** How long a drawing stays up when the event names no ttl. The daemon fills this in itself, so this only covers an event that lost it on the way. */
 const DEFAULT_TTL_MS = 3000;
 
-/** How high above the straight line between the two ends the flight's curve bulges: 0.22 of the distance, never more than 90 CSS pixels. Tying the lift to the distance is what stops a hop of twenty pixels from looping absurdly high over its own target. */
-const ARC_LIFT_RATIO = 0.22;
-const ARC_LIFT_MAX = 90;
+/** How high above the straight line between the two ends the flight's curve bulges: 0.2 of the distance, never more than 80 CSS pixels. Tying the lift to the distance is what stops a hop of twenty pixels from looping absurdly high over its own target. Clicky's OverlayWindow.swift:521 lifts its own arc by the same 0.2 of the distance, capped at 80 points. */
+const ARC_LIFT_RATIO = 0.2;
+const ARC_LIFT_MAX = 80;
 
-/** The shortest and the longest a flight may take, in milliseconds, and how many pixels of distance buy one millisecond in between. A trip of 800 pixels takes 421 ms and anything past about 1480 pixels takes the full 780. */
-const FLIGHT_MIN_MS = 420;
-const FLIGHT_MAX_MS = 780;
-const FLIGHT_PX_PER_MS = 1.9;
+/** The shortest and the longest a flight may take, in milliseconds, and how many pixels of distance buy one millisecond in between. A trip of 800 pixels takes 1000 ms and anything past about 1120 pixels takes the full 1400. Clicky's OverlayWindow.swift:510 flies its own buddy at the same 800 points a second, clamped the same way between 600 ms and 1400 ms. */
+const FLIGHT_MIN_MS = 600;
+const FLIGHT_MAX_MS = 1400;
+const FLIGHT_PX_PER_MS = 0.8;
 
 /** How long the pointer takes to settle once it has touched down, in milliseconds. */
 export const SETTLE_MS = 220;

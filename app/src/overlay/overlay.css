@@ -108,9 +108,11 @@ body {
   border-radius: 6px;
   padding: 3px 8px;
   transition: background-color var(--mood) ease;
+  /* Clicky's own speech bubble glows in its cursor's colour (OverlayWindow.swift:270-278: a shadow filled with DS.Colors.overlayCursorBlue, 6pt radius at rest); this pill picks up the same colour rather than the plain black Ora's marks use, so the thing saying what the ink is about visibly belongs to the ink. */
   box-shadow:
     0 0 0 1px rgb(255 255 255 / 30%),
-    0 2px 8px rgb(0 0 0 / 35%);
+    0 2px 8px rgb(0 0 0 / 35%),
+    0 0 8px var(--ink);
   transform-origin: 14px 50%;
   animation: settle-in 220ms var(--settle) backwards;
 }
@@ -175,7 +177,8 @@ body {
   transform-origin: 50% 50%;
   transition: opacity 380ms ease;
   will-change: transform, opacity;
-  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%)) drop-shadow(0 3px 8px rgb(0 0 0 / 25%));
+  /* Clicky's file header calls its own pointer "the blue glowing cursor" and draws that glow as a shadow filled with the cursor's own colour, 8pt radius at rest (OverlayWindow.swift:5, :309); this is that same coloured glow behind Ora's ordinary black drop-shadows. */
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%)) drop-shadow(0 3px 8px rgb(0 0 0 / 25%)) drop-shadow(0 0 8px var(--ink));
 }
 
 #pointer path {
