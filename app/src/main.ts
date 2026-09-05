@@ -1,0 +1,937 @@
+import {
+  availableMonitors,
+  currentMonitor,
+  cursorPosition,
+  getCurrentWindow,
+} from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
+import {
+  dotClass,
+  isJobLive,
+  NOTICE_MS,
+  placeholder,
+  placeholderMatter,
+  sourceMeta,
+  step,
+  stepIconKind,
+  stepLabel,
+  stepSeconds,
+  stepsCollapsed,
+  stepsSummaryLine,
+  THEME_KEY,
+  themeChoice,
+  themeFromStorage,
+  type DaemonEvent,
+  type JobMeta,
+  type Matter,
+  type Notice,
+  type Theme,
+  type ToolStep,
+  type View,
+} from "./state";
+// The key a clicked notice's target is left under is defined beside the code in the app window that reads it, so there is one spelling of it rather than two.
+import { OPEN_AT_KEY } from "./app/state";
+import { initialView, venueScript } from "./mock";
+import {
+  actAnswer,
+  actPauseResume,
+  actStart,
+  actStop,
+  ask,
+  context,
+  endpoint,
+  events,
+  matters,
+  probe,
+  setPort,
+  setToken,
+  voiceStart,
+  voiceStatus,
+  voiceStop,
+} from "./daemon";
+import { dictationKey, startDictation, stopDictation } from "./dictate";
+import {
+  fitWindow as winplaceFitWindow,
+  placementFor,
+  resolveContext,
+  storedHoverPosition,
+  toggleWindow,
+  type Desktop,
+  type Dock,
+  type PlaceContext,
+} from "./winplace";
+
+const root = document.getElementById("w") as HTMLElement;
+/** The notice bubble, a sibling above the card rather than part of it: a notice that arrives while a question is on screen has to stack over that question, and the card is rebuilt from scratch on every render. */
+const noticeEl = document.getElementById("n") as HTMLElement;
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const params = new URLSearchParams(location.search);
+
+// Fake data only when the page is opened with ?mock=1 for UI work; otherwise the window starts empty and everything on it comes from the daemon.
+const mockMode = params.has("mock");
+
+// Switches that only exist while the page is served from the Vite dev server, so a packaged build ignores them entirely. They exist so every state of this window can be driven from a URL and photographed without a keyboard: ?token= stands in for the secret Tauri hands over through invoke("ipc_token"), ?port= points the client at another port (a closed one is how the offline state is reached without stopping the user's real daemon), each ?q= asks one question — a second one is asked as a follow-up once the first is answered — ?evidence=open unfolds the evidence as soon as an answer arrives, and ?theme= forces light or dark.
+const devMode = location.hostname === "localhost";
+const devPort = devMode ? params.get("port") : null;
+const devToken = devMode ? params.get("token") : null;
+const devQuestions = devMode ? params.getAll("q") : [];
+const devTheme = devMode ? params.get("theme") : null;
+const devEvidenceOpen = devMode && params.get("evidence") === "open";
+// ?dictate=1 opens the microphone on load and ?voice=1 starts a live session, so both states can be reached without a hand on the keyboard.
+const devDictate = devMode && params.get("dictate") === "1";
+const devVoice = devMode && params.get("voice") === "1";
+if (devPort) setPort(devPort);
+
+let view: View = mockMode ? initialView() : emptyView();
+
+/** The view before anything has been asked: one placeholder matter, no context chip. Input: none. Output: the view. */
+function emptyView(): View {
+  return {
+    matters: [placeholderMatter()],
+    current: 0,
+    evidenceOpen: false,
+    input: "",
+    state: "empty",
+    contextChip: "",
+    contextText: "",
+    dictating: false,
+    hint: "",
+    voice: "",
+    voiceState: "idle",
+  };
+}
+
+/** Whether the local daemon answered the last health probe; decides if a question goes to it. Refreshed by connect() at start and every time the window is shown. */
+let daemonUp = false;
+let eventsStarted = false;
+
+/** The daemon's id for the question this window asked. The /events stream carries every client's ask — the CLI and the main app window included — and each event names the ask it belongs to, so this is what tells one apart from another. Undefined until the POST /ask reply lands. */
+let askId: string | undefined;
+
+/** The daemon's id for the computer-use job this window started with "do:", the same way askId tracks an ask's. Undefined until the POST /act reply lands, and again once the job is done — a fresh "do:" always starts a fresh job, never answers a stale one. */
+let jobId: string | undefined;
+
+/** Re-reads the daemon's token (it changes on every daemon restart), probes it, opens the event stream once, and loads the screen context. Input: none. Output: nothing; leaves daemonUp set and the view rendered either way. */
+async function connect(): Promise<void> {
+  try {
+    setToken(await invoke<string>("ipc_token"));
+  } catch {
+    // Not inside Tauri, or the daemon has not written its token file yet; in the dev server the token can come from the query string instead.
+    if (devToken) setToken(devToken);
+  }
+  daemonUp = await probe();
+  if (daemonUp) {
+    if (!eventsStarted) {
+      eventsStarted = true;
+      events((raw) => {
+        // daemon.ts describes the stream as the pages before this one needed it; this window reads it through its own event type, which knows about the notice as well.
+        const ev = raw as DaemonEvent;
+        // Ora speaking first, which is nobody's answer and belongs to no session: taken before every filter below, all of which are about matching an event to something this window asked for.
+        if (ev.type === "notice" && ev.notice) {
+          void showNotice(ev.notice);
+          return;
+        }
+        // Everything a live voice session hears, says and calls arrives on this same stream under the session's id.
+        if (view.voice && ev.id === view.voice) {
+          dispatch({ kind: "voiceEvent", ev });
+          return;
+        }
+        // The daemon's silence gate ends a dictation without being asked, and the words come back here rather than on a stop reply.
+        if (ev.type === "dictation") {
+          if (ev.id === dictateId) finishDictation(ev.text ?? "");
+          return;
+        }
+        // A computer-use job's progress, tagged with its own id rather than an ask's — matched against jobId the same way an ask is matched against askId, and dropped rather than guessed at when it belongs to some other job (or beats the POST /act reply that would have told this window the id to match).
+        if (ev.type === "act") {
+          if (jobId && ev.id === jobId) dispatch({ kind: "daemonEvent", ev });
+          return;
+        }
+        // Only the answer to the question this window is waiting on is applied: anything that arrives while nothing is pending, or that names a different ask, belongs to another client.
+        // ponytail: an event that beats the POST /ask reply is accepted because askId is not known yet; that only picks up the wrong answer if another client asks in the same instant. Have the daemon accept a client-supplied id if that ever matters.
+        if (view.state !== "asking") return;
+        if (ev.id && askId && ev.id !== askId) return;
+        dispatch({ kind: "daemonEvent", ev });
+      });
+    }
+    await loadFromDaemon();
+    // Hiding this window does not end a session, and neither does reloading it, so every time the window comes back it matches itself to whatever the daemon is actually running: it joins a session it was not part of, picks up the state that session moved to while nothing was on screen, and drops one that has already ended — by the spoken "stop", or from another window.
+    const live = await voiceStatus();
+    if (live?.active) {
+      if (live.id !== view.voice) {
+        dispatch({ kind: "voiceOn", id: live.id });
+        clearHintSoon();
+      }
+      dispatch({
+        kind: "voiceEvent",
+        ev: { id: live.id, type: "state", text: live.state },
+      });
+    } else if (live && view.voice) {
+      dispatch({ kind: "voiceOff" });
+    }
+  }
+  render(view);
+}
+void connect().then(runDevSwitches);
+
+/** Runs the dev-only URL switches once the daemon is connected: the queued ?q= questions, a four-second dictation, a live voice session. Input: none. Output: nothing. */
+function runDevSwitches(): void {
+  askNextDevQuestion();
+  if (devDictate) beginDictation();
+  if (devVoice) void toggleVoice();
+}
+
+/** Asks the next question left in the ?q= list, if any. Input: none. Output: nothing; dispatch calls this again each time an answer lands, so two ?q= values become a question and its follow-up. */
+function askNextDevQuestion(): void {
+  const q = devQuestions.shift();
+  if (!q) return;
+  dispatch({ kind: "type", value: q });
+  dispatch({ kind: "enter" });
+}
+
+/** Refreshes the context chip from the daemon, and the matters list behind it. Nothing on the window draws the matters yet — the user is still deciding what belongs in the empty state — but the reducer keeps them so a later screen can read them without another round trip. Input: none. Output: nothing; leaves the current state alone when a call fails. */
+async function loadFromDaemon(): Promise<void> {
+  const [ctx, rows] = await Promise.all([context(), matters()]);
+  if (ctx) dispatch({ kind: "contextLoaded", ctx });
+  if (rows) dispatch({ kind: "mattersLoaded", rows });
+}
+
+/** Escapes text pulled into a template as plain text (questions, titles) so it can never be read as markup. */
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Renders text that is allowed the two emphasis tags an answer or an evidence body may carry. Everything is escaped first and then only <b> and <mark> are put back, so nothing else in model output or in captured screen text can turn into markup. Input: the raw text. Output: HTML safe to assign. */
+function rich(s: string): string {
+  return esc(s).replace(/&lt;(\/?)(b|mark)&gt;/g, "<$1$2>");
+}
+
+/** Whether the input has text or a turn is on screen; the footer, the divider above it, and the roomier input padding all wait for one of those, so the empty state is one calm row: dot, input, chip. Input: the view and its current matter. Output: true once there is more than that one row to show. */
+function hasContent(v: View, m: Matter): boolean {
+  return v.input.trim() !== "" || m.turns.length > 0;
+}
+
+/** Rebuilds the window's whole innerHTML from the current state, resizes the OS window to fit it, and puts the caret back in the input. Input: the view. Output: nothing, the DOM is the output. */
+function render(v: View): void {
+  const m = v.matters[v.current] ?? placeholderMatter();
+  root.innerHTML = cardHtml(v, m);
+  root.classList.toggle("bare", !hasContent(v, m));
+  renderNotice(v);
+  void fitWindow();
+
+  const input = root.querySelector<HTMLInputElement>(".q");
+  if (input) {
+    // preventScroll: focusing on every render must not jerk a long answer out of view.
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.addEventListener("input", () => {
+      // A full render on every keystroke would move the caret and resize the window each time (see dispatch below), but the footer appearing the moment text shows up needs no re-render, just this class flip; fitWindow no-ops unless the height actually changed.
+      root.classList.toggle(
+        "bare",
+        input.value.trim() === "" && m.turns.length === 0,
+      );
+      void fitWindow();
+      dispatch({ kind: "type", value: input.value });
+    });
+    input.addEventListener("keydown", onInputKeydown);
+  }
+  root
+    .querySelector(".evd .h")
+    ?.addEventListener("click", () => dispatch({ kind: "toggleEvidence" }));
+  root
+    .querySelector(".stepsum")
+    ?.addEventListener("click", () => dispatch({ kind: "toggleSteps" }));
+  root.querySelector(".job-stop")?.addEventListener("click", () => {
+    const job = currentJobView();
+    if (job) void actStop(job.id);
+  });
+  root.querySelector(".job-pauseresume")?.addEventListener("click", () => {
+    const job = currentJobView();
+    if (job) void actPauseResume(job.id, job.state !== "paused");
+  });
+}
+
+/** The notice drawn into the bubble right now, so an unrelated render — a tool event landing while the notice is up — leaves it alone instead of rewriting its markup and replaying its entrance. The reducer builds a new view object for every event but only replaces the notice itself when the notice changes, so identity is what says whether anything has to be redrawn. */
+let drawnNotice: Notice | undefined;
+
+/** Draws the notice bubble from the current state: the title in bold, up to three lines of body under it, a tail on the side facing the screen edge the hover is anchored to, and the card underneath hidden when the notice is the only thing this window is up to say. Input: the view. Output: nothing, the DOM is the output. */
+function renderNotice(v: View): void {
+  const n = v.notice;
+  noticeEl.hidden = n === undefined;
+  document.body.classList.toggle(
+    "alone",
+    n !== undefined && v.noticeAlone === true,
+  );
+  if (n === drawnNotice) return;
+  drawnNotice = n;
+  if (!n) {
+    noticeEl.innerHTML = "";
+    return;
+  }
+  // A hover that opens at the top of the screen has its nearest edge above it, so its tail points up; the bottom and middle positions both hang off the dock below.
+  noticeEl.className = storedHoverPosition() === "top" ? "N up" : "N down";
+  noticeEl.innerHTML = `<div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>`;
+}
+
+/** The six seconds a notice stays up. Input: the view. Output: nothing; the timer is cleared and started again from the top whenever the notice itself changes, and left cleared while the pointer is over the card, which is what pauses it — the card then gets its full six seconds again when the pointer leaves. */
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+function armNotice(v: View): void {
+  clearTimeout(noticeTimer);
+  noticeTimer = undefined;
+  if (!v.notice || v.noticeHeld) return;
+  noticeTimer = setTimeout(() => dispatch({ kind: "noticeGone" }), NOTICE_MS);
+}
+
+// Bound once to the bubble itself, which survives every render, rather than to the markup inside it, which does not.
+noticeEl.addEventListener("pointerenter", () =>
+  dispatch({ kind: "noticeHold" }),
+);
+noticeEl.addEventListener("pointerleave", () =>
+  dispatch({ kind: "noticeRelease" }),
+);
+noticeEl.addEventListener("click", () => dispatch({ kind: "noticeClick" }));
+
+/** Opens the main app window at what the clicked notice was about. The window is opened through the daemon, which broadcasts the instruction the Rust side acts on (see internal/ipc/window.go), and the screen and row are left in the localStorage both windows share, under a key beside the theme and the hover position, for the app window to read when it opens. Input: the notice's place ("tasks", "days") and row id, either of which may be empty when the notice pointed at nothing in particular. Output: nothing; a daemon that cannot be reached simply leaves the window shut. */
+function openNotice(place: string, id: string): void {
+  try {
+    localStorage.setItem(OPEN_AT_KEY, JSON.stringify({ place, id }));
+  } catch {
+    /* storage blocked */
+  }
+  const { base, token } = endpoint();
+  const headers: Record<string, string> = {};
+  if (token) headers[TOKEN_HEADER] = token;
+  void fetch(`${base}/window?action=open`, { method: "POST", headers }).catch(
+    () => {
+      /* the daemon is gone, so there is nothing to open the window */
+    },
+  );
+}
+
+/** The header the daemon authenticates a call with, the same one daemon.ts sends. */
+const TOKEN_HEADER = "X-Ora-Token";
+
+/** Ticks the live step list's elapsed-seconds numbers up once a second while an ask is running; nothing else re-renders on its own between daemon events, so a slow tool call would otherwise sit on a stale number until the next one arrives. Input: none. Output: nothing. */
+let stepTicker: ReturnType<typeof setInterval> | undefined;
+function startStepTicker(): void {
+  stopStepTicker();
+  stepTicker = setInterval(tickSteps, 1000);
+}
+function stopStepTicker(): void {
+  clearInterval(stepTicker);
+  stepTicker = undefined;
+}
+
+/** The whole card: the input line, the thread of what has been asked so far, and the footer. Input: the view and the matter the turns belong to. Output: the card's HTML. */
+function cardHtml(v: View, m: Matter): string {
+  const tag = daemonUp ? "daemon" : mockMode ? "mock" : "daemon offline";
+
+  return `
+    <div class="in${v.dictating ? " holding" : ""}${v.voice ? " live" : ""}">
+      <span class="dot ${dotClass(v, daemonUp)}"></span>
+      <input class="q" value="${esc(v.input)}" placeholder="${esc(placeholder(v))}" />
+      <span class="wave"><i></i><i></i><i></i></span>
+      ${v.contextChip ? `<span class="ctx">${esc(v.contextChip)}</span>` : ""}
+    </div>
+    ${threadHtml(v, m)}
+    <div class="foot"><span>↵ ask</span><span>ctrl↵ new thread</span><span>esc close</span><span class="tag">${tag}</span></div>
+  `;
+}
+
+/** The check or cross a finished step's mark draws itself with (see the "draw" keyframe in styles.css) — an SVG stroke rather than a character so it can animate stroke-dashoffset instead of just popping in. Input: which one. Output: the svg's HTML; its colour comes from .step-mark's CSS via currentColor, the same way the old plain "✓"/"✕" text did. */
+function markSvg(kind: "ok" | "err"): string {
+  const d = kind === "ok" ? "M3 8.5L6.5 12L13 4" : "M4 4L12 12M12 4L4 12";
+  return `<svg class="mark-svg" viewBox="0 0 16 16" width="12" height="12"><path d="${d}"/></svg>`;
+}
+
+/** One row of the live step list: an icon by tool kind (breathing while the step runs), the plain-English label (shimmering while it runs), a check or cross that draws itself once it finishes, and how many seconds it has run — ticked live for a step still running (see startStepTicker), fixed once it finishes. A failed step also gets the daemon's error text under it, since that is the one row an "Ora stopped" answer alone does not explain. Input: the step and the current time. Output: the row's HTML (plus its error line, if any). */
+function stepRowHtml(s: ToolStep, now: number): string {
+  const seconds = stepSeconds(s, now);
+  const cls = s.error ? "err" : s.finishedAt !== undefined ? "ok" : "run";
+  const mark = cls === "run" ? "" : markSvg(cls);
+  return `<div class="step ${cls}">
+      <span class="step-ic ${stepIconKind(s.name)}"></span>
+      <span class="step-label">${esc(stepLabel(s.name, s.detail))}</span>
+      <span class="step-mark">${mark}</span>
+      <span class="step-time">${seconds > 0 ? seconds.toFixed(1) + "s" : ""}</span>
+    </div>${s.error ? `<div class="step-err">${esc(s.error)}</div>` : ""}`;
+}
+
+/** The words the live row shows before the first tool call starts, and what it falls back to between one tool call finishing and the next starting. Shared between stepsHtml's first render of a turn and updateLiveRow's later in-place patches so the two produce byte-identical markup — that sameness is what lets updateLiveRow tell "nothing changed" from "the step just moved on" with one string comparison. */
+const THINKING_LABEL = `Thinking<span class="dots"><i>.</i><i>.</i><i>.</i></span>`;
+
+/** The placeholder row shown before any tool call has started. Same four children a real step's row has — icon, mark, time, all empty — as stepRowHtml, not the bare icon-and-label pair this used to be: that structural parity is what lets the live row survive the change from this placeholder to the first real step in place (see patchLiveSteps) instead of being swapped for a differently-shaped element, which was one more place the shimmer used to restart. Input: none. Output: the row's HTML. */
+function thinkingRowHtml(): string {
+  return `<div class="step run"><span class="step-ic"></span><span class="step-label">${THINKING_LABEL}</span><span class="step-mark"></span><span class="step-time"></span></div>`;
+}
+
+/** The live step list shown in place of an answer while an ask is still running. A "Thinking…" row — three dots animating in sequence, same shimmer as any running label — stands in until the first tool call arrives, so the daemon's own "Checking." status text is never what the user sees — that hardcoded, unchanging line was the entire complaint this replaces. Only ever builds the list from scratch, for the first render of a turn; every event after that patches this same markup in place instead (see patchLiveSteps), which is what keeps the running row's animations from restarting on every tool call. Input: the turn's steps so far. Output: the list's HTML. */
+function stepsHtml(steps: ToolStep[]): string {
+  if (steps.length === 0)
+    return `<div class="steps">${thinkingRowHtml()}</div>`;
+  const now = Date.now();
+  return `<div class="steps">${steps.map((s) => stepRowHtml(s, now)).join("")}</div>`;
+}
+
+/** Fades one animated element's contents out and back in instead of swapping the element itself, so a CSS animation running on it (the live row's shimmer, its icon's breathe) keeps running through the change instead of restarting the way replacing the element with a fresh one would. Input: the element and its next inner HTML. Output: nothing; skipped under reduced motion, where every other animation on the card is already cut. */
+function crossFadeText(el: HTMLElement, html: string): void {
+  if (reduce) {
+    el.innerHTML = html;
+    return;
+  }
+  el.style.opacity = "0";
+  setTimeout(() => {
+    el.innerHTML = html;
+    el.style.opacity = "1";
+  }, 150);
+}
+
+/** Updates the one live step row in place: the icon's kind and the label's text (cross-faded, see crossFadeText), and only when either actually changed — a "status" event that leaves the running step exactly as it was must touch nothing, or it would blank the ticking elapsed-time number for no reason (see tickSteps) and cross-fade text that never changed. Input: the row element, kept alive across the whole turn by patchLiveSteps, and the step it should now show, or undefined for the idle "Thinking" look before the first tool call or between one finishing and the next starting. Output: nothing. */
+function updateLiveRow(row: HTMLElement, s: ToolStep | undefined): void {
+  const iconEl = row.querySelector<HTMLElement>(".step-ic");
+  const labelEl = row.querySelector<HTMLElement>(".step-label");
+  if (!iconEl || !labelEl) return;
+  const html = s ? esc(stepLabel(s.name, s.detail)) : THINKING_LABEL;
+  if (labelEl.innerHTML === html) return;
+  iconEl.className = `step-ic${s ? " " + stepIconKind(s.name) : ""}`;
+  const timeEl = row.querySelector<HTMLElement>(".step-time");
+  if (timeEl) timeEl.textContent = "";
+  crossFadeText(labelEl, html);
+}
+
+/** Applies a "tool" or "status" daemon event to the live step list without the full-card rebuild render() does: every step that has now finished is appended as its own row, once, and the one row still running is updated in place (see updateLiveRow) instead of recreated. Recreating it on every tool call — and once a second besides, from the elapsed-time ticker — was what actually restarted the shimmer and breathe animations; the reported "stuttering" was that restart, not anything about the animations themselves. Input: the view, already patched by the reducer. Output: whether the patch applied; false when there is no live row on screen yet to patch (the very first render of a turn), which tells the caller to fall back to the ordinary render(). */
+function patchLiveSteps(v: View): boolean {
+  const wrap = root.querySelector<HTMLElement>(".steps");
+  const row = wrap?.lastElementChild as HTMLElement | null;
+  if (!wrap || !row || !row.classList.contains("run")) return false;
+  const turns = v.matters[v.current]?.turns ?? [];
+  const steps = turns[turns.length - 1]?.steps ?? [];
+  const now = Date.now();
+  const last = steps[steps.length - 1];
+  // The index of the step still running, or steps.length when none is (the gap between one finishing and the next starting).
+  const openIdx =
+    last && last.finishedAt === undefined ? steps.length - 1 : steps.length;
+  // Every already-finished step not yet its own row gets appended now, in the order they ran, just before the live row.
+  for (let i = wrap.children.length - 1; i < openIdx; i++) {
+    const tmp = document.createElement("template");
+    tmp.innerHTML = stepRowHtml(steps[i], now);
+    while (tmp.content.firstChild)
+      wrap.insertBefore(tmp.content.firstChild, row);
+  }
+  updateLiveRow(row, openIdx < steps.length ? steps[openIdx] : undefined);
+  void fitWindow();
+  return true;
+}
+
+/** Ticks the running step's own elapsed-seconds number without touching anything else — what startStepTicker calls once a second instead of the full render() it used to, which tore the whole steps list down and rebuilt it every second an ask ran, restarting its shimmer and breathe animations on a one-second loop regardless of whether any tool call had actually happened. Input: none, reads the live DOM and the view. Output: nothing; does nothing once the running step has finished (the gap before the next one starts, or the turn's last step already done) rather than show a stale number. */
+function tickSteps(): void {
+  const turns = view.matters[view.current]?.turns ?? [];
+  const last = turns[turns.length - 1];
+
+  // A live job's title line carries its own running seconds, next to the goal — ticked here in place for the same reason a step's own time is: rebuilding the row on every tick would restart its animations.
+  if (last?.job && isJobLive(last.job.state)) {
+    const elapsedEl = root.querySelector<HTMLElement>(".qq .elapsed");
+    if (elapsedEl)
+      elapsedEl.textContent = ` · ${Math.floor((Date.now() - last.job.startedAt) / 1000)}s`;
+  }
+
+  const timeEl = root.querySelector<HTMLElement>(".steps .step.run .step-time");
+  if (!timeEl) return;
+  const steps = last?.steps ?? [];
+  const s = steps[steps.length - 1];
+  if (!s || s.finishedAt !== undefined) return;
+  const seconds = stepSeconds(s, Date.now());
+  timeEl.textContent = seconds > 0 ? seconds.toFixed(1) + "s" : "";
+}
+
+/** The one-line summary a finished turn's step list collapses to ("4 steps · 6.2 s"), click to expand back into the full list (see toggleSteps). Input: the view (for stepsOpen's arrow) and the turn's steps. Output: the line's HTML. Only called once stepsSummaryLine has something to say. */
+function stepsSummaryHtml(v: View, steps: ToolStep[]): string {
+  return `<div class="stepsum">${esc(stepsSummaryLine(steps))}<span class="tw">${v.stepsOpen ? "⇧ hide" : "⇩ show"}</span></div>`;
+}
+
+/** The job on the turn on screen, if there is one. Input: none, reads the module's own view. Output: the job, or undefined. Used by the control buttons' click handlers, which are bound once per render and so cannot close over the turn a later render replaces. */
+function currentJobView(): JobMeta | undefined {
+  const turns = view.matters[view.current]?.turns ?? [];
+  return turns[turns.length - 1]?.job;
+}
+
+/** The title line above a turn's steps: the question for an ask, or, for a job, the goal plus its running seconds (ticked in place by tickSteps, same as a step's own time) and, for one Escape away from being stopped, the confirmation prompt. Input: the view (for confirmStopJob) and the turn. Output: the line's HTML. */
+function qqHtml(v: View, last: Matter["turns"][number]): string {
+  if (!last.job) return `<div class="qq">${esc(last.q)}</div>`;
+  const elapsed = Math.floor((Date.now() - last.job.startedAt) / 1000);
+  const confirm = v.confirmStopJob
+    ? `<span class="confirm"> — esc again to stop</span>`
+    : "";
+  return `<div class="qq">${esc(last.q)}<span class="elapsed"> · ${elapsed}s</span>${confirm}</div>`;
+}
+
+/** The Stop and Pause/Resume controls on a live job's card, the second one label alone deciding which of the two it means. Input: the job (for its state, which says whether the second button reads Pause or Resume). Output: the controls' HTML. The click handlers below read the job fresh off the view rather than close over this one, since a render between the click and here would leave them holding a stale copy. */
+function jobControlsHtml(job: JobMeta): string {
+  const paused = job.state === "paused";
+  return `<div class="jobctl"><button type="button" class="job-stop">Stop</button><button type="button" class="job-pauseresume">${paused ? "Resume" : "Pause"}</button></div>`;
+}
+
+/** The one question a stuck job is waiting on, shown as the current row under its steps — in the same big type an answer reads at, since it is the one thing on the card asking for a reply right now. The composer underneath it is already focused (render() focuses the input on every render), and Enter there posts the reply to /act/{id}/answer instead of asking something new (see the submit case in state.ts). Input: the job. Output: the row's HTML, or "" when nothing is asked right now. */
+function jobQuestionHtml(job: JobMeta): string {
+  if (!job.question) return "";
+  return `<div class="jobq">${esc(job.question)}</div>`;
+}
+
+/** The cost line a finished job's card ends on: how many rounds it took and what they cost in tokens. Input: the job's spend. Output: the line's HTML. */
+function spendLineHtml(spend: NonNullable<JobMeta["spend"]>): string {
+  return `<div class="spend">${spend.rounds} round${spend.rounds === 1 ? "" : "s"} · ${spend.input} in · ${spend.cached} cached · ${spend.output} out</div>`;
+}
+
+/** The thread under the input line: every finished turn folded to a grey question-and-answer pair, then the turn on screen with its question in grey; the live step list or its collapsed summary; the answer in big type; and the evidence fold-out. Input: the view and the matter. Output: the thread's HTML, or "" when nothing has been asked. */
+function threadHtml(v: View, m: Matter): string {
+  const last = m.turns[m.turns.length - 1];
+  if (!last) return "";
+
+  const folded = m.turns
+    .slice(0, -1)
+    .map(
+      (t) =>
+        `<div class="prev"><b>${esc(t.q)}</b>${esc(t.a.replace(/<\/?b>/g, ""))}</div>`,
+    )
+    .join("");
+  const evidence = last.evidence ?? [];
+  const steps = last.steps ?? [];
+  // The "answer" event lands a beat before "done" flips the state, so a turn can be mid-transition with an answer already in hand but state still "asking" — last.a, not v.state alone, is what decides whether the step list is still the live one or something to collapse.
+  const stillAsking = v.state === "asking" && !last.a;
+
+  const stepsBlock = stillAsking
+    ? stepsHtml(steps)
+    : steps.length === 0
+      ? ""
+      : stepsCollapsed(steps, v.stepsOpen)
+        ? stepsSummaryHtml(v, steps)
+        : stepsHtml(steps);
+
+  return `<div class="thread">
+      ${folded}
+      ${qqHtml(v, last)}
+      ${last.job && isJobLive(last.job.state) ? jobControlsHtml(last.job) : ""}
+      ${stepsBlock}
+      ${last.job ? jobQuestionHtml(last.job) : ""}
+      ${stillAsking ? "" : `<div class="a">${last.a ? rich(last.a) : ""}</div>`}
+      ${last.job?.spend ? spendLineHtml(last.job.spend) : ""}
+      ${
+        evidence.length > 0
+          ? `<div class="evd">
+              <div class="h">read <b>${esc(evidence[0].title)}</b>${metaSuffix(evidence[0])}${evidence.length > 1 ? ` +${evidence.length - 1} more` : ""}<span class="tw">${v.evidenceOpen ? "⇧ hide" : "⇩ show"}</span></div>
+              ${v.evidenceOpen ? `<div class="items">${evidence.map(evidenceBlock).join("")}</div>` : ""}
+            </div>`
+          : detailHtml(v, last)
+      }
+    </div>`;
+}
+
+/** The fold under a failed ask, holding the whole of a message the answer slot only took one line of (see state.errorLine). It is the same fold-out an answer's sources use, which means the same look and, more to the point, the same 300px scrolling body: a provider's error has no size limit, and nothing it sends can grow the window past the screen from in there. Input: the view and the turn on screen. Output: the fold's HTML, or "" when the turn kept nothing back. */
+function detailHtml(v: View, last: Matter["turns"][number]): string {
+  if (!last.detail) return "";
+  return `<div class="evd">
+      <div class="h">the whole message<span class="tw">${v.evidenceOpen ? "⇧ hide" : "⇩ show"}</span></div>
+      ${v.evidenceOpen ? `<div class="items"><div class="body">${esc(last.detail)}</div></div>` : ""}
+    </div>`;
+}
+
+/** The part of an evidence line that follows its title, already escaped and with its leading separator, or "" when the meta says nothing the title has not. Input: the item. Output: the HTML fragment. */
+function metaSuffix(e: { title: string; meta: string }): string {
+  const parts = sourceMeta(e.title, e.meta);
+  return parts.length > 0 ? ` · ${esc(parts.join(" · "))}` : "";
+}
+
+/** Renders one evidence item as its own block: title, meta and body. Input: an Evidence entry. Output: the block's HTML. */
+function evidenceBlock(e: {
+  title: string;
+  meta: string;
+  body?: string;
+}): string {
+  return `<div class="body"><div class="im"><b>${esc(e.title)}</b>${metaSuffix(e)}</div>${rich(e.body ?? "")}</div>`;
+}
+
+/** Applies an event to the pure state, re-renders, and carries out any effect it returns. Typing is the one event that skips the re-render, because the input element already holds the new value and rebuilding it on every keystroke would move the caret and resize the OS window each time. A "tool" or "status" event that leaves the ask still running patches the live step list in place instead (see patchLiveSteps), which is what keeps its shimmer and breathe animations from restarting on every single tool call. Input: the event. Output: nothing. */
+export function dispatch(event: Parameters<typeof step>[1]): void {
+  const before = view.state;
+  const wasAsking = before === "asking";
+  // A window that was only up to show a notice goes again with it, whether the six seconds ran out or the card was clicked through.
+  const wasNoticeAlone = view.notice !== undefined && view.noticeAlone === true;
+  const result = step(view, event);
+  view = result.view;
+  // The moment an ask finishes gets its own render below (see collapseStepsThenRender), timed to land after the 200ms shrink instead of snapping the step list down immediately.
+  const justFinished = wasAsking && view.state !== "asking";
+  const stillRunning =
+    event.kind === "daemonEvent" &&
+    (event.ev.type === "tool" || event.ev.type === "status") &&
+    wasAsking &&
+    view.state === "asking";
+  const patched = stillRunning && patchLiveSteps(view);
+  // "asked" only writes down which conversation the daemon put the question in, which nothing on the card draws, so it is not worth a rebuild and a window resize mid-question.
+  if (
+    event.kind !== "type" &&
+    event.kind !== "asked" &&
+    !justFinished &&
+    !patched
+  )
+    render(view);
+  // Only the notice's own events restart its six seconds: a brief that arrived while a question was being answered must not be held up by every tool event that follows.
+  if (event.kind.startsWith("notice")) armNotice(view);
+  if (wasNoticeAlone && !view.notice) hideWindow();
+  if (result.effect?.kind === "close") hideWindow();
+  if (result.effect?.kind === "openNotice")
+    openNotice(result.effect.place, result.effect.id);
+  if (result.effect?.kind === "ask") {
+    startAsk(result.effect.question, result.effect.conversation);
+    startStepTicker();
+  }
+  if (result.effect?.kind === "startJob") {
+    startJob(result.effect.goal);
+    startStepTicker();
+  }
+  if (result.effect?.kind === "stopJob") void actStop(result.effect.id);
+  if (result.effect?.kind === "answerJob")
+    void actAnswer(result.effect.id, result.effect.text);
+  if (justFinished) {
+    stopStepTicker();
+    collapseStepsThenRender();
+  }
+  if (before !== "answered" && view.state === "answered") {
+    if (devEvidenceOpen && !view.evidenceOpen)
+      dispatch({ kind: "toggleEvidence" });
+    askNextDevQuestion();
+  }
+}
+
+/** Plays the 200ms shrink when a finished turn's step list is about to fold down to its one-line summary, instead of the next render just snapping straight to the short form. Runs the instant a turn finishes, while the full list from the render before this one is still on screen: measures its current height, then transitions it to nothing before the deferred render() below settles the DOM into its normal (unanimated) collapsed shape. Plain immediate render instead — no animation — when there is nothing to collapse to (stepsCollapsed says no, e.g. a step failed and stays expanded) or the viewer asked for reduced motion. Input: none, reads the view and the DOM the last render left behind. Output: nothing. */
+function collapseStepsThenRender(): void {
+  const turns = view.matters[view.current]?.turns ?? [];
+  const last = turns[turns.length - 1];
+  const wrap = root.querySelector<HTMLElement>(".steps");
+  if (
+    !last ||
+    !wrap ||
+    reduce ||
+    !stepsCollapsed(last.steps ?? [], view.stepsOpen)
+  ) {
+    render(view);
+    return;
+  }
+  wrap.style.height = `${wrap.getBoundingClientRect().height}px`;
+  wrap.style.overflow = "hidden";
+  void wrap.offsetHeight; // commits the explicit height above so the transition below has something to animate away from, instead of starting from "auto"
+  wrap.style.transition = "height 200ms ease, opacity 200ms ease";
+  requestAnimationFrame(() => {
+    wrap.style.height = "0px";
+    wrap.style.opacity = "0";
+  });
+  setTimeout(() => render(view), 200);
+}
+
+/** Sends the question that has just been put on the pending turn: to the daemon when it answered the last probe, to the mock script under ?mock=1, and otherwise straight to the offline sentence in the answer slot. Input: the question, and the conversation to append it to, or undefined to have the daemon open one (see askConversation). Output: nothing; the answer arrives later as daemon events. */
+function startAsk(q: string, conversation: string | undefined): void {
+  const m = view.matters[view.current];
+  if (!m) return;
+  if (daemonUp) {
+    askId = undefined;
+    void ask(q, view.contextText || m.context, conversation)
+      .then((res) => {
+        askId = res.id;
+        // The daemon says which conversation it stored the question in. Writing it down here is the whole of the follow-up: the next question names it, and the daemon then puts the turns already in it in front of the model.
+        if (res.conversationId)
+          dispatch({ kind: "asked", conversationId: res.conversationId });
+      })
+      .catch(() =>
+        offline("Ora's daemon stopped answering, so I could not look this up."),
+      );
+  } else if (mockMode) {
+    scheduleAnswer(m.id);
+  } else {
+    offline("Ora's daemon is not running, so I cannot look anything up.");
+  }
+}
+
+/** Starts a computer-use job for a goal, the "do:" counterpart to startAsk. Input: the goal in the user's own words. Output: nothing; the job's progress arrives later as "act" daemon events, matched against jobId once the POST /act reply names it. */
+function startJob(goal: string): void {
+  if (!daemonUp) {
+    offline("Ora's daemon is not running, so I cannot start that.");
+    return;
+  }
+  jobId = undefined;
+  void actStart(goal).then((id) => {
+    if (!id) {
+      offline("Ora's daemon would not start that job.");
+      return;
+    }
+    jobId = id;
+    dispatch({ kind: "jobStarted", id });
+  });
+}
+
+/** The daemon's id for the dictation on screen, undefined while the microphone is closed. The window matches the daemon's own "dictation" event against it, because that event is how a dictation the silence gate ended gets its words back. */
+let dictateId: string | undefined;
+
+/** The open dictation's start request, awaited by endDictation so a key pressed before the daemon answered still stops the right recording. */
+let dictation: Promise<string> | undefined;
+
+/** Whether the dictation on screen has already had its words applied. The transcript can arrive twice — once on the daemon's event and once on a stop reply — and only the first of them is used. */
+let dictateTaken = true;
+
+/** Opens the daemon's microphone and puts the window into its listening look. Input: none. Output: nothing; the transcript arrives later through finishDictation, from whichever of the two sources gets there first. */
+function beginDictation(): void {
+  // Dictation and a live session would fight over the same microphone, and there is nothing to dictate into when the daemon is down.
+  if (!daemonUp || view.voice || dictation) return;
+  const { base, token } = endpoint();
+  dictateId = undefined;
+  dictateTaken = false;
+  dispatch({ kind: "dictating" });
+  dictation = startDictation(base, token);
+  dictation
+    .then((id) => {
+      dictateId = id;
+    })
+    .catch(() => failDictation());
+}
+
+/** Closes the microphone, if the daemon has not already closed it itself. Input: none. Output: a promise for when the transcript has been applied. */
+async function endDictation(): Promise<void> {
+  const started = dictation;
+  if (!started) return;
+  const { base, token } = endpoint();
+  try {
+    finishDictation(await stopDictation(base, token, await started));
+  } catch {
+    failDictation();
+  }
+}
+
+/** Says the dictation could not be done, once, whether the microphone would not open or whisper would not transcribe. Input: none. Output: nothing. */
+function failDictation(): void {
+  if (dictateTaken) return;
+  dictateTaken = true;
+  dictation = undefined;
+  dispatch({ kind: "dictationFailed" });
+  clearHintSoon();
+}
+
+/** Puts the words of a finished dictation into the input, once, whichever source they came from. Input: the transcript, empty when nothing was said. Output: nothing; an empty transcript leaves the input alone and shows a one-second hint instead. */
+function finishDictation(text: string): void {
+  if (dictateTaken) return;
+  dictateTaken = true;
+  dictation = undefined;
+  dispatch({ kind: "dictated", text });
+  clearHintSoon();
+}
+
+/** Takes the hint back down a second after it went up, if one did. Input: none. Output: nothing. */
+function clearHintSoon(): void {
+  if (view.hint) setTimeout(() => dispatch({ kind: "hint", text: "" }), 1000);
+}
+
+/** Starts a live voice session, or ends the one already running. Input: none. Output: a promise for when the daemon has answered. */
+async function toggleVoice(): Promise<void> {
+  if (!daemonUp) return;
+  if (view.voice) return stopVoice();
+  const id = await voiceStart();
+  if (id) {
+    dispatch({ kind: "voiceOn", id });
+    clearHintSoon();
+  }
+}
+
+/** Ends the live voice session and returns the window to its resting look. Input: none. Output: a promise for when the daemon has released the microphone. */
+async function stopVoice(): Promise<void> {
+  await voiceStop();
+  dispatch({ kind: "voiceOff" });
+}
+
+/** Puts one sentence in the answer slot and moves the view to answered, for the cases where nothing was asked of the daemon at all. Input: the sentence. Output: nothing. */
+function offline(text: string): void {
+  dispatch({
+    kind: "daemonEvent",
+    ev: { id: "", type: "error", text, evidence: [] },
+  });
+}
+
+/** After the ~900ms "asking" delay, fills the pending turn in from the mock script. Input: the matter id asked of. Output: nothing. */
+function scheduleAnswer(matterId: string): void {
+  setTimeout(
+    () => {
+      const m = view.matters.find((x) => x.id === matterId);
+      if (!m || m.turns.length === 0) return;
+      const idx = Math.min(m.turns.length - 1, venueScript.length - 1);
+      const script =
+        matterId === "venue"
+          ? venueScript[idx]
+          : { a: "Nothing else on this yet.", evidence: undefined };
+      const turns = m.turns
+        .slice(0, -1)
+        .concat([
+          {
+            ...m.turns[m.turns.length - 1],
+            a: script.a,
+            evidence: script.evidence,
+          },
+        ]);
+      dispatch({ kind: "answered", patch: { turns } });
+    },
+    reduce ? 50 : 900,
+  );
+}
+
+// Both microphone keys are bound to the document in the capture phase rather than to the input: the desktop hotkey shows this window and the next key press can land before the input has taken focus, and every voice turn rebuilds the card, which would take a listener on the input with it. Capturing also means the input's own Enter and Escape never see a key that stopped a dictation.
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.code === "Space" && e.shiftKey) {
+      e.preventDefault();
+      void toggleVoice();
+      return;
+    }
+    const value = root.querySelector<HTMLInputElement>(".q")?.value ?? "";
+    const action = dictationKey(
+      e,
+      value.trim() === "",
+      view.dictating === true,
+    );
+    if (!action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (action === "start") beginDictation();
+    else void endDictation();
+  },
+  true,
+);
+
+function onInputKeydown(e: KeyboardEvent): void {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    // Ctrl+Enter is the way to ask something unrelated without waiting the few minutes out: it drops the thread in hand so the daemon opens a new conversation for this question. Plain Enter carries on in the thread (see askConversation), which is what a follow-up needs.
+    dispatch({ kind: "enter", fresh: e.ctrlKey });
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    dispatch({ kind: "escape" });
+  }
+}
+
+// Tauri wiring; harmless in a plain browser.
+let hideWindow = () => {};
+/** Shows the hover so it can say one of Ora's own moments, and takes no focus doing it: the notice arrives while the user is working in another window, so the window is placed and shown exactly as the hotkey path places and shows it but with no raise() and nothing else that asks GNOME for focus. Input: the notice off the daemon's stream. Output: a promise for when the window is up. */
+let showNotice: (n: Notice) => Promise<void> = async () => {};
+/** Sizes the OS window to the rendered content so the empty state is a short strip and an answer grows the window, keeping it anchored to the dock whenever that height changes while the window is visible. Input: none. Output: the logical size the window was set to. */
+let fitWindow: () => Promise<{ width: number; height: number }> = async () => ({
+  width: 720,
+  height: 0,
+});
+try {
+  const win = getCurrentWindow();
+  hideWindow = () => void win.hide();
+
+  // Where the dock is, re-read from the desktop on every open so moving the dock takes effect on the next hotkey press instead of on the next restart. The last answer is kept as the fallback, and the first one is a bottom dock that reserves no space, which is also what the Rust side returns when it can read nothing.
+  let dock: Dock = { edge: "bottom", clearance: 0 };
+  const desktop: Desktop = {
+    monitors: () => availableMonitors(),
+    pointer: () => cursorPosition(),
+    focused: () => currentMonitor(),
+    dock: async () => {
+      dock = await invoke<Dock>("dock_anchor").catch(() => dock);
+      return dock;
+    },
+  };
+  // The monitor, dock and chosen position this open used, held for as long as the window stays up so that an answer growing the window keeps sitting where it opened instead of following the pointer onto another screen.
+  let placeCtx: PlaceContext | null = null;
+
+  // The card does not fill the window: the body keeps a gutter around it so the card's shadow has somewhere to fall, so the window has to be as tall as the card's bottom edge plus that gutter. Growing it downwards alone would walk it off the position it opened at, so every height change is followed by a move (see winplace.fitWindow).
+  let lastHeight = 0;
+  fitWindow = async () => {
+    const gutter =
+      parseFloat(getComputedStyle(document.body).paddingBottom) || 0;
+    // Whichever of the two reaches lowest: the card, or the notice bubble above it when a notice is the only thing on screen and the card is hidden.
+    const bottom = Math.max(
+      root.getBoundingClientRect().bottom,
+      noticeEl.getBoundingClientRect().bottom,
+    );
+    // The 96px floor is the card's own minimum height; a notice showing on its own has no card under it, so it is only as tall as the bubble and would otherwise float half a card's height off the dock.
+    const floor = view.notice && view.noticeAlone ? 0 : 96;
+    const height = Math.max(floor, Math.ceil(bottom + gutter));
+    const changed = height !== lastHeight;
+    lastHeight = height;
+    const size = { width: 720, height };
+    await winplaceFitWindow(win, size, changed, placeCtx);
+    return size;
+  };
+  showNotice = async (n) => {
+    const open = await win.isVisible();
+    // A hover already on screen keeps the position it opened at; one that is shut is placed for this notice the same way the hotkey path places it, before anything is shown.
+    if (!open) placeCtx = await resolveContext(desktop, storedHoverPosition());
+    dispatch({ kind: "notice", notice: n, hoverOpen: open });
+    if (open) return;
+    const size = await fitWindow();
+    if (placeCtx) {
+      const at = placementFor(placeCtx, size);
+      await win.setPosition(new PhysicalPosition(at.x, at.y));
+    }
+    // show() and nothing else. No raise(), no setFocus(): the user is typing in another window and a notice must not take the keyboard off them.
+    await win.show();
+  };
+
+  // The desktop hotkey signals the Rust side, which emits this event; showing and hiding from here keeps every window call on the main loop.
+  void listen("ora://toggle", () =>
+    toggleWindow(win, {
+      // Ask the daemon what is on screen before this window takes focus, or the context would be Ora itself.
+      beforeShow: connect,
+      openContext: async () => {
+        // The position is re-read from storage on every open, so choosing a different one on the Settings screen takes effect on the next hotkey press without a restart.
+        placeCtx = await resolveContext(desktop, storedHoverPosition());
+        return placeCtx;
+      },
+      sizeToContent: fitWindow,
+      raise: () => invoke("raise"),
+      focusInput: () => root.querySelector<HTMLInputElement>(".q")?.focus(),
+    }),
+  );
+} catch {
+  /* not inside Tauri */
+}
+
+// Which theme was asked for last, so an earlier "system" whose answer is still on its way from Rust cannot land on top of a later choice.
+let themeAsk = 0;
+
+/** Puts a theme choice on the page. Input: the choice. Output: nothing; "light" and "dark" are stamped on the root element straight away, and "system" is resolved by asking the desktop through the Rust system_theme command, which reads GNOME's own setting. It has to be asked, because WebKitGTK's prefers-color-scheme media query does not follow that setting; the media query is only the fallback, for a plain browser tab with no Tauri behind it. The app window resolves "system" the same way (see stampSystemTheme in src/app/main.ts), so the two windows never disagree about what it means. */
+function applyThemeChoice(choice: Theme): void {
+  const ask = ++themeAsk;
+  if (choice !== "system") {
+    document.documentElement.dataset.theme = choice;
+    return;
+  }
+  const stamp = (t: string) => {
+    if (ask === themeAsk) document.documentElement.dataset.theme = t;
+  };
+  void invoke<string>("system_theme")
+    .then(stamp)
+    .catch(() =>
+      stamp(
+        matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
+      ),
+    );
+}
+
+// Theme choice: the dev switch wins, then the setting the app window's Settings screen stored, and nothing stored leaves it to the desktop.
+let storedTheme: string | null = null;
+try {
+  storedTheme = localStorage.getItem(THEME_KEY);
+} catch {
+  /* storage blocked */
+}
+applyThemeChoice(themeChoice(devTheme ?? storedTheme));
+
+// The hover is shown and hidden rather than reloaded, so the choice read above would otherwise be the only one this page ever saw, and a theme picked in the app window afterwards would never reach it. The storage event fires here whenever the app window writes the key, which is what makes that change land while the hover is still up. A page opened with ?theme= is being held at one theme on purpose, so it does not follow.
+if (!devTheme) {
+  window.addEventListener("storage", (e) => {
+    const choice = themeFromStorage(e);
+    if (choice) applyThemeChoice(choice);
+  });
+}
+
+render(view);
