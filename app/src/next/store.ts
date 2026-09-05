@@ -3,8 +3,8 @@
 import { configureStore, createAction, createListenerMiddleware, createSlice, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
 import { useDispatch, useSelector } from "react-redux";
 
-import { events, oraApi, type DaemonEvent, type Evidence, type Spend } from "./api";
-import { jobStateWord } from "./format";
+import { events, oraApi, type DaemonEvent, type Evidence, type Notice, type Spend } from "./api";
+import { jobStateWord, noticeActionMessage } from "./format";
 
 /** The key a fresh, unsaved chat draft's composer text and job are kept under, before the first message has opened a real conversation and given it a real id. */
 export const DRAFT_CHAT = "__draft__";
@@ -367,6 +367,15 @@ export const conversationsUi = conversationsSlice.actions;
 export const settings = settingsSlice.actions;
 export const progress = progressSlice.actions;
 
+/** What a "notice" event does outside the progress slice, once its action is set: says it on the sidebar's rail line — the one surface every notice already reaches, alongside the routine run result "Could not add that routine" and the rest of ui.notice's callers — and, for a task notice pressed Done from its own desktop notification, tells the Tasks screen's cache to read the list again, since the daemon closed that task through its own task-done path (see internal/proactive/notify.go's markDone) without this window's POST /tasks/{id}/done ever running to invalidate it. A notice with no action (one arriving fresh, drawn only by the hover window) is left alone. */
+function reactToNotice(n: Notice, api: { dispatch: AppDispatch }): void {
+  const msg = noticeActionMessage(n);
+  if (msg === undefined) return;
+  api.dispatch(uiSlice.actions.noticed(msg));
+  if (n.kind === "task" && n.action === "done")
+    api.dispatch(oraApi.util.invalidateTags(["Task"]));
+}
+
 /** Opens the daemon's SSE stream the first time progress.streamOpened is dispatched and feeds every message into the progress slice. A second streamOpened is ignored, so the window never ends up with two streams answering the same ask. Input: the function that opens a stream, which the window leaves as the real one and a test replaces. Output: the middleware. */
 export function streamMiddleware(open: typeof events = events) {
   const listener = createListenerMiddleware();
@@ -375,15 +384,29 @@ export function streamMiddleware(open: typeof events = events) {
     actionCreator: progressSlice.actions.streamOpened,
     effect: async (_action, api) => {
       if (stop) return;
-      stop = open((ev) => {
-        api.dispatch(progressSlice.actions.eventArrived(ev));
-        // A finished ask is what changes the conversation list, the turns inside it and what has been spent, so the cache is told to read them again rather than polling on a timer.
-        if (ev.type === "done" || ev.type === "error") api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Usage"]));
-      });
+      stop = open(
+        (ev) => {
+          api.dispatch(progressSlice.actions.eventArrived(ev));
+          // A finished ask is what changes the conversation list, the turns inside it and what has been spent, so the cache is told to read them again rather than polling on a timer.
+          if (ev.type === "done" || ev.type === "error") api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Usage"]));
+        },
+        () => {
+          // The stream opening again is this window's one signal that the daemon it had lost is answering, so everything that failed while it was gone is read once more. Without it a window left open across a daemon restart keeps showing "Nothing is answering" until something happens to focus it.
+          api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]));
+        },
+      );
     },
   });
   // A live job is not a conversation the daemon knows about, so nothing tells the sidebar's own GET /conversations to say what it is doing; this patches the row's subtitle straight into the RTK Query cache instead; every other field is left as the daemon last sent it, and a job with no row to find (a fresh draft, before the first message opened one) patches nothing.
   const startTyped = listener.startListening.withTypes<RootState, AppDispatch>();
+  // Reacts to eventArrived itself rather than to the open() callback above, so a "notice" event lands the same way whether the real stream carried it or a test (or the ?mock=1 fixture in mock.ts) dispatched progress.eventArrived directly.
+  startTyped({
+    matcher: progressSlice.actions.eventArrived.match,
+    effect: (action, api) => {
+      const ev = action.payload;
+      if (ev.type === "notice" && ev.notice) reactToNotice(ev.notice, api);
+    },
+  });
   startTyped({
     matcher: isAnyOf(progressSlice.actions.jobSent, progressSlice.actions.jobAccepted, progressSlice.actions.eventArrived),
     effect: (_action, api) => {

@@ -483,20 +483,38 @@ export const {
   useStopDictationMutation,
 } = oraApi;
 
-/** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, and "act" is one line of a computer-use job's progress. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. */
+/** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep, a task or routine raised on its own. body is the routine's or task's own text for those two kinds (see internal/proactive/routine.go and proactive.go); kind is "task", "routine", "brief", "close", "meeting" or "note", and id is the row's own id. action and until are empty on a notice arriving fresh, and set once the user has pressed Done or a snooze button on the desktop notification it was also posted as: action is "snoozed" or "done", and until is the RFC 3339 moment a snoozed notice comes back. Only the hover window draws title and place (see internal/ipc/notice.go); this window reacts to action and until alone, through noticeActionMessage in format.ts. */
+export type Notice = {
+  title: string;
+  body: string;
+  place: string;
+  id: string;
+  kind: string;
+  action?: string;
+  until?: string;
+};
+
+/** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, "notice" is Ora speaking first, and "act" is one line of a computer-use job's progress. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */
 export type DaemonEvent = {
   id: string;
-  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "act";
+  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "act" | "notice";
   text?: string;
   detail?: string;
   evidence?: Evidence[];
   conversation_id?: string;
+  notice?: Notice;
 };
 
-/** Opens the daemon's SSE stream and forwards each parsed message to onEvent, reconnecting two seconds after a drop. Input: a callback for each event. Output: a stop function that closes the stream for good. The token goes in the query string because an EventSource cannot set headers, which is why the daemon accepts it there as well (see requireIPCToken in cmd/ipc.go). */
-export function events(onEvent: (ev: DaemonEvent) => void): () => void {
+/** Opens the daemon's SSE stream and forwards each parsed message to onEvent, reconnecting two seconds after a drop. Input: a callback for each event, and a callback for the stream opening again after it had dropped, which is the only signal this window gets that a daemon it had lost is answering again. Output: a stop function that closes the stream for good. The token goes in the query string because an EventSource cannot set headers, which is why the daemon accepts it there as well (see requireIPCToken in cmd/ipc.go). */
+/** How long a dropped stream waits before reconnecting, in milliseconds, and how much random extra is added on top. */
+const RETRY_MS = 2000;
+const RETRY_JITTER_MS = 1000;
+
+export function events(onEvent: (ev: DaemonEvent) => void, onReopen?: () => void): () => void {
   let stopped = false;
   let source: EventSource | undefined;
+  // Whether the stream has failed since it was last open. Set on every error, including each failed retry, so it is still true whenever a later attempt finally succeeds.
+  let dropped = false;
 
   async function connect(): Promise<void> {
     if (stopped) return;
@@ -504,6 +522,12 @@ export function events(onEvent: (ev: DaemonEvent) => void): () => void {
     if (stopped) return;
     const url = t ? `${base}/events?token=${encodeURIComponent(t)}` : `${base}/events`;
     source = new EventSource(url);
+    source.onopen = () => {
+      // Only a stream that had dropped is a recovery worth telling the cache about; the first open of the window's life is not, since every query is already fetching by then. Cleared here rather than in the retry, so a second daemon restart later in the session is caught the same way this one was.
+      if (!dropped) return;
+      dropped = false;
+      onReopen?.();
+    };
     source.onmessage = (e: MessageEvent) => {
       try {
         onEvent(JSON.parse(e.data) as DaemonEvent);
@@ -513,8 +537,9 @@ export function events(onEvent: (ev: DaemonEvent) => void): () => void {
     };
     source.onerror = () => {
       source?.close();
-      // A dropped stream is also how a restarted daemon shows itself, so the token is read again on the way back in.
-      if (!stopped) setTimeout(() => void refreshToken().then(connect), 2000);
+      dropped = true;
+      // A dropped stream is also how a restarted daemon shows itself, so the token is read again on the way back in. Up to a second of jitter is added because every open window drops at the same instant when the daemon dies, and without it they all reconnect and refetch on the same tick for as long as it flaps.
+      if (!stopped) setTimeout(() => void refreshToken().then(connect), RETRY_MS + Math.random() * RETRY_JITTER_MS);
     };
   }
   void connect();
