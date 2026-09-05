@@ -137,3 +137,28 @@ func TestShouldRestartWindow_BacksOffButNeverGivesUp(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowLog_AppendsInTheDataDir(t *testing.T) {
+	dir := t.TempDir()
+	for _, line := range []string{"first\n", "second\n"} {
+		f, err := windowLog(dir)
+		if err != nil {
+			t.Fatalf("windowLog: %v", err)
+		}
+		if _, err := f.WriteString(line); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "window.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "first\nsecond\n" {
+		t.Errorf("window.log = %q; want both lines kept", got)
+	}
+	info, _ := os.Stat(filepath.Join(dir, "window.log"))
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("mode = %v; want 0600 like ora.log", info.Mode().Perm())
+	}
+}

@@ -128,6 +128,9 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
         }
     }
 
+    // One line per successful dial, so the window's log shows whether the drawing layer was ever subscribed when a drawing seems not to have appeared.
+    eprintln!("ora: overlay event stream: connected");
+
     let mut buffer = String::new();
     loop {
         let bytes = if chunked {

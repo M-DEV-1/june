@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"ora/internal/config"
 )
 
 // The daemon owns the desktop window's lifetime, so a user starts and stops one thing rather than two. The login entry launches the daemon (see autostart.go), the daemon launches the window, and quitting the daemon takes the window with it.
@@ -91,10 +93,26 @@ func startWindow(ctx context.Context, path string) (*exec.Cmd, error) {
 	// The window is asked to close rather than killed outright, so it can hide its windows and release the microphone before it goes.
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = windowStopGrace
+	// Whatever the window prints, above all the overlay's "event stream" lines, goes to window.log beside ora.log; without this it went to /dev/null and a drawing that never appeared left nothing to read.
+	if f, err := windowLog(config.DataDir()); err == nil {
+		cmd.Stdout = f
+		cmd.Stderr = f
+		defer f.Close()
+	} else {
+		slog.Warn("window log not opened, output dropped", "err", err)
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 	return cmd, nil
+}
+
+// windowLog opens the file the window's own output is appended to. Input: the directory the log lives in. Output: the open file, created 0600 like ora.log because the window prints whatever the page logs, or an error when it could not be opened.
+func windowLog(dir string) (*os.File, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(filepath.Join(dir, "window.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 }
 
 // superviseWindow keeps the desktop window running for as long as the daemon does, restarting it when it exits on its own. Input: the context that ends when the daemon stops, the binary to run, and the function that starts it (a parameter so a test can stand in for a real process). Output: none; it returns when the context ends or the restart policy gives up.
