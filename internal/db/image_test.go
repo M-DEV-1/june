@@ -126,33 +126,3 @@ func TestAgeEpisodeImages_DeletesExtraMonitorFrames(t *testing.T) {
 		t.Fatalf("recent episode lost its extra frame: %v", got)
 	}
 }
-
-// TestPruneAncientEpisodes_DeletesExtraMonitorFrames covers the other path that reclaims frames: deleting the row must take every monitor's frame with it.
-func TestPruneAncientEpisodes_DeletesExtraMonitorFrames(t *testing.T) {
-	dir := t.TempDir()
-	store, err := db.New(filepath.Join(dir, "db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-
-	id, err := store.WriteEpisode(ctx, db.EpisodeWrite{
-		App: "Zoom", Title: "standup", ScreenText: "call",
-		ImageJPEG: []byte("primary"), ExtraJPEG: [][]byte{[]byte("second")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(ctx,
-		`UPDATE episodes SET created_at = datetime('now', '-400 days'), screen_text = '' WHERE id = ?`, id); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := store.PruneAncientEpisodes(ctx, 365*24*time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "frames", "1-b.jpg")); !os.IsNotExist(err) {
-		t.Fatalf("pruned extra frame still on disk: %v", err)
-	}
-}

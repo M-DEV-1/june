@@ -3,6 +3,7 @@ package db
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // Half of every character Ora ever captured has no vector: an episode is embedded as one document capped at maxEmbedRunes, so a 96,061-character screen is represented by its first 4,000 and the rest is unreachable by meaning. Chunking makes the whole capture addressable.
@@ -72,6 +73,29 @@ func TestBestPassagePerRow_KeepsOneHitPerCapture(t *testing.T) {
 	for _, c := range got {
 		if c.id == "episode:42" {
 			t.Error("kept the weaker passage of episode 42; the best-scoring one should win")
+		}
+	}
+}
+
+// TestChunkText_NonPositiveSizeReturnsOnePassageInsteadOfLoopingForever pins the geometry guard. With size <= 0 the loop's window never advanced: it appended an empty passage and reset start to where it already was, appending empty strings until the process ran out of memory, and a negative size sliced runes[start:start-1] and panicked. Production only ever passes chunkRunes, but the loop must not be one edit away from either outcome.
+func TestChunkText_NonPositiveSizeReturnsOnePassageInsteadOfLoopingForever(t *testing.T) {
+	for _, size := range []int{0, -1, -1000} {
+		done := make(chan []string, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					done <- nil
+				}
+			}()
+			done <- chunkText("some capture text that is longer than nothing", size, 200)
+		}()
+		select {
+		case got := <-done:
+			if len(got) != 1 || got[0] != "some capture text that is longer than nothing" {
+				t.Errorf("chunkText(size=%d) = %q, want the whole text as one passage", size, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("chunkText(size=%d) did not return within two seconds", size)
 		}
 	}
 }

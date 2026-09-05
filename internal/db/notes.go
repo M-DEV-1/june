@@ -2,11 +2,13 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
 	"log/slog"
 	"ora/internal/memory"
 	"ora/internal/obs"
+	oratext "ora/internal/text"
 	"strings"
 	"time"
 )
@@ -20,10 +22,39 @@ type Note struct {
 	UpdatedAt time.Time
 }
 
+// ArchivedNote is a fact that consolidation replaced, as it was when it was replaced.
+type ArchivedNote struct {
+	NoteID     int64
+	Content    string
+	Kind       string
+	CreatedAt  time.Time
+	ArchivedAt time.Time
+}
+
+// ArchivedNotes returns every fact consolidation has replaced, oldest archive first. Input: none. Output: the archived rows, or an error from the store.
+func (s *Store) ArchivedNotes(ctx context.Context) ([]ArchivedNote, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT note_id, content, kind, created_at, archived_at FROM notes_archive ORDER BY archived_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("archived notes: %w", err)
+	}
+	defer rows.Close()
+	var out []ArchivedNote
+	for rows.Next() {
+		var a ArchivedNote
+		var created, archived sql.NullTime
+		if err := rows.Scan(&a.NoteID, &a.Content, &a.Kind, &created, &archived); err != nil {
+			return nil, fmt.Errorf("archived notes: scan: %w", err)
+		}
+		a.CreatedAt, a.ArchivedAt = created.Time, archived.Time
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // normalizeNoteContent trims, collapses internal whitespace to single spaces, and lowercases — used by LogNote's dedup check to catch paraphrased restatements.
 // Does not strip punctuation, so "user likes go" and "user likes go." still stay distinct rows.
 func normalizeNoteContent(s string) string {
-	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+	return oratext.OneLine(strings.ToLower(s))
 }
 
 // LogNote inserts a note. Idempotent on (content, kind) — returns existing id.
@@ -322,6 +353,11 @@ func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
 		return fmt.Errorf("replace notes: iterate old ids: %w", err)
 	}
 
+	// The facts being replaced are the source of the merged ones; keep them where a wrong merge can be traced and undone.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO notes_archive (note_id, content, kind, created_at, updated_at) SELECT id, content, kind, created_at, updated_at FROM notes WHERE kind = 'fact'`); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: archive: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM notes WHERE kind = 'fact'`); err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("replace notes: clear: %w", err)

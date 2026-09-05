@@ -17,7 +17,7 @@ type ReconcileReport struct {
 	Backfilled int
 }
 
-// ReconcileVectors walks every id currently in the vector index and deletes any whose backing SQL row is gone (or, for episodes, already thinned to empty screen_text) — this is what heals the orphaning left by consolidation (ReplaceAllNotes renumbering notes, ReplaceSummariesWithDigest dropping replaced summaries) for a store that predates targeted vector deletes, without a manual rebuild.
+// ReconcileVectors walks every id currently in the vector index and deletes any whose backing SQL row is gone (or, for episodes, already thinned to empty screen_text) — this is what heals the orphaning left by consolidation (ReplaceAllNotes renumbering notes) for a store that predates targeted vector deletes, without a manual rebuild. ReplaceSummariesWithDigest no longer causes this: it reparents summaries under their digest instead of deleting them, so their vectors stay live.
 // A Store with no vector index configured is a no-op (zero report, no error).
 func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileReport, error) {
 	var report ReconcileReport
@@ -232,7 +232,7 @@ func (s *Store) reconcileBackfillCandidates(ctx context.Context, existing map[st
 	return out
 }
 
-// vectorBackingAlive reports whether refID's SQL row still exists for the given source, and — for episodes only — whether it's been thinned (screen_text cleared by AgeEpisodes) since that also means the vector should go even though the row itself remains. Unrecognized sources report alive=true so ReconcileVectors leaves them untouched — vector lifecycle for those isn't in scope here.
+// vectorBackingAlive reports whether refID's SQL row still exists for the given source, and — for episodes only — whether its screen_text is empty, since that also means the vector should go even though the row itself remains. Unrecognized sources report alive=true so ReconcileVectors leaves them untouched — vector lifecycle for those isn't in scope here.
 func (s *Store) vectorBackingAlive(ctx context.Context, source string, refID int64) (alive, thinned bool) {
 	switch source {
 	case "note":

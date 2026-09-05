@@ -252,8 +252,93 @@ func (s *Store) OldSummaryGroups(ctx context.Context, olderThan time.Duration) (
 	return groups, nil
 }
 
-// ReplaceSummariesWithDigest writes a digest node under dayID and deletes the constituent summary nodes in a single transaction. FTS5 stays correct via the nodes_ai_summary (insert) and nodes_ad_summary (delete) triggers.
-// If the insert fails the deletes never happen — summaries are never lost.
+// inClause builds a "... WHERE id IN (?,?,...)" query and its argument slice for a set of int64 ids. Input: the SQL up to and including the open paren (such as "DELETE FROM nodes WHERE id IN ("), and the ids. Output: the finished SQL and the ids as an arg slice, in the same order.
+func inClause(prefix string, ids []int64) (string, []any) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	return prefix + strings.Join(placeholders, ",") + ")", args
+}
+
+// existingDigestID returns the digest node already filed under dayID, if any. Input: ctx, the open transaction, and the day's node id. Output: the digest's id and true, or 0 and false when the day has none yet, or an error from the read.
+func (s *Store) existingDigestID(ctx context.Context, tx *sql.Tx, dayID int64) (int64, bool, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type = 'digest' AND parent_id = ?`, dayID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("find existing digest: %w", err)
+	}
+	return id, true, nil
+}
+
+// dedupeSummaryContent reads back the content of every id in summaryIDs and splits them into keepIDs, one id per distinct content (the first seen), and dropIDs, every later id whose content repeats one already kept or one already parented on digestID. Input: ctx, the open transaction, the digest the batch is about to be reparented under, and the candidate ids. Output: the two sets, covering every input id between them once, or an error from the read.
+//
+// Seeding with digestID's own children is what makes a resumed compaction safe: a day whose digest already exists from an earlier, partial run can have a summary still sitting under its original task that happens to repeat the content of one already moved under the digest, and reparenting it now would hit the exact same idx_nodes_unique collision a plain duplicate within the batch would.
+func (s *Store) dedupeSummaryContent(ctx context.Context, tx *sql.Tx, digestID int64, summaryIDs []int64) (keepIDs, dropIDs []int64, err error) {
+	seen := make(map[string]bool, len(summaryIDs))
+	existing, err := tx.QueryContext(ctx, `SELECT content FROM nodes WHERE parent_id = ? AND type = 'summary'`, digestID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read digest's existing summaries: %w", err)
+	}
+	for existing.Next() {
+		var c string
+		if err := existing.Scan(&c); err != nil {
+			existing.Close()
+			return nil, nil, fmt.Errorf("scan digest's existing summary: %w", err)
+		}
+		seen[c] = true
+	}
+	if err := existing.Err(); err != nil {
+		existing.Close()
+		return nil, nil, fmt.Errorf("iterate digest's existing summaries: %w", err)
+	}
+	existing.Close()
+
+	selectSQL, args := inClause("SELECT id, content FROM nodes WHERE id IN (", summaryIDs)
+	rows, err := tx.QueryContext(ctx, selectSQL, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read summary content: %w", err)
+	}
+	defer rows.Close()
+
+	content := make(map[int64]string, len(summaryIDs))
+	for rows.Next() {
+		var id int64
+		var c string
+		if err := rows.Scan(&id, &c); err != nil {
+			return nil, nil, fmt.Errorf("scan summary content: %w", err)
+		}
+		content[id] = c
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate summary content: %w", err)
+	}
+
+	for _, id := range summaryIDs {
+		c, ok := content[id]
+		if !ok {
+			// Already gone by the time this ran; nothing to reparent or drop.
+			continue
+		}
+		if seen[c] {
+			dropIDs = append(dropIDs, id)
+			continue
+		}
+		seen[c] = true
+		keepIDs = append(keepIDs, id)
+	}
+	return keepIDs, dropIDs, nil
+}
+
+// ReplaceSummariesWithDigest reparents the given summary nodes under dayID's digest, in a single transaction — the surviving summaries are kept, not deleted, so the day's raw source material survives compaction. The exception is a summary whose content exactly duplicates one already kept (see dedupeSummaryContent below): that node, and its FTS5 and vector-index entries, are deleted, since keeping both would collide on idx_nodes_unique. Every surviving summary's row is left alone, so its existing memory_fts entry is untouched.
+//
+// A day with no digest yet gets one written now, from digest, and the digest insert is what is picked up by the nodes_ai_summary trigger and (see below) embedded. A day that already has a digest — left by an earlier call that reparented some but not all of its summaries, the shape idx_nodes_unique's duplicate-content collision used to leave behind — reuses that digest instead of inserting a second one; digest is not written anywhere and the existing digest's own text and vector are left exactly as they are, since finishing the reparent is all this call is for.
+// If the digest insert fails the reparenting never happens — summaries are never left orphaned.
 func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, summaryIDs []int64, digest string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.ReplaceSummariesWithDigest")
@@ -270,32 +355,49 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 	}
 	defer tx.Rollback()
 
-	// insert digest node — triggers nodes_ai_summary which indexes into FTS5
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO nodes (parent_id, type, content) VALUES (?, 'digest', ?)`,
-		dayID, digest)
+	digestID, reused, err := s.existingDigestID(ctx, tx, dayID)
 	if err != nil {
 		span.RecordError(err)
-		return fmt.Errorf("insert digest node: %w", err)
+		return err
 	}
-	digestID, err := res.LastInsertId()
-	if err != nil {
-		span.RecordError(err)
-		return fmt.Errorf("digest node id: %w", err)
+	if !reused {
+		// insert digest node — triggers nodes_ai_summary which indexes into FTS5
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO nodes (parent_id, type, content) VALUES (?, 'digest', ?)`,
+			dayID, digest)
+		if err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("insert digest node: %w", err)
+		}
+		digestID, err = res.LastInsertId()
+		if err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("digest node id: %w", err)
+		}
 	}
 
-	// delete summaries — triggers nodes_ad_summary which removes from FTS5.
-	// Build a parameterized IN clause manually since the driver doesn't support []int64 expansion.
-	placeholders := make([]string, len(summaryIDs))
-	args := make([]any, len(summaryIDs))
-	for i, id := range summaryIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	deleteSQL := "DELETE FROM nodes WHERE id IN (" + strings.Join(placeholders, ",") + ")"
-	if _, err := tx.ExecContext(ctx, deleteSQL, args...); err != nil {
+	// Two summaries written under different original parents can carry identical content, and reparenting both under the same digest would give them the same (parent_id, type, content) — exactly what idx_nodes_unique forbids. Read each summary's content back and drop every id past the first that shares content with one already kept or with one already parented on this digest, so the reparent below only ever moves one row per distinct content. Nothing is lost: the dropped row's content is a byte-for-byte duplicate of the one that survives beside it under the digest.
+	keepIDs, dropIDs, err := s.dedupeSummaryContent(ctx, tx, digestID, summaryIDs)
+	if err != nil {
 		span.RecordError(err)
-		return fmt.Errorf("delete summary nodes: %w", err)
+		return err
+	}
+	if len(dropIDs) > 0 {
+		dropSQL, dropArgs := inClause("DELETE FROM nodes WHERE id IN (", dropIDs)
+		if _, err := tx.ExecContext(ctx, dropSQL, dropArgs...); err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("drop duplicate summary nodes: %w", err)
+		}
+	}
+
+	// reparent the surviving summaries under the new digest instead of deleting them — they stay searchable via their existing memory_fts rows, which this UPDATE never touches. keepIDs can be empty if every summary named was already gone by the time this ran, in which case there is nothing left to reparent.
+	if len(keepIDs) > 0 {
+		reparentSQL, reparentArgs := inClause("UPDATE nodes SET parent_id = ? WHERE id IN (", keepIDs)
+		reparentArgs = append([]any{digestID}, reparentArgs...)
+		if _, err := tx.ExecContext(ctx, reparentSQL, reparentArgs...); err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("reparent summary nodes: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -311,20 +413,22 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 	s.mu.RLock()
 	emb, vidx := s.embedder, s.vectorIndex
 	s.mu.RUnlock()
+
+	// The reparented (surviving) summaries' vectors are left in place — those nodes are reparented, not deleted, so their embeddings still point at live rows. The dropped duplicates are a different story: their nodes are gone (deleted above), so their vector entries would otherwise sit orphaned in the index forever, the same problem DeleteNote and DeleteThread already guard against. Deleted async/best-effort, same non-blocking pattern as those, so a vector-index error here never fails the reparent the caller is waiting on.
 	if vidx != nil {
-		go func(ids []int64) {
-			delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			for _, id := range ids {
+		for _, id := range dropIDs {
+			go func(id int64) {
+				delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
 				if err := vidx.Delete(delCtx, fmt.Sprintf("summary:%d", id)); err != nil {
-					slog.Error("async summary vector delete failed", "summary_id", id, "error", err)
+					slog.Error("async dropped-summary vector delete failed", "summary_id", id, "error", err)
 				}
-			}
-		}(summaryIDs)
+			}(id)
+		}
 	}
 
-	// Async, best-effort embedding of the new digest, same non-blocking pattern as LogSemanticNode's summary embed goroutine. Without this the digest is FTS-only forever — the whole point of a digest is to still answer "what did I do that day" through the semantic half of HybridSearch.
-	if emb != nil && vidx != nil && strings.TrimSpace(digest) != "" {
+	// Async, best-effort embedding of the new digest, same non-blocking pattern as LogSemanticNode's summary embed goroutine. Without this the digest is FTS-only forever — the whole point of a digest is to still answer "what did I do that day" through the semantic half of HybridSearch. Skipped when reused is true: an existing digest's stored content was left untouched above, so embedding the digest text this call was handed would point its vector at words that are not what the row actually says.
+	if !reused && emb != nil && vidx != nil && strings.TrimSpace(digest) != "" {
 		go func(id int64, text string) {
 			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()

@@ -61,7 +61,7 @@ func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64,
 	return id, nil
 }
 
-// UpdateThreadState overwrites an existing thread's state — the one-line summary of where that throughline stands — leaving its subject and kind alone. This is the repair path for a thread whose summary merged two unrelated things or recorded a wrong fact; the model can see that from a "[thread#N]" hit but had no way to act on it, since update_note only reaches the notes table.
+// UpdateThreadState overwrites an existing thread's state — the one-line summary of where that throughline stands — leaving its subject and kind alone. This is the repair path for a thread whose summary merged two unrelated things or recorded a wrong fact; the model can see that from a "[thread#N]" hit but had no way to act on it, since revise's note path only reaches the notes table.
 // The FTS5 mirror is kept in sync by the threads_au trigger. The stale vector is deleted and the corrected text re-embedded async/best-effort, same non-blocking pattern as UpdateNote — a vector-index error never fails the SQL update. The embed text is "subject — state", matching the threads_ai trigger so both halves of hybrid search see the same thread.
 // Input: the thread's id and the corrected state. Output: an error if no thread carries that id.
 func (s *Store) UpdateThreadState(ctx context.Context, id int64, state string) error {

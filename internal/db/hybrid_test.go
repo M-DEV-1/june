@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -606,7 +607,7 @@ func TestUpdateNote_DeletesOldVectorAndReAddsNewContent(t *testing.T) {
 	}
 }
 
-// backdateEpisode directly rewrites an episode's created_at into the past, so AgeEpisodes/PruneAncientEpisodes tests don't have to race real wall-clock second boundaries with a tiny/negative keepRawFor (SQLite's datetime() modifier also can't take a negative interval — the "-" || secs string concat produces an invalid double-negative for secs < 0).
+// backdateEpisode directly rewrites an episode's created_at into the past, so tests exercising age-based queries don't have to race real wall-clock second boundaries.
 func backdateEpisode(t *testing.T, store *Store, id int64, age time.Duration) {
 	t.Helper()
 	if _, err := store.db.Exec(`UPDATE episodes SET created_at = datetime('now', '-' || ? || ' seconds') WHERE id = ?`, int64(age.Seconds()), id); err != nil {
@@ -614,89 +615,16 @@ func backdateEpisode(t *testing.T, store *Store, id int64, age time.Duration) {
 	}
 }
 
-// TestAgeEpisodes_DeletesVectorsForAgedEpisodes verifies clearing an episode's screen_text also deletes its vector — otherwise the aged episode's raw text lives on in the vector index even though the SQL row was thinned specifically to reclaim that content.
-func TestAgeEpisodes_DeletesVectorsForAgedEpisodes(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1)}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	store.SetVectorIndex(vidx)
-
-	id, err := store.LogEpisode(ctx, "Code", "main.go", "short capture")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-	backdateEpisode(t, store, id, 24*time.Hour)
-
-	n, err := store.AgeEpisodes(ctx, time.Hour, 1.1) // importanceFloor > any possible score, so this episode always qualifies
-	if err != nil {
-		t.Fatalf("AgeEpisodes: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected 1 aged row, got %d", n)
-	}
-
-	select {
-	case got := <-vidx.deletedCalled:
-		want := fmt.Sprintf("episode:%d", id)
-		if got != want {
-			t.Errorf("expected Delete(%q), got Delete(%q)", want, got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the aged episode's vector Delete call")
-	}
-}
-
-// TestPruneAncientEpisodes_DeletesVectorsForPrunedEpisodes verifies deleting an already-thinned episode row also deletes any leftover vector for it.
-func TestPruneAncientEpisodes_DeletesVectorsForPrunedEpisodes(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2)}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	store.SetVectorIndex(vidx)
-
-	id, err := store.LogEpisode(ctx, "Code", "main.go", "short capture")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-	backdateEpisode(t, store, id, 400*24*time.Hour)
-	if _, err := store.AgeEpisodes(ctx, time.Hour, 1.1); err != nil {
-		t.Fatalf("AgeEpisodes (pre-thin): %v", err)
-	}
-	select {
-	case <-vidx.deletedCalled: // drain AgeEpisodes' own delete before exercising PruneAncientEpisodes
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for AgeEpisodes' vector delete")
-	}
-
-	n, err := store.PruneAncientEpisodes(ctx, 365*24*time.Hour)
-	if err != nil {
-		t.Fatalf("PruneAncientEpisodes: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected 1 pruned row, got %d", n)
-	}
-
-	select {
-	case got := <-vidx.deletedCalled:
-		want := fmt.Sprintf("episode:%d", id)
-		if got != want {
-			t.Errorf("expected Delete(%q), got Delete(%q)", want, got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the pruned episode's vector Delete call")
-	}
-}
-
-// TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries verifies rolling summaries up into a digest also deletes the replaced summaries' vectors — they no longer exist as nodes, so their vectors would otherwise be permanent orphans.
-func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testing.T) {
+// TestReplaceSummariesWithDigest_KeepsVectorsForReparentedSummaries verifies rolling summaries up into a digest does NOT delete the summaries' vectors — the nodes are reparented under the digest, not deleted, so their embeddings still point at live rows.
+func TestReplaceSummariesWithDigest_KeepsVectorsForReparentedSummaries(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1)}
 	store.SetVectorIndex(vidx)
+	vidx.mu.Lock()
+	vidx.liveIDs = map[string]bool{}
+	vidx.mu.Unlock()
 
 	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
 	if err != nil {
@@ -706,6 +634,10 @@ func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testin
 	if err != nil {
 		t.Fatalf("ensureNode(summary): %v", err)
 	}
+	summaryVecID := fmt.Sprintf("summary:%d", summaryID)
+	vidx.mu.Lock()
+	vidx.liveIDs[summaryVecID] = true
+	vidx.mu.Unlock()
 
 	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{summaryID}, "digest of the day"); err != nil {
 		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
@@ -713,12 +645,84 @@ func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testin
 
 	select {
 	case got := <-vidx.deletedCalled:
-		want := fmt.Sprintf("summary:%d", summaryID)
-		if got != want {
-			t.Errorf("expected Delete(%q), got Delete(%q)", want, got)
+		t.Errorf("expected no Delete call for the reparented summary, got Delete(%q)", got)
+	case <-time.After(200 * time.Millisecond):
+		// no delete — as expected
+	}
+
+	vidx.mu.Lock()
+	stillLive := vidx.liveIDs[summaryVecID]
+	vidx.mu.Unlock()
+	if !stillLive {
+		t.Errorf("expected %q to remain in the vector index", summaryVecID)
+	}
+}
+
+// TestReplaceSummariesWithDigest_DeletesVectorsForDroppedDuplicates verifies that when duplicate summary content collapses two summary nodes into one survivor, the dropped node's own vector entry is deleted too — its underlying node is gone from the nodes table, so a stale vidx row left pointing at it would sit there forever, the same problem DeleteNote's async delete already guards against for notes.
+func TestReplaceSummariesWithDigest_DeletesVectorsForDroppedDuplicates(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2)}
+	store.SetVectorIndex(vidx)
+
+	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+	if err != nil {
+		t.Fatalf("ensureNode(day): %v", err)
+	}
+	taskAID, err := store.ensureNode(ctx, dayID, "task", "Task A")
+	if err != nil {
+		t.Fatalf("ensureNode(task A): %v", err)
+	}
+	taskBID, err := store.ensureNode(ctx, dayID, "task", "Task B")
+	if err != nil {
+		t.Fatalf("ensureNode(task B): %v", err)
+	}
+	const dupContent = "fixed the flaky test uniquedup2"
+	sumA, err := store.ensureNode(ctx, taskAID, "summary", dupContent)
+	if err != nil {
+		t.Fatalf("ensureNode(summary A): %v", err)
+	}
+	sumB, err := store.ensureNode(ctx, taskBID, "summary", dupContent)
+	if err != nil {
+		t.Fatalf("ensureNode(summary B): %v", err)
+	}
+
+	vidx.mu.Lock()
+	vidx.liveIDs = map[string]bool{
+		fmt.Sprintf("summary:%d", sumA): true,
+		fmt.Sprintf("summary:%d", sumB): true,
+	}
+	vidx.mu.Unlock()
+
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{sumA, sumB}, "digest covering both tasks"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
+	}
+
+	// dedupeSummaryContent keeps the first of the two and drops the other; find out which survived so the test knows which vector must be gone and which must remain.
+	var survivorID int64
+	if err := store.db.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='summary' AND content=?`, dupContent).Scan(&survivorID); err != nil {
+		t.Fatalf("find surviving summary: %v", err)
+	}
+	dropped, survived := fmt.Sprintf("summary:%d", sumB), fmt.Sprintf("summary:%d", sumA)
+	if survivorID == sumB {
+		dropped, survived = fmt.Sprintf("summary:%d", sumA), fmt.Sprintf("summary:%d", sumB)
+	}
+
+	select {
+	case got := <-vidx.deletedCalled:
+		if got != dropped {
+			t.Errorf("expected Delete(%q) for the dropped duplicate, got Delete(%q)", dropped, got)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the replaced summary's vector Delete call")
+		t.Fatal("timed out waiting for the dropped duplicate's vector Delete call")
+	}
+
+	vidx.mu.Lock()
+	stillLive := vidx.liveIDs[survived]
+	vidx.mu.Unlock()
+	if !stillLive {
+		t.Errorf("expected the surviving summary's vector %q to remain in the index", survived)
 	}
 }
 
@@ -771,6 +775,36 @@ func TestReplaceSummariesWithDigest_AddsVectorForDigest(t *testing.T) {
 	}
 	if _, ok := rec.metadata["domain"]; !ok {
 		t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+	}
+}
+
+// TestHybridSearch_DigestShadowsItsOwnReparentedSummary verifies that when a compacted day's digest and its (now-reparented, still-live) summary both match a query, HybridSearch returns only the digest — otherwise the same day's content would appear twice in a 10-row result.
+func TestHybridSearch_DigestShadowsItsOwnReparentedSummary(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+	if err != nil {
+		t.Fatalf("ensureNode(day): %v", err)
+	}
+	summaryID, err := store.ensureNode(ctx, dayID, "summary", "worked on uniqueshadowterm project")
+	if err != nil {
+		t.Fatalf("ensureNode(summary): %v", err)
+	}
+
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{summaryID}, "uniqueshadowterm day summary"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
+	}
+
+	hits, err := store.HybridSearch(ctx, "uniqueshadowterm", "", 10)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 hit (the digest shadowing its reparented summary), got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Source != "digest" {
+		t.Errorf("expected the surviving hit to be the digest, got source=%s", hits[0].Source)
 	}
 }
 
@@ -831,7 +865,7 @@ func TestReconcileVectors_DeletesOrphanedNoteVector(t *testing.T) {
 	}
 }
 
-// TestReconcileVectors_DeletesVectorForThinnedEpisode verifies a vector for an episode whose screen_text has since been cleared (AgeEpisodes) gets removed even though the episode row itself still exists.
+// TestReconcileVectors_DeletesVectorForThinnedEpisode verifies a vector for an episode whose screen_text has since been cleared gets removed even though the episode row itself still exists.
 func TestReconcileVectors_DeletesVectorForThinnedEpisode(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -1677,5 +1711,141 @@ func TestFormatNoteHit_GetsTheSameBudgetAsFormatHit(t *testing.T) {
 	got := FormatNoteHit(MemoryHit{Source: "note", RefID: 7, Content: long}, 0)
 	if len([]rune(got)) < 2000 {
 		t.Errorf("note excerpted to %d runes; it should get the note budget, not the episode one", len([]rune(got)))
+	}
+}
+
+// A 50-question gold run on 2026-09-04 found answers with no evidence: the user could not see which stored row an answer came from, so a misheard name in a meeting went unnoticed. FormatHitWithSource carries the same line FormatHit renders plus a parseable source tag a caller can trace back to the row.
+func TestFormatHitWithSource_AppendsParseableSourceTag(t *testing.T) {
+	when := time.Date(2026, 9, 1, 10, 30, 0, 0, time.UTC)
+	h := MemoryHit{Source: "episode", RefID: 42, Content: "reviewing the PR", App: "Code", Title: "main.go", CreatedAt: when}
+	got := FormatHitWithSource(h, 0)
+	if !strings.HasPrefix(got, FormatHit(h, 0)) {
+		t.Fatalf("expected FormatHitWithSource to lead with FormatHit's own line, got %q", got)
+	}
+	i := strings.Index(got, `{"source":`)
+	if i < 0 {
+		t.Fatalf("expected a {\"source\":...} tag, got %q", got)
+	}
+	var wrapped struct{ Source EvidenceSource }
+	if err := json.Unmarshal([]byte(got[i:]), &wrapped); err != nil {
+		t.Fatalf("source tag did not parse as JSON: %v (%q)", err, got[i:])
+	}
+	want := EvidenceSource{Kind: "episode", ID: 42, Title: "main.go", When: when.Format(time.RFC3339)}
+	if wrapped.Source != want {
+		t.Errorf("source = %+v, want %+v", wrapped.Source, want)
+	}
+}
+
+// notes are the only source revise can follow up on, and FormatNoteHitWithSource needs to carry the same trace-back tag FormatHitWithSource does.
+func TestFormatNoteHitWithSource_AppendsParseableSourceTag(t *testing.T) {
+	when := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	h := MemoryHit{Source: "note", RefID: 7, Content: "the user prefers terse replies", CreatedAt: when}
+	got := FormatNoteHitWithSource(h, 0)
+	i := strings.Index(got, `{"source":`)
+	if i < 0 {
+		t.Fatalf("expected a {\"source\":...} tag, got %q", got)
+	}
+	var wrapped struct{ Source EvidenceSource }
+	if err := json.Unmarshal([]byte(got[i:]), &wrapped); err != nil {
+		t.Fatalf("source tag did not parse as JSON: %v (%q)", err, got[i:])
+	}
+	if wrapped.Source.Kind != "note" || wrapped.Source.ID != 7 {
+		t.Errorf("source = %+v, want kind=note id=7", wrapped.Source)
+	}
+}
+
+// Consolidation merges facts into fewer, better-worded ones, but a merge is a model's summary and the originals are the source. On 2026-09-03 the store held 19 facts after 28 consolidation runs, and nothing on disk could say what those runs had folded away. The replaced facts now move to notes_archive with the time they were archived, so a wrong merge can be traced and undone. Storage is not a concern: every note in the store together is about 115 KB.
+func TestReplaceAllNotes_ArchivesTheOldFacts(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	for _, c := range []string{"the user likes tea", "the user likes coffee"} {
+		if _, err := store.LogNote(ctx, c, "fact"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ReplaceAllNotes(ctx, []string{"the user likes tea and coffee"}); err != nil {
+		t.Fatalf("ReplaceAllNotes: %v", err)
+	}
+	archived, err := store.ArchivedNotes(ctx)
+	if err != nil {
+		t.Fatalf("ArchivedNotes: %v", err)
+	}
+	if len(archived) != 2 {
+		t.Fatalf("archived = %d rows, want the 2 replaced facts", len(archived))
+	}
+	got := map[string]bool{}
+	for _, a := range archived {
+		got[a.Content] = true
+		if a.ArchivedAt.IsZero() {
+			t.Errorf("archived note %q has no archived_at", a.Content)
+		}
+	}
+	if !got["the user likes tea"] || !got["the user likes coffee"] {
+		t.Fatalf("archived contents = %v, want both originals", got)
+	}
+}
+
+// TestNodeDomains_BatchesOneQueryForEveryNodeCandidate pins the batched replacement for the per-candidate domain lookup: given a mix of node ids, it returns the domain of each node that has one, omits ids with no row and ids whose domain column is empty, and answers an empty request without touching the database.
+func TestNodeDomains_BatchesOneQueryForEveryNodeCandidate(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+
+	var ids []int64
+	for _, domain := range []string{"work", "personal", ""} {
+		res, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content, domain) VALUES ('summary', ?, ?)`, "summary about "+domain, domain)
+		if err != nil {
+			t.Fatalf("insert node: %v", err)
+		}
+		id, _ := res.LastInsertId()
+		ids = append(ids, id)
+	}
+
+	if got := store.nodeDomains(ctx, nil); len(got) != 0 {
+		t.Errorf("nodeDomains(nil) = %v, want an empty map", got)
+	}
+
+	// The last id plus one names a row that does not exist, which must simply be absent from the result rather than an error or a blank entry.
+	got := store.nodeDomains(ctx, append(append([]int64{}, ids...), ids[len(ids)-1]+1))
+	want := map[int64]string{ids[0]: "work", ids[1]: "personal"}
+	if len(got) != len(want) {
+		t.Fatalf("nodeDomains returned %v, want %v", got, want)
+	}
+	for id, domain := range want {
+		if got[id] != domain {
+			t.Errorf("nodeDomains[%d] = %q, want %q", id, got[id], domain)
+		}
+	}
+}
+
+// TestSummaryParents_BatchesOneQueryForEverySummaryCandidate pins the batched replacement for the per-summary parent lookup that dropSummariesShadowedByDigest ran: it returns the parent id of each summary that has one and omits summaries with a null parent.
+func TestSummaryParents_BatchesOneQueryForEverySummaryCandidate(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+
+	parent, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content) VALUES ('digest', 'the digest')`)
+	if err != nil {
+		t.Fatalf("insert digest: %v", err)
+	}
+	parentID, _ := parent.LastInsertId()
+
+	child, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content, parent_id) VALUES ('summary', 'the child', ?)`, parentID)
+	if err != nil {
+		t.Fatalf("insert child summary: %v", err)
+	}
+	childID, _ := child.LastInsertId()
+
+	orphan, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content) VALUES ('summary', 'the orphan')`)
+	if err != nil {
+		t.Fatalf("insert orphan summary: %v", err)
+	}
+	orphanID, _ := orphan.LastInsertId()
+
+	if got := store.summaryParents(ctx, nil); len(got) != 0 {
+		t.Errorf("summaryParents(nil) = %v, want an empty map", got)
+	}
+
+	got := store.summaryParents(ctx, []int64{childID, orphanID})
+	if len(got) != 1 || got[childID] != parentID {
+		t.Errorf("summaryParents = %v, want only {%d: %d}", got, childID, parentID)
 	}
 }

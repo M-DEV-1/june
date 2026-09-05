@@ -22,8 +22,8 @@ func TestAddActionItems_StoresAndReadsBackOpen(t *testing.T) {
 	store := newStore(t)
 
 	added, err := store.AddActionItems(ctx, []memory.ActionItem{
-		item("Vikram", "carry PR #13 through CI and merge."),
-		item("Krish", "reply on WhatsApp during his leave."),
+		item("Me", "carry PR #13 through CI and merge."),
+		item("Me", "reply on WhatsApp during his leave."),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,8 +39,35 @@ func TestAddActionItems_StoresAndReadsBackOpen(t *testing.T) {
 	if len(open) != 2 {
 		t.Fatalf("want 2 open items, got %d: %+v", len(open), open)
 	}
-	if open[0].Owner != "Vikram" || open[0].Text != "carry PR #13 through CI and merge." {
+	if open[0].Owner != "Me" || open[0].Text != "carry PR #13 through CI and merge." {
 		t.Errorf("first item = %+v", open[0])
+	}
+}
+
+// OpenActionItems only surfaces the user's own owed work: rows already stored under another person's name (from before this filter existed, or ever) never appear, however many are on file.
+func TestOpenActionItems_OnlyTheUsersOwn(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
+		item("Me", "send the deck by Friday."),
+		item("Vikram", "carry PR #13 through CI and merge."),
+		item(memory.UnknownOwner, "trial attaching walkthrough videos to PRs."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := store.OpenActionItems(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 2 {
+		t.Fatalf("want 2 open items, got %d: %+v", len(open), open)
+	}
+	for _, a := range open {
+		if a.Owner == "Vikram" {
+			t.Errorf("returned an item owed by somebody else: %+v", a)
+		}
 	}
 }
 
@@ -49,7 +76,7 @@ func TestAddActionItems_DoesNotResurrectAClosedItem(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Alex Rivera", "finish the acme-essentials setup.")}); err != nil {
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "finish the acme-essentials setup.")}); err != nil {
 		t.Fatal(err)
 	}
 	open, err := store.OpenActionItems(ctx)
@@ -61,7 +88,7 @@ func TestAddActionItems_DoesNotResurrectAClosedItem(t *testing.T) {
 	}
 
 	// The recorder re-files the same meeting's minutes, as it does on every retry.
-	added, err := store.AddActionItems(ctx, []memory.ActionItem{item("Alex Rivera", "finish the acme-essentials setup.")})
+	added, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "finish the acme-essentials setup.")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +108,7 @@ func TestAddActionItems_DoesNotResurrectAClosedItem(t *testing.T) {
 func TestSetActionPriority(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Krish", "reply on WhatsApp during his leave.")}); err != nil {
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "reply on WhatsApp during his leave.")}); err != nil {
 		t.Fatal(err)
 	}
 	open, _ := store.OpenActionItems(ctx)
