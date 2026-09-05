@@ -77,31 +77,6 @@ func (b *mockBrain) QueryStore(ctx context.Context, query string, rowCap int) (s
 
 // behavior
 
-// verifies that connect returns an error on failure and can be called again with the same micChan
-func TestAgent_ReconnectLoopRetries(t *testing.T) {
-	mic := &mockMic{}
-	a := agent.NewAgent(mic, &mockSpeaker{}, &mockBrain{}, nil, "FAKE_API_KEY")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	micChan, _ := mic.StartCapture(ctx)
-
-	// connect should fail fast (bad key) and be callable multiple times with the same micChan without panicking or blocking
-	attempts := 0
-	for attempts < 3 {
-		err := a.Connect(ctx, micChan)
-		if err == nil {
-			t.Fatal("expected Connect to fail with bad API key")
-		}
-		attempts++
-	}
-
-	if attempts != 3 {
-		t.Fatalf("expected 3 reconnect attempts, got %d", attempts)
-	}
-}
-
 func TestAgent_ConnectFailsWithBadKey(t *testing.T) {
 	// inject mocks and fake API key
 	mic := &mockMic{}

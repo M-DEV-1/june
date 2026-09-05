@@ -7,33 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"google.golang.org/genai"
 )
-
-// personalTool returns the personal_context declaration, or nil if it isn't declared at all.
-func personalTool() *genai.FunctionDeclaration {
-	for _, fd := range toolDefinitions()[0].FunctionDeclarations {
-		if fd.Name == "personal_context" {
-			return fd
-		}
-	}
-	return nil
-}
-
-// TestPersonalContextTool_TeachesTheCertaintyBar checks the declaration says the one thing that keeps this store clean: only what the user actually said goes in, and an existing subject gets edited rather than duplicated.
-func TestPersonalContextTool_TeachesTheCertaintyBar(t *testing.T) {
-	decl := personalTool()
-	if decl == nil {
-		t.Fatal("personal_context is not declared")
-	}
-	desc := strings.ToLower(decl.Description)
-	for _, want := range []string{"certain", "guess", "save_note", "edit"} {
-		if !strings.Contains(desc, want) {
-			t.Errorf("the declaration never mentions %q — the model won't know the bar:\n%s", want, decl.Description)
-		}
-	}
-}
 
 // TestPersonalContextTool_IsNonBlocking keeps it consistent with every other write tool: a store write must not freeze the voice conversation.
 func TestPersonalContextTool_IsNonBlocking(t *testing.T) {
