@@ -1,0 +1,11 @@
+[Unit]
+Description=Ora
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/ora --daemon
+Restart=on-failure
+EnvironmentFile=-%h/.config/ora/env
+
+[Install]
+WantedBy=default.target
