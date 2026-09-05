@@ -288,7 +288,8 @@ func TestCloseDoneActionItems_TheMeetingThatRaisedItCannotCloseIt(t *testing.T) 
 	}
 	raiser := "1:1 with Priya Shah"
 	a := item(memory.MeOwner, "rebase the two pending branches and push them in logical chunks.")
-	a.Source = raiser
+	// The recorder raises an item with the recording's own start (liftActionItems in internal/recorder/recorder.go), so the minutes and the items they raise always share a day; that pair is what identifies the raising meeting now that its name alone no longer does.
+	a.Source, a.Raised = raiser, time.Now()
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{a}); err != nil {
 		t.Fatal(err)
 	}
@@ -302,5 +303,31 @@ func TestCloseDoneActionItems_TheMeetingThatRaisedItCannotCloseIt(t *testing.T) 
 	}
 	if closed != 0 {
 		t.Errorf("the meeting that raised the task closed it: %d closed", closed)
+	}
+}
+
+// A recurring meeting is the one place "yes, I did that" gets said, so today's standup must be able to close what last week's standup raised. The two share a name, which is all the provenance an action item carries, so the day it was raised on is what tells the instances apart.
+func TestCloseDoneActionItems_ALaterInstanceOfARecurringMeetingClosesIt(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
+		t.Fatal(err)
+	}
+	standup := "Daily AI standup"
+	a := item(memory.MeOwner, "deploy the Value Chain & risk-statements PR (#5632).")
+	a.Source, a.Raised = standup, time.Now().AddDate(0, 0, -7)
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{a}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LogNote(ctx, "# "+standup+"\n\n**"+standup+" — Fri 5 Sep 2026, 09:30**\n\n## Your part\n- Merged the Value Chain risk-statements PR #5632 to main.\n", "meeting"); err != nil {
+		t.Fatal(err)
+	}
+
+	closed, err := store.CloseDoneActionItems(ctx, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Errorf("closed = %d, want 1: a later instance of a recurring meeting must close what an earlier one raised", closed)
 	}
 }

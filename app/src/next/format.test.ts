@@ -366,6 +366,24 @@ describe("meetings", () => {
     expect(meetingTasks(list, call).map((t) => t.id)).toEqual(["owed"]);
     expect(meetingTasks(list, meeting({ title: "" }))).toEqual([]);
   });
+
+  it("pins only the instance of a recurring meeting that raised them", () => {
+    // The daemon writes a noticed task's provenance as "<meeting>, YYYY-MM-DD" (raisedIn in internal/ipc/tasks.go), which is the only thing telling Monday's standup from Tuesday's.
+    // Built from local parts, so the day the window reads off `when` is 2026-09-07 whatever zone the test runs in.
+    const monday = meeting({
+      title: "Daily standup",
+      when: new Date(2026, 8, 7, 9, 30).toISOString(),
+    });
+    const list = [
+      task({ id: "monday", source: "noticed", detail: "Daily standup, 2026-09-07" }),
+      task({ id: "tuesday", source: "noticed", detail: "Daily standup, 2026-09-08" }),
+      task({ id: "undated", source: "noticed", detail: "Daily standup" }),
+    ];
+    expect(meetingTasks(list, monday).map((t) => t.id)).toEqual([
+      "monday",
+      "undated",
+    ]);
+  });
 });
 
 describe("numbers as a person writes them", () => {

@@ -446,14 +446,24 @@ export function meetingsShown(list: Meeting[], query: string): Meeting[] {
   return list.filter((m) => hits(query, m.title, meetingWho(m.attendees)));
 }
 
-/** The tasks one meeting raised, as the Meetings page pins them above the minutes. Input: everything GET /tasks answered and the meeting. Output: the action items whose provenance is this meeting's own title, in the order the daemon listed them. GET /tasks only ever holds the items that are the user's own and still open, so this needs no filter of its own for either; the items other people took away are left in the minutes text, which is where the model wrote them.
+/** The tasks one meeting raised, as the Meetings page pins them above the minutes. Input: everything GET /tasks answered and the meeting. Output: the action items whose provenance is this meeting's own name on this meeting's own day, in the order the daemon listed them. The daemon writes that provenance as "<meeting>, YYYY-MM-DD" (raisedIn in internal/ipc/tasks.go), and the day is what keeps Monday's standup from listing everything every standup ever raised. GET /tasks only ever holds the items that are the user's own and still open, so this needs no filter of its own for either; the items other people took away are left in the minutes text, which is where the model wrote them.
  */
 export function meetingTasks(tasks: Task[], meeting: Meeting): Task[] {
   const title = (meeting?.title ?? "").trim();
   if (!title) return [];
-  return tasks.filter(
-    (t) => t.source === "noticed" && (t.detail ?? "").trim() === title,
-  );
+  const d = new Date(meeting?.when ?? "");
+  const day = Number.isNaN(d.getTime())
+    ? ""
+    : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return tasks.filter((t) => {
+    if (t.source !== "noticed") return false;
+    const detail = (t.detail ?? "").trim();
+    const dated = detail.match(/^(.*), (\d{4}-\d{2}-\d{2})$/);
+    const name = dated ? dated[1] : detail;
+    if (name !== title) return false;
+    // Every instance of a recurring meeting carries the same name, so the day is what tells Monday's standup from Tuesday's. A task filed before the daemon carried the date, or a meeting whose own date will not parse, falls back to the name alone.
+    return !dated || !day || dated[2] === day;
+  });
 }
 
 /** What the composer on the Tasks page sends alongside a question, so the answer is about the task rather than about nothing. Input: the task. Output: one short passage naming the task and where it came from, or "" when there is no task. The conversation the question goes into carries the rest of the context by itself, which is why none of it is repeated here.

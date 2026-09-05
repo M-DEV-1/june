@@ -540,3 +540,49 @@ func TestContext_StoredEpisodeFallbackSkipsOra(t *testing.T) {
 		t.Errorf("got %+v, want the newest stored episode that is not Ora's own window", got)
 	}
 }
+
+// A meeting is dated by when it ran, not by when its write-up was filed. A recording deferred to mains, or one the startup sweep recovered after a crash, is filed hours or days after the call — and the window groups the list by this field, so the call would sit under the wrong day and read as "today".
+func TestMeetings_DatedByTheRecordingsStartNotTheNote(t *testing.T) {
+	store := newReadStore(t)
+	ctx := context.Background()
+	withMarker := "# Standup\n\n## Key points\n- shipped it.\n\n<!--ora:duration start=2026-09-04T16:10:00Z stop=2026-09-04T16:41:00Z-->\n"
+	if _, err := store.LogNote(ctx, withMarker, "meeting"); err != nil {
+		t.Fatalf("seed meeting: %v", err)
+	}
+	if _, err := store.LogNote(ctx, "# Unmarked\n\n**Unmarked — Tue 2 Sep 2026 09:00 to 09:20**\n", "meeting"); err != nil {
+		t.Fatalf("seed unmarked meeting: %v", err)
+	}
+
+	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
+	var got struct {
+		Meetings []Meeting `json:"meetings"`
+	}
+	getJSON(t, srv, "/meetings", &got)
+
+	if len(got.Meetings) != 2 {
+		t.Fatalf("got %d meetings, want 2", len(got.Meetings))
+	}
+	var marked, unmarked Meeting
+	for _, m := range got.Meetings {
+		if m.Title == "Standup" {
+			marked = m
+		} else {
+			unmarked = m
+		}
+	}
+	when, err := time.Parse(time.RFC3339, marked.When)
+	if err != nil {
+		t.Fatalf("when = %q: %v", marked.When, err)
+	}
+	if !when.Equal(time.Date(2026, 9, 4, 16, 10, 0, 0, time.UTC)) {
+		t.Errorf("when = %s, want the recording's start 2026-09-04T16:10:00Z", marked.When)
+	}
+	// A note filed before the marker existed has nothing else to go on, so it keeps the date it was filed.
+	if unmarked.When == "" {
+		t.Errorf("a meeting with no duration marker must still carry the date its note was filed")
+	}
+	// The list is ordered by when the meetings ran, so the one recorded in September sits below the one filed just now rather than above it on the strength of being filed second.
+	if got.Meetings[0].Title != "Unmarked" {
+		t.Errorf("meetings are ordered %q then %q; want the most recently run first", got.Meetings[0].Title, got.Meetings[1].Title)
+	}
+}

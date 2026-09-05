@@ -377,6 +377,8 @@ func (s *Server) Meetings(w http.ResponseWriter, r *http.Request) {
 		fail(w, err, http.StatusInternalServerError)
 		return
 	}
+	// Notes arrive in the order they were filed, which is not the order the meetings ran in: a recording deferred to mains or recovered by the startup sweep is written up long after the call. Sorting before the cap makes this the 30 most recent meetings rather than the 30 most recently written up.
+	sort.SliceStable(notes, func(i, j int) bool { return meetingStart(notes[i]).After(meetingStart(notes[j])) })
 	if len(notes) > meetingsCap {
 		notes = notes[:meetingsCap]
 	}
@@ -386,7 +388,7 @@ func (s *Server) Meetings(w http.ResponseWriter, r *http.Request) {
 		meetings = append(meetings, Meeting{
 			ID:        strconv.FormatInt(n.ID, 10),
 			Title:     minutesTitle(minutes),
-			When:      rfc3339(n.CreatedAt),
+			When:      rfc3339(meetingStart(n)),
 			Minutes:   minutes,
 			DurationS: meetingDurationSeconds(n.Content),
 			Attendees: minutesAttendees(minutes),
@@ -497,11 +499,19 @@ func (s *Server) People(w http.ResponseWriter, r *http.Request) {
 // meetingDurationPrefix opens the machine-readable line internal/recorder appends to a meeting note's stored content, after the minutes text — see fileMinutes in internal/recorder/recorder.go. It carries the recording's actual wall-clock start and stop, the one thing on the note that could never be recovered from the minutes text itself.
 const meetingDurationPrefix = "<!--ora:duration "
 
-// meetingDurationSeconds reads a meeting note's recorded wall-clock length. Input: the raw note content, marker included. Output: how long the meeting ran in seconds, or 0 for a note filed before this marker existed, or one where it fails to parse.
-func meetingDurationSeconds(content string) int {
+// meetingStart is when a note's meeting actually ran. Input: one meeting note. Output: the recording's own start from its duration marker, falling back to when the note was filed for a note written before the marker existed — the window groups the meetings list by this, so a call written up the next morning would otherwise read as "today".
+func meetingStart(n db.Note) time.Time {
+	if start, _, ok := meetingDurationBounds(n.Content); ok {
+		return start
+	}
+	return n.CreatedAt
+}
+
+// meetingDurationBounds reads the wall-clock start and stop a meeting note's marker carries. Input: the raw note content, marker included. Output: the two times and true, or two zero times and false for a note filed before this marker existed, one whose marker fails to parse, and one whose stop is not after its start.
+func meetingDurationBounds(content string) (time.Time, time.Time, bool) {
 	i := strings.Index(content, meetingDurationPrefix)
 	if i < 0 {
-		return 0
+		return time.Time{}, time.Time{}, false
 	}
 	line := content[i+len(meetingDurationPrefix):]
 	if j := strings.Index(line, "-->"); j >= 0 {
@@ -518,6 +528,15 @@ func meetingDurationSeconds(content string) int {
 	start, err1 := time.Parse(time.RFC3339, startStr)
 	stop, err2 := time.Parse(time.RFC3339, stopStr)
 	if err1 != nil || err2 != nil || !stop.After(start) {
+		return time.Time{}, time.Time{}, false
+	}
+	return start, stop, true
+}
+
+// meetingDurationSeconds reads a meeting note's recorded wall-clock length. Input: the raw note content, marker included. Output: how long the meeting ran in seconds, or 0 for a note filed before this marker existed, or one where it fails to parse.
+func meetingDurationSeconds(content string) int {
+	start, stop, ok := meetingDurationBounds(content)
+	if !ok {
 		return 0
 	}
 	return int(stop.Sub(start).Seconds())
