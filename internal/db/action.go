@@ -106,7 +106,7 @@ func (s *Store) CloseDoneActionItems(ctx context.Context, since time.Time) (int,
 	for _, a := range open {
 		for _, e := range evidence {
 			// The minutes that raised an item must never close it: they are filed in the same second as the item and always talk about the same work. Everything else is fair evidence as long as it was written no earlier than the item.
-			if e.when.Before(a.Created) || (e.meeting != "" && e.meeting == a.Source) {
+			if e.when.Before(a.Created) || raisedThere(e, a) {
 				continue
 			}
 			if !memory.EvidenceCloses(a, e.text) {
@@ -132,12 +132,26 @@ func (s *Store) SetActionDone(ctx context.Context, noteID int64, doneSource stri
 	})
 }
 
-// closingEvidence is one piece of later writing a task might be finished in. Meeting is the name of the meeting it is the minutes of, "" for anything that is not a set of minutes, and is what keeps a meeting from closing the very items it raised.
+// closingEvidence is one piece of later writing a task might be finished in. Meeting is the name of the meeting it is the minutes of, "" for anything that is not a set of minutes, and day is the calendar day it was written on; together they are what keeps a meeting from closing the very items it raised.
 type closingEvidence struct {
 	label   string
 	meeting string
+	day     string
 	text    string
 	when    time.Time
+}
+
+// raisedThere reports whether a piece of evidence is the very minutes that raised this item. Input: one piece of evidence and one open item. Output: true only when both name the same meeting on the same calendar day.
+// The name alone is not enough: every instance of a recurring meeting carries it, and the daily standup is precisely where "yes, I did that" gets said, so matching on the name would throw away the evidence of the one meeting most likely to hold it.
+func raisedThere(e closingEvidence, a memory.ActionItem) bool {
+	if e.meeting == "" || e.meeting != a.Source {
+		return false
+	}
+	raised := a.Raised
+	if raised.IsZero() {
+		raised = a.Created
+	}
+	return e.day == raised.Local().Format(raisedDayFormat)
 }
 
 // evidenceKinds are the note kinds whose text can say a task is finished: a meeting's minutes and the memory compiler's own observations. Action notes are deliberately not among them — a task must not close itself.
@@ -159,7 +173,7 @@ func (s *Store) closingEvidence(ctx context.Context, since time.Time) ([]closing
 					label = meeting + " " + day
 				}
 			}
-			out = append(out, closingEvidence{label: label, meeting: meeting, text: n.Content, when: n.CreatedAt})
+			out = append(out, closingEvidence{label: label, meeting: meeting, day: day, text: n.Content, when: n.CreatedAt})
 		}
 	}
 
