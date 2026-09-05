@@ -483,6 +483,69 @@ describe("giving up a draft", () => {
   });
 });
 
+describe("dictating in the composer", () => {
+  it("starts and stops a dictation through the daemon's mic routes, and drops the words into the box", async () => {
+    const { calls } = renderApp(
+      { conversations: summary, turns: { c1: view }, dictateText: "book the flight" },
+      { conversationId: "c1" },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Dictate" }));
+    await waitFor(() => expect(calls.find((c) => c.path === "/dictate/start")).toBeDefined());
+    const stop = await screen.findByRole("button", { name: "Stop dictation" });
+    expect(screen.getByText("Listening…")).toBeDefined();
+    await userEvent.click(stop);
+    await waitFor(() =>
+      expect(calls.find((c) => c.path === "/dictate/stop")?.body).toEqual({ id: "dictate-1" }),
+    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe("book the flight"));
+  });
+
+  it("stops a dictation on Escape as well as on a second click, without needing the box focused", async () => {
+    renderApp(
+      { conversations: summary, turns: { c1: view }, dictateText: "yes" },
+      { conversationId: "c1" },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Dictate" }));
+    await screen.findByRole("button", { name: "Stop dictation" });
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull());
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe("yes"));
+  });
+
+  it("starts dictation on Space when the box is empty, and only types a space once there is already text in it", async () => {
+    const { calls } = renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1" },
+    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await userEvent.click(box);
+    await userEvent.keyboard(" ");
+    await waitFor(() => expect(calls.find((c) => c.path === "/dictate/start")).toBeDefined());
+    await screen.findByRole("button", { name: "Stop dictation" });
+    expect(box.value).toBe("");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull());
+    await waitFor(() => expect(box.value).toBe("send this thought"));
+    calls.length = 0;
+    await userEvent.click(box);
+    await userEvent.keyboard(" ");
+    expect(box.value).toBe("send this thought ");
+    expect(calls.find((c) => c.path === "/dictate/start")).toBeUndefined();
+  });
+
+  it("says on the composer's own placeholder, for a few seconds, when the daemon would not start a dictation", async () => {
+    renderApp(
+      { conversations: summary, turns: { c1: view }, fails: ["POST /dictate/start"] },
+      { conversationId: "c1" },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Dictate" }));
+    const box = await screen.findByLabelText("Ask Ora");
+    await waitFor(() => expect(box.getAttribute("placeholder")).toBe("Could not start dictation"));
+  });
+});
+
 describe("announcing a finished turn", () => {
   const oneReply: ConversationView = {
     ...view,
