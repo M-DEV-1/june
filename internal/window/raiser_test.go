@@ -14,9 +14,10 @@ import (
 
 // fakeExtension stands in for the ora@ora.local shell extension on a private test bus: it records each call it receives and answers with a canned bool, so the test can prove the Raiser sends the right method name and argument without a real gnome-shell.
 type fakeExtension struct {
-	mu    sync.Mutex
-	calls []string
-	want  string // the pid/title/wmclass value that should be reported found
+	mu       sync.Mutex
+	calls    []string
+	want     string // the pid/title/wmclass value that should be reported found
+	listJSON string // what List() answers with; "[]" when empty
 }
 
 func (f *fakeExtension) record(s string) {
@@ -27,7 +28,10 @@ func (f *fakeExtension) record(s string) {
 
 func (f *fakeExtension) List() (string, *dbus.Error) {
 	f.record("List()")
-	return "[]", nil
+	if f.listJSON == "" {
+		return "[]", nil
+	}
+	return f.listJSON, nil
 }
 
 func (f *fakeExtension) ActivateByPid(pid uint32) (bool, *dbus.Error) {
@@ -179,6 +183,37 @@ func TestRaiser_NoExtensionMeansUnavailable(t *testing.T) {
 	}
 	if ok, err := r.ByPid(ctx, 1); ok || err == nil {
 		t.Fatalf("ByPid with no extension exported: ok=%v err=%v, want false and an error", ok, err)
+	}
+}
+
+// TestRaiser_ListParsesTheWindowsTheExtensionReports proves List turns the extension's JSON string into the Window slice the caller reads: every field named, in the order the extension put them in.
+func TestRaiser_ListParsesTheWindowsTheExtensionReports(t *testing.T) {
+	addr := startPrivateBus(t)
+	ext := &fakeExtension{listJSON: `[{"id":1,"pid":1234,"wm_class":"brave-browser","title":"Brave · News","focused":true},{"id":2,"pid":5678,"wm_class":"Slack","title":"Slack · General","focused":false}]`}
+	serveFakeExtension(t, addr, ext)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", addr)
+	r, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := r.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []Window{
+		{ID: 1, Pid: 1234, WmClass: "brave-browser", Title: "Brave · News", Focused: true},
+		{ID: 2, Pid: 5678, WmClass: "Slack", Title: "Slack · General", Focused: false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("List = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("List[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 
