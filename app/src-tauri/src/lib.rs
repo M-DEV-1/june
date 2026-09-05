@@ -18,7 +18,9 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
             return Some(PathBuf::from(dir).join("ora"));
         }
     }
-    std::env::var("HOME").ok().map(|home| PathBuf::from(home).join(".local").join("share").join("ora"))
+    std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".local").join("share").join("ora"))
 }
 
 /// Tauri command: reads the daemon's IPC token file so the window can authenticate its requests. Input: none. Output: the trimmed token string, or an error string if the data dir or file can't be found.
@@ -38,17 +40,28 @@ struct DockAnchor {
 
 /// Reads one gsettings key. Input: the schema and key names. Output: the value with gsettings' quoting stripped, or None when gsettings is missing, the schema is not installed, or the key does not exist.
 fn gsetting(schema: &str, key: &str) -> Option<String> {
-    let out = std::process::Command::new("gsettings").args(["get", schema, key]).output().ok()?;
+    let out = std::process::Command::new("gsettings")
+        .args(["get", schema, key])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'').to_string())
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .trim_matches('\'')
+            .to_string(),
+    )
 }
 
 /// Tauri command: works out which edge the dock is on so the hover can be anchored against it instead of floating in the middle of the screen. Input: none; it reads the dash-to-dock and ubuntu-dock GNOME extension settings, which are where a GNOME desktop keeps the dock's position. Output: the edge and the clearance to leave. An auto-hiding dock reserves no screen space, so its own thickness is reported as clearance and estimated from the configured icon size plus the padding dash-to-dock draws around it. When no dock extension answers — a plain GNOME session, a different desktop, or no gsettings at all — this falls back to a bottom edge with no clearance, which puts the hover along the bottom of the work area, clear of whatever panel the desktop did reserve space for.
 #[tauri::command]
 fn dock_anchor() -> DockAnchor {
-    for schema in ["org.gnome.shell.extensions.dash-to-dock", "org.gnome.shell.extensions.ubuntu-dock"] {
+    for schema in [
+        "org.gnome.shell.extensions.dash-to-dock",
+        "org.gnome.shell.extensions.ubuntu-dock",
+    ] {
         let Some(position) = gsetting(schema, "dock-position") else {
             continue;
         };
@@ -58,12 +71,22 @@ fn dock_anchor() -> DockAnchor {
             "top" => "top",
             _ => "bottom",
         };
-        let fixed = gsetting(schema, "dock-fixed").map(|v| v == "true").unwrap_or(false);
-        let icon = gsetting(schema, "dash-max-icon-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(48.0);
+        let fixed = gsetting(schema, "dock-fixed")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let icon = gsetting(schema, "dash-max-icon-size")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(48.0);
         let clearance = if fixed { 0.0 } else { icon + 16.0 };
-        return DockAnchor { edge: edge.to_string(), clearance };
+        return DockAnchor {
+            edge: edge.to_string(),
+            clearance,
+        };
     }
-    DockAnchor { edge: "bottom".to_string(), clearance: 0.0 }
+    DockAnchor {
+        edge: "bottom".to_string(),
+        clearance: 0.0,
+    }
 }
 
 /// Tauri command: reads GNOME's dark-mode preference so the webview can match the desktop theme, because WebKitGTK's own prefers-color-scheme media query does not follow the desktop's gsettings value. Input: none. Output: "dark" or "light", read from `gsettings get org.gnome.desktop.interface color-scheme` when that subprocess succeeds, otherwise from the GTK gtk-application-prefer-dark-theme setting on Linux, otherwise "light".
@@ -75,14 +98,24 @@ fn system_theme() -> String {
     {
         if output.status.success() {
             let value = String::from_utf8_lossy(&output.stdout);
-            return if value.contains("prefer-dark") { "dark" } else { "light" }.to_string();
+            return if value.contains("prefer-dark") {
+                "dark"
+            } else {
+                "light"
+            }
+            .to_string();
         }
     }
     #[cfg(target_os = "linux")]
     {
         use gtk::prelude::GtkSettingsExt;
         if let Some(settings) = gtk::Settings::default() {
-            return if settings.is_gtk_application_prefer_dark_theme() { "dark" } else { "light" }.to_string();
+            return if settings.is_gtk_application_prefer_dark_theme() {
+                "dark"
+            } else {
+                "light"
+            }
+            .to_string();
         }
     }
     "light".to_string()
@@ -109,7 +142,9 @@ fn drop_attention_demand(gtk_win: &gtk::ApplicationWindow) {
     if gdk_display.is_null() {
         return;
     }
-    let xdisplay = unsafe { gdkx11::ffi::gdk_x11_display_get_xdisplay(gdk_display as *mut gdkx11::ffi::GdkX11Display) };
+    let xdisplay = unsafe {
+        gdkx11::ffi::gdk_x11_display_get_xdisplay(gdk_display as *mut gdkx11::ffi::GdkX11Display)
+    };
     if xdisplay.is_null() {
         return;
     }
@@ -139,7 +174,13 @@ fn drop_attention_demand(gtk_win: &gtk::ApplicationWindow) {
             0,
         ]);
         // The message goes to the root window with the substructure masks set, because that is the only place the window manager listens for requests about the windows it manages.
-        xlib::XSendEvent(xdisplay, root, xlib::False, xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask, &mut event);
+        xlib::XSendEvent(
+            xdisplay,
+            root,
+            xlib::False,
+            xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask,
+            &mut event,
+        );
         xlib::XFlush(xdisplay);
     }
 }
@@ -237,7 +278,12 @@ fn union_bounds(rects: &[(i32, i32, u32, u32)]) -> Option<(i32, i32, u32, u32)> 
         right = right.max(x.saturating_add(w as i32));
         bottom = bottom.max(y.saturating_add(h as i32));
     }
-    Some((left, top, (right - left).max(1) as u32, (bottom - top).max(1) as u32))
+    Some((
+        left,
+        top,
+        (right - left).max(1) as u32,
+        (bottom - top).max(1) as u32,
+    ))
 }
 
 /// Reads every monitor as a plain (x, y, width, height) in physical pixels. Input: the app handle. Output: one tuple per monitor, empty when the display cannot be enumerated.
@@ -245,7 +291,14 @@ fn monitor_rects(app: &AppHandle) -> Vec<(i32, i32, u32, u32)> {
     app.available_monitors()
         .unwrap_or_default()
         .iter()
-        .map(|m| (m.position().x, m.position().y, m.size().width, m.size().height))
+        .map(|m| {
+            (
+                m.position().x,
+                m.position().y,
+                m.size().width,
+                m.size().height,
+            )
+        })
         .collect()
 }
 
@@ -255,10 +308,20 @@ fn overlay_layout(app: AppHandle) -> OverlayLayout {
     let monitors = app.available_monitors().unwrap_or_default();
     let rects: Vec<(i32, i32, u32, u32)> = monitors
         .iter()
-        .map(|m| (m.position().x, m.position().y, m.size().width, m.size().height))
+        .map(|m| {
+            (
+                m.position().x,
+                m.position().y,
+                m.size().width,
+                m.size().height,
+            )
+        })
         .collect();
     let (origin_x, origin_y, _, _) = union_bounds(&rects).unwrap_or((0, 0, 1, 1));
-    let scale = app.get_webview_window("overlay").and_then(|w| w.scale_factor().ok()).unwrap_or(1.0);
+    let scale = app
+        .get_webview_window("overlay")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0);
     OverlayLayout {
         origin_x,
         origin_y,
@@ -330,12 +393,17 @@ fn set_overlay_wm_class(gtk_win: &gtk::ApplicationWindow) {
     if gdk_display.is_null() {
         return;
     }
-    let xdisplay = unsafe { gdkx11::ffi::gdk_x11_display_get_xdisplay(gdk_display as *mut gdkx11::ffi::GdkX11Display) };
+    let xdisplay = unsafe {
+        gdkx11::ffi::gdk_x11_display_get_xdisplay(gdk_display as *mut gdkx11::ffi::GdkX11Display)
+    };
     if xdisplay.is_null() {
         return;
     }
     let xid = unsafe { gdkx11::ffi::gdk_x11_window_get_xid(raw as *mut gdkx11::ffi::GdkX11Window) };
-    let (Ok(instance), Ok(class)) = (std::ffi::CString::new(OVERLAY_WM_CLASS_INSTANCE), std::ffi::CString::new("Ora")) else {
+    let (Ok(instance), Ok(class)) = (
+        std::ffi::CString::new(OVERLAY_WM_CLASS_INSTANCE),
+        std::ffi::CString::new("Ora"),
+    ) else {
         return;
     };
     unsafe {
@@ -382,7 +450,9 @@ fn hush_overlay(app: &AppHandle) {
         gtk::glib::Propagation::Proceed
     });
     let later = gtk_win.clone();
-    gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || drop_attention_demand(&later));
+    gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || {
+        drop_attention_demand(&later)
+    });
 }
 
 /// The type of the daemon event that asks this window to show something. The daemon's tray is the only menu Ora has, so the items that used to sit in this app's own tray reach the window as events on the stream it already reads.
@@ -394,7 +464,13 @@ fn window_action(payload: &str) -> Option<String> {
     if event.get("type").and_then(|v| v.as_str()) != Some(WINDOW_EVENT) {
         return None;
     }
-    Some(event.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string())
+    Some(
+        event
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 /// Does what a daemon event asks of this window. Input: the app handle and the JSON text of one event off the daemon's stream. Output: true when the event was one of ours and has been acted on, false for every other event, which belongs to the pages. {"type": "window", "text": "open"} shows the main app window; {"type": "window", "text": "toggle"} runs the hover's show/hide, the same thing SIGHUP from the desktop's keybinding does.
@@ -418,7 +494,13 @@ pub(crate) fn window_command(app: &AppHandle, payload: &str) -> bool {
 pub fn run() {
     // Wayland lets a client neither place its own window nor grab a global key, so the process asks for the X11 backend in main() before GTK has chosen one; see prefer_x11_backend there. Setting it at this point would be too late.
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ipc_token, system_theme, raise, dock_anchor, overlay_layout])
+        .invoke_handler(tauri::generate_handler![
+            ipc_token,
+            system_theme,
+            raise,
+            dock_anchor,
+            overlay_layout
+        ])
         // Closing a window hides it instead of quitting: Ora keeps running under the daemon, and the same window comes back with its state when the daemon's tray asks for it again.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -460,18 +542,27 @@ mod tests {
 
     #[test]
     fn union_bounds_of_one_monitor_is_that_monitor() {
-        assert_eq!(union_bounds(&[(0, 0, 1920, 1080)]), Some((0, 0, 1920, 1080)));
+        assert_eq!(
+            union_bounds(&[(0, 0, 1920, 1080)]),
+            Some((0, 0, 1920, 1080))
+        );
     }
 
     #[test]
     fn union_bounds_spans_two_monitors_side_by_side() {
-        assert_eq!(union_bounds(&[(0, 0, 1920, 1080), (1920, 0, 2560, 1440)]), Some((0, 0, 4480, 1440)));
+        assert_eq!(
+            union_bounds(&[(0, 0, 1920, 1080), (1920, 0, 2560, 1440)]),
+            Some((0, 0, 4480, 1440))
+        );
     }
 
     #[test]
     fn union_bounds_keeps_a_monitor_left_of_the_origin() {
         // A screen placed to the left of the primary one has a negative x, and the overlay window has to start there rather than at zero, or every rect on it lands off the window.
-        assert_eq!(union_bounds(&[(0, 0, 1920, 1080), (-1280, -200, 1280, 1024)]), Some((-1280, -200, 3200, 1280)));
+        assert_eq!(
+            union_bounds(&[(0, 0, 1920, 1080), (-1280, -200, 1280, 1024)]),
+            Some((-1280, -200, 3200, 1280))
+        );
     }
 
     #[test]
@@ -482,11 +573,19 @@ mod tests {
     #[test]
     fn a_window_event_names_the_action_to_take() {
         use super::window_action;
-        assert_eq!(window_action(r#"{"id":"window","type":"window","text":"open"}"#), Some("open".to_string()));
-        assert_eq!(window_action(r#"{"id":"window","type":"window","text":"toggle"}"#), Some("toggle".to_string()));
+        assert_eq!(
+            window_action(r#"{"id":"window","type":"window","text":"open"}"#),
+            Some("open".to_string())
+        );
+        assert_eq!(
+            window_action(r#"{"id":"window","type":"window","text":"toggle"}"#),
+            Some("toggle".to_string())
+        );
         // The daemon marshals every field of its event, so the real payload carries the rest of them too.
         assert_eq!(
-            window_action(r#"{"id":"window","type":"window","text":"open","detail":"","evidence":null,"actions":null,"conversation_id":""}"#),
+            window_action(
+                r#"{"id":"window","type":"window","text":"open","detail":"","evidence":null,"actions":null,"conversation_id":""}"#
+            ),
             Some("open".to_string())
         );
     }
@@ -494,10 +593,15 @@ mod tests {
     #[test]
     fn the_overlay_s_wm_class_matches_the_desktop_entry_the_daemon_writes() {
         // Nothing at runtime notices when these two drift apart: the overlay keeps mapping, GNOME falls back to matching it by process id, and it lands back under Ora's dock entry with a dot of its own.
-        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cmd/desktop_entry_linux.go");
-        let source = std::fs::read_to_string(&entry).unwrap_or_else(|e| panic!("reading {}: {e}", entry.display()));
+        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cmd/desktop_entry_linux.go");
+        let source = std::fs::read_to_string(&entry)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", entry.display()));
         assert!(
-            source.contains(&format!("StartupWMClass={}", super::OVERLAY_WM_CLASS_INSTANCE)),
+            source.contains(&format!(
+                "StartupWMClass={}",
+                super::OVERLAY_WM_CLASS_INSTANCE
+            )),
             "cmd/desktop_entry_linux.go writes no entry claiming StartupWMClass={}",
             super::OVERLAY_WM_CLASS_INSTANCE
         );
@@ -506,7 +610,10 @@ mod tests {
     #[test]
     fn an_event_of_any_other_type_is_not_this_window_s_business() {
         use super::window_action;
-        assert_eq!(window_action(r#"{"id":"overlay","type":"overlay","text":"{\"kind\":\"ring\"}"}"#), None);
+        assert_eq!(
+            window_action(r#"{"id":"overlay","type":"overlay","text":"{\"kind\":\"ring\"}"}"#),
+            None
+        );
         assert_eq!(window_action(r#"{"type":"answer","text":"open"}"#), None);
         assert_eq!(window_action("not json at all"), None);
         assert_eq!(window_action("{}"), None);
