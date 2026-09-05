@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"ora/internal/config"
 )
@@ -168,6 +169,16 @@ func TestFromConfig(t *testing.T) {
 			cfg:  config.BrainConfig{Provider: config.BrainClaudeCLI, Binary: claudeBin, TimeoutSeconds: 10},
 			want: "from claude",
 		},
+		{
+			name:    "codex with no asker falls back to the Gemini API",
+			cfg:     config.BrainConfig{Provider: config.BrainCodex},
+			wantErr: "GEMINI_API_KEY",
+		},
+		{
+			name:    "ollama has no backend yet and falls back to the Gemini API",
+			cfg:     config.BrainConfig{Provider: config.BrainOllama},
+			wantErr: "GEMINI_API_KEY",
+		},
 	}
 
 	for _, tt := range tests {
@@ -231,5 +242,79 @@ func TestAgyCLI_Restored(t *testing.T) {
 	}
 	if _, err := AgyCLI(fakeCLI(t, "agy", `printf '%s' '{"status":"ERROR","response":""}'`), 10)(context.Background(), "x"); err == nil {
 		t.Error("a non-SUCCESS status must be an error")
+	}
+}
+
+// The gold-set eval pins each CLI arm to a named model so two runs compare the same thing. An empty model has to leave the flag off entirely, which is what keeps the CLI's own default.
+func TestCLIArgs_ModelFlag(t *testing.T) {
+	if got := grokArgs("hello", ""); contains(got, "-m") {
+		t.Errorf("empty model must not pass -m: %v", got)
+	}
+	got := grokArgs("hello", "grok-4")
+	if !contains(got, "-m") || got[indexOf(got, "-m")+1] != "grok-4" {
+		t.Errorf("grokArgs = %v, want -m grok-4", got)
+	}
+	if got := agyArgs("hello", ""); contains(got, "--model") {
+		t.Errorf("empty model must not pass --model: %v", got)
+	}
+	got = agyArgs("hello", "gemini-3-pro")
+	if !contains(got, "--model") || got[indexOf(got, "--model")+1] != "gemini-3-pro" {
+		t.Errorf("agyArgs = %v, want --model gemini-3-pro", got)
+	}
+}
+
+func contains(ss []string, s string) bool { return indexOf(ss, s) >= 0 }
+
+func indexOf(ss []string, s string) int {
+	for i, v := range ss {
+		if v == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestHead_CutsOnRunesSoALogLineIsAlwaysValidUTF8 pins that the CLI-stderr excerpt cuts on rune boundaries. It used to slice s[:300] by byte, which lands in the middle of a multi-byte character whenever a CLI's error output carries one and writes a broken half-character into the log.
+func TestHead_CutsOnRunesSoALogLineIsAlwaysValidUTF8(t *testing.T) {
+	long := strings.Repeat("é", 400) // two bytes each, so a 300-byte cut lands mid-character
+	got := head(long)
+	if !utf8.ValidString(got) {
+		t.Errorf("head returned invalid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("head(%d runes) = %q, want it marked as cut", utf8.RuneCountInString(long), got)
+	}
+	if n := utf8.RuneCountInString(got); n != 301 {
+		t.Errorf("head returned %d runes, want 300 plus the ellipsis", n)
+	}
+	if got := head("  a\n\tb  "); got != "a b" {
+		t.Errorf("head(%q) = %q, want %q", "  a\n\tb  ", got, "a b")
+	}
+	if got := head(""); got != "" {
+		t.Errorf("head(\"\") = %q, want \"\"", got)
+	}
+}
+
+// TestGeminiModel_DropsAnotherProvidersModelName pins the fix for the 404 loop of 2026-09-05: the config named provider "codex-direct" with model "gpt-5.5", the meeting summariser built its brain with no asker, and FromConfig's fallback to the Gemini API carried "gpt-5.5" through as the model — so every hourly retry of the 00-53-59 recording failed with "models/gpt-5.5 is not found for API version v1beta". A model name only means anything to the provider it was written for, so the fallback uses the Gemini default instead.
+func TestGeminiModel_DropsAnotherProvidersModelName(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.BrainConfig
+		want string
+	}{
+		{"codex model name", config.BrainConfig{Provider: config.BrainCodex, Model: "gpt-5.5"}, config.TextModel},
+		{"claude cli alias", config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}, config.TextModel},
+		{"ollama model name", config.BrainConfig{Provider: config.BrainOllama, Model: "llama3.1:8b"}, config.TextModel},
+		{"unknown provider", config.BrainConfig{Provider: "made-up", Model: "gpt-5.5"}, config.TextModel},
+		{"a gemini config keeps its own model", config.BrainConfig{Provider: config.BrainGeminiAPI, Model: "gemini-3.5-flash-lite"}, "gemini-3.5-flash-lite"},
+		{"no provider keeps its own model", config.BrainConfig{Model: "gemini-3.5-flash-lite"}, "gemini-3.5-flash-lite"},
+		{"no provider and no model is the text model", config.BrainConfig{}, config.TextModel},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := geminiModel(c.cfg); got != c.want {
+				t.Errorf("geminiModel(%+v) = %q, want %q", c.cfg, got, c.want)
+			}
+		})
 	}
 }
