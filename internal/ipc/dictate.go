@@ -45,6 +45,9 @@ const maxDictation = 120 * time.Second
 // dictateTimeout bounds one whisper run so a hung decode ends with an error rather than holding the route's goroutine.
 const dictateTimeout = 3 * time.Minute
 
+// promptTimeout bounds the store reads that build the priming prompt, which happen before the GPU turn is taken.
+const promptTimeout = 10 * time.Second
+
 // micSource is the part of audio.Microphone dictation uses, narrowed so the tests can feed canned PCM instead of opening the machine's microphone.
 type micSource interface {
 	StartCapture(ctx context.Context) (<-chan []byte, error)
@@ -257,13 +260,15 @@ func (d *Dictation) finish(cur *dictating) (string, error) {
 		return "", err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), dictateTimeout)
-	defer cancel()
 	started := time.Now()
-	prompt := d.prompt(ctx)
-	// whisper decodes on the GPU and only one run fits on this card, so a dictation started while a meeting is being transcribed waits its turn rather than failing to allocate beside it. Three of the four dictations on 2026-09-05 died with ErrorOutOfDeviceMemory for want of this.
+	promptCtx, cancelPrompt := context.WithTimeout(context.Background(), promptTimeout)
+	prompt := d.prompt(promptCtx)
+	cancelPrompt()
+	// whisper decodes on the GPU and only one run fits on this card, so a dictation started while a meeting is being transcribed waits its turn rather than failing to allocate beside it. Three of the four dictations on 2026-09-05 died with ErrorOutOfDeviceMemory for want of this. The decode's own clock starts only once the turn comes, so a long wait behind a meeting defers the dictation instead of spending its whole budget in the queue and then failing at once.
 	recorder.GPURun.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), dictateTimeout)
 	text, err := d.transcribe(ctx, path, prompt)
+	cancel()
 	recorder.GPURun.Unlock()
 	if err != nil {
 		return "", err

@@ -60,16 +60,18 @@ type fakeTranscriber struct {
 	text string
 	err  error
 
-	mu     sync.Mutex
-	wav    []byte
-	prompt string
-	path   string
-	calls  int
+	mu       sync.Mutex
+	wav      []byte
+	prompt   string
+	path     string
+	calls    int
+	deadline time.Time
 }
 
 func (f *fakeTranscriber) run(ctx context.Context, wavPath, prompt string) (string, error) {
 	b, _ := os.ReadFile(wavPath)
 	f.mu.Lock()
+	f.deadline, _ = ctx.Deadline()
 	f.wav = b
 	f.prompt = prompt
 	f.path = wavPath
@@ -518,5 +520,32 @@ func TestDictationTranscribesUnderTheGPULock(t *testing.T) {
 		recorder.GPURun.Unlock()
 	} else {
 		t.Error("the GPU lock was still held after the dictation finished")
+	}
+}
+
+// A dictation stopped while a meeting holds the GPU waits its turn, and its own three-minute clock starts only once the turn comes, so the wait never eats the decode's budget and the recorded speech is deferred rather than lost.
+func TestDictationStopWaitsForTheGPUWithoutSpendingItsClock(t *testing.T) {
+	mic := &fakeMic{chunks: [][]byte{pcm(1600)}}
+	tx := &fakeTranscriber{text: "later"}
+	_, srv, _ := newDictationTest(t, mic, tx)
+	id := startDictation(t, srv)
+
+	recorder.GPURun.Lock()
+	done := make(chan *http.Response, 1)
+	go func() { done <- stopDictation(t, srv, id) }()
+	time.Sleep(300 * time.Millisecond)
+	released := time.Now()
+	recorder.GPURun.Unlock()
+
+	resp := <-done
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stop status = %d, want 200 once the GPU was free", resp.StatusCode)
+	}
+	tx.mu.Lock()
+	deadline := tx.deadline
+	tx.mu.Unlock()
+	if deadline.Before(released.Add(dictateTimeout - 100*time.Millisecond)) {
+		t.Errorf("decode deadline %v was set before the GPU was released at %v; the wait spent the decode's own budget", deadline, released)
 	}
 }
