@@ -91,11 +91,9 @@ function Machine({ s }: { s: SettingsView }) {
   );
 }
 
-/** One window of the ledger as a table: a row per provider with that provider's models under it. Input: the window and the line to show when nothing was spent in it. Output: the table, or that one line. */
-function UsageTable({ window: w, empty }: { window: UsageWindow; empty: string }) {
-  const providers = w?.providers ?? [];
-  if (!providers.length) return <p className="text-ui text-muted-foreground">{empty}</p>;
-  const cells = (r: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number }) => (
+/** The four number columns of one usage-table row: calls, in, out, total. Module scope — it closes over nothing but its own argument, so there is no reason to rebuild it on every render. */
+function cells(r: { calls: number; input_tokens: number; output_tokens: number; total_tokens: number }) {
+  return (
     <>
       <td className="py-1.5 text-right tabular-nums">{tokens(r.calls)}</td>
       <td className="py-1.5 text-right tabular-nums">{tokens(r.input_tokens)}</td>
@@ -103,6 +101,12 @@ function UsageTable({ window: w, empty }: { window: UsageWindow; empty: string }
       <td className="py-1.5 text-right tabular-nums">{tokens(r.total_tokens)}</td>
     </>
   );
+}
+
+/** One window of the ledger as a table: a row per provider with that provider's models under it. Input: the window and the line to show when nothing was spent in it. Output: the table, or that one line. */
+function UsageTable({ window: w, empty }: { window: UsageWindow; empty: string }) {
+  const providers = w?.providers ?? [];
+  if (!providers.length) return <p className="text-ui text-muted-foreground">{empty}</p>;
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[26rem] text-ui">

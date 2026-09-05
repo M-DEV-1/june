@@ -28,6 +28,15 @@ import { conversationsUi, ui, useAppDispatch, useAppSelector, type Place } from 
 /** One row at the foot of the rail. */
 type Foot = { place: Place; label: string; icon: typeof ListTodo };
 
+// The four places that are not a chat, fixed regardless of what is in the store — module scope so it is not rebuilt on every render (the token ledger is not among them: it is the last section of Settings).
+const FEET: Foot[] = [
+  { place: "tasks", label: "Tasks", icon: ListTodo },
+  { place: "meetings", label: "Meetings", icon: Video },
+  { place: "days", label: "Days", icon: Calendar },
+  { place: "routines", label: "Routines", icon: Repeat },
+  { place: "settings", label: "Settings", icon: SettingsIcon },
+];
+
 /** The rail. Input: none — everything it draws comes from the store and the conversations cache. Output: the sidebar element, which SidebarProvider in App.tsx places. */
 export function AppSidebar() {
   const dispatch = useAppDispatch();
@@ -42,15 +51,6 @@ export function AppSidebar() {
 
   /** Opens an unsaved draft rather than a conversation the daemon has to be told to make: nothing is posted and nothing appears in the list until the draft's own first message opens a real one, the same way a noticed task's first question does. */
   const newChat = () => dispatch(ui.chatDraftOpened());
-
-  // The four places that are not a chat. The token ledger is not among them: it is the last section of Settings.
-  const feet: Foot[] = [
-    { place: "tasks", label: "Tasks", icon: ListTodo },
-    { place: "meetings", label: "Meetings", icon: Video },
-    { place: "days", label: "Days", icon: Calendar },
-    { place: "routines", label: "Routines", icon: Repeat },
-    { place: "settings", label: "Settings", icon: SettingsIcon },
-  ];
 
   return (
     <Sidebar collapsible="icon">
@@ -151,7 +151,7 @@ export function AppSidebar() {
 
       <SidebarFooter className="gap-0 border-t p-2">
         <SidebarMenu>
-          {feet.map((f) => (
+          {FEET.map((f) => (
             <SidebarMenuItem key={f.place}>
               <SidebarMenuButton
                 isActive={place === f.place}

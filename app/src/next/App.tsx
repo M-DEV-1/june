@@ -50,6 +50,16 @@ export function step(current: number, length: number, key: string): number {
   return Math.min(length - 1, Math.max(0, current + delta));
 }
 
+// What the palette offers besides the chats: the five screens, so Ctrl+K reaches a page and not only a conversation. Module scope so it is not rebuilt on every render — it closes over nothing.
+const PAGES: { place: Place; label: string; icon: typeof ListTodo }[] = [
+  { place: "chats", label: "Chats", icon: MessageSquare },
+  { place: "tasks", label: "Tasks", icon: ListTodo },
+  { place: "meetings", label: "Meetings", icon: Video },
+  { place: "days", label: "Days", icon: Calendar },
+  { place: "routines", label: "Routines", icon: Repeat },
+  { place: "settings", label: "Settings", icon: SettingsIcon },
+];
+
 /** The screen the place showing asks for. Input: none. Output: that screen. */
 function Screen() {
   const place = useAppSelector((s) => s.ui.place);
@@ -103,9 +113,11 @@ export default function App() {
     };
   }, [dispatch]);
 
-  // Stamps the theme on the root element, which is what every colour token in index.css keys off.
+  // Stamps the theme on the root element, which is what every colour token in index.css keys off. A stale resolution (see applyTheme's own themeAsk guard) comes back undefined and is not dispatched, so it cannot overwrite what a later, already-landed choice put in the store.
   useEffect(() => {
-    void applyTheme(theme).then((r) => dispatch(settings.themeResolved(r)));
+    void applyTheme(theme).then((r) => {
+      if (r) dispatch(settings.themeResolved(r));
+    });
   }, [theme, dispatch]);
 
   // What the arrows walk on the screen showing, in the order the rows appear, so the keys move through exactly what a search has left and skip what it hid. On Tasks that is the list on the page; on Meetings and Days it is what the header's picker offers, so the arrows step from one day or one recording to the next without opening the picker at all.
@@ -148,16 +160,6 @@ export default function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [dispatch, walk]);
-
-  // What the palette offers besides the chats: the five screens, so Ctrl+K reaches a page and not only a conversation.
-  const pages: { place: Place; label: string; icon: typeof ListTodo }[] = [
-    { place: "chats", label: "Chats", icon: MessageSquare },
-    { place: "tasks", label: "Tasks", icon: ListTodo },
-    { place: "meetings", label: "Meetings", icon: Video },
-    { place: "days", label: "Days", icon: Calendar },
-    { place: "routines", label: "Routines", icon: Repeat },
-    { place: "settings", label: "Settings", icon: SettingsIcon },
-  ];
 
   const renaming = convs.find((c) => c.id === renamingId);
   const deleting = convs.find((c) => c.id === confirmingDeleteId);
@@ -205,7 +207,7 @@ export default function App() {
             <CommandList>
               <CommandEmpty>Nothing by that name.</CommandEmpty>
               <CommandGroup heading="Go to">
-                {pages.map((p) => (
+                {PAGES.map((p) => (
                   <CommandItem
                     key={p.place}
                     value={`page ${p.label}`}
