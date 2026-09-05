@@ -38,10 +38,12 @@ export function buildVariation(width: number): number[] {
 /**
  * Waveform smooths one audio channel's amplitude readings and renders them as a symmetric braille bar centred on a baseline, the same shape internal/ui/waveform.go draws for one of the terminal client's two Waveforms (mic or speaker).
  *
- * The terminal UI stacks a second "far" braille row above and below its "near" row on each side of centre, so one bar spans four terminal rows and eight dot-levels of amplitude. The hover's bar is only ever one braille row on each side of centre — two rows total — so this port keeps waveform.go's per-column gamma curve and centre-out fill but drops the far row: amplitude that would have spilled into it instead saturates the near row at "full".
+ * The terminal UI stacks a second "far" braille row above and below its "near" row on each side of centre, so one bar spans four rows and eight dot-levels of amplitude — the near rows fill first, then the far rows fill outward once the near rows are full. This port keeps all four rows, in the same top-to-bottom order as waveform.go's Render: far-top, near-top, near-bottom, far-bottom.
  *
- *   silent:  ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀
+ *   silent:  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+ *            ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀
  *            ⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉
+ *            ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
  */
 export class Waveform {
   width: number;
@@ -63,15 +65,19 @@ export class Waveform {
     if (this.smoothed < AMP_THRESHOLD) this.smoothed = 0;
   }
 
-  /** Renders the current smoothed amplitude as two rows of braille characters, one above the centre baseline and one below it, filling outward from the centre as the level rises. Each column has its own fixed variation multiplier, so louder columns and quieter columns rise to different heights the way waveform.go's Render does. Output: [topRow, bottomRow], each this.width characters long — a silent column in each is the dim centreline character (⣀ on top, ⠉ on bottom) rather than a blank. */
+  /** Renders the current smoothed amplitude as four rows of braille characters — far-top, near-top, near-bottom, far-bottom, top to bottom, same order as waveform.go's Render — filling outward from the centre as the level rises: the near rows fill first (levels 1-4), then the far rows fill (levels 5-8) once the near rows are already full. Each column has its own fixed variation multiplier, so louder columns and quieter columns rise to different heights. Output: four strings, each this.width characters long — a silent column is the dim centreline character in the near rows (⣀ on near-top, ⠉ on near-bottom) and a blank braille cell in the far rows. */
   render(): string[] {
-    let top = "";
-    let bottom = "";
+    let farTop = "";
+    let nearTop = "";
+    let nearBottom = "";
+    let farBottom = "";
     for (let i = 0; i < this.width; i++) {
       const colAmp = this.smoothed * this.variation[i];
       if (colAmp < AMP_THRESHOLD) {
-        top += String.fromCharCode(ROW0_LEVELS[1]);
-        bottom += String.fromCharCode(ROW1_LEVELS[1]);
+        farTop += String.fromCharCode(ROW0_LEVELS[0]);
+        nearTop += String.fromCharCode(ROW0_LEVELS[1]);
+        nearBottom += String.fromCharCode(ROW1_LEVELS[1]);
+        farBottom += String.fromCharCode(ROW1_LEVELS[0]);
         continue;
       }
       // gamma 0.42: close to the original sensitivity, works with scaled RMS. 0.05→0.18, 0.1→0.27, 0.3→0.53, 0.7→0.82, 1.0→1.0.
@@ -80,10 +86,13 @@ export class Waveform {
       if (n < 1) n = 1;
       if (n > 8) n = 8;
       const near = Math.min(n, 4);
-      top += String.fromCharCode(ROW0_LEVELS[near]);
-      bottom += String.fromCharCode(ROW1_LEVELS[near]);
+      const far = Math.max(n - 4, 0);
+      farTop += String.fromCharCode(ROW0_LEVELS[far]);
+      nearTop += String.fromCharCode(ROW0_LEVELS[near]);
+      nearBottom += String.fromCharCode(ROW1_LEVELS[near]);
+      farBottom += String.fromCharCode(ROW1_LEVELS[far]);
     }
-    return [top, bottom];
+    return [farTop, nearTop, nearBottom, farBottom];
   }
 }
 

@@ -45,30 +45,46 @@ describe("Waveform", () => {
     expect(w.variation).toHaveLength(40);
   });
 
-  it("renders the dim centreline in both rows while silent", () => {
+  it("renders four rows — blank far rows, dim centreline near rows — while silent", () => {
     const w = new Waveform(8);
-    const [top, bottom] = w.render();
-    expect(top).toBe("⣀".repeat(8));
-    expect(bottom).toBe("⠉".repeat(8));
+    const [farTop, nearTop, nearBottom, farBottom] = w.render();
+    expect(farTop).toBe("⠀".repeat(8));
+    expect(nearTop).toBe("⣀".repeat(8));
+    expect(nearBottom).toBe("⠉".repeat(8));
+    expect(farBottom).toBe("⠀".repeat(8));
   });
 
-  it("renders two rows of the same width as the bar, both changed once loud", () => {
+  it("renders four rows of the same width as the bar, the near rows changed once loud", () => {
     const w = new Waveform(12);
     for (let i = 0; i < 10; i++) w.update(1.0);
-    const [top, bottom] = w.render();
-    expect(top).toHaveLength(12);
-    expect(bottom).toHaveLength(12);
-    expect(top).not.toBe("⣀".repeat(12));
-    expect(bottom).not.toBe("⠉".repeat(12));
+    const rows = w.render();
+    expect(rows).toHaveLength(4);
+    for (const row of rows) expect(row).toHaveLength(12);
+    const [, nearTop, nearBottom] = rows;
+    expect(nearTop).not.toBe("⣀".repeat(12));
+    expect(nearBottom).not.toBe("⠉".repeat(12));
   });
 
-  it("fills a full block once a column's amplitude saturates the gamma curve", () => {
+  it("saturates the near rows to a full block before the far rows fill at all", () => {
+    const w = new Waveform(20);
+    // A moderate, non-maxed level should fill the near rows solid without spilling into the far rows yet.
+    for (let i = 0; i < 10; i++) w.update(0.25);
+    const [farTop, nearTop, nearBottom, farBottom] = w.render();
+    expect(nearTop).toContain("⣿");
+    expect(nearBottom).toContain("⣿");
+    expect(farTop).toBe("⠀".repeat(20));
+    expect(farBottom).toBe("⠀".repeat(20));
+  });
+
+  it("fills the far rows once a column's amplitude saturates past the near rows", () => {
     const w = new Waveform(20);
     for (let i = 0; i < 10; i++) w.update(1.0);
-    const [top, bottom] = w.render();
-    // width 20 spans enough columns that buildVariation's sine mix puts at least one near its 1.0 peak, which at smoothed≈1 saturates that column's near level to 4 (the full-block braille cell) on both rows.
-    expect(top).toContain("⣿");
-    expect(bottom).toContain("⣿");
+    const [farTop, nearTop, nearBottom, farBottom] = w.render();
+    // width 20 spans enough columns that buildVariation's sine mix puts at least one near its 1.0 peak, which at smoothed≈1 pushes that column's level past 4 and fills its far rows too.
+    expect(nearTop).toContain("⣿");
+    expect(nearBottom).toContain("⣿");
+    expect(farTop).toContain("⣿");
+    expect(farBottom).toContain("⣿");
   });
 });
 

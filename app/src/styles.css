@@ -58,8 +58,8 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .W .in.live .q::placeholder { color: var(--accent); }
 /* The context chip is a label saying what is on screen, not a button: no fill, no border, no code font, just muted proportional text that gives way to the input when the window title is long. DESIGN.md's text-ui: every control's size. */
 .W .in .ctx { font: 400 13px/1.45 var(--body); color: var(--mute); white-space: nowrap; max-width: 38%; overflow: hidden; text-overflow: ellipsis; flex: none; }
-/* The live-voice waveform (see waveform.ts): the mic's two braille rows in green, the same colour the terminal client's WaveUser style uses, and the speaker's beside them in the accent purple (WaveOra) once it has anything to show. Monospace so the braille cells line up column for column the way they were built to. */
-.W .in .vwave { display: flex; align-items: center; gap: 6px; flex: none; font-family: var(--mono); font-size: 13px; line-height: 1.15; }
+/* The live-voice waveform (see waveform.ts): the mic's four braille rows in green, the same colour the terminal client's WaveUser style uses, and the speaker's beside them in the accent purple (WaveOra) once it has anything to show. Monospace so the braille cells line up column for column the way they were built to. Four rows at 9px/1.0 line-height stack to exactly 36px, so the block sits within the composer row's height. */
+.W .in .vwave { display: flex; align-items: center; gap: 6px; flex: none; font-family: var(--mono); font-size: 9px; line-height: 1; }
 .W .vw-mic, .W .vw-spk { display: flex; flex-direction: column; }
 .W .vw-mic { color: var(--ok); }
 .W .vw-spk { color: var(--accent); }
