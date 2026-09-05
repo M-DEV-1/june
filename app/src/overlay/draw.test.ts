@@ -404,28 +404,28 @@ describe("edgeStart", () => {
 describe("flightFor", () => {
   it("lifts the curve's control point above the midpoint of the trip", () => {
     const flight = flightFor({ x: 100, y: 500 }, { x: 900, y: 500 });
-    expect(flight.control).toEqual({ x: 500, y: 410 });
+    expect(flight.control).toEqual({ x: 500, y: 420 });
   });
 
   it("keeps a short hop's arc in proportion to the hop rather than looping it over its own target", () => {
     const flight = flightFor({ x: 400, y: 400 }, { x: 440, y: 400 });
-    expect(flight.control).toEqual({ x: 420, y: 400 - 40 * 0.22 });
+    expect(flight.control).toEqual({ x: 420, y: 400 - 40 * 0.2 });
   });
 
-  it("stops lifting the arc past ninety pixels, however far the trip", () => {
-    expect(flightFor({ x: 0, y: 500 }, { x: 1800, y: 500 }).control.y).toBe(410);
+  it("stops lifting the arc past eighty pixels, however far the trip", () => {
+    expect(flightFor({ x: 0, y: 500 }, { x: 1800, y: 500 }).control.y).toBe(420);
   });
 
   it("takes the shortest time for a hop that goes nowhere", () => {
-    expect(flightFor({ x: 400, y: 400 }, { x: 400, y: 400 }).ms).toBe(420);
+    expect(flightFor({ x: 400, y: 400 }, { x: 400, y: 400 }).ms).toBe(600);
   });
 
   it("takes longer the further it goes", () => {
-    expect(flightFor({ x: 0, y: 0 }, { x: 600, y: 800 }).ms).toBe(526);
+    expect(flightFor({ x: 0, y: 0 }, { x: 600, y: 800 }).ms).toBe(1250);
   });
 
-  it("never takes longer than 780 milliseconds, however far across the desk it goes", () => {
-    expect(flightFor({ x: 0, y: 0 }, { x: 3800, y: 1000 }).ms).toBe(780);
+  it("never takes longer than 1400 milliseconds, however far across the desk it goes", () => {
+    expect(flightFor({ x: 0, y: 0 }, { x: 3800, y: 1000 }).ms).toBe(1400);
   });
 });
 
@@ -440,7 +440,7 @@ describe("flightAt", () => {
     const flight = flightFor({ x: 100, y: 500 }, { x: 900, y: 500 });
     const mid = flightAt(flight, 0.5);
     expect(mid.x).toBeCloseTo(500);
-    expect(mid.y).toBeCloseTo(455);
+    expect(mid.y).toBeCloseTo(460);
   });
 
   it("faces up on the way out and down on the way in, on a trip to the right", () => {

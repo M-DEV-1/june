@@ -34,8 +34,8 @@ import {
 /** The Tauri event Rust hands each daemon event over as. Its payload is the text of one event off the daemon's stream. */
 const DAEMON_EVENT = "ora://daemon-event";
 
-/** How long the whole drawing takes to fade away, in milliseconds. */
-const FADE_MS = 320;
+/** How long the whole drawing takes to fade away, in milliseconds. Clicky's OverlayWindow.swift:819 fades its own overlay window out over the same 400 ms. */
+const FADE_MS = 400;
 
 /** The colour of each mood. Neutral is Ora's own accent, halfway between the purple the app uses on a light theme and the one it uses on a dark one, so it reads on either. Point is the warm orange everything Ora shows you is drawn in, act is the red of a press about to happen, and done is the green of a thing finished. */
 const MOODS: Record<Mood, string> = {
@@ -48,6 +48,9 @@ const MOODS: Record<Mood, string> = {
 /** How long after the ink has finished the label appears, in milliseconds. The pointer arrives, the stroke is drawn, then the name of the thing follows, which is the order the three would happen if a person were doing the pointing. */
 const LABEL_LAG = 80;
 
+/** How long a gap to leave between one stroke finishing and the next one starting, in milliseconds, so several strokes sent in one event draw one after another instead of all landing at once. */
+const STROKE_GAP_MS = 100;
+
 /** How a stroke draws itself on: quick at first, easing off as it reaches the end, the way a hand slows at the end of a line. */
 const INK_EASING = "cubic-bezier(0.33, 0, 0.2, 1)";
 
@@ -56,6 +59,12 @@ const POINTER_IDLE_MS = 1500;
 
 /** How long apart the two circles of a tap ripple start, in milliseconds. The circle itself runs for 380, so the whole tap is over 500 milliseconds after the pointer lands. */
 const RIPPLE_GAP_MS = 120;
+
+/** How much longer a drawing with no ttl_ms of its own stays readable for each stroke of ink actually on the layer, in milliseconds, once its ink has finished drawing. Several shapes can arrive as several events that all keep the ones before them, so this is read off the layer itself rather than off the one event that just landed, or a nine-shape diagram would be timed as if only its last shape existed. */
+const PER_SHAPE_TTL_MS = 900;
+
+/** The most milliseconds that per-stroke scaling may ever ask a default-ttl drawing to stay up. This is maxOverlayTTLMs in internal/ipc/overlay.go, the ceiling the daemon already holds an explicit ttl_ms to, so a drawing that named no ttl of its own must never end up outliving one that asked for the daemon's maximum. */
+const MAX_TTL_MS = 15000;
 
 const layer = document.getElementById("layer") as HTMLElement;
 const shapesEl = document.getElementById("shapes") as HTMLElement;
@@ -74,6 +83,9 @@ let lastRing: LastRing | null = null;
 /** The timers that fade the drawing when its ttl runs out and the pointer when it has sat still long enough. */
 let clearTimer: number | undefined;
 let pointerTimer: number | undefined;
+
+/** The timers waiting to start tracing a later stroke of the drawing now on screen. The pointer is one shared element and can only trace one drawing's strokes at a time, so every render() clears whatever is left in here before it schedules its own: a trace queued by a drawing that has since been superseded must never fire against the pointer's new job. */
+let traceTimers: number[] = [];
 
 /** The id of the ask whose drawing is on the layer now, or null when the layer is empty. Every overlay event carries the id of the ask that drew it, or "overlay" when no ask did, which is how a drawing that belongs with the one already up is told from one that replaces it. */
 let drawingAsk: string | null = null;
@@ -99,7 +111,7 @@ const TRACE_STEP_PX = 8;
 const TRACE_TURN_IN = 0.125;
 
 /** Puts one set of shapes on the layer and takes off whatever was there. Input: the shapes, already in this page's CSS pixels, and how long from now the pointer touches down. Output: when the last stroke has finished drawing itself, in milliseconds from now, which is when the label may appear.
- * The order on screen is the order a person doing it would take: the pointer arrives at the start of the stroke, travels along it while the ink appears behind it, and only when it has stopped does the pill naming the thing show up.
+ * The order on screen is the order a person doing it would take: the pointer arrives at the start of the first stroke, travels along it while the ink appears behind it, then moves on to the next stroke the moment the one before it lands, and only once the last stroke has stopped does the pill naming the thing show up. With a single stroke there is no next one to wait for, so it draws exactly as it always has.
  * When keep is set the layer is left as it is and these shapes are added to it, so several drawings can stand together; the shapes already there keep the animations they are part-way through. */
 function render(shapes: Shape[], arrival = 0, keep = false): number {
   for (const el of [shapesEl, inkEl]) {
@@ -109,9 +121,16 @@ function render(shapes: Shape[], arrival = 0, keep = false): number {
     }
     el.style.opacity = "";
   }
+  // Whatever this drawing's predecessor still had queued for the pointer is now stale: the pointer has one job at a time, and it is about to become this drawing's.
+  traceTimers.forEach((t) => clearTimeout(t));
+  traceTimers = [];
 
-  let inkEnd = arrival;
-  let traced = false;
+  // Runs ahead of the strokes as they are drawn: stroke n starts the moment stroke n-1 has landed, with a short gap between, so several strokes sent in one event draw one after another rather than all appearing at once. A single stroke never advances it, so that stroke still starts exactly at arrival.
+  let cursor = arrival;
+  // When the most recently drawn shaft finished, which is also the return value once the loop ends: the moment the last stroke landed.
+  let shaftEnd = arrival;
+  // Whether a stroke has been given to the pointer to trace yet.
+  let tracedFirst = false;
 
   for (const shape of shapes) {
     if (shape.kind !== "stroke") continue;
@@ -122,21 +141,29 @@ function render(shapes: Shape[], arrival = 0, keep = false): number {
     inkEl.appendChild(path);
 
     if (shape.filled) {
-      // The head of an arrow is a solid triangle, so there is nothing to draw on: it appears once the shaft it belongs to has arrived.
-      path.style.animationDelay = `${inkEnd}ms`;
+      // The head of an arrow is a solid triangle, so there is nothing to draw on: shapesFor always puts it right after its own shaft, so it appears the moment that shaft, and not the rest of the diagram, has landed.
+      path.style.animationDelay = `${shaftEnd}ms`;
       continue;
     }
 
     const length = path.getTotalLength();
     const ms = stillness() ? 1 : drawMs(length);
     // The stroke is revealed through a mask whose own line grows along the same path. A dashed stroke cannot use its dash pattern to reveal itself, because that pattern is already the dashes, so every stroke is revealed the same way.
-    reveal(path, length, arrival, ms);
-    if (!traced && !stillness()) {
-      tracePointer(path, length, arrival, ms);
-      traced = true;
+    reveal(path, length, cursor, ms);
+    if (!stillness()) {
+      // The pointer is one shared element, so giving every stroke's trace a native delay up front would leave several Web Animations sitting on it at once, and a later one wins over an earlier one for as long as both exist, which would freeze the pointer at the next stroke's start for the whole time the stroke before it is actually being drawn. The first stroke has nothing earlier to collide with and traces straight away; every stroke after it instead waits for a timer, so its animation is not even created until the one before it has genuinely finished.
+      if (!tracedFirst) {
+        tracePointer(path, length, cursor, ms);
+        tracedFirst = true;
+      } else {
+        traceTimers.push(window.setTimeout(() => tracePointer(path, length, 0, ms), cursor));
+      }
     }
-    inkEnd = Math.max(inkEnd, arrival + ms);
+    shaftEnd = cursor + ms;
+    // The next stroke waits for this one to land, plus a short gap; stillness asks for no stagger, so the gap drops out and the whole diagram still lands together.
+    cursor = shaftEnd + (stillness() ? 0 : STROKE_GAP_MS);
   }
+  const inkEnd = shaftEnd;
 
   for (const shape of shapes) {
     if (shape.kind !== "label" && shape.kind !== "mark") continue;
@@ -296,8 +323,13 @@ function draw(text: string, askID: string): void {
   if (rect && tap) ripple(pointFor(rect, layout), rippleSize(rect, layout), inkEnd);
   if (start) pointerTimer = window.setTimeout(() => (pointer.style.opacity = "0"), inkEnd + POINTER_IDLE_MS);
 
+  // An explicit ttl_ms always wins outright, because the caller set it on purpose and the daemon has already held it to its own ceiling. Failing that, the default grows with how many strokes are actually on the layer right now, not with how many this one event carried, so a diagram sent as several accumulating events is timed by how much of it there is to read rather than by its last, possibly tiny, event. It never drops below the old flat default and never climbs past the daemon's own ceiling on an explicit ttl_ms.
+  const defaultTtl = ttlFor(spec);
+  const strokesOnScreen = inkEl.querySelectorAll("path.stroke").length;
+  const readable = spec.ttl_ms ? defaultTtl : Math.min(MAX_TTL_MS, Math.max(defaultTtl, PER_SHAPE_TTL_MS * strokesOnScreen));
+
   // The ttl is time the drawing is meant to be readable, so it starts once the ink is finished rather than once the event arrived.
-  clearTimer = window.setTimeout(fadeOut, ttlFor(spec) + inkEnd);
+  clearTimer = window.setTimeout(fadeOut, readable + inkEnd);
 }
 
 /** Acts on one event off the daemon's stream. Input: the JSON text of one event. Output: nothing; anything that is not an overlay event is another window's business. */
