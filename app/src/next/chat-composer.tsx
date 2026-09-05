@@ -185,7 +185,7 @@ export function Composer({
         wide={wide}
         rail={wide && railed ? <div aria-hidden /> : undefined}
       >
-        <div className="flex items-end gap-1 rounded-xl border bg-card p-1.5 shadow-lg transition-shadow focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/40">
+        <div className="flex items-end gap-1 rounded-2xl border border-hairline-strong bg-card p-1.5 shadow-lg transition-shadow focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/40">
           {dictating ? (
             <button
               type="button"
@@ -223,7 +223,7 @@ export function Composer({
               dictateNotice ?? (ready ? placeholder : "Open a chat first, or start a new one")
             }
             aria-label="Ask Ora"
-            className="min-h-0 resize-none border-0 bg-transparent px-2 py-1.5 text-read shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent dark:disabled:bg-transparent"
+            className="min-h-0 resize-none border-0 bg-transparent px-2 py-1.5 text-lead font-medium shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent dark:disabled:bg-transparent"
             onChange={(e) =>
               key &&
               dispatch(ui.asked({ conversationId: key, text: e.target.value }))
@@ -253,7 +253,8 @@ export function Composer({
             <TooltipTrigger asChild>
               <Button
                 size="icon-sm"
-                className="rounded-lg"
+                variant={draft.trim() ? "default" : "ghost"}
+                className={draft.trim() ? "rounded-lg" : "rounded-lg text-muted-foreground"}
                 aria-label="Send"
                 disabled={!ready || !draft.trim() || running}
                 onClick={() => void send()}

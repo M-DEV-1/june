@@ -78,39 +78,40 @@ One accent, indigo, and it appears at most twice on a screen: the focus ring, an
 
 | | Light | Dark |
 |---|---|---|
-| canvas | `#ffffff` | `#191a1d` |
+| canvas | `#ffffff` | `#1b1c20` |
 | rail | `#f7f7f9` | `#141518` |
-| raised (popover, card, group) | `#ffffff` | `#232529` |
+| card | `#ffffff` | `#26282d` |
+| popover, settings group | `#ffffff` | `#2d3036` |
 | sunken (a quote, a code block) | `rgba(0,0,0,.035)` | `rgba(255,255,255,.05)` |
 | text | `#17181c` | `#e8e9ec` |
 | muted text | `#61646d` | `#979ba4` |
 | hairline | `rgba(0,0,0,.075)` | `rgba(255,255,255,.09)` |
 | hover | `rgba(0,0,0,.045)` | `rgba(255,255,255,.055)` |
-| selected | `rgba(0,0,0,.075)` | `rgba(255,255,255,.09)` |
+| selected | `rgba(0,0,0,.075)` | `rgba(255,255,255,.14)` |
 | accent | `#5a45ea` | `#9d90ff` |
 | work in flight | `#996009` | `#e0b341` |
 | something wrong | `#c3372b` | `#f08279` |
 
-Muted text is `#61646d` on white (6.3:1) and `#979ba4` on `#191a1d` (6.1:1), so the grey line under a row is still readable rather than decorative. Dark is built by lightness: the rail is darker than the canvas and a popover is lighter than both, which is what says a menu floats.
+Muted text is `#61646d` on white (6.3:1) and `#979ba4` on `#1b1c20` (6.1:1), so the grey line under a row is still readable rather than decorative. Dark is built by lightness: the rail is darker than the canvas, a card lighter again, and a popover lighter still — four steps rather than two, which is what says a menu floats clear of the card it sits over rather than merely clear of the canvas behind both.
 
 ### Measured contrast
 
-Every text colour against every surface it sits on, in both themes — WCAG 2.1 AA needs 4.5:1 for body text and 3:1 for text at 24px or above (only `text-figure` qualifies; everything else here is checked at the stricter 4.5:1). Computed from the hex values above with the standard relative-luminance formula; the script is not kept in the repo, only the numbers it produced.
+Every text colour against every surface it sits on, in both themes — WCAG 2.1 AA needs 4.5:1 for body text and 3:1 for text at 24px or above (only `text-figure` qualifies; everything else here is checked at the stricter 4.5:1). Computed from the hex values above with the standard relative-luminance formula; the script is not kept in the repo, only the numbers it produced. Dark used to have one "raised" surface for both a card and a popover; now that a popover sits lighter than a card, each gets its own column, and both are checked separately since a popover is where the tightest pair below actually lands.
 
-| Text | Canvas | Rail | Raised (card/popover) |
-|---|---|---|---|
-| text (light) | 17.74:1 | 16.58:1 | 17.74:1 |
-| text (dark) | 14.33:1 | 15.04:1 | 12.64:1 |
-| muted text (light) | 5.91:1 | 5.53:1 | 5.91:1 |
-| muted text (dark) | 6.25:1 | 6.56:1 | 5.51:1 |
-| work in flight (light) | 5.21:1 | 4.87:1 | 5.21:1 |
-| work in flight (dark) | 8.86:1 | 9.30:1 | 7.82:1 |
-| something wrong (light) | 5.38:1 | 5.03:1 | 5.38:1 |
-| something wrong (dark) | 6.77:1 | 7.11:1 | 5.97:1 |
-| accent, as text (light) | 6.04:1 | 5.65:1 | 6.04:1 |
-| accent, as text (dark) | 6.52:1 | 6.84:1 | 5.75:1 |
+| Text | Canvas | Rail | Card | Popover |
+|---|---|---|---|---|
+| text (light) | 17.74:1 | 16.58:1 | 17.74:1 | 17.74:1 |
+| text (dark) | 14.02:1 | 15.04:1 | 12.15:1 | 10.90:1 |
+| muted text (light) | 5.91:1 | 5.53:1 | 5.91:1 | 5.91:1 |
+| muted text (dark) | 6.11:1 | 6.56:1 | 5.30:1 | 4.75:1 |
+| work in flight (light) | 5.21:1 | 4.87:1 | 5.21:1 | 5.21:1 |
+| work in flight (dark) | 8.67:1 | 9.30:1 | 7.51:1 | 6.74:1 |
+| something wrong (light) | 5.38:1 | 5.03:1 | 5.38:1 | 5.38:1 |
+| something wrong (dark) | 6.63:1 | 7.11:1 | 5.74:1 | 5.15:1 |
+| accent, as text (light) | 6.04:1 | 5.65:1 | 6.04:1 | 6.04:1 |
+| accent, as text (dark) | 6.38:1 | 6.84:1 | 5.53:1 | 4.96:1 |
 
-One pair failed on first measurement: light-mode `work in flight` against the rail's `#f7f7f9` read 4.40:1, under the 4.5:1 floor — the "still writing" line and a tool step's status text are both set at `text-meta`/`text-work`, ordinary body-sized text with no exemption. `--work` in light moved from `#a3660a` to `#996009`, the same amber darkened until it cleared 4.5:1 (4.87:1) against the lightest surface it could sit on; every other pair in the table above already cleared AA without a change. `primary-foreground` on the accent fill — white-on-indigo, the one place the accent is a background rather than a ring or a line, e.g. the Send button — is 6.04:1 in light and 6.69:1 in dark, both comfortably past 4.5:1.
+One pair failed on first measurement: light-mode `work in flight` against the rail's `#f7f7f9` read 4.40:1, under the 4.5:1 floor — the "still writing" line and a tool step's status text are both set at `text-meta`/`text-work`, ordinary body-sized text with no exemption. `--work` in light moved from `#a3660a` to `#996009`, the same amber darkened until it cleared 4.5:1 (4.87:1) against the lightest surface it could sit on; every other pair in the table above already cleared AA without a change. `primary-foreground` on the accent fill — white-on-indigo, the one place the accent is a background rather than a ring or a line, e.g. the Send button — is 6.04:1 in light and 6.69:1 in dark, both comfortably past 4.5:1. Widening the dark ramp (canvas `#191a1d`→`#1b1c20`, a card at `#26282d`, a popover lifted clear of the card at `#2d3036`) moved every dark pair against a raised surface down a little, since the raised surface itself moved up: muted text on a popover is now the tightest pair in the table at 4.75:1, still 0.25 clear of the 4.5:1 floor, and accent-as-text on a popover is next-tightest at 4.96:1.
 
 ## Shadows
 

@@ -5,7 +5,8 @@
     "module": "ESNext",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
-    "types": ["vite/client"],
+    /* "node" is here because the test files run under Vitest in node: tokens.test.ts reads the two stylesheets off disk to check they have not drifted apart. tsconfig includes src, so the production build typechecks the tests too. */
+    "types": ["vite/client", "node"],
     "jsx": "react-jsx",
 
     /* The "@" alias the shadcn/ui components import each other and lib/utils by; vite.config.ts resolves it the same way. */

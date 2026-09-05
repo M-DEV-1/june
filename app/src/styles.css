@@ -1,33 +1,24 @@
 /* The window. One rounded opaque card floating on a transparent OS window, which draws nothing itself. Light is the "Soft" look, dark is the "Ink" look; the same rules read both through tokens. Nothing on this page is smaller than 13px, and anything meant to be read runs at line-height 1.5.
    The tokens below are copied from src/next/DESIGN.md (the values live in src/next/index.css) so this window and the redesigned main window read as one product. This file does not import next/index.css, which would pull Tailwind into a page that has none. */
 @import "@fontsource-variable/geist";
+@import "./shared/tokens.css";
 :root {
   --body: "Geist Variable", system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif;
   --mono: ui-monospace, "Source Code Pro", "DejaVu Sans Mono", monospace;
-  /* bg/fg/mute/line/well are DESIGN.md's raised/text/muted text/hairline/sunken, light values. */
-  --bg: #ffffff; --fg: #17181c; --mute: #61646d; --line: rgba(0, 0, 0, .075); --well: rgba(0, 0, 0, .035);
-  /* busy/bad are DESIGN.md's "work in flight" and "something wrong"; ok and mark are outside DESIGN.md's covered palette (a connection dot and a search highlight) and keep their own colour. */
-  --ok: #2f9e5f; --busy: #a3660a; --bad: #c3372b; --mark: #fde68a;
-  --accent: #5a45ea; /* DESIGN.md's accent; used for the live-voice status line so it reads as a distinct mode, not just another muted placeholder */
+  /* bg/fg/mute/line/well are short aliases onto tokens.css's raised/text/muted text/hairline/sunken, so this file keeps its own short names without keeping its own colours. */
+  --bg: var(--popover); --fg: var(--foreground); --mute: var(--muted-foreground); --line: var(--border); --well: var(--sunken);
+  /* busy/bad are DESIGN.md's "work in flight" and "something wrong", aliased the same way; ok and mark are outside DESIGN.md's covered palette (a connection dot and a search highlight) and keep their own colour, one per theme since tokens.css has no equivalent to alias onto. */
+  --ok: #2f9e5f; --busy: var(--work); --bad: var(--destructive); --mark: #fde68a;
+  --accent: var(--primary); /* DESIGN.md's accent; used for the live-voice status line so it reads as a distinct mode, not just another muted placeholder */
   --radius: 12px; --card-radius: 16px;
   /* DESIGN.md's shadow-lg, for a dialog or composer, plus the hairline ring it is always paired with. */
   --shadow: 0 16px 40px -12px rgba(0, 0, 0, .20), 0 0 0 1px var(--line);
   /* The gutter every block inside the card keeps. */
   --pad: 20px 24px;
 }
-/* Theme: the system setting decides unless the user picks one in settings, which stamps data-theme on the root. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #232529; --fg: #e8e9ec; --mute: #979ba4; --line: rgba(255, 255, 255, .09); --well: rgba(255, 255, 255, .05);
-    --busy: #e0b341; --bad: #f08279; --mark: #5c4a12;
-    --accent: #9d90ff;
-    --shadow: 0 16px 40px -12px rgba(0, 0, 0, .6), 0 0 0 1px var(--line);
-  }
-}
+/* Theme: the system setting decides unless the user picks one in settings, which stamps data-theme on the root; tokens.css only stamps colours under [data-theme="dark"], so this file's own dark block carries the values with no equivalent there plus this file's shadow, which is built from --line and so must be redeclared once --line itself has changed. */
 :root[data-theme="dark"] {
-  --bg: #232529; --fg: #e8e9ec; --mute: #979ba4; --line: rgba(255, 255, 255, .09); --well: rgba(255, 255, 255, .05);
-  --busy: #e0b341; --bad: #f08279; --mark: #5c4a12;
-  --accent: #9d90ff;
+  --mark: #5c4a12;
   --shadow: 0 16px 40px -12px rgba(0, 0, 0, .6), 0 0 0 1px var(--line);
 }
 * { box-sizing: border-box; }
