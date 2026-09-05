@@ -9,11 +9,14 @@ import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import {
   dotClass,
+  dotLabel,
+  voiceStateWord,
   isJobLive,
   noticeActionLine,
   NOTICE_MS,
   placeholder,
   placeholderMatter,
+  RESTING_PLACEHOLDER,
   sourceMeta,
   step,
   stepIconKind,
@@ -30,7 +33,6 @@ import {
   type Theme,
   type ToolStep,
   type View,
-  type VoiceState,
 } from "./state";
 // The key a clicked notice's target is left under is defined beside the code in the app window that reads it, so there is one spelling of it rather than two.
 import { OPEN_AT_KEY } from "./app/state";
@@ -349,13 +351,6 @@ function voiceWaveInnerHtml(): string {
   return `<span class="vw-spk">${voiceWaveRowsHtml(speakerWave)}</span>`;
 }
 
-/** The word shown above the voice-mode grid for what the session is doing right now, straight off the daemon's "state" events (see internal/ipc/voice.go's setState: "listening", "thinking" or "speaking" while a session runs, "idle" only once it has ended, at which point voiceOff has already taken the whole surface down). Input: the view's voiceState. Output: the word, defaulting to "Listening" for "idle" or anything unrecognised — a session with nothing to show yet is still just waiting to hear something. */
-function voiceStateWord(state: VoiceState | undefined): string {
-  if (state === "thinking") return "Thinking";
-  if (state === "speaking") return "Speaking";
-  return "Listening";
-}
-
 /** The live transcript under the voice-mode grid: the last thing the user said and the last thing Ora said, one line each. Both come straight off the current matter's last turn — a live session's "heard" and "said" events already fold into a turn's q and a the same way a typed question and its answer do (see the voiceEvent case in state.ts) — so there is nothing new to store here, only to read. Input: the matter the session's turns are landing in. Output: the two lines' HTML, either one left out while it has nothing yet, or "" while neither does. */
 function voiceTranscriptHtml(m: Matter): string {
   const last = m.turns[m.turns.length - 1];
@@ -384,17 +379,34 @@ function voiceSurfaceHtml(v: View, m: Matter): string {
   `;
 }
 
+/** The words shown after the shortcuts in the input's placeholder used to be the only way a user with the input empty and nothing running learned that Space and Shift+Space did anything at all. They now live permanently beside the input instead, in the same slot the window's context chip uses once the daemon reports one, at DESIGN.md's text-micro (11px/1.3/500/+0.02em) rather than the chip's own size, so they read as a quiet legend rather than a second copy of what the chip says. */
+const HINT_TEXT = "⎵ dictate · ⇧⎵ voice";
+
+/** What the input's placeholder actually renders. Same as state.ts's placeholder(v) except at rest, where the full RESTING_PLACEHOLDER sentence (which used to carry the two shortcut hints inline) shortens to "Ask Ora" now that the hints live beside the input instead (see HINT_TEXT and cardHtml). Input: the view. Output: the placeholder text to render. */
+function displayPlaceholder(v: View): string {
+  const p = placeholder(v);
+  return p === RESTING_PLACEHOLDER ? "Ask Ora" : p;
+}
+
 /** The whole card: the input line, the thread of what has been asked so far, and the footer — or, for the whole length of a live voice session, the voice-mode surface instead (see voiceSurfaceHtml). Input: the view and the matter the turns belong to. Output: the card's HTML. */
 function cardHtml(v: View, m: Matter): string {
   if (v.voice) return voiceSurfaceHtml(v, m);
   const tag = daemonUp ? "daemon" : mockMode ? "mock" : "daemon offline";
+  // A 9px dot telling "not connected" apart from "idle" by colour alone is invisible to begin with, so the first thing a user sees when the daemon is down is not a red dot but these two words, in the same place the dot sat and in the "something wrong" colour rather than a shape nobody can name.
+  const status = daemonUp
+    ? `<span class="dot ${dotClass(v, daemonUp)}" role="img" title="${esc(dotLabel(v, daemonUp))}" aria-label="${esc(dotLabel(v, daemonUp))}"></span>`
+    : `<span role="status" style="flex:none;color:var(--bad);font:400 12px/1.4 var(--body);">${esc(dotLabel(v, daemonUp))}</span>`;
+  // Permanent, not just while resting: the chip shows the window's own context once the daemon reports one, and the shortcut hints otherwise — never both, since there is only room for one aside next to the input.
+  const ctx = v.contextChip
+    ? `<span class="ctx">${esc(v.contextChip)}</span>`
+    : `<span class="ctx" style="font:500 11px/1.3 var(--body);letter-spacing:.02em;color:var(--mute);">${HINT_TEXT}</span>`;
 
   return `
     <div class="in${v.dictating ? " holding" : ""}">
-      <span class="dot ${dotClass(v, daemonUp)}"></span>
-      <input class="q" value="${esc(v.input)}" placeholder="${esc(placeholder(v))}" />
+      ${status}
+      <input class="q" value="${esc(v.input)}" placeholder="${esc(displayPlaceholder(v))}" />
       <span class="wave"><i></i><i></i><i></i></span>
-      ${v.contextChip ? `<span class="ctx">${esc(v.contextChip)}</span>` : ""}
+      ${ctx}
     </div>
     ${threadHtml(v, m)}
     <div class="foot"><span>↵ ask</span><span>ctrl↵ new thread</span><span>esc close</span><span class="tag">${tag}</span></div>

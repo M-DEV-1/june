@@ -340,3 +340,62 @@ describe("a notice's action line replaces its title and body in the bubble", () 
     expect(bubble?.querySelector(".nb")).toBeNull();
   });
 });
+
+// C6 from the design review: the status dot told its four states apart by colour alone, with idle (a near-invisible grey) reading the same as "the dot is missing", and the daemon-down red carrying no words for a new user to go on.
+describe("the status dot names its own state", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("gives the resting dot an aria-label and title once the daemon has answered", async () => {
+    await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dot = document.querySelector(".dot");
+    expect(dot?.getAttribute("aria-label")).toBe("Ready");
+    expect(dot?.getAttribute("title")).toBe("Ready");
+  });
+
+  it("gives the dot a different label while a question is running", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "type", value: "what changed on this page" });
+    dispatch({ kind: "enter" });
+
+    const dot = document.querySelector(".dot");
+    expect(dot?.getAttribute("aria-label")).toBe("Working");
+  });
+
+  it("replaces the dot with the words 'Not connected' when the daemon does not answer its probe", async () => {
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(false);
+    await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(document.querySelector(".dot")).toBeNull();
+    expect(document.querySelector(".in")?.textContent).toContain("Not connected");
+  });
+});
+
+// Same review: the resting placeholder used to carry the two shortcut hints inline ("Space to dictate · Shift+Space for voice"), which vanished the moment there was anything else to say and were never announced any other way. They now sit permanently beside the input instead.
+describe("the shortcut hints beside the input", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("shows the resting placeholder as just 'Ask Ora', with the dictate and voice hints in the context-chip slot instead", async () => {
+    await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const input = document.querySelector<HTMLInputElement>(".q");
+    expect(input?.placeholder).toBe("Ask Ora");
+
+    const ctx = document.querySelector(".ctx");
+    expect(ctx?.textContent).toBe("⎵ dictate · ⇧⎵ voice");
+  });
+});

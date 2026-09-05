@@ -7,6 +7,7 @@ import {
   CONVERSATION_MS,
   chipLabel,
   dotClass,
+  dotLabel,
   failRunningStep,
   isJobLive,
   jobGoal,
@@ -907,6 +908,30 @@ describe("dotClass", () => {
     expect(dotClass(view({ state: "answered" }), true)).toBe("ok");
     expect(dotClass(view(), true)).toBe("");
     expect(dotClass(view(), false)).toBe("off");
+  });
+});
+
+describe("dotLabel", () => {
+  // The dot's five states differ only by colour, so the label is the only thing a screen reader gets and the only thing a hover tooltip can say. It has to walk the same branches in the same order as dotClass, or the colour and the words disagree.
+  it("names every state dotClass distinguishes, in the same order", () => {
+    expect(dotLabel(view({ dictating: true }), true)).toBe("Listening");
+    expect(
+      dotLabel(view({ voice: "voice-1", voiceState: "listening" }), true),
+    ).toBe("Listening");
+    expect(
+      dotLabel(view({ voice: "voice-1", voiceState: "thinking" }), true),
+    ).toBe("Thinking");
+    expect(
+      dotLabel(view({ voice: "voice-1", voiceState: "speaking" }), true),
+    ).toBe("Speaking");
+    expect(dotLabel(view({ state: "asking" }), true)).toBe("Working");
+    expect(dotLabel(view({ state: "answered" }), true)).toBe("Answered");
+    expect(dotLabel(view(), true)).toBe("Ready");
+  });
+
+  // The review asked for these exact words, and the footer tag beside the dot uses them too.
+  it("says Not connected when the daemon is unreachable", () => {
+    expect(dotLabel(view(), false)).toBe("Not connected");
   });
 });
 

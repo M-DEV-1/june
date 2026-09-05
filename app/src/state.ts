@@ -361,6 +361,22 @@ export function dotClass(v: View, daemonUp: boolean): string {
   return daemonUp ? "" : "off";
 }
 
+/** The same status the dot shows, in words, used as its title and aria-label. The dot is a 9px circle whose five states differ only by colour, which tells a screen reader nothing and tells a sighted user only what they happened to learn elsewhere. Input: the view and whether the daemon is reachable. Output: a short phrase naming the current state. */
+export function dotLabel(v: View, daemonUp: boolean): string {
+  if (v.dictating) return "Listening";
+  if (v.voice) return voiceStateWord(v.voiceState);
+  if (v.state === "asking") return "Working";
+  if (v.state === "answered") return "Answered";
+  return daemonUp ? "Ready" : "Not connected";
+}
+
+/** The word for what a live voice session is doing right now, straight off the daemon's "state" events (see internal/ipc/voice.go's setState: "listening", "thinking" or "speaking" while a session runs, "idle" only once it has ended, at which point voiceOff has already taken the whole surface down). Shown above the voice-mode grid and returned by dotLabel for the same session, so the surface and the dot never name the same state two different ways. Input: the view's voiceState. Output: the word, defaulting to "Listening" for "idle" or anything unrecognised — a session with nothing to show yet is still just waiting to hear something. */
+export function voiceStateWord(state: VoiceState | undefined): string {
+  if (state === "thinking") return "Thinking";
+  if (state === "speaking") return "Speaking";
+  return "Listening";
+}
+
 /** Folds one "tool" daemon event into a turn's step list. The daemon reports each tool call as two events carrying the same Text (its name): the first as the call starts, its Detail the argument summary; the second as it finishes, its Detail just a generic result word ("done", "3 hits"). Nothing on the event says which is which, so this closes the most recently opened step if one is still running (leaving its label alone — only the finish time is worth keeping from that second event) and opens a new one otherwise. Input: the steps so far, the event, and the current time. Output: the updated steps. */
 export function applyToolEvent(
   steps: ToolStep[],
