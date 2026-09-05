@@ -9,15 +9,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"ora/internal/act"
+	"ora/internal/actjob"
 	"ora/internal/agent"
 	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
 	"ora/internal/dream"
 	"ora/internal/embed"
+	"ora/internal/ipc"
 	"ora/internal/ipctoken"
 	"ora/internal/memory"
 	"ora/internal/proactive"
@@ -26,12 +31,19 @@ import (
 	"ora/internal/tally"
 	"ora/internal/tracker"
 	"ora/internal/vector"
+	"ora/internal/window"
 )
 
 // meetingRecorder is the tray's handle on the meeting recorder. startDaemonServices assigns it once the store exists, before registerSNI runs; it stays nil if the daemon never got that far, and every read of it is nil-safe.
 var meetingRecorder *recorder.Recorder
 
-const DaemonPort = "6942"
+// DaemonPort is the loopback port the daemon binds and every client in this package dials. Overridable via ORA_PORT so a second daemon (a test, a dry run) can run beside the live one without fighting it for the port. Defaults to 6942.
+var DaemonPort = func() string {
+	if p := os.Getenv("ORA_PORT"); p != "" {
+		return p
+	}
+	return "6942"
+}()
 
 // pingHandler answers with this process's build identity — the client compares it against its own to detect a daemon that's been running since before the most recent rebuild (see checkDaemonBuildMismatch in root.go). Extracted as a named function so it's testable in isolation from the rest of the daemon's mux.
 func pingHandler(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +53,43 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 
 // maxDeriveStateNotes bounds how many relevance-ranked notes feed the 5-minute working-state derive, instead of the full notes table.
 const maxDeriveStateNotes = 10
+
+// maxDeriveStateEpisodes bounds how many tracked episodes the change gate reads to build its app-and-window-title signature. Two hundred: this store logged at most 60 episodes in its busiest hour on 2026-09-04, so it covers well over the ten-minute window the gate compares across, and the signature is a set so reading extra rows only costs the query.
+const maxDeriveStateEpisodes = 200
+
+// codexFallbackBrain holds the hand-over brain the unattended jobs use when Gemini answers 429 or 503. It is published once the daemon has built the ask agent, which happens after those jobs are wired, so it is read through an atomic rather than captured directly.
+var codexFallbackBrain atomic.Pointer[brain.Brain]
+
+// publishCodexFallback makes b the brain every unattended job hands over to on a quota or overload failure. Input: the Codex-backed brain; called once during startup.
+func publishCodexFallback(b brain.Brain) {
+	codexFallbackBrain.Store(&b)
+}
+
+// backgroundFallbackBrain returns the hand-over brain the unattended jobs should use, resolved at call time. Output: a Brain that answers through Codex once one has been published, and fails with a clear message before that.
+func backgroundFallbackBrain() brain.Brain {
+	return func(ctx context.Context, prompt string) (string, error) {
+		b := codexFallbackBrain.Load()
+		if b == nil {
+			return "", fmt.Errorf("codex fallback is not wired yet")
+		}
+		return (*b)(ctx, prompt)
+	}
+}
+
+// geminiRequestGate adapts brain.WithDailyQuota's Brain-shaped daily quota check into the Allow(model string) error shape memory.GeminiSummarizer's request gate expects, so its direct genai calls are metered against the same shared daily count as every Brain-wrapped call site above. The wrapped primary is a no-op: WithDailyQuota calls it only once its own quota check has already passed, so by the time it runs the count has already advanced and there is nothing left to do.
+type geminiRequestGate struct {
+	state *brain.QuotaState
+	opts  brain.QuotaOptions
+	// forAsks marks the interactive band, which may spend the share the quota keeps back from the nightly jobs.
+	forAsks bool
+}
+
+// Allow reports whether a request against model may proceed in this gate's band: background like every unattended job, or interactive when forAsks is set.
+func (g *geminiRequestGate) Allow(model string) error {
+	noop := func(context.Context, string) (string, error) { return "", nil }
+	_, err := brain.WithDailyQuota(g.state, model, g.forAsks, g.opts, noop)(context.Background(), "")
+	return err
+}
 
 // reconcileEmbedCap bounds how many backfill embeds one ReconcileVectors sweep performs, to protect API quota on a large dirty store — the sweep runs again on the next trigger (startup / note consolidation) and picks up where it left off.
 const reconcileEmbedCap = 200
@@ -123,6 +172,22 @@ func every(ctx context.Context, interval time.Duration, name string, fn func()) 
 	}
 }
 
+// closeWithin runs one shutdown step and comes back at the bound whether or not the step finished, so a step that hangs delays the daemon's exit by that bound and no more. Input: the step's name for the log line, how long it may take, and the step itself. Output: none — a step still running when its bound passes is left behind and logged, which is the right trade at shutdown: the process is about to exit and the alternative is a daemon that never releases its port.
+func closeWithin(name string, bound time.Duration, step func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		step()
+	}()
+	t := time.NewTimer(bound)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		slog.Warn("a shutdown step did not finish in time and was left behind", "step", name, "bound", bound)
+	}
+}
+
 func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) error {
 	slog.Info("Starting Ora Daemon...")
 
@@ -142,6 +207,7 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 // The returned stop func shuts down the server and closes the db — safe to call once.
 // The returned *tracker.Daemon allows the tray to pause/resume tracking.
 func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(), daemonOut *tracker.Daemon, err error) {
+	startTime := time.Now()
 	store, err := db.New(filepath.Join(config.DataDir(), "db"))
 	if err != nil {
 		slog.Error("failed to init db", "error", err)
@@ -164,12 +230,26 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	appConfig := config.LoadConfig()
 
+	// Every unattended job reads its model through config.BackgroundModel, so the choice lives in the config file rather than in each call site. Without this they all run on DefaultBackgroundModel.
+	config.SetBackgroundModels(appConfig.BackgroundModels)
+
 	// The config file is the switch for start-on-login: make the on-disk login entry agree with it on every daemon start, so a config edited by hand (or an entry left behind by an older build) is corrected here rather than drifting.
 	reconcileAutostart(appConfig.Autostart)
 
+	// Names the tray mark as the desktop window's dock icon (GNOME otherwise shows a generic gear); never fatal.
+	if err := installDesktopEntry(); err != nil {
+		slog.Warn("failed to install desktop entry", "error", err)
+	}
+
 	apiKey := os.Getenv("GEMINI_API_KEY")
 
+	// geminiQuota is the free-tier daily request ceiling shared by every Gemini-routed brain in this function — the summarizer's own direct calls below, plus evening close/morning brief and dream further down — persisted under the data dir so it survives a daemon restart; see internal/brain/quota.go. None of these are the interactive ask (that path lives in internal/agent and calls Gemini directly, bypassing this package), so everything here is metered as background, not asks.
+	geminiQuota := brain.NewQuotaState(config.DataDir())
+	geminiQuotaOpts := brain.DefaultQuotaOptions()
+
 	meetingRecorder = recorder.New(config.DataDir(), store, apiKey)
+	// A meeting write-up that hits a spent daily allowance is finished by Codex instead of being dropped.
+	meetingRecorder.SetMinutesFallback(backgroundFallbackBrain())
 
 	// Ora watches the microphone rather than the meeting apps: a call is the one thing that always takes it, and watching it needs no list of which applications count as a meeting.
 	if appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord {
@@ -181,6 +261,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		slog.Warn("failed to init summarizer, semantic memory disabled", "error", err)
 	}
 	if summarizer != nil {
+		// A background summary whose Gemini call comes back 429 or 503 is handed to Codex rather than lost, the same rule the user's own asks already follow.
+		summarizer.SetBackgroundFallback(memory.TextBackend(backgroundFallbackBrain()))
+		// The summarizer's own direct Gemini calls (ReconcileNotes, AttributeThreads, DeriveState, ConsolidateNotes, AnalyzeScreen) count against the same shared daily cap as every other background brain here, rather than running unmetered.
+		summarizer.SetRequestGate(&geminiRequestGate{state: geminiQuota, opts: geminiQuotaOpts})
 		// The compiler otherwise reads the user's name off a calendar entry and files them as somebody they met.
 		summarizer.SetIdentity(func(ctx context.Context) string {
 			entries, err := store.PersonalContext(ctx)
@@ -209,6 +293,15 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		slog.Warn("no local embedder configured (embed.llama_server / embed.model_path), hybrid search degrades to lexical-only")
 	}
 
+	// The embedding server above answers only /v1/embeddings, so it cannot write the working state; this is a second llama-server on its own port running the instruction-tuned GGUF, spawned on the first derive and reaped when it goes idle.
+	textEngine := embed.NewTextEngine(appConfig)
+	if textEngine == nil {
+		slog.Warn("no local text model configured (local_text.model_path / dream.model_path), the working-state derive stays on the metered API")
+	} else if summarizer != nil {
+		// This is what takes the five-minute working-state job off the user's free-tier daily request allowance entirely.
+		summarizer.SetStateBackend(textEngine.Generate)
+	}
+
 	if embedEngine != nil {
 		// A whisper GPU decode and the embedding server share one small card; when the card is short, the recorder may evict an idle embedding server (it respawns on the next embed).
 		recorder.SetGPUReleaser(embedEngine.StopIfIdle)
@@ -223,6 +316,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			store.SetEmbedsAreFree(true)
 			embedsFree = true
 			store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
+			// The floor the act run reference block scores past screen questions against, on the same embedder's scale as the one above.
+			store.SetActRunSimilarityFloor(appConfig.Embed.ActRunFloor())
 			store.SetVectorIndex(&vectorIndexAdapter{inner: vecIndex})
 
 			// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later (e.g. client-side note saves) that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
@@ -291,15 +386,27 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			}
 		})
 
-		// recompute the working-state cache every 5 minutes from recent summaries + notes.
-		// cost guard: skip the LLM call when no new summaries have arrived.
+		// recompute the working-state cache from recent summaries + notes.
+		// The tick stays at five minutes, but memory.StateGate decides whether the call is actually made: at least ten minutes since the last derive, and either a window the user was not in before or enough new summaries to be worth re-reading. Before this gate every tick that found a single new summary made an API call, which is how one unattended job spent a 500-request day by noon on 2026-09-04.
+		var gate memory.StateGate
 		var lastDerive time.Time
 		go every(ctx, 5*time.Minute, "working-state-derive", func() {
-			if !lastDerive.IsZero() {
-				n, _ := store.CountSummariesSince(ctx, lastDerive)
-				if n == 0 {
-					return
-				}
+			now := time.Now()
+			// The window starts at the last derive, or one interval back on the first tick, so the signature describes the episodes this derive would actually be covering.
+			since := lastDerive
+			if since.IsZero() {
+				since = now.Add(-memory.StateInterval)
+			}
+			episodes, _ := store.EpisodesInWindow(ctx, since, now, maxDeriveStateEpisodes)
+			windows := make([]string, 0, len(episodes))
+			for _, e := range episodes {
+				windows = append(windows, e.App+"|"+e.Title)
+			}
+			signature := memory.EpisodeSignature(windows)
+			// A running total rather than a count since the last derive, so the gate can measure how many arrived between one derive and the next.
+			summaryCount, _ := store.CountSummariesSince(ctx, time.Time{})
+			if !gate.ShouldDerive(now, signature, summaryCount) {
+				return
 			}
 			recent, _ := store.RecentSummaries(ctx, 10)
 			// prepend concurrent live threads so the working state reflects everything in flight (watching + coding), not just the latest summary.
@@ -325,12 +432,16 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 					slog.Error("set working state failed", "error", err)
 				}
 			}
-			lastDerive = time.Now()
+			// Only a derive that produced something moves the gate on, so a failed call does not start the ten-minute floor running and lose the change that earned it.
+			gate.Derived(now, signature, summaryCount)
+			lastDerive = now
 		})
 	}
 
 	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
-	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.FromConfig(appConfig.Brain, apiKey), store)
+	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(appConfig.Brain, apiKey, geminiQuota, false, geminiQuotaOpts), store)
+	// Meeting minutes previously built their own unmetered brain per meeting; pinning to the meeting-minutes job's own model (as defaultBrain did unmetered) and metering it against the same shared quota means an unattended write-up spends the day's allowance in the same place it always spent it, just counted now.
+	meetingRecorder.SetBrain(tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobMeetingMinutes), apiKey, geminiQuota, false, geminiQuotaOpts), store))
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
 	// One-click answers to the morning brief's question about an item that has gone quiet. The notification blocks until it is answered, so the scheduler asks from its own goroutine.
 	scheduler.SetAsk(proactive.NotifySendAsk)
@@ -352,7 +463,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
 	dreamBriefHour, _ := appConfig.Proactive.Hours()
-	dreamer := dream.New(store, tally.Wrap(brainProviderName(appConfig.Brain), brain.FromConfig(appConfig.Brain, apiKey), store), dream.Probes{
+	dreamer := dream.New(store, tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(appConfig.Brain, apiKey, geminiQuota, false, geminiQuotaOpts), store), dream.Probes{
 		OnAC:              recorder.OnACPower,
 		SessionLocked:     tracker.SessionLocked,
 		RecorderQuiescent: meetingRecorder.Quiescent,
@@ -364,7 +475,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	dreamer.DataDir = config.DataDir()
 	// A dream brain of its own (grok, agy) frees the night from the Claude window curfew, since it spends none of the user's Claude usage.
 	if p := appConfig.Dream.Brain.Provider; p != "" {
-		dreamer.SetBrain(tally.Wrap(brainProviderName(appConfig.Dream.Brain), brain.FromConfig(appConfig.Dream.Brain, apiKey), store))
+		// On the Gemini API the night runs on the model config.BackgroundModel names for the dream job, and a quota or overload failure hands the stage to Codex.
+		dreamBrainConfig := config.BackgroundBrainConfig(appConfig.Dream.Brain, config.JobDream)
+		dreamer.SetBrain(tally.Wrap(brainProviderName(appConfig.Dream.Brain), brain.WithCodexFallback(brain.Metered(dreamBrainConfig, apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store))
 		dreamer.CurfewExempt = p != config.BrainClaudeCLI
 	}
 	// Nightly dual-run: a local Gemma shadows the primary dream brain on the same prompts, replies logged for comparison, never acted on. The daemon owns the llama-server child for exactly one night's run — started before the stages, stopped after. The binary is the same llama-server the embedder already runs (appConfig.Embed.LlamaServer); a config with a dream model_path but no embed.llama_server falls back to PATH.
@@ -382,37 +495,15 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 	go every(ctx, 5*time.Minute, "dreaming", func() { dreamer.Tick(ctx) })
 
-	// age out old, low-importance episode text every 24 hours: clears screen_text (row kept, not deleted) for episodes older than keepRawFor whose importance is below importanceFloor.
+	// age out old episode JPEGs every 24 hours. Screen text is no longer cleared here: all captured text ever recorded is only 7.4 MB, and it is the source of truth for memory, so there is no storage reason to lose it.
 	go every(ctx, 24*time.Hour, "episode-aging", func() {
-		const (
-			keepRawFor      = 10 * 24 * time.Hour
-			importanceFloor = 0.3
-			keepImagesFor   = 14 * 24 * time.Hour
-		)
-		n, err := store.AgeEpisodes(ctx, keepRawFor, importanceFloor)
-		if err != nil {
-			slog.Error("episode aging failed", "error", err)
-		} else {
-			slog.Info("episode aging complete", "aged_rows", n)
-		}
+		const keepImagesFor = 14 * 24 * time.Hour
 		// JPEGs are the storage hog. Drop every vision thumbnail older than two weeks; keep the structured description.
 		dropped, err := store.AgeEpisodeImages(ctx, keepImagesFor)
 		if err != nil {
 			slog.Error("episode image aging failed", "error", err)
 		} else {
 			slog.Info("episode image aging complete", "dropped_jpegs", dropped)
-		}
-	})
-
-	// delete already-thinned, very old episode rows once a week, since AgeEpisodes above only ever empties screen_text and never deletes.
-	// Only rows already thinned (screen_text already empty) are eligible. episodes_fts stays in sync via the episodes_ad AFTER DELETE trigger.
-	go every(ctx, 7*24*time.Hour, "ancient-episode-prune", func() {
-		const ancientAfter = 365 * 24 * time.Hour
-		n, err := store.PruneAncientEpisodes(ctx, ancientAfter)
-		if err != nil {
-			slog.Error("ancient episode prune failed", "error", err)
-		} else {
-			slog.Info("ancient episode prune complete", "deleted_rows", n)
 		}
 	})
 
@@ -446,6 +537,87 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		})
 	}
 
+	// askAgent answers /ask questions the same way the CLI's text-eval path does: no mic/speaker (text only), the daemon's own store as the ContextReader, no compiler (buffer context isn't needed here).
+	askAgent := agent.NewAgent(nil, nil, store, nil, apiKey)
+	// The window's asks and the live voice session spend the interactive share of the same daily Gemini count the nightly jobs are held to, so the reserve is real.
+	askAgent.SetRequestGate(&geminiRequestGate{state: geminiQuota, opts: geminiQuotaOpts, forAsks: true})
+	// The window's read routes draw on the same store the daemon writes, on the compiler's live activity buffer — the one /buffer already serves — for what is on screen this second, and on the tracker's own active-window read for what has focus right now: the buffer only updates on the tracker's sampling interval, so a hotkey pressed between samples would otherwise name a window the user has already left.
+	ipcServer := ipc.New(askAgent, store, func() []tracker.Activity {
+		if compiler == nil {
+			return nil
+		}
+		return compiler.GetCurrentBuffer()
+	}, func(context.Context) (tracker.Activity, bool) {
+		// The tracker's own read has no cancellable form, so a context here can only bound how long the caller waits on it (see ipc.readFocused), not interrupt the call itself.
+		a, err := trackerImpl.GetActiveWindow()
+		if err != nil || a == nil || (a.App == "Unknown" && a.Title == "Unknown") {
+			return tracker.Activity{}, false
+		}
+		return *a, true
+	})
+	// A proactive moment goes to Ora's own card in the hover window when a window is there to show it, and falls back to the desktop's notifications only when none has been listening for a minute. Returning false is what makes that fallback happen, so a window that has just gone away does not swallow the notice.
+	proactive.SetNoticeSender(func(n proactive.Notice) bool {
+		if !ipcServer.Subscribed(time.Minute) {
+			return false
+		}
+		ipcServer.Notice(ipc.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind})
+		return true
+	})
+
+	// point_at rings through the same overlay path POST /overlay uses, so the extension has one thing to listen to. One agent answers every ask, so the ring itself says nothing about which question drew it; the server names the ask running at that moment (see ipc.Server.DrawingAsk) and the overlay event goes out under that id, so a client watching /events can tie the ring to the question.
+	askAgent.Point = func(x, y, w, h int, label string) {
+		ipcServer.Ring(ipcServer.DrawingAsk(), x, y, w, h, label)
+	}
+	askAgent.Draw = ipcServer.Draw
+	// show_marks marks through the same overlay path, one rect per observed item, labelled with the item's own number so the marks line up with what observe_screen just listed.
+	askAgent.Marks = func(items []act.Item) {
+		rects := make([]ipc.OverlayRect, len(items))
+		for i, it := range items {
+			rects[i] = ipc.OverlayRect{X: it.X, Y: it.Y, W: it.W, H: it.H, Label: strconv.Itoa(it.N)}
+		}
+		ipcServer.Marks(ipcServer.DrawingAsk(), rects)
+	}
+	// press_key, click_at and scroll_at drive the keyboard and pointer through the desktop portal, which asks the user to allow remote control the first time its session opens. The session opens on the first tool call that needs it, not here, so nobody sees that dialog until a task actually has to press a key or click a point the accessibility tree cannot reach; the grant is then restored from a token in the data directory, so the dialog is asked once rather than on every restart.
+	askAgent.UsePortalInput(config.DataDir())
+	// The bundled GNOME Shell extension, when the user has installed it and logged in again, raises another application's window on request; switch_window asks it first and falls back to the shell's own search through the portal keyboard when it is not there.
+	var windowRaiser *window.Raiser
+	if raiser, err := window.New(); err != nil {
+		slog.Warn("window raiser unavailable, switch_window will use the keyboard path", "error", err)
+	} else {
+		windowRaiser = raiser
+		askAgent.UseWindowRaiser(raiser)
+	}
+	// Codex answers asks the window routes to it by calling the ChatGPT backend directly with the user's own login, running the same tools through the same gate as the Gemini text path.
+	ipcServer.AddBrain("codex", agent.CodexBrain{Agent: askAgent})
+	// Claude answers through the Claude Code command line on the user's own subscription, with Ora's tools offered to it over MCP, so working on the screen does not depend on Codex's smaller monthly allowance.
+	ipcServer.AddBrain("claude", agent.ClaudeBrain{Agent: askAgent})
+	// Gemini is the default asker's own first choice, so naming it routes through that same path; without this line GET /brains offers Gemini while POST /ask refuses the name with a 400, which is what the window's picker hit on 2026-09-05.
+	ipcServer.AddBrain("gemini", askAgent)
+
+	// A long computer-use goal runs as a job in the daemon rather than inside one HTTP request (see internal/actjob): it plans, takes one checked step at a time, and can be stopped, paused, answered and resumed. Its rounds go to a plain prompt-in, text-out brain, never through an ask — an ask would run a second tool loop inside the job's own — and its steps go through the ask's own gated tool path, so the tool gate and the stop line have one copy.
+	// The default is the daemon's own configured brain, metered and tallied like every other call it makes; the CLI logins are offered by name so the same goal can be run on each and the cost compared. No API-key path is ever picked by default.
+	actModels := map[string]actjob.Model{"default": actjob.FromPromptFunc(brainProviderName(appConfig.Brain), mainBrain)}
+	for _, provider := range []string{config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI} {
+		actModels[provider] = actjob.FromPromptFunc(provider, brain.FromConfig(config.BrainConfig{Provider: provider}, apiKey))
+	}
+	actRunner := actjob.New(store, askAgent, actModels, "default", ipc.ActEmitter(ipcServer))
+	actJobs := ipc.NewActJobs(actRunner)
+	// A job the last daemon left in flight is never picked up by itself: resuming one moves things on the user's screen, so it waits to be asked for by name.
+	if unfinished, err := store.UnfinishedActJobs(ctx); err == nil {
+		for _, job := range unfinished {
+			slog.Info("act job left unfinished; POST /act/{id}/resume picks it up", "job", job.ID, "goal", job.Goal, "state", job.State)
+		}
+	}
+
+	// The unattended jobs were wired with a late-bound hand-over brain before the ask agent existed; publishing it here is what makes their 429 and 503 fallbacks live. It hands on again from Codex to Claude when Codex's own allowance is spent, so one spent subscription does not lose the day's summaries and minutes.
+	publishCodexFallback(brain.FromAsker(agent.CodexThenClaude{Agent: askAgent}))
+
+	// A routine asks through the same tool-calling path the window's /ask uses, so "when Priya replies about the venue" can look at the screen and the store rather than answer from a bare prompt.
+	scheduler.SetRoutineAsk(func(ctx context.Context, q string) (string, error) {
+		tr, err := askAgent.AskText(ctx, q)
+		return tr.Answer, err
+	})
+
 	// local http for IPC between the tui and daemon
 	mux := http.NewServeMux()
 
@@ -462,6 +634,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(buf)
 	}))
+
+	// The tray asks the window it started to open or to show its hover; the instruction travels on the event stream the window already reads.
+	mux.HandleFunc("/window", auth(ipcServer.Window))
 
 	// pause/resume tracking
 	mux.HandleFunc("/pause", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -495,8 +670,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			N         int               `json:"n"`
 			Where     map[string]string `json:"where"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !ipc.DecodeJSON(w, r, &req) {
 			return
 		}
 		results, err := vecIndex.Search(r.Context(), req.Embedding, req.N, req.Where)
@@ -519,8 +693,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			Embedding []float32         `json:"embedding"`
 			Metadata  map[string]string `json:"metadata"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !ipc.DecodeJSON(w, r, &req) {
 			return
 		}
 		if err := vecIndex.Add(r.Context(), req.ID, req.Content, req.Embedding, req.Metadata); err != nil {
@@ -538,8 +711,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		var req struct {
 			ID string `json:"id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !ipc.DecodeJSON(w, r, &req) {
 			return
 		}
 		if err := vecIndex.Delete(r.Context(), req.ID); err != nil {
@@ -559,8 +731,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			Task string `json:"task"`
 			Text string `json:"text"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if !ipc.DecodeJSON(w, r, &req) {
 			return
 		}
 		vec, err := embedEngine.Embed(r.Context(), embed.TaskType(req.Task), req.Text)
@@ -572,6 +743,53 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
 	}))
 
+	// /ask and /events let the desktop window pose a question about what's on screen and stream the answer as it comes together — see internal/ipc for the route bodies.
+	mux.HandleFunc("/ask", auth(ipcServer.Ask))
+	mux.HandleFunc("/events", auth(ipcServer.Events))
+
+	// A long computer-use goal: POST /act starts one and returns its id, GET /act/{id} is its whole record, and the four control routes stop it, hold it, carry it on and answer the one question a stuck job asks. Progress rides the same /events stream as an ask, tagged type "act" with the job's id.
+	mux.HandleFunc("POST /act", auth(actJobs.Start))
+	mux.HandleFunc("GET /act/{id}", auth(actJobs.Get))
+	mux.HandleFunc("POST /act/{id}/stop", auth(actJobs.Stop))
+	mux.HandleFunc("POST /act/{id}/pause", auth(actJobs.Pause))
+	mux.HandleFunc("POST /act/{id}/resume", auth(actJobs.Resume))
+	mux.HandleFunc("POST /act/{id}/answer", auth(actJobs.Answer))
+
+	// Hold-to-talk dictation: /dictate/start opens the microphone, /dictate/stop transcribes what was said with the same local whisper.cpp build the meeting recorder uses and hands the text back for the window to put in its input. Route bodies are in internal/ipc/dictate.go.
+	dictation := ipc.NewDictation(ipcServer)
+	mux.HandleFunc("/dictate/start", auth(dictation.Start))
+	mux.HandleFunc("/dictate/stop", auth(dictation.Stop))
+
+	// The window's read-only screens: what is on screen now, what is outstanding, what happened today, the meetings, a memory search and the people. Route bodies are in internal/ipc/reads.go.
+	mux.HandleFunc("/context", auth(ipcServer.Context))
+	mux.HandleFunc("/matters", auth(ipcServer.Matters))
+	mux.HandleFunc("/today", auth(ipcServer.Today))
+	mux.HandleFunc("/meetings", auth(ipcServer.Meetings))
+	mux.HandleFunc("/memory/search", auth(ipcServer.MemorySearch))
+	mux.HandleFunc("/people", auth(ipcServer.People))
+
+	// The window's voice: the daemon runs the same Gemini Live loop the terminal client does, and what the session hears, says and calls rides the /events stream above. Route bodies are in internal/ipc/voice.go.
+	voiceSession := ipc.NewVoice(ipcServer, store, apiKey)
+	mux.HandleFunc("/voice/start", auth(voiceSession.Start))
+	mux.HandleFunc("/voice/stop", auth(voiceSession.Stop))
+	mux.HandleFunc("/voice/status", auth(voiceSession.Status))
+
+	// The window's own record: the conversations it keeps and the turns inside them, the one list of work (action items plus the tasks the user typed in), the day pages, and which brains this machine is signed in to. Route bodies are in internal/ipc/conversations.go, tasks.go, days.go and brains.go.
+	mux.HandleFunc("/conversations", auth(ipcServer.Conversations))
+	mux.HandleFunc("/conversations/{id}", auth(ipcServer.Conversation)) // GET reads it, DELETE removes it
+	mux.HandleFunc("/conversations/{id}/title", auth(ipcServer.ConversationTitle))
+	mux.HandleFunc("/tasks", auth(ipcServer.Tasks))
+	mux.HandleFunc("/tasks/{id}/done", auth(ipcServer.TaskDone))
+	mux.HandleFunc("/days", auth(ipcServer.Days))
+	mux.HandleFunc("/days/{date}", auth(ipcServer.Day))
+	mux.HandleFunc("/routines", auth(ipcServer.Routines))
+	mux.HandleFunc("/routines/{id}", auth(ipcServer.RoutineDelete))
+	mux.HandleFunc("/routines/{id}/run", auth(ipcServer.RoutineRun))
+	mux.HandleFunc("/brains", auth(ipc.Brains(&appConfig, config.SaveConfig)))
+	mux.HandleFunc("/overlay", auth(ipcServer.Overlay))
+	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), appConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
+	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor)))
+
 	server := &http.Server{
 		Handler: mux,
 	}
@@ -582,21 +800,43 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 	}()
 
+	// The desktop window runs as the daemon's child, so the login entry starts one thing and stopping the daemon takes the window with it. It is started here, last, because the window reads the IPC token file once at startup: started any earlier it would read the token of the daemon that just exited, and every request it made would be refused for the life of the window.
+	runWindow(ctx, appConfig.Window)
+
 	stop = func() {
+		// Every step here gets a bound, because shutdown runs them one after another and a step that never finishes keeps the process alive holding port 6942, which is the one thing that stops the next daemon from starting.
 		// A recording in progress is closed first, before anything it depends on goes away. Nothing did this until a daemon restart on 2026-09-01 abandoned a meeting fourteen minutes in.
-		if meetingRecorder != nil {
-			if _, err := meetingRecorder.StopForShutdown(); err != nil {
-				slog.Warn("could not close the running meeting recording on shutdown", "error", err)
+		// Five seconds: this stops the audio capture, closes mic.wav and system.wav, and calls the tray's state observer, which emits over D-Bus. All of it is local and takes milliseconds; the bound is there for a wedged session bus, not for the work.
+		closeWithin("closing the running meeting recording", 5*time.Second, func() {
+			if meetingRecorder != nil {
+				if _, err := meetingRecorder.StopForShutdown(); err != nil {
+					slog.Warn("could not close the running meeting recording on shutdown", "error", err)
+				}
 			}
-		}
+		})
+		// The event streams are ended first: Shutdown waits for open handlers but never cancels their requests, so a daemon with the window connected would otherwise hold its port for the whole timeout and the next daemon could not bind.
+		ipcServer.CloseStreams()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		server.Shutdown(shutdownCtx)
 		// The embedding server is this process's child and must never outlive it — a stranded llama-server holds ~600 MB and the port the next daemon needs.
-		if embedEngine != nil {
-			embedEngine.Close()
-		}
-		store.Close()
+		// Ten seconds: Close interrupts the child and waits up to five for it to exit before sending SIGKILL, then waits for the reap. That is its own five plus room for the kill, so this bound only fires if the child is unkillable.
+		closeWithin("stopping the embedding server", 10*time.Second, func() {
+			textEngine.Close()
+			if embedEngine != nil {
+				embedEngine.Close()
+			}
+		})
+		// Five seconds: database/sql's Close waits for every connection in use to come back, and the daemon's background sweeps — vector reconciliation, note consolidation, episodic compaction — hold one for the length of their query. Five is long enough for a statement to finish and short enough that a sweep caught mid-flight does not keep the port bound.
+		closeWithin("closing the store", 5*time.Second, func() { store.Close() })
+		// The window raiser's session-bus connection is this process's too, so it is released here rather than left to process exit. Two seconds: closing a D-Bus connection is local and takes microseconds; the bound is there for a wedged bus, not for the work.
+		closeWithin("closing the window raiser", 2*time.Second, func() {
+			if windowRaiser != nil {
+				if err := windowRaiser.Close(); err != nil {
+					slog.Warn("could not close the window raiser's bus connection", "error", err)
+				}
+			}
+		})
 	}
 
 	return stop, daemon, nil
