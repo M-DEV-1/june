@@ -143,10 +143,10 @@ export function Reading({ wide, rail, children }: { wide: boolean; rail?: ReactN
   );
 }
 
-/** The rail beside a document. Input: what it names itself to a screen reader and what it holds. Output: the column, 280px wide and pinned to the top of the region as the document scrolls past it. */
+/** The rail beside a document. Input: what it names itself to a screen reader and what it holds. Output: the column, 280px wide and pinned to the top of the region as the document scrolls past it, with a hairline down its left edge so it reads as a column next to the document rather than a second document floating beside it. */
 export function Rail({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <aside aria-label={label} className="sticky top-0 flex w-[280px] shrink-0 flex-col gap-7 self-start">
+    <aside aria-label={label} className="sticky top-0 flex w-[280px] shrink-0 flex-col gap-7 self-start border-l border-hairline pl-6">
       {children}
     </aside>
   );

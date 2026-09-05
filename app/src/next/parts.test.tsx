@@ -9,7 +9,7 @@ import { Provider } from "react-redux";
 import { useState } from "react";
 
 import type { Brain, UsageLimit } from "./api";
-import { BrainPicker, Scroller, UsageBar } from "./parts";
+import { BrainPicker, Rail, Scroller, UsageBar } from "./parts";
 import { makeStore } from "./store";
 import { stubBrowser } from "./testing";
 
@@ -56,6 +56,15 @@ describe("Scroller staying put", () => {
     await userEvent.click(screen.getByText("rerender, same content"));
 
     expect(view.scrollTop).toBe(3150);
+  });
+});
+
+describe("Rail", () => {
+  it("carries a hairline border down its left edge so it reads apart from the document beside it", () => {
+    render(<Rail label="Sections">hi</Rail>);
+    const aside = screen.getByLabelText("Sections");
+    expect(aside.className).toContain("border-l");
+    expect(aside.className).toContain("border-hairline");
   });
 });
 
