@@ -415,3 +415,32 @@ func TestPickMeetingNote_MatchesOnTheRareWordAndIgnoresTheCommonOne(t *testing.T
 		t.Errorf("pickMeetingNote = %d,%v, want the note sharing the rare word", got.ID, ok)
 	}
 }
+
+// A Chinese meeting window writes its buttons, its chat and a person's name in the same script, and nothing in that script is capitalised, so the caseless pass has only the line's own shape to go on. A line of chat text is not a roster line, and nothing on it — least of all the app's own words for mute, leave and participants — is a person on the call.
+func TestCollectMeetingNames_CJKChatTextIsNotAParticipant(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - team-sync - Brave", ScreenText: "李伟: 静音 离开会议 参会者 我马上加入会议\n王芳: 好的 我们开始吧 请大家静音\nMute\nLeave call"},
+	}
+
+	got := collectMeetingNames(eps, true, nil)
+
+	if len(got) != 0 {
+		t.Errorf("collectMeetingNames = %v, want no names from a window whose chat is written in a caseless script", got)
+	}
+}
+
+// A roster lists one name per line, and a name in a caseless script is written across two words there just as a Latin one is. It must arrive as the whole name rather than as its two words separately, since half a name matches nothing in past minutes.
+func TestCollectMeetingNames_CaselessRosterLineIsOneWholeName(t *testing.T) {
+	eps := []db.Episode{
+		{Title: "Meet - team-sync - Brave", ScreenText: "People (3)\nराहुल शर्मा\nRohit Verma\nYou\nMute\nLeave call"},
+	}
+
+	got := collectMeetingNames(eps, true, nil)
+
+	if !contains(got, "राहुल शर्मा") {
+		t.Errorf("collectMeetingNames = %v, want the whole two-word name %q", got, "राहुल शर्मा")
+	}
+	if contains(got, "राहुल") || contains(got, "शर्मा") {
+		t.Errorf("collectMeetingNames = %v, want no half of the name on its own", got)
+	}
+}
