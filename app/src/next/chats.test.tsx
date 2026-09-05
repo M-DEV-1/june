@@ -378,9 +378,11 @@ describe("asking a question", () => {
     store.dispatch(
       progress.askAccepted({ askId: "ask-1", conversationId: "c1" }),
     );
+    // The question in flight says it is working with the dot grid, the one shape that means Ora is busy, and no words of its own.
     await waitFor(() =>
-      expect(screen.getAllByText("working…")).toHaveLength(1),
+      expect(screen.getAllByRole("img", { name: "Ora is working" })).toHaveLength(1),
     );
+    expect(screen.queryByText("working…")).toBeNull();
     store.dispatch(
       progress.eventArrived({ id: "ask-1", type: "status", text: "Checking." }),
     );
@@ -409,8 +411,9 @@ describe("asking a question", () => {
       }),
     );
     expect(await screen.findByText("They are booked.")).toBeDefined();
-    // The one line under the answer says it is still coming, and it is said once because there is nowhere else it could be said.
-    expect(screen.getAllByText("still writing")).toHaveLength(1);
+    // Under the partial answer the same dot grid says the rest is still coming, in place of the old words.
+    expect(screen.getAllByRole("img", { name: "Ora is working" })).toHaveLength(1);
+    expect(screen.queryByText("still writing")).toBeNull();
   });
 
 });
