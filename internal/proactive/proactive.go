@@ -599,9 +599,12 @@ func sendNotice(n Notice) bool {
 	return send != nil && send(n)
 }
 
-// say delivers one of the scheduler's own moments both to the desktop window, as a card of its own, and to the desktop notification with the full set of buttons — always both, since either surface can be the one on screen when the user acts: a window left open all day still wants the notification's Done/snooze buttons, and a notification answered from the message tray still wants the window's rail line to update. Input: the notice. Output: nothing.
+// say delivers one of the scheduler's own moments to whichever single surface is there to show it: the desktop window's own card when a window is reading the event stream, and otherwise the desktop notification carrying the full set of buttons. Input: the notice. Output: nothing.
+// One surface, not both: the window's card offers the same Done and snooze buttons through POST /notices/{kind}/{id}/action, so posting a banner as well asked the user the same question twice. This is the rule the package-level Notify below already followed for a meeting's own moments.
 func (s *Scheduler) say(n Notice) {
-	sendNotice(n)
+	if sendNotice(n) {
+		return
+	}
 	s.post(n)
 }
 

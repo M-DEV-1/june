@@ -352,7 +352,7 @@ func atHour(day time.Time, hour int) time.Time {
 	return time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, day.Location())
 }
 
-// maybeSnoozes posts every snooze that has come due, with the same buttons as the first time so it can be pushed back again. Each is stamped as fired before it is posted, so a snooze can only ever come back once per pressing.
+// maybeSnoozes raises every snooze that has come due, with the same buttons as the first time so it can be pushed back again. Each is stamped as fired before it is raised, so a snooze can only ever come back once per pressing. It goes through say rather than post so a re-fired snooze lands on the same single surface a first-time notice does: the window's card when a window is up, the desktop banner when none is.
 func (s *Scheduler) maybeSnoozes(ctx context.Context) {
 	due, err := s.store.DueSnoozes(ctx, s.now())
 	if err != nil {
@@ -364,7 +364,7 @@ func (s *Scheduler) maybeSnoozes(ctx context.Context) {
 			slog.Warn("snoozes: could not stamp one as fired, skipping it", "id", sn.ID, "error", err)
 			continue
 		}
-		s.post(Notice{Title: sn.Title, Body: sn.Body, ID: sn.NoticeID, Kind: sn.Kind})
+		s.say(Notice{Title: sn.Title, Body: sn.Body, ID: sn.NoticeID, Kind: sn.Kind})
 	}
 }
 
