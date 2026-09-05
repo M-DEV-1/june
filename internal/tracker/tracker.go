@@ -42,6 +42,14 @@ type Tracker interface {
 	GetActiveWindow() (*Activity, error)
 }
 
+// IsOraWindow reports whether a window is Ora's own desktop window: the app is named ora, or it is the XWayland frame process (mutter-x11-frames) carrying the exact title "Ora". A terminal titled "ora" because it sits in the repo is not the window, so the title alone never decides.
+// Input: an application name and a window title. Output: true when the window is Ora itself.
+// Ora looking at Ora is never the user's activity, so this is the one rule the tracker, the capture loop and the /context reads all filter by.
+func IsOraWindow(app, title string) bool {
+	app = strings.TrimSpace(app)
+	return strings.EqualFold(app, "ora") || (app == "mutter-x11-frames" && strings.TrimSpace(title) == "Ora")
+}
+
 func Normalize(app, title string) *Activity {
 	// memory scrubbing
 	cleanApp := strings.TrimSpace(strings.ReplaceAll(app, "\x00", ""))

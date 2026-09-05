@@ -4,7 +4,11 @@ package tracker
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -22,16 +26,25 @@ func extractText() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
 	defer cancel()
 
-	text, _ := atspiExtract(ctx)
-	return text, nil
+	return atspiTextWithin(ctx), nil
+}
+
+// atspiTextWithin reads the focused window's accessibility text and gives up at ctx's deadline whatever the bus is doing. Input: a context carrying the budget. Output: the text, or "" when the budget ran out first.
+// The budget has to be enforced from out here because the context does not reach all the way in: dialling the accessibility bus goes through dbus.Dial, Auth and Hello, none of which take a context, so a bus that accepted the connection and then stopped talking would otherwise hold the caller for good. The context is still passed down as well, so the method calls that do honour it stop on their own instead of running on unread.
+func atspiTextWithin(ctx context.Context) string {
+	return withBudget(ctx, func() string {
+		text, _ := atspiExtract(ctx)
+		return text
+	})
 }
 
 // Walk bounds — deep enough to reach text in IDEs/terminals/rich native apps, but bounded so a pathological tree can't hang capture. captureTimeout is the hard ceiling regardless.
 const (
 	captureTimeout = 2500 * time.Millisecond
-	maxDepth       = 14
-	maxNodes       = 4000
-	maxTextLen     = 100000
+	// maxDepth is how far down an accessibility tree the walk goes. A web app nests deeply: on 2026-09-03 the Teams window in Chrome had its document at depth 7 and its text, the people list included, down to depth 26, and at 14 the read returned eleven characters. The node cap and the deadline are what bound the cost, so this only needs to clear the deepest page seen.
+	maxDepth   = 40
+	maxNodes   = 4000
+	maxTextLen = 100000
 )
 
 // enableATSPI makes GTK3/Qt/VTE apps build and expose their accessibility trees, by setting org.a11y.Status.IsEnabled only.
@@ -47,43 +60,399 @@ func enableATSPI() {
 		"org.a11y.Status", "IsEnabled", dbus.MakeVariant(true))
 }
 
+// busDialer opens a connection to the accessibility bus. Input: a context bounding the dial. Output: a live connection the caller must close, or an error when the bus is absent or unreachable.
+type busDialer func(ctx context.Context) (*dbus.Conn, error)
+
+// dialBus is the dialler every reader in this file goes through, or nil for the real one. It is swappable so a test can stand in a bus that accepts the connection and then never answers, which is the failure the deadlines below exist for. It is atomic rather than a plain variable because a read abandoned at its deadline is still inside this function when a test puts the real dialler back.
+var dialBus atomic.Pointer[busDialer]
+
+// dialTheBus dials the accessibility bus through whichever dialler is installed. Input: a context bounding the dial. Output: a live connection the caller must close, or an error.
+func dialTheBus(ctx context.Context) (*dbus.Conn, error) {
+	if d := dialBus.Load(); d != nil {
+		return (*d)(ctx)
+	}
+	return dialA11y(ctx)
+}
+
+// namedWindow is an application name and a window title travelling together, so a two-value read can pass through withBudget.
+type namedWindow struct {
+	app   string
+	title string
+}
+
+// meetingRead is one look for a call window: the application, the window title, the text read out of it, and whether a call window was found at all.
+type meetingRead struct {
+	app   string
+	title string
+	text  string
+	ok    bool
+}
+
 // aref is an AT-SPI accessible reference: the bus name + object path tuple.
 type aref struct {
 	Name string
 	Path dbus.ObjectPath
 }
 
-// atspiExtract does the real work so we can return errors internally without leaking them to the caller.
-func atspiExtract(ctx context.Context) (string, error) {
-	// Step 1: get the a11y bus address from the session bus.
+// dialA11y opens a connection to the accessibility bus, whose address it asks the session bus for. Input: a context bounding both calls. Output: a live, authenticated connection the caller must close, or an error when the bus is absent or unreachable.
+func dialA11y(ctx context.Context) (*dbus.Conn, error) {
 	sess, err := dbus.SessionBus()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	regObj := sess.Object("org.a11y.Bus", "/org/a11y/bus")
 	var addr string
-	if err := regObj.CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil {
-		return "", err
+	if err := sess.Object("org.a11y.Bus", "/org/a11y/bus").CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil {
+		return nil, err
 	}
 	if addr == "" {
-		return "", nil
+		return nil, dbus.ErrClosed
+	}
+	conn, err := dbus.Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Auth(nil); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := conn.Hello(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// focusState remembers the window the desktop last said was activated, together with its application's name.
+// It exists because STATE_ACTIVE is not trustworthy: probed on 2026-09-04, the Chrome window hosting the Teams PWA kept the bit set after losing focus while a second window also carried it, so a walk that returns the first ACTIVE window it meets reports Teams no matter where the user is working. The window:activate and window:deactivate signals are exact and arrive in milliseconds.
+type focusState struct {
+	mu     sync.Mutex
+	ref    aref
+	app    string
+	ora    bool // whether the window in ref is Ora's own
+	prev   aref // the last activated window that was not Ora's own
+	prevAp string
+	seen   bool
+}
+
+// apply records one AT-SPI window signal. Input: the signal's member name, the window accessible it names, and that window's application name and title (both read only for activations). An activate replaces whatever was remembered; a deactivate clears the memory only when it names the remembered window, so a late deactivate from a window already left cannot blank the current one. The member is compared case-insensitively because Chromium emits "Activate" and GTK4 emits "activate".
+// Activating a window that is not Ora's own also records it as the previous window, which is what get hands back while Ora itself holds focus.
+func (s *focusState) apply(member string, ref aref, app, title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seen = true
+	switch {
+	case strings.EqualFold(member, "activate"):
+		s.ref, s.app, s.ora = ref, app, IsOraWindow(app, title)
+		if !s.ora {
+			s.prev, s.prevAp = ref, app
+		}
+	case strings.EqualFold(member, "deactivate"):
+		if s.ref != ref {
+			return
+		}
+		// Ora's own window closing hands focus back to the window it was opened over, and that window sent its activate before Ora took focus, so it sends no other one. Restoring it here is the only way back: blanking the state left nothing focused until the user next switched applications, which meant no episodes and every screen tool answering that nothing is on screen.
+		if s.ora && s.prev.Name != "" {
+			s.ref, s.app, s.ora = s.prev, s.prevAp, false
+			return
+		}
+		s.ref, s.app, s.ora = aref{}, "", false
+	}
+}
+
+// get returns the window to report and its application name. While Ora's own window holds focus it returns the last window the user was in instead, because the hover is opened to ask about what is behind it. ok is false when nothing holds focus, either because no signal has arrived yet or because the last one was the deactivation of the window we were holding.
+func (s *focusState) get() (aref, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ora && s.prev.Name != "" {
+		return s.prev, s.prevAp, true
+	}
+	return s.ref, s.app, s.ref.Name != ""
+}
+
+// previous returns the last window that took focus and was not Ora's own, together with its application name. Unlike get it still answers after that window has been deactivated with nothing else taking focus, which is what happens whenever focus moves to an application that publishes no accessibility tree. ok is false when no such window has been seen, or when the one remembered has left the bus. Callers that must know what holds focus right now use get; this one answers "what was the user last in".
+func (s *focusState) previous() (aref, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prev, s.prevAp, s.prev.Name != ""
+}
+
+// clear forgets a window that has left the bus and can no longer answer, whether it was the focused one, the previous one, or both.
+func (s *focusState) clear(ref aref) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ref == ref {
+		s.ref, s.app, s.ora = aref{}, "", false
+	}
+	if s.prev == ref {
+		s.prev, s.prevAp = aref{}, ""
+	}
+}
+
+// seenAny reports whether any window signal has arrived. Until one has, callers may still fall back to walking the tree for STATE_ACTIVE; after one has, the absence of a focused window is an answer in itself and the walk would only resurrect a stale bit.
+func (s *focusState) seenAny() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seen
+}
+
+// signalMember returns the part of a D-Bus signal name after the last dot, e.g. "Activate" for "org.a11y.atspi.Event.Window.Activate".
+func signalMember(name string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return name[i+1:]
+	}
+	return name
+}
+
+// focusWatcher holds one live subscription to AT-SPI window activations. Its connection carries the signals and also serves the title read, so reporting the focused window costs one round trip instead of a walk over every application on the bus. It lives exactly as long as that connection does; when the bus drops it, the supervisor builds a new one.
+type focusWatcher struct {
+	conn  *dbus.Conn
+	state focusState
+}
+
+// How long the supervisor waits before dialling the accessibility bus again. The first retry is short because the usual cause is the bus launcher restarting and coming straight back; the ceiling stops a machine that has no accessibility bus at all from dialling in a tight loop for the life of the process.
+const (
+	focusRetryMin = time.Second
+	focusRetryMax = time.Minute
+)
+
+// focusSupervisor keeps one connected focus watcher available to the process. It exists because the connection does not last: the accessibility bus launcher restarts, accessibility is toggled, the machine resumes from suspend, and on any of those the D-Bus library closes the signal channel, the consume loop ends and the watcher is deaf. Readers take the live watcher with current, which is nil while there is none, and fall back to walking the tree for STATE_ACTIVE.
+type focusSupervisor struct {
+	cur atomic.Pointer[focusWatcher]
+	// ready is closed once the first dial has finished, win or lose, so the first caller waits for the answer instead of being told there is no bus while the dial is still in flight — which is all a short-lived process would ever see.
+	ready   chan struct{}
+	settled sync.Once
+}
+
+var (
+	focusOnce sync.Once
+	focusSup  focusSupervisor
+)
+
+// focus returns the process-wide window watcher, starting the supervisor that keeps one connected on first use. Output: nil while there is no connection to the accessibility bus, in which case callers fall back to walking the tree.
+func focus() *focusWatcher {
+	focusOnce.Do(func() {
+		focusSup.ready = make(chan struct{})
+		go focusSup.supervise(context.Background(), dialFocusWatcher, time.Sleep)
+	})
+	focusSup.waitReady()
+	return focusSup.current()
+}
+
+// waitReady blocks until the first dial has finished, or captureTimeout passes, whichever comes first. Later calls return at once, including while a reconnection is in flight: the answer then is the honest "no watcher right now", and the caller walks the tree.
+func (s *focusSupervisor) waitReady() {
+	if s.ready == nil {
+		return
+	}
+	t := time.NewTimer(captureTimeout)
+	defer t.Stop()
+	select {
+	case <-s.ready:
+	case <-t.C:
+	}
+}
+
+// settle releases the callers waiting on the first dial. Called after every attempt and does its work only on the first.
+func (s *focusSupervisor) settle() {
+	s.settled.Do(func() {
+		if s.ready != nil {
+			close(s.ready)
+		}
+	})
+}
+
+// current returns the watcher callers should read, or nil while the supervisor has no connection to the accessibility bus.
+func (s *focusSupervisor) current() *focusWatcher { return s.cur.Load() }
+
+// supervise keeps a focus watcher connected until ctx ends. Input: a context, a dial function returning a watcher already subscribed to window signals together with the channel those signals arrive on, and a sleep used for the backoff — the last two are parameters so this loop can be tested without an accessibility bus. It publishes the watcher while its connection is up, consumes signals until that connection drops, withdraws the watcher, logs why it stopped, and dials again after a wait that grows to focusRetryMax while dialling keeps failing.
+// The dead watcher is withdrawn rather than kept, and its replacement starts with an empty focus state, because both the seen flag and the window references belong to the connection they were learned on. A dead watcher left in place went on reporting that it had seen a focus signal, which is the flag that turns off the fallback tree walk, so its death took the healthy paths down with it.
+func (s *focusSupervisor) supervise(ctx context.Context, dial func() (*focusWatcher, chan *dbus.Signal, error), sleep func(time.Duration)) {
+	backoff := focusRetryMin
+	for ctx.Err() == nil {
+		w, sigs, err := dial()
+		s.settle()
+		if err != nil {
+			slog.Warn("cannot watch window focus, the accessibility bus did not answer", "error", err, "retry_in", backoff)
+		} else {
+			backoff = focusRetryMin
+			s.cur.Store(w)
+			slog.Info("watching window focus over the accessibility bus")
+			w.run(sigs) // returns when the bus closes the signal channel under it
+			s.cur.Store(nil)
+			w.close()
+			slog.Warn("the window focus watcher lost its bus connection, reconnecting", "retry_in", backoff)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		sleep(backoff)
+		backoff = min(2*backoff, focusRetryMax)
+	}
+}
+
+// dialFocusWatcher connects to the accessibility bus, asks the registry to emit window activations, and subscribes to them. Output: a watcher holding the connection and the channel its window signals will arrive on, or an error naming what failed — no bus, a registry that refused the registration, or a match rule the bus would not add.
+func dialFocusWatcher() (*focusWatcher, chan *dbus.Signal, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	// The real dialler, not the dialBus seam: this runs on the supervisor's own goroutine, which nothing waits on, and a dial that never answers costs only a reconnection attempt.
+	conn, err := dialA11y(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The registry only routes an event class to listeners that have registered for it; without this the match below receives nothing.
+	reg := conn.Object("org.a11y.atspi.Registry", dbus.ObjectPath("/org/a11y/atspi/registry"))
+	for _, ev := range []string{"window:activate", "window:deactivate"} {
+		if call := reg.CallWithContext(ctx, "org.a11y.atspi.Registry.RegisterEvent", 0, ev); call.Err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("the accessibility registry refused %s: %w", ev, call.Err)
+		}
+	}
+	if err := conn.AddMatchSignal(dbus.WithMatchInterface("org.a11y.atspi.Event.Window")); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("the accessibility bus refused the window signal match: %w", err)
 	}
 
-	// Step 2: dial the dedicated AT-SPI bus (separate from the session bus).
-	conn, err := dbus.Dial(addr)
+	w := &focusWatcher{conn: conn}
+	sigs := make(chan *dbus.Signal, 64)
+	conn.Signal(sigs)
+	return w, sigs, nil
+}
+
+// close drops the watcher's bus connection, which also closes its signal channel if the bus has not already done so. Safe on a watcher that never had a connection.
+func (w *focusWatcher) close() {
+	if w.conn != nil {
+		w.conn.Close()
+	}
+}
+
+// hearsTheDesktop reports whether this watcher is still connected and has had at least one window signal. Only then is "no window has focus" an answer rather than a gap: a watcher whose connection has died knows nothing, so callers walk the tree instead of trusting it while the supervisor is still on its way to withdrawing it.
+func (w *focusWatcher) hearsTheDesktop() bool {
+	return w.conn != nil && w.conn.Connected() && w.state.seenAny()
+}
+
+// frameAppLogged makes the mutter-x11-frames note below fire once per process rather than on every X11 activation, since every such window that takes focus goes through it.
+var frameAppLogged sync.Once
+
+// run applies every window signal to the focus state, naming each activated window by reading its own Name and its accessible parent's over the bus. It returns when the connection closes and the channel drains.
+func (w *focusWatcher) run(sigs chan *dbus.Signal) {
+	w.consume(sigs, func(ref aref) (string, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+		defer cancel()
+		app := getName(ctx, w.conn, getParent(ctx, w.conn, ref))
+		title := getName(ctx, w.conn, ref)
+		if app == "mutter-x11-frames" {
+			// An X11 window's activation is announced by the compositor's frame process, not by the app inside it: the frame's own Name is already the window's title, which title holds, but there is no cheaper way from AT-SPI alone to reach the real client's name. Logged once so it is visible without repeating for every such window.
+			frameAppLogged.Do(func() {
+				slog.Info("an X11 window activated through its mutter frame; reporting the frame as the app name since the accessibility bus does not expose the real client here", "title", title)
+			})
+		}
+		return app, title
+	})
+}
+
+// consume is run's loop with the window lookup passed in, so the signal handling can be tested without a bus. Input: a channel of AT-SPI window signals and a function returning the application name and title of a window accessible. It records each activation and deactivation and ignores every other window signal.
+func (w *focusWatcher) consume(sigs chan *dbus.Signal, describe func(aref) (app, title string)) {
+	for s := range sigs {
+		member := signalMember(s.Name)
+		isActivate := strings.EqualFold(member, "activate")
+		if !isActivate && !strings.EqualFold(member, "deactivate") {
+			continue
+		}
+		ref := aref{Name: s.Sender, Path: s.Path}
+		app, title := "", ""
+		if isActivate {
+			app, title = describe(ref)
+		}
+		w.state.apply(member, ref, app, title)
+	}
+}
+
+// current returns the application name and title of the window that last took focus. The title is read live because a window keeps its identity while its title changes — a browser switching tabs sends no activation — and ok is false when no window holds focus or the remembered one has gone, which drops it from the state.
+// The remembered window can also be alive but no longer the active one: its own activation never arrived, which happens when the window that actually took focus belongs to another session's systemd scope, or was announced by its mutter-x11-frames client rather than by the app. So the remembered window's STATE_ACTIVE bit is checked here too, and when it is unset the desktop is scanned for whichever window really is active (see activeOrFallback and scanForActive); the state is updated to that window so the next call does not re-scan.
+func (w *focusWatcher) current(ctx context.Context) (app, title string, ok bool) {
+	ref, app, ok := w.state.get()
+	if !ok {
+		return "", "", false
+	}
+	title, err := readName(ctx, w.conn, ref)
+	if err != nil {
+		w.state.clear(ref)
+		return "", "", false
+	}
+	newRef, app, title, ok := activeOrFallback(ref, app, title, hasState(ctx, w.conn, ref, stateActive), func() (aref, string, string, bool) {
+		return scanForActive(ctx, w.conn)
+	})
+	if !ok {
+		return "", "", false
+	}
+	if newRef != ref {
+		w.state.apply("activate", newRef, app, title)
+	}
+	return app, title, true
+}
+
+// activeOrFallback decides what current() reports once it already knows the remembered window's live title. Input: the remembered window's ref, app and title, whether it still carries STATE_ACTIVE, and a scan for whichever window is active when it does not. Output: the window to report and true, or false when neither the remembered window nor any other is active. Kept apart from current() so the decision can be tested without a live accessibility bus.
+func activeOrFallback(ref aref, app, title string, active bool, scan func() (aref, string, string, bool)) (aref, string, string, bool) {
+	if active {
+		return ref, app, title, true
+	}
+	// Ora's own window holding focus is the one case the remembered window exists to hide, so a scan that finds only it reports no focus rather than Ora.
+	if newRef, newApp, newTitle, found := scan(); found && !IsOraWindow(newApp, newTitle) {
+		return newRef, newApp, newTitle, true
+	}
+	return aref{}, "", "", false
+}
+
+// getParent reads the accessible's Parent property, which for a top-level window is its application. Output: the zero aref when the property cannot be read.
+func getParent(ctx context.Context, conn *dbus.Conn, ref aref) aref {
+	obj := conn.Object(ref.Name, ref.Path)
+	var v dbus.Variant
+	if err := obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0,
+		"org.a11y.atspi.Accessible", "Parent").Store(&v); err != nil {
+		return aref{}
+	}
+	var p struct {
+		Name string
+		Path dbus.ObjectPath
+	}
+	if err := dbus.Store([]interface{}{v.Value()}, &p); err != nil {
+		return aref{}
+	}
+	return aref{Name: p.Name, Path: p.Path}
+}
+
+// walkWindow walks one window's accessibility subtree and says, at debug, when a bound rather than the end of the tree is what stopped it. Input: a context carrying the walk's budget, a live bus connection and the window accessible. Output: the tree that was built, partial when a bound was hit.
+// It is logged because a truncated walk returns short text and is indistinguishable, from the outside, from a window that simply had little in it. Measured on this desktop on 2026-09-05: the focused window's walk costs 0.5-80 ms over 2-400 nodes and reaches depth 22 at most, well inside every bound; the one walk that comes near them is gnome-shell's own tree, at 3,836-3,933 nodes against the 4,000 cap and 0.87-1.94 s against the 2.5 s budget, and only the pre-focus-signal fallback ever walks it.
+func walkWindow(ctx context.Context, conn *dbus.Conn, win aref) a11yNode {
+	visited := 0
+	started := time.Now()
+	tree := buildA11yTree(ctx, conn, win, 0, &visited)
+	if visited >= maxNodes || ctx.Err() != nil {
+		slog.Debug("the accessibility walk stopped on a bound, not on the end of the tree",
+			"nodes", visited, "node_cap", maxNodes, "elapsed", time.Since(started), "deadline_passed", ctx.Err() != nil)
+	}
+	return tree
+}
+
+// atspiExtract does the real work so we can return errors internally without leaking them to the caller.
+func atspiExtract(ctx context.Context) (string, error) {
+	conn, err := dialTheBus(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
-	if err := conn.Auth(nil); err != nil {
-		return "", err
-	}
-	if err := conn.Hello(); err != nil {
-		return "", err
+
+	// Read the window the desktop last activated. Choosing by STATE_ACTIVE instead pulls in windows that have lost focus but kept the bit, which is how a Teams tab's text ended up filed against whatever the user was really doing.
+	if w := focus(); w != nil {
+		if ref, _, ok := w.state.get(); ok {
+			return trimText(documentText(walkWindow(ctx, conn, ref))), nil
+		}
+		if w.hearsTheDesktop() {
+			return "", nil
+		}
 	}
 
-	// Step 3: enumerate application-level accessibles from the registry root.
+	// No signal has arrived yet: enumerate application-level accessibles from the registry root and take the windows that claim to be active.
 	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
 	apps, err := getChildren(ctx, conn, root)
 	if err != nil {
@@ -109,8 +478,7 @@ func atspiExtract(ctx context.Context) (string, error) {
 				continue
 			}
 			// found the focused window — walk its subtree, then apply documentText's role-aware rule: browser chrome lives outside any DOCUMENT_WEB node, so keep only that when present; native apps have none and fall back to the full tree.
-			visited := 0
-			tree := buildA11yTree(ctx, conn, win, 0, &visited)
+			tree := walkWindow(ctx, conn, win)
 			if t := strings.TrimSpace(documentText(tree)); t != "" {
 				if _, dup := seen[t]; !dup {
 					seen[t] = struct{}{}
@@ -125,11 +493,15 @@ func atspiExtract(ctx context.Context) (string, error) {
 		return "", nil
 	}
 
-	result := strings.Join(parts, "\n")
-	if len(result) > maxTextLen {
-		result = result[:maxTextLen]
+	return trimText(strings.Join(parts, "\n")), nil
+}
+
+// trimText strips surrounding whitespace from captured text and caps it at maxTextLen bytes.
+func trimText(s string) string {
+	if len(s) > maxTextLen {
+		s = s[:maxTextLen]
 	}
-	return strings.TrimSpace(result), nil
+	return strings.TrimSpace(s)
 }
 
 // extractMeetingWindow finds a call in progress anywhere on the desktop and reads it, whether or not it has focus, returning its app, its window title and its text. ok is false when no meeting window is open.
@@ -139,31 +511,27 @@ func extractMeetingWindow() (app, title, text string, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
 	defer cancel()
 
-	sess, err := dbus.SessionBus()
+	r := meetingWindowWithin(ctx)
+	return r.app, r.title, r.text, r.ok
+}
+
+// meetingWindowWithin is the look for a call window with its deadline made real: the whole read, dialling the bus included, is abandoned once ctx is done. Input: a context carrying the budget. Output: what was found, with ok false when there is no call window or the budget ran out first.
+func meetingWindowWithin(ctx context.Context) meetingRead {
+	return withBudget(ctx, func() meetingRead { return scanForMeetingWindow(ctx) })
+}
+
+// scanForMeetingWindow walks every application on the accessibility bus looking for a window whose name says a call is in progress, and reads it. Input: a context bounding the bus calls. Output: the call window's application, title and text, with ok false when no call window is open.
+func scanForMeetingWindow(ctx context.Context) meetingRead {
+	conn, err := dialTheBus(ctx)
 	if err != nil {
-		return "", "", "", false
-	}
-	regObj := sess.Object("org.a11y.Bus", "/org/a11y/bus")
-	var addr string
-	if err := regObj.CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil || addr == "" {
-		return "", "", "", false
-	}
-	conn, err := dbus.Dial(addr)
-	if err != nil {
-		return "", "", "", false
+		return meetingRead{}
 	}
 	defer conn.Close()
-	if err := conn.Auth(nil); err != nil {
-		return "", "", "", false
-	}
-	if err := conn.Hello(); err != nil {
-		return "", "", "", false
-	}
 
 	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
 	apps, err := getChildren(ctx, conn, root)
 	if err != nil {
-		return "", "", "", false
+		return meetingRead{}
 	}
 
 	for _, a := range apps {
@@ -183,55 +551,63 @@ func extractMeetingWindow() (app, title, text string, ok bool) {
 			if !IsMeetingWindow(appName, winName) {
 				continue
 			}
-			visited := 0
-			tree := buildA11yTree(ctx, conn, win, 0, &visited)
+			tree := walkWindow(ctx, conn, win)
 			t := strings.TrimSpace(documentText(tree))
 			if len(t) > maxTextLen {
 				t = t[:maxTextLen]
 			}
-			return appName, winName, t, true
+			return meetingRead{app: appName, title: winName, text: t, ok: true}
 		}
 	}
-	return "", "", "", false
+	return meetingRead{}
 }
 
-// atspiActiveWindow returns (app, title) of the focused window via AT-SPI, walking the same registry tree as atspiExtract but reading Names instead of text.
-// Returns ("", "") on any failure — the caller maps that to Unknown.
+// atspiActiveWindow returns (app, title) of the focused window via AT-SPI. It reads the window the desktop last activated, which the focus watcher keeps current from window:activate and window:deactivate signals, and only walks the registry tree for STATE_ACTIVE before the first such signal arrives.
+// Returns ("", "") when nothing has focus or the bus is unreachable — the caller maps that to Unknown.
 func atspiActiveWindow(ctx context.Context) (string, string) {
-	sess, err := dbus.SessionBus()
-	if err != nil {
-		return "", ""
+	w := withBudget(ctx, func() namedWindow {
+		app, title := scanActiveWindow(ctx)
+		return namedWindow{app: app, title: title}
+	})
+	return w.app, w.title
+}
+
+// scanActiveWindow is atspiActiveWindow's actual read, kept apart so the wrapper above can abandon it at the deadline. Input: a context bounding the bus calls. Output: the focused window's application name and title, both "" when nothing has focus or the bus is unreachable.
+func scanActiveWindow(ctx context.Context) (string, string) {
+	if w := focus(); w != nil {
+		if app, title, ok := w.current(ctx); ok {
+			return app, title
+		}
+		if w.hearsTheDesktop() {
+			// The desktop is telling us which window has focus and right now that is none we can see, which is the honest answer: an application that publishes no accessibility tree, or the lock screen. Walking for STATE_ACTIVE here would hand back the last window that left its bit set.
+			return "", ""
+		}
 	}
 
-	regObj := sess.Object("org.a11y.Bus", "/org/a11y/bus")
-	var addr string
-	if err := regObj.CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil || addr == "" {
-		return "", ""
-	}
-
-	conn, err := dbus.Dial(addr)
+	conn, err := dialTheBus(ctx)
 	if err != nil {
 		return "", ""
 	}
 	defer conn.Close()
-	if err := conn.Auth(nil); err != nil {
-		return "", ""
-	}
-	if err := conn.Hello(); err != nil {
-		return "", ""
-	}
 
-	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
-	apps, err := getChildren(ctx, conn, root)
+	_, app, title, ok := scanForActive(ctx, conn)
+	if !ok {
+		return "", ""
+	}
+	return app, title
+}
+
+// scanForActive walks every application's top-level windows on the accessibility bus — the same walk observeDesktop uses to list them — and returns the one carrying STATE_ACTIVE. Input: a context bounding the bus calls and a live connection. Output: that window's ref, its application's name and its own title, with ok false when nothing on the bus is active right now.
+func scanForActive(ctx context.Context, conn *dbus.Conn) (ref aref, app, title string, ok bool) {
+	apps, err := getChildren(ctx, conn, registryRoot)
 	if err != nil {
-		return "", ""
+		return aref{}, "", "", false
 	}
-
-	for _, app := range apps {
+	for _, a := range apps {
 		if ctx.Err() != nil {
 			break
 		}
-		wins, err := getChildren(ctx, conn, app)
+		wins, err := getChildren(ctx, conn, a)
 		if err != nil {
 			continue
 		}
@@ -242,22 +618,28 @@ func atspiActiveWindow(ctx context.Context) (string, string) {
 			if !hasState(ctx, conn, win, stateActive) {
 				continue
 			}
-			return getName(ctx, conn, app), getName(ctx, conn, win)
+			return win, getName(ctx, conn, a), getName(ctx, conn, win), true
 		}
 	}
-	return "", ""
+	return aref{}, "", "", false
 }
 
-// getName reads the org.a11y.atspi.Accessible "Name" property of an accessible.
+// getName reads the org.a11y.atspi.Accessible "Name" property of an accessible, returning "" when it cannot be read.
 func getName(ctx context.Context, conn *dbus.Conn, ref aref) string {
+	name, _ := readName(ctx, conn, ref)
+	return name
+}
+
+// readName is getName with the error kept, for callers that need to tell "this window is called nothing" apart from "this window is gone".
+func readName(ctx context.Context, conn *dbus.Conn, ref aref) (string, error) {
 	obj := conn.Object(ref.Name, ref.Path)
 	var v dbus.Variant
 	if err := obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0,
 		"org.a11y.atspi.Accessible", "Name").Store(&v); err != nil {
-		return ""
+		return "", err
 	}
 	s, _ := v.Value().(string)
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(s), nil
 }
 
 // stateActive is the AtspiStateType bit index for STATE_ACTIVE (focused top-level window).
@@ -364,22 +746,16 @@ func WindowTitleFor(ctx context.Context, app string) string {
 	ctx, cancel := context.WithTimeout(ctx, captureTimeout)
 	defer cancel()
 
-	sess, err := dbus.SessionBus()
-	if err != nil {
-		return ""
-	}
-	var addr string
-	if err := sess.Object("org.a11y.Bus", "/org/a11y/bus").CallWithContext(ctx, "org.a11y.Bus.GetAddress", 0).Store(&addr); err != nil || addr == "" {
-		return ""
-	}
-	conn, err := dbus.Dial(addr)
+	return withBudget(ctx, func() string { return scanWindowTitle(ctx, app) })
+}
+
+// scanWindowTitle is WindowTitleFor's actual read, kept apart so the wrapper above can abandon it at the deadline. Input: a context bounding the bus calls and the application's process name. Output: the longest window title that application publishes, or "" when it publishes none.
+func scanWindowTitle(ctx context.Context, app string) string {
+	conn, err := dialTheBus(ctx)
 	if err != nil {
 		return ""
 	}
 	defer conn.Close()
-	if conn.Auth(nil) != nil || conn.Hello() != nil {
-		return ""
-	}
 
 	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
 	apps, err := getChildren(ctx, conn, root)
