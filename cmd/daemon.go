@@ -445,6 +445,31 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
 	// One-click answers to the morning brief's question about an item that has gone quiet. The notification blocks until it is answered, so the scheduler asks from its own goroutine.
 	scheduler.SetAsk(proactive.NotifySendAsk)
+	// Every other notice is posted straight to the desktop's notification service, carrying the buttons a macOS reminder carries: Open in Ora, Done, In an hour, This evening, Tomorrow. Presses arrive back over the session bus, so nothing blocks waiting for one, and a machine with no session bus falls back to notify-send.
+	scheduler.SetNotifier(proactive.NewNotifier(ctx))
+	// "Open in Ora", and a click on the notification body itself, do what the tray's own Open Ora item does.
+	scheduler.SetOpenWindow(func() {
+		authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
+	})
+	// "Done" on a task notice closes it through the daemon's own POST /tasks/{id}/done, so a task ticked off from a notification takes the one path that already knows a task the user typed in from an action item a meeting raised.
+	scheduler.SetTaskDone(func(ctx context.Context, id string) error {
+		url := "http://127.0.0.1:" + DaemonPort + "/tasks/" + id + "/done"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(`{"done":true}`))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		attachIPCToken(req, ipctoken.DefaultPath)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("closing task %s answered %s", id, resp.Status)
+		}
+		return nil
+	})
 	// Sunday-only: render the week's self-accounting log, then run the distillation study pass over the same replay/trace material evals/main.go's track 6 uses — on the daemon's own main brain (claude-cli sonnet by default), which deliberately rides the user's Claude workday window rather than running overnight.
 	scheduler.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
 		if err := tally.RunWeeklyLog(ctx, store, now); err != nil {
@@ -560,7 +585,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		if !ipcServer.Subscribed(time.Minute) {
 			return false
 		}
-		ipcServer.Notice(ipc.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind})
+		ipcServer.Notice(ipc.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind, Action: n.Action, Until: n.Until})
 		return true
 	})
 

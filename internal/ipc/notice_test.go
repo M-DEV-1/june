@@ -98,3 +98,27 @@ func TestSubscribed_AsksTheHubWhoIsListening(t *testing.T) {
 		t.Error("a window that has gone still counts as subscribed with no window at all to wait in")
 	}
 }
+
+// A notice the user has already dealt with from its own desktop notification comes back over the same event with action and until filled in, which is how the window learns to show "snoozed until 18:00" rather than drawing the card again. The window reads these two names, so they are pinned here.
+func TestNotice_SnoozedJSONShape(t *testing.T) {
+	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+
+	s.Notice(Notice{Title: "Still open", Body: "Send the invoice", Kind: "task", ID: "42", Action: "snoozed", Until: "2026-09-05T18:00:00+05:30"})
+	ev := <-ch
+
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		Notice map[string]string `json:"notice"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Notice["action"] != "snoozed" || got.Notice["until"] != "2026-09-05T18:00:00+05:30" {
+		t.Errorf("notice = %+v, want action snoozed and the moment it comes back", got.Notice)
+	}
+}

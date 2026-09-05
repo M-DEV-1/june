@@ -4,13 +4,17 @@ import "time"
 
 // A notice is Ora speaking first: the morning brief, the evening close, a meeting prep. It reaches the desktop window as an event on the stream that window is already reading, and the window draws it as its own card. Nothing here waits for the window, and nothing here knows whether it drew anything — see Subscribed for what the caller asks before choosing this over the desktop's own notifications.
 
-// Notice is what one "notice" event carries. Title is the card's bold first line and Body the few lines under it. Place and ID say what a click on the card opens: Place names one of the app window's own screens ("chats", "tasks", "days") and ID the row to select there, both empty when the notice points at nothing in particular and a click should just open the window. Kind names the moment it came from — "brief", "close", "meeting", "day" — so the window can tell one apart from another without reading the title.
+// Notice is what one "notice" event carries. Title is the card's bold first line and Body the few lines under it. Place and ID say what a click on the card opens: Place names one of the app window's own screens ("chats", "tasks", "days") and ID the row to select there, both empty when the notice points at nothing in particular and a click should just open the window. Kind names the moment it came from — "brief", "close", "meeting", "day", "task", "routine" — so the window can tell one apart from another without reading the title.
+//
+// Action and Until are empty on a notice arriving for the first time, and filled in when the user has since dealt with it from the desktop notification it was also posted as: Action is "snoozed" or "done", and Until is the RFC 3339 moment a snoozed notice comes back, so the window can show "snoozed until 18:00" against the card it already drew instead of drawing it again. Kind and ID say which card that is.
 type Notice struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
-	Place string `json:"place"`
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Place  string `json:"place"`
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Action string `json:"action"`
+	Until  string `json:"until"`
 }
 
 // noticeEventID is the id every notice event carries. Like windowEventID it is deliberately not of the "ask-N" shape, because no question caused it: the window matches an ask's events against the id it is waiting on, and a notice must never be mistaken for one of those.
