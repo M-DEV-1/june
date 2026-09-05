@@ -365,8 +365,8 @@ func TestAct_Snooze_WritesTheSameSnoozeAPressWould(t *testing.T) {
 	}
 }
 
-// TestSay_PostsAndSendsToTheWindow_Both checks say() always delivers a notice to both surfaces — the window's own card and the desktop notification with its buttons — rather than picking whichever the window's presence would have preferred, since either one can be what the user is actually looking at.
-func TestSay_PostsAndSendsToTheWindow_Both(t *testing.T) {
+// TestSay_WindowUp_SendsOnlyToTheWindow checks a notice raised while a window is reading the event stream reaches that window's own card and posts no desktop banner, so the user is asked once about a thing rather than twice.
+func TestSay_WindowUp_SendsOnlyToTheWindow(t *testing.T) {
 	s, _, f := testScheduler(t)
 	var sent []Notice
 	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
@@ -374,11 +374,50 @@ func TestSay_PostsAndSendsToTheWindow_Both(t *testing.T) {
 
 	s.say(Notice{Title: "Morning brief", Body: "Three things today.", Kind: "brief"})
 
-	if len(sent) != 1 {
-		t.Errorf("window got %d notices, want 1", len(sent))
+	if len(sent) != 1 || sent[0].Title != "Morning brief" {
+		t.Errorf("window got %+v, want the one notice", sent)
 	}
+	if f.count() != 0 {
+		t.Errorf("desktop got %d notifications, want none while a window is up", f.count())
+	}
+}
+
+// TestSay_WindowDown_PostsTheBanner checks a notice raised with no window listening still reaches the desktop with its full set of buttons, which is the only surface such a machine has.
+func TestSay_WindowDown_PostsTheBanner(t *testing.T) {
+	s, _, f := testScheduler(t)
+	SetNoticeSender(func(Notice) bool { return false })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s.say(Notice{Title: "Morning brief", Body: "Three things today.", Kind: "brief"})
+
 	if f.count() != 1 {
-		t.Errorf("desktop got %d notifications, want 1", f.count())
+		t.Fatalf("desktop got %d notifications, want 1 with no window up", f.count())
+	}
+	if f.sent[0].title != "Morning brief" || len(f.sent[0].actions) != len(noticeActions) {
+		t.Errorf("posted %q with %d buttons, want the notice's own title and all %d buttons", f.sent[0].title, len(f.sent[0].actions), len(noticeActions))
+	}
+}
+
+// TestMaybeTaskNotices_WindowUp_SendsOnlyToTheWindow checks the task-notice path takes the same one-surface rule as every other notice: an action item newly lifted from a meeting while a window is up becomes a card there and no banner.
+func TestMaybeTaskNotices_WindowUp_SendsOnlyToTheWindow(t *testing.T) {
+	ctx := context.Background()
+	s, store, f := testScheduler(t)
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
+		{Owner: "Me", Text: "Send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
+	}); err != nil {
+		t.Fatalf("AddActionItems: %v", err)
+	}
+
+	s.maybeTaskNotices(ctx)
+
+	if len(sent) != 1 || sent[0].Kind != "task" || sent[0].Title != "New task from Standup" {
+		t.Errorf("window got %+v, want the one task notice", sent)
+	}
+	if f.count() != 0 {
+		t.Errorf("desktop got %d notifications, want none while a window is up", f.count())
 	}
 }
 
