@@ -9,6 +9,12 @@ edition = "2021"
 name = "ora_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Tauri's own build script sets cfg(dev) whenever custom-protocol is off (dev = !has_feature("custom-protocol") in tauri's build.rs), and generate_context! in a cfg(dev) build points the windows at build.devUrl -- the Vite dev server on http://localhost:1420 -- instead of the frontend baked in from frontendDist. A window loaded from that origin is not one the daemon's CORS allowlist names (windowOrigins in cmd/ipc.go), so every request it makes is discarded by the webview and the window shows the daemon as unreachable while the daemon is fine.
+# Nothing here drives the Tauri CLI -- scripts/release.sh builds the window with a plain `cargo build --release` -- so the feature is on by default and any build of this crate produces the packaged window. To work on the frontend against the Vite dev server instead, build with --no-default-features and start the daemon with ORA_DEV_ORIGIN=http://localhost:1420.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
