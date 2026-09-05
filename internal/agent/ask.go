@@ -923,6 +923,7 @@ var askAllowedTools = map[string]bool{
 	"look": true, "observe_screen": true, "point_at": true, "show_marks": true, "draw": true, "click": true, "scroll_to": true, "type_text": true, "wait_for": true,
 	"press_key": true, "click_at": true, "scroll_at": true, "switch_window": true,
 	"save_note": true, "personal_context": true, "revise": true, "action_items": true, "query_store": true, "open_url": true,
+	"delegate": true,
 }
 
 // evalExecute runs a tool for an ask, refusing the ones outside the gate. Input: the tool's name and arguments. Output: the tool's result, or a refusal naming the tool. The refusal used to read "disabled in evals (read-only memory eval)", which describes a situation a person typing a question is not in; askTools now keeps a gated tool off the list in the first place, so anything reaching this refusal is a model calling a tool it was never offered, and the message says the plain true thing instead.

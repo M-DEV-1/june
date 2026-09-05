@@ -386,6 +386,8 @@ func toolDefinitions() []*genai.Tool {
 					"can close one straight afterwards.",
 				Parameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{}},
 			},
+			// The delegate tool is declared in delegate.go beside its handler; screen rounds trim to screenRoundTools, so it costs them nothing.
+			delegateTool,
 		},
 	}}
 }
@@ -1659,6 +1661,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			fmt.Fprintf(&b, "[note#%d] %s\n", it.NoteID, it.Note())
 		}
 		return strings.TrimRight(b.String(), "\n")
+
+	case "delegate":
+		return delegateHandler(ctx, a, args)
 
 	default:
 		slog.Warn("unknown tool called", "tool", name)
