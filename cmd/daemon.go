@@ -809,6 +809,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	mux.HandleFunc("/conversations/{id}/title", auth(ipcServer.ConversationTitle))
 	mux.HandleFunc("/tasks", auth(ipcServer.Tasks))
 	mux.HandleFunc("/tasks/{id}/done", auth(ipcServer.TaskDone))
+	mux.HandleFunc("/tasks/{id}", auth(ipcServer.TaskOwner)) // PATCH corrects whose task it is, by hand
+
 	mux.HandleFunc("/days", auth(ipcServer.Days))
 	mux.HandleFunc("/days/{date}", auth(ipcServer.Day))
 	mux.HandleFunc("/routines", auth(ipcServer.Routines))

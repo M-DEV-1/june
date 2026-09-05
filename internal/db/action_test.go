@@ -135,6 +135,57 @@ func TestSetActionStatus_UnknownID(t *testing.T) {
 	}
 }
 
+// The user's own correction wins over whatever the minutes' owner text would otherwise read as: hearing about a thing does not make it his, and a class he picked by hand is the one place that call is actually made.
+func TestSetOwnerClass_OverridesTheParsedOwner(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "look into the vendor's new pricing.")}); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := store.OpenActionItems(ctx)
+	if len(open) != 1 {
+		t.Fatalf("want 1 open item, got %d", len(open))
+	}
+	if err := store.SetOwnerClass(ctx, open[0].NoteID, memory.OwnerThem); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := store.ActionItemsByOwner(ctx, memory.OwnerThem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].NoteID != open[0].NoteID {
+		t.Fatalf("owner=them = %+v, want the item just moved there", all)
+	}
+	mine, err := store.OpenActionItems(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 0 {
+		t.Errorf("the item is still on the user's own open list after being moved to them: %+v", mine)
+	}
+}
+
+// A class that is not one of the three is refused, and so is an id that names no action item.
+func TestSetOwnerClass_Rejects(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "renew the domain.")}); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := store.OpenActionItems(ctx)
+
+	if err := store.SetOwnerClass(ctx, open[0].NoteID, "sideways"); err == nil {
+		t.Error("want an error for a class that is not me, them or unclear")
+	}
+	if err := store.SetOwnerClass(ctx, 4242, memory.OwnerMe); err == nil {
+		t.Error("want an error for an id that is not an action note")
+	}
+}
+
 // testIdentity is the personal-context entry that says who the user is, the same shape the store migrates in on open.
 const testIdentity = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1."
 

@@ -571,6 +571,10 @@ func (s *Store) createSchema() error {
 			return err
 		}
 	}
+	// notes gained owner_class on 2026-09-05 so the user can correct an action item's "me"/"them"/"unclear" reading by hand; empty for every note that is not an action item and for one nobody has corrected yet.
+	if err := s.ensureColumn("notes", "owner_class", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 
 	// Migration for DBs written before nodes_ai_summary extracted $.summary: their summary rows still hold the raw marshalled TaskSummary, so the JSON keys stay searchable until the text is rewritten. Idempotent — a rewritten row is no longer JSON, so the guard skips it on every later run.
 	if _, err := s.db.Exec(`

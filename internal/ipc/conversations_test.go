@@ -26,6 +26,7 @@ func newWindowServer(t *testing.T, asker Asker, store *db.Store) (*Server, *http
 	mux.HandleFunc("/conversations/{id}/title", s.ConversationTitle)
 	mux.HandleFunc("/tasks", s.Tasks)
 	mux.HandleFunc("/tasks/{id}/done", s.TaskDone)
+	mux.HandleFunc("/tasks/{id}", s.TaskOwner)
 	mux.HandleFunc("/days", s.Days)
 	mux.HandleFunc("/days/{date}", s.Day)
 	srv := httptest.NewServer(mux)
@@ -44,6 +45,22 @@ func postJSON(t *testing.T, srv *httptest.Server, path, body string, out any) in
 	if out != nil {
 		json.NewDecoder(resp.Body).Decode(out) //nolint:errcheck — an empty body on an error status is expected
 	}
+	return resp.StatusCode
+}
+
+// patchJSON sends a PATCH with body to path and returns the status, failing the test only when the request itself could not be made.
+func patchJSON(t *testing.T, srv *httptest.Server, path, body string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPatch, srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build PATCH %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH %s: %v", path, err)
+	}
+	defer resp.Body.Close()
 	return resp.StatusCode
 }
 

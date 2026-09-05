@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
-import { useAllTasksQuery, useBrainsQuery, useConversationQuery, useCreateConversationMutation, useCreateTaskMutation, useSetTaskStatusMutation, type Task, type TaskStatus } from "./api";
+import { useAllTasksQuery, useBrainsQuery, useConversationQuery, useCreateConversationMutation, useCreateTaskMutation, useSetTaskOwnerMutation, useSetTaskStatusMutation, type Task, type TaskOwner, type TaskStatus } from "./api";
 import { shortWhen, taskContext, taskDetail, tasksShown } from "./format";
 import { Composer, Thread } from "./chats";
 import { HEAD, Nothing, PageHeader, Picker, Reading, Scroller, TAIL, BrainPicker, useFollowSelection, useWide } from "./parts";
@@ -42,8 +42,8 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
   );
 }
 
-/** One task in the list: the tick, the title on one line, where it came from and when it was raised in a column of their own on the right, and the menu holding the other status changes. Input: the task, whether it is the one the composer is aimed at, the moment the dates are read against, and whether this row also gets the small control that names how it would move between Mine and Theirs (only the Theirs section offers it, since a task already in Mine has nowhere more useful to go). Output: the row. */
-function TaskRow({ task, selected, now, showOwnerControl }: { task: Task; selected: boolean; now: Date; showOwnerControl?: boolean }) {
+/** One task in the list: the tick, the title on one line, where it came from and when it was raised in a column of their own on the right, and the menu holding the other status changes. Input: the task, whether it is the one the composer is aimed at, and the moment the dates are read against. Output: the row; a noticed task also gets the owner control, since a meeting's guess at who a task belongs to — including "Mine" — is exactly what the user needs to be able to correct. */
+function TaskRow({ task, selected, now }: { task: Task; selected: boolean; now: Date }) {
   const dispatch = useAppDispatch();
   const [setStatus] = useSetTaskStatusMutation();
   const detail = taskDetail(task);
@@ -111,24 +111,49 @@ function TaskRow({ task, selected, now, showOwnerControl }: { task: Task; select
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
-      {showOwnerControl ? <OwnerControl task={task} /> : null}
+      {task.source === "noticed" ? <OwnerControl task={task} /> : null}
     </div>
   );
 }
 
-/** The control beside a watched row that names moving it between Mine and Theirs — read-only, because there is no route for it: POST /tasks/{id}/done only ever takes a status, nothing that touches who a task belongs to. Disabled rather than wired to a click that would only fail, with the route it needs in its title so the gap is visible rather than silent. Input: the task. Output: the button. */
+/** ownerLabels names the three classes the way the menu shows them, in the order Mine, Theirs, Unclear. */
+const ownerLabels: Record<TaskOwner, string> = { me: "Mine", them: "Theirs", unclear: "Unclear" };
+
+/** The control beside a noticed row that lets the user say whose task it really is — a meeting's guess is only ever a guess, "Mine" included, and this is how he corrects it. Input: the task. Output: a menu of Mine / Theirs / Unclear; picking one writes it through PATCH /tasks/{id} and says on one line when the daemon refuses it. */
 function OwnerControl({ task }: { task: Task }) {
+  const dispatch = useAppDispatch();
+  const [setOwner] = useSetTaskOwnerMutation();
+
+  const set = async (owner: TaskOwner) => {
+    if (owner === task.owner) return;
+    try {
+      await setOwner({ id: task.id, owner }).unwrap();
+    } catch {
+      dispatch(ui.noticed("Could not change who owns that task"));
+    }
+  };
+
   return (
-    <Button
-      variant="ghost"
-      size="icon-xs"
-      disabled
-      aria-label={task.owner === "me" ? `Move ${task.title} to theirs` : `Move ${task.title} to mine`}
-      title="Ora has no way to move a task yet — needs a route such as PATCH /tasks/{id} that sets owner"
-      className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 disabled:pointer-events-none"
-    >
-      <ArrowRightLeft />
-    </Button>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`${task.title}: ${ownerLabels[task.owner]} — change who owns it`}
+          className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ArrowRightLeft />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+        {(Object.keys(ownerLabels) as TaskOwner[]).map((owner) => (
+          <DropdownMenuItem key={owner} onClick={() => void set(owner)}>
+            {ownerLabels[owner]}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -191,7 +216,7 @@ function TheirsSection({ tasks, total, selectedId, now }: { tasks: Task[]; total
         ) : (
           <div role="listbox" aria-label="Theirs, watching" className="-mx-2 flex flex-col">
             {tasks.map((t) => (
-              <TaskRow key={t.id} task={t} selected={t.id === selectedId} now={now} showOwnerControl />
+              <TaskRow key={t.id} task={t} selected={t.id === selectedId} now={now} />
             ))}
           </div>
         )

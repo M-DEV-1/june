@@ -304,6 +304,25 @@ func TestOwnerClass_NoIdentityLeavesHisOwnNameUnclassified(t *testing.T) {
 	}
 }
 
+// The minutes named him, but hearing about a thing does not make it his — the user can say by hand that a "me" reading is wrong, and that call must win over whatever the owner text would otherwise read as.
+func TestOwnerClass_OverrideWinsOverTheParsedOwner(t *testing.T) {
+	a := ActionItem{Owner: "Alex Rivera", Text: "Continue transition-risk work.", OwnerOverride: OwnerThem}
+	if got := a.OwnerClass(identityEntry); got != OwnerThem {
+		t.Errorf("OwnerClass with an override set = %q, want the override %q", got, OwnerThem)
+	}
+}
+
+func TestValidOwnerClass(t *testing.T) {
+	for _, c := range []struct {
+		class string
+		want  bool
+	}{{OwnerMe, true}, {OwnerThem, true}, {OwnerUnclear, true}, {"", false}, {"sideways", false}} {
+		if got := ValidOwnerClass(c.class); got != c.want {
+			t.Errorf("ValidOwnerClass(%q) = %v, want %v", c.class, got, c.want)
+		}
+	}
+}
+
 func TestEvidenceCloses(t *testing.T) {
 	item := ActionItem{Owner: "Me", Text: "deploy the Value Chain & risk-statements PR (#5632)."}
 	cases := []struct {

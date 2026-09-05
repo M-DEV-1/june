@@ -231,11 +231,33 @@ describe("Mine and Theirs", () => {
     expect(screen.queryByRole("button", { name: /Theirs, watching/ })).toBeNull();
   });
 
-  it("names a watched row's owner control read-only, and the route it would need, rather than pretending a move works", async () => {
-    renderApp({ tasks: withWatched }, { place: "tasks" });
+  it("moves a watched row to Mine from its owner menu, and tells the daemon which class it is now", async () => {
+    const { calls } = renderApp({ tasks: withWatched }, { place: "tasks" });
     await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
-    const control = screen.getByRole("button", { name: "Move Re-run the source data to mine" });
-    expect(control).toHaveProperty("disabled", true);
-    expect(control.title).toMatch(/PATCH \/tasks\/\{id\}/);
+    await userEvent.click(screen.getByRole("button", { name: /Re-run the source data.*change who owns it/ }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
+    await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/21")?.body).toEqual({ owner: "me" }));
+  });
+
+  it("offers the same owner menu on a noticed row already in Mine, since a meeting's guess at Mine is still only a guess", async () => {
+    const { calls } = renderApp({ tasks: withWatched }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Reopen Send the file" });
+    await userEvent.click(screen.getByRole("button", { name: /Send the file.*change who owns it/ }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Unclear" }));
+    await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/20")?.body).toEqual({ owner: "unclear" }));
+  });
+
+  it("does not offer an owner control on a task the user typed in, since there is nothing to correct", async () => {
+    renderApp({ tasks: withWatched }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    expect(screen.queryByRole("button", { name: /Book the flight.*change who owns it/ })).toBeNull();
+  });
+
+  it("says so and leaves the row where it was when the daemon refuses the owner change", async () => {
+    renderApp({ tasks: withWatched, fails: ["PATCH /tasks/21"] }, { place: "tasks" });
+    await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Re-run the source data.*change who owns it/ }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
+    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Could not change who owns that task");
   });
 });
