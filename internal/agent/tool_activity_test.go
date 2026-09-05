@@ -20,8 +20,6 @@ func TestToolActivitySummary(t *testing.T) {
 	}{
 		{"query_memory", map[string]any{"query": "Riddler puzzles"}, `"Riddler puzzles"`},
 		{"query_memory", map[string]any{"query": "cuda", "domain": "work"}, `"cuda"`},
-		{"get_recent", map[string]any{}, "recent"},
-		{"get_recent", map[string]any{"app": "Slack"}, `"Slack"`},
 		{"recall", map[string]any{"subject": "DeepSeek"}, `"DeepSeek"`},
 		{"recall", map[string]any{"since": "2026-07-05", "until": "2026-07-06"}, `since 2026-07-05 until 2026-07-06`},
 		{"recall", map[string]any{}, ""},
@@ -32,8 +30,15 @@ func TestToolActivitySummary(t *testing.T) {
 		{"open_url", map[string]any{"url": "https://example.com"}, `"https://example.com"`},
 		{"read_clipboard", map[string]any{}, ""},
 		{"save_note", map[string]any{"content": "user has a dentist appointment Friday"}, `"user has a dentist appointment Friday"`},
+		{"revise", map[string]any{"ref": "note#12", "content": "corrected"}, `"note#12"`},
 		{"branch", map[string]any{"task": "catch me up on Riddler"}, `"catch me up on Riddler"`},
 		{"unknown_tool", map[string]any{"foo": "bar"}, ""},
+		// Screen tools used to summarize to "": the eval and the UI's live progress had no way to see what was clicked, scrolled to or typed, only that some numbered call happened.
+		{"click", map[string]any{"n": float64(13)}, "element 13"},
+		{"scroll_to", map[string]any{"n": float64(2)}, "element 2"},
+		{"point_at", map[string]any{"n": float64(4)}, "element 4"},
+		{"type_text", map[string]any{"text": "example.com"}, `"example.com"`},
+		{"observe_screen", map[string]any{}, ""},
 		// A long argument is cut to a bounded length so one shell command or note body can't push the tool line off the status row.
 		{"shell_exec", map[string]any{"command": strings.Repeat("x", 200)}, `"` + strings.Repeat("x", toolArgSummaryRunes) + `…"`},
 		{"save_note", map[string]any{"content": strings.Repeat("y", 200)}, `"` + strings.Repeat("y", toolArgSummaryRunes) + `…"`},
@@ -54,7 +59,6 @@ func TestResultSummary(t *testing.T) {
 		{"query_memory", "no memory matches", "0 hits"},
 		{"recall", "no memory of that subject", "0 hits"},
 		{"recall", "no episodes in that window", "0 hits"},
-		{"get_recent", "no recent episodes", "0 hits"},
 		{"query_memory", "[episode] foo\n[note] bar\n[summary] baz", "3 hits"},
 		{"recall", "[Jan 2 15:04] Chrome — reddit: something", "1 hits"},
 		{"shell_exec", "total 0\ndrwxr-xr-x", "done"},
@@ -62,8 +66,15 @@ func TestResultSummary(t *testing.T) {
 		{"read_file", "file contents here", "done"},
 		{"save_note", "saved", "saved"},
 		{"save_note", "error: content argument is required", "failed"},
+		{"revise", "updated", "updated"},
+		{"revise", "fixed", "fixed"},
 		{"branch", "Riddler kicked off last week, blocked on X", "done"},
 		{"branch", "error: branch failed: gemini: unavailable", "failed"},
+		// observe_screen and click carry the window line — never the accessibility listing itself — so a pass rule or the UI's live progress can see what window a look or a click actually landed on.
+		{"observe_screen", "brave · PR #13 · GitHub\n[1] push button \"Merge\"", "brave · PR #13 · GitHub"},
+		{"observe_screen", "brave · Inbox\n(nothing actionable is showing)", "brave · Inbox"},
+		{"click", `clicked [1] push button "Merge" via press; the window is now "PR #13 · GitHub"; check it matches what was asked, then call observe_screen if you need the list`, `window now "PR #13 · GitHub"`},
+		{"click", `clicked [1] push button "Merge" via press; call observe_screen to see the result`, "done"},
 	}
 	for _, c := range cases {
 		got := resultSummary(c.name, c.result)

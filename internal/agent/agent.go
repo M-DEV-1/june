@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"ora/internal/act"
 	"ora/internal/audio"
 	"ora/internal/db"
 	"ora/internal/memory"
@@ -23,21 +24,21 @@ type ContextReader interface {
 	RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	GetNotes(ctx context.Context) ([]db.Note, error)
-	// UpdateNote/DeleteNote back update_note/delete_note (tools.go) — the model's only way to fix or remove a wrong note, using the id query_memory's "[note#N]" format gives it.
+	// UpdateNote/DeleteNote back the "revise" tool's note path (tools.go) — the model's only way to fix or remove a wrong note, using the id query_memory's "[note#N]" format gives it.
 	UpdateNote(ctx context.Context, id int64, content string) error
 	DeleteNote(ctx context.Context, id int64) error
 	// PersonalContext/SetPersonalContext/DeletePersonalContext back the personal_context tool (tools.go) and the block the system prompt opens with. Separate from notes on purpose: these are the things the user stated about themselves, edited in place by subject, and no inference path writes here.
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	SetPersonalContext(ctx context.Context, subject, content string) error
 	DeletePersonalContext(ctx context.Context, subject string) error
-	// SetActionStatus/SetActionPriority back update_action (tools.go). An action item is a notes row whose content carries its own status and priority, so update_note could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead.
+	// SetActionStatus backs the "revise" tool's state path (tools.go). An action item is a notes row whose content carries its own status, so a plain content edit could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead. SetActionPriority is unused by any tool now that revise only exposes state — kept for the store's own callers.
 	SetActionStatus(ctx context.Context, id int64, status string) error
 	SetActionPriority(ctx context.Context, id int64, priority string) error
 	// OpenActionItems backs the action_items tool (tools.go). "What do I owe?" is a question about a column, not about meaning: the rows say "[open/normal] Alex Rivera — check out develop-essentials-api", which shares no words with the question and sits nowhere near it in embedding space. Asked through query_memory it returned ten summaries about attending meetings and not one action item, so the structural query gets its own door.
 	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
-	// EpisodesForThread backs thread_evidence (tools.go). A thread's state is one line — "reviewed the code, eleven findings" — and until the compiler started recording which captures it was attributed from, that line was all anyone could reach. This is the walk from the summary to the screens behind it.
+	// EpisodesForThread backed the retired thread_evidence tool. No tool calls it now; left on the interface rather than rippling its removal into the store.
 	EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error)
-	// UpdateThreadState backs fix_thread (tools.go). Threads live in their own table with their own semantics — a subject plus a state summary — so update_note cannot reach them, and a thread whose summary merged two unrelated things was unfixable until this existed.
+	// UpdateThreadState backs the "revise" tool's thread path (tools.go). Threads live in their own table with their own semantics — a subject plus a state summary — so a note edit cannot reach them, and a thread whose summary merged two unrelated things was unfixable until this existed.
 	UpdateThreadState(ctx context.Context, id int64, state string) error
 	ListEpisodes(ctx context.Context, q db.EpisodeQuery) ([]db.Episode, error)
 	// SummaryTimeline backs recall's coverage tier: when a window holds more episodes than one tool result fits, the window's task summaries — bounded per day by construction — answer instead, so a busy stretch cannot scroll the rest of its own day out of the reply.
@@ -103,11 +104,41 @@ type ToolActivity struct {
 }
 
 type Agent struct {
-	mic     audio.Microphone
-	speaker audio.Speaker
-	brain   ContextReader
+	// evalWrites lets the eval entry points run write tools; see AllowEvalWrites.
+	evalWrites bool
+	mic        audio.Microphone
+	speaker    audio.Speaker
+	brain      ContextReader
+	// gate, when set, is asked before every Gemini request an interactive ask or a live voice session makes, so those count against the same daily allowance as the nightly jobs; nil means unmetered.
+	gate RequestGate
 	// bufferProvider is the source of the handshake's "[working]" current-activity context — nil means skip that part of the handshake entirely. NewAgent seeds it from a non-nil compiler (in-process use); the client process (which never has a compiler) wires its own via SetBufferProvider — see cmd/client.go's IPC-backed provider.
-	bufferProvider   func() []tracker.Activity
+	bufferProvider func() []tracker.Activity
+	// observe reads the window in front for the observe_screen tool: tracker.Observe in production, a fake in tests.
+	observe func(ctx context.Context) (app, title string, nodes []act.Node, err error)
+	// Point draws a ring around a rectangle on the screen with a label beside it, for the point_at tool. The daemon sets it to the overlay hub; nil means this session cannot draw, and point_at says so.
+	Point func(x, y, w, h int, label string)
+	// Marks draws one numbered mark over each of the given items, for the show_marks tool. The daemon sets it to the overlay hub; nil means this session cannot draw, and show_marks says so.
+	Marks func(items []act.Item)
+	// Draw draws an arrow, line, path, box or circle on the screen with a label beside it, for the draw tool. Points carries the path for arrow/line/path; x, y, w, h carry the rectangle to draw around or inscribe within for box/circle, and are ignored otherwise. The daemon sets it to the overlay hub's Draw method; nil means this session cannot draw, and draw says so. Returns an error naming what was wrong when shape is none of the five.
+	Draw func(shape string, points [][2]int, x, y, w, h int, label string) error
+	// lastTarget holds the newest ScreenTarget a point_at, click or draw(on) call recorded, so a later ask's bare "it" resolves against what was actually done rather than a fresh screen read. It is the one piece of screen memory that outlives an ask on purpose — see rememberTarget in tools.go. The list observe_screen produced, the answer it gave and the field a click focused all belong to one ask and live on its context instead; see askLookState and askState in tools.go.
+	lastTarget atomic.Value
+	// askScreen is the screen state a tool call driven directly rather than through an ask reads and writes, since only an ask attaches one to its context. See askState in tools.go.
+	askScreen askLookState
+	// capture takes the picture the look tool sends the model: tracker.CaptureFront in production, a fake in tests. nil means this session cannot see the screen, and look says so.
+	// What one ask's looks leave behind — the newest picture, whether it has been handed to the model, how many it has taken and what they cost — lives on an askLookState carried on the ask's own context (see withAskLookState in tools.go), not here, so two asks running at once never share one screenshot.
+	capture func(ctx context.Context) (tracker.Capture, error)
+	// doAction and scrollTo act on the screen for the click and scroll_to tools (type_text goes through the input session, see UsePortalInput): the tracker's in production, fakes in tests.
+	doAction func(ctx context.Context, ref string) (string, error)
+	scrollTo func(ctx context.Context, ref string) error
+	// input hands back the keyboard and pointer the press_key, click_at and scroll_at tools drive, and the one type_text falls back to, opening it on the first call that needs it — see UsePortalInput and onceInput in tools.go. nil means nothing wired one up and those tools say so.
+	input func(ctx context.Context) (InputDevice, error)
+	// raiser brings another application's window to the front through the bundled GNOME Shell extension, which switch_window tries before driving the shell's own search from the keyboard — see UseWindowRaiser and WindowRaiser in tools.go. nil means nothing wired one up, which is also what an uninstalled extension amounts to, and switch_window uses the keys instead.
+	raiser WindowRaiser
+	// verify re-reads a node's role, label and rectangle right before click acts on it or point_at rings it, since a toolkit can recycle an object path onto a different element after the page re-renders, and a page that scrolls under the list leaves every number pointing at the right element in the wrong place. Takes what observe_screen listed for the node; returns an error naming what changed, or nil when the node still matches. The tracker's in production, a fake in tests.
+	verify func(ctx context.Context, ref, role, label string, x, y, w, h int) error
+	// extents reads where one element is on the screen right now, so point_at and the guarded-click confirmation ring the element where it is rather than where the list left it. The tracker's in production, a fake in tests.
+	extents          func(ctx context.Context, ref string) (x, y, w, h int, err error)
 	apiKey           string
 	model            atomic.Value
 	voice            atomic.Value
@@ -124,6 +155,8 @@ type Agent struct {
 	ReconnectChan chan struct{}
 	// resumeHandle stores the latest Gemini Live session-resumption handle (from LiveServerSessionResumptionUpdate), so a reconnect can resume via SessionResumptionConfig instead of cold-starting. atomic.Value, same pattern as model/voice above.
 	resumeHandle atomic.Value
+	// voiceUsage holds the Live API token usage of this session's most recently completed voice turn. receiveLoop writes it once per finished turn while whatever goroutine is draining TextResponseChan reads it, so it is an atomic.Value, the same pattern as resumeHandle above; unset means no turn has finished yet. See VoiceUsage in connect.go.
+	voiceUsage atomic.Value
 
 	// subtaskClientOnce/subtaskClient/subtaskClientErr back branch()'s side-call engine (subtask.go): a second, independent *genai.Client, lazily built once and reused for the process lifetime — same pattern as memory.GeminiSummarizer.
 	subtaskClientOnce sync.Once
@@ -239,11 +272,33 @@ func (a *Agent) TriggerReconnect() {
 }
 
 // NewAgent keeps the compiler param for signature compatibility — a non-nil compiler seeds bufferProvider for any in-process caller (the client process has no compiler and never did; it wires its own provider afterward via SetBufferProvider — see cmd/client.go's IPC-backed one).
+// RequestGate decides whether one more Gemini request against a model may go out today. It is the same one-method shape memory.GeminiSummarizer takes, so the daemon hands both the one shared daily count.
+type RequestGate interface {
+	Allow(model string) error
+}
+
+// SetRequestGate installs the daily request gate the interactive paths consult. Input: the gate, or nil to run unmetered.
+func (a *Agent) SetRequestGate(g RequestGate) { a.gate = g }
+
+// allowGemini asks the installed gate whether a Gemini request against model may go out now. Input: the model the request is for. Output: nil, or the gate's refusal, which carries the 429 shape GeminiCannotAnswer recognises so the ask hands over to Codex and Claude instead of failing.
+func (a *Agent) allowGemini(model string) error {
+	if a.gate == nil {
+		return nil
+	}
+	return a.gate.Allow(model)
+}
+
 func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, compiler *memory.Compiler, apiKey string) *Agent {
 	a := &Agent{
 		mic:              mic,
 		speaker:          speaker,
 		brain:            brain,
+		observe:          tracker.Observe,
+		capture:          tracker.CaptureFront,
+		doAction:         tracker.DoAction,
+		scrollTo:         tracker.ScrollTo,
+		verify:           tracker.Verify,
+		extents:          tracker.Extents,
 		apiKey:           apiKey,
 		TextChan:         make(chan string, 100),
 		TextResponseChan: make(chan ResponseChunk, 100),
