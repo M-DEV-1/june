@@ -328,7 +328,7 @@ describe("a notice's action reaching the window", () => {
     expect(store.getState().ui.notice).toBe("Send the invoice: Done");
   });
 
-  it("leaves the rail line alone for a notice arriving fresh, with no action yet", () => {
+  it("leaves the rail line's text alone for a notice arriving fresh, with no action yet, and holds it as the live one instead", () => {
     const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
     const store = makeStore(undefined, open);
     store.dispatch(progress.streamOpened());
@@ -342,6 +342,28 @@ describe("a notice's action reaching the window", () => {
       }),
     );
     expect(store.getState().ui.notice).toBeUndefined();
+    expect(store.getState().ui.liveNotice).toEqual({ kind: "brief", id: "", title: "Morning brief", body: "Two things are still open." });
+  });
+
+  it("clears the live notice once the daemon's answer comes back with its action set, the same event a desktop press produces", () => {
+    const store = makeStore();
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+      }),
+    );
+    expect(store.getState().ui.liveNotice).toEqual({ kind: "task", id: "task-42", title: "Still open", body: "Send the invoice" });
+
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
+      }),
+    );
+    expect(store.getState().ui.liveNotice).toBeUndefined();
   });
 });
 

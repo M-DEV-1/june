@@ -76,6 +76,7 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     const done = /^\/tasks\/([^/]+)\/done$/.exec(path);
     const ownerPatch = /^\/tasks\/([^/]+)$/.exec(path);
     const routineRun = /^\/routines\/([^/]+)\/run$/.exec(path);
+    const noticeAction = /^\/notices\/[^/]+\/[^/]+\/action$/.exec(path);
     const routineID = /^\/routines\/([^/]+)$/.exec(path);
     const jobID = /^\/act\/([^/]+)$/.exec(path);
     const jobStop = /^\/act\/([^/]+)\/stop$/.exec(path);
@@ -165,6 +166,8 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
       routines = routines.map((r) => (r.id === id ? { ...r, last_run: new Date().toISOString(), last_answer: answer } : r));
       return { status: 200, body: { answer } };
     }
+    // The rail line's own Done/1h/Evening/Tomorrow buttons; nothing here fires the "notice" event the real Act does, since a fixture that wants to show one arriving already dispatches progress.eventArrived directly (see store.test.ts).
+    if (method === "POST" && noticeAction) return { status: 200, body: null };
     if (method === "GET" && path === "/status") return { status: 200, body: { paused: canned.paused ?? false } };
     if (method === "POST" && (path === "/pause" || path === "/resume")) return { status: 200, body: "paused" };
     if (method === "POST" && path === "/dictate/start") return { status: 202, body: { id: "dictate-1" } };

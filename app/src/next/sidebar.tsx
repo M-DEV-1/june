@@ -3,6 +3,7 @@
 import { useMemo, useRef } from "react";
 import { Calendar, ListTodo, MoreHorizontal, Pencil, Plus, Repeat, Search, Settings as SettingsIcon, Trash2, Video } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,7 +21,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { useConversationsQuery } from "./api";
+import { useActOnNoticeMutation, useConversationsQuery } from "./api";
 import { chatsShown, groupConversations, shortWhen } from "./format";
 import { useFollowSelection } from "./parts";
 import { conversationsUi, ui, useAppDispatch, useAppSelector, type Place } from "./store";
@@ -40,9 +41,16 @@ const FEET: Foot[] = [
 /** The rail. Input: none — everything it draws comes from the store and the conversations cache. Output: the sidebar element, which SidebarProvider in App.tsx places. */
 export function AppSidebar() {
   const dispatch = useAppDispatch();
-  const { place, conversationId, query, notice } = useAppSelector((s) => s.ui);
+  const { place, conversationId, query, notice, liveNotice } = useAppSelector((s) => s.ui);
   const { data: convs = [], isFetching, isLoading, isError } = useConversationsQuery();
+  const [actOnNotice] = useActOnNoticeMutation();
   const list = useRef<HTMLDivElement>(null);
+
+  /** Presses one of the live notice's own buttons. The daemon's answer comes back as the same "notice" event a desktop press produces (see reactToNotice in store.ts), which is what replaces these buttons with the rail line's plain text — nothing here reacts to the mutation's own response. */
+  const act = (action: "done" | "hour" | "evening" | "tomorrow") => {
+    if (!liveNotice) return;
+    void actOnNotice({ ...liveNotice, action });
+  };
 
   const now = new Date();
   const today = now.toDateString();
@@ -74,7 +82,30 @@ export function AppSidebar() {
             className="h-8 rounded-full border-transparent bg-sidebar-accent pl-8 text-ui"
           />
         </div>
-        {notice ? (
+        {liveNotice ? (
+          <div className="flex flex-col gap-1 px-1 group-data-[collapsible=icon]:hidden">
+            <p role="status" className="text-meta text-muted-foreground">
+              {liveNotice.body}
+            </p>
+            <div className="flex gap-1">
+              {/* Done closes a task through the daemon's own task-done path (see Act in internal/proactive/notify.go); a routine has nothing to complete — it is Ora reporting, not work owed — so only the snooze buttons show for one. */}
+              {liveNotice.kind !== "routine" ? (
+                <Button variant="outline" size="xs" onClick={() => act("done")}>
+                  Done
+                </Button>
+              ) : null}
+              <Button variant="outline" size="xs" onClick={() => act("hour")}>
+                1 h
+              </Button>
+              <Button variant="outline" size="xs" onClick={() => act("evening")}>
+                Evening
+              </Button>
+              <Button variant="outline" size="xs" onClick={() => act("tomorrow")}>
+                Tomorrow
+              </Button>
+            </div>
+          </div>
+        ) : notice ? (
           <p role="status" className="px-1 text-meta text-destructive group-data-[collapsible=icon]:hidden">
             {notice}
           </p>

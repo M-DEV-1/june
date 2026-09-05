@@ -3,6 +3,7 @@ package proactive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -221,7 +222,9 @@ func (s *Scheduler) chose(ctx context.Context, n Notice, key string) {
 			s.openWindow()
 		}
 	case actionDone:
-		s.markDone(ctx, n)
+		if err := s.markDone(ctx, n); err != nil {
+			slog.Warn("could not close a task from its notification", "id", n.ID, "error", err)
+		}
 	case actionHour, actionEvening, actionTomorrow:
 		s.snooze(ctx, n, key)
 	default:
@@ -241,12 +244,11 @@ func (s *Scheduler) snooze(ctx context.Context, n Notice, key string) {
 	sendNotice(n)
 }
 
-// markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is Ora reporting, not work owed — so all this records is that the user cleared it. Either way, any snooze still pending for this notice is cancelled, so a Done pressed while a snooze is in flight — from the original notice or from a re-fired one, both carrying the same kind and id — stops it firing again. Input: the notice. Output: nothing.
-func (s *Scheduler) markDone(ctx context.Context, n Notice) {
+// markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is Ora reporting, not work owed — so all this records is that the user cleared it. Either way, any snooze still pending for this notice is cancelled, so a Done pressed while a snooze is in flight — from the original notice or from a re-fired one, both carrying the same kind and id — stops it firing again. Input: the notice. Output: whatever closing the task returned when that failed — ErrTaskGone when the id no longer names one — otherwise nil; cancelling the pending snooze is best-effort and only logged on failure, since the notice itself is already closed by then.
+func (s *Scheduler) markDone(ctx context.Context, n Notice) error {
 	if n.Kind == "task" && n.ID != "" && s.taskDone != nil {
 		if err := s.taskDone(ctx, n.ID); err != nil {
-			slog.Warn("could not close a task from its notification", "id", n.ID, "error", err)
-			return
+			return err
 		}
 	}
 	if _, err := s.store.CancelSnoozes(ctx, n.Kind, n.ID); err != nil {
@@ -255,6 +257,27 @@ func (s *Scheduler) markDone(ctx context.Context, n Notice) {
 	slog.Info("notice cleared from its notification", "kind", n.Kind, "id", n.ID)
 	n.Action = "done"
 	sendNotice(n)
+	return nil
+}
+
+// ErrBadNoticeAction is what Act returns for an action string that is none of the four buttons a notice offers.
+var ErrBadNoticeAction = errors.New("not a notice action")
+
+// ErrTaskGone is what Act returns for "done" on a task notice whose task no longer exists. The taskDone func wired with SetTaskDone (cmd/daemon.go's loopback call to its own POST /tasks/{id}/done) is what recognises the 404 that route answers with and wraps this in.
+var ErrTaskGone = errors.New("the task this notice named no longer exists")
+
+// Act applies one notice button exactly as pressing it on the desktop notification would — POST /notices/{kind}/{id}/action and a D-Bus press both call this, so a task closed or snoozed from the window's own rail line takes the same path as one closed or snoozed from the notification. Input: kind and id name the notice ("" for one with no task or place behind it, such as a brief), title and body are what a snooze needs to re-fire the notice later, and action is "done", "hour", "evening" or "tomorrow". Output: ErrBadNoticeAction for any other action string, whatever markDone returned (ErrTaskGone included) for "done", else nil.
+func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action string) error {
+	n := Notice{Title: title, Body: body, Kind: kind, ID: id}
+	switch action {
+	case actionDone:
+		return s.markDone(ctx, n)
+	case actionHour, actionEvening, actionTomorrow:
+		s.snooze(ctx, n, action)
+		return nil
+	default:
+		return ErrBadNoticeAction
+	}
 }
 
 // snoozeUntil is when a snoozed notice comes back. Input: the moment the button was pressed and its key. Output: one hour later for "hour"; today at eveningHour for "evening", or tomorrow's when that hour has already gone by; tomorrow at morningHour for "tomorrow"; the zero time for any other key.
