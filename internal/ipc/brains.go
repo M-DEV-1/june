@@ -1,0 +1,236 @@
+// brains.go holds GET /brains: which backends can answer for Ora on this machine, which of them the user is signed in to, and which one the daemon is configured to use. Every signal is read live — a login file on disk, a binary on PATH — so a brain nobody has set up says so instead of being offered.
+package ipc
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"ora/internal/config"
+)
+
+// ollamaListTimeout bounds the `ollama list` call this route makes, so a wedged local server cannot hang the window's settings screen.
+const ollamaListTimeout = 3 * time.Second
+
+// BrainView is one backend on GET or POST /brains. SignedIn says whether this machine can actually call it; Account is what the login file plainly says about the account (a plan name, a mode), never a token; Models are the models the user may pick, empty for a CLI that exposes no choice; Model is the one currently chosen for this brain, "" when none has ever been picked; Note is one sentence about why this brain is here; Default marks the one the daemon is configured to use.
+type BrainView struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	SignedIn bool     `json:"signed_in"`
+	Account  string   `json:"account"`
+	Models   []string `json:"models"`
+	Model    string   `json:"model"`
+	Note     string   `json:"note"`
+	Default  bool     `json:"default"`
+}
+
+// Brains builds the /brains handler. GET answers the five brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk with save so it survives a restart, and answers with the same list GET would. An id outside the five known ones is 400 and changes nothing. Input: a pointer to the loaded config, shared with the rest of the daemon so a POST's change is visible everywhere, and the function that persists a config to disk (config.SaveConfig in production, a stub in tests). Output: the handler.
+func Brains(cfg *config.OraConfig, save func(config.OraConfig) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeBrains(w, *cfg)
+		case http.MethodPost:
+			var req struct {
+				Brain string `json:"brain"`
+				Model string `json:"model"`
+			}
+			if !DecodeJSON(w, r, &req) {
+				return
+			}
+			provider, ok := providerForBrainID(req.Brain)
+			if !ok {
+				http.Error(w, "unknown brain: "+req.Brain, http.StatusBadRequest)
+				return
+			}
+			cfg.Brain.Provider = provider
+			cfg.Brain.Model = req.Model
+			if cfg.BrainModels == nil {
+				cfg.BrainModels = map[string]string{}
+			}
+			cfg.BrainModels[req.Brain] = req.Model
+			if err := save(*cfg); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeBrains(w, *cfg)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+// writeBrains writes the five brain rows for cfg as JSON, the body both GET and POST /brains answer with.
+func writeBrains(w http.ResponseWriter, cfg config.OraConfig) {
+	home, _ := os.UserHomeDir()
+	writeJSON(w, map[string]any{"brains": brainList(cfg, home, onPath)})
+}
+
+// providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every one of the five ids gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's still falls back to the Gemini API inside FromConfig because no CLI backend for it exists yet, but its own provider constant is what lands on disk, not gemini's. ok is false when id names none of the five brains Ora knows about, and the caller must leave the config untouched in that case.
+func providerForBrainID(id string) (provider string, ok bool) {
+	switch id {
+	case "claude":
+		return config.BrainClaudeCLI, true
+	case "grok":
+		return config.BrainGrokCLI, true
+	case "codex":
+		return config.BrainCodex, true
+	case "ollama":
+		return config.BrainOllama, true
+	case "gemini":
+		return config.BrainGeminiAPI, true
+	default:
+		return "", false
+	}
+}
+
+// onPath reports whether a binary of that name can be run from this process's PATH.
+func onPath(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+// brainList builds the five rows. Input: the config (for the default brain and the Gemini model), the home directory the login files live under, and the PATH check — both injected so the tests read a temporary home and never shell out. Output: the rows in the order the window draws them.
+func brainList(cfg config.OraConfig, home string, has func(string) bool) []BrainView {
+	def := defaultBrainID(cfg.Brain.Provider)
+	claudeAccount := plainField(filepath.Join(home, ".claude", ".credentials.json"), "claudeAiOauth", "subscriptionType")
+	codexAccount := plainField(filepath.Join(home, ".codex", "auth.json"), "", "auth_mode")
+
+	ollamaModels := []string{}
+	if has("ollama") {
+		ollamaModels = ollamaList()
+	}
+
+	list := []BrainView{
+		{
+			ID:       "claude",
+			Name:     "Claude",
+			SignedIn: exists(filepath.Join(home, ".claude", ".credentials.json")),
+			Account:  claudeAccount,
+			Models:   []string{"sonnet", "opus"},
+			Note:     "Ora runs Claude through Anthropic's own command line, because a third-party login is billed as extra usage on top of the subscription.",
+		},
+		{
+			ID:       "codex",
+			Name:     "Codex",
+			SignedIn: exists(filepath.Join(home, ".codex", "auth.json")),
+			Account:  codexAccount,
+			Models:   []string{"gpt-5.5", "gpt-5.6-luna"},
+			Note:     "OpenAI endorses using a Codex login from open-source harnesses, so Ora may call it under the plan the user already pays for.",
+		},
+		{
+			ID:       "gemini",
+			Name:     "Gemini",
+			SignedIn: has("agy"),
+			Models:   geminiModels(cfg.Brain),
+			Note:     "Gemini answers through the Antigravity command line when it is installed; the model comes from ora-config.json.",
+		},
+		{
+			ID:       "grok",
+			Name:     "Grok",
+			SignedIn: has("grok"),
+			Models:   []string{},
+			Note:     "The Grok command line exposes no model choice, so there is nothing to pick here.",
+		},
+		{
+			ID:       "ollama",
+			Name:     "Ollama",
+			SignedIn: has("ollama"),
+			Models:   ollamaModels,
+			Note:     "Ollama runs a model on this machine, so the list is whatever `ollama list` reports and nothing leaves the laptop.",
+		},
+	}
+	for i := range list {
+		list[i].Default = list[i].ID == def
+		list[i].Model = modelFor(list[i].ID, cfg, def)
+	}
+	return list
+}
+
+// modelFor is the model to show already chosen for a brain row. Input: the row's id, the config, and the id of the default brain. Output: whatever POST /brains last set for that id; failing that, the model BrainConfig itself carries when this row is the one the daemon is actually configured to use, so a config written before BrainModels existed still shows correctly; otherwise "".
+func modelFor(id string, cfg config.OraConfig, def string) string {
+	if m := cfg.BrainModels[id]; m != "" {
+		return m
+	}
+	if id == def {
+		return cfg.Brain.Model
+	}
+	return ""
+}
+
+// defaultBrainID maps a configured provider to one of the five ids. Input: config.BrainConfig.Provider. Output: the id of the brain that answers today — "gemini" for the Gemini API, for the Antigravity CLI (the same model family), and for any provider string this switch does not recognise.
+func defaultBrainID(provider string) string {
+	switch provider {
+	case config.BrainClaudeCLI:
+		return "claude"
+	case config.BrainGrokCLI:
+		return "grok"
+	case config.BrainCodex:
+		return "codex"
+	case config.BrainOllama:
+		return "ollama"
+	default:
+		return "gemini"
+	}
+}
+
+// geminiModels is the Gemini models the window may offer: the one the config pins, when it pins one, and the model the daemon otherwise calls. A model pinned while a non-Gemini provider is configured belongs to that provider's own namespace (a Claude model alias, a Grok or Codex model name, an Ollama tag), not Gemini's, so it is left out here.
+func geminiModels(cfg config.BrainConfig) []string {
+	models := []string{config.TextModel}
+	nonGemini := cfg.Provider == config.BrainClaudeCLI || cfg.Provider == config.BrainGrokCLI || cfg.Provider == config.BrainCodex || cfg.Provider == config.BrainOllama
+	if cfg.Model != "" && cfg.Model != config.TextModel && !nonGemini {
+		models = append([]string{cfg.Model}, models...)
+	}
+	return models
+}
+
+// exists reports whether a path is there at all, which is what "signed in" means for a login file.
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// plainField reads one plain string field out of a JSON login file, so the window can name the account without ever handling a credential. Input: the file, the object to look inside ("" for the top level), and the field. Output: the field's value, or "" when the file is missing, unreadable, not JSON, or the field is not a plain string. Nothing here is logged.
+func plainField(path, object, field string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var doc map[string]any
+	if json.Unmarshal(data, &doc) != nil {
+		return ""
+	}
+	if object != "" {
+		inner, ok := doc[object].(map[string]any)
+		if !ok {
+			return ""
+		}
+		doc = inner
+	}
+	value, _ := doc[field].(string)
+	return value
+}
+
+// ollamaList asks the local Ollama for its installed models. Output: the model names in the order it lists them, or an empty list when the command fails or reports none.
+func ollamaList() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), ollamaListTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ollama", "list").Output()
+	if err != nil {
+		return []string{}
+	}
+	models := []string{}
+	for i, line := range strings.Split(string(out), "\n") {
+		// The first line is the header row ("NAME  ID  SIZE  MODIFIED"); every later line starts with the model's name.
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		models = append(models, strings.Fields(line)[0])
+	}
+	return models
+}
