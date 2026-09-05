@@ -176,7 +176,7 @@ func TestParseCodexStream_CollectsItemsTextAndUsage(t *testing.T) {
 		`{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello there","annotations":[]}]}}`,
 		`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5-2026-06-01","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`,
 	)
-	round, err := parseCodexStream(strings.NewReader(body))
+	round, err := parseCodexStream(strings.NewReader(body), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestParseCodexStream_CollectsItemsTextAndUsage(t *testing.T) {
 
 // When no message item arrives the text deltas are the answer.
 func TestParseCodexStream_TextFromDeltasWhenNoMessageItem(t *testing.T) {
-	round, err := parseCodexStream(strings.NewReader(sse(`{"type":"response.output_text.delta","delta":"a"}`, `{"type":"response.output_text.delta","delta":"b"}`, `{"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}`)))
+	round, err := parseCodexStream(strings.NewReader(sse(`{"type":"response.output_text.delta","delta":"a"}`, `{"type":"response.output_text.delta","delta":"b"}`, `{"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}`)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestParseCodexStream_ReturnsFunctionCalls(t *testing.T) {
 		`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"observe_screen","arguments":"{}","status":"completed"}}`,
 		`{"type":"response.completed","response":{"model":"gpt-5.5","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
 	)
-	round, err := parseCodexStream(strings.NewReader(body))
+	round, err := parseCodexStream(strings.NewReader(body), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestParseCodexStream_ReturnsFunctionCalls(t *testing.T) {
 func TestParseCodexStream_IncompleteIsAFailure(t *testing.T) {
 	_, err := parseCodexStream(strings.NewReader(sse(
 		`{"type":"response.output_text.delta","delta":"half a sen"}`,
-		`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`)))
+		`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`)), nil)
 	if err == nil || !strings.Contains(err.Error(), "max_output_tokens") {
 		t.Errorf("err = %v", err)
 	}
@@ -238,7 +238,7 @@ func TestParseCodexStream_JoinsMultiLineData(t *testing.T) {
 	body := "data: {\"type\":\"response.output_item.done\",\n" +
 		"data:  \"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"joined\"}]}}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.5\",\"usage\":{}}}\n\n"
-	round, err := parseCodexStream(strings.NewReader(body))
+	round, err := parseCodexStream(strings.NewReader(body), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,17 +249,75 @@ func TestParseCodexStream_JoinsMultiLineData(t *testing.T) {
 
 // A failed response or an error event is the round's error, carrying the backend's message; a stream that ends without response.completed is an error too.
 func TestParseCodexStream_SurfacesFailure(t *testing.T) {
-	_, err := parseCodexStream(strings.NewReader(sse(`{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"}}}`)))
+	_, err := parseCodexStream(strings.NewReader(sse(`{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"}}}`)), nil)
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("response.failed: %v", err)
 	}
-	_, err = parseCodexStream(strings.NewReader(sse(`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`)))
+	_, err = parseCodexStream(strings.NewReader(sse(`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`)), nil)
 	if err == nil || !strings.Contains(err.Error(), "slow down") {
 		t.Errorf("error event: %v", err)
 	}
-	_, err = parseCodexStream(strings.NewReader(sse(`{"type":"response.output_text.delta","delta":"half"}`)))
+	_, err = parseCodexStream(strings.NewReader(sse(`{"type":"response.output_text.delta","delta":"half"}`)), nil)
 	if err == nil {
 		t.Error("a stream cut off before response.completed must be an error")
+	}
+}
+
+// A shape whose transport draw call fails while the stream is still arriving must not shift which of the remaining shapes counts as already drawn (finding 1 of the 2026-09 draw-batch review): onShape has to record the failure rather than drop it, so the prefix streamDrawnFrom hands back still lines up with the shapes the finished call lists. Two shapes stream in, the first's a.Draw call fails and the second's succeeds; the finished call must then draw nothing more, leaving a.Draw called exactly twice, once per shape, each with its own rectangle.
+func TestAskCodex_StreamedDrawFailureDoesNotDoubleDrawTheNextShape(t *testing.T) {
+	a, drawn := drawingAgent(t)
+	calls := 0
+	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error {
+		calls++
+		*drawn = append(*drawn, fmt.Sprintf("%d,%d,%d,%d", x, y, w, h))
+		if calls == 1 {
+			return errors.New("transport failed")
+		}
+		return nil
+	}
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+
+	ctx := context.Background()
+	early := map[string][]streamDrawn{}
+	// Mirrors the onShape closure askCodex builds around one round (codex.go), fixed per finding 1: a shape that fails to draw is recorded as an error entry rather than dropped.
+	onShape := func(itemID string, shape map[string]any) {
+		phrase, target, errText := a.drawOne(ctx, shape)
+		if errText != "" {
+			early[itemID] = append(early[itemID], streamDrawn{Err: errText})
+			return
+		}
+		early[itemID] = append(early[itemID], streamDrawn{Phrase: phrase, Target: target})
+	}
+
+	argsJSON := `{"shapes":[{"shape":"box","on":1},{"shape":"box","on":2}]}`
+	split := strings.Index(argsJSON, `{"shape":"box","on":2}`)
+	first, _ := json.Marshal(argsJSON[:split])
+	second, _ := json.Marshal(argsJSON[split:])
+	doneItem, _ := json.Marshal(map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "draw", "arguments": argsJSON})
+	body := sse(
+		`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","name":"draw"}}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":`+string(first)+`}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":`+string(second)+`}`,
+		`{"type":"response.output_item.done","item":`+string(doneItem)+`}`,
+		`{"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}`,
+	)
+	round, err := parseCodexStream(strings.NewReader(body), onShape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(round.Calls) != 1 {
+		t.Fatalf("Calls = %+v", round.Calls)
+	}
+	call := round.Calls[0]
+	var callArgs map[string]any
+	json.Unmarshal([]byte(call.Arguments), &callArgs)
+	a.executeTool(withStreamDrawn(ctx, early[call.ID]), call.Name, callArgs)
+
+	if calls != 2 {
+		t.Fatalf("a.Draw called %d times, want exactly 2 (no double draw)", calls)
+	}
+	if len(*drawn) != 2 || (*drawn)[0] == (*drawn)[1] {
+		t.Errorf("drew %v, want two different rectangles", *drawn)
 	}
 }
 
@@ -291,7 +349,7 @@ func TestCodexClient_RefreshesOnceAfter401(t *testing.T) {
 	auth := writeCodexAuth(t, map[string]any{"id_token": "old.id", "access_token": "old-access", "refresh_token": "old-refresh", "account_id": "acct_1"})
 	c := codexTestClient(backend.URL, tokens.URL, auth)
 
-	round, err := c.round(t.Context(), "sys", []any{map[string]any{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "hi"}}}}, nil, "sess-1")
+	round, err := c.round(t.Context(), "sys", []any{map[string]any{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "hi"}}}}, nil, "sess-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +393,7 @@ func TestCodexClient_RefreshesOnceAfter401(t *testing.T) {
 	always401 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusUnauthorized) }))
 	defer always401.Close()
 	c = codexTestClient(always401.URL, tokens.URL, auth)
-	if _, err := c.round(t.Context(), "sys", nil, nil, ""); err == nil || !strings.Contains(err.Error(), "401") {
+	if _, err := c.round(t.Context(), "sys", nil, nil, "", nil); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("second 401 must fail with the status, got %v", err)
 	}
 }
@@ -375,7 +433,7 @@ func TestCodexClient_RefreshHappensOnceForConcurrentAsks(t *testing.T) {
 // A request cannot be sent without a ChatGPT account id, because the backend answers such a call with an error that says nothing about the real cause.
 func TestCodexClient_RefusesWithoutAnAccountID(t *testing.T) {
 	c := codexTestClient("http://127.0.0.1:1/never", "http://127.0.0.1:1/never", writeCodexAuth(t, map[string]any{"access_token": "a"}))
-	if _, err := c.round(t.Context(), "sys", nil, nil, ""); err == nil || !strings.Contains(err.Error(), "account id") {
+	if _, err := c.round(t.Context(), "sys", nil, nil, "", nil); err == nil || !strings.Contains(err.Error(), "account id") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -389,7 +447,7 @@ func TestCodexClient_ReportsHTTPErrorsAndSendsTheRequiredFields(t *testing.T) {
 	}))
 	defer backend.Close()
 	c := codexTestClient(backend.URL, "http://127.0.0.1:1/never", writeCodexAuth(t, map[string]any{"access_token": "a", "account_id": "acct_1"}))
-	_, err := c.round(t.Context(), "sys", nil, codexTools(ToolDeclarations()[:1]), "")
+	_, err := c.round(t.Context(), "sys", nil, codexTools(ToolDeclarations()[:1]), "", nil)
 	var httpErr codexHTTPError
 	if err == nil || !errors.As(err, &httpErr) || httpErr.Code != 429 || !strings.Contains(err.Error(), "usage limit") {
 		t.Errorf("err = %v", err)

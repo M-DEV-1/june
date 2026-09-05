@@ -585,7 +585,7 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 				pictures = append(pictures, &genai.Part{InlineData: &genai.Blob{MIMEType: shot.Mime, Data: shot.Data}})
 			}
 		}
-		if !sameScreenAgain(&screen, tr.ToolHops[round:]) {
+		if round := tr.ToolHops[round:]; !sameScreenAgain(&screen, round) && !onlyAnnotated(round) {
 			spent++
 		}
 		trail = append(trail, genai.NewContentFromParts(parts, genai.RoleUser))
@@ -624,6 +624,22 @@ func sameScreenAgain(seen *string, hops []ToolHop) bool {
 		}
 	}
 	return repeat
+}
+
+// annotationTools are the tools that mark the screen without changing it: they draw over what is showing, and nothing moves, opens or is pressed. Nothing they do has to be read back, so a round spent on them leaves the turn exactly where it was.
+var annotationTools = map[string]bool{"draw": true, "point_at": true, "show_marks": true}
+
+// onlyAnnotated reports whether one round of tool calls did nothing but mark the screen, so the cap can let that round pass without spending a step. It is the same reasoning sameScreenAgain applies to a look that saw nothing new: the step budget is sized for observe, act, observe again, and drawing is none of those. Marking up a diagram on 2026-09-05 drew ten shapes in ten rounds and so spent the whole twelve-step budget on drawing, ending in a cap error with the picture finished. Input: the tool hops of one round in call order. Output: true only when the round called at least one tool and every tool it called was an annotation.
+func onlyAnnotated(hops []ToolHop) bool {
+	if len(hops) == 0 {
+		return false
+	}
+	for _, hop := range hops {
+		if !annotationTools[hop.Name] {
+			return false
+		}
+	}
+	return true
 }
 
 // lastObservedWindow is the window the turn last saw, for the message an ask gives when it runs out of steps. Input: the turn's tool hops in call order. Output: the title from the newest observe_screen that worked — its first line, with the app name ahead of the separator dropped — or the whole first line when the window has no title, or "" when the turn never looked at the screen and every look failed.
@@ -798,7 +814,7 @@ func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Con
 					Response: map[string]any{"output": result},
 				})
 			}
-			if !sameScreenAgain(&screen, tr.ToolHops[round:]) {
+			if round := tr.ToolHops[round:]; !sameScreenAgain(&screen, round) && !onlyAnnotated(round) {
 				spent++
 			}
 			if err := session.SendToolResponse(genai.LiveSendToolResponseParameters{FunctionResponses: responses}); err != nil {

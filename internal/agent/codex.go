@@ -487,11 +487,15 @@ func (e codexHTTPError) Error() string {
 	return fmt.Sprintf("codex: HTTP %d: %s", e.Code, e.Body)
 }
 
-// parseCodexStream reads the text/event-stream body of one Responses call. Input: the stream. Output: the round, or an error carrying the backend's message when the response failed, an error event arrived, or the stream ended before response.completed.
-func parseCodexStream(r io.Reader) (codexRound, error) {
+// parseCodexStream reads the text/event-stream body of one Responses call. Input: the stream, and a callback given each shape of a draw call as soon as that shape's object closes in the arguments still arriving, so the ink starts while the model is still writing the rest of the call — nil to wait for the whole call, which is what every path but an ask does. Output: the round, or an error carrying the backend's message when the response failed, an error event arrived, or the stream ended before response.completed.
+func parseCodexStream(r io.Reader, onShape func(itemID string, shape map[string]any)) (codexRound, error) {
 	var round codexRound
 	var deltas, message strings.Builder
 	sawMessage, completed := false, false
+	// firstCallDone is true once any function_call in this response has finished. The calls of one response only execute after the whole stream ends, so a draw call after the first one would otherwise resolve its shapes against the screen as it was before that first call ran rather than as it will be once it has — onShape stops early instead.
+	firstCallDone := false
+	// drawing holds a scanner for each draw call whose arguments are still arriving, keyed by the stream item they belong to.
+	drawing := map[string]*shapeStream{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	// One event's payload may arrive as several data lines, which the stream format says to join with newlines, so the lines are gathered until the blank line that ends the event.
@@ -504,6 +508,7 @@ func parseCodexStream(r io.Reader) (codexRound, error) {
 		var ev struct {
 			Type     string          `json:"type"`
 			Delta    string          `json:"delta"`
+			ItemID   string          `json:"item_id"`
 			Item     json.RawMessage `json:"item"`
 			Code     string          `json:"code"`
 			Message  string          `json:"message"`
@@ -524,6 +529,25 @@ func parseCodexStream(r io.Reader) (codexRound, error) {
 		switch ev.Type {
 		case "response.output_text.delta":
 			deltas.WriteString(ev.Delta)
+		case "response.output_item.added":
+			// A draw call is the one call worth acting on before it has finished arriving, so only its arguments are scanned; the name is only on this event, never on the deltas that follow. Nothing is scanned once the response's first call has finished (firstCallDone) or without an item id to key the scanner and the shapes it collects by (finding 5 of the 2026-09 draw-batch review: an empty id shared by two calls would share their buckets too).
+			if onShape == nil || firstCallDone {
+				return true
+			}
+			var item struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(ev.Item, &item) == nil && item.Type == "function_call" && item.Name == "draw" && item.ID != "" {
+				drawing[item.ID] = &shapeStream{}
+			}
+		case "response.function_call_arguments.delta":
+			if scan := drawing[ev.ItemID]; scan != nil {
+				for _, shape := range scan.Push(ev.Delta) {
+					onShape(ev.ItemID, shape)
+				}
+			}
 		case "response.output_item.done":
 			round.Items = append(round.Items, ev.Item)
 			var item struct {
@@ -543,6 +567,7 @@ func parseCodexStream(r io.Reader) (codexRound, error) {
 			switch item.Type {
 			case "function_call":
 				round.Calls = append(round.Calls, codexCall{ID: item.ID, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments})
+				firstCallDone = true
 			case "message":
 				for _, part := range item.Content {
 					if part.Type == "output_text" {
@@ -625,8 +650,8 @@ func (e *codexErrorBody) text(fallback string) string {
 	return e.Message
 }
 
-// round sends one Responses call and reads the stream back. Input: the system instruction, the full input so far, the tools to offer, and the session key that ties every round of one ask together for the backend's prompt cache. A 401 is answered by one token refresh and one retry; any other non-2xx is a codexHTTPError.
-func (c *codexClient) round(ctx context.Context, instructions string, input []any, tools []codexTool, session string) (codexRound, error) {
+// round sends one Responses call and reads the stream back. Input: the system instruction, the full input so far, the tools to offer, the session key that ties every round of one ask together for the backend's prompt cache, and the callback parseCodexStream hands each drawn shape to as it arrives. A 401 is answered by one token refresh and one retry; any other non-2xx is a codexHTTPError.
+func (c *codexClient) round(ctx context.Context, instructions string, input []any, tools []codexTool, session string, onShape func(itemID string, shape map[string]any)) (codexRound, error) {
 	if input == nil {
 		input = []any{}
 	}
@@ -677,7 +702,7 @@ func (c *codexClient) round(ctx context.Context, instructions string, input []an
 		wait, _ := netx.ParseRetryAfter(resp.Header, time.Now())
 		return codexRound{}, codexHTTPError{Code: resp.StatusCode, Body: strings.TrimSpace(string(snippet)), RetryAfter: wait}
 	}
-	return parseCodexStream(resp.Body)
+	return parseCodexStream(resp.Body, onShape)
 }
 
 // codexRetryWait says whether a failed round is worth one more try and how long to wait first. A 429 is the one failure that fixes itself given a moment, so it earns a single retry, in the same shape a 401 earns one refresh and one resend. Input: the error the round came back with and how many tools the turn has already run. Output: the wait and true only when the backend answered 429, no tool has run yet — a retry after a tool has run would take the user's action a second time, which is why the handover to another provider carries the same rule — and the delay is inside codexMaxRetryWait. A 429 that named no delay waits codexDefaultRetryWait.
@@ -853,7 +878,27 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 		input = append(input, thread...)
 		input = append(input, turnItem)
 		input = append(input, trail...)
-		round, err := c.round(ctx, prompt, input, offered, session)
+		// Shapes drawn while the model was still writing the call they belong to, keyed by the stream item that carried it. Drawing marks the screen and changes nothing else, so doing it early costs nothing if the round then fails; the call itself draws only what is left (see streamDrawnFrom).
+		early := map[string][]streamDrawn{}
+		onShape := func(itemID string, shape map[string]any) {
+			if a.Draw == nil {
+				return
+			}
+			// maxDrawShapes caps a call the same way drawShapeList does, so a call over the limit does not draw the excess off the stream before the finished call ever gets to refuse it.
+			if len(early[itemID]) >= maxDrawShapes {
+				return
+			}
+			phrase, target, errText := a.drawOne(ctx, shape)
+			if errText != "" {
+				// Recorded rather than dropped: a shape refused during the stream still has to hold its place in early, or the shapes after it in the finished call shift onto the wrong entries (see streamDrawn.Err).
+				early[itemID] = append(early[itemID], streamDrawn{Err: errText})
+				return
+			}
+			early[itemID] = append(early[itemID], streamDrawn{Phrase: phrase, Target: target})
+			// Logged because it is the only way to tell from outside whether the backend actually sends argument deltas: no line here means the drawing waited for the whole call, which is the same picture a little later rather than a failure.
+			slog.Debug("ask codex: drew a shape off the stream", "item", itemID, "shape", phrase, "so_far", len(early[itemID]))
+		}
+		round, err := c.round(ctx, prompt, input, offered, session, onShape)
 		if wait, ok := codexRetryWait(err, len(tr.ToolHops)); ok {
 			slog.Warn("ask codex: the backend is rate limiting, waiting once and asking again", "wait", wait, "error", err)
 			timer := time.NewTimer(wait)
@@ -864,7 +909,9 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 				return tr, fmt.Errorf("ask codex: round %d: %w", i, err)
 			case <-timer.C:
 			}
-			round, err = c.round(ctx, prompt, input, offered, session)
+			// The failed attempt may have drawn some of a call before it died, and the retry sends the whole call again, so what it drew is forgotten rather than subtracted from the call that is about to arrive.
+			clear(early)
+			round, err = c.round(ctx, prompt, input, offered, session, onShape)
 		}
 		if err != nil {
 			tr.Evidence = evidenceFromToolHops(tr.ToolHops)
@@ -900,7 +947,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 				}
 			}
 			ObserveTool(ctx, call.Name, toolActivitySummary(call.Name, args))
-			result := a.evalExecute(ctx, call.Name, args)
+			result := a.evalExecute(withStreamDrawn(ctx, early[call.ID]), call.Name, args)
 			ObserveTool(ctx, call.Name, resultSummary(call.Name, result))
 			slog.Info("ask: tool", "tool", call.Name, "args", toolActivitySummary(call.Name, args), "result", resultSummary(call.Name, result), "detail", toolLogDetail(call.Name, result))
 			tr.ToolHops = append(tr.ToolHops, ToolHop{Name: call.Name, Args: args, Result: result})
@@ -922,7 +969,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 				}}})
 			}
 		}
-		if !sameScreenAgain(&screen, tr.ToolHops[hopsBefore:]) {
+		if round := tr.ToolHops[hopsBefore:]; !sameScreenAgain(&screen, round) && !onlyAnnotated(round) {
 			spent++
 		}
 	}

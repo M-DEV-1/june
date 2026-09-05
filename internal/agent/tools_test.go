@@ -2762,8 +2762,8 @@ func TestScreenRoundDeclarations_StayShort(t *testing.T) {
 		total += len(raw)
 		byName[tool.Name] = strings.ToLower(tool.Description)
 	}
-	// 6,400 bytes leaves the measured round at about 2,964 tokens: the rest of a round (instruction, thread, the newest screen listing) is about 5,450 bytes, and 3,000 tokens is 12,000 bytes at four bytes a token.
-	const screenRoundDeclarationBudget = 6400
+	// 6,450 bytes leaves the measured round at 2,989 tokens: the rest of a round (instruction, thread, the newest screen listing) is about 5,450 bytes, and 3,000 tokens is 12,000 bytes at four bytes a token. It was 6,400 until draw started taking a list of shapes instead of one, which is about 25 more tokens on every screen round; the turn that marked up a diagram on 2026-09-05 spent ten rounds and 38,335 input tokens drawing ten shapes one per round, and now spends one. That leaves the last round 11 tokens under the 3,000 bound — the next word added to any screen-round declaration fails TestAskCodex_ScreenRoundsStayUnderThreeThousandTokens.
+	const screenRoundDeclarationBudget = 6450
 	if total > screenRoundDeclarationBudget {
 		t.Errorf("the screen-round declarations are %d bytes, want at most %d", total, screenRoundDeclarationBudget)
 	}
