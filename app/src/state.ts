@@ -1,7 +1,7 @@
 /** Pure state model for the window. No DOM here — main.ts renders View, this file only computes it. */
 
 import { truncateAtWord } from "./shared/errorline";
-import type { DaemonEvent, Notice } from "./daemon";
+import type { DaemonEvent, Notice as WireNotice } from "./daemon";
 import { renderLevelEvent, type LevelDetail } from "./waveform";
 
 export type Evidence = { title: string; meta: string; body?: string };
@@ -36,8 +36,13 @@ export type Turn = {
   steps?: ToolStep[];
   job?: JobMeta;
 };
-// Notice and DaemonEvent are the daemon's wire shapes, not this window's own state, so daemon.ts (the module that actually talks to the wire) declares them once and this file only re-exports them — the point being that main.ts's events() callback and this reducer read the very same type instead of two same-named declarations that happened to agree by hand.
-export type { DaemonEvent, Notice };
+/** One answer button a notice names for itself: key is what goes to the daemon's notice route as the action, label is what the button reads. The daily stale-task question ("Still open — any progress?") is the first notice to name its own, because Done / Not happening / Not urgent are not the Done / snooze / Open set every other notice takes. */
+export type NoticeAction = { key: string; label: string };
+
+// Notice and DaemonEvent are the daemon's wire shapes, not this window's own state, so daemon.ts (the module that actually talks to the wire) declares them once and this file only widens them — the point being that main.ts's events() callback and this reducer read the very same type instead of two same-named declarations that happened to agree by hand.
+/** The daemon's notice, plus the answers it may carry. A notice with actions gets exactly those buttons, in that order, in place of the default set; one without is drawn exactly as it always has been (see noticeButtonsHtml in main.ts). */
+export type Notice = WireNotice & { actions?: NoticeAction[] };
+export type { DaemonEvent };
 
 export type Matter = {
   id: string;

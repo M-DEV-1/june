@@ -144,3 +144,30 @@ describe("startMockVoice", () => {
     10000,
   );
 });
+
+// The stale-task question is the one notice whose answers are its own rather than the Done/snooze set, so it needs a way to be looked at with no daemon running.
+describe("startMockNotice", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("puts a Still-open card up with its three answers under ?mock=1&notice=ask", async () => {
+    const { startMockNotice } = await import("./mock");
+    startMockNotice(new URLSearchParams("mock=1&notice=ask"));
+    await new Promise((r) => setTimeout(r, 20));
+    const bubble = document.getElementById("n")!;
+    expect(bubble.querySelector(".nt")?.textContent).toBe("Still open");
+    expect(
+      [...bubble.querySelectorAll<HTMLButtonElement>("button.na")].map((b) => b.textContent),
+    ).toEqual(["Done", "Not happening", "Not urgent"]);
+  });
+
+  it("does nothing for a notice mode it does not know", async () => {
+    const { startMockNotice } = await import("./mock");
+    startMockNotice(new URLSearchParams("mock=1&notice=nope"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.getElementById("n")?.hidden).toBe(true);
+  });
+});

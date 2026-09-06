@@ -1372,6 +1372,32 @@ describe("notice", () => {
   it("a click with no card up asks for nothing", () => {
     expect(step(view(), { kind: "noticeClick" }).effect).toBeUndefined();
   });
+
+  // The daily stale-task question comes with its own three answers instead of the usual Done/snooze set, so the reducer has to carry them from the wire to the card unchanged, and hand the pressed key back for the POST.
+  it("keeps a notice's own actions and sends the pressed key to the daemon", () => {
+    const ask: Notice = {
+      title: "Still open",
+      body: "Priya — send the invoice. Open since 28 Aug. Any progress?",
+      place: "tasks",
+      id: "42",
+      kind: "task",
+      actions: [
+        { key: "done", label: "Done" },
+        { key: "dropped", label: "Not happening" },
+        { key: "later", label: "Not urgent" },
+      ],
+    };
+    const up = step(view(), { kind: "notice", notice: ask, hoverOpen: false })
+      .view;
+    expect(up.notice?.actions).toEqual(ask.actions);
+    const { view: next, effect } = step(up, {
+      kind: "noticeAct",
+      act: "dropped",
+    });
+    expect(effect).toEqual({ kind: "noticeAct", notice: ask, act: "dropped" });
+    // The card stays up until the daemon's follow-up event, exactly as a snooze does.
+    expect(next.notice).toEqual(ask);
+  });
 });
 
 // noticeActionLine is what the desktop notification's own Done/snooze buttons turn a notice into, once the daemon sends the same notice back with that button's choice on it (see internal/proactive/notify.go's chose/snooze/markDone).
