@@ -608,6 +608,9 @@ func (s *Scheduler) say(n Notice) {
 	s.post(n)
 }
 
+// Say is say for callers outside this package. Input: the notice. Output: nothing. The daemon hands it to internal/ipc so a routine run started from the window's own Run button reaches the user the same way the scheduler's tick on the same routine would, desktop-notification fallback included.
+func (s *Scheduler) Say(n Notice) { s.say(n) }
+
 // noticeKinds names the moment behind a notification from the icon it was posted with, which is the only thing such a call carries that says what it is about: the recorder posts everything it has to say about a meeting under the microphone icon, its "Before you join" prep included, and this package's own daily moments carry the calendar.
 var noticeKinds = map[string]string{"audio-input-microphone": "meeting", "x-office-calendar": "day"}
 

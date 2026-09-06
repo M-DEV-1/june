@@ -102,12 +102,9 @@ function RoutineRow({ routine }: { routine: Routine }) {
 
   const run = async () => {
     try {
-      const { answer } = await runRoutine(routine.id).unwrap();
-      dispatch(
-        ui.noticed(
-          answer === "NOTHING" ? "Nothing worth saying right now" : answer,
-        ),
-      );
+      await runRoutine(routine.id).unwrap();
+      // The daemon answers as soon as the run has started, not when it has finished; what the routine says arrives as a notice, the same as on its own schedule.
+      dispatch(ui.noticed("Running…"));
     } catch {
       dispatch(ui.noticed("Could not run that routine"));
     }
