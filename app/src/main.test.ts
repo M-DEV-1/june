@@ -608,6 +608,8 @@ describe("a notice the daemon refuses", () => {
 
       expect(document.getElementById("n")?.hidden).toBe(false);
       expect(document.querySelector("#n .nf")?.textContent).toBe("Couldn't do that");
+      // The buttons are still there, so the same press can be tried again; the app window takes its own view of a refusal (see DESIGN.md rule 18), and this is the hover's.
+      expect(document.querySelectorAll("#n button.na").length).toBe(5);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -980,5 +982,131 @@ describe("what the stylesheet and the page hold the notice to", () => {
   it("makes the bubble a live region, since a notice is Ora talking first", () => {
     const html = readFileSync(`${process.cwd()}/index.html`, "utf8");
     expect(html).toContain('id="n" role="status" aria-live="polite"');
+  });
+});
+
+// Space with an empty input opens the microphone, and the capture-phase listener that does it sees every key on the card first. The fold headers were exempted by their role="button"; every other control on the card is a native <button>, which carries no role attribute at all.
+describe("Space on the card's own buttons", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("leaves the microphone shut when Space presses a notice button", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+
+    const button = document.querySelector<HTMLButtonElement>('#n button.na[data-act="done"]')!;
+    const pressed = button.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+
+    // Not cancelled means the browser goes on to turn this Space into the button's own click.
+    expect(pressed).toBe(true);
+    expect(document.querySelector(".in.holding")).toBeNull();
+  });
+});
+
+// The context read is what a question about what is on screen is answered from, and it is fired off behind the show rather than before it, so a question sent in the first seconds after the hotkey used to go with nothing.
+describe("a question asked while the screen context is still being read", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe, matters } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    vi.mocked(matters).mockResolvedValue(null);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("waits for the read and sends the screen text with the question", async () => {
+    const { context, ask } = await import("./daemon");
+    let land: () => void = () => {};
+    vi.mocked(context).mockReturnValue(
+      new Promise((resolve) => {
+        land = () => resolve({ app: "Brave", title: "Invoice 42", text: "Invoice 42 is due on Friday." });
+      }),
+    );
+    vi.mocked(ask).mockReturnValue(new Promise(() => {}));
+
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    dispatch({ kind: "type", value: "when is this due" });
+    dispatch({ kind: "enter" });
+
+    // Nothing has gone to the daemon yet: the read the question needs is still out.
+    expect(ask).not.toHaveBeenCalled();
+
+    land();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(ask).mock.calls[0][1]).toBe("Invoice 42 is due on Friday.");
+  });
+});
+
+// Every render rebuilds the card, and the rebuild used to put the keyboard back in the input whatever the user was doing — including a render landing seconds after the show, when the context read finally answers.
+describe("what a render does to the keyboard", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("leaves the keyboard on a notice button a render lands under", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+    const button = document.querySelector<HTMLButtonElement>('#n button.na[data-act="hour"]')!;
+    button.focus();
+
+    dispatch({ kind: "contextLoaded", ctx: { app: "Brave", title: "Invoice 42", text: "due Friday" } });
+
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("keeps the caret where the user put it instead of throwing it to the end", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    const input = document.querySelector<HTMLInputElement>(".q")!;
+    input.value = "invoice from priya";
+    dispatch({ kind: "type", value: input.value });
+    input.setSelectionRange(7, 7);
+
+    dispatch({ kind: "contextLoaded", ctx: { app: "Brave", title: "Invoice 42", text: "due Friday" } });
+
+    const after = document.querySelector<HTMLInputElement>(".q")!;
+    expect(document.activeElement).toBe(after);
+    expect(after.selectionStart).toBe(7);
+  });
+});
+
+// The card's margin and the hidden ask card underneath it both say the same thing — this notice is on its own — and used to be read from two different flags, which disagreed anywhere but the Tauri path.
+describe("a notice that is the only thing on screen", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("takes its air above and hides the card, from the one flag", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    dispatch({ kind: "notice", notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief" }, hoverOpen: false });
+
+    expect(document.getElementById("n")?.className).toBe("N up");
+    expect(document.body.classList.contains("alone")).toBe(true);
+  });
+
+  it("takes its air below when the hover is open under it", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    dispatch({ kind: "notice", notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief" }, hoverOpen: true });
+
+    expect(document.getElementById("n")?.className).toBe("N down");
+    expect(document.body.classList.contains("alone")).toBe(false);
   });
 });
