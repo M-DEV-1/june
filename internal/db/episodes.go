@@ -229,7 +229,8 @@ func (s *Store) ListEpisodes(ctx context.Context, q EpisodeQuery) ([]Episode, er
 		args = append(args, sqliteUTC(q.Until))
 	}
 	if app := strings.TrimSpace(q.App); app != "" {
-		clauses = append(clauses, "LOWER(app) LIKE '%' || LOWER(?) || '%'")
+		// instr rather than LIKE: the filter reaches this from the query tool, so a model can put a '%' or '_' in it, and under LIKE those are wildcards rather than the characters the caller typed.
+		clauses = append(clauses, "instr(LOWER(app), LOWER(?)) > 0")
 		args = append(args, app)
 	}
 	where := ""

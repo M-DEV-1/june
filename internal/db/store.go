@@ -432,16 +432,26 @@ func (s *Store) createSchema() error {
 	);
 
 	-- Mirrored into memory_fts exactly like threads, so diary entries surface
-	-- through the existing query_memory path with no agent changes.
+	-- through the existing query_memory path with no agent changes. Every kind but
+	-- TaskNoticeWatermarkKind, which is a bare note id the proactive loop rewrites on
+	-- most ticks rather than anything Ora wrote (see diary.go). The insert is written as
+	-- INSERT ... SELECT ... WHERE rather than a trigger-level WHEN so the update
+	-- trigger's DELETE still runs for every kind, which is what clears a watermark row
+	-- an older database had already mirrored.
+	-- Dropped first so a database created before the watermark was excluded picks up the new bodies.
+	DROP TRIGGER IF EXISTS diary_ai;
+	DROP TRIGGER IF EXISTS diary_au;
 	CREATE TRIGGER IF NOT EXISTS diary_ai AFTER INSERT ON diary BEGIN
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'diary', NEW.id);
+		INSERT INTO memory_fts(content, source, ref_id)
+			SELECT NEW.content, 'diary', NEW.id WHERE NEW.kind <> '` + TaskNoticeWatermarkKind + `';
 	END;
 	CREATE TRIGGER IF NOT EXISTS diary_ad AFTER DELETE ON diary BEGIN
 		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
 	END;
 	CREATE TRIGGER IF NOT EXISTS diary_au AFTER UPDATE ON diary BEGIN
 		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'diary', NEW.id);
+		INSERT INTO memory_fts(content, source, ref_id)
+			SELECT NEW.content, 'diary', NEW.id WHERE NEW.kind <> '` + TaskNoticeWatermarkKind + `';
 	END;
 
 	-- dream_runs: one row per night of the overnight dreaming loop, keyed by the
@@ -650,6 +660,14 @@ func (s *Store) createSchema() error {
 			AND json_valid(content)
 			AND NULLIF(json_extract(content, '$.summary'), '') IS NOT NULL`); err != nil {
 		return fmt.Errorf("rebuild summary fts content: %w", err)
+	}
+
+	// Migration for DBs written while the diary triggers still mirrored every kind: the task-notice watermark's bare note id is sitting in the search index as if it were a memory. Idempotent — there is nothing left to delete on every later run.
+	if _, err := s.db.Exec(`
+		DELETE FROM memory_fts
+		WHERE source = 'diary'
+		  AND ref_id IN (SELECT id FROM diary WHERE kind = ?)`, TaskNoticeWatermarkKind); err != nil {
+		return fmt.Errorf("clear the task notice watermark from the search index: %w", err)
 	}
 
 	return nil

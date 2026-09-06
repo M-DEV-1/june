@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 )
@@ -27,14 +28,22 @@ type ActJobRow struct {
 }
 
 // SaveActJob writes a job's checkpoint, rewriting the row this job already has rather than adding one. Input: the job as it stands now, with Checkpoint holding the runner's JSON. Output: an error from the store.
-// The row it rewrites is matched on the goal as well as the id, and the insert that follows refuses an id another goal already holds, so a second job that somehow takes an id already on disk is an error rather than a silent overwrite of the older job's whole history.
+// The row it rewrites is matched on the id alone, and the goal is written along with the checkpoint. Matching the goal as well meant a goal text that differed from the stored one by a character updated nothing, the insert behind it was refused by the id already on disk, and every later save failed the same way — so the job ran on with no checkpoint at all and could not be resumed. A goal that has changed is logged once, when it changes, rather than ending the checkpointing. The insert still refuses an id already on disk, so a second job that somehow takes a live job's id cannot overwrite its history.
 func (s *Store) SaveActJob(ctx context.Context, job ActJobRow) error {
 	if job.ID == "" {
 		return fmt.Errorf("save act job: the job has no id")
 	}
+	var stored string
+	err := s.db.QueryRowContext(ctx, `SELECT question FROM act_runs WHERE job_id = ?`, job.ID).Scan(&stored)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("save act job: %w", err)
+	}
+	if err == nil && stored != job.Goal {
+		slog.Warn("a job's goal is not the one it was checkpointed under, checkpointing it under the new one", "job_id", job.ID, "stored", stored, "now", job.Goal)
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE act_runs SET model = ?, job_state = ?, answer = ?, error = ?, duration_ms = ?, job_json = ? WHERE job_id = ? AND question = ?`,
-		job.Brain, job.State, job.Answer, job.Error, job.DurationMS, string(job.Checkpoint), job.ID, job.Goal)
+		`UPDATE act_runs SET question = ?, model = ?, job_state = ?, answer = ?, error = ?, duration_ms = ?, job_json = ? WHERE job_id = ?`,
+		job.Goal, job.Brain, job.State, job.Answer, job.Error, job.DurationMS, string(job.Checkpoint), job.ID)
 	if err != nil {
 		return fmt.Errorf("save act job: %w", err)
 	}

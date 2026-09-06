@@ -402,8 +402,8 @@ var noticePlaces = map[string]string{
 	"close":   "days",
 }
 
-// taskNoticeWatermarkKind is the diary-table row maybeTaskNotices keeps purely as a marker, on the empty day the same way the understanding doc is: the highest action-item note id already turned into a task notice, so a daemon restart never re-announces work it has already surfaced.
-const taskNoticeWatermarkKind = "task-notice-watermark"
+// taskNoticeWatermarkKind is the diary-table row maybeTaskNotices keeps purely as a marker, on the empty day the same way the understanding doc is: the highest action-item note id already turned into a task notice, so a daemon restart never re-announces work it has already surfaced. The kind itself is declared in the store (db.TaskNoticeWatermarkKind), because the diary's search-index triggers name it too: a bare number rewritten on most ticks is the one diary row that must never come back from a search as if Ora had written it.
+const taskNoticeWatermarkKind = db.TaskNoticeWatermarkKind
 
 // maxTaskNoticesPerMeeting caps how many task notices one meeting's newly-lifted action items raise at once. Five bullets from one meeting would otherwise be five banners in a row; the rest are folded into the last one's body as a count instead.
 const maxTaskNoticesPerMeeting = 3

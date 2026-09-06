@@ -293,6 +293,10 @@ func (s *Store) DeleteConversation(ctx context.Context, id int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_turns WHERE conversation_id = ?`, id); err != nil {
 		return fmt.Errorf("delete conversation: turns: %w", err)
 	}
+	// user_tasks.conversation_id carries no foreign key, so nothing in the database unlinks a task from the thread it was opened alongside. Left pointing at a deleted conversation, the task opens an empty thread in the window; zero is what "no conversation" already means there.
+	if _, err := tx.ExecContext(ctx, `UPDATE user_tasks SET conversation_id = 0 WHERE conversation_id = ?`, id); err != nil {
+		return fmt.Errorf("delete conversation: unlink its tasks: %w", err)
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM conversations WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete conversation: %w", err)

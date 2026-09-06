@@ -7,6 +7,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -731,5 +732,35 @@ func TestActRunVectorsDieWithTheirRun(t *testing.T) {
 	}
 	if len(actRunVector(t, store, ids[1])) == 0 {
 		t.Errorf("the kept run lost its vector")
+	}
+}
+
+// TestSimilarActRunsFallsBackToAnEmbeddedRunOfTheSameGoal pins what happens when the newest run of a goal has no vector yet: it is queued for the background backfill, and the lookup goes on to the older run of the same goal that does have one. Marking the goal as seen before the vector was decoded hid every embedded run of that goal from the ask that triggered the backfill.
+func TestSimilarActRunsFallsBackToAnEmbeddedRunOfTheSameGoal(t *testing.T) {
+	store := newActStore(t)
+	emb := newActEmbedder()
+	ctx := context.Background()
+	const asked = "show me how to change subtitles"
+	const stored = "where can i change subtitles here?"
+	emb.register(asked, 0)
+	ids := seedActRuns(t, store, emb, actQuestion{stored, 20})
+
+	// A newer run of the same goal, written straight to the table so it has no vector — the state every run was in before act runs were embedded.
+	steps, err := json.Marshal(twoScreenSteps())
+	if err != nil {
+		t.Fatalf("marshal steps: %v", err)
+	}
+	if _, err := store.db.Exec(
+		`INSERT INTO act_runs (question, model, outcome, answer, error, duration_ms, steps_json) VALUES (?, 'gemini-3-flash', 'ok', '', '', 10, ?)`,
+		stored, string(steps)); err != nil {
+		t.Fatalf("insert the unembedded run: %v", err)
+	}
+
+	matches, err := store.SimilarActRuns(ctx, asked, 3)
+	if err != nil {
+		t.Fatalf("SimilarActRuns: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Run.ID != ids[0] {
+		t.Fatalf("SimilarActRuns returned %+v, want the older run %d that does have a vector", matches, ids[0])
 	}
 }

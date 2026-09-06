@@ -40,8 +40,8 @@ func TestSaveActJob_WritesThenOverwritesOneRow(t *testing.T) {
 	}
 }
 
-// TestSaveActJob_RefusesAnIdThatAlreadyHoldsAnotherGoal checks a second job saved under an id another goal already holds is refused rather than rewriting that row, which is what a daemon whose id counter restarted at zero would otherwise do to the older job.
-func TestSaveActJob_RefusesAnIdThatAlreadyHoldsAnotherGoal(t *testing.T) {
+// TestSaveActJob_AGoalUnderAnIdInUseRewritesThatIdsRow checks what a save under an id already on disk does now: it rewrites that id's row, goal and all, because a job's checkpoint follows its id alone. This used to be refused, which protected an older job from a daemon whose id counter had restarted at zero, at the cost of ending checkpointing outright for the far more likely case of a goal that differs by a character (see SaveActJob). What keeps two jobs off one id is upstream: the runner claims an id in memory before it starts and seeds its counter from MaxActJobNumber on every restart.
+func TestSaveActJob_AGoalUnderAnIdInUseRewritesThatIdsRow(t *testing.T) {
 	store, err := New(":memory:")
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
@@ -52,15 +52,15 @@ func TestSaveActJob_RefusesAnIdThatAlreadyHoldsAnotherGoal(t *testing.T) {
 	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "play S16 E8", Brain: "codex", State: "stepping", Checkpoint: []byte(`{"step":1}`)}); err != nil {
 		t.Fatalf("SaveActJob: %v", err)
 	}
-	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "order the groceries", Brain: "codex", State: "planning", Checkpoint: []byte(`{}`)}); err == nil {
-		t.Fatal("a second goal saved under an id already in use was accepted")
+	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "order the groceries", Brain: "codex", State: "planning", Checkpoint: []byte(`{}`)}); err != nil {
+		t.Fatalf("SaveActJob under an id in use: %v", err)
 	}
 	got, err := store.ActJob(ctx, "act-1")
 	if err != nil {
 		t.Fatalf("ActJob: %v", err)
 	}
-	if got.Goal != "play S16 E8" || string(got.Checkpoint) != `{"step":1}` {
-		t.Fatalf("ActJob = %+v, want the first job's goal and checkpoint untouched", got)
+	if got.Goal != "order the groceries" || string(got.Checkpoint) != `{}` {
+		t.Fatalf("ActJob = %+v, want the goal and checkpoint of the save that came last", got)
 	}
 }
 
@@ -181,5 +181,37 @@ func TestNew_ActRunsHasJobColumnsBeforeAnySave(t *testing.T) {
 	defer store.Close()
 	if _, err := store.db.Exec(`SELECT job_id, job_state, job_json FROM act_runs`); err != nil {
 		t.Fatalf("fresh act_runs lacks the job columns: %v", err)
+	}
+}
+
+// TestSaveActJob_KeepsCheckpointingAfterTheGoalIsEdited pins that a job is found by its id alone. Matching the checkpoint's UPDATE on the goal text as well meant a goal that differed by a character updated nothing, the insert behind it was refused by the id that was already taken, and every later save returned an error — so the job ran on with no checkpoint at all and could not be resumed.
+func TestSaveActJob_KeepsCheckpointingAfterTheGoalIsEdited(t *testing.T) {
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "play S16 E8", Brain: "codex", State: "stepping", Checkpoint: []byte(`{"step":1}`)}); err != nil {
+		t.Fatalf("SaveActJob: %v", err)
+	}
+	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "play S16 E8 ", Brain: "codex", State: "stepping", Checkpoint: []byte(`{"step":2}`)}); err != nil {
+		t.Fatalf("SaveActJob with an edited goal: %v", err)
+	}
+
+	job, err := store.ActJob(ctx, "act-1")
+	if err != nil {
+		t.Fatalf("ActJob: %v", err)
+	}
+	if string(job.Checkpoint) != `{"step":2}` {
+		t.Errorf("checkpoint is %q, want the second save's", job.Checkpoint)
+	}
+	var rows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM act_runs WHERE job_id = 'act-1'`).Scan(&rows); err != nil {
+		t.Fatalf("count job rows: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("%d rows for one job, want 1", rows)
 	}
 }

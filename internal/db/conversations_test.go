@@ -537,3 +537,47 @@ func TestAddTurnUnderConcurrentWriters(t *testing.T) {
 		t.Errorf("stored %d turns, want %d", len(turns), writers*each)
 	}
 }
+
+// TestDeleteConversation_UnlinksTheTasksThatPointedAtIt pins that deleting a thread leaves no task pointing at an id that names nothing. user_tasks.conversation_id carries no foreign key, so nothing in the database does this on its own, and a task left pointing at a deleted conversation opens an empty thread in the window.
+func TestDeleteConversation_UnlinksTheTasksThatPointedAtIt(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	id, err := store.CreateConversation(ctx, "book the flights", "claude")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	taskID, err := store.AddUserTask(ctx, "book the flights", id)
+	if err != nil {
+		t.Fatalf("AddUserTask: %v", err)
+	}
+	other, err := store.CreateConversation(ctx, "something else", "claude")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	keptID, err := store.AddUserTask(ctx, "something else", other)
+	if err != nil {
+		t.Fatalf("AddUserTask: %v", err)
+	}
+
+	if err := store.DeleteConversation(ctx, id); err != nil {
+		t.Fatalf("DeleteConversation: %v", err)
+	}
+
+	tasks, err := store.UserTasks(ctx)
+	if err != nil {
+		t.Fatalf("UserTasks: %v", err)
+	}
+	for _, task := range tasks {
+		switch task.ID {
+		case taskID:
+			if task.ConversationID != 0 {
+				t.Errorf("the task still points at conversation %d, which was deleted", task.ConversationID)
+			}
+		case keptID:
+			if task.ConversationID != other {
+				t.Errorf("an unrelated task's link changed to %d, want %d", task.ConversationID, other)
+			}
+		}
+	}
+}
