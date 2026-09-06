@@ -5,15 +5,15 @@ import { useDispatch, useSelector } from "react-redux";
 
 import { events, oraApi, type DaemonEvent, type Evidence, type Notice, type Spend } from "./api";
 import { isJobLive, jobStateWord, noticeActionMessage } from "./format";
+import type { Theme } from "../shared/theme";
+
+export type { Theme };
 
 /** The key a fresh, unsaved chat draft's composer text and job are kept under, before the first message has opened a real conversation and given it a real id. */
 export const DRAFT_CHAT = "__draft__";
 
 /** The screens the window can be showing. Each of Tasks, Meetings and Days is one page whose header carries a picker; none of them holds a list of its own beside the sidebar, because the sidebar is for chats and nothing else. */
 export type Place = "chats" | "tasks" | "days" | "meetings" | "settings" | "routines";
-
-/** Light and dark. "system" means follow the desktop, which still resolves to a light or dark stamp on the root element. */
-export type Theme = "light" | "dark" | "system";
 
 /** What each searchable list is being filtered by. Empty strings mean the whole list shows. */
 export type Queries = { chats: string; tasks: string; days: string; meetings: string };

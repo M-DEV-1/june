@@ -3,23 +3,15 @@
 import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type FetchBaseQueryError } from "@reduxjs/toolkit/query/react";
 import { invoke } from "@tauri-apps/api/core";
 
+import { TOKEN_HEADER, devToken } from "../shared/token";
+
+export { devToken };
+
 /** Where the daemon listens. */
 const base = "http://127.0.0.1:6942";
 
-/** The header the daemon authenticates every call by (ipctoken.HeaderName on the Go side). */
-const TOKEN_HEADER = "X-Ora-Token";
-
-/** The port the Vite dev server runs on, which is the only origin allowed to take a token out of the page's own URL. */
-const DEV_PORT = "1420";
-
 /** The shared IPC secret, held in memory only and never logged. Undefined until refreshToken has read one. */
 let token: string | undefined;
-
-/** The IPC token a page may take from its own URL, which only the Vite dev server's origin may do. Input: the page's port and query string. Output: the value of ?token=, or undefined on any other origin or when there is none. The packaged window is served from tauri://localhost with no port, so this is never a way into the real window. */
-export function devToken(loc: { port: string; search: string }): string | undefined {
-  if (loc.port !== DEV_PORT) return undefined;
-  return new URLSearchParams(loc.search).get("token") ?? undefined;
-}
 
 /** Re-reads the IPC token from the Tauri side, falling back to the dev server's query string. Input: none. Output: the token now in use, or undefined when there is none to be had. The daemon writes a fresh token every time it starts and it restarts this window as its child, so a token read once at startup goes stale and every later request is refused with 401; this is called again on the first 401 and whenever the window is shown. */
 export async function refreshToken(): Promise<string | undefined> {
