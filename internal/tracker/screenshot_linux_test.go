@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -157,4 +158,39 @@ func TestScreenshotShell(t *testing.T) {
 		t.Fatalf("empty image %dx%d", cfg.Width, cfg.Height)
 	}
 	t.Logf("captured %dx%d, %d bytes", cfg.Width, cfg.Height, len(png))
+}
+
+// When the five-second screenshot bound wins while the portal is still working, the portal goes on to write a PNG of the whole desktop and nothing used to delete it: the removal lived in readFileURI, which that path never reaches. The abandoned request is now drained and its file removed.
+func TestDiscardLateShot_RemovesTheFileTheLateResponseNames(t *testing.T) {
+	shot := filepath.Join(t.TempDir(), "screen.png")
+	if err := os.WriteFile(shot, []byte("a picture of the whole desktop"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	handle := dbus.ObjectPath("/org/freedesktop/portal/desktop/request/x/ora_shot_1")
+	sigCh := make(chan *dbus.Signal, 1)
+	sigCh <- &dbus.Signal{Path: handle, Body: []interface{}{
+		uint32(0),
+		map[string]dbus.Variant{"uri": dbus.MakeVariant("file://" + shot)},
+	}}
+
+	discardLateShot(sigCh, handle, handle, 2*time.Second)
+
+	if _, err := os.Stat(shot); !os.IsNotExist(err) {
+		t.Fatalf("the abandoned portal screenshot is still on disk: %v", err)
+	}
+}
+
+// A request that never answers must not keep the drain goroutine for the life of the process.
+func TestDiscardLateShot_GivesUpWhenNoResponseArrives(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		discardLateShot(make(chan *dbus.Signal), dbus.ObjectPath("/a"), dbus.ObjectPath("/a"), 20*time.Millisecond)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the drain never gave up on a portal request that answered nothing")
+	}
 }

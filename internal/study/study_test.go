@@ -185,3 +185,26 @@ func TestStudy_NoMaterialIsAnError(t *testing.T) {
 		t.Error("the teacher should not be called when there is no material")
 	}
 }
+
+// appendLessons read the file once for its dedup check, so two lessons carrying the same title in one teacher reply both landed in lessons.md and every later prompt embedded the pair.
+func TestAppendLessons_SkipsADuplicateTitleWithinOneReply(t *testing.T) {
+	dir := t.TempDir()
+	path, added, err := appendLessons(dir, []Lesson{
+		{Title: "Ask before restarting", Lesson: "Say what will move on screen first."},
+		{Title: "Ask before restarting", Lesson: "The same lesson said twice in one reply."},
+		{Title: "Keep the terminal UI", Lesson: "It is not dead code."},
+	})
+	if err != nil {
+		t.Fatalf("appendLessons: %v", err)
+	}
+	if added != 2 {
+		t.Errorf("appended %d lessons, want 2 with the repeat dropped", added)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(body), "## Ask before restarting\n"); got != 1 {
+		t.Errorf("the repeated heading appears %d times in lessons.md, want 1", got)
+	}
+}

@@ -33,7 +33,10 @@ type fakeBrain struct {
 	extract   string
 	und       string
 	compact   string
-	report    string
+	// compactFailAfter, when above zero, makes every compact call past that number return an error, so a test can fail one week of a multi-week compaction.
+	compactFailAfter int
+	compacts         int
+	report           string
 	reportErr error
 	asked     []string
 }
@@ -53,6 +56,10 @@ func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
 		return f.und, nil
 	case strings.Contains(prompt, "Collapse the diary entries below"):
 		f.asked = append(f.asked, "compact")
+		f.compacts++
+		if f.compactFailAfter > 0 && f.compacts > f.compactFailAfter {
+			return "", fmt.Errorf("the brain refused compact call %d", f.compacts)
+		}
 		return f.compact, nil
 	case strings.Contains(prompt, "You just spent the night dreaming about the user"):
 		f.asked = append(f.asked, "report")
@@ -1275,5 +1282,34 @@ func TestBuildEvidence_CarriesAMeetingsActionItems(t *testing.T) {
 
 	if !strings.Contains(got, "push the value chain branch") {
 		t.Error("the action items were cut off the end of the minutes")
+	}
+}
+
+// A week that fails used to take every week already compacted down with it: compactEntry's error returned before CommitCompactStage ran, so the brain calls for the earlier weeks were paid for and thrown away, every night, forever. The weeks already built are now committed before the error goes up.
+func TestCompactStage_CommitsTheWeeksBuiltBeforeAFailure(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	night := "2026-08-30"
+	// Two complete, old weeks: 2026-07-06 and 2026-07-13, both Mondays. The compaction of the second one fails.
+	for _, monday := range []string{"2026-07-06", "2026-07-13"} {
+		for d := 0; d < 7; d++ {
+			setDiary(t, store, nightMinus(monday, -d), "day", fmt.Sprintf("A day of the week of %s.", monday))
+		}
+	}
+
+	brain := &fakeBrain{compact: "A remembered week.", compactFailAfter: 1}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	if err := store.StartDreamRun(ctx, night); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := r.compactStage(ctx, night)
+	if err == nil {
+		t.Fatal("compactStage swallowed the failing week")
+	}
+	if rep.weeks != 1 {
+		t.Errorf("report says %d weeks compacted, want the one that succeeded", rep.weeks)
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-07-06", "week"); got != "A remembered week." {
+		t.Errorf("the week compacted before the failure was thrown away: %q", got)
 	}
 }
