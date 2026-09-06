@@ -23,7 +23,7 @@ export function TasksScreen() {
   const { data: brains = [] } = useBrainsQuery();
   const [createConversation] = useCreateConversationMutation();
   const [wide, pane] = useWide();
-  const list = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLUListElement>(null);
 
   const shown = tasksShown(tasks, query.tasks);
   // Mine is the default view; Theirs holds what a meeting raised for someone else or for nobody named, which is watched rather than assumed onto the user's own list. theirsTotal ignores the search box, since whether the section exists at all should not flicker with what is typed into it.
@@ -90,11 +90,11 @@ export function TasksScreen() {
                     {mineTasks.length === 0 ? (
                       <Nothing up={!isError} empty={query.tasks ? `Nothing matches “${query.tasks}”.` : "Nothing of yours open."} />
                     ) : (
-                      <div ref={list} role="listbox" aria-label="Tasks" className="-mx-2 flex flex-col">
+                      <ul ref={list} role="list" aria-label="Tasks" className="-mx-2 flex flex-col">
                         {mineTasks.map((t) => (
                           <TaskRow key={t.id} task={t} selected={t.id === selected?.id} now={now} />
                         ))}
-                      </div>
+                      </ul>
                     )}
                     <TheirsSection tasks={theirs} total={theirsTotal} selectedId={selected?.id} now={now} />
                   </>

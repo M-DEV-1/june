@@ -16,7 +16,7 @@ afterEach(() => {
 
 /** The list on the page, so a title is looked for among the rows rather than in the header, which names the same task. */
 function list() {
-  return within(screen.getByRole("listbox", { name: "Tasks" }));
+  return within(screen.getByRole("list", { name: "Tasks" }));
 }
 
 const when = new Date().toISOString();
@@ -49,17 +49,37 @@ describe("the list", () => {
     renderApp({ tasks }, { place: "tasks" });
     const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     expect(tick.className).toContain("focus-visible:ring-2");
-    expect(list().getByRole("option", { name: /Book the flight/ }).className).toContain("focus-visible:ring-2");
+    expect(list().getByRole("button", { name: "Book the flight" }).className).toContain("focus-visible:ring-2");
+  });
+
+  it("draws the rows as a plain list, so the tick and the menus a row holds are controls in their own right rather than parts of one option", async () => {
+    renderApp({ tasks }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    // An option must not hold interactive descendants, and every row holds at least two: the tick and the More menu. So there are no options on the page at all, only listitems, and the selectable part of each is a button of its own.
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(list().getAllByRole("listitem")).toHaveLength(3);
+    const row = list().getByRole("button", { name: "Book the flight" });
+    expect(row.getAttribute("data-row-id")).toBe("task-1");
+    expect(within(row).queryByRole("checkbox")).toBeNull();
+  });
+
+  it("marks the picked row with aria-current rather than aria-selected, since the list is no longer a listbox", async () => {
+    renderApp({ tasks }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    await userEvent.click(list().getByText("Book the room"));
+    // A noticed row reads as its title and where it came from, which is what the button is named after; only the title carries for one the user typed in.
+    await waitFor(() => expect(list().getByRole("button", { name: "Book the room from TCFD call" }).getAttribute("aria-current")).toBe("true"));
+    expect(list().getByRole("button", { name: "Book the flight" }).getAttribute("aria-current")).toBeNull();
   });
 
   it("moves the keyboard's own focus onto the row the arrow just selected, so the ring on screen follows it", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    const first = list().getByRole("option", { name: /Book the flight/ });
+    const first = list().getByRole("button", { name: "Book the flight" });
     first.focus();
     // The store has no task selected yet — the fallback in TasksScreen is only what the page shows, not what App.tsx's walker has — so the first press just confirms row one and the second is what actually steps to row two.
     await userEvent.keyboard("{ArrowDown}{ArrowDown}");
-    await waitFor(() => expect(document.activeElement).toBe(list().getByRole("option", { name: /Send the TCFD file/ })));
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-row-id")).toBe("12"));
   });
 
   it("says there is nothing to do rather than showing an empty list", async () => {
@@ -264,7 +284,7 @@ describe("Mine and Theirs", () => {
   it("opens the theirs section on its own disclosure and shows where each one came from", async () => {
     renderApp({ tasks: withWatched }, { place: "tasks" });
     await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
-    const watched = within(screen.getByRole("listbox", { name: "Theirs, watching" }));
+    const watched = within(screen.getByRole("list", { name: "Theirs, watching" }));
     expect(watched.getByText("Re-run the source data")).toBeDefined();
     expect(watched.getByText(/from TCFD call/)).toBeDefined();
     expect(watched.getByText("Write up the findings")).toBeDefined();

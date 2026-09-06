@@ -1,6 +1,6 @@
 /** The tick on a task, wherever a task is drawn: the Tasks list, the Days page's raised list, and the block of what a meeting left behind. Input: the task, as little of it as the tick needs so a day's raised item can use it too without carrying a whole Task. Output: the tick — an empty ring until it is done and a filled one after.
  *
- * The circle fills the instant it is clicked, but nothing is told to the daemon until UNDO_MS later: a second click inside that window puts the circle back and the daemon is never called at all, which is what makes a misclick free. Only once the window passes uncontested does the real status change go out, and the circle holds what it is showing until the daemon has answered — at which point the row it sits in, reading task.done rather than anything kept here, strikes the title through and the daemon's own reply is what a failed change is undone against. A click while that request is in flight does nothing, and the tick says so rather than swallowing it: the change has already gone out, so there is nothing left to undo.
+ * The circle fills the instant it is clicked, but nothing is told to the daemon until UNDO_MS later: a second click inside that window puts the circle back and the daemon is never called at all, which is what makes a misclick free. Only once the window passes uncontested does the real status change go out, and the circle holds what it is showing until the row it sits in says the same thing — not until the daemon answers, which on the Days page is a read of the day earlier than the row changes. A refused change is the one case the row never catches up on, so the circle is put back there by hand. A click while a request is in flight does nothing, and the tick says so rather than swallowing it: the change has already gone out, so there is nothing left to undo.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -21,6 +21,10 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
   // True from the moment the change goes out until the daemon has answered it. A click in that time is ignored: the change is already gone, so there is nothing left to undo, and treating it as a fresh tick would send the opposite status straight after the first one. It is state rather than a ref so the button can redraw as disabled while it holds — a control that swallows a click without saying anything reads as broken.
   const [sending, setSending] = useState(false);
   useEffect(() => () => clearTimeout(timer.current), []);
+  // The pending circle is dropped only once the row underneath is showing the same thing, not when the daemon answers. On the Tasks screen setTaskStatus patches the tasks caches as the request goes out, so the two agree at once and this fires on the next render. On the Days page the row comes from day.tasks, which changes only when GET /days/{date} is read again, and clearing any earlier empties the circle for the whole of that read.
+  useEffect(() => {
+    if (pending !== undefined && task.done === pending) setPending(undefined);
+  }, [task.done, pending]);
 
   const done = pending ?? task.done;
 
@@ -41,11 +45,11 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
       try {
         await setStatus({ id: task.id, status: next ? "done" : "open" }).unwrap();
       } catch {
+        // A refused change never reaches the row, so nothing else will ever clear the circle: put it back here.
         dispatch(ui.noticed("Could not change that task"));
-      } finally {
-        // The circle only goes back to reading task.done once the daemon has answered; dropping the pending state any earlier empties the circle again for the whole round trip.
-        setSending(false);
         setPending(undefined);
+      } finally {
+        setSending(false);
       }
     }, UNDO_MS);
   };

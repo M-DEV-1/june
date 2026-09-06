@@ -1,4 +1,7 @@
-/** One task in the list: the tick, the title on one line, where it came from and when it was raised in a column of their own on the right, and the menu holding the other status changes. */
+/** One task in the list: the tick, the title on one line, where it came from and when it was raised in a column of their own on the right, and the menu holding the other status changes.
+ *
+ * The row itself is a plain list item with no role of its own, and picking it is one button inside it. It was an option in a listbox once, which is wrong: an option may hold no interactive descendants, and every row holds two or three — the tick, the More menu, and on a noticed task the owner menu — so a screen reader in listbox mode could reach none of them and read all their labels as part of the row's own name instead.
+ */
 
 import { Check, MoreHorizontal, RotateCcw, X } from "lucide-react";
 
@@ -28,21 +31,15 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
   };
 
   return (
-    <div
-      role="option"
-      aria-selected={selected}
-      data-row-id={task.id}
-      tabIndex={0}
-      onClick={() => dispatch(ui.taskOpened(task.id))}
-      onKeyDown={(e) => {
-        if (e.key !== "Enter" && e.key !== " ") return;
-        e.preventDefault();
-        dispatch(ui.taskOpened(task.id));
-      }}
-      className={`group flex items-center gap-2.5 rounded-sm px-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${detail ? "h-11" : "h-8"} ${selected ? "bg-selected" : "hover:bg-hover"}`}
-    >
+    <li className={`group flex items-center gap-2.5 rounded-sm px-2 transition-colors ${detail ? "h-11" : "h-8"} ${selected ? "bg-selected" : "hover:bg-hover"}`}>
       <TaskTick task={task} />
-      <div className="min-w-0 flex-1">
+      <button
+        type="button"
+        data-row-id={task.id}
+        aria-current={selected ? "true" : undefined}
+        onClick={() => dispatch(ui.taskOpened(task.id))}
+        className="min-w-0 flex-1 self-stretch rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
         <div className={`truncate text-ui ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`} title={task.title}>
           {task.title}
         </div>
@@ -51,7 +48,7 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
             {detail}
           </div>
         ) : null}
-      </div>
+      </button>
       {when ? (
         <div className="hidden shrink-0 whitespace-nowrap text-right text-meta text-muted-foreground tabular-nums sm:block">{when}</div>
       ) : null}
@@ -85,6 +82,6 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
         </DropdownMenuContent>
       </DropdownMenu>
       {task.source === "noticed" ? <OwnerControl task={task} /> : null}
-    </div>
+    </li>
   );
 }

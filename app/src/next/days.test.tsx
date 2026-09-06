@@ -110,4 +110,29 @@ describe("ticking a raised task", () => {
     // The tag setTaskStatus invalidates ("Task") is the same tag the day query carries, so the day refetches and the tick it now sees reflects the same row the Tasks screen would.
     expect(await screen.findByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
   });
+
+  it("holds the circle filled from the click until the day itself agrees, rather than emptying it while the day is being read again", async () => {
+    const { calls } = renderApp({ days, tasks, pages: { "2026-09-04": page } }, { place: "days" });
+    await screen.findByText("Raised that day");
+    // setTaskStatus patches the tasks and allTasks caches on its way out, but the Days page reads its ticks off day.tasks, which changes only when GET /days/{date} is read again. Holding that read open here is what makes the gap between the daemon answering the status change and the day reporting it wide enough to look at.
+    const daemon = globalThis.fetch;
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(typeof input === "object" && "url" in input ? input.url : String(input)).pathname;
+      if (path !== "/days/2026-09-04") return daemon(input, init);
+      return held.then(() => daemon(input, init));
+    });
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
+    await waitFor(() => expect(calls.find((c) => c.path === "/tasks/11/done")?.body).toEqual({ status: "done" }));
+    // The status change has been answered and the day has not been read again yet: the circle must still be filled.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+
+    release();
+    expect(await screen.findByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+  });
 });

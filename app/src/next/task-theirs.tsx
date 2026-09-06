@@ -27,11 +27,11 @@ export function TheirsSection({ tasks, total, selectedId, now }: { tasks: Task[]
         tasks.length === 0 ? (
           <Nothing up empty="Nothing watching." />
         ) : (
-          <div role="listbox" aria-label="Theirs, watching" className="-mx-2 flex flex-col">
+          <ul role="list" aria-label="Theirs, watching" className="-mx-2 flex flex-col">
             {tasks.map((t) => (
               <TaskRow key={t.id} task={t} selected={t.id === selectedId} now={now} />
             ))}
-          </div>
+          </ul>
         )
       ) : null}
     </div>
