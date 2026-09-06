@@ -2,6 +2,8 @@ package proactive
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,6 +145,7 @@ func TestSchedulerRunsDueRoutineAndNotifies(t *testing.T) {
 	})
 
 	s.tick(ctx)
+	s.waitRoutines()
 
 	if len(asked) != 1 {
 		t.Fatalf("routine asked %d times, want 1", len(asked))
@@ -181,6 +184,7 @@ func TestSchedulerSkipsNothingAnswerAndDisabledRoutine(t *testing.T) {
 	s.SetRoutineAsk(func(context.Context, string) (string, error) { return "NOTHING", nil })
 
 	s.tick(ctx)
+	s.waitRoutines()
 
 	if len(sent) != 0 {
 		t.Errorf("notices = %+v, want none for a NOTHING answer", sent)
@@ -214,6 +218,7 @@ func TestSchedulerSkipsRoutineAlreadyRunning(t *testing.T) {
 	})
 
 	s.tick(ctx)
+	s.waitRoutines()
 
 	if asked != 0 {
 		t.Errorf("routine asked %d times while already running, want 0", asked)
@@ -226,6 +231,7 @@ func TestSchedulerSkipsRoutineAlreadyRunning(t *testing.T) {
 	// The guard is still held (this test never called Finish), so releasing it and ticking again must now run it.
 	store.Finish(id)
 	s.tick(ctx)
+	s.waitRoutines()
 	if asked != 1 {
 		t.Errorf("routine asked %d times after the guard was released, want 1", asked)
 	}
@@ -242,6 +248,7 @@ func TestSchedulerNeverAsksWithNoRoutineAsk(t *testing.T) {
 		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
 
 	s.tick(ctx)
+	s.waitRoutines()
 
 	routines, err := store.Routines(ctx)
 	if err != nil {
@@ -249,5 +256,106 @@ func TestSchedulerNeverAsksWithNoRoutineAsk(t *testing.T) {
 	}
 	if !routines[0].LastRun.IsZero() {
 		t.Errorf("a routine ran with no routineAsk wired: %+v", routines[0])
+	}
+}
+
+// TestTick_RoutineRunsWithoutHoldingUpTheTick checks a due routine's ask runs on its own goroutine: the tick must return while the ask is still in flight, since one ask goes through the whole tool loop and would otherwise delay every later tick.
+func TestTick_RoutineRunsWithoutHoldingUpTheTick(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.AddRoutine(ctx, "tell me the one thing I must do today", "every 1 hour"); err != nil {
+		t.Fatalf("AddRoutine: %v", err)
+	}
+	SetNoticeSender(func(Notice) bool { return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var finished atomic.Bool
+	s := New(store, func(context.Context, string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.SetRoutineAsk(func(context.Context, string) (string, error) {
+		close(started)
+		<-release
+		finished.Store(true)
+		return "Ship the report.", nil
+	})
+
+	s.tick(ctx)
+	<-started
+	if finished.Load() {
+		t.Error("the tick waited for the routine's ask to finish")
+	}
+	close(release)
+	s.waitRoutines()
+	if !finished.Load() {
+		t.Error("the routine's ask never finished")
+	}
+}
+
+// TestRoutine_LastRunIsStampedAfterTheAsk checks the run is stamped with the clock as it stands once the ask returns, not the tick's own timestamp: an ask that itself outran the "when" throttle used to be due again the moment it returned, asking continuously.
+func TestRoutine_LastRunIsStampedAfterTheAsk(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.AddRoutine(ctx, "tell me if Priya replied", "when Priya replies about the venue"); err != nil {
+		t.Fatalf("AddRoutine: %v", err)
+	}
+
+	base := time.Now()
+	var offset atomic.Int64
+	var asked atomic.Int64
+	s := New(store, func(context.Context, string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.now = func() time.Time { return base.Add(time.Duration(offset.Load())) }
+	s.SetRoutineAsk(func(context.Context, string) (string, error) {
+		asked.Add(1)
+		// The ask itself takes longer than the throttle the routine is under.
+		offset.Add(int64(minWhenInterval + 5*time.Minute))
+		return db.RoutineNothing, nil
+	})
+
+	s.tick(ctx)
+	s.waitRoutines()
+	s.tick(ctx)
+	s.waitRoutines()
+
+	if got := asked.Load(); got != 1 {
+		t.Errorf("routine asked %d times, want 1 — the run must be stamped after the ask returned", got)
+	}
+}
+
+// TestRoutine_StoreFailureStillPostsAndDoesNotReask checks a routine whose run the store would not record still reaches the user, and is not asked again on the very next tick — the answer is already paid for, and a store that keeps refusing must not turn one routine into an ask a minute.
+func TestRoutine_StoreFailureStillPostsAndDoesNotReask(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.AddRoutine(ctx, "tell me the one thing I must do today", "every 1 hour"); err != nil {
+		t.Fatalf("AddRoutine: %v", err)
+	}
+	stub := &stubStore{Store: store, setRun: func(context.Context, int64, time.Time, string) error {
+		return errors.New("disk full")
+	}}
+
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	var asked atomic.Int64
+	s := New(stub, func(context.Context, string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.SetRoutineAsk(func(context.Context, string) (string, error) {
+		asked.Add(1)
+		return "Ship the report.", nil
+	})
+
+	s.tick(ctx)
+	s.waitRoutines()
+	if len(sent) != 1 || sent[0].Body != "Ship the report." {
+		t.Fatalf("notices = %+v, want the answer posted despite the failed write", sent)
+	}
+
+	s.tick(ctx)
+	s.waitRoutines()
+	if got := asked.Load(); got != 1 {
+		t.Errorf("routine asked %d times, want 1 — a failed write must not cause a re-ask", got)
 	}
 }

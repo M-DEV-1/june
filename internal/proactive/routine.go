@@ -159,18 +159,44 @@ func (s *Scheduler) maybeRoutines(ctx context.Context) {
 			slog.Warn("routines: schedule does not parse, skipping", "id", r.ID, "schedule", r.Schedule, "error", err)
 			continue
 		}
-		if !sched.Due(now, r.LastRun) {
+		if !sched.Due(now, s.lastRunOf(r)) {
 			continue
 		}
-		if err := s.runRoutine(ctx, r, now); err != nil {
-			slog.Warn("routine failed, retrying next tick", "id", r.ID, "error", err)
-		}
+		// One run goes through the whole tool loop, which the tick must not wait for: several due routines used to run one after another and hold up every duty on the next tick. TryStart inside runRoutine is what stops two runs of the same routine overlapping.
+		s.running.Add(1)
+		go func() {
+			defer s.running.Done()
+			runCtx, cancel := context.WithTimeout(ctx, routineTimeout)
+			defer cancel()
+			if err := s.runRoutine(runCtx, r); err != nil {
+				slog.Warn("routine failed, retrying next tick", "id", r.ID, "error", err)
+			}
+		}()
 	}
 }
 
-// runRoutine puts one routine's instruction to the daemon's ask path, records the answer as its last run, and posts a notice for anything but an exact "NOTHING" answer. The marker is written before the notice, same reasoning as the brief: a failure after this can at worst lose one notification, never repeat one every tick.
+// lastRunOf is when a routine last actually ran. Input: the routine as the store has it. Output: the later of the stored last run and this process's own record of one, so a run the store refused to record does not make the routine due again on the very next tick.
+func (s *Scheduler) lastRunOf(r db.Routine) time.Time {
+	s.lastRunMu.Lock()
+	defer s.lastRunMu.Unlock()
+	if ran, ok := s.lastRun[r.ID]; ok && ran.After(r.LastRun) {
+		return ran
+	}
+	return r.LastRun
+}
+
+// markRun records in memory that a routine ran at the given moment. Input: the routine's id and when its ask returned. Output: nothing.
+func (s *Scheduler) markRun(id int64, at time.Time) {
+	s.lastRunMu.Lock()
+	defer s.lastRunMu.Unlock()
+	s.lastRun[id] = at
+}
+
+// runRoutine puts one routine's instruction to the daemon's ask path, records the answer as its last run, and posts a notice for anything but an exact "NOTHING" answer.
+// The run is stamped with the clock as it stands once the ask returns, not the moment the tick started: a "when" routine whose ask took longer than its own throttle used to come back due the instant it returned, and asked continuously from then on.
+// A run the store will not record is still posted and still remembered in memory — the answer has already been paid for, and re-asking every minute while the disk is full costs a full tool-loop ask each time.
 // TryStart/Finish stop this from overlapping a POST /routines/{id}/run for the same routine: if one is already in flight (either path), this tick skips the routine silently rather than asking and recording its result a second time.
-func (s *Scheduler) runRoutine(ctx context.Context, r db.Routine, now time.Time) error {
+func (s *Scheduler) runRoutine(ctx context.Context, r db.Routine) error {
 	if !s.store.TryStart(r.ID) {
 		return nil
 	}
@@ -180,8 +206,10 @@ func (s *Scheduler) runRoutine(ctx context.Context, r db.Routine, now time.Time)
 		return err
 	}
 	answer = strings.TrimSpace(answer)
-	if err := s.store.SetRoutineRun(ctx, r.ID, now, answer); err != nil {
-		return err
+	ranAt := s.now()
+	s.markRun(r.ID, ranAt)
+	if err := s.store.SetRoutineRun(ctx, r.ID, ranAt, answer); err != nil {
+		slog.Warn("routines: could not record a routine's run, posting its answer anyway", "id", r.ID, "error", err)
 	}
 	if answer != db.RoutineNothing {
 		s.say(Notice{Title: "Routine", Body: answer, Place: "routine", ID: strconv.FormatInt(r.ID, 10), Kind: "routine"})

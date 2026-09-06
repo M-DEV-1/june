@@ -27,6 +27,18 @@ const briefMinutesWindow = 3 * 24 * time.Hour
 // dayFormat is the local calendar-day key used for diary rows.
 const dayFormat = "2006-01-02"
 
+// defaultDutyTimeout bounds one tick duty. The Gemini API path puts no deadline of its own on a call, so a TCP connection that died silently — a laptop suspend, a Wi-Fi drop mid-TLS — used to leave the close blocked forever and every duty after it never ran again until the daemon was restarted. Ten minutes is above two CLI brain calls at their own 300-second ceiling and far below "for the life of the daemon".
+const defaultDutyTimeout = 10 * time.Minute
+
+// routineTimeout bounds one routine run, which goes through the whole tool loop and so is allowed considerably longer than a duty's own single brain call.
+const routineTimeout = 30 * time.Minute
+
+// firstBackoff and laterBackoff are how long a failed close or brief waits before it is attempted again: five minutes after the first failure in a row, thirty after every one after that. Without them a broken brain cost one counted request, one warning line and one usage tally every minute for the rest of the day.
+const (
+	firstBackoff = 5 * time.Minute
+	laterBackoff = 30 * time.Minute
+)
+
 // Store is the slice of *db.Store the scheduler needs: the diary rows both duties key their once-per-day state off, the action items the brief chases, and the day's material the evening close writes from. Declared here rather than taking *db.Store whole, so this package states its entire data dependency in one place and widening it is a deliberate edit instead of an accident.
 type Store interface {
 	// Both duties key their once-per-day state off the diary table itself, which is why a daemon restart never repeats or loses a delivery.
@@ -82,12 +94,31 @@ type Scheduler struct {
 	openWindow func()
 	// taskDone closes one task through the daemon's own task-done path when "Done" is pressed on a task notice; unset, Done only records the dismissal. See SetTaskDone.
 	taskDone func(ctx context.Context, id string) error
+	// dutyTimeout is how long one duty on a tick may take before its context is cancelled. Set from defaultDutyTimeout in New and shortened by tests.
+	dutyTimeout time.Duration
+	// retryAfter is the earliest moment a duty that failed may be attempted again, keyed by duty name, and retries counts its consecutive failures, which is what picks the backoff step. Both are read and written only on the tick goroutine, so neither needs a lock.
+	retryAfter map[string]time.Time
+	retries    map[string]int
+	// taskMark is the last task-notice watermark this process computed, kept so a SetDiaryEntry that failed does not make the same items be announced again on the next tick. Tick goroutine only.
+	taskMark int64
+	// lastRun remembers when each routine actually last ran, so a store that will not record the run does not make the routine re-ask every minute. Guarded by lastRunMu, since a routine finishes on its own goroutine while a later tick reads this.
+	lastRun   map[int64]time.Time
+	lastRunMu sync.Mutex
+	// running counts the routine runs a tick has started and not yet finished, so tests can wait for them. Nothing in production waits on it.
+	running sync.WaitGroup
 }
 
 // New builds a Scheduler from the store, a one-shot brain, a desktop-notification func (NotifySend in production), and the proactive config, whose zero hours resolve to the defaults.
 func New(store Store, b brain.Brain, notify func(title, body string), cfg config.ProactiveConfig) *Scheduler {
 	briefHour, closeHour := cfg.Hours()
-	return &Scheduler{store: store, brain: b, notify: notify, briefHour: briefHour, closeHour: closeHour, now: time.Now}
+	return &Scheduler{
+		store: store, brain: b, notify: notify,
+		briefHour: briefHour, closeHour: closeHour, now: time.Now,
+		dutyTimeout: defaultDutyTimeout,
+		retryAfter:  map[string]time.Time{},
+		retries:     map[string]int{},
+		lastRun:     map[int64]time.Time{},
+	}
 }
 
 // SetAsk wires the one-click question the brief asks about an item that has gone quiet. Unset, the brief still names stale items in its text and simply never asks about one — cmd/daemon.go is the only production caller. The func posts the question and blocks until the user answers or dismisses it, returning the action they chose ("" for a dismissal).
@@ -115,17 +146,53 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// tick runs both duties' condition checks once. Split from Run so tests can drive the schedule directly.
+// tick runs every duty's condition check once. Split from Run so tests can drive the schedule directly.
+// The two store-only duties go first: they are a sqlite read each, and running them after the brain-calling ones made a "remind me in an hour" land ten minutes late whenever a close or a brief was slow.
 func (s *Scheduler) tick(ctx context.Context) {
-	s.maybeBrief(ctx)
-	s.maybeClose(ctx)
-	s.maybeWeeklyStudy(ctx)
+	s.duty(ctx, s.maybeSnoozes)
+	s.duty(ctx, s.maybeTaskNotices)
+	s.duty(ctx, s.maybeClose)
+	s.duty(ctx, s.maybeBrief)
+	s.duty(ctx, s.maybeWeeklyStudy)
+	// Not wrapped in duty: maybeRoutines runs each due routine on its own goroutine, which outlives this call and so must not be handed a context that is cancelled when it returns. It gives each run its own routineTimeout instead.
 	s.maybeRoutines(ctx)
-	s.maybeSnoozes(ctx)
-	s.maybeTaskNotices(ctx)
 }
 
-// maybeClose writes the day's diary entry once the close hour has passed, provided today has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
+// duty runs one tick duty under its own deadline. Input: the tick's context and the duty. Output: nothing. The deadline is per duty, so a brain call that never returns costs that one duty this tick rather than freezing every duty after it for the life of the daemon.
+func (s *Scheduler) duty(ctx context.Context, fn func(context.Context)) {
+	ctx, cancel := context.WithTimeout(ctx, s.dutyTimeout)
+	defer cancel()
+	fn(ctx)
+}
+
+// backedOff reports whether a duty is still inside the wait its last failure earned. Input: the duty's name and the tick's moment. Output: true when it must not be attempted yet.
+func (s *Scheduler) backedOff(duty string, now time.Time) bool {
+	return now.Before(s.retryAfter[duty])
+}
+
+// failed records that a duty just failed and sets when it may be tried again: firstBackoff after the first failure in a row, laterBackoff after any further one. Input: the duty's name and the tick's moment. Output: nothing.
+func (s *Scheduler) failed(duty string, now time.Time) {
+	s.retries[duty]++
+	wait := firstBackoff
+	if s.retries[duty] > 1 {
+		wait = laterBackoff
+	}
+	s.retryAfter[duty] = now.Add(wait)
+}
+
+// succeeded clears whatever backoff a duty was under, so its next failure starts again at firstBackoff. Input: the duty's name. Output: nothing.
+func (s *Scheduler) succeeded(duty string) {
+	delete(s.retries, duty)
+	delete(s.retryAfter, duty)
+}
+
+// waitRoutines blocks until every routine run this scheduler has started has finished. Only tests call it: production starts a run and lets the tick return.
+func (s *Scheduler) waitRoutines() {
+	s.running.Wait()
+}
+
+// maybeClose writes the day's diary entry once the close hour has passed, provided the day has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
+// Yesterday is checked first, because a machine asleep at yesterday's close hour never got yesterday's row and the day is otherwise lost for good — it is also today's "yesterday's entry" prompt input and the dream's material.
 func (s *Scheduler) maybeClose(ctx context.Context) {
 	if s.closeHour < 0 {
 		return
@@ -134,23 +201,44 @@ func (s *Scheduler) maybeClose(ctx context.Context) {
 	if now.Hour() < s.closeHour {
 		return
 	}
-	day := now.Format(dayFormat)
+	// One second before today began: the timeline it composes covers the whole of yesterday and the prompt's date line names yesterday.
+	s.closeOneDay(ctx, "close-yesterday", db.DayStart(now).Add(-time.Second))
+	s.closeOneDay(ctx, "close", now)
+}
+
+// closeOneDay writes one calendar day's diary entry if it has none and that day saw any activity. Input: the tick's context, the backoff key the duty is tracked under, and the moment the day is written from — the tick's own now for today, the last second of yesterday when catching up a day the machine slept through. Output: nothing; a failure is logged and backed off.
+func (s *Scheduler) closeOneDay(ctx context.Context, duty string, at time.Time) {
+	if s.backedOff(duty, s.now()) {
+		return
+	}
+	day := at.Format(dayFormat)
 	existing, err := s.store.DiaryEntry(ctx, day, "day")
 	if err != nil {
-		slog.Warn("evening close: reading today's diary entry failed", "error", err)
+		slog.Warn("evening close: reading the day's diary entry failed", "day", day, "error", err)
 		return
 	}
 	if existing != "" {
 		return
 	}
-	// Some activity must have happened today — a machine that sat powered off or idle all day has no day to write about. Episodes are stored in UTC; the day comparison is local.
-	last, err := s.store.MemoryAsOf(ctx, "episode:recent")
-	if err != nil || last.IsZero() || last.Local().Format(dayFormat) != day {
+	if !s.hadActivity(ctx, at) {
 		return
 	}
-	if err := s.closeDay(ctx, now, day); err != nil {
-		slog.Warn("evening close failed, retrying next tick", "error", err)
+	if err := s.closeDay(ctx, at, day); err != nil {
+		s.failed(duty, s.now())
+		slog.Warn("evening close failed, backing off", "day", day, "error", err)
+		return
 	}
+	s.succeeded(duty)
+}
+
+// hadActivity reports whether the machine was in use on one local day — a day that sat powered off or idle has no day to write about. Input: a moment on that day. Output: true when the newest episode falls on it, or when the day recorded any screen summary at all. The newest episode only ever answers for the last day the machine was awake, so a day being caught up after a sleep is answered from its own timeline instead. Episodes are stored in UTC; the day comparison is local.
+func (s *Scheduler) hadActivity(ctx context.Context, at time.Time) bool {
+	last, err := s.store.MemoryAsOf(ctx, "episode:recent")
+	if err == nil && !last.IsZero() && last.Local().Format(dayFormat) == at.Format(dayFormat) {
+		return true
+	}
+	summaries, err := s.store.SummaryTimeline(ctx, db.DayStart(at), at)
+	return err == nil && len(summaries) > 0
 }
 
 // closeDay composes the day's material, asks the brain for the diary entry and the rewritten understanding doc, persists both, and posts the close notification. The kind='day' row is written last: it is the once-per-day marker, so nothing can half-complete and still count as done.
@@ -285,6 +373,9 @@ func (s *Scheduler) maybeBrief(ctx context.Context) {
 	if now.Hour() < s.briefHour {
 		return
 	}
+	if s.backedOff("brief", now) {
+		return
+	}
 	day := now.Format(dayFormat)
 	existing, err := s.store.DiaryEntry(ctx, day, "brief")
 	if err != nil {
@@ -299,8 +390,11 @@ func (s *Scheduler) maybeBrief(ctx context.Context) {
 		return
 	}
 	if err := s.deliverBrief(ctx, now, day); err != nil {
-		slog.Warn("morning brief failed, retrying next tick", "error", err)
+		s.failed("brief", now)
+		slog.Warn("morning brief failed, backing off", "error", err)
+		return
 	}
+	s.succeeded("brief")
 }
 
 // briefInstruction heads the morning brief prompt. The brief is a notification, so brevity is the whole design.
@@ -373,8 +467,9 @@ func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string)
 	}
 	s.say(Notice{Title: "Morning brief", Body: brief, Place: "tasks", Kind: "brief"})
 	// ask came from OpenActionItems, which already keeps only the user's own work ("Me" or an unnamed owner) — asking about the first one needs no further ownership check here.
+	// The question is answered long after this tick's duty deadline has passed, so the answer is applied on a context that outlives it.
 	if len(ask) > 0 {
-		go s.askAbout(ctx, ask[0])
+		go s.askAbout(context.WithoutCancel(ctx), ask[0])
 	}
 	return nil
 }
@@ -423,14 +518,22 @@ func (s *Scheduler) askAbout(ctx context.Context, a memory.ActionItem) {
 	}
 }
 
-// NotifySendAsk posts a notification carrying one button per action and blocks until the user picks one or dismisses it, returning the chosen action's key ("" for a dismissal). Each action is "key=Label"; notify-send prints the key of whatever was clicked. --action implies --wait, so this call is as long-lived as the notification on screen.
+// notifyWait is how long a notify-send call that waits for a button is given before the child process is killed: past an hour nobody is coming to press it, and on a machine with no session bus every unanswered notice otherwise pinned a goroutine and a process until the daemon exited.
+const notifyWait = time.Hour
+
+// notifySendTimeout bounds a notify-send call that is not waiting for anything, so a wedged notification daemon cannot hold up whatever goroutine posted the notice.
+const notifySendTimeout = 30 * time.Second
+
+// NotifySendAsk posts a notification carrying one button per action and blocks until the user picks one or dismisses it, returning the chosen action's key ("" for a dismissal). Each action is "key=Label"; notify-send prints the key of whatever was clicked. --action implies --wait, so this call is as long-lived as the notification on screen, up to notifyWait.
 func NotifySendAsk(title, body string, actions []string) (string, error) {
 	args := []string{"-a", "Ora"}
 	for _, a := range actions {
 		args = append(args, "--action="+a)
 	}
 	args = append(args, title, body)
-	out, err := exec.Command("notify-send", args...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), notifyWait)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "notify-send", args...).Output()
 	if err != nil {
 		return "", err
 	}
@@ -638,14 +741,16 @@ func Notify(icon, title, body string) {
 			return
 		}
 		args := notifyArgs(icon, title, body)
-		if err := exec.Command("notify-send", args...).Run(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
+		defer cancel()
+		if err := exec.CommandContext(ctx, "notify-send", args...).Run(); err != nil {
 			slog.Debug("notify-send failed", "title", title, "error", err)
 		}
 		return
 	}
 	longArgs := notifyArgs(icon, title, body)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		ctx, cancel := context.WithTimeout(context.Background(), notifyWait)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "notify-send", longArgs...).Output()
 		if err != nil {
