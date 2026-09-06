@@ -414,7 +414,7 @@ function actOnNotice(n: Notice, act: string): void {
 /** Puts one muted line at the bottom of the notice card saying the button did not take, for a daemon that answered with an error or could not be reached at all. Input: none. Output: nothing; the line is appended to the card, once however many presses fail, and goes when the card is next redrawn for a different notice (see renderNotice). */
 function noticeFailed(): void {
   if (!noticeEl.querySelector(".nf"))
-    noticeEl.insertAdjacentHTML("beforeend", `<div class="nf">Couldn't do that</div>`);
+    noticeEl.insertAdjacentHTML("beforeend", `<div class="nf">Could not do that</div>`);
 }
 
 /** The six seconds a notice stays up. Input: the view. Output: nothing; the timer is cleared and started again from the top whenever the notice itself changes, and left cleared while the pointer is over the card, which is what pauses it — the card then gets its full six seconds again when the pointer leaves. The card is asked directly whether the pointer is on it rather than only reading noticeHeld, because a notice landing under a pointer that is already there fires no pointerenter of its own, so the flag would say the card is free while the user is reading it (a tick can post five notices in a row; see maybeTaskNotices in internal/proactive/notify.go). */

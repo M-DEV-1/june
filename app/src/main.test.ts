@@ -516,7 +516,7 @@ describe("a notice card carries its own buttons", () => {
       });
       document.querySelector<HTMLButtonElement>('#n button.na[data-act="later"]')!.click();
       await new Promise((r) => setTimeout(r, 0));
-      expect(document.querySelector("#n .nf")?.textContent).toBe("Couldn't do that");
+      expect(document.querySelector("#n .nf")?.textContent).toBe("Could not do that");
       expect(document.querySelectorAll("#n button.na").length).toBe(1);
     } finally {
       vi.unstubAllGlobals();
@@ -678,7 +678,7 @@ describe("a notice the daemon refuses", () => {
       await new Promise((r) => setTimeout(r, 0));
 
       expect(document.getElementById("n")?.hidden).toBe(false);
-      expect(document.querySelector("#n .nf")?.textContent).toBe("Couldn't do that");
+      expect(document.querySelector("#n .nf")?.textContent).toBe("Could not do that");
       // The buttons are still there, so the same press can be tried again; the app window takes its own view of a refusal (see DESIGN.md rule 18), and this is the hover's.
       expect(document.querySelectorAll("#n button.na").length).toBe(5);
     } finally {
@@ -695,7 +695,7 @@ describe("a notice the daemon refuses", () => {
       document.querySelector<HTMLButtonElement>('#n button.na[data-act="done"]')!.click();
       await new Promise((r) => setTimeout(r, 0));
 
-      expect(document.querySelector("#n .nf")?.textContent).toBe("Couldn't do that");
+      expect(document.querySelector("#n .nf")?.textContent).toBe("Could not do that");
     } finally {
       vi.unstubAllGlobals();
     }
