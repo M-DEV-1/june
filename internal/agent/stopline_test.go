@@ -240,10 +240,11 @@ func TestExecuteTool_Click_RefusesWhenVerifyFails(t *testing.T) {
 	}
 }
 
-// The keyboard-focus read has three answers, not two: focused, not focused, and nothing either way. A definite not-focused is what the guard is for — the click landed somewhere the keys will not reach — and typing is refused.
+// The keyboard-focus read has three answers, not two: focused, not focused, and nothing either way. A definite not-focused with a readable element holding the keyboard that is no place to type is what the guard is for — the click landed somewhere the keys will not reach — and typing is refused.
 func TestExecuteTool_TypeText_RefusesWhenTheFieldNoLongerHoldsTheKeyboard(t *testing.T) {
 	a, f := actingAgent(t)
 	a.focused = func(context.Context, string) (bool, error) { return false, nil }
+	holdsKeyboard(t, act.Node{Role: "push button", Label: "Send", Ref: "r-send"}, true)
 	a.executeTool(context.Background(), "observe_screen", map[string]any{})
 	a.executeTool(context.Background(), "click", map[string]any{"n": float64(2)})
 

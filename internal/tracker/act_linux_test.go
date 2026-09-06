@@ -6,6 +6,8 @@ import (
 	"context"
 	"image"
 	"testing"
+
+	"github.com/godbus/dbus/v5"
 )
 
 // Chromium names its actions press, click, jump, select, activate or doDefault depending on the node, always with showContextMenu beside them; the one to fire is the first of those, never the context menu, and index 0 when nothing recognisable is offered.
@@ -207,5 +209,57 @@ func TestFocusedFromStates_TellsAnEmptyReadFromANotFocusedOne(t *testing.T) {
 	held, err = focusedFromStates([]uint32{0, 0}, "r-address")
 	if err != nil || held {
 		t.Errorf("focusedFromStates(not focused) = (%v, %v), want (false, nil)", held, err)
+	}
+}
+
+// A Chromium or Electron text input often leaves STATE_FOCUSED off the node the accessibility walk listed and sets it on a child of that node instead, so reading the bit on the listed node alone answers "something else has the keyboard" for a box the keys are going straight into. The walk has to look under the node before it says no.
+func TestFindFocused(t *testing.T) {
+	ref := func(path string) aref { return aref{Name: ":1.7", Path: dbus.ObjectPath(path)} }
+	kids := map[string][]string{"/win": {"/bar", "/page"}, "/page": {"/input"}, "/input": {"/inner"}}
+	// read answers for one window as the bus would: the node at focused carries the bit and every node has the children kids gives it.
+	read := func(focused string) func(aref) (bool, []aref) {
+		return func(r aref) (bool, []aref) {
+			if string(r.Path) == focused {
+				return true, nil
+			}
+			out := make([]aref, 0, len(kids[string(r.Path)]))
+			for _, k := range kids[string(r.Path)] {
+				out = append(out, ref(k))
+			}
+			return false, out
+		}
+	}
+	cases := []struct {
+		name    string
+		focused string
+		want    string
+	}{
+		{name: "the bit sits on a child of the listed input", focused: "/inner", want: "/inner"},
+		{name: "the bit sits on the node itself", focused: "/input", want: "/input"},
+		{name: "nothing in the window carries the bit", focused: "/elsewhere"},
+	}
+	for _, c := range cases {
+		budget := maxNodes
+		got, ok := findFocused(ref("/win"), 0, &budget, read(c.focused))
+		if ok != (c.want != "") || (ok && string(got.Path) != c.want) {
+			t.Errorf("%s: findFocused = %q, %v; want %q, %v", c.name, got.Path, ok, c.want, c.want != "")
+		}
+	}
+}
+
+// A walk that reads every node of a window must stop on its budget rather than on the size of the tree, since the tree it is given is a whole browser page.
+func TestFindFocused_StopsOnItsBudget(t *testing.T) {
+	reads := 0
+	// Each node has one child for ever, so only the budget can end this walk.
+	read := func(r aref) (bool, []aref) {
+		reads++
+		return false, []aref{{Name: r.Name, Path: r.Path + "/x"}}
+	}
+	budget := 5
+	if _, ok := findFocused(aref{Name: ":1.7", Path: "/win"}, 0, &budget, read); ok {
+		t.Error("findFocused found a focused element in a tree that has none")
+	}
+	if reads > 5 {
+		t.Errorf("the walk read %d elements, want at most the 5 it was given", reads)
 	}
 }

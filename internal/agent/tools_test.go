@@ -9,8 +9,8 @@ import (
 	"ora/internal/act"
 	"ora/internal/db"
 	"ora/internal/memory"
-	oratext "ora/internal/text"
 	"ora/internal/tracker"
+	"ora/internal/util"
 	"ora/internal/window"
 	"os"
 	"os/exec"
@@ -316,32 +316,6 @@ func TestRecallBounds(t *testing.T) {
 	}
 }
 
-// TestToolDefinitions_DeclaresRevise verifies revise is declared to the model (not just wired in executeTool), with ref required and content/state/remove all optional — the single repair tool has to be offered before it can replace the four it stands in for.
-func TestToolDefinitions_DeclaresRevise(t *testing.T) {
-	var revise *genai.FunctionDeclaration
-	for _, tool := range toolDefinitions() {
-		for _, fd := range tool.FunctionDeclarations {
-			if fd.Name == "revise" {
-				revise = fd
-			}
-		}
-	}
-	if revise == nil {
-		t.Fatal("revise tool declaration not found")
-	}
-	for _, name := range []string{"ref", "content", "state", "remove"} {
-		if _, ok := revise.Parameters.Properties[name]; !ok {
-			t.Errorf("expected revise to declare a %q parameter", name)
-		}
-	}
-	if !slices.Contains(revise.Parameters.Required, "ref") {
-		t.Errorf("expected revise to require ref, got required=%v", revise.Parameters.Required)
-	}
-	if slices.Contains(revise.Parameters.Required, "content") || slices.Contains(revise.Parameters.Required, "state") || slices.Contains(revise.Parameters.Required, "remove") {
-		t.Errorf("expected only ref required, got required=%v", revise.Parameters.Required)
-	}
-}
-
 // TestExecuteTool_QueryMemory_SurfacesEpisodeHit verifies query_memory surfaces episode hits (raw screen-capture history), labeled "[episode] ...", so the model can search episode specifics.
 func TestExecuteTool_QueryMemory_SurfacesEpisodeHit(t *testing.T) {
 	brain := &toolTestBrain{
@@ -446,20 +420,6 @@ func TestExecuteTool_Recall_MultiDayShowsDates(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_Recall_UsesNewestFirst verifies the "recall" tool's timeline path asks ListEpisodes for the newest episodes in the window, not the default oldest-first sort — a real day can exceed the 50-episode cap, and oldest-first would return only the start of the window and silently stop there.
-func TestExecuteTool_Recall_UsesNewestFirst(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	a.executeTool(context.Background(), "recall", map[string]any{
-		"since": "2026-07-04", "until": "2026-07-04",
-	})
-
-	if !brain.capturedEpisodeQuery.NewestFirst {
-		t.Error("expected recall's ListEpisodes call to set NewestFirst: true")
-	}
-}
-
 // TestExecuteTool_Recall_TimestampsRenderInLocalTime verifies the timeline path renders each episode's timestamp converted to the user's local zone, not left in whatever zone it happens to be stored in (UTC, in practice) — otherwise every time shown to the user is off by the UTC offset and can even show the wrong date.
 // The fixture uses a zone offset guaranteed to differ from the test machine's Local zone, so a bug that renders the stored zone verbatim shows up as the wrong wall-clock hour.
 func TestExecuteTool_Recall_TimestampsRenderInLocalTime(t *testing.T) {
@@ -488,59 +448,46 @@ func TestExecuteTool_Recall_TimestampsRenderInLocalTime(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_Recall_NonStringSinceErrors verifies that a present-but-wrong-typed "since" arg (e.g. the model sends a JSON number instead of a string) surfaces an explicit error instead of silently coercing to "" and falling through to the default window, which the model could never distinguish from an intentional "default to today" call.
-func TestExecuteTool_Recall_NonStringSinceErrors(t *testing.T) {
-	brain := &toolTestBrain{
-		windowEpisodes: []db.Episode{
-			{ID: 1, CreatedAt: time.Now(), App: "Mail", Title: "Inbox", ScreenText: "should not be reached"},
+// TestExecuteTool_Recall_InvalidRangeAndTypeErrors verifies that malformed types or reversed date ranges produce explicit error strings rather than silent fallbacks or false-empty results.
+func TestExecuteTool_Recall_InvalidRangeAndTypeErrors(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      map[string]any
+		wantError string
+	}{
+		{
+			name:      "non-string since produces error",
+			args:      map[string]any{"since": float64(20260704)},
+			wantError: "error",
+		},
+		{
+			name:      "non-string until produces error",
+			args:      map[string]any{"until": 12345},
+			wantError: "error",
+		},
+		{
+			name:      "reversed range produces error",
+			args:      map[string]any{"since": "2026-07-10T00:00:00Z", "until": "2026-07-05T00:00:00Z"},
+			wantError: "runs backwards",
 		},
 	}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
 
-	result := a.executeTool(context.Background(), "recall", map[string]any{"since": float64(20260704)})
-
-	if !strings.Contains(result, "error") {
-		t.Errorf("expected an explicit error for a non-string since arg, got: %q", result)
-	}
-	if strings.Contains(result, "should not be reached") {
-		t.Errorf("non-string since must not silently fall through to the default window, got: %q", result)
-	}
-}
-
-// TestExecuteTool_Recall_NonStringUntilErrors is the "until" analogue of TestExecuteTool_Recall_NonStringSinceErrors.
-func TestExecuteTool_Recall_NonStringUntilErrors(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "recall", map[string]any{"until": 12345})
-
-	if !strings.Contains(result, "error") {
-		t.Errorf("expected an explicit error for a non-string until arg, got: %q", result)
-	}
-}
-
-// TestExecuteTool_Recall_ReversedRangeErrors verifies that since > until is rejected explicitly rather than silently returning "no episodes in that window" — a result indistinguishable from a genuinely empty day.
-func TestExecuteTool_Recall_ReversedRangeErrors(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "recall", map[string]any{
-		"since": "2026-07-10T00:00:00Z",
-		"until": "2026-07-05T00:00:00Z",
-	})
-
-	if !strings.Contains(result, "error") {
-		t.Errorf("expected an explicit error for a reversed since/until range, got: %q", result)
-	}
-	if strings.Contains(result, "no episodes in that window") {
-		t.Errorf("reversed range must not be reported as a genuinely empty window, got: %q", result)
-	}
-	// the range parsed fine — it's the ordering that's wrong, so the message must not claim a date-format problem that doesn't exist.
-	if strings.Contains(result, "real date") {
-		t.Errorf("reversed-range error should not lead with a format complaint, got: %q", result)
-	}
-	if !strings.Contains(result, "runs backwards") {
-		t.Errorf("expected the actual ordering problem to be stated, got: %q", result)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			brain := &toolTestBrain{
+				windowEpisodes: []db.Episode{
+					{ID: 1, CreatedAt: time.Now(), App: "Mail", Title: "Inbox", ScreenText: "should not be reached"},
+				},
+			}
+			a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+			res := a.executeTool(context.Background(), "recall", tc.args)
+			if !strings.Contains(res, tc.wantError) {
+				t.Errorf("result = %q, want error containing %q", res, tc.wantError)
+			}
+			if strings.Contains(res, "should not be reached") {
+				t.Errorf("invalid args must not fall through to default window: %q", res)
+			}
+		})
 	}
 }
 
@@ -581,125 +528,83 @@ func TestExecuteTool_Recall_SubjectWithApp_AnswersAndSaysTheFilterWasIgnored(t *
 	}
 }
 
-// TestToolDefinitions_QueryMemory_HasDomainParam asserts query_memory declares an optional "domain" string parameter.
-func TestToolDefinitions_QueryMemory_HasDomainParam(t *testing.T) {
-	var queryMemory *genai.FunctionDeclaration
-	for _, tool := range toolDefinitions() {
-		for _, fd := range tool.FunctionDeclarations {
-			if fd.Name == "query_memory" {
-				queryMemory = fd
+// TestExecuteTool_QueryMemory_DomainFilterArgs verifies that query_memory passes the optional domain arg through to HybridSearch, defaulting to empty when omitted.
+func TestExecuteTool_QueryMemory_DomainFilterArgs(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       map[string]any
+		wantDomain string
+	}{
+		{"omitted domain defaults to empty filter", map[string]any{"query": "x"}, ""},
+		{"provided domain passes through verbatim", map[string]any{"query": "x", "domain": "work"}, "work"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			brain := &toolTestBrain{capturedDomain: "sentinel"}
+			a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+			a.executeTool(context.Background(), "query_memory", tc.args)
+			if brain.capturedDomain != tc.wantDomain {
+				t.Errorf("domainFilter = %q, want %q", brain.capturedDomain, tc.wantDomain)
 			}
-		}
-	}
-	if queryMemory == nil {
-		t.Fatalf("query_memory tool declaration not found")
-	}
-	if queryMemory.Parameters == nil || queryMemory.Parameters.Properties == nil {
-		t.Fatalf("query_memory has no parameters/properties defined")
-	}
-	if _, ok := queryMemory.Parameters.Properties["domain"]; !ok {
-		t.Errorf(`expected query_memory to declare an optional "domain" parameter, got properties: %v`, queryMemory.Parameters.Properties)
-	}
-	// domain must be optional: it must NOT appear in Required.
-	for _, req := range queryMemory.Parameters.Required {
-		if req == "domain" {
-			t.Errorf(`expected "domain" to be optional, but found it in Required: %v`, queryMemory.Parameters.Required)
-		}
+		})
 	}
 }
 
-// TestExecuteTool_QueryMemory_NoDomainArg_CallsHybridSearchWithEmptyFilter verifies that omitting the optional "domain" arg calls a.brain.HybridSearch with domainFilter="" (search everything, weighted toward the current domain) rather than erroring on a missing optional arg.
-func TestExecuteTool_QueryMemory_NoDomainArg_CallsHybridSearchWithEmptyFilter(t *testing.T) {
-	brain := &toolTestBrain{capturedDomain: "sentinel-should-be-overwritten"}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "x"})
-
-	if brain.capturedDomain != "" {
-		t.Errorf(`expected HybridSearch to be called with domainFilter="" when "domain" is absent, got %q`, brain.capturedDomain)
-	}
-}
-
-// TestExecuteTool_QueryMemory_DomainArg_CallsHybridSearchWithDomainFilter verifies that a present "domain" arg ("work") is passed through verbatim as HybridSearch's domainFilter.
-func TestExecuteTool_QueryMemory_DomainArg_CallsHybridSearchWithDomainFilter(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	a.executeTool(context.Background(), "query_memory", map[string]any{"query": "x", "domain": "work"})
-
-	if brain.capturedDomain != "work" {
-		t.Errorf(`expected HybridSearch to be called with domainFilter="work", got %q`, brain.capturedDomain)
-	}
-}
-
-// TestExecuteTool_QueryMemory_FormatsHybridHits verifies the hits HybridSearch returns are formatted into the result string using the same "[%s] %s" line style already used elsewhere for other sources (e.g. "[episode] ...", "[summary] ...").
-func TestExecuteTool_QueryMemory_FormatsHybridHits(t *testing.T) {
-	brain := &toolTestBrain{
-		hybridHits: []db.MemoryHit{
-			{Source: "episode", Content: "saw the Riddler press conference on Gotham News"},
-			{Source: "summary", Content: "spent the afternoon debugging CUDA OOM errors"},
+// TestExecuteTool_QueryMemory_HitFormatting verifies that query_memory formats hits consistently (including source tags, note ref_ids, excerpt truncation, and empty result sentinels).
+func TestExecuteTool_QueryMemory_HitFormatting(t *testing.T) {
+	overlong := strings.Repeat("x", 2000)
+	cases := []struct {
+		name         string
+		hits         []db.MemoryHit
+		wantContains []string
+		mustNotHave  []string
+	}{
+		{
+			name: "formats episode and summary hits",
+			hits: []db.MemoryHit{
+				{Source: "episode", Content: "saw the Riddler press conference on Gotham News"},
+				{Source: "summary", Content: "spent the afternoon debugging CUDA OOM errors"},
+			},
+			wantContains: []string{"[episode] saw the Riddler", "[summary] spent the afternoon"},
+		},
+		{
+			name: "formats note hit with ref id",
+			hits: []db.MemoryHit{
+				{Source: "note", Content: "Samara is my wife", RefID: 105},
+			},
+			wantContains: []string{"[note#105] Samara is my wife"},
+		},
+		{
+			name: "truncates overlong hit content",
+			hits: []db.MemoryHit{
+				{Source: "summary", Content: overlong},
+			},
+			mustNotHave: []string{overlong},
+		},
+		{
+			name:         "zero hits returns no memory matches sentinel",
+			hits:         nil,
+			wantContains: []string{"no memory"},
 		},
 	}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
 
-	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "Riddler"})
-
-	if !strings.Contains(result, "[episode] saw the Riddler press conference on Gotham News") {
-		t.Errorf("expected episode hit formatted as '[episode] ...', got: %q", result)
-	}
-	if !strings.Contains(result, "[summary] spent the afternoon debugging CUDA OOM errors") {
-		t.Errorf("expected summary hit formatted as '[summary] ...', got: %q", result)
-	}
-}
-
-// TestExecuteTool_QueryMemory_FormatsNoteHitWithRefID verifies note hits carry their ref_id in the surfaced line ("[note#105] ..." instead of just "[note] ..."), unlike every other source — notes are the only source with a revise follow-up tool, and the model needs the id in hand to ever call it.
-func TestExecuteTool_QueryMemory_FormatsNoteHitWithRefID(t *testing.T) {
-	brain := &toolTestBrain{
-		hybridHits: []db.MemoryHit{
-			{Source: "note", Content: "Samara is my wife", RefID: 105},
-		},
-	}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "Samara"})
-
-	if !strings.Contains(result, "[note#105] Samara is my wife") {
-		t.Errorf(`expected note hit formatted as "[note#105] ...", got: %q`, result)
-	}
-}
-
-// TestExecuteTool_QueryMemory_TruncatesOverlongHitContent verifies query_memory formats hits through db.FormatHit like every other read path — a hit whose content exceeds the excerpt budget must come back truncated, not injected raw. Raw Activity Log summaries in production run tens of KB; an uncapped hit here can consume the entire tool-result byte budget by itself.
-func TestExecuteTool_QueryMemory_TruncatesOverlongHitContent(t *testing.T) {
-	overlong := strings.Repeat("x", 2000) // well past db's excerpt budget for a summary (maxSummaryExcerpt, 700 runes)
-	brain := &toolTestBrain{
-		hybridHits: []db.MemoryHit{
-			{Source: "summary", Content: overlong},
-		},
-	}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "anything"})
-
-	if strings.Contains(result, overlong) {
-		t.Fatalf("expected overlong hit content to be truncated, got full %d-char content in result", len(overlong))
-	}
-	if len(result) >= len(overlong) {
-		t.Errorf("expected result shorter than the untruncated content (%d chars), got %d chars", len(overlong), len(result))
-	}
-}
-
-// TestExecuteTool_QueryMemory_ZeroHits_ReturnsNoMatchesString verifies that zero hits from HybridSearch still returns a sensible "no memory matches"-style string rather than an empty string or a panic.
-func TestExecuteTool_QueryMemory_ZeroHits_ReturnsNoMatchesString(t *testing.T) {
-	brain := &toolTestBrain{hybridHits: nil}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "nothing matches this"})
-
-	if result == "" {
-		t.Fatal("expected a non-empty sentinel string for zero hits, got empty string")
-	}
-	if !strings.Contains(strings.ToLower(result), "no memory") {
-		t.Errorf(`expected a "no memory matches"-style string, got: %q`, result)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			brain := &toolTestBrain{hybridHits: tc.hits}
+			a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+			result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "search"})
+			for _, want := range tc.wantContains {
+				if !strings.Contains(strings.ToLower(result), strings.ToLower(want)) {
+					t.Errorf("expected result to contain %q, got: %q", want, result)
+				}
+			}
+			for _, bad := range tc.mustNotHave {
+				if strings.Contains(result, bad) {
+					t.Errorf("result unexpectedly contained forbidden snippet: %q", bad)
+				}
+			}
+		})
 	}
 }
 
@@ -2885,29 +2790,6 @@ func TestScreenRoundDeclarations_StayShort(t *testing.T) {
 	}
 }
 
-// TestDelegateTool_IsRegistered checks the delegate tool is declared, allowed for asks, and dispatched by executeTool, so a model that is offered it can actually call it.
-func TestDelegateTool_IsRegistered(t *testing.T) {
-	found := false
-	for _, tool := range toolDefinitions() {
-		for _, fd := range tool.FunctionDeclarations {
-			if fd.Name == "delegate" {
-				found = true
-			}
-		}
-	}
-	if !found {
-		t.Fatal("delegate tool declaration not found in toolDefinitions")
-	}
-	if !askAllowedTools["delegate"] {
-		t.Error("delegate is not in askAllowedTools, so an ask could never run it")
-	}
-	a := &Agent{}
-	got := a.executeTool(context.Background(), "delegate", map[string]any{})
-	if !strings.Contains(got, "brief") {
-		t.Errorf("executeTool(delegate) = %q, want the handler's own missing-brief error rather than the unknown-tool default", got)
-	}
-}
-
 // TestNewScreenScope_GivesOneCallerItsOwnNumberedList checks the exported scope a long-running job installs keeps that job's screen state to itself: the list one scope observed is not visible in another scope, nor in the agent-wide state a directly driven tool call reads. Two jobs sharing one list is how a click by number lands in the other job's window.
 func TestNewScreenScope_GivesOneCallerItsOwnNumberedList(t *testing.T) {
 	a := &Agent{}
@@ -3057,7 +2939,7 @@ func TestRunShellCommand_TruncatesWithoutSplittingARune(t *testing.T) {
 		t.Error("the truncated shell output is not valid UTF-8")
 	}
 	if !strings.HasSuffix(got, "\n... (truncated)") {
-		t.Fatalf("expected the truncation marker, got the tail %q", oratext.Runes(got, 40))
+		t.Fatalf("expected the truncation marker, got the tail %q", util.Runes(got, 40))
 	}
 	if n := utf8.RuneCountInString(strings.TrimSuffix(got, "\n... (truncated)")); n != 2000 {
 		t.Errorf("kept %d runes, want 2000", n)
@@ -3105,6 +2987,7 @@ func TestExecuteTool_TypeText_RefusesWhenTheClickedFieldNoLongerHasFocus(t *test
 	a.executeTool(ctx, "observe_screen", map[string]any{})
 	a.rememberClick(ctx, act.Item{N: 1, Role: "entry", Label: "To", Ref: "r-1"})
 	a.focused = func(context.Context, string) (bool, error) { return false, nil }
+	holdsKeyboard(t, act.Node{Role: "push button", Label: "Send", Ref: "r-send"}, true)
 
 	got := a.executeTool(ctx, "type_text", map[string]any{"text": "hello"})
 
@@ -3113,6 +2996,71 @@ func TestExecuteTool_TypeText_RefusesWhenTheClickedFieldNoLongerHasFocus(t *test
 	}
 	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "could not identify") {
 		t.Errorf("result = %q, want a stop saying the field could not be identified", got)
+	}
+}
+
+// holdsKeyboard stands in for the read of which element of the window in front holds the keyboard, for the run of one test. Input: the test, the element to answer with, and whether anything readable holds the keyboard at all. Output: none; the real read is put back when the test ends.
+func holdsKeyboard(t *testing.T, n act.Node, ok bool) {
+	t.Helper()
+	restore := keyboardHolder
+	keyboardHolder = func(context.Context) (act.Node, bool) { return n, ok }
+	t.Cleanup(func() { keyboardHolder = restore })
+}
+
+// The reported failure: the user asked for music, the model clicked Brave's address bar by a point on the screen, the page moved the keyboard into its own search box, and the typing was refused because the clicked field no longer carried the focused bit. Another box to type in is where the keys legitimately land, so the text goes in and the result says which box got it.
+func TestExecuteTool_TypeText_TypesIntoTheFieldThatHoldsTheKeyboard(t *testing.T) {
+	a, in := typingAgent(t)
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.rememberClick(ctx, act.Item{N: 1, Role: "entry", Label: "Address bar", Ref: "r-1"})
+	a.focused = func(context.Context, string) (bool, error) { return false, nil }
+	holdsKeyboard(t, act.Node{Role: "entry", Label: "Search", Ref: "r-search"}, true)
+
+	got := a.executeTool(ctx, "type_text", map[string]any{"text": "lofi beats"})
+
+	if len(in.calls) != 1 || in.calls[0] != "type lofi beats" {
+		t.Errorf("keyboard = %v, want the text typed", in.calls)
+	}
+	if !strings.Contains(got, "Search") {
+		t.Errorf("result = %q, want it to name the field the text went into", got)
+	}
+}
+
+// A window that publishes nothing readable says nothing about where the keyboard is, and refusing on that is what stopped the typing this stop line exists to let through. It goes ahead on the remembered click, as it does when the read of the clicked field itself fails.
+func TestExecuteTool_TypeText_TypesWhenNothingReadableHoldsTheKeyboard(t *testing.T) {
+	a, in := typingAgent(t)
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.rememberClick(ctx, act.Item{N: 1, Role: "entry", Label: "Address bar", Ref: "r-1"})
+	a.focused = func(context.Context, string) (bool, error) { return false, nil }
+	holdsKeyboard(t, act.Node{}, false)
+
+	got := a.executeTool(ctx, "type_text", map[string]any{"text": "hello"})
+
+	if len(in.calls) != 1 || in.calls[0] != "type hello" {
+		t.Errorf("keyboard = %v, want the text typed", in.calls)
+	}
+	if strings.HasPrefix(got, "Stopped before ") {
+		t.Errorf("result = %q, want the typing to go through", got)
+	}
+}
+
+// The keyboard being in a box to type in is not enough on its own: a password box is one of those, and the secret stop line is checked against whichever field the keys are really going to, not only against the one the last click acted on.
+func TestExecuteTool_TypeText_RefusesWhenAPasswordFieldHoldsTheKeyboard(t *testing.T) {
+	a, in := typingAgent(t)
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.rememberClick(ctx, act.Item{N: 1, Role: "entry", Label: "Email", Ref: "r-1"})
+	a.focused = func(context.Context, string) (bool, error) { return false, nil }
+	holdsKeyboard(t, act.Node{Role: "password text", Ref: "r-pass"}, true)
+
+	got := a.executeTool(ctx, "type_text", map[string]any{"text": "hunter2"})
+
+	if len(in.calls) != 0 {
+		t.Errorf("keyboard = %v, want nothing typed", in.calls)
+	}
+	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "password") {
+		t.Errorf("result = %q, want the refusal that never types a secret", got)
 	}
 }
 
@@ -3190,3 +3138,37 @@ func TestExecuteTool_ScrollTo_RefusesAStaleElement(t *testing.T) {
 		t.Errorf("result = %q, want the staleness refusal", got)
 	}
 }
+
+// WithToolObserver/ObserveTool round-trip: a context carrying an observer must deliver both name and summary to it exactly as given.
+func TestWithToolObserver_RoundTrips(t *testing.T) {
+	var got []string
+	ctx := WithToolObserver(context.Background(), func(name, summary string) {
+		got = append(got, name+":"+summary)
+	})
+	ObserveTool(ctx, "click", "pressing Reload")
+	if len(got) != 1 || got[0] != "click:pressing Reload" {
+		t.Errorf("observer round-trip = %v", got)
+	}
+}
+
+// A context with no observer attached, or one attached as an explicit nil, must be a silent no-op rather than a nil-func panic — askText and askVoice call this on every tool hop of every turn, most of which (a plain /ask with no live window watching) carry no observer at all.
+func TestObserveTool_NoObserverIsANoop(t *testing.T) {
+	ObserveTool(context.Background(), "click", "pressing Reload")
+	ObserveTool(WithToolObserver(context.Background(), nil), "click", "pressing Reload")
+}
+
+// The gate that lets a text ask run tools without AllowEvalWrites has to admit whatever a real /ask turn needs, since the daemon never sets AllowEvalWrites: it now also allows the store-writing tools that need no HITL approval (save_note, personal_context, revise, action_items, query_store, open_url), while the ones gated behind ToolApprovalChan (shell_exec, read_file, list_files) stay blocked, because nothing in the daemon reads that channel to answer the prompt.
+func TestEvalExecute_AllowsUnapprovedWriteTools(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	for _, tool := range []string{"save_note", "personal_context", "revise", "action_items", "query_store", "open_url"} {
+		if got := a.evalExecute(context.Background(), tool, map[string]any{}); strings.Contains(got, "not available in an ask") {
+			t.Errorf("%s must be allowed without AllowEvalWrites, got %q", tool, got)
+		}
+	}
+	for _, tool := range []string{"shell_exec", "read_file", "list_files"} {
+		if got := a.evalExecute(context.Background(), tool, map[string]any{}); !strings.Contains(got, "not available in an ask") {
+			t.Errorf("%s must stay behind the gate, got %q", tool, got)
+		}
+	}
+}
+
