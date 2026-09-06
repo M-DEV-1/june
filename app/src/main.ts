@@ -626,8 +626,8 @@ function stepsHtml(steps: ToolStep[]): string {
   return `<div class="steps" data-made="${steps.length}">${moreRowHtml(steps.length - shown.length)}${shown.map((s) => stepRowHtml(s, now)).join("")}</div>`;
 }
 
-/** How many step rows the card keeps. A screen task calls the same few tools over and over — look, see, look, see — and a row for every one of them filled the card and pushed everything else off it. The rest are counted into one line instead. */
-const STEP_ROWS = 4;
+/** How many step rows the card keeps while a task is running: one, the step happening now. A screen task calls the same few tools over and over — look, see, look, see — and a row for every one of them filled the card and pushed everything else off it, so a running task says what it is doing in a single line with the rest counted above it. The whole list is still there once the task has finished, folded behind its "N steps" line. */
+const STEP_ROWS = 1;
 
 /** The one line standing in for the steps the card is no longer showing. Input: how many were folded away. Output: the line's HTML, or "" when none were. */
 function moreRowHtml(hidden: number): string {
