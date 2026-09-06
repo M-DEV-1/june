@@ -17,7 +17,8 @@ export function ThreadRail({
   showing?: Turn;
 }) {
   const jobLive = Boolean(job && isJobLive(job.state));
-  const { data: jobData } = useJobQuery(job?.id ?? "", {
+  // currentData rather than data: RTK Query keeps the previous job's result in data while a new job's own fetch is in flight, which would show the last job's plan and spend under the job that just started.
+  const { currentData: jobData } = useJobQuery(job?.id ?? "", {
     skip: !sources || !job?.id,
     pollingInterval: jobLive ? 2000 : 0,
   });
