@@ -75,7 +75,9 @@ const (
 // BusNotifier posts notifications on the session bus and watches it for what the user pressed. Presses arrive as ActionInvoked and dismissals as NotificationClosed, both carrying the id the Notify call returned, which is what ties a press back to the notice that caused it.
 type BusNotifier struct {
 	conn *dbus.Conn
-	// mu guards waiting and keyed, and is held across the Notify call itself, so a user quick enough to click before the id is recorded still finds a handler waiting for them.
+	// notifyCall posts one notification to the desktop and returns the id it was given. A field because *dbus.Conn is concrete and a test has no session bus to post on; NewBusNotifier sets it to callBus.
+	notifyCall func(title, body string, actions []string) (uint32, error)
+	// mu guards waiting and keyed. It is taken after the Notify call, never across it: godbus's Call has no timeout, and holding this lock through a wedged notification daemon stalled every pending button press and every Close for as long as it took.
 	mu      sync.Mutex
 	waiting map[uint32]func(string)
 	// keyed maps a notice's own key to the D-Bus id Notify posted it under, so Close can find which banner a window press should also dismiss.
@@ -108,6 +110,7 @@ func NewBusNotifier(ctx context.Context) (*BusNotifier, error) {
 		}
 	}
 	n := &BusNotifier{conn: conn, waiting: map[uint32]func(string){}, keyed: map[string]uint32{}}
+	n.notifyCall = n.callBus
 	sigCh := make(chan *dbus.Signal, 16)
 	conn.Signal(sigCh)
 	go n.listen(ctx, sigCh)
@@ -120,24 +123,34 @@ func (n *BusNotifier) Notify(noticeKey, title, body string, actions []Action, ch
 	for _, a := range actions {
 		flat = append(flat, a.Key, a.Label)
 	}
-	hints := map[string]dbus.Variant{
-		"urgency":       dbus.MakeVariant(byte(1)),
-		"desktop-entry": dbus.MakeVariant("ora"),
+	id, err := n.notifyCall(title, body, flat)
+	if err != nil {
+		return err
 	}
+	// The lock is taken only once the desktop has answered, so a wedged notification daemon stalls this one post instead of every pending press. The cost is a press that arrives before this line: finish finds nobody waiting on that id and drops it. That window is the microseconds between the desktop assigning the id and this map write, which no user can click inside.
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	var id uint32
-	// The zero replaces_id posts a new notification rather than replacing an existing one; the zero expire_timeout means it never times out.
-	if err := n.conn.Object(notifyDest, notifyPath).Call(notifyIface+".Notify", 0,
-		"Ora", uint32(0), noticeIcon, title, body, flat, hints, int32(0)).Store(&id); err != nil {
-		return fmt.Errorf("notify: %w", err)
-	}
 	n.waiting[id] = chose
 	// A key with nothing behind the kind (no id and no title) would make each such banner overwrite the last one's entry, so it is not remembered for Close.
 	if noticeKey != "" && !strings.HasSuffix(noticeKey, "|") {
 		n.keyed[noticeKey] = id
 	}
 	return nil
+}
+
+// callBus is the real Notify call on the session bus. Input: the notification's title and body and its buttons flattened to key, label pairs. Output: the id the desktop assigned it, or the bus error.
+func (n *BusNotifier) callBus(title, body string, actions []string) (uint32, error) {
+	hints := map[string]dbus.Variant{
+		"urgency":       dbus.MakeVariant(byte(1)),
+		"desktop-entry": dbus.MakeVariant("ora"),
+	}
+	var id uint32
+	// The zero replaces_id posts a new notification rather than replacing an existing one; the zero expire_timeout means it never times out.
+	if err := n.conn.Object(notifyDest, notifyPath).Call(notifyIface+".Notify", 0,
+		"Ora", uint32(0), noticeIcon, title, body, actions, hints, int32(0)).Store(&id); err != nil {
+		return 0, fmt.Errorf("notify: %w", err)
+	}
+	return id, nil
 }
 
 // Close dismisses the banner Notify most recently posted under noticeKey, through the same CloseNotification call the desktop uses to auto-expire one. A key nothing was posted under — the banner already gone, or this notifier never posted it — is not an error: the window and the banner can race to deal with the same notice, and the loser here simply has nothing left to close.
@@ -377,8 +390,16 @@ func (s *Scheduler) maybeSnoozes(ctx context.Context) {
 			slog.Warn("snoozes: could not stamp one as fired, skipping it", "id", sn.ID, "error", err)
 			continue
 		}
-		s.say(Notice{Title: sn.Title, Body: sn.Body, ID: sn.NoticeID, Kind: sn.Kind})
+		s.say(Notice{Title: sn.Title, Body: sn.Body, Place: noticePlaces[sn.Kind], ID: sn.NoticeID, Kind: sn.Kind})
 	}
+}
+
+// noticePlaces says which of the window's own screens a notice of each kind opens. A snooze row carries the kind but not the place, so a re-fired notice's place is derived from it here — without this the card for a snoozed task opened nothing, while the original card opened Tasks. A kind not listed opens nothing in particular, which is what an empty place already means.
+var noticePlaces = map[string]string{
+	"task":    "tasks",
+	"brief":   "tasks",
+	"routine": "routine",
+	"close":   "days",
 }
 
 // taskNoticeWatermarkKind is the diary-table row maybeTaskNotices keeps purely as a marker, on the empty day the same way the understanding doc is: the highest action-item note id already turned into a task notice, so a daemon restart never re-announces work it has already surfaced.
@@ -398,7 +419,11 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 		return
 	}
 	watermark, _ := strconv.ParseInt(mark, 10, 64)
-	seeding := mark == ""
+	// The watermark this process last computed wins when it is ahead of the stored one, which is what a failed write leaves behind. Without it a store that will not take the write made the same items be announced again every minute for as long as the disk was full.
+	if s.taskMark > watermark {
+		watermark = s.taskMark
+	}
+	seeding := mark == "" && s.taskMark == 0
 
 	items, err := s.store.ActionItemsByOwner(ctx, memory.OwnerMe)
 	if err != nil {
@@ -447,6 +472,7 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 	}
 
 	if max != watermark || seeding {
+		s.taskMark = max
 		if err := s.store.SetDiaryEntry(ctx, "", taskNoticeWatermarkKind, strconv.FormatInt(max, 10)); err != nil {
 			slog.Warn("task notices: writing the watermark failed", "error", err)
 		}

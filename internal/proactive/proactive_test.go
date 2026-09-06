@@ -137,8 +137,8 @@ func TestScheduler_Close_RequiresActivityToday(t *testing.T) {
 	}
 }
 
-// TestScheduler_Close_RetriesNextTickAfterBrainFailure verifies a failed close leaves no partial state and succeeds on a later tick once the brain recovers.
-func TestScheduler_Close_RetriesNextTickAfterBrainFailure(t *testing.T) {
+// TestScheduler_Close_RetriesAfterBrainFailure verifies a failed close leaves no partial state and succeeds on a later tick once the brain recovers and the backoff its failure earned has passed.
+func TestScheduler_Close_RetriesAfterBrainFailure(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
@@ -153,7 +153,11 @@ func TestScheduler_Close_RetriesNextTickAfterBrainFailure(t *testing.T) {
 		return "The day, written.", nil
 	}, func(string, string) {}, config.ProactiveConfig{BriefHour: -1})
 	s.closeHour = 0
-	today := time.Now().Format(dayFormat)
+	n := time.Now()
+	base := time.Date(n.Year(), n.Month(), n.Day(), 12, 0, 0, 0, n.Location())
+	var offset time.Duration
+	s.now = func() time.Time { return base.Add(offset) }
+	today := base.Format(dayFormat)
 
 	s.tick(ctx)
 	if entry, _ := store.DiaryEntry(ctx, today, "day"); entry != "" {
@@ -161,6 +165,7 @@ func TestScheduler_Close_RetriesNextTickAfterBrainFailure(t *testing.T) {
 	}
 
 	failing = false
+	offset = firstBackoff + time.Minute
 	s.tick(ctx)
 	if entry, _ := store.DiaryEntry(ctx, today, "day"); entry != "The day, written." {
 		t.Errorf("diary entry after retry = %q, want the brain's answer", entry)
@@ -669,5 +674,164 @@ func TestNotifyArgs_LongBodyGetsReadAction(t *testing.T) {
 	args = notifyArgs("x-office-calendar", "Recording meeting", "Ora is recording.")
 	if strings.Contains(strings.Join(args, " "), "--action=") {
 		t.Errorf("short body should stay a plain notification, got %v", args)
+	}
+}
+
+// stubStore wraps a store so one test can replace a single method. The real store cannot write a screen summary at a past time, and cannot be made to refuse one write while every other one still works. A nil field delegates to the wrapped store.
+type stubStore struct {
+	Store
+	summaries func(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
+	setDiary  func(ctx context.Context, day, kind, content string) error
+	setRun    func(ctx context.Context, id int64, when time.Time, answer string) error
+}
+
+// SummaryTimeline returns the stubbed timeline when one is set, otherwise the wrapped store's.
+func (s *stubStore) SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error) {
+	if s.summaries != nil {
+		return s.summaries(ctx, since, until)
+	}
+	return s.Store.SummaryTimeline(ctx, since, until)
+}
+
+// SetDiaryEntry writes through the stub when one is set, otherwise to the wrapped store.
+func (s *stubStore) SetDiaryEntry(ctx context.Context, day, kind, content string) error {
+	if s.setDiary != nil {
+		return s.setDiary(ctx, day, kind, content)
+	}
+	return s.Store.SetDiaryEntry(ctx, day, kind, content)
+}
+
+// SetRoutineRun writes through the stub when one is set, otherwise to the wrapped store.
+func (s *stubStore) SetRoutineRun(ctx context.Context, id int64, when time.Time, answer string) error {
+	if s.setRun != nil {
+		return s.setRun(ctx, id, when, answer)
+	}
+	return s.Store.SetRoutineRun(ctx, id, when, answer)
+}
+
+// TestTick_HungDutyDoesNotStopTheNext checks every duty gets its own deadline: a close whose brain call never returns must not stop the brief running on the same tick. A wedged Gemini call used to freeze every later duty for the life of the daemon.
+func TestTick_HungDutyDoesNotStopTheNext(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, diaryInstruction) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+		return "Three things today.", nil
+	}, func(string, string) {}, config.ProactiveConfig{})
+	s.briefHour, s.closeHour = 0, 0
+	s.dutyTimeout = 50 * time.Millisecond
+
+	s.tick(ctx)
+
+	if brief, _ := store.DiaryEntry(ctx, time.Now().Format(dayFormat), "brief"); brief != "Three things today." {
+		t.Errorf("brief marker after a hung close = %q, want the brief delivered anyway", brief)
+	}
+}
+
+// TestTick_StoreOnlyDutiesRunBeforeTheBrainOnes checks the cheap store-only duties are run first, so a "remind me in an hour" is not held up by a brain call that takes minutes.
+func TestTick_StoreOnlyDutiesRunBeforeTheBrainOnes(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+	if _, err := store.AddSnooze(ctx, "task", "42", "Still open", "Send the invoice", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("AddSnooze: %v", err)
+	}
+
+	var order []string
+	SetNoticeSender(func(n Notice) bool { order = append(order, "notice:"+n.Kind); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s := New(store, func(context.Context, string) (string, error) {
+		order = append(order, "brain")
+		return "The day, written.", nil
+	}, func(string, string) {}, config.ProactiveConfig{BriefHour: -1})
+	s.closeHour = 0
+
+	s.tick(ctx)
+
+	if len(order) == 0 || order[0] != "notice:task" {
+		t.Errorf("tick order = %v, want the due snooze raised before any brain call", order)
+	}
+}
+
+// TestScheduler_Close_BacksOffAfterAFailure checks a close whose brain call failed is not retried on the very next tick: five minutes after the first failure, thirty after each one after that. Before this a broken brain cost one counted request a minute for the rest of the day.
+func TestScheduler_Close_BacksOffAfterAFailure(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	calls := 0
+	s := New(store, func(context.Context, string) (string, error) {
+		calls++
+		return "", fmt.Errorf("brain down")
+	}, func(string, string) {}, config.ProactiveConfig{BriefHour: -1})
+	s.closeHour = 0
+	n := time.Now()
+	base := time.Date(n.Year(), n.Month(), n.Day(), 12, 0, 0, 0, n.Location())
+	var offset time.Duration
+	s.now = func() time.Time { return base.Add(offset) }
+
+	steps := []struct {
+		after time.Duration
+		want  int
+	}{
+		{0, 1},
+		{time.Minute, 1},
+		{firstBackoff + time.Minute, 2},
+		{firstBackoff + 2*time.Minute, 2},
+		{firstBackoff + laterBackoff + 2*time.Minute, 3},
+	}
+	for _, st := range steps {
+		offset = st.after
+		s.tick(ctx)
+		if calls != st.want {
+			t.Errorf("%s after the first failure: %d brain calls, want %d", st.after, calls, st.want)
+		}
+	}
+}
+
+// TestScheduler_Close_CatchesUpADaySleptThrough checks a day the machine was asleep through at the close hour still gets its diary entry on the first tick after the next day's close hour, written from that day's own timeline. The lost row is also the next day's "yesterday's entry" prompt input.
+func TestScheduler_Close_CatchesUpADaySleptThrough(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	n := time.Now()
+	today := time.Date(n.Year(), n.Month(), n.Day(), 23, 0, 0, 0, n.Location())
+	yesterdayNoon := today.AddDate(0, 0, -1).Add(-11 * time.Hour)
+
+	stub := &stubStore{Store: store, summaries: func(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error) {
+		if yesterdayNoon.Before(since) || yesterdayNoon.After(until) {
+			return nil, nil
+		}
+		return []db.WindowSummary{{CreatedAt: yesterdayNoon, Content: "wrote the recorder"}}, nil
+	}}
+
+	var prompts []string
+	s := New(stub, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		return "Yesterday was the recorder.", nil
+	}, func(string, string) {}, config.ProactiveConfig{BriefHour: -1})
+	s.closeHour = 22
+	s.now = func() time.Time { return today }
+
+	s.tick(ctx)
+
+	if entry, _ := store.DiaryEntry(ctx, today.AddDate(0, 0, -1).Format(dayFormat), "day"); entry != "Yesterday was the recorder." {
+		t.Errorf("yesterday's diary entry = %q, want it written from yesterday's own timeline", entry)
+	}
+	if entry, _ := store.DiaryEntry(ctx, today.Format(dayFormat), "day"); entry != "" {
+		t.Errorf("today was closed with no activity recorded: %q", entry)
+	}
+	if len(prompts) == 0 || !strings.Contains(prompts[0], "wrote the recorder") {
+		t.Errorf("the diary prompt did not carry yesterday's timeline: %v", prompts)
 	}
 }

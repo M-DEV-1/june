@@ -621,3 +621,97 @@ func TestBusNotifier_FinishForgetsTheKey(t *testing.T) {
 		t.Error("an unrelated banner's key was dropped")
 	}
 }
+
+// TestMaybeTaskNotices_FailedWatermarkWriteDoesNotReannounce checks a watermark the store would not write is still remembered for this process, so the same items are not announced again on the next tick, once a minute, for as long as the disk is full.
+func TestMaybeTaskNotices_FailedWatermarkWriteDoesNotReannounce(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if err := store.SetDiaryEntry(ctx, "", taskNoticeWatermarkKind, "0"); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
+		{Owner: "Me", Text: "Send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
+	}); err != nil {
+		t.Fatalf("AddActionItems: %v", err)
+	}
+
+	stub := &stubStore{Store: store, setDiary: func(context.Context, string, string, string) error {
+		return errors.New("disk full")
+	}}
+	s := New(stub, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	f := &fakeNotifier{}
+	s.SetNotifier(f)
+
+	s.maybeTaskNotices(ctx)
+	if f.count() != 1 {
+		t.Fatalf("posted %d task notices, want 1", f.count())
+	}
+	s.maybeTaskNotices(ctx)
+	if f.count() != 1 {
+		t.Errorf("posted %d task notices after a failed watermark write, want still 1", f.count())
+	}
+}
+
+// TestSnooze_RefiredNoticeCarriesItsPlace checks a snooze coming back points at the same screen the first posting did. The snooze row does not carry the place, so it is derived from the kind; without it the card opened nothing.
+func TestSnooze_RefiredNoticeCarriesItsPlace(t *testing.T) {
+	cases := []struct{ kind, place string }{
+		{"task", "tasks"},
+		{"routine", "routine"},
+		{"close", "days"},
+		{"brief", "tasks"},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			ctx := context.Background()
+			store := testStore(t)
+			if _, err := store.AddSnooze(ctx, c.kind, "42", "Still open", "Send the invoice", time.Now().Add(-time.Minute)); err != nil {
+				t.Fatalf("AddSnooze: %v", err)
+			}
+			var sent []Notice
+			SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+			t.Cleanup(func() { SetNoticeSender(nil) })
+
+			s := New(store, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+			s.maybeSnoozes(ctx)
+
+			if len(sent) != 1 || sent[0].Place != c.place {
+				t.Errorf("re-fired notice = %+v, want one with place %q", sent, c.place)
+			}
+		})
+	}
+}
+
+// TestBusNotifier_SlowNotifyDoesNotStallAPress checks the D-Bus lock is not held across the Notify call: a wedged notification daemon must stall only its own post, not every pending button press on every other notice.
+func TestBusNotifier_SlowNotifyDoesNotStallAPress(t *testing.T) {
+	pressed := make(chan string, 1)
+	release := make(chan struct{})
+	n := &BusNotifier{
+		waiting: map[uint32]func(string){7: func(key string) { pressed <- key }},
+		keyed:   map[string]uint32{"task|42": 7},
+	}
+	n.notifyCall = func(title, body string, actions []string) (uint32, error) {
+		<-release
+		return 8, nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- n.Notify("task|43", "Still open", "Book the venue", noticeActions, func(string) {}) }()
+	go n.finish(7, actionDone)
+
+	select {
+	case key := <-pressed:
+		if key != actionDone {
+			t.Errorf("press came back as %q, want %q", key, actionDone)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a press was stalled by a Notify call that had not returned")
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Errorf("Notify: %v", err)
+	}
+	if n.keyed["task|43"] != 8 {
+		t.Errorf("keyed = %v, want the second notice recorded once its call returned", n.keyed)
+	}
+}
