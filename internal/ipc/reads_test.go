@@ -586,3 +586,23 @@ func TestMeetings_DatedByTheRecordingsStartNotTheNote(t *testing.T) {
 		t.Errorf("meetings are ordered %q then %q; want the most recently run first", got.Meetings[0].Title, got.Meetings[1].Title)
 	}
 }
+
+// The hotkey's live read must refuse the same windows the tracker refuses. /context filtered Ora's own window and nothing else, so pressing the hotkey with a password manager in front answered {"app":"1Password","title":"Vault — Personal"} and that is what the window fed into the model's prompt — a row the episode store would never hold, because the tracker's own skip drops it before it is written.
+func TestContext_LiveFocusOnTheBlocklistFallsThroughToBuffer(t *testing.T) {
+	tracker.SetBlocklist([]string{"1password"})
+	t.Cleanup(func() { tracker.SetBlocklist(nil) })
+
+	store := newReadStore(t)
+	screen := func() []tracker.Activity {
+		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
+	}
+	focused := func(context.Context) (tracker.Activity, bool) {
+		return tracker.Activity{App: "1Password", Title: "Vault — Personal", ScreenText: "the master password list"}, true
+	}
+	srv := newTestServer(t, &fakeAsker{}, store, screen, focused)
+	var got ContextView
+	getJSON(t, srv, "/context", &got)
+	if got.App != "Slack" || got.Text != "slack text" {
+		t.Errorf("got %+v, want the buffer's window since the live read named a blocked application", got)
+	}
+}
