@@ -21,7 +21,7 @@ const stateShowing uint = 25
 // observeTimeout bounds one read of a window; a page that has not finished in this time is answered with what was read so far.
 const observeTimeout = 4 * time.Second
 
-// Observe reads the window that has focus (the last one before Ora took it, when Ora has it) into the nodes a model can act on. Input: a context. Output: the app's name, the window's title, one act.Node per node with an actionable role (see act.Actionable) in tree order, and an error when the accessibility bus is unreachable, the focused window has gone, or nothing on the desktop publishes an actionable node. When no window has taken focus since the daemon started it walks the desktop instead (see observeDesktop).
+// Observe reads the window that has focus (the last one before Ora took it, when Ora has it) into the nodes a model can act on. Input: a context. Output: the app's name, the window's title, one act.Node per node with an actionable role (see act.Actionable) in tree order, and an error when the accessibility bus is unreachable, the focused window has gone, the application in front is on the blocklist, or nothing on the desktop publishes an actionable node. When no window has taken focus since the daemon started it walks the desktop instead (see observeDesktop).
 func Observe(ctx context.Context) (app, title string, nodes []act.Node, err error) {
 	w := focus()
 	if w == nil {
@@ -33,6 +33,9 @@ func Observe(ctx context.Context) (app, title string, nodes []act.Node, err erro
 	if !ok || IsOraWindow(app, getName(ctx, w.conn, ref)) {
 		// The watcher only learns focus from activation events after the daemon starts, so a fresh daemon, or one that has only seen Ora's own hover come and go, has nothing to walk. Fall back to the desktop tree and take the window with the most actionable nodes.
 		return observeDesktop(ctx, w.conn)
+	}
+	if Blocklisted(app) {
+		return "", "", nil, blockedRead(app)
 	}
 	title, err = readName(ctx, w.conn, ref)
 	if err != nil {
@@ -51,7 +54,7 @@ func correctListing(ctx context.Context, conn *dbus.Conn, ref aref, nodes []act.
 	if len(nodes) == 0 {
 		return
 	}
-	work, screen, ok := desktopBounds()
+	d, ok := deskNow()
 	if !ok {
 		return
 	}
@@ -59,12 +62,12 @@ func correctListing(ctx context.Context, conn *dbus.Conn, ref aref, nodes []act.
 	if !ok {
 		return
 	}
-	toScreen(nodes, frame, work, screen)
+	toScreen(nodes, frame, d)
 }
 
-// toScreen moves every node of one window's listing by however far that window's rectangles are from the truth. Input: the nodes as the walk read them, the rectangle the window reported for itself, and the desktop's work area and whole screen. Output: none; the nodes are moved in place, by the shift windowShift works out, and a node with no rectangle is left at zero because there is nothing there to move.
-func toScreen(nodes []act.Node, frame, work, screen rect) {
-	dx, dy := windowShift(frame, work, screen, monitorRects())
+// toScreen moves every node of one window's listing by however far that window's rectangles are from the truth. Input: the nodes as the walk read them, the rectangle the window reported for itself, and the desktop it is on. Output: none; the nodes are moved in place, by the shift windowShift works out, and a node with no rectangle is left at zero because there is nothing there to move.
+func toScreen(nodes []act.Node, frame rect, d desk) {
+	dx, dy := windowShift(frame, d)
 	if dx == 0 && dy == 0 {
 		return
 	}
@@ -177,10 +180,15 @@ func observeDesktop(ctx context.Context, conn *dbus.Conn) (app, title string, no
 	return app, title, nodes, nil
 }
 
-// skipWindow reports whether observeDesktop should leave a window out of the running: the shell's own windows, and Ora's, which must never be what Ora describes back to the user.
+// skipWindow reports whether observeDesktop should leave a window out of the running: the shell's own windows, Ora's, which must never be what Ora describes back to the user, and any application on the blocklist, whose contents — a password manager's entry names reach the listing as ordinary list item labels — must not go to a brain.
 // The title has to be part of the decision. On this desktop Ora's window reaches the accessibility bus twice over: once as the application "ora", and once as "mutter-x11-frames" — the compositor's frame process — with "Ora" as the title. The application name alone identifies only the first of those. Pass "" for the title to make the cheap application-level check before any window is read.
 func skipWindow(app, title string) bool {
-	return app == "gnome-shell" || IsOraWindow(app, title)
+	return app == "gnome-shell" || IsOraWindow(app, title) || Blocklisted(app)
+}
+
+// blockedRead is the refusal a read of a blocklisted application answers with. Input: the application's name. Output: an error saying that application is not read, the same refusal the capture loop's skipReason gives when it answers "blocked".
+func blockedRead(app string) error {
+	return fmt.Errorf("%s is on this machine's blocklist, so its windows are not read or pictured", app)
 }
 
 // typableRoles mirrors the roles act.Filter keeps without a label, because an empty box to type in is still a target. Kept here because act does not export it; keptCount's test holds the two rules together.

@@ -4,6 +4,7 @@ package tracker
 
 import (
 	"context"
+	"image"
 	"testing"
 	"time"
 
@@ -87,6 +88,21 @@ func TestKeptCountDoesNotSaturateAtTheListCap(t *testing.T) {
 	}
 }
 
+// The blocklist is what keeps a password manager out of everything Ora records, and it was applied on the capture loop and on the /context read but nowhere near the act engine: a focused KeePassXC or 1Password window was walked and its list item labels — the names of the entries in the vault — went to the brain as an observe_screen listing. observeDesktop picks the window with the most actionable nodes, so a blocked application could also be picked when nothing had focus yet.
+func TestObserve_RefusesABlocklistedApplication(t *testing.T) {
+	SetBlocklist([]string{"keepassxc"})
+	t.Cleanup(func() { SetBlocklist(nil) })
+	if !skipWindow("KeePassXC", "Passwords") {
+		t.Error("observeDesktop must not pick a window of a blocklisted application")
+	}
+	if blockedRead("KeePassXC") == nil {
+		t.Error("a read of a blocklisted application has to come back as a refusal")
+	}
+	if skipWindow("brave", "PR #13 · GitHub") {
+		t.Error("an application that is not on the blocklist must still be walked")
+	}
+}
+
 // A listing is what the model reads coordinates off, and the drawing tool passes coordinates the model supplies straight through, so the numbers in a listing have to be real screen pixels. Brave is a native Wayland client: it cannot know where its own window sits on the desktop, so it answers a request for screen coordinates with window coordinates, and on 2026-09-05 its maximized frame reported 0,0 1920x1048 while _NET_WORKAREA said the work area starts at y=32. Every row of the list read out of that window was then 32 pixels high, the height of the top bar. One shift is worked out for the window and every node in the pass is moved by it.
 func TestToScreen(t *testing.T) {
 	screen := rect{X: 0, Y: 0, W: 1920, H: 1080}
@@ -110,7 +126,7 @@ func TestToScreen(t *testing.T) {
 	}
 	for _, c := range cases {
 		nodes := append([]act.Node(nil), read...)
-		toScreen(nodes, c.frame, c.work, c.screen)
+		toScreen(nodes, c.frame, desk{work: c.work, screen: c.screen, pointer: image.Pt(-1, -1)})
 		for i, got := range nodes {
 			want := read[i]
 			if want.W > 0 && want.H > 0 {
