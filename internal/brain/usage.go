@@ -99,3 +99,9 @@ func GeminiDaily(state *QuotaState, model string, opts QuotaOptions, now time.Ti
 		}},
 	}, true
 }
+
+// GrokNote is the sentence GET /brains and GET /usage carry as the Grok row's limits_note, so the picker's empty bar reads as a checked fact rather than a gap nobody looked at.
+func GrokNote() string {
+	return "grok exposes no usage data: its CLI, config, logs, and session files carry no quota, usage, or rate-limit reading, and it has no command that reports one"
+}
+
