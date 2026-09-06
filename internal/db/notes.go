@@ -147,6 +147,38 @@ func (s *Store) findNoteByNormalizedContent(ctx context.Context, normalized, kin
 	return 0, false, nil
 }
 
+// NotesSince returns the notes touched at or after since, newest first. Input: the context and the bound. Output: every note whose created_at or updated_at is at or after the bound, so a note written days ago and closed today still comes back — that is the day it belongs on. This is what GET /today reads instead of GetNotes, which has no bound at all and grows with the whole store.
+func (s *Store) NotesSince(ctx context.Context, since time.Time) ([]Note, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.NotesSince")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, kind, created_at, updated_at FROM notes WHERE created_at >= ? OR updated_at >= ? ORDER BY id DESC`,
+		sqliteUTC(since), sqliteUTC(since))
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query notes since: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Note
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Content, &n.Kind, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan note since: %w", err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate notes since: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
+}
+
 // GetNotes returns all notes ordered newest first.
 func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")

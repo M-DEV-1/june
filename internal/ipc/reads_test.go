@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -604,5 +605,86 @@ func TestContext_LiveFocusOnTheBlocklistFallsThroughToBuffer(t *testing.T) {
 	getJSON(t, srv, "/context", &got)
 	if got.App != "Slack" || got.Text != "slack text" {
 		t.Errorf("got %+v, want the buffer's window since the live read named a blocked application", got)
+	}
+}
+
+// TestToday_ReadsOnlyTheNotesTodayNeeds checks the bound GET /today reads its notes under: a note written days ago and untouched since is not on today's page, while an action item written days ago and closed this morning still is — the store's bound is on created_at or updated_at for exactly that reason.
+func TestToday_ReadsOnlyTheNotesTodayNeeds(t *testing.T) {
+	store := newReadStore(t)
+	ctx := context.Background()
+
+	stale, err := store.LogNote(ctx, "the user prefers short answers", "fact")
+	if err != nil {
+		t.Fatalf("seed note: %v", err)
+	}
+	action, err := store.LogNote(ctx, memory.ActionItem{Owner: "Alex", Text: "send the invoice", Status: memory.StatusOpen, Priority: memory.PriorityNormal}.Note(), memory.ActionNoteKind)
+	if err != nil {
+		t.Fatalf("seed action: %v", err)
+	}
+	if _, err := store.DB().Exec(`UPDATE notes SET created_at = datetime('now','-10 days'), updated_at = datetime('now','-10 days') WHERE id IN (?, ?)`, stale, action); err != nil {
+		t.Fatalf("age the notes: %v", err)
+	}
+	if err := store.SetActionStatus(ctx, action, memory.StatusDone); err != nil {
+		t.Fatalf("close action: %v", err)
+	}
+
+	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
+	var got TodayView
+	getJSON(t, srv, "/today", &got)
+
+	var kinds []string
+	for _, e := range got.Timeline {
+		kinds = append(kinds, e.Kind)
+		if strings.Contains(e.Text, "prefers short answers") {
+			t.Errorf("a note untouched for ten days is on today's page: %+v", e)
+		}
+	}
+	if len(got.Timeline) != 1 || got.Timeline[0].Kind != "task" {
+		t.Errorf("timeline = %v, want the one action item closed today", kinds)
+	}
+}
+
+// TestMemorySearch_CapsArchivedMatches checks that the archived notes appended after the hybrid hits are bounded by the same searchCap the rest of the page is: without a cap, a one-letter query hands the window the whole archive, each row up to 600 runes.
+func TestMemorySearch_CapsArchivedMatches(t *testing.T) {
+	store := newReadStore(t)
+	for i := 0; i < searchCap+10; i++ {
+		if _, err := store.DB().Exec(
+			`INSERT INTO notes_archive(note_id, content, kind, created_at, archived_at) VALUES(?, ?, 'fact', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+			i+1, fmt.Sprintf("the widget for the venue, take %d", i)); err != nil {
+			t.Fatalf("seed archived note: %v", err)
+		}
+	}
+
+	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
+	var got struct{ Facts []Fact }
+	getJSON(t, srv, "/memory/search?q=widget", &got)
+	if len(got.Facts) > searchCap {
+		t.Errorf("facts = %d, want at most searchCap (%d)", len(got.Facts), searchCap)
+	}
+	if len(got.Facts) == 0 {
+		t.Errorf("facts = 0, want the archived matches up to the cap")
+	}
+}
+
+// TestPeople_BoundsTheMeetingNoteRead checks the window GET /people reads meeting notes over: a name only ever heard in a meeting older than peopleWindow is not on the page, so this screen does not grow one FTS count query per name for the life of the store.
+func TestPeople_BoundsTheMeetingNoteRead(t *testing.T) {
+	store := newReadStore(t)
+	ctx := context.Background()
+
+	old, err := store.LogNote(ctx, sampleMinutes, meetingNoteKind)
+	if err != nil {
+		t.Fatalf("seed meeting: %v", err)
+	}
+	if _, err := store.DB().Exec(`UPDATE notes SET created_at = datetime('now','-200 days') WHERE id = ?`, old); err != nil {
+		t.Fatalf("age the meeting: %v", err)
+	}
+
+	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
+	var got struct {
+		People []Person `json:"people"`
+	}
+	getJSON(t, srv, "/people", &got)
+	if len(got.People) != 0 {
+		t.Errorf("people = %+v, want none — the only meeting is older than the window", got.People)
 	}
 }

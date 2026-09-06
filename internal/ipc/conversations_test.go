@@ -360,3 +360,21 @@ func TestTitleFromQuestion(t *testing.T) {
 		}
 	}
 }
+
+// TestAskWithAStaleConversationIs404 checks that an ask naming a conversation that no longer exists is refused rather than accepted: AddTurn refuses the orphan turn, so answering 202 would draw an answer the window loses the moment it reloads.
+func TestAskWithAStaleConversationIs404(t *testing.T) {
+	store := newReadStore(t)
+	_, srv := newWindowServer(t, &fakeAsker{trace: agent.TurnTrace{Answer: "yes"}}, store)
+
+	var created struct{ ID string }
+	postJSON(t, srv, "/conversations", `{"title":"the flight"}`, &created)
+	if code := deleteRequest(t, srv, "/conversations/"+created.ID); code != http.StatusNoContent {
+		t.Fatalf("DELETE /conversations/%s did not remove it", created.ID)
+	}
+	if code := postJSON(t, srv, "/ask", `{"question":"is it still on","conversation_id":"`+created.ID+`"}`, nil); code != http.StatusNotFound {
+		t.Errorf("POST /ask into a deleted conversation = %d, want 404", code)
+	}
+	if code := postJSON(t, srv, "/ask", `{"question":"is it still on","conversation_id":"424242"}`, nil); code != http.StatusNotFound {
+		t.Errorf("POST /ask into a conversation that never existed = %d, want 404", code)
+	}
+}
