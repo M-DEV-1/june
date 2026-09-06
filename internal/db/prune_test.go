@@ -443,3 +443,37 @@ func TestCommitPruneStage(t *testing.T) {
 		t.Errorf("stages_done = %q after a second commit, still want the prune token", run.StagesDone)
 	}
 }
+
+// TestPruneActRunsKeepsALiveJobsCheckpoint pins the third exemption: a long-running computer-use job's checkpoint is an act_runs row like any other, but it is the only record of a job the user can still resume, and nothing ever rewrites the row of a job that is paused or stuck. It is neither held by a note nor a young failure, so the count cap used to delete it and take the whole trail in job_json with it.
+func TestPruneActRunsKeepsALiveJobsCheckpoint(t *testing.T) {
+	store := newFileStore(t)
+	ctx := context.Background()
+
+	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "play the next episode", Brain: "codex", State: "stepping", Checkpoint: []byte(`{"step":7}`)}); err != nil {
+		t.Fatalf("SaveActJob: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE act_runs SET started_at = ? WHERE job_id = 'act-1'`, sqliteUTC(time.Now().Add(-400*24*time.Hour))); err != nil {
+		t.Fatalf("backdate the job row: %v", err)
+	}
+	for _, q := range []string{"ordinary one", "ordinary two", "ordinary three"} {
+		addRun(t, store, q, "ok", time.Hour)
+	}
+
+	removed, err := store.PruneActRuns(ctx, 2, testFailedGrace)
+	if err != nil {
+		t.Fatalf("PruneActRuns: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("PruneActRuns removed %d runs, want 1 (the oldest ordinary run, with the job's checkpoint exempt and not counted against the cap)", removed)
+	}
+	if left := runQuestions(t, store); !has(left, "play the next episode") {
+		t.Errorf("the job's checkpoint was pruned; kept %v", left)
+	}
+	unfinished, err := store.UnfinishedActJobs(ctx)
+	if err != nil {
+		t.Fatalf("UnfinishedActJobs: %v", err)
+	}
+	if len(unfinished) != 1 {
+		t.Errorf("%d unfinished jobs after the prune, want the one job still resumable", len(unfinished))
+	}
+}

@@ -10,6 +10,9 @@ import (
 	"ora/internal/obs"
 )
 
+// TaskNoticeWatermarkKind is the diary kind the proactive loop keeps its task-notice watermark under (internal/proactive/notify.go is the only writer): the highest action-item note id already announced, on the empty day. It lives here rather than there because the diary FTS triggers in store.go name it too — its content is a bare number that the loop rewrites on most ticks, so it is deliberately the one diary kind that is never mirrored into memory_fts and never comes back from a search as if it were something Ora wrote.
+const TaskNoticeWatermarkKind = "task-notice-watermark"
+
 // DiaryDay is one kind='day' diary row: the local calendar day it covers and the entry Ora wrote for it.
 type DiaryDay struct {
 	Day     string

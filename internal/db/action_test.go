@@ -369,3 +369,65 @@ func TestCloseDoneActionItems_ALaterInstanceOfARecurringMeetingClosesIt(t *testi
 		t.Errorf("closed = %d, want 1: a later instance of a recurring meeting must close what an earlier one raised", closed)
 	}
 }
+
+// TestCloseDoneActionItems_ReadsOnlyTheDayPages pins which diary rows count as evidence: the day pages, and nothing else. The morning brief is generated from the open task list itself, so it names every open task and often carries a completion word about one of them; the understanding doc, the dream reports and the task-notice watermark are not writing about the user's day at all. All of them used to be read as evidence, and every one of them was labelled "your day, ".
+func TestCloseDoneActionItems_ReadsOnlyTheDayPages(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the Value Chain & risk-statements PR (#5632).")}); err != nil {
+		t.Fatal(err)
+	}
+	const said = "Merged the Value Chain risk-statements PR #5632 to main."
+	if err := store.SetDiaryEntry(ctx, "2026-09-06", "brief", said); err != nil {
+		t.Fatal(err)
+	}
+
+	closed, err := store.CloseDoneActionItems(ctx, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed != 0 {
+		t.Errorf("a morning brief closed %d items, want 0 — only a day page is evidence", closed)
+	}
+
+	if err := store.SetDiaryEntry(ctx, "2026-09-06", "day", said); err != nil {
+		t.Fatal(err)
+	}
+	closed, err = store.CloseDoneActionItems(ctx, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Errorf("the day page closed %d items, want 1", closed)
+	}
+}
+
+// TestCloseDoneActionItems_ReadsEvidenceWrittenAtTheSinceInstant pins that the diary read binds its cutoff the way every other dated query in this package binds one. A raw time.Time renders as "2026-09-06 08:15:04 +0000 UTC", which compares as a string against a stored "2026-09-06 08:15:04" and excludes the very row it was derived from.
+func TestCloseDoneActionItems_ReadsEvidenceWrittenAtTheSinceInstant(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the Value Chain & risk-statements PR (#5632).")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDiaryEntry(ctx, "2026-09-06", "day", "Merged the Value Chain risk-statements PR #5632 to main."); err != nil {
+		t.Fatal(err)
+	}
+	var written time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT created_at FROM diary WHERE kind = 'day'`).Scan(&written); err != nil {
+		t.Fatalf("read the day page's created_at: %v", err)
+	}
+
+	closed, err := store.CloseDoneActionItems(ctx, written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Errorf("evidence written at the since instant closed %d items, want 1", closed)
+	}
+}

@@ -158,7 +158,8 @@ func raisedThere(e closingEvidence, a memory.ActionItem) bool {
 // evidenceKinds are the note kinds whose text can say a task is finished: a meeting's minutes and the memory compiler's own observations. Action notes are deliberately not among them — a task must not close itself.
 var evidenceKinds = []string{"meeting", string(memory.KindFact)}
 
-// closingEvidence reads everything written since that could say a task is done: meeting minutes, compiled notes, and the diary's day pages and morning briefs. Input: the earliest writing to read, zero for all of it. Output: each one's text with a label naming where it came from, for the closed item to point at.
+// closingEvidence reads everything written since that could say a task is done: meeting minutes, compiled notes, and the diary's day pages. Input: the earliest writing to read, zero for all of it. Output: each one's text with a label naming where it came from, for the closed item to point at.
+// Only kind='day' diary rows count, which is what the "your day, " label already claims. The morning brief is generated from the open task list itself, so it names every open task and carries a completion word about one of them often enough to close the wrong one; the understanding doc, the dream reports, the week and month rollups and the task-notice watermark are not writing about a day at all.
 func (s *Store) closingEvidence(ctx context.Context, since time.Time) ([]closingEvidence, error) {
 	var out []closingEvidence
 	for _, kind := range evidenceKinds {
@@ -178,7 +179,7 @@ func (s *Store) closingEvidence(ctx context.Context, since time.Time) ([]closing
 		}
 	}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT day, content, created_at FROM diary WHERE created_at >= ? ORDER BY id`, since.UTC())
+	rows, err := s.db.QueryContext(ctx, `SELECT day, content, created_at FROM diary WHERE kind = 'day' AND created_at >= ? ORDER BY id`, sqliteUTC(since))
 	if err != nil {
 		return nil, fmt.Errorf("query the diary for evidence: %w", err)
 	}

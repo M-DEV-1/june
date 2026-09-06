@@ -171,13 +171,13 @@ func (s *Store) SimilarActRuns(ctx context.Context, question string, limit int) 
 		if goal == "" || seenGoal[goal] {
 			continue
 		}
-		seenGoal[goal] = true
 		stored := decodeActRunVector(blob)
 		if len(stored) != len(asked) {
-			// Written before act runs were embedded, or written by another model: unscorable now, so it is queued for the background pass and the lookup goes on without it.
+			// Written before act runs were embedded, or written by another model: unscorable now, so it is queued for the background pass and the lookup goes on without it. The goal is deliberately not marked as seen — an older run of the same goal that does have a vector is the best this lookup can still offer, and marking it here hid every embedded run of the goal until the backfill caught up.
 			unembedded = append(unembedded, id)
 			continue
 		}
+		seenGoal[goal] = true
 		score := actRunCosine(asked, stored)
 		if score < floor {
 			continue
