@@ -68,11 +68,11 @@ func (e *CoordinateError) Error() string {
 type Session struct {
 	conn   *dbus.Conn
 	stream uint32 // ScreenCast PipeWire node id backing absolute pointer motion; 0 if none was granted
-	width  int    // monitor size from the stream's "size" property; 0 if the compositor didn't report one
-	height int
+	// rect is where the granted monitor sits on the desktop and how big it is, from the stream's "position" and "size" properties; all zero when the compositor reported neither. Pointer coordinates arrive in whole-desktop space and are mapped into this rectangle's own space before they are sent (see toStream).
+	rect streamRect
 
-	// send routes one RemoteDesktop method call; nil means the live D-Bus connection. Tests set it to record the event stream without a bus.
-	send func(method string, args ...interface{}) error
+	// send routes one RemoteDesktop method call; nil means the live D-Bus connection. Tests set it to record the event stream without a bus. It takes the call's own context so the timeout call puts on every event is the one the test sees.
+	send func(ctx context.Context, method string, args ...interface{}) error
 
 	// acting is held for the whole of PressKey, TypeText, ClickAt and ScrollAt, each of which is several separate events paced keyDelay apart. One Session is shared by every ask, and without this one ask's modifier press lands between another's key down and key up.
 	acting sync.Mutex
@@ -81,12 +81,17 @@ type Session struct {
 	handle string // session_handle; a plain string despite naming an object path (a documented portal spec quirk kept for backwards compatibility). Guarded by mu because Close clears it while another goroutine may be mid-call.
 }
 
-// call sends one RemoteDesktop method to the portal. Input: the method name without its interface, and the arguments it takes. Output: the D-Bus error, or whatever the test stub in send returns.
+// portalCallTimeout bounds one RemoteDesktop event on the bus. Each one is a fire-and-forget Notify with no consent dialog behind it, so a reply that has not come in two seconds is a portal that has stopped answering, and waiting on it holds s.acting and wedges every screen action in the daemon behind it. A variable so a test can shorten it and cost no wall time.
+var portalCallTimeout = 2 * time.Second
+
+// call sends one RemoteDesktop method to the portal, bounded by portalCallTimeout. Input: the method name without its interface, and the arguments it takes. Output: the D-Bus error, the timeout when the portal did not answer, or whatever the test stub in send returns.
 func (s *Session) call(method string, args ...interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), portalCallTimeout)
+	defer cancel()
 	if s.send != nil {
-		return s.send(method, args...)
+		return s.send(ctx, method, args...)
 	}
-	return s.conn.Object(portalDest, portalPath).Call(remoteDesktopIface+"."+method, 0, args...).Err
+	return s.conn.Object(portalDest, portalPath).CallWithContext(ctx, remoteDesktopIface+"."+method, 0, args...).Err
 }
 
 // currentHandle returns the live session handle, or errClosed once Close has run.
@@ -118,14 +123,14 @@ func Open(ctx context.Context, dataDir string) (*Session, error) {
 		return nil, fmt.Errorf("session bus: %w", err)
 	}
 
-	handle, stream, width, height, newToken, err := openSequence(ctx, &realPortal{conn: conn}, loadToken(dataDir))
+	handle, stream, rect, newToken, err := openSequence(ctx, &realPortal{conn: conn}, loadToken(dataDir))
 	if err != nil {
 		return nil, err
 	}
 	if err := saveToken(dataDir, newToken); err != nil {
 		return nil, fmt.Errorf("save token: %w", err)
 	}
-	return &Session{conn: conn, handle: handle, stream: stream, width: width, height: height}, nil
+	return &Session{conn: conn, handle: handle, stream: stream, rect: rect}, nil
 }
 
 // portalOps is the set of fallible RemoteDesktop/ScreenCast steps openSequence drives. Splitting it out from Session lets the failure-cleanup logic in openSequence be tested against a fake, without a live D-Bus session.
@@ -133,32 +138,32 @@ type portalOps interface {
 	createSession(ctx context.Context) (string, error)
 	selectDevices(ctx context.Context, handle, restoreToken string) error
 	selectSources(ctx context.Context, handle string) error
-	start(ctx context.Context, handle string) (stream uint32, width, height int, restoreToken string, err error)
+	start(ctx context.Context, handle string) (stream uint32, rect streamRect, restoreToken string, err error)
 	closeSession(handle string) error
 }
 
 // openSequence runs the CreateSession -> SelectDevices -> SelectSources -> Start handshake. If any step after createSession fails, it closes the session it opened before returning the error, so a failed Open never leaks a live portal session (and the orphaned PipeWire stream that comes with it).
-func openSequence(ctx context.Context, p portalOps, restoreToken string) (handle string, stream uint32, width, height int, newToken string, err error) {
+func openSequence(ctx context.Context, p portalOps, restoreToken string) (handle string, stream uint32, rect streamRect, newToken string, err error) {
 	handle, err = p.createSession(ctx)
 	if err != nil {
-		return "", 0, 0, 0, "", err
+		return "", 0, streamRect{}, "", err
 	}
 
 	if err = p.selectDevices(ctx, handle, restoreToken); err != nil {
 		_ = p.closeSession(handle)
-		return "", 0, 0, 0, "", err
+		return "", 0, streamRect{}, "", err
 	}
 	if err = p.selectSources(ctx, handle); err != nil {
 		_ = p.closeSession(handle)
-		return "", 0, 0, 0, "", err
+		return "", 0, streamRect{}, "", err
 	}
 
-	stream, width, height, newToken, err = p.start(ctx, handle)
+	stream, rect, newToken, err = p.start(ctx, handle)
 	if err != nil {
 		_ = p.closeSession(handle)
-		return "", 0, 0, 0, "", err
+		return "", 0, streamRect{}, "", err
 	}
-	return handle, stream, width, height, newToken, nil
+	return handle, stream, rect, newToken, nil
 }
 
 // Close ends the portal session so the compositor can release the associated PipeWire stream. Safe to call more than once.
@@ -170,18 +175,25 @@ func (s *Session) Close() error {
 	return s.conn.Object(portalDest, dbus.ObjectPath(h)).Call(sessionIface+".Close", 0).Err
 }
 
-// validateCoords rejects a pointer coordinate before it reaches the portal. When the ScreenCast stream reported a monitor size in Open, both bounds are enforced; otherwise only negative coordinates (never valid on any monitor) are rejected.
-func (s *Session) validateCoords(x, y float64) error {
-	if s.width > 0 || s.height > 0 {
-		if x < 0 || y < 0 || x > float64(s.width) || y > float64(s.height) {
-			return &CoordinateError{X: x, Y: y, Width: s.width, Height: s.height}
+// streamRect is where the granted ScreenCast stream's monitor sits on the desktop and how big it is, read from the stream's "position" and "size" properties. All zero when the compositor reported neither, which is the case the mapping falls back to leaving a point alone.
+type streamRect struct {
+	X, Y int
+	W, H int
+}
+
+// toStream maps a point in whole-desktop coordinates into the granted stream's own coordinate space, which is what NotifyPointerMotionAbsolute takes, and rejects one that is not on that monitor. Input: the desktop point and the granted stream's rectangle. Output: the point measured from the monitor's own top-left corner, or a CoordinateError when the monitor's size is known and the point is outside it. With no size reported the point is passed through with only the origin taken off and only a negative result refused, which is what this did before the position was read.
+func toStream(x, y float64, r streamRect) (float64, float64, error) {
+	sx, sy := x-float64(r.X), y-float64(r.Y)
+	if r.W > 0 || r.H > 0 {
+		if sx < 0 || sy < 0 || sx > float64(r.W) || sy > float64(r.H) {
+			return 0, 0, &CoordinateError{X: x, Y: y, Width: r.W, Height: r.H}
 		}
-		return nil
+		return sx, sy, nil
 	}
-	if x < 0 || y < 0 {
-		return &CoordinateError{X: x, Y: y}
+	if sx < 0 || sy < 0 {
+		return 0, 0, &CoordinateError{X: x, Y: y}
 	}
-	return nil
+	return sx, sy, nil
 }
 
 // PressKey sends a full press-then-release for the named key or chord (e.g. "Enter", "Ctrl+L"), paced keyDelay apart. Modifiers in a chord are pressed first and released last, in reverse order, so the compositor sees them held down for the whole chord.
@@ -238,9 +250,10 @@ func (s *Session) TypeText(text string) error {
 	return paceEvents(events, keyDelay, time.Sleep)
 }
 
-// ClickAt moves the pointer to (x, y), in the ScreenCast stream's logical coordinate space, and clicks the left button.
+// ClickAt moves the pointer to (x, y), in whole-desktop coordinates, and clicks the left button. The point is mapped into the granted stream's own space first, since that is what the portal's absolute motion takes.
 func (s *Session) ClickAt(x, y float64) error {
-	if err := s.validateCoords(x, y); err != nil {
+	x, y, err := toStream(x, y, s.rect)
+	if err != nil {
 		return err
 	}
 	s.acting.Lock()
@@ -258,9 +271,10 @@ func (s *Session) ClickAt(x, y float64) error {
 	return s.notifyButton(handle, btnLeft, keyStateReleased)
 }
 
-// ScrollAt moves the pointer to (x, y) and scrolls dy discrete vertical steps (positive is down).
+// ScrollAt moves the pointer to (x, y), in whole-desktop coordinates, and scrolls dy discrete vertical steps (positive is down).
 func (s *Session) ScrollAt(x, y float64, dy int32) error {
-	if err := s.validateCoords(x, y); err != nil {
+	x, y, err := toStream(x, y, s.rect)
+	if err != nil {
 		return err
 	}
 	s.acting.Lock()
@@ -348,57 +362,60 @@ func (p *realPortal) selectSources(ctx context.Context, handle string) error {
 }
 
 // start begins the session (the point at which the one-time consent dialog appears) and returns the ScreenCast stream's PipeWire node id, its monitor size if reported, and any restore_token to save for next time.
-func (p *realPortal) start(ctx context.Context, handle string) (stream uint32, width, height int, restoreToken string, err error) {
+func (p *realPortal) start(ctx context.Context, handle string) (stream uint32, rect streamRect, restoreToken string, err error) {
 	results, err := portalRequest(ctx, p.conn, remoteDesktopIface+".Start",
 		[]interface{}{dbus.ObjectPath(handle), ""}, map[string]dbus.Variant{})
 	if err != nil {
-		return 0, 0, 0, "", err
+		return 0, streamRect{}, "", err
 	}
 	if v, ok := results["restore_token"]; ok {
 		restoreToken, _ = v.Value().(string)
 	}
 	if v, ok := results["streams"]; ok {
-		stream, width, height = parseStream(v)
+		stream, rect = parseStream(v)
 	}
-	return stream, width, height, restoreToken, nil
+	return stream, rect, restoreToken, nil
 }
 
 func (p *realPortal) closeSession(handle string) error {
 	return p.conn.Object(portalDest, dbus.ObjectPath(handle)).Call(sessionIface+".Close", 0).Err
 }
 
-// parseStream pulls the PipeWire node id and, when present, the monitor's (width, height) out of a Start response's "streams" result: an array of (u node_id, a{sv} props) structs. godbus decodes an unknown-shape D-Bus struct as []interface{}, so each stream arrives as []interface{}{uint32, map[string]dbus.Variant}, and its "size" property (itself a (ii) struct) the same way. Returns all zeros if no stream, or no size, is present.
-func parseStream(v dbus.Variant) (node uint32, width, height int) {
+// parseStream pulls the PipeWire node id and, when present, the granted monitor's position and size out of a Start response's "streams" result: an array of (u node_id, a{sv} props) structs. godbus decodes an unknown-shape D-Bus struct as []interface{}, so each stream arrives as []interface{}{uint32, map[string]dbus.Variant}, and the "position" and "size" properties (each itself a (ii) struct) the same way. Returns a zero rectangle for whichever of the two the compositor did not report.
+func parseStream(v dbus.Variant) (node uint32, rect streamRect) {
 	streams, ok := v.Value().([]interface{})
 	if !ok || len(streams) == 0 {
-		return 0, 0, 0
+		return 0, streamRect{}
 	}
 	entry, ok := streams[0].([]interface{})
 	if !ok || len(entry) == 0 {
-		return 0, 0, 0
+		return 0, streamRect{}
 	}
 	node, _ = entry[0].(uint32)
 	if len(entry) < 2 {
-		return node, 0, 0
+		return node, streamRect{}
 	}
 	props, ok := entry[1].(map[string]dbus.Variant)
 	if !ok {
-		return node, 0, 0
+		return node, streamRect{}
 	}
-	size, ok := props["size"]
-	if !ok {
-		return node, 0, 0
+	rect.X, rect.Y = pairOf(props["position"])
+	rect.W, rect.H = pairOf(props["size"])
+	return node, rect
+}
+
+// pairOf reads a portal (ii) struct property, which godbus hands over as []interface{} of two int32. Input: the property, which may be the zero Variant when the compositor did not report it. Output: the two numbers, or 0, 0 when it is missing or not that shape.
+func pairOf(v dbus.Variant) (int, int) {
+	pair, ok := v.Value().([]interface{})
+	if !ok || len(pair) != 2 {
+		return 0, 0
 	}
-	dims, ok := size.Value().([]interface{})
-	if !ok || len(dims) != 2 {
-		return node, 0, 0
+	a, aok := pair[0].(int32)
+	b, bok := pair[1].(int32)
+	if !aok || !bok {
+		return 0, 0
 	}
-	w, wok := dims[0].(int32)
-	h, hok := dims[1].(int32)
-	if !wok || !hok {
-		return node, 0, 0
-	}
-	return node, int(w), int(h)
+	return int(a), int(b)
 }
 
 // predictRequestPath computes the Request object path the portal will use to reply to a call made with the given handle_token, per the spec: /org/freedesktop/portal/desktop/request/SENDER/TOKEN, where SENDER is the caller's own unique bus name with the leading ':' dropped and '.' replaced by '_'. Computing it up front lets the caller subscribe to the Response signal before making the call, so a fast reply is never missed.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -93,9 +94,9 @@ func TestParseStreamWithSize(t *testing.T) {
 			"size": dbus.MakeVariant([]interface{}{int32(1920), int32(1080)}),
 		}},
 	})
-	node, w, h := parseStream(streams)
-	if node != 42 || w != 1920 || h != 1080 {
-		t.Fatalf("got (%d, %d, %d), want (42, 1920, 1080)", node, w, h)
+	node, rect := parseStream(streams)
+	if node != 42 || rect.W != 1920 || rect.H != 1080 {
+		t.Fatalf("got (%d, %+v), want node 42 sized 1920x1080", node, rect)
 	}
 }
 
@@ -104,49 +105,35 @@ func TestParseStreamNoSize(t *testing.T) {
 	streams := dbus.MakeVariant([]interface{}{
 		[]interface{}{uint32(7), map[string]dbus.Variant{}},
 	})
-	node, w, h := parseStream(streams)
-	if node != 7 || w != 0 || h != 0 {
-		t.Fatalf("got (%d, %d, %d), want (7, 0, 0)", node, w, h)
+	node, rect := parseStream(streams)
+	if node != 7 || rect != (streamRect{}) {
+		t.Fatalf("got (%d, %+v), want node 7 with no rectangle", node, rect)
 	}
 }
 
 // An empty or malformed streams value yields all zeros rather than panicking; ClickAt still works for relative-only compositors, just without absolute positioning.
 func TestParseStreamEmpty(t *testing.T) {
-	node, w, h := parseStream(dbus.MakeVariant([]interface{}{}))
-	if node != 0 || w != 0 || h != 0 {
-		t.Fatalf("got (%d, %d, %d), want zeros", node, w, h)
+	node, rect := parseStream(dbus.MakeVariant([]interface{}{}))
+	if node != 0 || rect != (streamRect{}) {
+		t.Fatalf("got (%d, %+v), want zeros", node, rect)
 	}
 }
 
 // With known monitor bounds from Open, an out-of-range coordinate is rejected with a typed error instead of being passed through to the portal.
-func TestValidateCoordsKnownBounds(t *testing.T) {
-	s := &Session{width: 1920, height: 1080}
-	if err := s.validateCoords(-1, 100); err == nil {
+func TestToStreamKnownBounds(t *testing.T) {
+	rect := streamRect{W: 1920, H: 1080}
+	if _, _, err := toStream(-1, 100, rect); err == nil {
 		t.Fatal("expected error for negative x")
 	}
-	if err := s.validateCoords(100, 1081); err == nil {
+	if _, _, err := toStream(100, 1081, rect); err == nil {
 		t.Fatal("expected error for y past height")
 	}
-	if err := s.validateCoords(1920, 1080); err != nil {
+	if _, _, err := toStream(1920, 1080, rect); err != nil {
 		t.Fatalf("boundary coordinate should be valid: %v", err)
 	}
 	var coordErr *CoordinateError
-	if err := s.validateCoords(-1, 0); !errors.As(err, &coordErr) {
+	if _, _, err := toStream(-1, 0, rect); !errors.As(err, &coordErr) {
 		t.Fatalf("error should be a *CoordinateError, got %T", err)
-	}
-}
-
-// Without known monitor bounds (size property absent), only negative coordinates are rejected.
-func TestValidateCoordsUnknownBounds(t *testing.T) {
-	s := &Session{}
-	if err := s.validateCoords(-1, 0); err == nil {
-		t.Fatal("expected error for negative x")
-	}
-	if err := s.validateCoords(0, -1); err == nil {
-		t.Fatal("expected error for negative y")
-	}
-	if err := s.validateCoords(50000, 50000); err != nil {
-		t.Fatalf("unbounded coordinates should pass when the monitor size is unknown: %v", err)
 	}
 }
 
@@ -167,7 +154,7 @@ func TestSessionHandleRaceWithClose(t *testing.T) {
 // openSequence must close any session it opened before returning an error, at every failure point after createSession succeeds, so a failed Open never leaks a live portal session.
 func TestOpenSequenceClosesOnSelectDevicesFailure(t *testing.T) {
 	p := &fakePortal{selectDevicesErr: errBoom}
-	_, _, _, _, _, err := openSequence(context.Background(), p, "")
+	_, _, _, _, err := openSequence(context.Background(), p, "")
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want errBoom", err)
 	}
@@ -178,7 +165,7 @@ func TestOpenSequenceClosesOnSelectDevicesFailure(t *testing.T) {
 
 func TestOpenSequenceClosesOnSelectSourcesFailure(t *testing.T) {
 	p := &fakePortal{selectSourcesErr: errBoom}
-	_, _, _, _, _, err := openSequence(context.Background(), p, "")
+	_, _, _, _, err := openSequence(context.Background(), p, "")
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want errBoom", err)
 	}
@@ -189,7 +176,7 @@ func TestOpenSequenceClosesOnSelectSourcesFailure(t *testing.T) {
 
 func TestOpenSequenceClosesOnStartFailure(t *testing.T) {
 	p := &fakePortal{startErr: errBoom}
-	_, _, _, _, _, err := openSequence(context.Background(), p, "")
+	_, _, _, _, err := openSequence(context.Background(), p, "")
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want errBoom", err)
 	}
@@ -201,7 +188,7 @@ func TestOpenSequenceClosesOnStartFailure(t *testing.T) {
 // A createSession failure has no handle to leak, so closeSession must never be called.
 func TestOpenSequenceCreateSessionFailureNoClose(t *testing.T) {
 	p := &fakePortal{createSessionErr: errBoom}
-	_, _, _, _, _, err := openSequence(context.Background(), p, "")
+	_, _, _, _, err := openSequence(context.Background(), p, "")
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want errBoom", err)
 	}
@@ -213,12 +200,12 @@ func TestOpenSequenceCreateSessionFailureNoClose(t *testing.T) {
 // The success path never calls closeSession.
 func TestOpenSequenceSuccessNoClose(t *testing.T) {
 	p := &fakePortal{}
-	handle, stream, w, h, _, err := openSequence(context.Background(), p, "")
+	handle, stream, rect, _, err := openSequence(context.Background(), p, "")
 	if err != nil {
 		t.Fatalf("openSequence: %v", err)
 	}
-	if handle != "session-1" || stream != 42 || w != 1920 || h != 1080 {
-		t.Fatalf("got (%q, %d, %d, %d)", handle, stream, w, h)
+	if handle != "session-1" || stream != 42 || rect != (streamRect{W: 1920, H: 1080}) {
+		t.Fatalf("got (%q, %d, %+v)", handle, stream, rect)
 	}
 	if p.closedHandle != "" {
 		t.Fatalf("closedHandle = %q, want none", p.closedHandle)
@@ -251,11 +238,11 @@ func (f *fakePortal) selectSources(_ context.Context, _ string) error {
 	return f.selectSourcesErr
 }
 
-func (f *fakePortal) start(_ context.Context, _ string) (uint32, int, int, string, error) {
+func (f *fakePortal) start(_ context.Context, _ string) (uint32, streamRect, string, error) {
 	if f.startErr != nil {
-		return 0, 0, 0, "", f.startErr
+		return 0, streamRect{}, "", f.startErr
 	}
-	return 42, 1920, 1080, "", nil
+	return 42, streamRect{W: 1920, H: 1080}, "", nil
 }
 
 func (f *fakePortal) closeSession(handle string) error {
@@ -267,7 +254,7 @@ func (f *fakePortal) closeSession(handle string) error {
 func TestPressKeyChordsDoNotInterleave(t *testing.T) {
 	var mu sync.Mutex
 	var events [][2]int32
-	s := &Session{handle: "/session/1", send: func(_ string, args ...interface{}) error {
+	s := &Session{handle: "/session/1", send: func(_ context.Context, _ string, args ...interface{}) error {
 		mu.Lock()
 		defer mu.Unlock()
 		events = append(events, [2]int32{args[2].(int32), int32(args[3].(uint32))})
@@ -317,7 +304,7 @@ func sameEvents(got [][2]int32, want [][2]int32) bool {
 func TestPressKeyReleasesWhatItPressedWhenAPressFails(t *testing.T) {
 	var events [][2]int32
 	sent := 0
-	s := &Session{handle: "/session/1", send: func(_ string, args ...interface{}) error {
+	s := &Session{handle: "/session/1", send: func(_ context.Context, _ string, args ...interface{}) error {
 		sent++
 		if sent == 3 {
 			return errBoom
@@ -333,5 +320,70 @@ func TestPressKeyReleasesWhatItPressedWhenAPressFails(t *testing.T) {
 	want := [][2]int32{{29, 1}, {42, 1}, {42, 0}, {29, 0}}
 	if len(events) != len(want) || !sameEvents(events, want) {
 		t.Fatalf("events = %v, want %v (Ctrl and Shift released in reverse order after L failed)", events, want)
+	}
+}
+
+// The stream's "position" property says where the granted monitor's top-left corner sits on the desktop, which is what the pointer coordinates have to be measured from.
+func TestParseStreamWithPosition(t *testing.T) {
+	streams := dbus.MakeVariant([]interface{}{
+		[]interface{}{uint32(42), map[string]dbus.Variant{
+			"position": dbus.MakeVariant([]interface{}{int32(1920), int32(0)}),
+			"size":     dbus.MakeVariant([]interface{}{int32(2560), int32(1440)}),
+		}},
+	})
+	node, rect := parseStream(streams)
+	if node != 42 || rect != (streamRect{X: 1920, Y: 0, W: 2560, H: 1440}) {
+		t.Fatalf("got (%d, %+v), want node 42 at 1920,0 sized 2560x1440", node, rect)
+	}
+}
+
+// NotifyPointerMotionAbsolute takes coordinates in the granted stream's own space, while a click or a scroll arrives in whole-desktop coordinates read off a whole-desktop screenshot. On a monitor that does not start at the desktop origin the two differ by that monitor's position, and a click on the second screen used to be refused as outside the monitor or land on the first one.
+func TestToStreamSubtractsTheMonitorOrigin(t *testing.T) {
+	rect := streamRect{X: 1920, Y: 0, W: 2560, H: 1440}
+	x, y, err := toStream(2020, 100, rect)
+	if err != nil || x != 100 || y != 100 {
+		t.Fatalf("toStream = (%v, %v, %v), want (100, 100, nil)", x, y, err)
+	}
+	// A point on the other monitor is off this stream entirely, and is refused rather than sent as a negative coordinate.
+	if _, _, err := toStream(100, 100, rect); err == nil {
+		t.Fatal("a point left of the granted monitor should be refused")
+	}
+	// Past the far edge of the granted monitor, measured from its own origin, is refused too.
+	if _, _, err := toStream(4481, 100, rect); err == nil {
+		t.Fatal("a point past the granted monitor's width should be refused")
+	}
+}
+
+// A compositor that reports neither position nor size leaves the behaviour as it was: the point is passed through untouched and only a negative one is refused.
+func TestToStreamWithoutStreamProperties(t *testing.T) {
+	x, y, err := toStream(50000, 50000, streamRect{})
+	if err != nil || x != 50000 || y != 50000 {
+		t.Fatalf("toStream = (%v, %v, %v), want the point passed through", x, y, err)
+	}
+	if _, _, err := toStream(-1, 0, streamRect{}); err == nil {
+		t.Fatal("a negative coordinate should be refused")
+	}
+}
+
+// Every RemoteDesktop event is a plain method call with no dialog behind it, and it is made with s.acting held. A portal that has stopped answering must cost one call its timeout rather than wedging every screen action in the daemon until a restart.
+func TestCallTimesOutWhenThePortalDoesNotAnswer(t *testing.T) {
+	old := portalCallTimeout
+	portalCallTimeout = 50 * time.Millisecond
+	defer func() { portalCallTimeout = old }()
+
+	s := &Session{handle: "/session/1", send: func(ctx context.Context, _ string, _ ...interface{}) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+
+	done := make(chan error, 1)
+	go func() { done <- s.PressKey("Enter") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("PressKey = nil, want the call's own timeout")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PressKey never returned; the call has no timeout")
 	}
 }

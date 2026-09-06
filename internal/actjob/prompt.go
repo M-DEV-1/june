@@ -93,7 +93,7 @@ func BuildPrompt(j Job) string {
 	}
 	if n := len(j.Steps); n > 0 {
 		last := j.Steps[n-1]
-		b.WriteString(fmt.Sprintf("\nThe last step was %s, expecting %s; it %sed, and %s.", last.Tool, last.Expect.Describe(), last.Outcome, capRunes(last.Why, resultCap)))
+		b.WriteString(fmt.Sprintf("\nThe last step was %s, expecting %s; it %s, and %s.", last.Tool, last.Expect.Describe(), outcomePhrase(last.Outcome), capRunes(last.Why, resultCap)))
 	}
 	if j.Next != "" {
 		b.WriteString("\nYou said the next thing to do was: " + j.Next)
@@ -115,6 +115,14 @@ func BuildPrompt(j Job) string {
 	}
 	b.WriteString("\n" + budgetLine(j))
 	return b.String()
+}
+
+// outcomePhrase is how a step's outcome reads in a sentence. Input: the outcome word a step carries. Output: "passed", "failed", or for a check that was already true before the action, a phrase saying so rather than one claiming the step worked.
+func outcomePhrase(outcome string) string {
+	if outcome == alreadyHeld {
+		return "checked out on something that was already true before it"
+	}
+	return outcome + "ed"
 }
 
 // progressLine says how far the job has got, in the two numbers that matter: steps taken and steps that checked out.
