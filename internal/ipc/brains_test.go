@@ -389,3 +389,24 @@ func TestBrains_LimitsNoteCarriesTheSnapshotsOwnNote(t *testing.T) {
 		}
 	}
 }
+
+// TestBrainsPostRefusesABrainWithNoBackend checks a pick of a brain internal/brain cannot answer with is refused with the reason, rather than persisted. GET already marks the Ollama row unavailable, but the POST accepted it: the config then held ollama-cli, FromConfig failed every call with ErrNoBackend, and WithCodexFallback answered each one on Codex — the user's duties running on a brain they did not choose.
+func TestBrainsPostRefusesABrainWithNoBackend(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	cfg := &config.OraConfig{}
+	rec := httptest.NewRecorder()
+	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"ollama","model":"llama3"}`)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /brains with ollama = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), brain.NoBackendNote(config.BrainOllama)) {
+		t.Errorf("the refusal says %q, want it to carry the reason the row is unavailable", rec.Body.String())
+	}
+	if cfg.Brain.Provider != "" {
+		t.Errorf("the refused pick changed the provider to %q", cfg.Brain.Provider)
+	}
+	if _, err := os.Stat(config.ConfigPath()); err == nil {
+		t.Errorf("the refused pick wrote a config file")
+	}
+}

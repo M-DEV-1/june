@@ -307,8 +307,50 @@ func TestScheduler_WeeklyStudy_NeverFiresOnANonSunday(t *testing.T) {
 	}
 }
 
-// TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure verifies a failing weeklyStudy still writes the once-per-Sunday marker — the trigger logs and moves on rather than retrying every minute for the rest of the day, unlike the close/brief duties which do retry on failure.
-func TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure(t *testing.T) {
+// TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking verifies a failing weeklyStudy does not write the once-per-Sunday marker, so the pass is tried again rather than recorded as done. It backs off like the close and the brief instead: the next tick inside the wait does nothing, and the first tick past it runs the study again.
+func TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+
+	sunday := lastSunday(time.Now())
+	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	calls := 0
+	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
+		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.briefHour = 0
+	now := sunday
+	s.now = func() time.Time { return now }
+	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
+		calls++
+		return fmt.Errorf("study pass failed")
+	})
+
+	s.tick(ctx)
+	if calls != 1 {
+		t.Fatalf("weeklyStudy called %d times, want 1", calls)
+	}
+	if marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study"); err != nil || marker != "" {
+		t.Errorf("weekly-study marker = %q, %v, want none written for a study that failed", marker, err)
+	}
+
+	now = sunday.Add(firstBackoff - time.Minute)
+	s.tick(ctx)
+	if calls != 1 {
+		t.Errorf("weeklyStudy called %d times inside the backoff, want still 1", calls)
+	}
+
+	now = sunday.Add(firstBackoff + time.Minute)
+	s.tick(ctx)
+	if calls != 2 {
+		t.Errorf("weeklyStudy called %d times once the backoff had passed, want 2", calls)
+	}
+}
+
+// TestScheduler_WeeklyStudy_MarksDoneWhenNothingWasThereToRead verifies the "nothing to read" nil — cmd/daemon.go returns it when the machine has no replays and no dream traces — still writes the marker, since there is nothing to retry.
+func TestScheduler_WeeklyStudy_MarksDoneWhenNothingWasThereToRead(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 
@@ -322,22 +364,12 @@ func TestScheduler_WeeklyStudy_MarksDoneEvenOnFailure(t *testing.T) {
 		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
 	s.briefHour = 0
 	s.now = func() time.Time { return sunday }
-	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error {
-		calls++
-		return fmt.Errorf("study pass failed")
-	})
+	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error { calls++; return nil })
 
 	s.tick(ctx)
-	if calls != 1 {
-		t.Fatalf("weeklyStudy called %d times, want 1", calls)
-	}
-	if marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study"); err != nil || marker == "" {
-		t.Errorf("weekly-study marker = %q, %v, want a marker even though weeklyStudy failed", marker, err)
-	}
-
 	s.tick(ctx)
 	if calls != 1 {
-		t.Errorf("weeklyStudy called %d times after a second tick, want still 1", calls)
+		t.Errorf("weeklyStudy called %d times, want 1: the marker records a pass that had nothing to read", calls)
 	}
 }
 
@@ -833,5 +865,62 @@ func TestScheduler_Close_CatchesUpADaySleptThrough(t *testing.T) {
 	}
 	if len(prompts) == 0 || !strings.Contains(prompts[0], "wrote the recorder") {
 		t.Errorf("the diary prompt did not carry yesterday's timeline: %v", prompts)
+	}
+}
+
+// TestScheduler_Close_GivesEachDayItsOwnDeadline checks the catch-up day and today are closed under a deadline each, not both under one. Each close makes two brain calls, so four calls had to fit in one duty timeout on the first tick after a night the machine slept through, and the deadline expiring made yesterday's close eat the budget today's needed.
+func TestScheduler_Close_GivesEachDayItsOwnDeadline(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	n := time.Now()
+	today := time.Date(n.Year(), n.Month(), n.Day(), 23, 0, 0, 0, n.Location())
+
+	// Both days have a timeline, so both are closed on this one tick.
+	stub := &stubStore{Store: store, summaries: func(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error) {
+		return []db.WindowSummary{{CreatedAt: until.Add(-time.Hour), Content: "wrote the recorder"}}, nil
+	}}
+
+	// Every brain call spends most of one duty timeout and then checks whether it still has one. Under a single shared deadline the second day's calls are already past it.
+	const call = 30 * time.Millisecond
+	s := New(stub, func(ctx context.Context, prompt string) (string, error) {
+		time.Sleep(call)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return "The day, written.", nil
+	}, func(string, string) {}, config.ProactiveConfig{BriefHour: -1})
+	s.closeHour = 22
+	s.now = func() time.Time { return today }
+	s.dutyTimeout = 3 * call
+
+	s.tick(ctx)
+
+	for _, day := range []time.Time{today.AddDate(0, 0, -1), today} {
+		if entry, _ := store.DiaryEntry(ctx, day.Format(dayFormat), "day"); entry != "The day, written." {
+			t.Errorf("%s diary entry = %q, want it written under its own deadline", day.Format(dayFormat), entry)
+		}
+	}
+}
+
+// TestDutyTimeoutFor_HoldsTwoBrainCallsWithHeadroom pins the deadline one duty gets against the brain timeout it has to cover. The evening close makes two brain calls, so ten minutes against a 300-second call ceiling was exactly the two calls with nothing left for the store reads and the prompt assembly around them.
+func TestDutyTimeoutFor_HoldsTwoBrainCallsWithHeadroom(t *testing.T) {
+	call := time.Duration(config.DefaultBrainTimeoutSeconds) * time.Second
+	if got := dutyTimeoutFor(call); got <= 2*call {
+		t.Errorf("dutyTimeoutFor(%v) = %v, want more than the two brain calls a close makes", call, got)
+	}
+	if got := dutyTimeoutFor(60 * time.Second); got >= dutyTimeoutFor(300*time.Second) {
+		t.Error("the duty deadline does not follow the configured brain timeout")
+	}
+	if New(testStore(t), nil, nil, config.ProactiveConfig{}).dutyTimeout != dutyTimeoutFor(call) {
+		t.Error("New's default duty timeout is not derived from the default brain timeout")
+	}
+}
+
+// TestSetBrainTimeout_WidensTheDutyDeadline checks the daemon can hand the scheduler the brain timeout its config actually carries, so a machine that raised the CLI ceiling does not keep a deadline sized for the default.
+func TestSetBrainTimeout_WidensTheDutyDeadline(t *testing.T) {
+	s := New(testStore(t), nil, nil, config.ProactiveConfig{})
+	s.SetBrainTimeout(20 * time.Minute)
+	if got := s.dutyTimeout; got != dutyTimeoutFor(20*time.Minute) {
+		t.Errorf("dutyTimeout = %v after SetBrainTimeout(20m), want %v", got, dutyTimeoutFor(20*time.Minute))
 	}
 }

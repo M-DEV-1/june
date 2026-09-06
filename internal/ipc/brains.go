@@ -48,7 +48,7 @@ func (c *LiveConfig) Update(fn func(*config.OraConfig)) error {
 	return c.save(*c.cfg)
 }
 
-// Brains builds the /brains handler. GET answers the five brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would. An id outside the five known ones is 400 and changes nothing. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
+// Brains builds the /brains handler. GET answers the five brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would. An id outside the five known ones is 400 and changes nothing, and so is an id whose provider has no backend in internal/brain, with the reason in the body. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
 func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -65,6 +65,11 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 			provider, ok := providerForBrainID(req.Brain)
 			if !ok {
 				http.Error(w, "unknown brain: "+req.Brain, http.StatusBadRequest)
+				return
+			}
+			// A brain internal/brain has no code to answer with is refused here, not merely greyed out in the list GET returns. Accepting it persisted the provider, FromConfig then failed every call with ErrNoBackend, and WithCodexFallback answered each one on Codex — which is the "answering on a provider they did not choose" the ErrNoBackend change was written to stop, moved from Gemini to Codex.
+			if note := brain.NoBackendNote(provider); note != "" {
+				http.Error(w, "cannot pick "+req.Brain+": "+note, http.StatusBadRequest)
 				return
 			}
 			err := cfg.Update(func(c *config.OraConfig) {

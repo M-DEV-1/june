@@ -27,8 +27,14 @@ const briefMinutesWindow = 3 * 24 * time.Hour
 // dayFormat is the local calendar-day key used for diary rows.
 const dayFormat = "2006-01-02"
 
-// defaultDutyTimeout bounds one tick duty. The Gemini API path puts no deadline of its own on a call, so a TCP connection that died silently — a laptop suspend, a Wi-Fi drop mid-TLS — used to leave the close blocked forever and every duty after it never ran again until the daemon was restarted. Ten minutes is above two CLI brain calls at their own 300-second ceiling and far below "for the life of the daemon".
-const defaultDutyTimeout = 10 * time.Minute
+// dutyTimeoutFor is how long one duty may take, given the hard limit on a single brain call. Input: the configured brain timeout. Output: room for the two calls the evening close makes plus two minutes for the store reads and the prompt assembly around them.
+// A duty needs a deadline at all because a call that dies silently — a laptop suspend, a Wi-Fi drop mid-TLS — used to leave the close blocked forever and every duty after it never ran again until the daemon was restarted. The number is derived rather than fixed because a flat ten minutes was exactly two calls at the default 300-second ceiling with nothing left over, and said nothing at all about a machine that raised that ceiling.
+func dutyTimeoutFor(brainCall time.Duration) time.Duration {
+	return 2*brainCall + 2*time.Minute
+}
+
+// defaultDutyTimeout bounds one tick duty on a machine that has not set its own brain timeout. See SetBrainTimeout for the one that has.
+var defaultDutyTimeout = dutyTimeoutFor(config.DefaultBrainTimeoutSeconds * time.Second)
 
 // routineTimeout bounds one routine run, which goes through the whole tool loop and so is allowed considerably longer than a duty's own single brain call.
 const routineTimeout = 30 * time.Minute
@@ -126,6 +132,11 @@ func (s *Scheduler) SetAsk(fn func(title, body string, actions []string) (string
 	s.ask = fn
 }
 
+// SetBrainTimeout sizes the per-duty deadline from the hard limit one brain call is allowed. Input: the configured brain timeout (config.BrainConfig.TimeoutSeconds, as a duration) — cmd/daemon.go is the only production caller. Output: nothing; unset, the deadline is sized for config.DefaultBrainTimeoutSeconds.
+func (s *Scheduler) SetBrainTimeout(brainCall time.Duration) {
+	s.dutyTimeout = dutyTimeoutFor(brainCall)
+}
+
 // SetWeeklyStudy wires the Sunday-only weekly system log + distillation study pass — cmd/daemon.go is the only production caller. Unset, the trigger never fires.
 func (s *Scheduler) SetWeeklyStudy(fn func(ctx context.Context, now time.Time) error) {
 	s.weeklyStudy = fn
@@ -151,7 +162,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) tick(ctx context.Context) {
 	s.duty(ctx, s.maybeSnoozes)
 	s.duty(ctx, s.maybeTaskNotices)
-	s.duty(ctx, s.maybeClose)
+	// Not wrapped in duty: maybeClose can close two days on one tick, and it gives each of them its own deadline rather than making four brain calls share one.
+	s.maybeClose(ctx)
 	s.duty(ctx, s.maybeBrief)
 	s.duty(ctx, s.maybeWeeklyStudy)
 	// Not wrapped in duty: maybeRoutines runs each due routine on its own goroutine, which outlives this call and so must not be handed a context that is cancelled when it returns. It gives each run its own routineTimeout instead.
@@ -202,8 +214,10 @@ func (s *Scheduler) maybeClose(ctx context.Context) {
 		return
 	}
 	// One second before today began: the timeline it composes covers the whole of yesterday and the prompt's date line names yesterday.
-	s.closeOneDay(ctx, "close-yesterday", db.DayStart(now).Add(-time.Second))
-	s.closeOneDay(ctx, "close", now)
+	// A deadline each, because each close makes two brain calls: sharing one deadline meant four calls had to fit in it on the first tick after a night the machine slept through, and yesterday's close ate the time today's needed.
+	yesterday := db.DayStart(now).Add(-time.Second)
+	s.duty(ctx, func(ctx context.Context) { s.closeOneDay(ctx, "close-yesterday", yesterday) })
+	s.duty(ctx, func(ctx context.Context) { s.closeOneDay(ctx, "close", now) })
 }
 
 // closeOneDay writes one calendar day's diary entry if it has none and that day saw any activity. Input: the tick's context, the backoff key the duty is tracked under, and the moment the day is written from — the tick's own now for today, the last second of yesterday when catching up a day the machine slept through. Output: nothing; a failure is logged and backed off.
@@ -540,13 +554,20 @@ func NotifySendAsk(title, body string, actions []string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// maybeWeeklyStudy fires the Sunday-only weekly system log + distillation study pass, once the brief hour has passed and the user's first activity of the day shows up — the same first-activity gate maybeBrief uses, so it rides the Claude workday window rather than firing overnight. Disabled when no weeklyStudy func is wired (SetWeeklyStudy never called) or the brief hour itself is disabled. Today's kind='weekly-study' diary row is the once-per-Sunday marker, written after the attempt regardless of its outcome — a failed pass is logged, not retried every minute for the rest of the day.
+// weeklyStudyDuty is the backoff key the Sunday study is tracked under, so a failed pass waits like a failed close instead of being retried on every tick.
+const weeklyStudyDuty = "weekly-study"
+
+// maybeWeeklyStudy fires the Sunday-only weekly system log + distillation study pass, once the brief hour has passed and the user's first activity of the day shows up — the same first-activity gate maybeBrief uses, so it rides the Claude workday window rather than firing overnight. Disabled when no weeklyStudy func is wired (SetWeeklyStudy never called) or the brief hour itself is disabled.
+// Today's kind='weekly-study' diary row is the once-per-Sunday marker, and it is written only when the pass returned nil — either because it did the work or because it deliberately had nothing to read (see cmd/daemon.go). A pass that failed is backed off and tried again, since it now runs under a deadline and one cut off mid-call used to be recorded as done and not attempted again until next Sunday.
 func (s *Scheduler) maybeWeeklyStudy(ctx context.Context) {
 	if s.weeklyStudy == nil || s.briefHour < 0 {
 		return
 	}
 	now := s.now()
 	if now.Weekday() != time.Sunday || now.Hour() < s.briefHour {
+		return
+	}
+	if s.backedOff(weeklyStudyDuty, now) {
 		return
 	}
 	day := now.Format(dayFormat)
@@ -563,11 +584,15 @@ func (s *Scheduler) maybeWeeklyStudy(ctx context.Context) {
 		return
 	}
 	if err := s.weeklyStudy(ctx, now); err != nil {
-		slog.Warn("weekly study failed", "error", err)
+		s.failed(weeklyStudyDuty, s.now())
+		slog.Warn("weekly study failed, backing off", "error", err)
+		return
 	}
 	if err := s.store.SetDiaryEntry(ctx, day, "weekly-study", "weekly system log and distillation study ran"); err != nil {
 		slog.Warn("weekly study: writing marker failed", "error", err)
+		return
 	}
+	s.succeeded(weeklyStudyDuty)
 }
 
 // staleAfter is how long an action item may sit open before the brief stops restating it and starts asking how it is going. Roughly a working week: long enough that repeating it would have already worn out its welcome, short enough that the question still lands while the work is live.
