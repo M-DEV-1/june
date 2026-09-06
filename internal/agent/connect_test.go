@@ -1691,3 +1691,21 @@ func TestMatchesRecentOraSpeech_TheLoopOf20260905(t *testing.T) {
 		t.Error("a genuine user turn was dropped as an echo")
 	}
 }
+
+// The prompt must not promise a tool the session was not given. The daemon's voice session has no approver, so dropApprovalGated takes shell_exec out of its tool list; a prompt that tells the model to "use shell_exec to run what they ask" regardless left it explaining a limit it had invented — on 2026-09-07 it told the user it could not open applications, "only click what's on screen", while open_url sat unused in its own tool list.
+func TestSystemInstruction_TellsTheModelItsToolListIsTheTruth(t *testing.T) {
+	prompt := SystemInstruction(time.Date(2026, 9, 7, 3, 0, 0, 0, time.UTC), "", "some context")
+	for _, want := range []string{
+		"that list is the truth about what you can do",
+		"When shell_exec is in the list",
+		"open_url puts the page in front of them",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the live prompt no longer says %q", want)
+		}
+	}
+	// The rule against browsing is about answering questions, not about opening things the user asked for.
+	if strings.Contains(prompt, "never open a browser instead") {
+		t.Error("the live prompt still forbids opening a browser outright, which is what stopped it opening one when asked")
+	}
+}
