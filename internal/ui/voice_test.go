@@ -36,17 +36,24 @@ func TestParseVoiceCommand(t *testing.T) {
 	}
 }
 
-func TestVoiceListMessage_MarksCurrentVoice(t *testing.T) {
-	msg := voiceListMessage("Kore")
-	if !containsAll(msg, "Kore", "(current)", "Zephyr", "Usage:") {
-		t.Errorf("expected voice list message to mention Kore as current and list others, got:\n%s", msg)
+// TestVoiceListMessage is a table over voiceListMessage's marking rule: it marks the given voice
+// current and lists the others, and an empty current voice falls back to the default Iapetus.
+func TestVoiceListMessage(t *testing.T) {
+	cases := []struct {
+		name    string
+		current string
+		want    []string
+	}{
+		{"marks the current voice", "Kore", []string{"Kore", "(current)", "Zephyr", "Usage:"}},
+		{"defaults when current is empty", "", []string{"Iapetus", "(current)"}},
 	}
-}
-
-func TestVoiceListMessage_DefaultsWhenCurrentEmpty(t *testing.T) {
-	msg := voiceListMessage("")
-	if !containsAll(msg, "Iapetus", "(current)") {
-		t.Errorf("expected empty current voice to fall back to default Iapetus, got:\n%s", msg)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := voiceListMessage(tc.current)
+			if !containsAll(msg, tc.want...) {
+				t.Errorf("expected voice list message to contain %v, got:\n%s", tc.want, msg)
+			}
+		})
 	}
 }
 

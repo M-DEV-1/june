@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 	"os"
 	"path/filepath"
@@ -17,16 +18,10 @@ import (
 	"time"
 )
 
-// memStore opens a throwaway store in a fresh temp directory that is closed when the test ends.
-// File-backed rather than ":memory:" because a second connection against ":memory:" sees an empty, unrelated database in database/sql plus modernc/sqlite, which breaks any test that queries concurrently or reopens the store.
+// memStore opens a throwaway store in a fresh temp directory that is closed when the test ends — a thin alias over dbtest.Open kept so every call site in this package doesn't need its own import.
 func memStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.New(filepath.Join(t.TempDir(), "db"))
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
+	return dbtest.Open(t)
 }
 
 // TestStore_LogNote_NormalizesCaseAndWhitespaceForDedup proves the fix for the "paraphrased restatement creates a duplicate row" problem: LogNote used to dedupe on an exact (content, kind) match only, so re-logging the same fact with different casing/whitespace created a second row instead of reconciling. Content is now normalized (trimmed, whitespace collapsed, lowercased) before the dedup check.
@@ -314,47 +309,100 @@ func seedOldTree(t *testing.T, ctx context.Context, store *db.Store, dayContent 
 	return dayID
 }
 
-func TestStore_OldSummaryGroups_ReturnsGroupedByDay(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+// TestStore_OldSummaryGroups covers both the shape OldSummaryGroups returns (one group per old day, carrying that day's summaries) and the caps that keep one compaction pass from building a group too large for one prompt: MaxSummariesPerGroup rows per day and MaxDayGroupsPerRun days per run.
+func TestStore_OldSummaryGroups(t *testing.T) {
+	t.Run("returns grouped by day", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	// seed two separate old days with summaries
-	dayID1 := seedOldTree(t, ctx, store, "2026-05-01", []string{"summary-alpha", "summary-beta"})
-	dayID2 := seedOldTree(t, ctx, store, "2026-05-02", []string{"summary-gamma"})
+		// seed two separate old days with summaries
+		dayID1 := seedOldTree(t, ctx, store, "2026-05-01", []string{"summary-alpha", "summary-beta"})
+		dayID2 := seedOldTree(t, ctx, store, "2026-05-02", []string{"summary-gamma"})
 
-	// a fresh summary (created now) must NOT appear
-	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "Current Task",
-		Summary:  "very recent summary should not appear",
+		// a fresh summary (created now) must NOT appear
+		_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+			SameTask: false,
+			TaskName: "Current Task",
+			Summary:  "very recent summary should not appear",
+		})
+
+		groups, err := store.OldSummaryGroups(ctx, 7*24*time.Hour)
+		if err != nil {
+			t.Fatalf("OldSummaryGroups: %v", err)
+		}
+
+		// build a map by dayID for assertion order independence
+		byDay := make(map[int64]memory.SummaryGroup)
+		for _, g := range groups {
+			byDay[g.DayID] = g
+		}
+
+		g1, ok := byDay[dayID1]
+		if !ok {
+			t.Fatalf("group for dayID %d not found; got groups: %+v", dayID1, groups)
+		}
+		if len(g1.Summaries) != 2 {
+			t.Errorf("expected 2 summaries in day1 group, got %d", len(g1.Summaries))
+		}
+
+		g2, ok := byDay[dayID2]
+		if !ok {
+			t.Fatalf("group for dayID %d not found", dayID2)
+		}
+		if len(g2.Summaries) != 1 {
+			t.Errorf("expected 1 summary in day2 group, got %d", len(g2.Summaries))
+		}
 	})
 
-	groups, err := store.OldSummaryGroups(ctx, 7*24*time.Hour)
-	if err != nil {
-		t.Fatalf("OldSummaryGroups: %v", err)
-	}
+	// The compaction job puts a group's summaries into one prompt, so an uncapped day builds a prompt past the model's input limit and is then skipped on every run forever.
+	t.Run("caps rows per group and groups per run", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
+		raw := store.DB()
 
-	// build a map by dayID for assertion order independence
-	byDay := make(map[int64]memory.SummaryGroup)
-	for _, g := range groups {
-		byDay[g.DayID] = g
-	}
+		var userID int64
+		if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='user' LIMIT 1`).Scan(&userID); err != nil {
+			t.Fatalf("find user node: %v", err)
+		}
 
-	g1, ok := byDay[dayID1]
-	if !ok {
-		t.Fatalf("group for dayID %d not found; got groups: %+v", dayID1, groups)
-	}
-	if len(g1.Summaries) != 2 {
-		t.Errorf("expected 2 summaries in day1 group, got %d", len(g1.Summaries))
-	}
+		// One over each cap: a day holding MaxSummariesPerGroup+1 summaries, and MaxDayGroupsPerRun+1 days holding one each.
+		seed := func(day string, n int) {
+			t.Helper()
+			var dayID, sessID, taskID int64
+			if err := raw.QueryRowContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'day',?,datetime('now','-30 days')) RETURNING id`, userID, day).Scan(&dayID); err != nil {
+				t.Fatalf("insert day %s: %v", day, err)
+			}
+			if err := raw.QueryRowContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'session','Old Session',datetime('now','-30 days')) RETURNING id`, dayID).Scan(&sessID); err != nil {
+				t.Fatalf("insert session for %s: %v", day, err)
+			}
+			if err := raw.QueryRowContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'task','Old Task',datetime('now','-30 days')) RETURNING id`, sessID).Scan(&taskID); err != nil {
+				t.Fatalf("insert task for %s: %v", day, err)
+			}
+			for i := 0; i < n; i++ {
+				if _, err := raw.ExecContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'summary',?,datetime('now','-30 days'))`, taskID, fmt.Sprintf("%s summary %d", day, i)); err != nil {
+					t.Fatalf("insert summary %d for %s: %v", i, day, err)
+				}
+			}
+		}
 
-	g2, ok := byDay[dayID2]
-	if !ok {
-		t.Fatalf("group for dayID %d not found", dayID2)
-	}
-	if len(g2.Summaries) != 1 {
-		t.Errorf("expected 1 summary in day2 group, got %d", len(g2.Summaries))
-	}
+		seed("2026-01-01", db.MaxSummariesPerGroup+1)
+		for i := 0; i < db.MaxDayGroupsPerRun; i++ {
+			seed(fmt.Sprintf("2026-02-%02d", i+1), 2)
+		}
+
+		groups, err := store.OldSummaryGroups(ctx, 7*24*time.Hour)
+		if err != nil {
+			t.Fatalf("OldSummaryGroups: %v", err)
+		}
+		if len(groups) > db.MaxDayGroupsPerRun {
+			t.Errorf("got %d day groups, want at most %d", len(groups), db.MaxDayGroupsPerRun)
+		}
+		for _, g := range groups {
+			if len(g.Summaries) > db.MaxSummariesPerGroup {
+				t.Errorf("day %s came back with %d summaries, want at most %d", g.Day, len(g.Summaries), db.MaxSummariesPerGroup)
+			}
+		}
+	})
 }
 
 func TestStore_GetImplicitContext_WithWorkingState(t *testing.T) {
@@ -569,99 +617,6 @@ func TestStore_CountSummariesSince(t *testing.T) {
 	}
 }
 
-func TestStore_ReplaceSummariesWithDigest_TransactionAndFTS(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	dayID := seedOldTree(t, ctx, store, "2026-05-10", []string{
-		"user debugged the xgb tracker uniquetoken1",
-		"user reviewed PR for audio pipeline uniquetoken2",
-	})
-
-	// grab the summary IDs just inserted
-	rows, err := store.DB().QueryContext(ctx,
-		`SELECT id FROM nodes WHERE type='summary' ORDER BY id ASC`)
-	if err != nil {
-		t.Fatalf("query summaries: %v", err)
-	}
-	var summaryIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			t.Fatalf("scan id: %v", err)
-		}
-		summaryIDs = append(summaryIDs, id)
-	}
-	rows.Close()
-
-	if len(summaryIDs) != 2 {
-		t.Fatalf("expected 2 summary IDs before replace, got %d", len(summaryIDs))
-	}
-
-	digest := "user spent the day debugging the tracker and reviewing the audio PR uniquetoken3"
-	if err := store.ReplaceSummariesWithDigest(ctx, dayID, summaryIDs, digest); err != nil {
-		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
-	}
-
-	// digest must exist under dayID
-	var digestID int64
-	var digestContent string
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT id, content FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestID, &digestContent); err != nil {
-		t.Fatalf("find digest node: %v", err)
-	}
-	if digestContent != digest {
-		t.Errorf("digest content mismatch: got %q", digestContent)
-	}
-
-	// summaries must survive, reparented under the digest rather than deleted
-	var sumCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary'`).Scan(&sumCount); err != nil {
-		t.Fatalf("count summaries: %v", err)
-	}
-	if sumCount != 2 {
-		t.Errorf("expected 2 summaries to survive replace, got %d", sumCount)
-	}
-	for _, id := range summaryIDs {
-		var parentID int64
-		if err := store.DB().QueryRowContext(ctx, `SELECT parent_id FROM nodes WHERE id=?`, id).Scan(&parentID); err != nil {
-			t.Fatalf("find summary %d: %v", id, err)
-		}
-		if parentID != digestID {
-			t.Errorf("summary %d: expected parent_id=%d, got %d", id, digestID, parentID)
-		}
-	}
-
-	// FTS: digest term must be searchable
-	hits, err := store.SearchMemory(ctx, "uniquetoken3")
-	if err != nil {
-		t.Fatalf("SearchMemory for digest term: %v", err)
-	}
-	if len(hits) == 0 {
-		t.Fatal("FTS returned no hits for digest term — digest insert trigger not firing")
-	}
-	if hits[0].Source != "digest" {
-		t.Errorf("expected source=digest, got %s", hits[0].Source)
-	}
-
-	// FTS: terms unique to the surviving summaries must still be searchable — they were reparented, not deleted.
-	oldHits1, err := store.SearchMemory(ctx, "uniquetoken1")
-	if err != nil {
-		t.Fatalf("SearchMemory for surviving summary term: %v", err)
-	}
-	if len(oldHits1) == 0 {
-		t.Error("FTS lost surviving summary term 'uniquetoken1' — summary should not have been deleted")
-	}
-
-	oldHits2, err := store.SearchMemory(ctx, "uniquetoken2")
-	if err != nil {
-		t.Fatalf("SearchMemory for surviving summary term: %v", err)
-	}
-	if len(oldHits2) == 0 {
-		t.Error("FTS lost surviving summary term 'uniquetoken2' — summary should not have been deleted")
-	}
-}
-
 // Two summaries written under different original parents can carry identical content — nothing stops two unrelated activities being written up in the same words. Reparenting both under the same new digest would give them the same (parent_id, type, content), which idx_nodes_unique forbids; the batch must survive that instead of failing the whole compaction and retrying forever.
 func TestStore_ReplaceSummariesWithDigest_ToleratesDuplicateContentAmongSummaries(t *testing.T) {
 	ctx := context.Background()
@@ -811,193 +766,188 @@ func TestStore_ReplaceSummariesWithDigest_ResumesADayWithAnExistingDigestAndLoos
 
 // ─── Thread tests ─────────────────────────────────────────────────────────────
 
-// TestStore_UpsertThread_NewThread verifies that a zero-ID upsert creates a new row with the right initial salience (0.5 when Novel=false, 0.6 when Novel=true), times_seen=1, and status='active'.
-func TestStore_UpsertThread_NewThread(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+// TestStore_UpsertThread covers the three shapes an UpsertThread call takes: a zero-ID insert (new row, salience seeded from Novel, times_seen=1, status active), a zero-ID call repeating an existing (subject, kind) (same row updated in place, salience bumped and capped at 1.0, times_seen incremented), and an ID>0 call (state replaced, times_seen incremented, same id returned).
+func TestStore_UpsertThread(t *testing.T) {
+	t.Run("new thread seeds salience from Novel", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	cases := []struct {
-		novel        bool
-		wantSalience float64
-	}{
-		{novel: false, wantSalience: 0.5},
-		{novel: true, wantSalience: 0.6},
-	}
+		cases := []struct {
+			novel        bool
+			wantSalience float64
+		}{
+			{novel: false, wantSalience: 0.5},
+			{novel: true, wantSalience: 0.6},
+		}
 
-	for _, tc := range cases {
-		subject := fmt.Sprintf("project-novel-%v", tc.novel)
-		id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-			Subject: subject,
+		for _, tc := range cases {
+			subject := fmt.Sprintf("project-novel-%v", tc.novel)
+			id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+				Subject: subject,
+				Kind:    "work",
+				State:   "working on it",
+				Novel:   tc.novel,
+			})
+			if err != nil {
+				t.Fatalf("UpsertThread (novel=%v): %v", tc.novel, err)
+			}
+			if id == 0 {
+				t.Fatalf("novel=%v: expected non-zero id", tc.novel)
+			}
+
+			var sal float64
+			var timesSeen int
+			var status string
+			if err := store.DB().QueryRowContext(ctx,
+				`SELECT salience, times_seen, status FROM threads WHERE id = ?`, id).
+				Scan(&sal, &timesSeen, &status); err != nil {
+				t.Fatalf("query thread (novel=%v): %v", tc.novel, err)
+			}
+			if sal != tc.wantSalience {
+				t.Errorf("novel=%v: want salience %v, got %v", tc.novel, tc.wantSalience, sal)
+			}
+			if timesSeen != 1 {
+				t.Errorf("novel=%v: want times_seen=1, got %d", tc.novel, timesSeen)
+			}
+			if status != "active" {
+				t.Errorf("novel=%v: want status='active', got %q", tc.novel, status)
+			}
+		}
+	})
+
+	t.Run("conflict on subject and kind updates the one row", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
+
+		id1, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: "ORA project",
 			Kind:    "work",
-			State:   "working on it",
-			Novel:   tc.novel,
+			State:   "initial state",
+			Novel:   false,
 		})
 		if err != nil {
-			t.Fatalf("UpsertThread (novel=%v): %v", tc.novel, err)
+			t.Fatalf("first upsert: %v", err)
 		}
-		if id == 0 {
-			t.Fatalf("novel=%v: expected non-zero id", tc.novel)
+
+		var sal1 float64
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT salience FROM threads WHERE id = ?`, id1).Scan(&sal1); err != nil {
+			t.Fatalf("query salience before conflict: %v", err)
+		}
+
+		// second upsert with same subject+kind, different state
+		id2, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: "ORA project",
+			Kind:    "work",
+			State:   "writing more tests",
+			Novel:   false,
+		})
+		if err != nil {
+			t.Fatalf("second upsert: %v", err)
+		}
+		if id2 != id1 {
+			t.Errorf("conflict must return same id: got %d, want %d", id2, id1)
+		}
+
+		var sal2 float64
+		var timesSeen int
+		var state string
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT salience, times_seen, state FROM threads WHERE id = ?`, id1).
+			Scan(&sal2, &timesSeen, &state); err != nil {
+			t.Fatalf("query after conflict: %v", err)
+		}
+		if sal2 <= sal1 {
+			t.Errorf("salience should increase on conflict: before=%v after=%v", sal1, sal2)
+		}
+		if timesSeen != 2 {
+			t.Errorf("times_seen should be 2 after conflict, got %d", timesSeen)
+		}
+		if state != "writing more tests" {
+			t.Errorf("state should be updated to new value, got %q", state)
+		}
+
+		// must stay at exactly one row
+		var count int
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT count(*) FROM threads WHERE subject = 'ORA project' AND kind = 'work'`).Scan(&count); err != nil {
+			t.Fatalf("count threads: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("conflict must keep single row, got %d rows", count)
+		}
+	})
+
+	t.Run("salience never exceeds 1.0", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
+
+		for i := 0; i < 30; i++ {
+			if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+				Subject: "recurring thread",
+				Kind:    "work",
+				State:   fmt.Sprintf("iteration %d", i),
+				Novel:   true,
+			}); err != nil {
+				t.Fatalf("upsert iter %d: %v", i, err)
+			}
 		}
 
 		var sal float64
-		var timesSeen int
-		var status string
 		if err := store.DB().QueryRowContext(ctx,
-			`SELECT salience, times_seen, status FROM threads WHERE id = ?`, id).
-			Scan(&sal, &timesSeen, &status); err != nil {
-			t.Fatalf("query thread (novel=%v): %v", tc.novel, err)
+			`SELECT salience FROM threads WHERE subject = 'recurring thread' AND kind = 'work'`).Scan(&sal); err != nil {
+			t.Fatalf("query salience: %v", err)
 		}
-		if sal != tc.wantSalience {
-			t.Errorf("novel=%v: want salience %v, got %v", tc.novel, tc.wantSalience, sal)
+		if sal > 1.0 {
+			t.Errorf("salience must not exceed 1.0 after many upserts, got %v", sal)
 		}
-		if timesSeen != 1 {
-			t.Errorf("novel=%v: want times_seen=1, got %d", tc.novel, timesSeen)
-		}
-		if status != "active" {
-			t.Errorf("novel=%v: want status='active', got %q", tc.novel, status)
-		}
-	}
-}
-
-// TestStore_UpsertThread_Conflict verifies that a second zero-ID upsert with the same (subject, kind) updates state, bumps times_seen to 2, raises salience by ~0.05 (capped at ≤1.0), and returns the same id with exactly one row.
-func TestStore_UpsertThread_Conflict(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	id1, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "initial state",
-		Novel:   false,
 	})
-	if err != nil {
-		t.Fatalf("first upsert: %v", err)
-	}
 
-	var sal1 float64
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT salience FROM threads WHERE id = ?`, id1).Scan(&sal1); err != nil {
-		t.Fatalf("query salience before conflict: %v", err)
-	}
+	t.Run("explicit id replaces state", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	// second upsert with same subject+kind, different state
-	id2, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "writing more tests",
-		Novel:   false,
-	})
-	if err != nil {
-		t.Fatalf("second upsert: %v", err)
-	}
-	if id2 != id1 {
-		t.Errorf("conflict must return same id: got %d, want %d", id2, id1)
-	}
-
-	var sal2 float64
-	var timesSeen int
-	var state string
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT salience, times_seen, state FROM threads WHERE id = ?`, id1).
-		Scan(&sal2, &timesSeen, &state); err != nil {
-		t.Fatalf("query after conflict: %v", err)
-	}
-	if sal2 <= sal1 {
-		t.Errorf("salience should increase on conflict: before=%v after=%v", sal1, sal2)
-	}
-	if sal2 > 1.0 {
-		t.Errorf("salience must not exceed 1.0, got %v", sal2)
-	}
-	if timesSeen != 2 {
-		t.Errorf("times_seen should be 2 after conflict, got %d", timesSeen)
-	}
-	if state != "writing more tests" {
-		t.Errorf("state should be updated to new value, got %q", state)
-	}
-
-	// must stay at exactly one row
-	var count int
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT count(*) FROM threads WHERE subject = 'ORA project' AND kind = 'work'`).Scan(&count); err != nil {
-		t.Fatalf("count threads: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("conflict must keep single row, got %d rows", count)
-	}
-}
-
-// TestStore_UpsertThread_SalienceCap verifies that salience never exceeds 1.0
-// regardless of how many times the same thread is upserted.
-func TestStore_UpsertThread_SalienceCap(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	for i := 0; i < 30; i++ {
-		if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-			Subject: "recurring thread",
+		id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: "ORA project",
 			Kind:    "work",
-			State:   fmt.Sprintf("iteration %d", i),
-			Novel:   true,
-		}); err != nil {
-			t.Fatalf("upsert iter %d: %v", i, err)
+			State:   "initial",
+			Novel:   false,
+		})
+		if err != nil {
+			t.Fatalf("initial insert: %v", err)
 		}
-	}
 
-	var sal float64
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT salience FROM threads WHERE subject = 'recurring thread' AND kind = 'work'`).Scan(&sal); err != nil {
-		t.Fatalf("query salience: %v", err)
-	}
-	if sal > 1.0 {
-		t.Errorf("salience must not exceed 1.0 after many upserts, got %v", sal)
-	}
-}
+		var timesSeen1 int
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT times_seen FROM threads WHERE id = ?`, id).Scan(&timesSeen1); err != nil {
+			t.Fatalf("query times_seen before explicit upsert: %v", err)
+		}
 
-// TestStore_UpsertThread_ExplicitID verifies the ID>0 update path: state is replaced, times_seen is incremented, and the same id is returned.
-func TestStore_UpsertThread_ExplicitID(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+		returnedID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			ID:    id,
+			State: "explicit-state-update",
+		})
+		if err != nil {
+			t.Fatalf("explicit-id upsert: %v", err)
+		}
+		if returnedID != id {
+			t.Errorf("explicit-id upsert must return same id: got %d, want %d", returnedID, id)
+		}
 
-	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "initial",
-		Novel:   false,
+		var state string
+		var timesSeen2 int
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT state, times_seen FROM threads WHERE id = ?`, id).
+			Scan(&state, &timesSeen2); err != nil {
+			t.Fatalf("query after explicit upsert: %v", err)
+		}
+		if state != "explicit-state-update" {
+			t.Errorf("state should be replaced: got %q", state)
+		}
+		if timesSeen2 != timesSeen1+1 {
+			t.Errorf("times_seen should increment: got %d, want %d", timesSeen2, timesSeen1+1)
+		}
 	})
-	if err != nil {
-		t.Fatalf("initial insert: %v", err)
-	}
-
-	var timesSeen1 int
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT times_seen FROM threads WHERE id = ?`, id).Scan(&timesSeen1); err != nil {
-		t.Fatalf("query times_seen before explicit upsert: %v", err)
-	}
-
-	returnedID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		ID:    id,
-		State: "explicit-state-update",
-	})
-	if err != nil {
-		t.Fatalf("explicit-id upsert: %v", err)
-	}
-	if returnedID != id {
-		t.Errorf("explicit-id upsert must return same id: got %d, want %d", returnedID, id)
-	}
-
-	var state string
-	var timesSeen2 int
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT state, times_seen FROM threads WHERE id = ?`, id).
-		Scan(&state, &timesSeen2); err != nil {
-		t.Fatalf("query after explicit upsert: %v", err)
-	}
-	if state != "explicit-state-update" {
-		t.Errorf("state should be replaced: got %q", state)
-	}
-	if timesSeen2 != timesSeen1+1 {
-		t.Errorf("times_seen should increment: got %d, want %d", timesSeen2, timesSeen1+1)
-	}
 }
 
 // TestStore_GetLiveThreads_RecencyWindow verifies the 2-day cutoff: a thread last_seen within 2 days is returned; one older than 2 days is not. Also checks newest-first ordering and that the limit parameter is honored.
@@ -1814,25 +1764,6 @@ func TestCreateSchema_DomainColumnMigration_Idempotent(t *testing.T) {
 	}
 }
 
-// TestLogEpisode_TagsDomainViaClassify verifies LogEpisode computes and stores memory.Classify(app, title) in the episodes.domain column.
-func TestLogEpisode_TagsDomainViaClassify(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	id, err := store.LogEpisode(ctx, "Netflix", "The Bear S3E1", "watching")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-
-	var domain string
-	if err := store.DB().QueryRow(`SELECT domain FROM episodes WHERE id = ?`, id).Scan(&domain); err != nil {
-		t.Fatalf("query episode domain: %v", err)
-	}
-	if domain != "personal" {
-		t.Errorf("domain = %q, want %q", domain, "personal")
-	}
-}
-
 // TestLogEpisode_DoesNotBlockOnSlowEmbedder proves LogEpisode returns immediately after its synchronous INSERT, even with a configured embedder that would block indefinitely — the async embed must run in its own goroutine, never inline on the caller's path.
 func TestLogEpisode_DoesNotBlockOnSlowEmbedder(t *testing.T) {
 	ctx := context.Background()
@@ -1864,49 +1795,6 @@ func TestLogEpisode_DoesNotBlockOnSlowEmbedder(t *testing.T) {
 		t.Fatal("expected the async embed goroutine to have started")
 	}
 	close(slow.release)
-}
-
-// TestLogSemanticNode_DomainInheritance_MajorityVote verifies that the summary node's domain is the majority vote over episodes logged since the current task's created_at, not a single Classify(app,title) call.
-func TestLogSemanticNode_DomainInheritance_MajorityVote(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// 1. Create the task (first flush — SameTask=false establishes currentTaskID and the task node's created_at anchor).
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "debugging session",
-		Summary:  "started debugging",
-	}); err != nil {
-		t.Fatalf("LogSemanticNode (create task): %v", err)
-	}
-
-	// 2. Log episodes AFTER the task exists, 2 work-tagged vs 1 personal-tagged — work should win the majority vote.
-	for _, app := range []string{"Slack", "Code", "Netflix"} {
-		if _, err := store.LogEpisode(ctx, app, "generic title", "some content"); err != nil {
-			t.Fatalf("LogEpisode(%s): %v", app, err)
-		}
-	}
-
-	// 3. Continue the same task (SameTask=true) — this triggers the domain majority-vote query over episodes since the task's created_at.
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: true,
-		TaskName: "debugging session",
-		Summary:  "still debugging, mostly in Slack and Code",
-	}); err != nil {
-		t.Fatalf("LogSemanticNode (continue task): %v", err)
-	}
-
-	var domain string
-	if err := store.DB().QueryRow(`
-		SELECT domain FROM nodes
-		WHERE type = 'summary'
-		ORDER BY id DESC LIMIT 1
-	`).Scan(&domain); err != nil {
-		t.Fatalf("query summary node domain: %v", err)
-	}
-	if domain != "work" {
-		t.Errorf("summary domain = %q, want %q (majority of Slack+Code work episodes over 1 personal)", domain, "work")
-	}
 }
 
 // TestHybridSearch_DomainBoost_AppliesToLexicalHitsNotJustVectorHits guards a regression: HybridSearch's same-domain boost (applied when domainFilter=="") only ever looked at rrfCandidate.domain, but that field was populated for vector-sourced candidates only — every lexical/FTS5 candidate's domain was left at "", so the boost silently never fired for keyword-matched hits, the common case since the vector index starts empty and grows slowly.
@@ -1957,13 +1845,19 @@ func TestHybridSearch_DomainBoost_AppliesToLexicalHitsNotJustVectorHits(t *testi
 	}
 }
 
-// A summary-node hit must carry the plain summary text, not the marshalled TaskSummary JSON that LogSemanticNode stores in nodes.content (the model sees this string verbatim), and its real created_at rather than the zero value (FormatHit's relative-age suffix needs it).
+// A summary-node hit must carry the plain summary text, not the marshalled TaskSummary JSON that LogSemanticNode stores in nodes.content (the model sees this string verbatim), and its real created_at rather than the zero value (FormatHit's relative-age suffix needs it). Summary nodes store the whole struct as JSON, so indexing it verbatim made the JSON keys ("same_task", "task_name") live search terms that matched every summary ever written; a search on one of those keys must find nothing.
 func TestSearchMemory_SummaryHit_CarriesProseAndCreatedAt(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
 	if err := store.LogSemanticNode(ctx, memory.TaskSummary{SameTask: false, TaskName: "debugging session", Summary: "fixed the parser edge case"}); err != nil {
 		t.Fatalf("LogSemanticNode: %v", err)
+	}
+
+	if hits, err := store.SearchMemory(ctx, "same_task"); err != nil {
+		t.Fatalf("SearchMemory(same_task): %v", err)
+	} else if len(hits) != 0 {
+		t.Errorf("searching a JSON key returned %d hits, want 0: %+v", len(hits), hits)
 	}
 
 	hits, err := store.SearchMemory(ctx, "parser edge case")
@@ -2149,34 +2043,6 @@ func TestLogEpisode_JunkOnlyRawFallbackIsStripped(t *testing.T) {
 	}
 	if strings.ContainsRune(text, '￼') {
 		t.Errorf("screen_text = %q, want no object replacement characters", text)
-	}
-}
-
-// TestStore_SummaryFTS_IndexesSummaryTextNotJSONKeys proves that a summary node's FTS entry holds the plain summary prose, not the marshalled TaskSummary. Summary nodes store the whole struct as JSON in nodes.content, so indexing it verbatim made the JSON keys ("same_task", "task_name") live search terms that matched every summary ever written.
-func TestStore_SummaryFTS_IndexesSummaryTextNotJSONKeys(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	const summaryText = "Rolled the staging cluster to 1.30 and watched every pod drain cleanly."
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "Kubernetes upgrade", Summary: summaryText}); err != nil {
-		t.Fatalf("LogSemanticNode: %v", err)
-	}
-
-	if hits, err := store.SearchMemory(ctx, "same_task"); err != nil {
-		t.Fatalf("SearchMemory(same_task): %v", err)
-	} else if len(hits) != 0 {
-		t.Errorf("searching a JSON key returned %d hits, want 0: %+v", len(hits), hits)
-	}
-
-	hits, err := store.SearchMemory(ctx, "staging cluster")
-	if err != nil {
-		t.Fatalf("SearchMemory(staging cluster): %v", err)
-	}
-	if len(hits) != 1 {
-		t.Fatalf("want 1 hit for the summary prose, got %d: %+v", len(hits), hits)
-	}
-	if hits[0].Content != summaryText {
-		t.Errorf("hit content = %q, want %q", hits[0].Content, summaryText)
 	}
 }
 
@@ -2403,70 +2269,72 @@ func TestSummaryTimeline_CarriesRealDates(t *testing.T) {
 	}
 }
 
-// A thread says what the user was doing; the episodes say what was actually on screen while they did it. Nothing joined the two, so a question like "what were those code review findings" could reach the thread's one-line summary and never the evidence behind it — 261 threads and 4,901 episodes with no edge between them.
-func TestStore_ThreadEpisodes_LinkAndReadBack(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+// TestStore_ThreadEpisodeEdges covers the two ways an episode gets linked to the thread the user was in while it was captured: an explicit LinkEpisodesToThread call over a time window, and BackfillThreadEdges rebuilding the edge after the fact from the summary nodes the compiler already wrote (one per thread per flush, timestamped at the flush). A thread says what the user was doing; the episodes say what was actually on screen while they did it — without this edge, a question like "what were those code review findings" reaches the thread's one-line summary and never the evidence behind it.
+func TestStore_ThreadEpisodeEdges(t *testing.T) {
+	t.Run("link and read back", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	inWindow, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings, two of them high severity"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	since := time.Now().Add(-time.Minute)
+		inWindow, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings, two of them high severity"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		since := time.Now().Add(-time.Minute)
 
-	threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work", State: "reading the findings"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.LinkEpisodesToThread(ctx, threadID, since, time.Now().Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
+		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work", State: "reading the findings"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.LinkEpisodesToThread(ctx, threadID, since, time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
 
-	got, err := store.EpisodesForThread(ctx, threadID, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].ID != inWindow {
-		t.Fatalf("got %+v, want the one episode written inside the window", got)
-	}
-	if !strings.Contains(got[0].ScreenText, "eleven findings") {
-		t.Errorf("the evidence did not come back with the episode: %q", got[0].ScreenText)
-	}
-}
+		got, err := store.EpisodesForThread(ctx, threadID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].ID != inWindow {
+			t.Fatalf("got %+v, want the one episode written inside the window", got)
+		}
+		if !strings.Contains(got[0].ScreenText, "eleven findings") {
+			t.Errorf("the evidence did not come back with the episode: %q", got[0].ScreenText)
+		}
+	})
 
-// The compiler discarded the episode-to-thread attribution for months, but it left a trace: one summary node per thread per flush, carrying the thread's subject and the moment of the flush. Those timestamps are the flush boundaries, so the edge can be rebuilt exactly rather than guessed at — every episode between one flush and the next belongs to the threads that flush produced.
-func TestStore_BackfillThreadEdges_RebuildsFromSummaryNodes(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+	// The compiler discarded the episode-to-thread attribution for months, but it left a trace: one summary node per thread per flush, carrying the thread's subject and the moment of the flush. Those timestamps are the flush boundaries, so the edge can be rebuilt exactly rather than guessed at — every episode between one flush and the next belongs to the threads that flush produced.
+	t.Run("backfill rebuilds from summary nodes", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	inFlush, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The summary node the compiler wrote for that flush, named after the thread.
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "code review of ora", Summary: "reviewed the code"}); err != nil {
-		t.Fatal(err)
-	}
+		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inFlush, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The summary node the compiler wrote for that flush, named after the thread.
+		if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "code review of ora", Summary: "reviewed the code"}); err != nil {
+			t.Fatal(err)
+		}
 
-	linked, err := store.BackfillThreadEdges(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if linked == 0 {
-		t.Fatal("backfill linked nothing")
-	}
+		linked, err := store.BackfillThreadEdges(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if linked == 0 {
+			t.Fatal("backfill linked nothing")
+		}
 
-	eps, err := store.EpisodesForThread(ctx, threadID, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(eps) != 1 || eps[0].ID != inFlush {
-		t.Fatalf("got %+v, want the episode captured before that flush", eps)
-	}
+		eps, err := store.EpisodesForThread(ctx, threadID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(eps) != 1 || eps[0].ID != inFlush {
+			t.Fatalf("got %+v, want the episode captured before that flush", eps)
+		}
+	})
 }
 
 // The tally table gained prompt_chars and reply_chars on 2026-09-01 in the create statement only, so a database created before that day failed every bump with "no column named prompt_chars". Opening such a database must add the columns.

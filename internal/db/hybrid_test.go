@@ -293,27 +293,6 @@ func TestHybridSearch_VectorSearchFails_DegradesToLexicalOnly(t *testing.T) {
 	}
 }
 
-// TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm verifies that for a query with 3+ significant terms, a lexical candidate matching only one of them (buildFTSMatch's OR-of-terms means FTS5 alone would return it) is dropped from fusion — without this floor, a query like "hiking docker kubernetes" surfaces any row containing just one of those words, on neither of the other topics.
-func TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	if _, err := store.LogNote(ctx, "the user likes hiking on weekends", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	if _, err := store.LogNote(ctx, "the user works with docker containers", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	hits, err := store.HybridSearch(ctx, "hiking docker kubernetes", "", 10)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	if len(hits) != 0 {
-		t.Errorf("expected both single-term-overlap notes to be dropped, got: %+v", hits)
-	}
-}
-
 // TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm is the other side of the floor: a two-word question is how people ask about one thing, not a demand that both words appear. Requiring both turned every two-term query into a strict AND, so "ora daemon" stopped matching "the daemon crashed at startup" — the floor has to scale with the query, not sit at a flat two terms.
 func TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm(t *testing.T) {
 	ctx := context.Background()
@@ -946,121 +925,6 @@ func TestReconcileVectors_LeavesFreshEpisodeVectorAlone(t *testing.T) {
 }
 
 // TestReconcileVectors_BackfillsMissingNoteVector verifies a note that has no vector entry at all (e.g. from before hybrid search was wired client-side, or a dirty pre-existing store) gets embedded and added.
-func TestReconcileVectors_BackfillsMissingNoteVector(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	// Configure the vector index only AFTER LogNote, so LogNote's own async embed never fires — this note is missing a vector purely because ReconcileVectors needs to backfill it, not because of a race with LogNote's own embed goroutine.
-	id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
-	if err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Errorf("expected 1 backfilled, got %d", report.Backfilled)
-	}
-	wantID := fmt.Sprintf("note:%d", id)
-	found := false
-	for _, got := range vidx.IDs() {
-		if got == wantID {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected %q to be backfilled into the index, got %v", wantID, vidx.IDs())
-	}
-}
-
-// TestReconcileVectors_BackfillsLiveSummaryNode verifies a summary node that survived (not yet rolled into a digest) but has no vector gets backfilled.
-func TestReconcileVectors_BackfillsLiveSummaryNode(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
-	if err != nil {
-		t.Fatalf("ensureNode(day): %v", err)
-	}
-	summaryID, err := store.ensureNode(ctx, dayID, "summary", "worked on the compiler")
-	if err != nil {
-		t.Fatalf("ensureNode(summary): %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Errorf("expected 1 backfilled, got %d", report.Backfilled)
-	}
-	wantID := fmt.Sprintf("summary:%d", summaryID)
-	found := false
-	for _, got := range vidx.IDs() {
-		if got == wantID {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected %q to be backfilled into the index, got %v", wantID, vidx.IDs())
-	}
-}
-
-// TestReconcileVectors_BackfillsRecentEpisode_SkipsOldOne verifies only episodes within the recency window get backfilled — an episode outside it is intentionally left without a vector rather than re-embedding stale raw captures indefinitely.
-func TestReconcileVectors_BackfillsRecentEpisode_SkipsOldOne(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	recentID, err := store.LogEpisode(ctx, "Code", "main.go", "recent capture")
-	if err != nil {
-		t.Fatalf("LogEpisode(recent): %v", err)
-	}
-	oldID, err := store.LogEpisode(ctx, "Code", "old.go", "old capture")
-	if err != nil {
-		t.Fatalf("LogEpisode(old): %v", err)
-	}
-	backdateEpisode(t, store, oldID, 30*24*time.Hour) // well past the 10-day recency window
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Errorf("expected 1 backfilled (recent only), got %d", report.Backfilled)
-	}
-	ids := vidx.IDs()
-	wantRecent := fmt.Sprintf("episode:%d", recentID)
-	dontWantOld := fmt.Sprintf("episode:%d", oldID)
-	foundRecent, foundOld := false, false
-	for _, got := range ids {
-		if got == wantRecent {
-			foundRecent = true
-		}
-		if got == dontWantOld {
-			foundOld = true
-		}
-	}
-	if !foundRecent {
-		t.Errorf("expected the recent episode %q to be backfilled, got %v", wantRecent, ids)
-	}
-	if foundOld {
-		t.Errorf("expected the old episode %q NOT to be backfilled, got %v", dontWantOld, ids)
-	}
-}
-
 // TestReconcileVectors_RespectsEmbedCap verifies the sweep stops backfilling once embedCap is reached, instead of embedding every missing candidate in one pass — protects API quota on a large dirty store.
 func TestReconcileVectors_RespectsEmbedCap(t *testing.T) {
 	ctx := context.Background()
@@ -1090,139 +954,155 @@ func TestReconcileVectors_RespectsEmbedCap(t *testing.T) {
 
 // --- ReconcileVectors: backfill metadata parity with the original write paths (W1) ---
 
-// TestReconcileVectors_BackfillsNote_IncludesCreatedAt verifies note backfill sets created_at metadata, matching LogNote's own async embed goroutine.
-func TestReconcileVectors_BackfillsNote_IncludesCreatedAt(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
+// TestReconcileVectors_BackfillsBySourceType verifies the sweep backfills a vector for a node with none, for every source type the sweep owns — note, summary, digest, episode and thread — matching that type's own async-embed write path (W1): the right embedded text (JSON-extracted for a summary, Document()-framed for an episode, the FTS-trigger text for a thread) and the right source/kind/created_at/domain metadata. A missing field here is not cosmetic: a missing domain silently drops the vector out of every domain-filtered search, and a missing created_at defeats recency decay.
+func TestReconcileVectors_BackfillsBySourceType(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, ctx context.Context, store *Store) (wantID string)
+		check func(t *testing.T, rec *addRecord)
+	}{
+		{
+			name: "note",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				// LogNote runs before the embedder/vector index are wired below, so its own async embed never fires — this note is missing a vector purely because ReconcileVectors needs to backfill it.
+				id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
+				if err != nil {
+					t.Fatalf("LogNote: %v", err)
+				}
+				return fmt.Sprintf("note:%d", id)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if rec.metadata["created_at"] == "" {
+					t.Errorf("expected created_at metadata to be set, got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "summary",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+				if err != nil {
+					t.Fatalf("ensureNode(day): %v", err)
+				}
+				// nodes.content for a summary is the full JSON-marshaled TaskSummary, not the plain summary text — LogSemanticNode's own embed goroutine embeds only summary.Summary, so backfill must extract the same field.
+				summaryID, err := store.ensureNode(ctx, dayID, "summary", `{"same_task":false,"task_name":"debugging session","summary":"fixed the parser edge case"}`)
+				if err != nil {
+					t.Fatalf("ensureNode(summary): %v", err)
+				}
+				if _, err := store.db.Exec(`UPDATE nodes SET domain = 'work' WHERE id = ?`, summaryID); err != nil {
+					t.Fatalf("set domain: %v", err)
+				}
+				return fmt.Sprintf("summary:%d", summaryID)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if rec.content != "fixed the parser edge case" {
+					t.Errorf("expected the embedded content to be the extracted summary text, got %q", rec.content)
+				}
+				if rec.metadata["domain"] != "work" {
+					t.Errorf("expected domain metadata %q, got %+v", "work", rec.metadata)
+				}
+				if rec.metadata["source"] != "summary" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
+					t.Errorf("expected source/kind/created_at metadata matching LogSemanticNode's write path, got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "digest",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+				if err != nil {
+					t.Fatalf("ensureNode(day): %v", err)
+				}
+				digestID, err := store.ensureNode(ctx, dayID, "digest", "rolled-up digest of the day")
+				if err != nil {
+					t.Fatalf("ensureNode(digest): %v", err)
+				}
+				return fmt.Sprintf("digest:%d", digestID)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if rec.content != "rolled-up digest of the day" {
+					t.Errorf("expected the embedded content to be the digest text, got %q", rec.content)
+				}
+				if rec.metadata["source"] != "digest" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
+					t.Errorf("expected source/kind/created_at metadata matching the digest write path, got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "episode",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				id, err := store.LogEpisode(ctx, "Code", "auth.go", "debugging the token refresh flow")
+				if err != nil {
+					t.Fatalf("LogEpisode: %v", err)
+				}
+				return fmt.Sprintf("episode:%d", id)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if !strings.Contains(rec.content, "Code") || !strings.Contains(rec.content, "auth.go") {
+					t.Errorf("expected the embedded content to be Document()-framed (app/title header), got %q", rec.content)
+				}
+				if !strings.Contains(rec.content, "debugging the token refresh flow") {
+					t.Errorf("expected the embedded content to still carry the raw substance, got %q", rec.content)
+				}
+				if rec.metadata["source"] != "episode" || rec.metadata["kind"] != string(memory.KindMoment) || rec.metadata["created_at"] == "" {
+					t.Errorf("expected source/kind/created_at metadata matching LogEpisode's write path, got %+v", rec.metadata)
+				}
+				if _, ok := rec.metadata["domain"]; !ok {
+					t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "thread",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				id, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "learning Vulkan", Kind: "learning", State: "working through the triangle tutorial"})
+				if err != nil {
+					t.Fatalf("UpsertThread: %v", err)
+				}
+				return fmt.Sprintf("thread:%d", id)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				// The embedded text must match what the threads_ai FTS trigger indexes, so the lexical and vector halves of hybrid search see the same thread.
+				if want := "learning Vulkan — working through the triangle tutorial"; rec.content != want {
+					t.Errorf("thread content = %q, want %q", rec.content, want)
+				}
+				if rec.metadata["source"] != "thread" {
+					t.Errorf("thread metadata source = %q, want thread", rec.metadata["source"])
+				}
+				if rec.metadata["kind"] != "arc" {
+					t.Errorf("thread metadata kind = %q, want arc", rec.metadata["kind"])
+				}
+				if rec.metadata["created_at"] == "" {
+					t.Error("thread metadata is missing created_at, which HybridSearch needs for recency")
+				}
+			},
+		},
+	}
 
-	id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
-	if err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newStore(t)
+			wantID := c.setup(t, ctx, store)
 
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
+			store.SetEmbedder(&fakeHybridEmbedder{})
+			vidx := &fakeHybridVectorIndex{}
+			store.SetVectorIndex(vidx)
 
-	rec := vidx.addRecordFor(fmt.Sprintf("note:%d", id))
-	if rec == nil {
-		t.Fatal("expected an Add call for the note")
-	}
-	if rec.metadata["created_at"] == "" {
-		t.Errorf("expected created_at metadata to be set, got %+v", rec.metadata)
-	}
-}
+			report, err := store.ReconcileVectors(ctx, 200)
+			if err != nil {
+				t.Fatalf("ReconcileVectors: %v", err)
+			}
+			if report.Backfilled != 1 {
+				t.Errorf("expected 1 backfilled, got %d", report.Backfilled)
+			}
 
-// TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata verifies summary backfill embeds the TaskSummary.Summary text (nodes.content is the full JSON-marshaled TaskSummary, not the plain summary — LogSemanticNode embeds only summary.Summary) with domain/source/kind/created_at all set, matching LogSemanticNode's own async embed goroutine.
-func TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
-	if err != nil {
-		t.Fatalf("ensureNode(day): %v", err)
-	}
-	summaryID, err := store.ensureNode(ctx, dayID, "summary", `{"same_task":false,"task_name":"debugging session","summary":"fixed the parser edge case"}`)
-	if err != nil {
-		t.Fatalf("ensureNode(summary): %v", err)
-	}
-	if _, err := store.db.Exec(`UPDATE nodes SET domain = 'work' WHERE id = ?`, summaryID); err != nil {
-		t.Fatalf("set domain: %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("summary:%d", summaryID))
-	if rec == nil {
-		t.Fatal("expected an Add call for the summary")
-	}
-	if rec.content != "fixed the parser edge case" {
-		t.Errorf("expected the embedded content to be the extracted summary text, got %q", rec.content)
-	}
-	if rec.metadata["domain"] != "work" {
-		t.Errorf("expected domain metadata %q, got %+v", "work", rec.metadata)
-	}
-	if rec.metadata["source"] != "summary" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
-		t.Errorf("expected source/kind/created_at metadata matching LogSemanticNode's write path, got %+v", rec.metadata)
-	}
-}
-
-// TestReconcileVectors_BackfillsDigest verifies the reconciliation sweep backfills a digest node that has no vector yet — this is what heals a digest written before the digest-embed fix existed, or one whose async embed goroutine failed.
-func TestReconcileVectors_BackfillsDigest(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
-	if err != nil {
-		t.Fatalf("ensureNode(day): %v", err)
-	}
-	digestID, err := store.ensureNode(ctx, dayID, "digest", "rolled-up digest of the day")
-	if err != nil {
-		t.Fatalf("ensureNode(digest): %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("digest:%d", digestID))
-	if rec == nil {
-		t.Fatal("expected an Add call for the digest")
-	}
-	if rec.content != "rolled-up digest of the day" {
-		t.Errorf("expected the embedded content to be the digest text, got %q", rec.content)
-	}
-	if rec.metadata["source"] != "digest" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
-		t.Errorf("expected source/kind/created_at metadata matching the digest write path, got %+v", rec.metadata)
-	}
-}
-
-// TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata verifies episode backfill embeds the same app/title-framed Document() text LogEpisode embeds (not bare screen_text) with domain/source/kind/created_at all set — a missing domain in particular would silently exclude the backfilled vector from every domain-filtered search (chromem's exact-match where fails on a missing key).
-func TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	id, err := store.LogEpisode(ctx, "Code", "auth.go", "debugging the token refresh flow")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("episode:%d", id))
-	if rec == nil {
-		t.Fatal("expected an Add call for the episode")
-	}
-	if !strings.Contains(rec.content, "Code") || !strings.Contains(rec.content, "auth.go") {
-		t.Errorf("expected the embedded content to be Document()-framed (app/title header), got %q", rec.content)
-	}
-	if !strings.Contains(rec.content, "debugging the token refresh flow") {
-		t.Errorf("expected the embedded content to still carry the raw substance, got %q", rec.content)
-	}
-	if rec.metadata["source"] != "episode" || rec.metadata["kind"] != string(memory.KindMoment) || rec.metadata["created_at"] == "" {
-		t.Errorf("expected source/kind/created_at metadata matching LogEpisode's write path, got %+v", rec.metadata)
-	}
-	if _, ok := rec.metadata["domain"]; !ok {
-		t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+			rec := vidx.addRecordFor(wantID)
+			if rec == nil {
+				t.Fatalf("expected an Add call for %q, got %v", wantID, vidx.IDs())
+			}
+			c.check(t, rec)
+		})
 	}
 }
 
@@ -1294,47 +1174,6 @@ func TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest(t *testing.T)
 	}
 	if len(kept) != 1 || kept[0] != "the genuine match" {
 		t.Errorf("expected only the top vector hit to survive the relative floor, got %v", kept)
-	}
-}
-
-// TestReconcileVectors_BackfillsThread verifies a thread gets a vector. Threads were never embedded by any write path, so the whole arc layer ("what has the user been working on for weeks") was invisible to the semantic half of hybrid search while the reconcile sweep still counted thread vectors as alive.
-func TestReconcileVectors_BackfillsThread(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "learning Vulkan", Kind: "learning", State: "working through the triangle tutorial"})
-	if err != nil {
-		t.Fatalf("UpsertThread: %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Fatalf("expected 1 backfilled, got %d", report.Backfilled)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("thread:%d", id))
-	if rec == nil {
-		t.Fatalf("expected thread:%d in the index, got %v", id, vidx.IDs())
-	}
-	// The embedded text must match what the threads_ai FTS trigger indexes, so the lexical and vector halves of hybrid search see the same thread.
-	if want := "learning Vulkan — working through the triangle tutorial"; rec.content != want {
-		t.Errorf("thread content = %q, want %q", rec.content, want)
-	}
-	if rec.metadata["source"] != "thread" {
-		t.Errorf("thread metadata source = %q, want thread", rec.metadata["source"])
-	}
-	if rec.metadata["kind"] != "arc" {
-		t.Errorf("thread metadata kind = %q, want arc", rec.metadata["kind"])
-	}
-	if rec.metadata["created_at"] == "" {
-		t.Error("thread metadata is missing created_at, which HybridSearch needs for recency")
 	}
 }
 

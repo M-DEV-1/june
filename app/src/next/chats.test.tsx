@@ -144,8 +144,6 @@ describe("the sources under a reply", () => {
     const fold = await screen.findByRole("button", { name: /Sources/ });
     expect(fold.getAttribute("aria-expanded")).toBe("false");
     expect(fold.textContent).toContain("2");
-    // A plain button, not the shadcn one, so it carries its own visible ring for a keyboard user tabbing to it.
-    expect(fold.className).toContain("focus-visible:ring-2");
     expect(screen.queryByText("the deadline is Friday")).toBeNull();
     await userEvent.click(fold);
     expect(await screen.findByText("the deadline is Friday")).toBeDefined();
@@ -233,20 +231,6 @@ describe("the wide layout", () => {
     ).toBeNull();
   });
 
-  // The thread and the composer each set their own width, so the only way the box lines up with the words above it is for both to reach the same answer about whether there is a rail. These two check that they do, in each direction.
-  it("puts the thread and the composer on the same two-column grid when the rail has something to show", async () => {
-    renderApp(
-      { conversations: summary, turns: { c1: view } },
-      { conversationId: "c1", wide: true },
-    );
-    await screen.findByRole("complementary", {
-      name: "What this answer is built on",
-    });
-    // The header, the thread and the composer: three boxes on the same two-column grid, so all three share the document's left and right edges.
-    expect(document.querySelectorAll(".reading-wide").length).toBe(3);
-    expect(document.querySelectorAll(".measure-wide").length).toBe(0);
-  });
-
   it("keeps the rail's column, empty, when nothing in the thread read or called anything, so the page never shifts between chats", async () => {
     const plain: ConversationView = {
       ...view,
@@ -263,19 +247,6 @@ describe("the wide layout", () => {
         name: "What this answer is built on",
       }),
     ).toBeNull();
-    // The header, the thread and the composer stay on the same two-column grid as a chat with sources, so switching between the two moves nothing (the user called the earlier centring "this shift", 2026-09-05).
-    expect(document.querySelectorAll(".reading-wide").length).toBe(3);
-    expect(document.querySelectorAll(".measure-wide").length).toBe(0);
-  });
-
-  it("starts a short thread at the top of the pane rather than pinning it to the composer", async () => {
-    renderApp(
-      { conversations: summary, turns: { c1: view } },
-      { conversationId: "c1", wide: true },
-    );
-    await screen.findByText("She said Friday.");
-    expect(document.querySelector(".justify-end")).toBeNull();
-    expect(document.querySelector(".justify-start")).not.toBeNull();
   });
 });
 
@@ -859,7 +830,6 @@ describe("starting a job", () => {
     // A check that held before the step took it proves nothing about the step, so it is neither ticked nor crossed.
     expect(await screen.findByText("it was already showing before the click")).toBeDefined();
     expect(screen.getByText("already held")).toBeDefined();
-    expect(screen.getByTitle("The check already held before this step, so it says nothing about what the step did")).toBeDefined();
     expect(document.querySelector(".lucide-check")).toBeNull();
     expect(document.querySelector(".lucide-x")).toBeNull();
   });

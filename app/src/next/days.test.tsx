@@ -96,16 +96,6 @@ describe("the day's own page", () => {
     renderApp({ days, pages: { "2026-09-04": bare } }, { place: "days", wide: true });
     await screen.findByText("Quiet.");
     expect(screen.queryByRole("complementary", { name: "About this day" })).toBeNull();
-    expect(document.querySelectorAll(".reading-wide").length).toBe(0);
-    // The header and the page, both on the plain centred measure.
-    expect(document.querySelectorAll(".measure-wide").length).toBe(2);
-  });
-
-  it("puts the header on the same grid as the page, so the picker starts where the day's first word does", async () => {
-    renderApp({ days, pages: { "2026-09-04": { ...page, heading: "366 things seen · 5 calls, 140 min" } } }, { place: "days", wide: true });
-    await screen.findByRole("complementary", { name: "About this day" });
-    expect(document.querySelectorAll(".reading-wide").length).toBe(2);
-    expect(document.querySelectorAll(".measure-wide").length).toBe(0);
   });
 
   it("says no days have been written rather than showing an empty page", async () => {

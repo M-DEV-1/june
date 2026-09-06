@@ -84,8 +84,16 @@ func TestPersonalContextTool_ReportsWriteFailures(t *testing.T) {
 	}
 }
 
-// TestSystemInstruction_PersonalContextBlock checks the entries reach the prompt verbatim, under their own heading, and that the prompt points corrections at the personal_context tool.
+// TestSystemInstruction_PersonalContextBlock checks the entries reach the prompt verbatim, under their own heading, and that the prompt points corrections at the personal_context tool — and that an empty store produces no block at all, keeping the prompt from carrying an empty heading on a fresh install.
 func TestSystemInstruction_PersonalContextBlock(t *testing.T) {
+	if block := personalContextBlock(nil); block != "" {
+		t.Errorf("an empty store produced a block: %q", block)
+	}
+	empty := systemInstructionText(time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC), "linux", "amd64", "sh", "", "some context", 5)
+	if strings.Contains(empty, "Personal context — things known for certain") {
+		t.Error("the heading is in the prompt with nothing under it")
+	}
+
 	block := personalContextBlock([]db.PersonalEntry{
 		{Subject: "identity", Content: "The user is Alex Rivera."},
 		{Subject: "preferences-communication", Content: "The user wants short answers."},
@@ -100,16 +108,5 @@ func TestSystemInstruction_PersonalContextBlock(t *testing.T) {
 	}
 	if !strings.Contains(got, "personal_context") {
 		t.Error("the prompt never tells the model where corrections to personal facts go")
-	}
-}
-
-// TestSystemInstruction_NoPersonalContextBlockWhenEmpty keeps the prompt from carrying an empty heading on a fresh install.
-func TestSystemInstruction_NoPersonalContextBlockWhenEmpty(t *testing.T) {
-	if block := personalContextBlock(nil); block != "" {
-		t.Errorf("an empty store produced a block: %q", block)
-	}
-	got := systemInstructionText(time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC), "linux", "amd64", "sh", "", "some context", 5)
-	if strings.Contains(got, "Personal context — things known for certain") {
-		t.Error("the heading is in the prompt with nothing under it")
 	}
 }

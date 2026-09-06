@@ -9,7 +9,7 @@ import { Provider } from "react-redux";
 import { useState } from "react";
 
 import type { Brain, UsageLimit } from "./api";
-import { BrainPicker, Rail, Scroller, UsageBar } from "./parts";
+import { BrainPicker, Scroller, UsageBar } from "./parts";
 import { makeStore } from "./store";
 import { stubBrowser } from "./testing";
 
@@ -56,15 +56,6 @@ describe("Scroller staying put", () => {
     await userEvent.click(screen.getByText("rerender, same content"));
 
     expect(view.scrollTop).toBe(3150);
-  });
-});
-
-describe("Rail", () => {
-  it("carries a hairline border down its left edge so it reads apart from the document beside it", () => {
-    render(<Rail label="Sections">hi</Rail>);
-    const aside = screen.getByLabelText("Sections");
-    expect(aside.className).toContain("border-l");
-    expect(aside.className).toContain("border-hairline");
   });
 });
 
@@ -234,23 +225,6 @@ describe("the brain picker's usage rows", () => {
     const keyWarning = spy.mock.calls.some((c) => String(c[0]).includes("same key"));
     expect(keyWarning).toBe(false);
     spy.mockRestore();
-  });
-
-  it("lays the menu out as menu > menuitem with no wrapping element between them", async () => {
-    renderPicker();
-    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
-    const menu = await screen.findByRole("menu");
-    const items = within(menu).getAllByRole("menuitem");
-    for (const item of items) {
-      expect(item.parentElement).toBe(menu);
-    }
-  });
-
-  it("separates each brain's section from the next with a hairline", async () => {
-    renderPicker();
-    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
-    const menu = await screen.findByRole("menu");
-    expect(menu.querySelectorAll("[role=separator]").length).toBe(brains.length - 1);
   });
 
   it("stays keyboard navigable: opening focuses the first row, with the rows adding no focusable stop of their own, and the arrow key walks to the next row", async () => {

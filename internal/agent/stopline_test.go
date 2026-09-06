@@ -176,42 +176,53 @@ func TestExecuteTool_Click_RemembersTheFieldForTypeText(t *testing.T) {
 	}
 }
 
-// A field whose own label names a secret is refused outright, with no consent phrase able to unlock it — the whole point is that Ora never types a password, a card number or a code on the user's behalf.
+// A field is refused outright, with no consent phrase able to unlock it, either because its own label names a secret — the whole point is that Ora never types a password, a card number or a code on the user's behalf — or because a password box carries no label at all (the accessibility walk blanks it), so its role alone tells type_text to refuse it.
 func TestExecuteTool_TypeText_RefusesSecretFieldOutright(t *testing.T) {
-	a, f := actingAgent(t)
-	// Billing, not Checkout: the window itself must not carry an action word, or the click that focuses the field would be stopped by that before type_text's own secret-field check is ever reached.
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		return "brave", "Billing", []act.Node{
-			{Role: "entry", Label: "Card number", X: 10, Y: 20, W: 200, H: 30, Showing: true, Ref: "r-card"},
-		}, nil
+	cases := []struct {
+		name       string
+		win        string
+		node       act.Node
+		question   string
+		text       string
+		wantSubstr string
+	}{
+		{
+			// Billing, not Checkout: the window itself must not carry an action word, or the click that focuses the field would be stopped by that before type_text's own secret-field check is ever reached.
+			name:       "labelled a card number",
+			win:        "Billing",
+			node:       act.Node{Role: "entry", Label: "Card number", X: 10, Y: 20, W: 200, H: 30, Showing: true, Ref: "r-card"},
+			question:   "yes, type it, go ahead",
+			text:       "4111111111111111",
+			wantSubstr: "secrets",
+		},
+		{
+			name:       "password role with no label",
+			win:        "Sign in",
+			node:       act.Node{Role: "password text", Label: "", X: 10, Y: 20, W: 200, H: 30, Showing: true, Ref: "r-pass"},
+			text:       "hunter2",
+			wantSubstr: "Stopped before ",
+		},
 	}
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
-	got := a.executeTool(WithQuestion(context.Background(), "yes, type it, go ahead"), "type_text", map[string]any{"text": "4111111111111111"})
-	if len(f.typed) != 0 {
-		t.Errorf("must never type into a card field, typed = %v", f.typed)
-	}
-	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "secrets") {
-		t.Errorf("result = %q, want an outright refusal naming secrets", got)
-	}
-}
-
-// A password box carries no label at all (the accessibility walk blanks it), so its role is what tells type_text to refuse it.
-func TestExecuteTool_TypeText_RefusesPasswordRoleWithNoLabel(t *testing.T) {
-	a, f := actingAgent(t)
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		return "brave", "Sign in", []act.Node{
-			{Role: "password text", Label: "", X: 10, Y: 20, W: 200, H: 30, Showing: true, Ref: "r-pass"},
-		}, nil
-	}
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
-	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "hunter2"})
-	if len(f.typed) != 0 {
-		t.Errorf("must never type into a password field, typed = %v", f.typed)
-	}
-	if !strings.HasPrefix(got, "Stopped before ") {
-		t.Errorf("result = %q, want an outright refusal", got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, f := actingAgent(t)
+			a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
+				return "brave", c.win, []act.Node{c.node}, nil
+			}
+			ctx := context.Background()
+			if c.question != "" {
+				ctx = WithQuestion(ctx, c.question)
+			}
+			a.executeTool(context.Background(), "observe_screen", map[string]any{})
+			a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
+			got := a.executeTool(ctx, "type_text", map[string]any{"text": c.text})
+			if len(f.typed) != 0 {
+				t.Errorf("must never type into a secret field, typed = %v", f.typed)
+			}
+			if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, c.wantSubstr) {
+				t.Errorf("result = %q, want an outright refusal containing %q", got, c.wantSubstr)
+			}
+		})
 	}
 }
 

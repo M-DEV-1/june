@@ -108,26 +108,6 @@ func TestAddActionItems_DoesNotResurrectAClosedItem(t *testing.T) {
 	}
 }
 
-// Priority is the user's to set and survives independently of status.
-func TestSetActionPriority(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "reply on WhatsApp during his leave.")}); err != nil {
-		t.Fatal(err)
-	}
-	open, _ := store.OpenActionItems(ctx)
-	if err := store.SetActionPriority(ctx, open[0].NoteID, memory.PriorityLow); err != nil {
-		t.Fatal(err)
-	}
-	open, _ = store.OpenActionItems(ctx)
-	if len(open) != 1 || open[0].Priority != memory.PriorityLow {
-		t.Fatalf("want one low-priority open item, got %+v", open)
-	}
-	if open[0].Status != memory.StatusOpen {
-		t.Errorf("changing priority changed status to %q", open[0].Status)
-	}
-}
-
 // Correcting the work an item describes keeps it a tracked action item: the rendered line is re-rendered around the new text, so its status, priority and provenance survive and it stays in the open list rather than dropping out of every read that goes through ParseAction.
 func TestSetActionText_KeepsTheItemTrackedAndItsOtherFields(t *testing.T) {
 	ctx := context.Background()

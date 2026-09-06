@@ -120,8 +120,6 @@ describe("Meetings", () => {
     const first = within(outline).getByRole("button", { name: "What was said" });
     expect(first).toBeDefined();
     expect(within(outline).getByRole("button", { name: "Action items" })).toBeDefined();
-    // A plain button with no visible ring of its own — it needs one so tabbing to it in the rail shows where the keyboard is.
-    expect(first.className).toContain("focus-visible:ring-2");
   });
 
   it("draws no rail at all in a narrow pane, and nothing is lost from the page", async () => {

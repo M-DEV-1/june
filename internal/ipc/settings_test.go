@@ -124,35 +124,54 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 	}
 }
 
-func TestSettings_MissingDataDirGivesZeroSizes(t *testing.T) {
-	withFakeGsettings(t, noCustomKeybindings)
-	dataDir := filepath.Join(t.TempDir(), "does-not-exist")
-	srv := httptest.NewServer(Settings(dataDir, NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
-	defer srv.Close()
-
-	var got SettingsView
-	getJSON(t, srv, "/", &got)
-	if got.StoreBytes != 0 || got.RecordingsBytes != 0 || got.ModelsBytes != 0 {
-		t.Errorf("sizes over a missing data dir = %d/%d/%d, want all zero", got.StoreBytes, got.RecordingsBytes, got.ModelsBytes)
-	}
-	// capturePaused nil (no tracker wired) defaults to capture enabled, the same "nothing wired yet" default the rest of the daemon uses.
-	if !got.CaptureEnabled {
-		t.Errorf("CaptureEnabled with a nil capturePaused = false, want true")
-	}
-}
-
-// TestSettings_ClaudeUsageFromLoginReflectsLiveConfig checks GET reads the flag off the pointer it was given, not a snapshot taken when the route was built — the same reason POST /brains is handed a pointer.
-func TestSettings_ClaudeUsageFromLoginReflectsLiveConfig(t *testing.T) {
-	withFakeGsettings(t, noCustomKeybindings)
+// TestSettings_Fields covers two independent GET /settings fields, each over its own scenario:
+// a data dir that does not exist yet (sizes all zero, capture still defaults enabled with no
+// tracker wired), and a config with the Claude usage fetch explicitly turned off (GET reads the
+// flag off the live pointer it was given, not a snapshot taken when the route was built — the
+// same reason POST /brains is handed a pointer).
+func TestSettings_Fields(t *testing.T) {
 	off := false
-	cfg := &config.OraConfig{ClaudeUsageFromLogin: &off}
-	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, noopSave), false, nil, time.Now()))
-	defer srv.Close()
+	cases := []struct {
+		name    string
+		dataDir func(t *testing.T) string
+		cfg     *config.OraConfig
+		check   func(t *testing.T, got SettingsView)
+	}{
+		{
+			"missing data dir gives zero sizes",
+			func(t *testing.T) string { return filepath.Join(t.TempDir(), "does-not-exist") },
+			&config.OraConfig{},
+			func(t *testing.T, got SettingsView) {
+				if got.StoreBytes != 0 || got.RecordingsBytes != 0 || got.ModelsBytes != 0 {
+					t.Errorf("sizes over a missing data dir = %d/%d/%d, want all zero", got.StoreBytes, got.RecordingsBytes, got.ModelsBytes)
+				}
+				// capturePaused nil (no tracker wired) defaults to capture enabled, the same "nothing wired yet" default the rest of the daemon uses.
+				if !got.CaptureEnabled {
+					t.Errorf("CaptureEnabled with a nil capturePaused = false, want true")
+				}
+			},
+		},
+		{
+			"claude usage from login reflects live config",
+			func(t *testing.T) string { return t.TempDir() },
+			&config.OraConfig{ClaudeUsageFromLogin: &off},
+			func(t *testing.T, got SettingsView) {
+				if got.ClaudeUsageFromLogin {
+					t.Errorf("claude_usage_from_login = true, want false: the config had it explicitly turned off")
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeGsettings(t, noCustomKeybindings)
+			srv := httptest.NewServer(Settings(tc.dataDir(t), NewLiveConfig(tc.cfg, noopSave), false, nil, time.Now()))
+			defer srv.Close()
 
-	var got SettingsView
-	getJSON(t, srv, "/", &got)
-	if got.ClaudeUsageFromLogin {
-		t.Errorf("claude_usage_from_login = true, want false: the config had it explicitly turned off")
+			var got SettingsView
+			getJSON(t, srv, "/", &got)
+			tc.check(t, got)
+		})
 	}
 }
 
@@ -269,100 +288,78 @@ func fakeGsettingsWithHotkey(args ...string) (string, error) {
 	return "", fmt.Errorf("unexpected schema/key %s/%s", schema, key)
 }
 
-// TestSettings_HotkeyFoundAmongOthers checks that the custom keybinding whose command names ora-window-toggle is picked out from among others, and its binding is unquoted.
-func TestSettings_HotkeyFoundAmongOthers(t *testing.T) {
-	withFakeGsettings(t, fakeGsettingsWithHotkey)
-	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
-	defer srv.Close()
+// TestSettings_Hotkey covers GET /settings' Hotkey field over every gsettings scenario it must
+// resolve without failing the whole settings read: the real binding picked out from among other
+// keybindings, an empty custom-keybindings list, gsettings itself unavailable, and — on top of any
+// of those — never looked up at all off Linux.
+func TestSettings_Hotkey(t *testing.T) {
+	cases := []struct {
+		name      string
+		gsettings func(args ...string) (string, error)
+		goos      string
+		want      string
+	}{
+		{"found among others", fakeGsettingsWithHotkey, "linux", "<Control><Alt>space"},
+		{"none configured", noCustomKeybindings, "linux", ""},
+		{"gsettings unavailable", func(args ...string) (string, error) {
+			return "", fmt.Errorf("gsettings: command not found")
+		}, "linux", ""},
+		{"never looked up off Linux", fakeGsettingsWithHotkey, "darwin", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeGsettings(t, tc.gsettings)
+			prevGOOS := hotkeyGOOS
+			hotkeyGOOS = tc.goos
+			t.Cleanup(func() { hotkeyGOOS = prevGOOS })
 
-	var got SettingsView
-	getJSON(t, srv, "/", &got)
-	if got.Hotkey != "<Control><Alt>space" {
-		t.Errorf("Hotkey = %q, want the binding on the keybinding running ora-window-toggle", got.Hotkey)
+			srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
+			defer srv.Close()
+
+			var got SettingsView
+			getJSON(t, srv, "/", &got)
+			if got.Hotkey != tc.want {
+				t.Errorf("Hotkey = %q, want %q", got.Hotkey, tc.want)
+			}
+		})
 	}
 }
 
-// TestSettings_HotkeyNoneConfigured checks that an empty custom-keybindings list reads as no hotkey rather than an error.
-func TestSettings_HotkeyNoneConfigured(t *testing.T) {
-	withFakeGsettings(t, noCustomKeybindings)
-	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
-	defer srv.Close()
-
-	var got SettingsView
-	getJSON(t, srv, "/", &got)
-	if got.Hotkey != "" {
-		t.Errorf("Hotkey = %q, want empty when nothing is bound", got.Hotkey)
-	}
-}
-
-// TestSettings_HotkeyGsettingsUnavailable checks that a machine with no gsettings (or one that refuses the call) reads as no hotkey rather than failing the whole settings read.
-func TestSettings_HotkeyGsettingsUnavailable(t *testing.T) {
-	withFakeGsettings(t, func(args ...string) (string, error) {
-		return "", fmt.Errorf("gsettings: command not found")
-	})
-	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
-	defer srv.Close()
-
-	var got SettingsView
-	getJSON(t, srv, "/", &got)
-	if got.Hotkey != "" {
-		t.Errorf("Hotkey = %q, want empty when gsettings fails", got.Hotkey)
-	}
-}
-
-// TestSettings_HotkeyNonLinux checks that the hotkey is never looked up off Linux, whatever the fake runner would have said.
-func TestSettings_HotkeyNonLinux(t *testing.T) {
-	withFakeGsettings(t, fakeGsettingsWithHotkey)
-	prevGOOS := hotkeyGOOS
-	hotkeyGOOS = "darwin"
-	t.Cleanup(func() { hotkeyGOOS = prevGOOS })
-
-	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
-	defer srv.Close()
-
-	var got SettingsView
-	getJSON(t, srv, "/", &got)
-	if got.Hotkey != "" {
-		t.Errorf("Hotkey = %q, want empty off Linux", got.Hotkey)
-	}
-}
-
-// TestFirstRun_NothingSetUpListsEveryStep checks that a machine with no login files, no GEMINI_API_KEY and no local model configured reports all four ways as false and lists a step for each.
-func TestFirstRun_NothingSetUpListsEveryStep(t *testing.T) {
-	t.Setenv("GEMINI_API_KEY", "")
-	home := t.TempDir()
-
-	got := firstRun(config.OraConfig{}, home)
-
-	if got.GeminiKey || got.CodexLogin || got.ClaudeCLI || got.LocalModel {
-		t.Errorf("firstRun() = %+v, want every field false", got)
-	}
-	if len(got.Steps) == 0 {
-		t.Error("firstRun() with nothing set up returned no steps")
-	}
-}
-
-// TestFirstRun_AnyOneWayIsEnoughToClearTheSteps checks that Ora needs only one of the four ways to answer text, not all of them: whichever one is set up, the steps list is empty.
-func TestFirstRun_AnyOneWayIsEnoughToClearTheSteps(t *testing.T) {
+// TestFirstRun covers firstRun() over every combination of what is set up: nothing at all (every
+// field false, and a step listed for each), and each of the four ways on its own (Ora needs only
+// one of them to answer text, not all of them, so whichever one is set up the steps list is empty).
+func TestFirstRun(t *testing.T) {
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, home string) config.OraConfig
+		check func(t *testing.T, got FirstRunView)
 	}{
-		{"gemini key", func(t *testing.T, home string) config.OraConfig {
+		{name: "nothing set up", setup: func(t *testing.T, home string) config.OraConfig {
+			t.Setenv("GEMINI_API_KEY", "")
+			return config.OraConfig{}
+		}, check: func(t *testing.T, got FirstRunView) {
+			if got.GeminiKey || got.CodexLogin || got.ClaudeCLI || got.LocalModel {
+				t.Errorf("firstRun() = %+v, want every field false", got)
+			}
+			if len(got.Steps) == 0 {
+				t.Error("firstRun() with nothing set up returned no steps")
+			}
+		}},
+		{name: "gemini key", setup: func(t *testing.T, home string) config.OraConfig {
 			t.Setenv("GEMINI_API_KEY", "sk-test")
 			return config.OraConfig{}
 		}},
-		{"codex login", func(t *testing.T, home string) config.OraConfig {
+		{name: "codex login", setup: func(t *testing.T, home string) config.OraConfig {
 			t.Setenv("GEMINI_API_KEY", "")
 			mustWriteFile(t, filepath.Join(home, ".codex", "auth.json"), `{"auth_mode":"chatgpt"}`)
 			return config.OraConfig{}
 		}},
-		{"claude cli", func(t *testing.T, home string) config.OraConfig {
+		{name: "claude cli", setup: func(t *testing.T, home string) config.OraConfig {
 			t.Setenv("GEMINI_API_KEY", "")
 			mustWriteFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{}`)
 			return config.OraConfig{}
 		}},
-		{"local model", func(t *testing.T, home string) config.OraConfig {
+		{name: "local model", setup: func(t *testing.T, home string) config.OraConfig {
 			t.Setenv("GEMINI_API_KEY", "")
 			return config.OraConfig{LocalText: config.LocalTextConfig{ModelPath: "/models/local.gguf"}}
 		}},
@@ -372,8 +369,12 @@ func TestFirstRun_AnyOneWayIsEnoughToClearTheSteps(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			home := t.TempDir()
 			cfg := c.setup(t, home)
-
 			got := firstRun(cfg, home)
+
+			if c.check != nil {
+				c.check(t, got)
+				return
+			}
 			if len(got.Steps) != 0 {
 				t.Errorf("firstRun() with %s set up = %+v, want no steps", c.name, got)
 			}

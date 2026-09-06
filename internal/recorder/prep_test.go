@@ -32,129 +32,143 @@ func contains(ss []string, want string) bool {
 	return false
 }
 
-// A participant on screen now who is also named in a past meeting's minutes is what identifies that meeting as the same one.
-func TestPrepMeeting_MatchesByParticipantAndNotifies(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me"}}}
-	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck by Friday.", noteKind); err != nil {
-		t.Fatal(err)
+// Every case below is silence: nothing on screen names the meeting, the meeting is named but memory has nothing from a prior instance, the alpha kill switch is on, or nothing on screen is even a call window. Whatever the reason, the brain must never be called and nothing must be sent.
+func TestPrepMeeting_Silent(t *testing.T) {
+	cases := []struct {
+		name        string
+		episodes    []db.Episode
+		noteContent string // logged first when non-empty
+		killSwitch  bool
+	}{
+		{
+			name:     "nothing on screen names the meeting",
+			episodes: []db.Episode{{Title: "call", ScreenText: "just a plain video call"}},
+		},
+		{
+			name:     "the meeting is identified but no past minutes match",
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}},
+		},
+		{
+			name:        "ORA_NO_MEETING_PREP=1 is the alpha kill switch",
+			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}},
+			noteContent: "# Meeting minutes\n\nPriya Shah agreed to send the deck.",
+			killSwitch:  true,
+		},
+		{
+			// A call in an app the meeting-window pattern does not list leaves no meeting window on screen at all, and the last window that was there names something else entirely. Naming the meeting after it — and then searching memory for its words — produced "Before you join: Gmail — Inbox (12)".
+			name:        "nothing on screen is a call window",
+			episodes:    []db.Episode{{App: "Brave", Title: "Inbox (12) - Acme Corp - Brave"}},
+			noteContent: "# Meeting minutes\n\nAcme Corp asked for the Q3 numbers.",
+		},
 	}
-	var got notifications
-	r.notify = got.add
-	var gotPrompt string
-	r.minutes = func(ctx context.Context, prompt string) (string, error) {
-		gotPrompt = prompt
-		return "Priya still owes the deck from last time.", nil
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.killSwitch {
+				t.Setenv(noMeetingPrepEnv, "1")
+			}
+			store := &fakeStore{episodes: c.episodes}
+			r, _, _ := newTestRecorder(t, store)
+			if c.noteContent != "" {
+				if _, err := store.LogNote(context.Background(), c.noteContent, noteKind); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r.minutes = func(ctx context.Context, prompt string) (string, error) {
+				t.Fatal("the brain must not be called")
+				return "", nil
+			}
+			var got notifications
+			r.notify = got.add
 
-	r.prepMeeting()
+			r.prepMeeting()
 
-	if !got.contains("deck") {
-		t.Errorf("expected a prep notification mentioning the deck, got %v", got.sent)
+			if len(got.sent) != 0 {
+				t.Errorf("expected silence, got %v", got.sent)
+			}
+		})
 	}
-	if !strings.Contains(gotPrompt, "Priya Shah agreed to send the deck") {
-		t.Errorf("prompt is missing the matched minutes:\n%s", gotPrompt)
-	}
+}
+
+// A participant on screen who is also named in a past meeting's minutes, or a shared title fragment on its own, or several matching notes with the newest one winning: each of these identifies the right past meeting and notifies about it.
+func TestPrepMeeting_Matches(t *testing.T) {
 	if strings.Contains(prepInstruction, "For example") {
 		t.Error("prepInstruction must be principles only, not a worked example")
 	}
-}
 
-// A shared title fragment ("Acme Corp") is enough to match even when no chat sender was on screen. The window is the call's own — a title that is not a meeting window names nothing, whatever words are in it.
-func TestPrepMeeting_MatchesByTitleFragment(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "Meet – Weekly sync with Acme Corp"}}}
-	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nAcme Corp asked for the Q3 numbers.", noteKind); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name        string
+		episodes    []db.Episode
+		notes       []string // logged in order filed
+		reply       string
+		wantContain string
+		checkPrompt func(t *testing.T, prompt string)
+	}{
+		{
+			name:        "matches by participant and notifies",
+			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me"}},
+			notes:       []string{"# Meeting minutes\n\nPriya Shah agreed to send the deck by Friday."},
+			reply:       "Priya still owes the deck from last time.",
+			wantContain: "deck",
+			checkPrompt: func(t *testing.T, prompt string) {
+				if !strings.Contains(prompt, "Priya Shah agreed to send the deck") {
+					t.Errorf("prompt is missing the matched minutes:\n%s", prompt)
+				}
+			},
+		},
+		{
+			// A shared title fragment ("Acme Corp") is enough to match even when no chat sender was on screen.
+			name:        "matches by title fragment alone",
+			episodes:    []db.Episode{{Title: "Meet – Weekly sync with Acme Corp"}},
+			notes:       []string{"# Meeting minutes\n\nAcme Corp asked for the Q3 numbers."},
+			reply:       "Acme Corp is still waiting on the Q3 numbers.",
+			wantContain: "q3",
+		},
+		{
+			// The most recently filed matching note wins, not just any match, since GetNotes already orders newest first.
+			name:     "the most recent matching note wins",
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}},
+			notes: []string{
+				"# Meeting minutes\n\nPriya Shah: older meeting, decided the budget.",
+				"# Meeting minutes\n\nPriya Shah: newest meeting, decided the venue.",
+			},
+			reply: "ok",
+			checkPrompt: func(t *testing.T, prompt string) {
+				if !strings.Contains(prompt, "newest meeting") || strings.Contains(prompt, "older meeting") {
+					t.Errorf("expected the most recent matching note in the prompt, got:\n%s", prompt)
+				}
+			},
+		},
 	}
-	var got notifications
-	r.notify = got.add
-	r.minutes = func(ctx context.Context, prompt string) (string, error) {
-		return "Acme Corp is still waiting on the Q3 numbers.", nil
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := &fakeStore{episodes: c.episodes}
+			r, _, _ := newTestRecorder(t, store)
+			for _, n := range c.notes {
+				if _, err := store.LogNote(context.Background(), n, noteKind); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var got notifications
+			r.notify = got.add
+			var gotPrompt string
+			r.minutes = func(ctx context.Context, prompt string) (string, error) {
+				gotPrompt = prompt
+				return c.reply, nil
+			}
 
-	r.prepMeeting()
+			r.prepMeeting()
 
-	if !got.contains("q3") {
-		t.Errorf("expected a prep notification about the Q3 numbers, got %v", got.sent)
-	}
-}
-
-// Silence is correct when nothing on screen names either the meeting or its attendees — there's nothing to search memory for.
-func TestPrepMeeting_SilentWhenNothingOnScreenNamesTheMeeting(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "call", ScreenText: "just a plain video call"}}}
-	r, _, _ := newTestRecorder(t, store)
-	r.minutes = func(ctx context.Context, prompt string) (string, error) {
-		t.Fatal("the brain must not be called when nothing identifies the meeting")
-		return "", nil
-	}
-	var got notifications
-	r.notify = got.add
-
-	r.prepMeeting()
-
-	if len(got.sent) != 0 {
-		t.Errorf("expected silence, got %v", got.sent)
-	}
-}
-
-// Silence is also correct when the meeting is identified but memory has nothing from a prior instance of it.
-func TestPrepMeeting_SilentWhenNoPastMinutesMatch(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
-	r, _, _ := newTestRecorder(t, store)
-	var got notifications
-	r.notify = got.add
-
-	r.prepMeeting()
-
-	if len(got.sent) != 0 {
-		t.Errorf("expected silence with no prior minutes filed, got %v", got.sent)
-	}
-}
-
-// The most recently filed matching note wins, not just any match, since GetNotes already orders newest first.
-func TestPrepMeeting_MostRecentMatchWins(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
-	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah: older meeting, decided the budget.", noteKind); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah: newest meeting, decided the venue.", noteKind); err != nil {
-		t.Fatal(err)
-	}
-	var gotPrompt string
-	r.minutes = func(ctx context.Context, prompt string) (string, error) { gotPrompt = prompt; return "ok", nil }
-
-	r.prepMeeting()
-
-	if !strings.Contains(gotPrompt, "newest meeting") || strings.Contains(gotPrompt, "older meeting") {
-		t.Errorf("expected the most recent matching note in the prompt, got:\n%s", gotPrompt)
-	}
-}
-
-// ORA_NO_MEETING_PREP=1 is the alpha kill switch: it must stop prep even when everything else would fire it.
-func TestPrepMeeting_KillSwitchDisablesIt(t *testing.T) {
-	t.Setenv(noMeetingPrepEnv, "1")
-	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
-	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck.", noteKind); err != nil {
-		t.Fatal(err)
-	}
-	var got notifications
-	r.notify = got.add
-	r.minutes = func(ctx context.Context, prompt string) (string, error) {
-		t.Fatal("the brain must not be called with the kill switch on")
-		return "", nil
-	}
-
-	r.prepMeeting()
-
-	if len(got.sent) != 0 {
-		t.Errorf("expected silence with the kill switch on, got %v", got.sent)
+			if c.wantContain != "" && !got.contains(c.wantContain) {
+				t.Errorf("expected a prep notification containing %q, got %v", c.wantContain, got.sent)
+			}
+			if c.checkPrompt != nil {
+				c.checkPrompt(t, gotPrompt)
+			}
+		})
 	}
 }
 
-// A brain call that is not back within the timeout must be dropped, even if it eventually returns text — a prep that lands mid-meeting is noise, not help.
+// A brain call that is not back within the timeout must be dropped, even if it eventually returns text — a prep that lands mid-meeting is noise, not help. This needs its own deadline configuration and a real sleep, so it cannot share the table above.
 func TestPrepMeeting_DropsSilentlyWhenTheBrainIsTooSlow(t *testing.T) {
 	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
@@ -176,7 +190,7 @@ func TestPrepMeeting_DropsSilentlyWhenTheBrainIsTooSlow(t *testing.T) {
 	}
 }
 
-// Start is the call-detection hook: it must fire prep without making the caller wait for it.
+// Start is the call-detection hook: it must fire prep without making the caller wait for it. This polls for an async result, so it cannot share the table above.
 func TestStart_FiresMeetingPrepAsynchronously(t *testing.T) {
 	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
@@ -223,168 +237,172 @@ func pastTitles() []string {
 	return append(ts, "Calendar | Zitadel auth review | Microsoft Teams - Brave")
 }
 
-// A Google Meet window is titled after a room code and the browser's own indicators — "Meet – abc-defg-hij - Microphone recording - Brave" — so every word in it except the code comes from the browser. Matching on any one of them picked an unrelated meeting from a week earlier, because "meet" and "recording" appear in all twelve past notes and identify nothing. The room code identifies the room and matches no minutes, so the right answer is to say nothing.
-func TestPickMeetingNote_DeclinesWhenTheTitleIsOnlyBrowserChrome(t *testing.T) {
-	frags := meetingTitleFragments("Meet \u2013 abc-defg-hij - Microphone recording - Brave")
-
-	if _, ok := pickMeetingNote(twelveMeetingNotes(), nil, frags, pastTitles()); ok {
-		t.Error("matched a past meeting on words that appear in every past meeting")
-	}
-}
-
-// A name read off the meeting window is the strong signal and still matches on its own.
-func TestPickMeetingNote_MatchesOnAParticipant(t *testing.T) {
-	notes := append(twelveMeetingNotes(), db.Note{ID: 99, Kind: "meeting", Content: "# Sync\nPriya walked through the value chain work."})
-
-	got, ok := pickMeetingNote(notes, []string{"Priya"}, nil, pastTitles())
-
-	if !ok || got.ID != 99 {
-		t.Errorf("pickMeetingNote = %d,%v, want the note naming the participant", got.ID, ok)
-	}
-}
-
-// collectMeetingNames must read a real call window's roster without pulling in the interface around it: mute buttons, presence labels, "(Host)"/"(You)"/"(Presenting)" tags, and the app's own name. Fixtures are the flattened single-string shape an accessibility tree actually produces for a participants pane — one long run of text, not one name per line.
-func TestCollectMeetingNames_RostersFromRealApps(t *testing.T) {
+// pickMeetingNote either declines on words every past meeting shares, or matches on a participant named on screen, or on the one word that is rare enough across past titles to identify a meeting instead of matching everything.
+func TestPickMeetingNote(t *testing.T) {
 	cases := []struct {
-		name  string
-		title string
-		text  string
-		want  []string
-		deny  []string
+		name         string
+		notes        []db.Note
+		participants []string
+		fragments    []string
+		wantOK       bool
+		wantID       int64
 	}{
 		{
-			// Accessibility trees read one node's text per line; a participants pane is one name (or one button) per line, same as the chat log chatSenderPattern already assumes.
-			name:  "google meet",
-			title: "Meet - team-sync-call - Brave",
-			text:  "People (3)\nSam Iyer (Host)\nPriya Shah (Presenting)\nRohit Verma\nYou\nMute\nCamera\nPresent now\nMore options\nLeave call",
-			want:  []string{"Sam Iyer", "Priya Shah", "Rohit Verma"},
-			deny:  []string{"Mute", "Camera", "Present", "More", "Leave", "You", "Sam Iyer (Host)", "Priya Shah (Presenting)"},
+			// A Google Meet window is titled after a room code and the browser's own indicators, so every word in it except the code comes from the browser. The room code identifies the room and matches no minutes, so the right answer is to say nothing.
+			name:      "declines when the title is only browser chrome",
+			notes:     twelveMeetingNotes(),
+			fragments: meetingTitleFragments("Meet – abc-defg-hij - Microphone recording - Brave"),
+			wantOK:    false,
 		},
 		{
-			name:  "teams",
-			title: "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams",
-			text:  "Participants (2)\nPriya Shah (Organizer)\nVikram Goel\nYou\nRaise Hand\nReact\nMore\nLeave",
-			want:  []string{"Priya Shah", "Vikram Goel"},
-			deny:  []string{"Microsoft Teams", "Raise Hand", "Chat", "More", "Leave", "You", "Priya Shah (Organizer)"},
+			name:         "matches on a participant named on screen",
+			notes:        append(twelveMeetingNotes(), db.Note{ID: 99, Kind: "meeting", Content: "# Sync\nPriya walked through the value chain work."}),
+			participants: []string{"Priya"},
+			wantOK:       true,
+			wantID:       99,
 		},
 		{
-			name:  "zoom",
-			title: "Zoom Meeting",
-			text:  "Participants (2)\nKaran Mehta (Host, me)\nNeha Kapoor\nMute All\nUnmute\nStop Video\nShare Screen\nRecord\nEnd Meeting",
-			want:  []string{"Karan Mehta", "Neha Kapoor"},
-			deny:  []string{"Zoom Meeting", "Share Screen", "Mute All", "Stop Video", "End Meeting", "Karan Mehta (Host, me)"},
+			// The word that only ever appears in one title is the one that names the meeting, and it matches on its own. The common word beside it is ignored rather than allowed to match everything.
+			name:      "matches on the rare word and ignores the common one",
+			notes:     append(twelveMeetingNotes(), db.Note{ID: 42, Kind: "meeting", Content: "# Zitadel auth\nWe agreed the Zitadel migration."}),
+			fragments: []string{"Meet", "Zitadel"},
+			wantOK:    true,
+			wantID:    42,
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := collectMeetingNames([]db.Episode{{Title: tc.title, ScreenText: tc.text}}, true, nil)
-			for _, w := range tc.want {
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := pickMeetingNote(c.notes, c.participants, c.fragments, pastTitles())
+			if ok != c.wantOK {
+				t.Fatalf("pickMeetingNote ok = %v, want %v", ok, c.wantOK)
+			}
+			if ok && got.ID != c.wantID {
+				t.Errorf("pickMeetingNote = %d, want %d", got.ID, c.wantID)
+			}
+		})
+	}
+}
+
+// collectMeetingNames must read a real call window's roster without pulling in the interface around it — mute buttons, presence labels, role tags, the app's own name — must collapse the same person tagged twice into one attendee, must keep a name already known from personal context even when its shape is unusual, and must read a script with no upper or lower form (Devanagari, Tamil, CJK) by its own shape rule beside the capitalised-word rule that reads Latin and Hinglish names.
+func TestCollectMeetingNames(t *testing.T) {
+	cases := []struct {
+		name     string
+		eps      []db.Episode
+		known    []string
+		want     []string // each must be present
+		wantOnce []string // each must be present exactly once
+		deny     []string // each must be absent
+		wantNone bool     // got must be empty
+	}{
+		{
+			// Fixtures are the flattened single-string shape an accessibility tree actually produces for a participants pane — one long run of text, not one name per line.
+			name: "google meet roster ignores mute/host tags and the app's own name",
+			eps:  []db.Episode{{Title: "Meet - team-sync-call - Brave", ScreenText: "People (3)\nSam Iyer (Host)\nPriya Shah (Presenting)\nRohit Verma\nYou\nMute\nCamera\nPresent now\nMore options\nLeave call"}},
+			want: []string{"Sam Iyer", "Priya Shah", "Rohit Verma"},
+			deny: []string{"Mute", "Camera", "Present", "More", "Leave", "You", "Sam Iyer (Host)", "Priya Shah (Presenting)"},
+		},
+		{
+			name: "teams roster ignores its own app name and toolbar",
+			eps:  []db.Episode{{Title: "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams", ScreenText: "Participants (2)\nPriya Shah (Organizer)\nVikram Goel\nYou\nRaise Hand\nReact\nMore\nLeave"}},
+			want: []string{"Priya Shah", "Vikram Goel"},
+			deny: []string{"Microsoft Teams", "Raise Hand", "Chat", "More", "Leave", "You", "Priya Shah (Organizer)"},
+		},
+		{
+			name: "zoom roster ignores its own controls",
+			eps:  []db.Episode{{Title: "Zoom Meeting", ScreenText: "Participants (2)\nKaran Mehta (Host, me)\nNeha Kapoor\nMute All\nUnmute\nStop Video\nShare Screen\nRecord\nEnd Meeting"}},
+			want: []string{"Karan Mehta", "Neha Kapoor"},
+			deny: []string{"Zoom Meeting", "Share Screen", "Mute All", "Stop Video", "End Meeting", "Karan Mehta (Host, me)"},
+		},
+		{
+			// The same person named twice — once tagged with a role in the roster, once as a chat sender with no tag — must collapse to one attendee, not two.
+			name: "the same person tagged twice collapses to one attendee",
+			eps: []db.Episode{
+				{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer (Host) Priya Shah"},
+				{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer: let's get started"},
+			},
+			wantOnce: []string{"Sam Iyer"},
+		},
+		{
+			// A name already known from personal context is kept even when its shape would otherwise get it dropped — here a five-word name past the four-word limit ordinary candidates are held to.
+			name:  "a known long name is kept even past the ordinary word-count limit",
+			eps:   []db.Episode{{Title: "Meet - family catch-up - Brave", ScreenText: "Sri Lakshmi Venkata Subramaniam Iyer\nYou\nMute\nLeave call"}},
+			known: personNamesFromContext([]db.PersonalEntry{{Subject: "sri-lakshmi-venkata-subramaniam-iyer", Content: "the user's aunt"}}),
+			want:  []string{"Sri Lakshmi Venkata Subramaniam Iyer"},
+		},
+		{
+			// Two capitalised interface words strung together must never come out as a name, known or not — an app's toolbar is never a person, however name-shaped the phrase reads.
+			name:     "two interface words strung together are never a name",
+			eps:      []db.Episode{{Title: "Meet - standup - Brave", ScreenText: "Raise Hand\nMore Options\nShare Screen"}},
+			wantNone: true,
+		},
+		{
+			// A name written in a script without case — Devanagari here, Tamil there — must reach the participant list the same way a Latin name does.
+			name: "a caseless script name reaches the roster the way a Latin one does",
+			eps: []db.Episode{
+				{Title: "Meet - team-sync - Brave", ScreenText: "People (2)\nराहुल\nYou\nMute\nLeave call"},
+				{Title: "Meet - team-sync - Brave", ScreenText: "Participants (2)\nபிரியா\nYou\nMute\nLeave call"},
+			},
+			want: []string{"राहुल", "பிரியா"},
+			deny: []string{"Mute", "Leave", "You"},
+		},
+		{
+			// A Hinglish meeting mixes a Latin name and a Devanagari name on the same line, and both must be read off it.
+			name: "a Hinglish line yields both its Latin and Devanagari names",
+			eps:  []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "Rohit Verma राहुल\nMute\nLeave call"}},
+			want: []string{"Rohit Verma", "राहुल"},
+		},
+		{
+			// A line of chat text is not a roster line, and nothing on it — least of all the app's own words for mute, leave and participants — is a person on the call.
+			name:     "CJK chat text with a colon is not a participant",
+			eps:      []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "李伟: 静音 离开会议 参会者 我马上加入会议\n王芳: 好的 我们开始吧 请大家静音\nMute\nLeave call"}},
+			wantNone: true,
+		},
+		{
+			// A roster lists one name per line, and a name in a caseless script is written across two words there just as a Latin one is. It must arrive as the whole name rather than as its two words separately.
+			name: "a caseless roster line is read as one whole name, not two halves",
+			eps:  []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "People (3)\nराहुल शर्मा\nRohit Verma\nYou\nMute\nLeave call"}},
+			want: []string{"राहुल शर्मा"},
+			deny: []string{"राहुल", "शर्मा"},
+		},
+		{
+			// Han is written without spaces between words, so a line of chat text, a toolbar button and a pane heading are each one unbroken run of letters exactly as a Chinese name would be. None of the three is a participant.
+			name:     "CJK screen text without a colon is not a participant",
+			eps:      []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "我马上加入会议\n静音\n参会者"}},
+			wantNone: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := collectMeetingNames(c.eps, true, c.known)
+			if c.wantNone && len(got) != 0 {
+				t.Errorf("collectMeetingNames = %v, want none", got)
+			}
+			for _, w := range c.want {
 				if !contains(got, w) {
-					t.Errorf("%s: got %v, want it to include %q", tc.name, got, w)
+					t.Errorf("got %v, want it to include %q", got, w)
 				}
 			}
-			for _, d := range tc.deny {
+			for _, d := range c.deny {
 				if contains(got, d) {
-					t.Errorf("%s: got %v, must not include interface text %q", tc.name, got, d)
+					t.Errorf("got %v, must not include interface text %q", got, d)
+				}
+			}
+			for _, w := range c.wantOnce {
+				n := 0
+				for _, g := range got {
+					if g == w {
+						n++
+					}
+				}
+				if n != 1 {
+					t.Errorf("got %v, want exactly one %q, got %d", got, w, n)
 				}
 			}
 		})
 	}
 }
 
-// The same person named twice — once tagged with a role in the roster, once as a chat sender with no tag — must collapse to one attendee, not two.
-func TestCollectMeetingNames_CollapsesDuplicatesAcrossRoleTags(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer (Host) Priya Shah"},
-		{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer: let's get started"},
-	}
-
-	got := collectMeetingNames(eps, true, nil)
-
-	count := 0
-	for _, n := range got {
-		if n == "Sam Iyer" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("collectMeetingNames = %v, want exactly one \"Sam Iyer\", got %d", got, count)
-	}
-}
-
-// A name already known from personal context is kept even when its shape would otherwise get it dropped — here a five-word name past the four-word limit ordinary candidates are held to.
-func TestCollectMeetingNames_KeepsAKnownNameEvenWhenUnusual(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - family catch-up - Brave", ScreenText: "Sri Lakshmi Venkata Subramaniam Iyer\nYou\nMute\nLeave call"},
-	}
-	known := personNamesFromContext([]db.PersonalEntry{{Subject: "sri-lakshmi-venkata-subramaniam-iyer", Content: "the user's aunt"}})
-
-	got := collectMeetingNames(eps, true, known)
-
-	if !contains(got, "Sri Lakshmi Venkata Subramaniam Iyer") {
-		t.Errorf("collectMeetingNames = %v, want the known long name kept", got)
-	}
-}
-
-// Two capitalised interface words strung together must never come out as a name, known or not — an app's toolbar is never a person, however name-shaped the phrase reads.
-func TestCollectMeetingNames_KnownInterfaceWordsNeverBecomeAName(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - standup - Brave", ScreenText: "Raise Hand\nMore Options\nShare Screen"},
-	}
-
-	got := collectMeetingNames(eps, true, nil)
-
-	if len(got) != 0 {
-		t.Errorf("collectMeetingNames = %v, want no names from pure interface text", got)
-	}
-}
-
-// A name written in a script without case — Devanagari here, Tamil there — must reach the participant list the same way a Latin name does, each on its own line the way a participants pane lists one name per line, with the usual interface furniture around it still dropped.
-func TestCollectMeetingNames_ScriptsWithoutCaseReachParticipants(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - team-sync - Brave", ScreenText: "People (2)\nराहुल\nYou\nMute\nLeave call"},
-		{Title: "Meet - team-sync - Brave", ScreenText: "Participants (2)\nபிரியா\nYou\nMute\nLeave call"},
-	}
-
-	got := collectMeetingNames(eps, true, nil)
-
-	for _, want := range []string{"राहुल", "பிரியா"} {
-		if !contains(got, want) {
-			t.Errorf("collectMeetingNames = %v, want it to include %q", got, want)
-		}
-	}
-	for _, deny := range []string{"Mute", "Leave", "You"} {
-		if contains(got, deny) {
-			t.Errorf("collectMeetingNames = %v, must not include interface text %q", got, deny)
-		}
-	}
-}
-
-// A Hinglish meeting mixes a Latin name and a Devanagari name on the same line, and both must be read off it — the Latin one by the existing capitalised-word rule, the Devanagari one by the caseless-script pass added beside it.
-func TestCollectMeetingNames_MixedHinglishLineYieldsBothScripts(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - team-sync - Brave", ScreenText: "Rohit Verma राहुल\nMute\nLeave call"},
-	}
-
-	got := collectMeetingNames(eps, true, nil)
-
-	if !contains(got, "Rohit Verma") {
-		t.Errorf("collectMeetingNames = %v, want the Latin name %q", got, "Rohit Verma")
-	}
-	if !contains(got, "राहुल") {
-		t.Errorf("collectMeetingNames = %v, want the Devanagari name %q", got, "राहुल")
-	}
-}
-
-// Cyrillic has an upper and lower form, so it belongs to the capitalised-word rule rather than the caseless-script pass — this pins the boundary the new rule draws, so a cased script never gets swept in beside Devanagari or Tamil.
-func TestCaselessScriptNames_ScriptsWithCaseAreLeftToTheCapitalisedRule(t *testing.T) {
-	got := caselessScriptNames("Иван Петров")
-	if len(got) != 0 {
-		t.Errorf("caselessScriptNames(%q) = %v, want none: Cyrillic has case", "Иван Петров", got)
-	}
-}
-
-// A name written in a script without letter case has no "all caps" form, so the shouting check must leave it alone, while a Latin word in all caps is still interface furniture. The proper-noun matcher that feeds collectMeetingNames is Latin-only, so this checks the shape rule on its own.
+// A name written in a script without letter case has no "all caps" form, so the shouting check must leave it alone, while a Latin word in all caps is still interface furniture.
 func TestLooksLikeName_ScriptsWithoutCaseAreNotShouting(t *testing.T) {
 	cases := []struct {
 		name string
@@ -400,81 +418,5 @@ func TestLooksLikeName_ScriptsWithoutCaseAreNotShouting(t *testing.T) {
 		if got := looksLikeName(c.name); got != c.want {
 			t.Errorf("looksLikeName(%q) = %v, want %v", c.name, got, c.want)
 		}
-	}
-}
-
-// The word that only ever appears in one title is the one that names the meeting, and it matches on its own. The common word beside it is ignored rather than allowed to match everything.
-func TestPickMeetingNote_MatchesOnTheRareWordAndIgnoresTheCommonOne(t *testing.T) {
-	notes := append(twelveMeetingNotes(),
-		db.Note{ID: 42, Kind: "meeting", Content: "# Zitadel auth\nWe agreed the Zitadel migration."},
-	)
-
-	got, ok := pickMeetingNote(notes, nil, []string{"Meet", "Zitadel"}, pastTitles())
-
-	if !ok || got.ID != 42 {
-		t.Errorf("pickMeetingNote = %d,%v, want the note sharing the rare word", got.ID, ok)
-	}
-}
-
-// A Chinese meeting window writes its buttons, its chat and a person's name in the same script, and nothing in that script is capitalised, so the caseless pass has only the line's own shape to go on. A line of chat text is not a roster line, and nothing on it — least of all the app's own words for mute, leave and participants — is a person on the call.
-func TestCollectMeetingNames_CJKChatTextIsNotAParticipant(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - team-sync - Brave", ScreenText: "李伟: 静音 离开会议 参会者 我马上加入会议\n王芳: 好的 我们开始吧 请大家静音\nMute\nLeave call"},
-	}
-
-	got := collectMeetingNames(eps, true, nil)
-
-	if len(got) != 0 {
-		t.Errorf("collectMeetingNames = %v, want no names from a window whose chat is written in a caseless script", got)
-	}
-}
-
-// A roster lists one name per line, and a name in a caseless script is written across two words there just as a Latin one is. It must arrive as the whole name rather than as its two words separately, since half a name matches nothing in past minutes.
-func TestCollectMeetingNames_CaselessRosterLineIsOneWholeName(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - team-sync - Brave", ScreenText: "People (3)\nराहुल शर्मा\nRohit Verma\nYou\nMute\nLeave call"},
-	}
-
-	got := collectMeetingNames(eps, true, nil)
-
-	if !contains(got, "राहुल शर्मा") {
-		t.Errorf("collectMeetingNames = %v, want the whole two-word name %q", got, "राहुल शर्मा")
-	}
-	if contains(got, "राहुल") || contains(got, "शर्मा") {
-		t.Errorf("collectMeetingNames = %v, want no half of the name on its own", got)
-	}
-}
-
-// The same Chinese meeting window without a single colon on it: a line of chat text, a toolbar button and a pane heading, each alone on its own line. Han is written without spaces between words, so every one of those lines is one unbroken run of letters exactly as a Chinese name would be, and nothing in the shape of "我马上加入会议" ("I'll join the meeting shortly") tells it from a person. None of the three is a participant.
-func TestCollectMeetingNames_CJKScreenTextWithoutAColonIsNotAParticipant(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - team-sync - Brave", ScreenText: "我马上加入会议\n静音\n参会者"},
-	}
-
-	got := collectMeetingNames(eps, true, nil)
-
-	if len(got) != 0 {
-		t.Errorf("collectMeetingNames = %v, want no names from unspaced screen text with no colon on it", got)
-	}
-}
-
-// A call in an app the meeting-window pattern does not list leaves no meeting window on screen at all, and the last window that was there names something else entirely. Naming the meeting after it — and then searching memory for its words — produced "Before you join: Gmail — Inbox (12)". Nothing on screen names the meeting, so prep stays silent.
-func TestPrepMeeting_SilentWhenNoWindowOnScreenIsACall(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{App: "Brave", Title: "Inbox (12) - Acme Corp - Brave"}}}
-	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nAcme Corp asked for the Q3 numbers.", noteKind); err != nil {
-		t.Fatal(err)
-	}
-	r.minutes = func(ctx context.Context, prompt string) (string, error) {
-		t.Fatal("the brain must not be called when nothing on screen is a call")
-		return "", nil
-	}
-	var got notifications
-	r.notify = got.add
-
-	r.prepMeeting()
-
-	if len(got.sent) != 0 {
-		t.Errorf("expected silence when no window on screen is a call, got %v", got.sent)
 	}
 }

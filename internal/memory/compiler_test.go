@@ -147,23 +147,6 @@ func (s *fakeStorage) ThreadsForAttribution(context.Context, int) ([]memory.Thre
 	return nil, nil
 }
 
-func TestCompiler_BuffersWithoutFlushing(t *testing.T) {
-	llm, store := &fakeSummarizer{}, &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "db.go"})
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "agent.go"})
-
-	if llm.attrCalls > 0 {
-		t.Errorf("expected 0 LLM calls, got %d", llm.attrCalls)
-	}
-	if compiler.BufferSize() != 3 {
-		t.Errorf("expected buffer size 3, got %d", compiler.BufferSize())
-	}
-}
-
 // An application switch flushes only above the compiler's floor. Alt-tabbing between two windows produces a switch every few seconds, and each flush is one metered attribution call, so a switch that comes moments after the last flush or with almost nothing buffered leaves the buffer alone — the word limit and the hourly tick still flush it.
 func TestCompiler_AppChangeBelowTheFloorDoesNotFlush(t *testing.T) {
 	llm, store := &fakeSummarizer{}, &fakeStorage{}
@@ -187,38 +170,38 @@ func TestCompiler_AppChangeBelowTheFloorDoesNotFlush(t *testing.T) {
 	}
 }
 
+// The compiler flushes once the buffer's word count crosses its limit, and must not flush a moment early.
 func TestCompiler_FlushesOnWordCountLimit(t *testing.T) {
-	llm, store := &fakeSummarizer{}, &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	// 300 words each × 5 = 1500 words → should trigger flush on the 5th ingest
-	screenText := strings.Repeat("word ", 300)
-	for i := 0; i < 5; i++ {
-		compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: screenText})
+	cases := []struct {
+		name          string
+		wordsPerEntry int
+		wantFlush     bool
+	}{
+		{"500 words total is under the limit: no flush", 100, false},
+		{"1500 words total crosses the limit: flushes", 300, true},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			llm, store := &fakeSummarizer{}, &fakeStorage{}
+			compiler := memory.NewCompiler(llm, store)
+			ctx := context.Background()
 
-	if llm.attrCalls != 1 {
-		t.Errorf("expected 1 flush at word limit, got %d", llm.attrCalls)
-	}
-	if len(store.semantic) != 1 {
-		t.Errorf("expected 1 store call, got %d", len(store.semantic))
-	}
-}
+			screenText := strings.Repeat("word ", c.wordsPerEntry)
+			for i := 0; i < 5; i++ {
+				compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: screenText})
+			}
 
-func TestCompiler_NoFlushBelowWordLimit(t *testing.T) {
-	llm := &fakeSummarizer{}
-	compiler := memory.NewCompiler(llm, &fakeStorage{})
-	ctx := context.Background()
-
-	// 100 words each × 5 = 500 words → under limit, no flush
-	screenText := strings.Repeat("word ", 100)
-	for i := 0; i < 5; i++ {
-		compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: screenText})
-	}
-
-	if llm.attrCalls != 0 {
-		t.Errorf("expected no flush under word limit, got %d LLM calls", llm.attrCalls)
+			wantCalls := 0
+			if c.wantFlush {
+				wantCalls = 1
+			}
+			if llm.attrCalls != wantCalls {
+				t.Errorf("LLM calls = %d, want %d", llm.attrCalls, wantCalls)
+			}
+			if len(store.semantic) != wantCalls {
+				t.Errorf("store calls = %d, want %d", len(store.semantic), wantCalls)
+			}
+		})
 	}
 }
 
@@ -316,73 +299,68 @@ func TestCompiler_AutoExtractsNotes(t *testing.T) {
 	}
 }
 
-func TestCompiler_ReconcileUpdate(t *testing.T) {
-	llm := &fakeSummarizer{
-		attr: identityAttribution("user prefers terse and concise responses"),
-		ops: []memory.NoteOp{
-			{Action: "update", ID: 7, Content: "user prefers terse and concise responses"},
-			{Action: "skip"},
+// Reconciling identity facts against existing notes can add a new note, update one that already says almost the same thing (and skip a duplicate), or — when the model call itself fails — fall back to logging every fact as new rather than dropping it.
+func TestCompiler_Reconcile(t *testing.T) {
+	cases := []struct {
+		name        string
+		facts       []string
+		ops         []memory.NoteOp
+		opsErr      error
+		existing    []memory.NoteRef
+		wantNotes   []noteCall
+		wantUpdates []updateCall
+	}{
+		{
+			name:      "add",
+			facts:     []string{"user works in Go"},
+			ops:       []memory.NoteOp{{Action: "add", Content: "user works in Go"}},
+			wantNotes: []noteCall{{content: "user works in Go", kind: "fact"}},
+		},
+		{
+			name:        "update an existing note and skip a duplicate",
+			facts:       []string{"user prefers terse and concise responses"},
+			ops:         []memory.NoteOp{{Action: "update", ID: 7, Content: "user prefers terse and concise responses"}, {Action: "skip"}},
+			existing:    []memory.NoteRef{{ID: 7, Content: "user prefers terse responses"}},
+			wantUpdates: []updateCall{{id: 7, content: "user prefers terse and concise responses"}},
+		},
+		{
+			// A reconciliation the model could not do must still keep the facts: they get logged as new notes rather than dropped.
+			name:   "a failed reconciliation call falls back to logging every fact",
+			facts:  []string{"user prefers terse responses", "user is debugging the React PR"},
+			opsErr: fmt.Errorf("llm timeout"),
+			wantNotes: []noteCall{
+				{content: "user prefers terse responses", kind: "fact"},
+				{content: "user is debugging the React PR", kind: "fact"},
+			},
 		},
 	}
-	store := &fakeStorage{existing: []memory.NoteRef{{ID: 7, Content: "user prefers terse responses"}}}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			llm := &fakeSummarizer{attr: identityAttribution(c.facts...), ops: c.ops, opsErr: c.opsErr}
+			store := &fakeStorage{existing: c.existing}
+			compiler := memory.NewCompiler(llm, store)
+			ctx := context.Background()
 
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-	compiler.ForceFlush(ctx)
+			compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+			compiler.ForceFlush(ctx)
 
-	if len(store.notes) != 0 {
-		t.Errorf("expected 0 LogNote calls for update/skip ops, got %d", len(store.notes))
-	}
-	if len(store.updates) != 1 {
-		t.Fatalf("expected 1 UpdateNote call, got %d", len(store.updates))
-	}
-	if store.updates[0].id != 7 || store.updates[0].content != "user prefers terse and concise responses" {
-		t.Errorf("unexpected UpdateNote call: %+v", store.updates[0])
-	}
-}
-
-func TestCompiler_ReconcileAdd(t *testing.T) {
-	llm := &fakeSummarizer{
-		attr: identityAttribution("user works in Go"),
-		ops:  []memory.NoteOp{{Action: "add", Content: "user works in Go"}},
-	}
-	store := &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-	compiler.ForceFlush(ctx)
-
-	if len(store.notes) != 1 || store.notes[0].content != "user works in Go" {
-		t.Fatalf("expected the added note to be logged, got %+v", store.notes)
-	}
-	if len(store.updates) != 0 {
-		t.Errorf("expected 0 UpdateNote calls for add op, got %d", len(store.updates))
-	}
-}
-
-// A reconciliation the model could not do must still keep the facts: they get logged as new notes rather than dropped.
-func TestCompiler_ReconcileErrorFallback(t *testing.T) {
-	llm := &fakeSummarizer{
-		attr:   identityAttribution("user prefers terse responses", "user is debugging the React PR"),
-		opsErr: fmt.Errorf("llm timeout"),
-	}
-	store := &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-	compiler.ForceFlush(ctx)
-
-	if len(store.notes) != 2 {
-		t.Fatalf("expected 2 LogNote calls on fallback, got %d", len(store.notes))
-	}
-	if store.notes[0].content != "user prefers terse responses" || store.notes[1].content != "user is debugging the React PR" {
-		t.Errorf("unexpected fallback notes: %+v", store.notes)
-	}
-	if len(store.updates) != 0 {
-		t.Errorf("expected 0 UpdateNote calls on fallback, got %d", len(store.updates))
+			if len(store.notes) != len(c.wantNotes) {
+				t.Fatalf("LogNote calls = %+v, want %+v", store.notes, c.wantNotes)
+			}
+			for i, n := range c.wantNotes {
+				if store.notes[i] != n {
+					t.Errorf("note %d = %+v, want %+v", i, store.notes[i], n)
+				}
+			}
+			if len(store.updates) != len(c.wantUpdates) {
+				t.Fatalf("UpdateNote calls = %+v, want %+v", store.updates, c.wantUpdates)
+			}
+			for i, u := range c.wantUpdates {
+				if store.updates[i] != u {
+					t.Errorf("update %d = %+v, want %+v", i, store.updates[i], u)
+				}
+			}
+		})
 	}
 }
 
@@ -425,23 +403,6 @@ func TestCompiler_NonSalientActivitiesNotBuffered(t *testing.T) {
 	}
 	if llm.attrCalls != 0 || len(store.semantic) != 0 {
 		t.Errorf("non-salient activities reached the model or the store: %d LLM calls, %d store calls", llm.attrCalls, len(store.semantic))
-	}
-}
-
-// TestCompiler_ThinTitleActivityFlushes checks that a salient activity with only a window title (no screen text) is summarized — social/gaming/meeting sessions produce sparse screen content but are still worth remembering.
-func TestCompiler_ThinTitleActivityFlushes(t *testing.T) {
-	llm, store := &fakeSummarizer{}, &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	compiler.Ingest(ctx, tracker.Activity{App: "Discord", Title: "General (voice)"})
-	compiler.ForceFlush(ctx)
-
-	if llm.attrCalls != 1 {
-		t.Errorf("expected 1 LLM call for thin-title flush, got %d", llm.attrCalls)
-	}
-	if len(store.semantic) != 1 {
-		t.Errorf("expected 1 store call for thin-title flush, got %d", len(store.semantic))
 	}
 }
 

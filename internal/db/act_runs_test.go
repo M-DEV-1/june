@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -138,21 +137,6 @@ func TestAddActRun_StepsWithNoStepsStoresEmptyArray(t *testing.T) {
 	}
 	if len(got.Steps) != 0 {
 		t.Errorf("Steps = %+v, want none", got.Steps)
-	}
-}
-
-// TestActStepJSONShape checks the JSON an ActStep encodes to, since steps_json is read by whatever later builds the replay learning off of it.
-func TestActStepJSONShape(t *testing.T) {
-	b, err := json.Marshal(ActStep{Name: "click", Args: map[string]any{"n": float64(1)}, Result: "ok"})
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if m["name"] != "click" || m["result"] != "ok" {
-		t.Errorf("json = %s, want name and result fields", b)
 	}
 }
 

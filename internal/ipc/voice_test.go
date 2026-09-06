@@ -17,6 +17,7 @@ import (
 	"ora/internal/audio"
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // voiceFakeMic is a Microphone that hands out a channel nobody writes to and records that it was closed, so a test can assert Stop frees the real device without opening one. Its amplitude is settable under a mutex (sync/atomic has no Float64) so the level-ticker tests can drive what CurrentAmplitude reports without touching real hardware.
@@ -565,11 +566,7 @@ func waitTokenUse(t *testing.T, store *db.Store, want int) []db.TokenUse {
 
 // TestVoiceTurn_RecordsWhatItCostInTokens covers the voice half of the usage screen. The live session counted every turn's tokens and then dropped them, so the voice model showed zero however long the user talked. A finished turn — the boundary the session already watches for — has to reach the ledger with the counts the session accumulated, the configured voice model, and the channel "voice" so the user can tell a spoken call from a typed one.
 func TestVoiceTurn_RecordsWhatItCostInTokens(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	srv, _, _, _, run := newVoiceServerStore(t, store)
 
 	start := voicePost(t, srv, "/voice/start")
@@ -596,11 +593,7 @@ func TestVoiceTurn_RecordsWhatItCostInTokens(t *testing.T) {
 
 // TestVoiceTurn_RecordsATurnThatCountedNothing checks the row that must still be written rather than skipped: a turn whose live session reported no usage at all is a call the user may have been charged for, and a missing row is a cost they cannot see. The counts stay at zero rather than being guessed at, and the call is still filed under the voice model.
 func TestVoiceTurn_RecordsATurnThatCountedNothing(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	srv, _, _, _, run := newVoiceServerStore(t, store)
 
 	start := voicePost(t, srv, "/voice/start")

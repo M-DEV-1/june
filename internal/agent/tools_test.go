@@ -8,6 +8,7 @@ import (
 	"maps"
 	"ora/internal/act"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 	"ora/internal/tracker"
 	"ora/internal/util"
@@ -1019,16 +1020,22 @@ func TestExecuteTool_ErrorsAreSaidInPlainWords(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_BadDate_SaysWhichDatesWork verifies the one date error phrasing names the forms that do work, so the model can fix the argument in the same turn instead of ending the turn on a failure.
+// TestExecuteTool_BadDate_SaysWhichDatesWork verifies an unparseable since is reported instead of ignored on both recall and query_memory, and that the one date error phrasing names the forms that do work, so the model can fix the argument in the same turn instead of ending the turn on a failure.
 func TestExecuteTool_BadDate_SaysWhichDatesWork(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "FAKE_API_KEY")
 
 	result := a.executeTool(context.Background(), "recall", map[string]any{"since": "last tuesdayish"})
-
 	for _, want := range []string{"real date", "today", "yesterday", "2026-07-05"} {
 		if !strings.Contains(result, want) {
 			t.Errorf("expected the date error to mention %q so the model can retry, got: %q", want, result)
 		}
+	}
+
+	brain := &toolTestBrain{hybridHits: []db.MemoryHit{{Source: "note", Content: "a note"}}}
+	a = NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+	result = a.executeTool(context.Background(), "query_memory", map[string]any{"query": "riddler", "since": "last tuesdayish"})
+	if !strings.HasPrefix(result, "error") {
+		t.Errorf(`expected an "error: ..." result for an unparseable since, got %q`, result)
 	}
 }
 
@@ -1158,11 +1165,7 @@ func TestExecuteTool_QueryMemory_WindowEmptiedANonEmptyTopic_SaysSo(t *testing.T
 // TestExecuteTool_QueryMemory_RealStore_WindowConstrainsResults runs query_memory against a real db.Store: a windowed call must return only in-window content, and a window holding nothing must come back as the honest none-in-window answer, never the out-of-window hits.
 func TestExecuteTool_QueryMemory_RealStore_WindowConstrainsResults(t *testing.T) {
 	ctx := context.Background()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "Code", "audit.md", "reviewing the retrieval audit"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -1182,17 +1185,6 @@ func TestExecuteTool_QueryMemory_RealStore_WindowConstrainsResults(t *testing.T)
 	}
 }
 
-// TestExecuteTool_QueryMemory_BadDate_ReturnsError verifies an unparseable since/until is reported instead of ignored.
-func TestExecuteTool_QueryMemory_BadDate_ReturnsError(t *testing.T) {
-	brain := &toolTestBrain{hybridHits: []db.MemoryHit{{Source: "note", Content: "a note"}}}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "riddler", "since": "last tuesdayish"})
-
-	if !strings.HasPrefix(result, "error") {
-		t.Errorf(`expected an "error: ..." result for an unparseable since, got %q`, result)
-	}
-}
 
 // TestExecuteTool_Recall_SkipsIdleCaptures is bug 4: the tracker writes the literal string "Unknown" for an app and title it could not read, and a night of idle captures turned 25 of 40 recall rows into "Unknown — Unknown: Unknown". Those rows carry no information and crowd out the ones that do, so they are dropped and counted instead.
 func TestExecuteTool_Recall_SkipsIdleCaptures(t *testing.T) {
@@ -2117,19 +2109,6 @@ func TestExecuteTool_PressKey_SaysWhenThereIsNoKeyboard(t *testing.T) {
 	}
 }
 
-// Enter on a focused Send button sends the message as surely as clicking it, so it stops at the same line.
-func TestExecuteTool_PressKey_StopsBeforeEnterOnASendButton(t *testing.T) {
-	a, in := typingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	a.rememberClick(context.Background(), act.Item{N: 2, Role: "push button", Label: "Send", Ref: "r-2"})
-	got := a.executeTool(context.Background(), "press_key", map[string]any{"keys": "Enter"})
-	if len(in.calls) != 0 {
-		t.Errorf("keyboard = %v, want nothing pressed", in.calls)
-	}
-	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "yes, send it") {
-		t.Errorf("result = %q, want a stop naming what to say to unlock it", got)
-	}
-}
 
 // The user's own go-ahead for this exact step unlocks the same press, the way it unlocks the click.
 func TestExecuteTool_PressKey_EnterGoesThroughWhenTheUserSaidGo(t *testing.T) {
@@ -3086,9 +3065,9 @@ func TestExecuteTool_TypeText_TypesWhenTheClickedFieldStillHasFocus(t *testing.T
 	}
 }
 
-// A focused Enter goes through the click's stop line, and so must the chords that press the focused control in the applications this engine drives: Ctrl+Enter is Send in Slack, Teams and Gmail.
+// Enter on a focused Send button sends the message as surely as clicking it, so it stops at the same line — and so must the chords that press the focused control in the applications this engine drives: Ctrl+Enter is Send in Slack, Teams and Gmail.
 func TestExecuteTool_PressKey_StopsBeforeSendChordsOnASendButton(t *testing.T) {
-	for _, keys := range []string{"Ctrl+Enter", "Ctrl+Return", "Shift+Enter", "Super+Enter"} {
+	for _, keys := range []string{"Enter", "Ctrl+Enter", "Ctrl+Return", "Shift+Enter", "Super+Enter"} {
 		a, in := typingAgent(t)
 		a.executeTool(context.Background(), "observe_screen", map[string]any{})
 		a.rememberClick(context.Background(), act.Item{N: 2, Role: "push button", Label: "Send", Ref: "r-2"})

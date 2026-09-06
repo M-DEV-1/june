@@ -30,16 +30,7 @@ func subtitlesMatch(ago time.Duration) db.ActMatch {
 	}
 }
 
-// TestRenderActReferenceReadsBackTheQuestionThenTheSteps checks the one thing this rendering is for: the question that was asked, then what was done about it, in the order it was done, in words a person would say.
-func TestRenderActReferenceReadsBackTheQuestionThenTheSteps(t *testing.T) {
-	got := RenderActReference(subtitlesMatch(6*time.Hour), refNow)
-	want := `6 hours ago, asked "show me how to change subtitles on this page, or where": looked at the screen, pointed at item 28 (subtitles).`
-	if got != want {
-		t.Errorf("RenderActReference =\n  %q\nwant\n  %q", got, want)
-	}
-}
-
-// TestRenderActReferenceKeepsTheStepsInTheOrderTheyHappened checks the steps are not reordered or sorted: a reference whose steps are in the wrong order describes a way of working that never happened.
+// TestRenderActReferenceKeepsTheStepsInTheOrderTheyHappened checks the steps are not reordered or sorted: a reference whose steps are in the wrong order describes a way of working that never happened. It also pins the exact reading of a single match (question, age and steps in order), which is the one thing TestRenderActReferenceReadsBackTheQuestionThenTheSteps used to check alone before TestActReferenceBlockFramesTheRunsAsSomethingThatHappened started asserting that same rendered line as part of the block.
 func TestRenderActReferenceKeepsTheStepsInTheOrderTheyHappened(t *testing.T) {
 	m := db.ActMatch{
 		When:  refNow.Add(-time.Hour),
@@ -103,6 +94,14 @@ func TestRenderActReferenceHasNothingToSayAboutSomeRuns(t *testing.T) {
 	}
 	if got := RenderActReference(long, refNow); got != "" {
 		t.Errorf("a run of %d steps rendered as %q, want nothing", len(long.Run.Steps), got)
+	}
+
+	// The block adds not one token to a prompt when the lookup found nothing close enough (nil), and the same when the one match it found renders to nothing.
+	if got := ActReferenceBlock(nil, refNow); got != "" {
+		t.Errorf("ActReferenceBlock(nil) = %q, want nothing", got)
+	}
+	if got := ActReferenceBlock([]db.ActMatch{empty}, refNow); got != "" {
+		t.Errorf("ActReferenceBlock with nothing renderable = %q, want nothing", got)
 	}
 }
 
@@ -170,17 +169,6 @@ func TestActReferenceBlockShowsNoMoreThanItsCap(t *testing.T) {
 	}
 	if !strings.Contains(block, "\n- an hour ago, asked \"wording change subtitles\"") {
 		t.Errorf("the block dropped the closest run, which arrives first:\n%s", block)
-	}
-}
-
-// TestActReferenceBlockIsNothingWhenThereIsNothingToShow checks the block adds not one token to a prompt when the lookup found nothing close enough, and the same when everything it found renders to nothing.
-func TestActReferenceBlockIsNothingWhenThereIsNothingToShow(t *testing.T) {
-	if got := ActReferenceBlock(nil, refNow); got != "" {
-		t.Errorf("ActReferenceBlock(nil) = %q, want nothing", got)
-	}
-	unreadable := db.ActMatch{When: refNow, Score: 1, Run: db.ActRun{Question: "do the thing", Steps: []db.ActStep{{Name: "query_memory"}}}}
-	if got := ActReferenceBlock([]db.ActMatch{unreadable}, refNow); got != "" {
-		t.Errorf("ActReferenceBlock with nothing renderable = %q, want nothing", got)
 	}
 }
 

@@ -72,24 +72,6 @@ func TestRequireIPCToken(t *testing.T) {
 	}
 }
 
-// TestBufferProvider_ParsesActivities verifies a 200 response with a JSON activity array decodes correctly — this is what feeds Agent.buildHandshakeContext's "[working]" lines (F2).
-func TestBufferProvider_ParsesActivities(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/buffer" {
-			t.Errorf("expected GET /buffer, got %s", r.URL.Path)
-		}
-		json.NewEncoder(w).Encode([]tracker.Activity{{App: "Code", Title: "main.go"}})
-	}))
-	defer srv.Close()
-
-	b := &bufferProvider{daemonClient{baseURL: srv.URL, client: srv.Client()}}
-	got := b.Get()
-
-	if len(got) != 1 || got[0].App != "Code" || got[0].Title != "main.go" {
-		t.Errorf("unexpected buffer: %+v", got)
-	}
-}
-
 // TestBufferProvider_NonOKStatus_ReturnsNil verifies a 204 (daemon has no compiler wired) or any other non-200 degrades to nil, not an error or a panic — a dead/half-configured daemon must not break the handshake.
 func TestBufferProvider_NonOKStatus_ReturnsNil(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +97,7 @@ func TestBufferProvider_Unreachable_ReturnsNil(t *testing.T) {
 	}
 }
 
-// TestBufferProvider_AttachesIPCToken verifies the request carries the daemon's IPC auth token — /buffer is protected like every other IPC endpoint except /ping (W2).
+// TestBufferProvider_AttachesIPCToken verifies the request carries the daemon's IPC auth token — /buffer is protected like every other IPC endpoint except /ping (W2) — and that a 200 response with a JSON activity array decodes correctly, which is what feeds Agent.buildHandshakeContext's "[working]" lines (F2).
 func TestBufferProvider_AttachesIPCToken(t *testing.T) {
 	tokenPath := filepath.Join(t.TempDir(), "ipc-token")
 	token, err := ipctoken.Generate(tokenPath)
@@ -123,35 +105,48 @@ func TestBufferProvider_AttachesIPCToken(t *testing.T) {
 		t.Fatalf("ipctoken.Generate: %v", err)
 	}
 
-	var gotToken string
+	var gotToken, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotToken = r.Header.Get(ipctoken.HeaderName)
-		json.NewEncoder(w).Encode([]tracker.Activity{})
+		gotPath = r.URL.Path
+		json.NewEncoder(w).Encode([]tracker.Activity{{App: "Code", Title: "main.go"}})
 	}))
 	defer srv.Close()
 
 	b := &bufferProvider{daemonClient{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}}
-	b.Get()
+	got := b.Get()
 
 	if gotToken != token {
 		t.Errorf("expected the %s header to carry %q, got %q", ipctoken.HeaderName, token, gotToken)
 	}
+	if gotPath != "/buffer" {
+		t.Errorf("expected GET /buffer, got %s", gotPath)
+	}
+	if len(got) != 1 || got[0].App != "Code" || got[0].Title != "main.go" {
+		t.Errorf("unexpected buffer: %+v", got)
+	}
 }
 
-// TestHTTPVectorIndex_Add_PostsExpectedPayload verifies Add POSTs to /vector/add with the id/content/embedding/metadata fields the daemon handler expects.
+// TestHTTPVectorIndex_Add_PostsExpectedPayload verifies Add POSTs to /vector/add with the id/content/embedding/metadata fields the daemon handler expects, and that the request carries the daemon's IPC auth token — without it, every /vector/* call now gets 401'd by requireIPCToken (see W2's security fix).
 func TestHTTPVectorIndex_Add_PostsExpectedPayload(t *testing.T) {
-	var gotPath string
+	tokenPath := filepath.Join(t.TempDir(), "ipc-token")
+	token, err := ipctoken.Generate(tokenPath)
+	if err != nil {
+		t.Fatalf("ipctoken.Generate: %v", err)
+	}
+
+	var gotPath, gotToken string
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotToken = r.Header.Get(ipctoken.HeaderName)
 		json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client()}}
-	err := h.Add(context.Background(), "note:5", "hello", []float32{0.1, 0.2}, map[string]string{"source": "note"})
-	if err != nil {
+	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}}
+	if err := h.Add(context.Background(), "note:5", "hello", []float32{0.1, 0.2}, map[string]string{"source": "note"}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if gotPath != "/vector/add" {
@@ -159,6 +154,9 @@ func TestHTTPVectorIndex_Add_PostsExpectedPayload(t *testing.T) {
 	}
 	if gotBody["id"] != "note:5" || gotBody["content"] != "hello" {
 		t.Errorf("unexpected request body: %+v", gotBody)
+	}
+	if gotToken != token {
+		t.Errorf("expected the %s header to carry %q, got %q", ipctoken.HeaderName, token, gotToken)
 	}
 }
 
@@ -231,30 +229,6 @@ func TestHTTPVectorIndex_Delete_PostsID(t *testing.T) {
 	}
 	if gotBody["id"] != "note:5" {
 		t.Errorf("expected id %q in delete request, got %+v", "note:5", gotBody)
-	}
-}
-
-// TestHTTPVectorIndex_AttachesIPCToken verifies every request carries the daemon's IPC auth token — without it, every /vector/* call now gets 401'd by requireIPCToken (see W2's security fix).
-func TestHTTPVectorIndex_AttachesIPCToken(t *testing.T) {
-	tokenPath := filepath.Join(t.TempDir(), "ipc-token")
-	token, err := ipctoken.Generate(tokenPath)
-	if err != nil {
-		t.Fatalf("ipctoken.Generate: %v", err)
-	}
-
-	var gotToken string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotToken = r.Header.Get(ipctoken.HeaderName)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}}
-	if err := h.Add(context.Background(), "note:5", "hello", []float32{0.1}, nil); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-	if gotToken != token {
-		t.Errorf("expected the %s header to carry %q, got %q", ipctoken.HeaderName, token, gotToken)
 	}
 }
 

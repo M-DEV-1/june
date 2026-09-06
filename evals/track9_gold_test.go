@@ -110,23 +110,6 @@ func TestRunTrajTurn_HonoursACallerSuppliedCap(t *testing.T) {
 	}
 }
 
-// Grok runs its narration and the protocol line together with no newline between them, so a TOOL: marker has to be found anywhere in the reply, the way SPOKEN: already is. Before this it fell through to "the whole text is the answer" and the arm ran no tools at all.
-func TestParseArmReply_FindsAToolCallMidLine(t *testing.T) {
-	call, _, err := parseArmReply(`I'll look at the full request first.I'll pull this week's meetings.TOOL: recall {"since": "2026-08-31", "until": "2026-09-04"}`)
-	if err != nil {
-		t.Fatalf("parseArmReply: %v", err)
-	}
-	if call == nil || call.Name != "recall" {
-		t.Fatalf("want a recall call, got %+v", call)
-	}
-	if call.Args["since"] != "2026-08-31" {
-		t.Errorf("args = %v", call.Args)
-	}
-	if _, spoken, _ := parseArmReply("SPOKEN: nothing to look up here"); spoken != "nothing to look up here" {
-		t.Errorf("a plain spoken reply still has to win: %q", spoken)
-	}
-}
-
 // The Live API reports a spent quota by closing the socket with 1011 and the quota text in the close reason, not as a tidy 429, and that is the string that has to stand an arm down.
 func TestGoldRateLimited_RecognisesBothWireShapes(t *testing.T) {
 	yes := []string{

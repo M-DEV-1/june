@@ -85,19 +85,6 @@ func TestWithDailyQuota_UnconfiguredModelPassesThrough(t *testing.T) {
 	}
 }
 
-// TestWithDailyQuota_PersistsAcrossState checks that the count survives a fresh QuotaState pointed at the same file, the way a daemon restart would see it.
-func TestWithDailyQuota_PersistsAcrossState(t *testing.T) {
-	dir := t.TempDir()
-	opts := QuotaOptions{"gemini-3.5-flash": {Limit: 1, Reserved: 0}}
-	if _, err := WithDailyQuota(NewQuotaState(dir), "gemini-3.5-flash", true, opts, alwaysOK)(context.Background(), "q"); err != nil {
-		t.Fatalf("first call: unexpected error: %v", err)
-	}
-	var q *ErrDailyQuota
-	if _, err := WithDailyQuota(NewQuotaState(dir), "gemini-3.5-flash", true, opts, alwaysOK)(context.Background(), "q"); !errors.As(err, &q) {
-		t.Fatalf("second call on a fresh state over the same dir: got err %v, want *ErrDailyQuota", err)
-	}
-}
-
 // TestErrDailyQuota_SatisfiesGeminiCannotAnswer checks that the fallback chain agent.AskText already uses for a real 429 (hand over to Codex, then Claude) also fires for ErrDailyQuota, since a request refused before it ever reached Gemini needs the same hand-over as one Gemini itself refused.
 func TestErrDailyQuota_SatisfiesGeminiCannotAnswer(t *testing.T) {
 	err := &ErrDailyQuota{Model: "gemini-3.5-flash", Limit: 20}

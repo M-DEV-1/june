@@ -122,6 +122,55 @@ func TestAct10Collect(t *testing.T) {
 			t.Errorf("Steps = %v, want [observe_screen] even without a terminal event", out.Steps)
 		}
 	})
+
+	// The daemon pairs each tool call with a before and an after event; one hop must fold to one step, not per event, two calls of the same tool must still stay two steps, and an unpaired event (the stream ended between its two events) must still count once.
+	t.Run("folds the daemon's paired tool events into one step per hop", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString(sseLine("ask-1", "status", "Checking."))
+		b.WriteString(sseLine("ask-1", "tool", "observe_screen"))
+		b.WriteString(sseLine("ask-1", "tool", "observe_screen"))
+		b.WriteString(sseLine("ask-1", "tool", "point_at"))
+		b.WriteString(sseLine("ask-1", "tool", "point_at"))
+		b.WriteString(sseLine("ask-1", "answer", "ringed it"))
+		b.WriteString(sseLine("ask-1", "done", ""))
+		if out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-1"); strings.Join(out.Steps, ">") != "observe_screen>point_at" {
+			t.Errorf("Steps = %q, want observe_screen>point_at (one entry per hop, not per event)", strings.Join(out.Steps, ">"))
+		}
+
+		b.Reset()
+		for i := 0; i < 2; i++ {
+			b.WriteString(sseLine("ask-2", "tool", "observe_screen"))
+			b.WriteString(sseLine("ask-2", "tool", "observe_screen"))
+		}
+		b.WriteString(sseLine("ask-2", "done", ""))
+		if out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-2"); strings.Join(out.Steps, ">") != "observe_screen>observe_screen" {
+			t.Errorf("Steps = %q, want two observe_screen hops", strings.Join(out.Steps, ">"))
+		}
+
+		b.Reset()
+		b.WriteString(sseLine("ask-3", "tool", "click"))
+		b.WriteString(sseLine("ask-3", "tool", "scroll_to"))
+		b.WriteString(sseLine("ask-3", "tool", "scroll_to"))
+		b.WriteString(sseLine("ask-3", "done", ""))
+		if out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-3"); strings.Join(out.Steps, ">") != "click>scroll_to" {
+			t.Errorf("Steps = %q, want click>scroll_to (an unpaired tool event still counts once)", strings.Join(out.Steps, ">"))
+		}
+	})
+
+	// internal/ipc's draw tags every overlay event with a fresh id of its own (s.newID()), never the id of the ask whose point_at drew it, so an overlay filtered out by ask id would make the ring task impossible to pass.
+	t.Run("sees an overlay carrying its own id", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString(sseLine("ask-1", "tool", "observe_screen"))
+		b.WriteString(sseLine("ask-1", "tool", "point_at"))
+		b.WriteString(`data: {"id":"ask-7","type":"overlay","text":"{\"kind\":\"ring\",\"rects\":[{\"x\":1,\"y\":1,\"w\":1,\"h\":1}]}"}` + "\n\n")
+		b.WriteString(sseLine("ask-1", "answer", "ringed the address bar"))
+		b.WriteString(sseLine("ask-1", "done", ""))
+
+		out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-1")
+		if !out.OverlayRing {
+			t.Errorf("OverlayRing = false; the daemon gives an overlay event its own id, so it must be counted whatever id it carries")
+		}
+	})
 }
 
 // TestAct10PassRules pins down every task's pass rule from the task table against hand-built tool sequences, so a rule that regresses (e.g. stops requiring observe_screen before point_at) fails here instead of only showing up as a flaky live run.
@@ -490,67 +539,6 @@ func TestAct10RunTaskAgainstFakeDaemon(t *testing.T) {
 	}
 	if got.Answer != "front window is Chrome" {
 		t.Errorf("Answer = %q", got.Answer)
-	}
-}
-
-// TestAct10CollectFoldsTheDaemonsPairedToolEvents pins the shape the daemon really broadcasts: internal/ipc's run wraps every ask in a ToolObserver that fires twice per tool call — once with the argument summary before the call runs and once with the result summary after — so one hop arrives as two "tool" events carrying the same tool name. The collected step list must be one entry per hop, and two genuine back-to-back calls of the same tool must still read as two.
-func TestAct10CollectFoldsTheDaemonsPairedToolEvents(t *testing.T) {
-	t.Run("one hop is one step", func(t *testing.T) {
-		var b strings.Builder
-		b.WriteString(sseLine("ask-1", "status", "Checking."))
-		b.WriteString(sseLine("ask-1", "tool", "observe_screen"))
-		b.WriteString(sseLine("ask-1", "tool", "observe_screen"))
-		b.WriteString(sseLine("ask-1", "tool", "point_at"))
-		b.WriteString(sseLine("ask-1", "tool", "point_at"))
-		b.WriteString(sseLine("ask-1", "answer", "ringed it"))
-		b.WriteString(sseLine("ask-1", "done", ""))
-
-		out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-1")
-		if got := strings.Join(out.Steps, ">"); got != "observe_screen>point_at" {
-			t.Errorf("Steps = %q, want observe_screen>point_at (one entry per hop, not per event)", got)
-		}
-	})
-
-	t.Run("two calls of the same tool stay two steps", func(t *testing.T) {
-		var b strings.Builder
-		for i := 0; i < 2; i++ {
-			b.WriteString(sseLine("ask-2", "tool", "observe_screen"))
-			b.WriteString(sseLine("ask-2", "tool", "observe_screen"))
-		}
-		b.WriteString(sseLine("ask-2", "done", ""))
-
-		out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-2")
-		if got := strings.Join(out.Steps, ">"); got != "observe_screen>observe_screen" {
-			t.Errorf("Steps = %q, want two observe_screen hops", got)
-		}
-	})
-
-	t.Run("an unpaired tool event still counts once", func(t *testing.T) {
-		var b strings.Builder
-		b.WriteString(sseLine("ask-3", "tool", "click"))
-		b.WriteString(sseLine("ask-3", "tool", "scroll_to"))
-		b.WriteString(sseLine("ask-3", "tool", "scroll_to"))
-		b.WriteString(sseLine("ask-3", "done", ""))
-
-		out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-3")
-		if got := strings.Join(out.Steps, ">"); got != "click>scroll_to" {
-			t.Errorf("Steps = %q, want click>scroll_to", got)
-		}
-	})
-}
-
-// TestAct10CollectSeesAnOverlayCarryingItsOwnID covers the ring task's one hard dependency: internal/ipc's draw tags every overlay event with a fresh id of its own (s.newID()), never the id of the ask whose point_at drew it, so an overlay filtered out by ask id would make the ring task impossible to pass.
-func TestAct10CollectSeesAnOverlayCarryingItsOwnID(t *testing.T) {
-	var b strings.Builder
-	b.WriteString(sseLine("ask-1", "tool", "observe_screen"))
-	b.WriteString(sseLine("ask-1", "tool", "point_at"))
-	b.WriteString(`data: {"id":"ask-7","type":"overlay","text":"{\"kind\":\"ring\",\"rects\":[{\"x\":1,\"y\":1,\"w\":1,\"h\":1}]}"}` + "\n\n")
-	b.WriteString(sseLine("ask-1", "answer", "ringed the address bar"))
-	b.WriteString(sseLine("ask-1", "done", ""))
-
-	out := act10Collect(bufio.NewScanner(strings.NewReader(b.String())), "ask-1")
-	if !out.OverlayRing {
-		t.Errorf("OverlayRing = false; the daemon gives an overlay event its own id, so it must be counted whatever id it carries")
 	}
 }
 

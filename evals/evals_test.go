@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"ora/internal/agent"
-	"ora/internal/db"
+	"ora/internal/db/dbtest"
 
 	"ora/internal/brain"
 )
@@ -110,11 +110,7 @@ func TestRateExcludesNotApplicable(t *testing.T) {
 // TestToolPathSearch_RunsQuestionsThroughTheRealQueryMemoryTool verifies the -tool-path replay: a question goes through the agent's ExecuteTool dispatch (the exact path the model's function calls take), a question's args ride along so a since/until window reaches the store, and the tool's honest none-in-window answer comes back as a row for the judge rather than being mistaken for content.
 func TestToolPathSearch_RunsQuestionsThroughTheRealQueryMemoryTool(t *testing.T) {
 	ctx := context.Background()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.Open(t)
 	if _, err := store.LogNote(ctx, "the user prefers oat milk lattes", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}

@@ -18,97 +18,131 @@ func (g *fakeGate) Allow(model string) error {
 	return g.err
 }
 
-// TestGeminiSummarizer_ReconcileNotes_GateRefusesWithoutCallingBackend checks that a refusing gate makes ReconcileNotes return the gate's error before ever reaching the Gemini API.
-func TestGeminiSummarizer_ReconcileNotes_GateRefusesWithoutCallingBackend(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
+// Every method that reaches the metered Gemini API must check the request gate first and return its refusal, untouched, without ever reaching the backend.
+func TestGeminiSummarizer_GateRefusesWithoutCallingBackend(t *testing.T) {
 	gateErr := errors.New("daily quota reached")
-	summarizer.SetRequestGate(&fakeGate{err: gateErr})
-
-	ops, err := summarizer.ReconcileNotes(context.Background(), nil, []string{"user likes tea"})
-	if !errors.Is(err, gateErr) {
-		t.Fatalf("ReconcileNotes error = %v, want it to wrap the gate's refusal", err)
+	cases := []struct {
+		name string
+		call func(t *testing.T, s *memory.GeminiSummarizer)
+	}{
+		{"ReconcileNotes", func(t *testing.T, s *memory.GeminiSummarizer) {
+			ops, err := s.ReconcileNotes(context.Background(), nil, []string{"user likes tea"})
+			if !errors.Is(err, gateErr) {
+				t.Fatalf("ReconcileNotes error = %v, want it to wrap the gate's refusal", err)
+			}
+			if ops != nil {
+				t.Errorf("ops = %v, want nil on refusal", ops)
+			}
+		}},
+		{"AttributeThreads", func(t *testing.T, s *memory.GeminiSummarizer) {
+			attr, err := s.AttributeThreads(context.Background(), nil, nil)
+			if !errors.Is(err, gateErr) {
+				t.Fatalf("AttributeThreads error = %v, want it to wrap the gate's refusal", err)
+			}
+			if attr != nil {
+				t.Errorf("attr = %v, want nil on refusal", attr)
+			}
+		}},
+		{"DeriveState, with no local backend or fallback installed to intercept it", func(t *testing.T, s *memory.GeminiSummarizer) {
+			state, err := s.DeriveState(context.Background(), []string{"did a thing"}, nil)
+			if !errors.Is(err, gateErr) {
+				t.Fatalf("DeriveState error = %v, want it to wrap the gate's refusal", err)
+			}
+			if state != "" {
+				t.Errorf("state = %q, want empty on refusal", state)
+			}
+		}},
+		{"ConsolidateNotes", func(t *testing.T, s *memory.GeminiSummarizer) {
+			merged, err := s.ConsolidateNotes(context.Background(), []string{"user likes tea"})
+			if !errors.Is(err, gateErr) {
+				t.Fatalf("ConsolidateNotes error = %v, want it to wrap the gate's refusal", err)
+			}
+			if merged != nil {
+				t.Errorf("merged = %v, want nil on refusal", merged)
+			}
+		}},
+		{"AnalyzeScreen, returning the zero ScreenSight", func(t *testing.T, s *memory.GeminiSummarizer) {
+			sight := s.AnalyzeScreen(context.Background(), []byte{1, 2, 3})
+			if sight.UserActivity != "" || len(sight.VisibleText) != 0 || sight.Summary != "" {
+				t.Errorf("AnalyzeScreen = %+v, want the zero value on refusal", sight)
+			}
+		}},
+		{"DescribeScreen, which flattens AnalyzeScreen's result", func(t *testing.T, s *memory.GeminiSummarizer) {
+			desc := s.DescribeScreen(context.Background(), []byte{1, 2, 3})
+			if desc != "" {
+				t.Errorf("DescribeScreen = %q, want empty on refusal", desc)
+			}
+		}},
+		{"Digest", func(t *testing.T, s *memory.GeminiSummarizer) {
+			digest, err := s.Digest(context.Background(), "", []string{"fixed the build", "wrote the notes"})
+			if !errors.Is(err, gateErr) {
+				t.Fatalf("Digest error = %v, want it to wrap the gate's refusal", err)
+			}
+			if digest != "" {
+				t.Errorf("digest = %q, want empty on refusal", digest)
+			}
+		}},
 	}
-	if ops != nil {
-		t.Errorf("ops = %v, want nil on refusal", ops)
-	}
-}
-
-// TestGeminiSummarizer_ReconcileNotes_PermittingGateLeavesEmptyShortCircuitUnchanged checks that installing a permitting gate does not disturb the existing empty-candidates short circuit, and that the gate is never even consulted when there is nothing to send.
-func TestGeminiSummarizer_ReconcileNotes_PermittingGateLeavesEmptyShortCircuitUnchanged(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gate := &fakeGate{}
-	summarizer.SetRequestGate(gate)
-
-	ops, err := summarizer.ReconcileNotes(context.Background(), nil, nil)
-	if err != nil || ops != nil {
-		t.Fatalf("ReconcileNotes(empty) = (%v, %v), want (nil, nil) same as with no gate installed", ops, err)
-	}
-	if len(gate.calls) != 0 {
-		t.Errorf("gate.Allow called %d times for empty candidates, want 0: nothing to send", len(gate.calls))
-	}
-}
-
-// TestGeminiSummarizer_AttributeThreads_GateRefusesWithoutCallingBackend checks that a refusing gate makes AttributeThreads return the gate's error before ever reaching the Gemini API.
-func TestGeminiSummarizer_AttributeThreads_GateRefusesWithoutCallingBackend(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gateErr := errors.New("daily quota reached")
-	summarizer.SetRequestGate(&fakeGate{err: gateErr})
-
-	attr, err := summarizer.AttributeThreads(context.Background(), nil, nil)
-	if !errors.Is(err, gateErr) {
-		t.Fatalf("AttributeThreads error = %v, want it to wrap the gate's refusal", err)
-	}
-	if attr != nil {
-		t.Errorf("attr = %v, want nil on refusal", attr)
-	}
-}
-
-// TestGeminiSummarizer_DeriveState_GateRefusesWithoutCallingBackend checks that a refusing gate makes DeriveState return the gate's error before ever reaching the Gemini API, with no local backend or fallback installed to intercept it.
-func TestGeminiSummarizer_DeriveState_GateRefusesWithoutCallingBackend(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gateErr := errors.New("daily quota reached")
-	summarizer.SetRequestGate(&fakeGate{err: gateErr})
-
-	state, err := summarizer.DeriveState(context.Background(), []string{"did a thing"}, nil)
-	if !errors.Is(err, gateErr) {
-		t.Fatalf("DeriveState error = %v, want it to wrap the gate's refusal", err)
-	}
-	if state != "" {
-		t.Errorf("state = %q, want empty on refusal", state)
-	}
-}
-
-// TestGeminiSummarizer_DeriveState_PermittingGateLeavesEmptyShortCircuitUnchanged checks that installing a permitting gate does not disturb the existing empty-input short circuit, and that the gate is never consulted when there is nothing to summarize.
-func TestGeminiSummarizer_DeriveState_PermittingGateLeavesEmptyShortCircuitUnchanged(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gate := &fakeGate{}
-	summarizer.SetRequestGate(gate)
-
-	state, err := summarizer.DeriveState(context.Background(), nil, nil)
-	if err != nil || state != "" {
-		t.Fatalf("DeriveState(empty) = (%q, %v), want (\"\", nil) same as with no gate installed", state, err)
-	}
-	if len(gate.calls) != 0 {
-		t.Errorf("gate.Allow called %d times for empty input, want 0: nothing to summarize", len(gate.calls))
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
+			if err != nil {
+				t.Fatalf("NewGeminiSummarizer: %v", err)
+			}
+			summarizer.SetRequestGate(&fakeGate{err: gateErr})
+			c.call(t, summarizer)
+		})
 	}
 }
 
-// TestGeminiSummarizer_DeriveState_LocalBackendBypassesTheRequestGate checks that the local-llama-server path (SetStateBackend) still answers even when the metered request gate refuses: the local backend spends no metered quota, so the gate must never be consulted on that path.
+// Installing a permitting gate must not disturb any method's existing empty-input short circuit, and the gate must never even be consulted when there is nothing to send.
+func TestGeminiSummarizer_PermittingGateLeavesEmptyShortCircuitUnchanged(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(t *testing.T, s *memory.GeminiSummarizer)
+	}{
+		{"ReconcileNotes", func(t *testing.T, s *memory.GeminiSummarizer) {
+			ops, err := s.ReconcileNotes(context.Background(), nil, nil)
+			if err != nil || ops != nil {
+				t.Fatalf("ReconcileNotes(empty) = (%v, %v), want (nil, nil) same as with no gate installed", ops, err)
+			}
+		}},
+		{"DeriveState", func(t *testing.T, s *memory.GeminiSummarizer) {
+			state, err := s.DeriveState(context.Background(), nil, nil)
+			if err != nil || state != "" {
+				t.Fatalf("DeriveState(empty) = (%q, %v), want (\"\", nil) same as with no gate installed", state, err)
+			}
+		}},
+		{"ConsolidateNotes", func(t *testing.T, s *memory.GeminiSummarizer) {
+			merged, err := s.ConsolidateNotes(context.Background(), nil)
+			if err != nil || merged != nil {
+				t.Fatalf("ConsolidateNotes(empty) = (%v, %v), want (nil, nil) same as with no gate installed", merged, err)
+			}
+		}},
+		{"AnalyzeScreen", func(t *testing.T, s *memory.GeminiSummarizer) {
+			sight := s.AnalyzeScreen(context.Background(), nil)
+			if sight.UserActivity != "" || len(sight.VisibleText) != 0 || sight.Summary != "" {
+				t.Fatalf("AnalyzeScreen(nil) = %+v, want the zero value", sight)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
+			if err != nil {
+				t.Fatalf("NewGeminiSummarizer: %v", err)
+			}
+			gate := &fakeGate{}
+			summarizer.SetRequestGate(gate)
+			c.call(t, summarizer)
+			if len(gate.calls) != 0 {
+				t.Errorf("gate.Allow called %d times for empty input, want 0: nothing to send", len(gate.calls))
+			}
+		})
+	}
+}
+
+// The local-llama-server path (SetStateBackend) must still answer even when the metered request gate refuses: the local backend spends no metered quota, so the gate must never be consulted on that path. This needs its own gated fake wiring, so it does not fit the tables above.
 func TestGeminiSummarizer_DeriveState_LocalBackendBypassesTheRequestGate(t *testing.T) {
 	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
 	if err != nil {
@@ -130,105 +164,5 @@ func TestGeminiSummarizer_DeriveState_LocalBackendBypassesTheRequestGate(t *test
 	}
 	if state != "local answer" {
 		t.Errorf("state = %q, want the local backend's answer", state)
-	}
-}
-
-// TestGeminiSummarizer_ConsolidateNotes_GateRefusesWithoutCallingBackend checks that a refusing gate makes ConsolidateNotes return the gate's error before ever reaching the Gemini API.
-func TestGeminiSummarizer_ConsolidateNotes_GateRefusesWithoutCallingBackend(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gateErr := errors.New("daily quota reached")
-	summarizer.SetRequestGate(&fakeGate{err: gateErr})
-
-	merged, err := summarizer.ConsolidateNotes(context.Background(), []string{"user likes tea"})
-	if !errors.Is(err, gateErr) {
-		t.Fatalf("ConsolidateNotes error = %v, want it to wrap the gate's refusal", err)
-	}
-	if merged != nil {
-		t.Errorf("merged = %v, want nil on refusal", merged)
-	}
-}
-
-// TestGeminiSummarizer_ConsolidateNotes_PermittingGateLeavesEmptyShortCircuitUnchanged checks that installing a permitting gate does not disturb the existing empty-notes short circuit.
-func TestGeminiSummarizer_ConsolidateNotes_PermittingGateLeavesEmptyShortCircuitUnchanged(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gate := &fakeGate{}
-	summarizer.SetRequestGate(gate)
-
-	merged, err := summarizer.ConsolidateNotes(context.Background(), nil)
-	if err != nil || merged != nil {
-		t.Fatalf("ConsolidateNotes(empty) = (%v, %v), want (nil, nil) same as with no gate installed", merged, err)
-	}
-	if len(gate.calls) != 0 {
-		t.Errorf("gate.Allow called %d times for empty notes, want 0: nothing to send", len(gate.calls))
-	}
-}
-
-// TestGeminiSummarizer_AnalyzeScreen_GateRefusesWithoutCallingBackend checks that a refusing gate makes AnalyzeScreen return the zero ScreenSight before ever reaching the Gemini API.
-func TestGeminiSummarizer_AnalyzeScreen_GateRefusesWithoutCallingBackend(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	summarizer.SetRequestGate(&fakeGate{err: errors.New("daily quota reached")})
-
-	sight := summarizer.AnalyzeScreen(context.Background(), []byte{1, 2, 3})
-	if sight.UserActivity != "" || len(sight.VisibleText) != 0 || sight.Summary != "" {
-		t.Errorf("AnalyzeScreen = %+v, want the zero value on refusal", sight)
-	}
-}
-
-// TestGeminiSummarizer_AnalyzeScreen_PermittingGateLeavesEmptyShortCircuitUnchanged checks that installing a permitting gate does not disturb the existing empty-png short circuit, and that the gate is never consulted for it.
-func TestGeminiSummarizer_AnalyzeScreen_PermittingGateLeavesEmptyShortCircuitUnchanged(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gate := &fakeGate{}
-	summarizer.SetRequestGate(gate)
-
-	sight := summarizer.AnalyzeScreen(context.Background(), nil)
-	if sight.UserActivity != "" || len(sight.VisibleText) != 0 || sight.Summary != "" {
-		t.Errorf("AnalyzeScreen(nil) = %+v, want the zero value", sight)
-	}
-	if len(gate.calls) != 0 {
-		t.Errorf("gate.Allow called %d times for empty input, want 0: no screenshot to analyze", len(gate.calls))
-	}
-}
-
-// TestGeminiSummarizer_DescribeScreen_GateRefusesWithoutCallingBackend checks that DescribeScreen, which flattens AnalyzeScreen's result, also comes back empty under a refusing gate rather than reaching the Gemini API.
-func TestGeminiSummarizer_DescribeScreen_GateRefusesWithoutCallingBackend(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	summarizer.SetRequestGate(&fakeGate{err: errors.New("daily quota reached")})
-
-	desc := summarizer.DescribeScreen(context.Background(), []byte{1, 2, 3})
-	if desc != "" {
-		t.Errorf("DescribeScreen = %q, want empty on refusal", desc)
-	}
-}
-
-// TestGeminiSummarizer_Digest_GateRefusesWithoutCallingBackend checks that a refusing gate makes Digest return the gate's error before ever reaching the Gemini API.
-func TestGeminiSummarizer_Digest_GateRefusesWithoutCallingBackend(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	gateErr := errors.New("daily quota reached")
-	summarizer.SetRequestGate(&fakeGate{err: gateErr})
-
-	digest, err := summarizer.Digest(context.Background(), "", []string{"fixed the build", "wrote the notes"})
-	if !errors.Is(err, gateErr) {
-		t.Fatalf("Digest error = %v, want it to wrap the gate's refusal", err)
-	}
-	if digest != "" {
-		t.Errorf("digest = %q, want empty on refusal", digest)
 	}
 }

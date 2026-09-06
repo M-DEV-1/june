@@ -23,74 +23,143 @@ func addUse(t *testing.T, store *Store, use TokenUse) int64 {
 	return id
 }
 
-// TestAddTokenUseRoundTrip writes one call and reads it back whole: every field the caller passed comes back as it went in, and the time comes back as the instant it was written rather than a wall clock read in the wrong zone.
-func TestAddTokenUseRoundTrip(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
+// TestAddTokenUse covers what AddTokenUse does to a row on the way in and back out, one property per subtest: every field round-trips as given, including an explicit time; the cache/rounds fields the cost view needs beyond the plain counts round-trip too; a call filed with no time is stamped now and a question over 200 runes is cut to 200 without splitting a character; a call that reported no usage is still stored, counted, and zeroed rather than dropped; and a call reporting only the input/output halves gets the total filed as their sum.
+func TestAddTokenUse(t *testing.T) {
+	t.Run("round trips every field, including an explicit time", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
 
-	at := time.Now().Add(-90 * time.Second).Truncate(time.Second)
-	addUse(t, store, TokenUse{
-		Provider:     "gemini",
-		Model:        "gemini-3-flash",
-		Channel:      "voice",
-		InputTokens:  1200,
-		OutputTokens: 340,
-		TotalTokens:  1540,
-		DurationMS:   2750,
-		Question:     "what did priya ask about",
-		At:           at,
+		at := time.Now().Add(-90 * time.Second).Truncate(time.Second)
+		addUse(t, store, TokenUse{
+			Provider:     "gemini",
+			Model:        "gemini-3-flash",
+			Channel:      "voice",
+			InputTokens:  1200,
+			OutputTokens: 340,
+			TotalTokens:  1540,
+			DurationMS:   2750,
+			Question:     "what did priya ask about",
+			At:           at,
+		})
+
+		got, err := store.TokenUseRecent(ctx, 10)
+		if err != nil {
+			t.Fatalf("TokenUseRecent: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("TokenUseRecent returned %d rows, want 1", len(got))
+		}
+		u := got[0]
+		if u.Provider != "gemini" || u.Model != "gemini-3-flash" || u.Channel != "voice" {
+			t.Errorf("provider/model/channel came back %q/%q/%q", u.Provider, u.Model, u.Channel)
+		}
+		if u.InputTokens != 1200 || u.OutputTokens != 340 || u.TotalTokens != 1540 {
+			t.Errorf("counts came back %d in, %d out, %d total", u.InputTokens, u.OutputTokens, u.TotalTokens)
+		}
+		if u.DurationMS != 2750 {
+			t.Errorf("duration came back %d ms, want 2750", u.DurationMS)
+		}
+		if u.Question != "what did priya ask about" {
+			t.Errorf("question came back %q", u.Question)
+		}
+		if !u.At.Equal(at) {
+			t.Errorf("time came back %v, want the instant %v that went in", u.At.UTC(), at.UTC())
+		}
 	})
 
-	got, err := store.TokenUseRecent(ctx, 10)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("TokenUseRecent returned %d rows, want 1", len(got))
-	}
-	u := got[0]
-	if u.Provider != "gemini" || u.Model != "gemini-3-flash" || u.Channel != "voice" {
-		t.Errorf("provider/model/channel came back %q/%q/%q", u.Provider, u.Model, u.Channel)
-	}
-	if u.InputTokens != 1200 || u.OutputTokens != 340 || u.TotalTokens != 1540 {
-		t.Errorf("counts came back %d in, %d out, %d total", u.InputTokens, u.OutputTokens, u.TotalTokens)
-	}
-	if u.DurationMS != 2750 {
-		t.Errorf("duration came back %d ms, want 2750", u.DurationMS)
-	}
-	if u.Question != "what did priya ask about" {
-		t.Errorf("question came back %q", u.Question)
-	}
-	if !u.At.Equal(at) {
-		t.Errorf("time came back %v, want the instant %v that went in", u.At.UTC(), at.UTC())
-	}
-}
+	t.Run("round trips cached tokens and rounds", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
 
-// TestAddTokenUseRoundTripsCachedTokensAndRounds checks the two fields the cost view needs beyond the plain counts: how many of the input tokens the provider answered out of its own prompt cache, and how many model calls the one question took.
-func TestAddTokenUseRoundTripsCachedTokensAndRounds(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
+		addUse(t, store, TokenUse{
+			Provider: "codex", Model: "gpt-5.5", Channel: "text",
+			InputTokens: 4614, OutputTokens: 80, TotalTokens: 4694,
+			CachedTokens: 3840, Rounds: 3,
+			Question: "click the merge button",
+		})
 
-	addUse(t, store, TokenUse{
-		Provider: "codex", Model: "gpt-5.5", Channel: "text",
-		InputTokens: 4614, OutputTokens: 80, TotalTokens: 4694,
-		CachedTokens: 3840, Rounds: 3,
-		Question: "click the merge button",
+		got, err := store.TokenUseRecent(ctx, 1)
+		if err != nil {
+			t.Fatalf("TokenUseRecent: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("TokenUseRecent returned %d rows, want 1", len(got))
+		}
+		if got[0].CachedTokens != 3840 {
+			t.Errorf("cached tokens came back %d, want 3840", got[0].CachedTokens)
+		}
+		if got[0].Rounds != 3 {
+			t.Errorf("rounds came back %d, want 3", got[0].Rounds)
+		}
 	})
 
-	got, err := store.TokenUseRecent(ctx, 1)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("TokenUseRecent returned %d rows, want 1", len(got))
-	}
-	if got[0].CachedTokens != 3840 {
-		t.Errorf("cached tokens came back %d, want 3840", got[0].CachedTokens)
-	}
-	if got[0].Rounds != 3 {
-		t.Errorf("rounds came back %d, want 3", got[0].Rounds)
-	}
+	t.Run("fills in the clock and caps the question", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
+
+		before := time.Now()
+		long := strings.Repeat("प", 500) // 500 runes, 1500 bytes: a byte cut would return mojibake and a wrong count
+		addUse(t, store, TokenUse{Provider: "claude", Model: "opus-5", Channel: "text", InputTokens: 10, OutputTokens: 2, TotalTokens: 12, Question: long})
+
+		got, err := store.TokenUseRecent(ctx, 1)
+		if err != nil {
+			t.Fatalf("TokenUseRecent: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("TokenUseRecent returned %d rows, want 1", len(got))
+		}
+		if n := len([]rune(got[0].Question)); n != 200 {
+			t.Errorf("stored question is %d runes, want it cut to 200", n)
+		}
+		if got[0].Question != strings.Repeat("प", 200) {
+			t.Errorf("stored question is not the first 200 runes of what was asked")
+		}
+		// Two seconds either way covers the whole-second truncation the timestamp column uses; anything larger is a zone read the wrong way round.
+		if off := got[0].At.Sub(before); off < -2*time.Second || off > 2*time.Second {
+			t.Errorf("unstamped call filed at %v, %v away from when it was written", got[0].At, off)
+		}
+	})
+
+	t.Run("records a call that reported no usage", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
+
+		addUse(t, store, TokenUse{Provider: "codex", Model: "gpt-5.5", Channel: "text", Question: "what is on my screen"})
+
+		recent, err := store.TokenUseRecent(ctx, 10)
+		if err != nil {
+			t.Fatalf("TokenUseRecent: %v", err)
+		}
+		if len(recent) != 1 {
+			t.Fatalf("a call that reported no usage left %d rows, want 1", len(recent))
+		}
+		if recent[0].InputTokens != 0 || recent[0].OutputTokens != 0 || recent[0].TotalTokens != 0 {
+			t.Errorf("a call that reported no usage came back with %+v, want zeroes", recent[0])
+		}
+
+		totals, err := store.TokenTotalsSince(ctx, time.Time{})
+		if err != nil {
+			t.Fatalf("TokenTotalsSince: %v", err)
+		}
+		if len(totals) != 1 || totals[0].Calls != 1 || totals[0].TotalTokens != 0 {
+			t.Errorf("totals over one zero-usage call = %+v, want one row, one call, zero tokens", totals)
+		}
+	})
+
+	t.Run("sums the total when the provider only reported the halves", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
+
+		addUse(t, store, TokenUse{Provider: "ollama", Model: "qwen3", Channel: "text", InputTokens: 100, OutputTokens: 20})
+
+		got, err := store.TokenUseRecent(ctx, 1)
+		if err != nil {
+			t.Fatalf("TokenUseRecent: %v", err)
+		}
+		if len(got) != 1 || got[0].TotalTokens != 120 {
+			t.Errorf("total came back %+v, want 120 summed from the halves", got)
+		}
+	})
 }
 
 // TestTokenTotalsSinceSumsCachedInputTokens checks that a window's cached-token count is the sum over its calls, the same way every other count on TokenTotal already is.
@@ -120,77 +189,6 @@ func TestTokenTotalsSinceSumsCachedInputTokens(t *testing.T) {
 	}
 	if gemini.CachedInputTokens != 0 {
 		t.Errorf("gemini cached input = %d, want 0: it reports no cache", gemini.CachedInputTokens)
-	}
-}
-
-// TestAddTokenUseFillsInTheClockAndCapsTheQuestion checks the two things AddTokenUse does to a row on the way in: a call filed with no time is stamped now, and a question longer than 200 runes is cut to 200 so one pasted page cannot bloat the ledger. Runes, not bytes — the cut must not land inside a character.
-func TestAddTokenUseFillsInTheClockAndCapsTheQuestion(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	before := time.Now()
-	long := strings.Repeat("प", 500) // 500 runes, 1500 bytes: a byte cut would return mojibake and a wrong count
-	addUse(t, store, TokenUse{Provider: "claude", Model: "opus-5", Channel: "text", InputTokens: 10, OutputTokens: 2, TotalTokens: 12, Question: long})
-
-	got, err := store.TokenUseRecent(ctx, 1)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("TokenUseRecent returned %d rows, want 1", len(got))
-	}
-	if n := len([]rune(got[0].Question)); n != 200 {
-		t.Errorf("stored question is %d runes, want it cut to 200", n)
-	}
-	if got[0].Question != strings.Repeat("प", 200) {
-		t.Errorf("stored question is not the first 200 runes of what was asked")
-	}
-	// Two seconds either way covers the whole-second truncation the timestamp column uses; anything larger is a zone read the wrong way round.
-	if off := got[0].At.Sub(before); off < -2*time.Second || off > 2*time.Second {
-		t.Errorf("unstamped call filed at %v, %v away from when it was written", got[0].At, off)
-	}
-}
-
-// TestAddTokenUseRecordsACallThatReportedNoUsage checks the row a provider that returns no usage metadata still leaves behind: it is stored, it is counted as a call, and its tokens are zero rather than the write being rejected or silently dropped.
-func TestAddTokenUseRecordsACallThatReportedNoUsage(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	addUse(t, store, TokenUse{Provider: "codex", Model: "gpt-5.5", Channel: "text", Question: "what is on my screen"})
-
-	recent, err := store.TokenUseRecent(ctx, 10)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(recent) != 1 {
-		t.Fatalf("a call that reported no usage left %d rows, want 1", len(recent))
-	}
-	if recent[0].InputTokens != 0 || recent[0].OutputTokens != 0 || recent[0].TotalTokens != 0 {
-		t.Errorf("a call that reported no usage came back with %+v, want zeroes", recent[0])
-	}
-
-	totals, err := store.TokenTotalsSince(ctx, time.Time{})
-	if err != nil {
-		t.Fatalf("TokenTotalsSince: %v", err)
-	}
-	if len(totals) != 1 || totals[0].Calls != 1 || totals[0].TotalTokens != 0 {
-		t.Errorf("totals over one zero-usage call = %+v, want one row, one call, zero tokens", totals)
-	}
-}
-
-// TestAddTokenUseSumsTheTotalWhenTheProviderOnlyReportedTheHalves checks the one derivation on the write path: a provider that reports input and output but no total gets the sum filed for it, so the totals of a mixed set of providers add up.
-func TestAddTokenUseSumsTheTotalWhenTheProviderOnlyReportedTheHalves(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	addUse(t, store, TokenUse{Provider: "ollama", Model: "qwen3", Channel: "text", InputTokens: 100, OutputTokens: 20})
-
-	got, err := store.TokenUseRecent(ctx, 1)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(got) != 1 || got[0].TotalTokens != 120 {
-		t.Errorf("total came back %+v, want 120 summed from the halves", got)
 	}
 }
 

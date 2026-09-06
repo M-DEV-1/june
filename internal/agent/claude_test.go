@@ -89,27 +89,7 @@ func TestClaudeToolServer_InitializesAndListsTheAskTools(t *testing.T) {
 }
 
 // A tools/call runs the tool through the ask's own gate, answers with its result as MCP text content, and records the call as a tool hop the trace can carry.
-func TestClaudeToolServer_RunsAToolThroughTheGateAndRecordsTheHop(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	s, err := a.startClaudeToolServer(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	call := rpcPost(t, s, "tools/call", 2, map[string]any{"name": "shell_exec", "arguments": map[string]any{"command": "ls"}})
-	content := call["result"].(map[string]any)["content"].([]any)
-	text := content[0].(map[string]any)["text"].(string)
-	if !strings.Contains(text, "not available in an ask") {
-		t.Errorf("result text = %q", text)
-	}
-	hops := s.Hops()
-	if len(hops) != 1 || hops[0].Name != "shell_exec" || hops[0].Args["command"] != "ls" || hops[0].Result != text {
-		t.Errorf("hops = %+v", hops)
-	}
-}
-
-// Past the step cap the server stops running tools and says so, so a model that keeps calling cannot spend the user's machine without end.
+// Every call runs the tool through the same gate an ask uses and records the hop with its args and result, and past the step cap the server stops running tools and says so, so a model that keeps calling cannot spend the user's machine without end.
 func TestClaudeToolServer_StopsAtTheStepCap(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	s, err := a.startClaudeToolServer(t.Context())
@@ -118,16 +98,26 @@ func TestClaudeToolServer_StopsAtTheStepCap(t *testing.T) {
 	}
 	defer s.Close()
 
-	var last string
+	var first, last string
 	for i := 0; i < maxAskIterations+1; i++ {
 		call := rpcPost(t, s, "tools/call", 3, map[string]any{"name": "shell_exec", "arguments": map[string]any{"command": "ls"}})
 		last = call["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+		if i == 0 {
+			first = last
+		}
+	}
+	if !strings.Contains(first, "not available in an ask") {
+		t.Errorf("the first call's result text = %q", first)
 	}
 	if !strings.Contains(last, "no steps left") {
 		t.Errorf("the call past the cap answered %q", last)
 	}
-	if len(s.Hops()) != maxAskIterations {
-		t.Errorf("%d hops recorded, cap is %d", len(s.Hops()), maxAskIterations)
+	hops := s.Hops()
+	if len(hops) != maxAskIterations {
+		t.Errorf("%d hops recorded, cap is %d", len(hops), maxAskIterations)
+	}
+	if hops[0].Name != "shell_exec" || hops[0].Args["command"] != "ls" || hops[0].Result != first {
+		t.Errorf("first hop = %+v", hops[0])
 	}
 }
 
@@ -279,12 +269,23 @@ func TestAskClaude_RunsToolsAndFillsTheTrace(t *testing.T) {
 }
 
 // The arguments the CLI is run with keep the subscription login, offer only Ora's own tools, and shut out the user's own settings, hooks, skills and MCP servers, because the prompt carries text nobody vetted.
+// One askClaude call has to get the CLI invocation right in three unrelated ways at once: run under the subscription with only Ora's tools allowed, and do it through a temp dir that exists while the CLI is meant to be reading it and is gone once the ask ends (see TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv for what that dir must hold).
 func TestAskClaude_RunsTheCLIUnderTheSubscriptionWithOnlyOraTools(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	var seen []string
-	var prompt string
+	var prompt, dir string
+	var existedDuringTheRun bool
 	run := func(ctx context.Context, args []string, stdin string) ([]byte, error) {
 		seen, prompt = args, stdin
+		for i, arg := range args {
+			if arg == "--mcp-config" {
+				dir = filepath.Dir(args[i+1])
+			}
+		}
+		if dir != "" {
+			_, err := os.Stat(dir)
+			existedDuringTheRun = err == nil
+		}
 		return []byte(`{"result":"done","is_error":false}`), nil
 	}
 	if _, err := a.askClaude(t.Context(), run, "sonnet", nil, "hello"); err != nil {
@@ -304,6 +305,16 @@ func TestAskClaude_RunsTheCLIUnderTheSubscriptionWithOnlyOraTools(t *testing.T) 
 	}
 	if !strings.HasSuffix(prompt, "hello") {
 		t.Errorf("the question is not the last thing the model reads: %q", prompt)
+	}
+
+	if dir == "" {
+		t.Fatal("never saw the mcp config path")
+	}
+	if !existedDuringTheRun {
+		t.Fatal("the temp dir did not exist while the CLI was meant to be reading it")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the ask's temp dir still exists after the ask ended: %v", err)
 	}
 }
 
@@ -364,37 +375,6 @@ func TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv(t *testing.T) {
 	}
 	if strings.Contains(joined, "--system-prompt ") {
 		t.Errorf("the system prompt is still on argv rather than in a file: %s", joined)
-	}
-}
-
-// The temp directory holding the two files is removed once the ask ends, so no stray file carrying the user's personal context survives the process.
-func TestAskClaude_RemovesItsTempDirWhenTheAskEnds(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	var dir string
-	var existedDuringTheRun bool
-	run := func(ctx context.Context, args []string, stdin string) ([]byte, error) {
-		for i, arg := range args {
-			if arg == "--mcp-config" {
-				dir = filepath.Dir(args[i+1])
-			}
-		}
-		if dir != "" {
-			_, err := os.Stat(dir)
-			existedDuringTheRun = err == nil
-		}
-		return []byte(`{"result":"done","is_error":false}`), nil
-	}
-	if _, err := a.askClaude(t.Context(), run, "sonnet", nil, "hello"); err != nil {
-		t.Fatal(err)
-	}
-	if dir == "" {
-		t.Fatal("never saw the mcp config path")
-	}
-	if !existedDuringTheRun {
-		t.Fatal("the temp dir did not exist while the CLI was meant to be reading it")
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("the ask's temp dir still exists after the ask ended: %v", err)
 	}
 }
 
@@ -514,19 +494,15 @@ func TestClaudeToolServer_SendsNoImageForAToolThatTookNone(t *testing.T) {
 	}
 }
 
-// A CLI error long enough to be cut is cut on a rune boundary, not a byte one: 299 ASCII characters followed by a two-byte rune used to be sliced through the middle of that rune and hand the log invalid UTF-8.
-func TestClaudeHead_CutsOnARuneBoundary(t *testing.T) {
-	got := claudeHead(strings.Repeat("a", 299) + "é" + "tail")
-	if !utf8.ValidString(got) {
+// A CLI error long enough to be cut is cut on a rune boundary, not a byte one: 299 ASCII characters followed by a two-byte rune used to be sliced through the middle of that rune and hand the log invalid UTF-8. A short line has its whitespace squeezed out but comes back whole, with no ellipsis.
+func TestClaudeHead(t *testing.T) {
+	long := strings.Repeat("a", 299) + "é" + "tail"
+	if got := claudeHead(long); !utf8.ValidString(got) {
 		t.Errorf("claudeHead returned invalid UTF-8: %q", got)
 	}
-	if want := strings.Repeat("a", 299) + "é" + "…"; got != want {
+	if got, want := claudeHead(long), strings.Repeat("a", 299)+"é"+"…"; got != want {
 		t.Errorf("claudeHead = %q, want the first 300 runes plus an ellipsis", got)
 	}
-}
-
-// Whitespace is still squeezed out, and a short line comes back whole with no ellipsis.
-func TestClaudeHead_FlattensAndLeavesShortTextAlone(t *testing.T) {
 	if got := claudeHead("  error:\n  could not\tstart\n"); got != "error: could not start" {
 		t.Errorf("claudeHead = %q, want the words on one line", got)
 	}
