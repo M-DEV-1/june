@@ -167,99 +167,129 @@ func TestJSONSchema_KeepsArraysAndNestedObjects(t *testing.T) {
 }
 
 // A streamed round is read from the SSE events: every finished output item is kept for echoing back, the answer text comes from the message item, and the model and usage come from response.completed.
-func TestParseCodexStream_CollectsItemsTextAndUsage(t *testing.T) {
-	body := sse(
-		`{"type":"response.created","response":{"id":"resp_1"}}`,
-		`{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}`,
-		`{"type":"response.output_text.delta","delta":"Hello"}`,
-		`{"type":"response.output_text.delta","delta":" there"}`,
-		`{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello there","annotations":[]}]}}`,
-		`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5-2026-06-01","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`,
-	)
-	round, err := parseCodexStream(strings.NewReader(body), nil)
-	if err != nil {
-		t.Fatal(err)
+// TestParseCodexStream drives parseCodexStream over one SSE stream per row and checks whatever that stream's shape is meant to prove: the happy path collects every item, joins the text deltas, and reads the model and usage off response.completed; a stream with no message item falls back to the deltas alone; a function_call item becomes a call that also stays in Items so the next round can echo it back; a payload split across several data lines is joined rather than dropped; and a cut-short turn, a failed response, a top-level error event and a stream that never reaches response.completed are all reported as the round's error rather than a false answer.
+func TestParseCodexStream(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		check func(t *testing.T, round codexRound, err error)
+	}{
+		{
+			name: "collects items, joins text deltas and reads model and usage",
+			body: sse(
+				`{"type":"response.created","response":{"id":"resp_1"}}`,
+				`{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}`,
+				`{"type":"response.output_text.delta","delta":"Hello"}`,
+				`{"type":"response.output_text.delta","delta":" there"}`,
+				`{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello there","annotations":[]}]}}`,
+				`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5-2026-06-01","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`,
+			),
+			check: func(t *testing.T, round codexRound, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if round.Text != "Hello there" {
+					t.Errorf("Text = %q", round.Text)
+				}
+				if len(round.Items) != 2 || !strings.Contains(string(round.Items[0]), `"reasoning"`) {
+					t.Errorf("Items = %s", round.Items)
+				}
+				if len(round.Calls) != 0 {
+					t.Errorf("Calls = %+v", round.Calls)
+				}
+				if round.Model != "gpt-5.5-2026-06-01" || round.Usage.InputTokens != 10 || round.Usage.OutputTokens != 5 || round.Usage.TotalTokens != 15 {
+					t.Errorf("Model = %q Usage = %+v", round.Model, round.Usage)
+				}
+			},
+		},
+		{
+			name: "no message item: the text deltas are the answer",
+			body: sse(`{"type":"response.output_text.delta","delta":"a"}`, `{"type":"response.output_text.delta","delta":"b"}`, `{"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}`),
+			check: func(t *testing.T, round codexRound, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if round.Text != "ab" {
+					t.Errorf("Text = %q", round.Text)
+				}
+			},
+		},
+		{
+			name: "a function_call item becomes a call and stays in Items",
+			body: sse(
+				`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"observe_screen","arguments":"{}","status":"completed"}}`,
+				`{"type":"response.completed","response":{"model":"gpt-5.5","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+			),
+			check: func(t *testing.T, round codexRound, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(round.Calls) != 1 || round.Calls[0] != (codexCall{ID: "fc_1", CallID: "call_1", Name: "observe_screen", Arguments: "{}"}) {
+					t.Errorf("Calls = %+v", round.Calls)
+				}
+				if len(round.Items) != 1 {
+					t.Errorf("Items = %s", round.Items)
+				}
+			},
+		},
+		{
+			name: "a payload split across several data lines is joined, not dropped",
+			body: "data: {\"type\":\"response.output_item.done\",\n" +
+				"data:  \"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"joined\"}]}}\n\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.5\",\"usage\":{}}}\n\n",
+			check: func(t *testing.T, round codexRound, err error) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if round.Text != "joined" {
+					t.Errorf("Text = %q", round.Text)
+				}
+			},
+		},
+		{
+			name: "a turn cut short by the token limit is a failure naming why",
+			body: sse(
+				`{"type":"response.output_text.delta","delta":"half a sen"}`,
+				`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`),
+			check: func(t *testing.T, round codexRound, err error) {
+				if err == nil || !strings.Contains(err.Error(), "max_output_tokens") {
+					t.Errorf("err = %v", err)
+				}
+			},
+		},
+		{
+			name: "a failed response surfaces its own error message",
+			body: sse(`{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"}}}`),
+			check: func(t *testing.T, round codexRound, err error) {
+				if err == nil || !strings.Contains(err.Error(), "boom") {
+					t.Errorf("response.failed: %v", err)
+				}
+			},
+		},
+		{
+			name: "a top-level error event surfaces its message",
+			body: sse(`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`),
+			check: func(t *testing.T, round codexRound, err error) {
+				if err == nil || !strings.Contains(err.Error(), "slow down") {
+					t.Errorf("error event: %v", err)
+				}
+			},
+		},
+		{
+			name: "a stream cut off before response.completed is an error",
+			body: sse(`{"type":"response.output_text.delta","delta":"half"}`),
+			check: func(t *testing.T, round codexRound, err error) {
+				if err == nil {
+					t.Error("a stream cut off before response.completed must be an error")
+				}
+			},
+		},
 	}
-	if round.Text != "Hello there" {
-		t.Errorf("Text = %q", round.Text)
-	}
-	if len(round.Items) != 2 || !strings.Contains(string(round.Items[0]), `"reasoning"`) {
-		t.Errorf("Items = %s", round.Items)
-	}
-	if len(round.Calls) != 0 {
-		t.Errorf("Calls = %+v", round.Calls)
-	}
-	if round.Model != "gpt-5.5-2026-06-01" || round.Usage.InputTokens != 10 || round.Usage.OutputTokens != 5 || round.Usage.TotalTokens != 15 {
-		t.Errorf("Model = %q Usage = %+v", round.Model, round.Usage)
-	}
-}
-
-// When no message item arrives the text deltas are the answer.
-func TestParseCodexStream_TextFromDeltasWhenNoMessageItem(t *testing.T) {
-	round, err := parseCodexStream(strings.NewReader(sse(`{"type":"response.output_text.delta","delta":"a"}`, `{"type":"response.output_text.delta","delta":"b"}`, `{"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}`)), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if round.Text != "ab" {
-		t.Errorf("Text = %q", round.Text)
-	}
-}
-
-// A function_call item becomes a call with its id, call_id, name and raw arguments, and stays in Items so the next round can echo it back.
-func TestParseCodexStream_ReturnsFunctionCalls(t *testing.T) {
-	body := sse(
-		`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"observe_screen","arguments":"{}","status":"completed"}}`,
-		`{"type":"response.completed","response":{"model":"gpt-5.5","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
-	)
-	round, err := parseCodexStream(strings.NewReader(body), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(round.Calls) != 1 || round.Calls[0] != (codexCall{ID: "fc_1", CallID: "call_1", Name: "observe_screen", Arguments: "{}"}) {
-		t.Errorf("Calls = %+v", round.Calls)
-	}
-	if len(round.Items) != 1 {
-		t.Errorf("Items = %s", round.Items)
-	}
-}
-
-// A turn the backend cut short is a failure carrying the reason, never a finished answer, because handing back half a sentence as though it were complete is worse than saying nothing.
-func TestParseCodexStream_IncompleteIsAFailure(t *testing.T) {
-	_, err := parseCodexStream(strings.NewReader(sse(
-		`{"type":"response.output_text.delta","delta":"half a sen"}`,
-		`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`)), nil)
-	if err == nil || !strings.Contains(err.Error(), "max_output_tokens") {
-		t.Errorf("err = %v", err)
-	}
-}
-
-// One event's payload may arrive as several data lines, which the stream format says to join with newlines; parsing them one at a time would drop the event and misreport the stream as cut off.
-func TestParseCodexStream_JoinsMultiLineData(t *testing.T) {
-	body := "data: {\"type\":\"response.output_item.done\",\n" +
-		"data:  \"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"joined\"}]}}\n\n" +
-		"data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.5\",\"usage\":{}}}\n\n"
-	round, err := parseCodexStream(strings.NewReader(body), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if round.Text != "joined" {
-		t.Errorf("Text = %q", round.Text)
-	}
-}
-
-// A failed response or an error event is the round's error, carrying the backend's message; a stream that ends without response.completed is an error too.
-func TestParseCodexStream_SurfacesFailure(t *testing.T) {
-	_, err := parseCodexStream(strings.NewReader(sse(`{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"}}}`)), nil)
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Errorf("response.failed: %v", err)
-	}
-	_, err = parseCodexStream(strings.NewReader(sse(`{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`)), nil)
-	if err == nil || !strings.Contains(err.Error(), "slow down") {
-		t.Errorf("error event: %v", err)
-	}
-	_, err = parseCodexStream(strings.NewReader(sse(`{"type":"response.output_text.delta","delta":"half"}`)), nil)
-	if err == nil {
-		t.Error("a stream cut off before response.completed must be an error")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			round, err := parseCodexStream(strings.NewReader(c.body), nil)
+			c.check(t, round, err)
+		})
 	}
 }
 
@@ -835,6 +865,7 @@ func TestAskCodex_KeepsOnlyTheNewestScreenListing(t *testing.T) {
 }
 
 // Once a turn has called a screen tool it is a screen task, and the handshake it opened with — how to talk, what memory is for, the personal context block — is no longer what the model needs. From that round on the instruction is the screen-task guidance and the stop line alone, which is both far shorter and byte-identical from one ask to the next, so the prompt cache can match it.
+// A question that says nothing about a screen still opens on the whole handshake and the whole tool list — it may turn out to be a memory question, and the screen prompt teaches nothing about who the people in the user's life are — but once the first round's own observe_screen call proves it a screen task, the next round drops the conversational handshake for the far shorter screen-task guidance and the stop line, and narrows the tool list to the screen set.
 func TestAskCodex_TrimsTheInstructionOnceItIsAScreenTask(t *testing.T) {
 	var bodies []map[string]any
 	c := codexScript(t, &bodies, observeRound("1"), answerRound)
@@ -847,6 +878,10 @@ func TestAskCodex_TrimsTheInstructionOnceItIsAScreenTask(t *testing.T) {
 	if !strings.Contains(first, "Talk like a sharp friend") {
 		t.Fatalf("the first round must still carry the whole handshake, got %d bytes", len(first))
 	}
+	if got := len(bodies[0]["tools"].([]any)); got != len(a.askToolDeclarations()) {
+		t.Errorf("round 0 offered %d tools, want every one of them", got)
+	}
+
 	second := bodies[1]["instructions"].(string)
 	if strings.Contains(second, "Talk like a sharp friend") {
 		t.Errorf("a screen round still carried the conversational handshake, %d bytes", len(second))
@@ -859,6 +894,25 @@ func TestAskCodex_TrimsTheInstructionOnceItIsAScreenTask(t *testing.T) {
 	}
 	if len(second) >= len(first)/2 {
 		t.Errorf("the screen instruction is %d bytes against the handshake's %d; it must be far shorter", len(second), len(first))
+	}
+
+	names := func(body map[string]any) []string {
+		var out []string
+		for _, tool := range body["tools"].([]any) {
+			out = append(out, tool.(map[string]any)["name"].(string))
+		}
+		return out
+	}
+	screenNames := names(bodies[1])
+	for _, want := range []string{"observe_screen", "click", "scroll_to", "type_text", "point_at", "open_url"} {
+		if !slices.Contains(screenNames, want) {
+			t.Errorf("a screen round must still offer %s, offered %v", want, screenNames)
+		}
+	}
+	for _, gone := range []string{"query_memory", "query_store", "recall", "personal_context", "revise", "action_items"} {
+		if slices.Contains(screenNames, gone) {
+			t.Errorf("a screen round still offered %s", gone)
+		}
 	}
 }
 
@@ -929,23 +983,6 @@ func TestAskCodex_ScreenAskSendsOnePrefixOnEveryRound(t *testing.T) {
 	}
 	if got := len(bodies[0]["tools"].([]any)); got != len(screenRoundTools) {
 		t.Errorf("round 0 offered %d tools, want the %d screen ones", got, len(screenRoundTools))
-	}
-}
-
-// A question that says nothing about a screen still opens on the whole handshake and the whole tool list: it may turn out to be a memory question, and the screen prompt teaches nothing about who the people in the user's life are.
-func TestAskCodex_KeepsTheHandshakeWhenTheQuestionNamesNoScreenTask(t *testing.T) {
-	var bodies []map[string]any
-	c := codexScript(t, &bodies, observeRound("1"), answerRound)
-	a, _ := observingAgent(t)
-
-	if _, err := a.askCodex(t.Context(), c, nil, "what did we settle on for the venue"); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(bodies[0]["instructions"].(string), "Talk like a sharp friend") {
-		t.Errorf("round 0 must still carry the whole handshake, got %d bytes", len(bodies[0]["instructions"].(string)))
-	}
-	if got := len(bodies[0]["tools"].([]any)); got != len(a.askToolDeclarations()) {
-		t.Errorf("round 0 offered %d tools, want every one of them", got)
 	}
 }
 
@@ -1060,39 +1097,7 @@ func TestAskCodex_SendsAStablePromptCacheKeyAcrossAsks(t *testing.T) {
 	}
 }
 
-// The tool definitions are 3,091 tokens, measured against the real backend on 2026-09-05, and they are re-sent on every round. Two thirds of them describe memory tools a round spent pressing a button has no use for, so once a turn is a screen task the definitions sent are the screen tools and open_url. The turn keeps the whole list whenever it has already called something outside that set, because every call it made is echoed into every later round and an answer to a call the request no longer declares is one the backend can refuse.
-func TestAskCodex_OffersOnlyTheScreenToolsOnAScreenRound(t *testing.T) {
-	var bodies []map[string]any
-	c := codexScript(t, &bodies, observeRound("1"), answerRound)
-	a, _ := observingAgent(t)
-	if _, err := a.askCodex(t.Context(), c, nil, "what did we settle on for the venue"); err != nil {
-		t.Fatal(err)
-	}
-	names := func(body map[string]any) []string {
-		var out []string
-		for _, tool := range body["tools"].([]any) {
-			out = append(out, tool.(map[string]any)["name"].(string))
-		}
-		return out
-	}
-	first := names(bodies[0])
-	if len(first) != len(a.askToolDeclarations()) {
-		t.Fatalf("the first round offered %d tools, want every one of them", len(first))
-	}
-	second := names(bodies[1])
-	for _, want := range []string{"observe_screen", "click", "scroll_to", "type_text", "point_at", "open_url"} {
-		if !slices.Contains(second, want) {
-			t.Errorf("a screen round must still offer %s, offered %v", want, second)
-		}
-	}
-	for _, gone := range []string{"query_memory", "query_store", "recall", "personal_context", "revise", "action_items"} {
-		if slices.Contains(second, gone) {
-			t.Errorf("a screen round still offered %s", gone)
-		}
-	}
-}
-
-// A turn that has already called a memory tool keeps every definition for the rest of its rounds, whatever it does on the screen afterwards: the call it made is echoed back into every later round, and answering it with a tool the request no longer declares is a request the backend can reject.
+// A turn that has already called a memory tool keeps every definition for the rest of its rounds, whatever it does on the screen afterwards: the call it made is echoed back into every later round, and answering it with a tool the request no longer declares is a request the backend can reject. (The tool definitions are 3,091 tokens, measured against the real backend on 2026-09-05, and two thirds of them describe memory tools a screen round has no use for — see TestAskCodex_TrimsTheInstructionOnceItIsAScreenTask for the round that narrows to the screen set and open_url.)
 func TestAskCodex_KeepsEveryToolOnceOneOutsideTheScreenSetHasRun(t *testing.T) {
 	var bodies []map[string]any
 	c := codexScript(t, &bodies,

@@ -14,6 +14,7 @@ import (
 
 	"ora/internal/act"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // fakeExec is a tool executor that answers from a script instead of touching the screen: every call is recorded, observe_screen and wait_for get canned answers, and anything else returns what the script says.
@@ -152,11 +153,7 @@ func doneReply(say string) string {
 // newRunner builds a Runner over an in-memory store with the given executor and model, and collects every event it emits.
 func newRunner(t *testing.T, exec Executor, m Model) (*Runner, *db.Store, func() []Event) {
 	t.Helper()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.Open(t)
 	var mu sync.Mutex
 	var events []Event
 	r := New(store, exec, map[string]Model{"fake": m}, "fake", func(ev Event) {
@@ -191,7 +188,7 @@ func waitState(t *testing.T, r *Runner, id string, states ...State) Job {
 	return Job{}
 }
 
-// TestRunner_HappyPath checks the whole loop on a goal that works first time: one step is decided, acted on, verified, and the job ends done with what it said, its steps recorded and its token spend added up.
+// TestRunner_HappyPath checks the whole loop on a goal that works first time: one step is decided, acted on, verified, and the job ends done with what it said, its steps recorded (with a check that did not already hold) and its token spend added up. It also checks the pre-reading of a step's check is one screen walk rather than a wait_for poll, so a job does not pay for verification before it has acted at all.
 func TestRunner_HappyPath(t *testing.T) {
 	exec := &fakeExec{}
 	r, store, events := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("It is playing S16 E8.")))
@@ -206,8 +203,8 @@ func TestRunner_HappyPath(t *testing.T) {
 	if job.Say != "It is playing S16 E8." {
 		t.Errorf("Say = %q, want the model's closing words", job.Say)
 	}
-	if len(job.Steps) != 1 || job.Steps[0].Outcome != "pass" {
-		t.Fatalf("steps = %+v, want one verified step", job.Steps)
+	if len(job.Steps) != 1 || job.Steps[0].Outcome != "pass" || job.Steps[0].HeldBefore {
+		t.Fatalf("steps = %+v, want one plain verified step whose check did not already hold", job.Steps)
 	}
 	if job.Spend.Rounds != 2 || job.Spend.Input != 2000 || job.Spend.Cached != 200 || job.Spend.Output != 100 {
 		t.Errorf("spend = %+v, want two rounds summed", job.Spend)
@@ -219,6 +216,19 @@ func TestRunner_HappyPath(t *testing.T) {
 	want := []string{"observe_screen", "click", "wait_for", "observe_screen"}
 	if strings.Join(calls, ",") != strings.Join(want, ",") {
 		t.Errorf("tool calls = %v, want %v", calls, want)
+	}
+	// The pre-reading is one walk of the screen matched against the check, not a wait_for: wait_for polls for up to five seconds and, on a list check, walks the window a second time to see whether another one came to the front, and a job used to pay both on every step before it had acted at all.
+	waits := 0
+	for _, name := range calls {
+		if name == "wait_for" {
+			waits++
+		}
+	}
+	if waits != 1 {
+		t.Errorf("wait_for was called %d time(s) for one step, want only the verification", waits)
+	}
+	if got := exec.preChecksSeen(); len(got) != 1 || got[0] != "S16 E8" {
+		t.Errorf("pre-readings = %v, want one, of the step's own check", got)
 	}
 
 	// The job is on disk under its own id, in its end state, so a restart never picks it up again.
@@ -325,11 +335,7 @@ func TestRunner_StopMidStep(t *testing.T) {
 
 // TestRunner_ResumeFromCheckpoint checks a job a fresh Runner has never seen — the shape a daemon restart leaves behind — is picked up from its stored checkpoint, keeping the steps already done rather than starting the goal again.
 func TestRunner_ResumeFromCheckpoint(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 
 	// The checkpoint a daemon that died mid-job would have left: one step done and verified, the plan and the progress summary written.
 	saved := Job{
@@ -363,31 +369,6 @@ func TestRunner_ResumeFromCheckpoint(t *testing.T) {
 	}
 	if job.Spend.Rounds < 4 {
 		t.Errorf("rounds = %d, want the checkpointed spend carried forward", job.Spend.Rounds)
-	}
-}
-
-// TestRunner_BudgetExhaustionEndsTruthfully checks a job that runs out of steps stops, says how far it got in plain words rather than claiming the goal was reached, and names what it was about to do next.
-func TestRunner_BudgetExhaustionEndsTruthfully(t *testing.T) {
-	exec := &fakeExec{}
-	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8")))
-	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: time.Minute, InputTokens: 200000, Steps: 3}})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	job := waitState(t, r, id, Failed, Done, Stuck)
-	if job.State != Failed {
-		t.Fatalf("state = %q, want failed when the budget is spent", job.State)
-	}
-	if len(job.Steps) != 3 {
-		t.Fatalf("steps = %d, want the budget's 3", len(job.Steps))
-	}
-	for _, want := range []string{"3 step", "play S16 E8"} {
-		if !strings.Contains(job.Say, want) {
-			t.Errorf("the closing words %q do not mention %q", job.Say, want)
-		}
-	}
-	if strings.Contains(strings.ToLower(job.Say), "done") {
-		t.Errorf("the closing words %q claim the job finished", job.Say)
 	}
 }
 
@@ -447,11 +428,7 @@ func TestRunner_PauseAndResume(t *testing.T) {
 
 // TestRunner_NewJobIdsCarryOnFromTheStore checks a fresh Runner numbers its first job past the highest id already on disk, so a daemon restart never hands a new job an id an older one still holds and rewrites that job's row under it.
 func TestRunner_NewJobIdsCarryOnFromTheStore(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	if err := store.SaveActJob(context.Background(), db.ActJobRow{ID: "act-9", Goal: "an older job", State: string(Done), Checkpoint: []byte(`{"id":"act-9"}`)}); err != nil {
 		t.Fatalf("SaveActJob: %v", err)
 	}
@@ -473,11 +450,7 @@ func TestRunner_NewJobIdsCarryOnFromTheStore(t *testing.T) {
 
 // TestRunner_ResumeClaimsTheJobBeforeReadingTheCheckpoint checks the live slot is taken under one lock before the store read, so a second Resume landing while the first is still reading is refused rather than launching the same job twice against the same screen.
 func TestRunner_ResumeClaimsTheJobBeforeReadingTheCheckpoint(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	saved := Job{ID: "act-7", Goal: "play S16 E8", Brain: "fake", State: Stepping, Budget: DefaultBudget()}
 	blob, _ := json.Marshal(saved)
 	if err := store.SaveActJob(context.Background(), db.ActJobRow{ID: saved.ID, Goal: saved.Goal, Brain: "fake", State: string(Stepping), Checkpoint: blob}); err != nil {
@@ -548,11 +521,7 @@ func (p *peekExec) ExecuteAskTool(ctx context.Context, name string, args map[str
 
 // TestRunner_ActionIsCheckpointedBeforeItIsChecked checks the step is on disk the moment its action has run, before the check: a daemon that dies between the two comes back knowing the action happened rather than taking it a second time on the real screen.
 func TestRunner_ActionIsCheckpointedBeforeItIsChecked(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	exec := &peekExec{store: store, id: "act-1"}
 	r := New(store, exec, map[string]Model{"fake": script(stepReply("click", "S16 E8"), doneReply("Playing."))}, "fake", nil)
 	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
@@ -776,11 +745,7 @@ func TestRunner_FieldHoldsExpectOfTypedTextIsRedacted(t *testing.T) {
 
 // TestRunner_ResumeAfterRedactedFieldHoldsStepDoesNotReverify checks a checkpointed step whose Expect was already redacted comes back through resume the same way any other finished step does: never checked again, only described. A daemon that saved this checkpoint has already recorded pass or fail for it, so a resumed run must ask the model for a fresh decision rather than re-running wait_for against the marker text.
 func TestRunner_ResumeAfterRedactedFieldHoldsStepDoesNotReverify(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 
 	saved := Job{
 		ID: "act-9", Goal: "type the passphrase", Brain: "fake", State: Stepping,
@@ -840,7 +805,7 @@ func TestRunner_SaveRefusesACheckpointThatWillNotMarshal(t *testing.T) {
 	}
 }
 
-// TestRunner_ResumeRaisesASpentBudget checks a job that ended on its step budget comes back when it is resumed with a bigger one, and that the fields the caller left at zero keep what the checkpoint had.
+// TestRunner_ResumeRaisesASpentBudget checks a job that ended on its step budget comes back when it is resumed with a bigger one, and that the fields the caller left at zero keep what the checkpoint had. It also checks that running out of steps says how far the job got in plain words rather than claiming the goal was reached, and names what it was about to do next.
 func TestRunner_ResumeRaisesASpentBudget(t *testing.T) {
 	exec := &fakeExec{}
 	r, _, _ := newRunner(t, exec, script(
@@ -857,6 +822,14 @@ func TestRunner_ResumeRaisesASpentBudget(t *testing.T) {
 	job := waitState(t, r, id, Failed, Done, Stuck)
 	if job.State != Failed || len(job.Steps) != 3 {
 		t.Fatalf("job = %q with %d steps, want failed on the three-step budget", job.State, len(job.Steps))
+	}
+	for _, want := range []string{"3 step", "play S16 E8"} {
+		if !strings.Contains(job.Say, want) {
+			t.Errorf("the closing words %q do not mention %q", job.Say, want)
+		}
+	}
+	if strings.Contains(strings.ToLower(job.Say), "done") {
+		t.Errorf("the closing words %q claim the job finished", job.Say)
 	}
 	if err := r.Resume(context.Background(), id, Budget{Steps: 12}); err != nil {
 		t.Fatalf("Resume with a raised budget: %v", err)
@@ -898,11 +871,7 @@ func TestRunner_SummaryIsRewrittenEveryFiveRounds(t *testing.T) {
 		mu.Unlock()
 		return "Two episodes tried. The show page is open.", Usage{Model: "cheap", Input: 300, Output: 20}, nil
 	}
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	r := New(store, exec, map[string]Model{
 		"fake":  script(stepReply("click", "S16 E8")),
 		"cheap": cheap,
@@ -1234,36 +1203,10 @@ func TestRunner_AStopLineRefusalIsPutToTheUser(t *testing.T) {
 	}
 }
 
-// TestRunner_PauseIsCheckpointed checks a pause reaches disk, so a daemon that stops while a job is held comes back knowing it was held rather than resuming it into the screen the user had just asked it to leave alone.
-func TestRunner_PauseIsCheckpointed(t *testing.T) {
-	exec := &fakeExec{}
-	slow := func(ctx context.Context, prompt string) (string, Usage, error) {
-		time.Sleep(20 * time.Millisecond)
-		return stepReply("click", "S16 E8"), Usage{Model: "fake", Input: 100}, nil
-	}
-	r, store, _ := newRunner(t, exec, slow)
-	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Pause(id); err != nil {
-		t.Fatalf("Pause: %v", err)
-	}
-	row, err := store.ActJob(context.Background(), id)
-	if err != nil {
-		t.Fatalf("ActJob: %v", err)
-	}
-	if row.State != string(Paused) {
-		t.Errorf("the stored row says %q, want the pause on disk", row.State)
-	}
-	r.Stop(id)
-	waitState(t, r, id, Stopped, Done, Failed)
-}
-
-// TestRunner_AVerifiedStepDoesNotUndoAPause checks a check that comes back after the user pressed Pause leaves the job reading as paused. Both front ends take the state word off every event, so a "verified" that says stepping puts a Pause button back on a job that is already held and leaves the user with no Resume to press.
+// TestRunner_AVerifiedStepDoesNotUndoAPause checks a check that comes back after the user pressed Pause leaves the job reading as paused. Both front ends take the state word off every event, so a "verified" that says stepping puts a Pause button back on a job that is already held and leaves the user with no Resume to press. It also checks the pause reaches disk, so a daemon that stops while a job is held comes back knowing it was held rather than resuming it into the screen the user had just asked it to leave alone.
 func TestRunner_AVerifiedStepDoesNotUndoAPause(t *testing.T) {
 	exec := &fakeExec{block: make(chan struct{}), blockTool: "wait_for"}
-	r, _, events := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("Playing.")))
+	r, store, events := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("Playing.")))
 	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1302,17 +1245,20 @@ func TestRunner_AVerifiedStepDoesNotUndoAPause(t *testing.T) {
 	if job, err := r.Job(context.Background(), id); err != nil || job.State != Paused {
 		t.Fatalf("state = %q (%v), want it still paused after the check came back", job.State, err)
 	}
+	row, err := store.ActJob(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ActJob: %v", err)
+	}
+	if row.State != string(Paused) {
+		t.Errorf("the stored row says %q, want the pause on disk", row.State)
+	}
 	r.Stop(id)
 	waitState(t, r, id, Stopped, Done, Failed)
 }
 
 // TestRunner_ResumeAsksAStuckJobsQuestionAgain checks a job read back from a checkpoint it was stuck on asks its question again rather than starting to drive the screen while the user is still deciding what to answer.
 func TestRunner_ResumeAsksAStuckJobsQuestionAgain(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	saved := Job{
 		ID: "act-4", Goal: "play S16 E8", Brain: "fake", State: Stuck,
 		Question: "Which season is it under?", Budget: DefaultBudget(),
@@ -1360,11 +1306,7 @@ func (g *gateStore) SaveActJob(ctx context.Context, row db.ActJobRow) error {
 
 // TestRunner_AnswerIsRefusedOnceTheJobHasEnded checks an answer sent to a job that has already been stopped is refused rather than reported as landed. The live slot outlives the stop by as long as the last checkpoint takes to write, and an answer dropped into it is never read by anyone.
 func TestRunner_AnswerIsRefusedOnceTheJobHasEnded(t *testing.T) {
-	inner, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer inner.Close()
+	inner := dbtest.Open(t)
 	store := &gateStore{Store: inner, state: string(Stopped), gate: make(chan struct{}), hit: make(chan struct{})}
 	r := New(store, &fakeExec{}, map[string]Model{"fake": script(`{"ask":"Which season is it under?"}`)}, "fake", func(Event) {})
 	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
@@ -1473,43 +1415,3 @@ func TestRunner_ACheckThatAlreadyHeldIsNotCountedAsAFailure(t *testing.T) {
 	}
 }
 
-// The pre-reading is one walk of the screen matched against the check, not a wait_for: wait_for polls for up to five seconds and, on a list check, walks the window a second time to see whether another one came to the front, and a job used to pay both on every step before it had acted at all.
-func TestRunner_ThePreReadingDoesNotGoThroughWaitFor(t *testing.T) {
-	exec := &fakeExec{}
-	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("It is playing S16 E8.")))
-	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waitState(t, r, id, Done, Failed, Stuck)
-
-	waits := 0
-	for _, name := range exec.names() {
-		if name == "wait_for" {
-			waits++
-		}
-	}
-	if waits != 1 {
-		t.Errorf("wait_for was called %d time(s) for one step, want only the verification", waits)
-	}
-	if got := exec.preChecksSeen(); len(got) != 1 || got[0] != "S16 E8" {
-		t.Errorf("pre-readings = %v, want one, of the step's own check", got)
-	}
-}
-
-// The pre-reading is only taken to be compared against: a check that was false before the action and true after it is the ordinary pass, and nothing about it changes.
-func TestRunner_ACheckThatFlippedIsStillAPass(t *testing.T) {
-	exec := &fakeExec{}
-	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("It is playing S16 E8.")))
-	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	job := waitState(t, r, id, Done, Failed, Stuck)
-	if job.State != Done {
-		t.Fatalf("state = %q (%s), want done", job.State, job.Err)
-	}
-	if len(job.Steps) != 1 || job.Steps[0].Outcome != "pass" || job.Steps[0].HeldBefore {
-		t.Errorf("steps = %+v, want one plain pass whose check did not already hold", job.Steps)
-	}
-}

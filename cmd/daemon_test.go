@@ -15,6 +15,7 @@ import (
 
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/tracker"
 )
 
@@ -97,13 +98,11 @@ func TestWeeklyStudyMaterial_ReadsReplaysUnderTheDataDir(t *testing.T) {
 	if len(replays) != 1 {
 		t.Fatalf("expected the replay under %s/replays to be found, got %v", dir, replays)
 	}
-}
 
-// With no replays and no dream traces anywhere there is nothing for the study to read, and the caller skips it rather than calling study.Study with two empty lists and logging its "no material found" every Sunday.
-func TestWeeklyStudyMaterial_IsEmptyWhenThereIsNothingToRead(t *testing.T) {
-	replays, traces := weeklyStudyMaterial(t.TempDir())
-	if len(replays) != 0 || len(traces) != 0 {
-		t.Fatalf("expected nothing to read, got %d replays and %d traces", len(replays), len(traces))
+	// With no replays and no dream traces anywhere there is nothing for the study to read, and the caller skips it rather than calling study.Study with two empty lists and logging its "no material found" every Sunday.
+	emptyReplays, emptyTraces := weeklyStudyMaterial(t.TempDir())
+	if len(emptyReplays) != 0 || len(emptyTraces) != 0 {
+		t.Fatalf("expected nothing to read, got %d replays and %d traces", len(emptyReplays), len(emptyTraces))
 	}
 }
 
@@ -248,11 +247,7 @@ func TestEveryMeteredAfter_RecordsEachRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 
 	ran := make(chan struct{}, 4)
 	go everyMeteredAfter(ctx, store, time.Millisecond, 24*time.Hour, "test-metered-job", func() { ran <- struct{}{} })

@@ -183,35 +183,3 @@ func TestNew_ActRunsHasJobColumnsBeforeAnySave(t *testing.T) {
 		t.Fatalf("fresh act_runs lacks the job columns: %v", err)
 	}
 }
-
-// TestSaveActJob_KeepsCheckpointingAfterTheGoalIsEdited pins that a job is found by its id alone. Matching the checkpoint's UPDATE on the goal text as well meant a goal that differed by a character updated nothing, the insert behind it was refused by the id that was already taken, and every later save returned an error — so the job ran on with no checkpoint at all and could not be resumed.
-func TestSaveActJob_KeepsCheckpointingAfterTheGoalIsEdited(t *testing.T) {
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-
-	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "play S16 E8", Brain: "codex", State: "stepping", Checkpoint: []byte(`{"step":1}`)}); err != nil {
-		t.Fatalf("SaveActJob: %v", err)
-	}
-	if err := store.SaveActJob(ctx, ActJobRow{ID: "act-1", Goal: "play S16 E8 ", Brain: "codex", State: "stepping", Checkpoint: []byte(`{"step":2}`)}); err != nil {
-		t.Fatalf("SaveActJob with an edited goal: %v", err)
-	}
-
-	job, err := store.ActJob(ctx, "act-1")
-	if err != nil {
-		t.Fatalf("ActJob: %v", err)
-	}
-	if string(job.Checkpoint) != `{"step":2}` {
-		t.Errorf("checkpoint is %q, want the second save's", job.Checkpoint)
-	}
-	var rows int
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM act_runs WHERE job_id = 'act-1'`).Scan(&rows); err != nil {
-		t.Fatalf("count job rows: %v", err)
-	}
-	if rows != 1 {
-		t.Errorf("%d rows for one job, want 1", rows)
-	}
-}

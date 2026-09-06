@@ -87,45 +87,35 @@ func TestDraw_OnItemNamesTheItemInItsResult(t *testing.T) {
 	}
 }
 
-// This is the exact regression from the night of 2026-09-05: turn 1 rings one item, turn 2 says "draw a circle around it" and the model (wrongly, for this test) picks a different item. The draw tool result must say so, one line, so the model can correct itself inside the same ask rather than the ring standing as the last word on what "it" meant.
-func TestDraw_NotesAMismatchOnABareReference(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
-	a.executeTool(t.Context(), "observe_screen", map[string]any{})
-	a.executeTool(t.Context(), "point_at", map[string]any{"n": float64(1)}) // rings [1] Merge
-
-	ctx := WithQuestion(t.Context(), "draw a circle around it")
-	got := a.executeTool(ctx, "draw", map[string]any{"shape": "circle", "on": float64(2)}) // picks [2] Checks instead
-	if !strings.Contains(got, `you were asked about "Merge"`) || !strings.Contains(got, `this is "Checks"`) {
-		t.Errorf("draw result = %q, want a mismatch note naming both items", got)
+// TestDraw_MismatchNote drives the same turn-1-rings-Merge, turn-2-draws setup for three questions and checks the mismatch note each one must or must not produce. The regression is the night of 2026-09-05: turn 1 rings one item, turn 2 says "draw a circle around it" and the model (wrongly, for the first row) picks a different item — the draw tool result must say so, one line, so the model can correct itself inside the same ask rather than the ring standing as the last word on what "it" meant. The note must not fire when the question already named its own target (naming a different button on purpose is not a mistake to flag) or when the picked item is in fact the remembered one (a correct answer earns no correction).
+func TestDraw_MismatchNote(t *testing.T) {
+	cases := []struct {
+		name        string
+		question    string
+		on          float64
+		wantMatch   bool // note names both "Merge" (remembered) and "Checks" (picked)
+		wantNoMatch bool
+	}{
+		{name: "bare reference picks a different item", question: "draw a circle around it", on: 2, wantMatch: true},
+		{name: "question names its own target", question: "draw a circle around the checks link", on: 2, wantNoMatch: true},
+		{name: "picked item matches the remembered one", question: "draw a circle around it", on: 1, wantNoMatch: true},
 	}
-}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, _ := observingAgent(t)
+			a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
+			a.executeTool(t.Context(), "observe_screen", map[string]any{})
+			a.executeTool(t.Context(), "point_at", map[string]any{"n": float64(1)}) // rings [1] Merge
 
-// The mismatch note must not fire when the question already named its own target: naming a different button on purpose is not a mistake to flag.
-func TestDraw_NoMismatchNoteWhenTheQuestionNamesItsOwnTarget(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
-	a.executeTool(t.Context(), "observe_screen", map[string]any{})
-	a.executeTool(t.Context(), "point_at", map[string]any{"n": float64(1)})
-
-	ctx := WithQuestion(t.Context(), "draw a circle around the checks link")
-	got := a.executeTool(ctx, "draw", map[string]any{"shape": "circle", "on": float64(2)})
-	if strings.Contains(got, "you were asked about") {
-		t.Errorf("draw result = %q, want no mismatch note when the question named its own target", got)
-	}
-}
-
-// The mismatch note must not fire when the picked item is in fact the remembered one — a correct answer earns no correction.
-func TestDraw_NoMismatchNoteWhenLabelsMatch(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
-	a.executeTool(t.Context(), "observe_screen", map[string]any{})
-	a.executeTool(t.Context(), "point_at", map[string]any{"n": float64(1)})
-
-	ctx := WithQuestion(t.Context(), "draw a circle around it")
-	got := a.executeTool(ctx, "draw", map[string]any{"shape": "circle", "on": float64(1)})
-	if strings.Contains(got, "you were asked about") {
-		t.Errorf("draw result = %q, want no mismatch note when the item matches", got)
+			ctx := WithQuestion(t.Context(), c.question)
+			got := a.executeTool(ctx, "draw", map[string]any{"shape": "circle", "on": c.on})
+			if c.wantMatch && (!strings.Contains(got, `you were asked about "Merge"`) || !strings.Contains(got, `this is "Checks"`)) {
+				t.Errorf("draw result = %q, want a mismatch note naming both items", got)
+			}
+			if c.wantNoMatch && strings.Contains(got, "you were asked about") {
+				t.Errorf("draw result = %q, want no mismatch note", got)
+			}
+		})
 	}
 }
 

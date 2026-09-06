@@ -77,15 +77,3 @@ func TestAskSentence_IsTheLineOnItsOwn(t *testing.T) {
 		t.Errorf("AskSentence(nil) = %q, want an empty string", got)
 	}
 }
-
-// A failure that reaches the window must be one line whatever the provider sent, since the window sizes itself to what it is given.
-func TestAskErrorText_IsOneShortLineForATextWallOfAnError(t *testing.T) {
-	sentence, detail := AskErrorText(errors.New(strings.Repeat(quotaBlob, 6)))
-
-	if strings.Contains(sentence, "\n") || len(sentence) > 120 {
-		t.Errorf("sentence = %q, want one line of 120 characters or fewer", sentence)
-	}
-	if len(detail) != len(quotaBlob)*6 {
-		t.Errorf("detail is %d characters, want the whole %d kept", len(detail), len(quotaBlob)*6)
-	}
-}

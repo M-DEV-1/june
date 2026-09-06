@@ -30,112 +30,101 @@ func (f *fakeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt string) 
 	return f.result, f.err
 }
 
-// BuildBrief puts the goal, the thread rendered as "user:"/"ora:" lines, and the constraints/report footer into one page, in that order.
-func TestBuildBrief_HasGoalThreadConstraintsAndReportLine(t *testing.T) {
-	thread := []db.Turn{
-		{Role: "you", Text: "can you fix the flaky test", Kind: "ask"},
-		{Role: "ora", Text: "which one is flaky", Kind: "ask"},
-	}
-	brief := BuildBrief("fix the flaky test in store_test.go", thread, "")
-
-	if !strings.Contains(brief, "Goal: fix the flaky test in store_test.go") {
-		t.Errorf("brief missing goal: %s", brief)
-	}
-	if !strings.Contains(brief, "user: can you fix the flaky test") || !strings.Contains(brief, "ora: which one is flaky") {
-		t.Errorf("brief missing thread lines: %s", brief)
-	}
-	if !strings.Contains(brief, "Constraints:") || !strings.Contains(brief, "do not send, publish, pay for or delete") {
-		t.Errorf("brief missing constraints: %s", brief)
-	}
-	if !strings.Contains(brief, "Where to report:") {
-		t.Errorf("brief missing report line: %s", brief)
-	}
-}
-
-// An empty thread still gets a "nothing said yet" line rather than an empty section, and an empty personal block adds nothing.
-func TestBuildBrief_EmptyThreadSaysSo(t *testing.T) {
-	brief := BuildBrief("do the thing", nil, "")
-	if !strings.Contains(brief, "(nothing said in this conversation yet)") {
-		t.Errorf("brief = %s", brief)
-	}
-}
-
-// A personal-context block, when given, is included in the brief verbatim.
-func TestBuildBrief_IncludesPersonalContext(t *testing.T) {
-	brief := BuildBrief("do the thing", nil, "Personal context — things known for certain about the user:\n  works on ora")
-	if !strings.Contains(brief, "works on ora") {
-		t.Errorf("brief = %s", brief)
-	}
-}
-
-// A thread longer than delegateThreadBudget runes keeps only its newest lines, dropping the oldest first.
-func TestBuildBrief_ThreadOverBudgetKeepsNewestOnly(t *testing.T) {
+// TestBuildBrief drives BuildBrief once per row and checks what that row's shape of goal/thread/personal-block must do to the page it returns: the goal, the thread rendered as "user:"/"ora:" lines, and the constraints/report footer all land in it, in that order; an empty thread gets a "nothing said yet" line rather than an empty section; a thread over delegateThreadBudget runes keeps its newest lines and drops the oldest; a trailing error-kind turn and an empty turn are left out the way HistoryFromTurns leaves them out; and a secret — in the thread, in the goal, or in the personal-context block — never reaches the brief while the rest of whichever block it was in survives.
+func TestBuildBrief(t *testing.T) {
 	oldLine := strings.Repeat("a", delegateThreadBudget)
-	thread := []db.Turn{
-		{Role: "you", Text: oldLine, Kind: "ask"},
-		{Role: "ora", Text: "the newest line", Kind: "ask"},
+	cases := []struct {
+		name            string
+		goal            string
+		thread          []db.Turn
+		personal        string
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			name: "goal, thread, constraints and report line",
+			goal: "fix the flaky test in store_test.go",
+			thread: []db.Turn{
+				{Role: "you", Text: "can you fix the flaky test", Kind: "ask"},
+				{Role: "ora", Text: "which one is flaky", Kind: "ask"},
+			},
+			wantContains: []string{
+				"Goal: fix the flaky test in store_test.go",
+				"user: can you fix the flaky test", "ora: which one is flaky",
+				"Constraints:", "do not send, publish, pay for or delete",
+				"Where to report:",
+			},
+		},
+		{
+			name:         "empty thread says so",
+			goal:         "do the thing",
+			wantContains: []string{"(nothing said in this conversation yet)"},
+		},
+		{
+			name:         "personal-context block included verbatim",
+			goal:         "do the thing",
+			personal:     "Personal context — things known for certain about the user:\n  works on ora",
+			wantContains: []string{"works on ora"},
+		},
+		{
+			name: "a thread over budget keeps only its newest lines",
+			goal: "goal",
+			thread: []db.Turn{
+				{Role: "you", Text: oldLine, Kind: "ask"},
+				{Role: "ora", Text: "the newest line", Kind: "ask"},
+			},
+			wantContains:    []string{"the newest line"},
+			wantNotContains: []string{oldLine},
+		},
+		{
+			name: "secret thread lines are redacted, ordinary ones survive",
+			goal: "goal",
+			thread: []db.Turn{
+				{Role: "you", Text: "my password is hunter2", Kind: "ask"},
+				{Role: "you", Text: "the key is at ~/.ssh/id_rsa", Kind: "ask"},
+				{Role: "you", Text: "this line is fine", Kind: "ask"},
+			},
+			wantContains:    []string{"this line is fine"},
+			wantNotContains: []string{"hunter2", "id_rsa"},
+		},
+		{
+			name: "error-kind and empty turns are dropped",
+			goal: "goal",
+			thread: []db.Turn{
+				{Role: "you", Text: "  ", Kind: "ask"},
+				{Role: "ora", Text: "something went wrong", Kind: "error"},
+				{Role: "you", Text: "the real question", Kind: "ask"},
+			},
+			wantContains:    []string{"the real question"},
+			wantNotContains: []string{"something went wrong"},
+		},
+		{
+			name:            "a secret in the goal itself is redacted",
+			goal:            "my password is hunter2",
+			wantNotContains: []string{"hunter2"},
+		},
+		{
+			name:            "a secret personal-context line is redacted, the rest survives",
+			goal:            "goal",
+			personal:        "Personal context — things known for certain about the user:\n  password: hunter2\n  works on ora",
+			wantContains:    []string{"works on ora"},
+			wantNotContains: []string{"hunter2"},
+		},
 	}
-	brief := BuildBrief("goal", thread, "")
-	if strings.Contains(brief, oldLine) {
-		t.Errorf("old line over budget should have been dropped: %s", brief)
-	}
-	if !strings.Contains(brief, "the newest line") {
-		t.Errorf("newest line should always be kept: %s", brief)
-	}
-}
-
-// A thread line naming a secret — a password mention, or a credential file path — never reaches the brief.
-func TestBuildBrief_RedactsSecretLines(t *testing.T) {
-	thread := []db.Turn{
-		{Role: "you", Text: "my password is hunter2", Kind: "ask"},
-		{Role: "you", Text: "the key is at ~/.ssh/id_rsa", Kind: "ask"},
-		{Role: "you", Text: "this line is fine", Kind: "ask"},
-	}
-	brief := BuildBrief("goal", thread, "")
-	if strings.Contains(brief, "hunter2") {
-		t.Errorf("password line leaked: %s", brief)
-	}
-	if strings.Contains(brief, "id_rsa") {
-		t.Errorf("credential path leaked: %s", brief)
-	}
-	if !strings.Contains(brief, "this line is fine") {
-		t.Errorf("non-secret line should survive: %s", brief)
-	}
-}
-
-// A trailing error-kind turn (a failed answer) and an empty turn are both left out of the thread the same way HistoryFromTurns leaves them out.
-func TestBuildBrief_DropsErrorAndEmptyTurns(t *testing.T) {
-	thread := []db.Turn{
-		{Role: "you", Text: "  ", Kind: "ask"},
-		{Role: "ora", Text: "something went wrong", Kind: "error"},
-		{Role: "you", Text: "the real question", Kind: "ask"},
-	}
-	brief := BuildBrief("goal", thread, "")
-	if strings.Contains(brief, "something went wrong") {
-		t.Errorf("error-kind turn should be dropped: %s", brief)
-	}
-	if !strings.Contains(brief, "the real question") {
-		t.Errorf("real turn missing: %s", brief)
-	}
-}
-
-// A secret in the goal itself — not just the thread — never reaches the brief.
-func TestBuildBrief_RedactsGoalLine(t *testing.T) {
-	brief := BuildBrief("my password is hunter2", nil, "")
-	if strings.Contains(brief, "hunter2") {
-		t.Errorf("secret goal leaked: %s", brief)
-	}
-}
-
-// A secret line inside the personal-context block never reaches the brief, while the rest of the block survives.
-func TestBuildBrief_RedactsPersonalContextLine(t *testing.T) {
-	personal := "Personal context — things known for certain about the user:\n  password: hunter2\n  works on ora"
-	brief := BuildBrief("goal", nil, personal)
-	if strings.Contains(brief, "hunter2") {
-		t.Errorf("secret personal-context line leaked: %s", brief)
-	}
-	if !strings.Contains(brief, "works on ora") {
-		t.Errorf("non-secret personal-context line should survive: %s", brief)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			brief := BuildBrief(c.goal, c.thread, c.personal)
+			for _, want := range c.wantContains {
+				if !strings.Contains(brief, want) {
+					t.Errorf("brief missing %q: %s", want, brief)
+				}
+			}
+			for _, unwanted := range c.wantNotContains {
+				if strings.Contains(brief, unwanted) {
+					t.Errorf("brief leaked %q: %s", unwanted, brief)
+				}
+			}
+		})
 	}
 }
 
@@ -161,30 +150,22 @@ func TestDelegateHandler_ErrorIncludesUnderlyingError(t *testing.T) {
 	}
 }
 
-// A cwd that does not exist, or is not a directory, fails before the runner is ever started, naming the problem.
+// A cwd that does not exist, or is a regular file rather than a directory, fails before the runner is ever started, naming the problem.
 func TestDelegate_RejectsMissingCWD(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{result: "done"}
-	_, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: "/no/such/project/dir"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "/no/such/project/dir") {
-		t.Errorf("err = %v, want it to name the missing cwd", err)
-	}
-	if run.gotPrompt != "" {
-		t.Errorf("runner should never have been called for a missing cwd")
-	}
-}
-
-// A regular file given as cwd is rejected the same way a missing one is, rather than being handed to the runner.
-func TestDelegate_RejectsCWDThatIsAFile(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{result: "done"}
 	file := t.TempDir() + "/not-a-dir"
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: file}, nil)
-	if err == nil {
-		t.Fatal("expected an error for a cwd that is a file")
+	for _, cwd := range []string{"/no/such/project/dir", file} {
+		a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+		run := &fakeRunner{result: "done"}
+		_, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: cwd}, nil)
+		if err == nil || !strings.Contains(err.Error(), cwd) {
+			t.Errorf("cwd %q: err = %v, want it to name the bad cwd", cwd, err)
+		}
+		if run.gotPrompt != "" {
+			t.Errorf("cwd %q: runner should never have been called", cwd)
+		}
 	}
 }
 
@@ -202,42 +183,24 @@ func TestNewDelegateCmd_RunsInOwnProcessGroupAndCancelKillsIt(t *testing.T) {
 	}
 }
 
-// Delegate passes the delegation's CWD straight through to the runner, unchanged.
+// One delegate call has to get four unrelated things right at once: the CWD passes straight through to the runner unchanged, the system prompt is the brief BuildBrief would have written for the same goal and thread, the prompt is the goal itself, and the runner's result comes back trimmed.
 func TestDelegate_PassesCWDThrough(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{result: "done"}
+	run := &fakeRunner{result: "  the answer  "}
 	dir := t.TempDir()
-	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "do it", CWD: dir}, nil); err != nil {
+	thread := []db.Turn{{Role: "you", Text: "earlier thing", Kind: "ask"}}
+	result, err := a.delegate(t.Context(), run, Delegation{Brief: "fix the bug", CWD: dir}, thread)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if run.gotCWD != dir {
 		t.Errorf("cwd = %q, want %q", run.gotCWD, dir)
-	}
-}
-
-// Delegate's system prompt is the brief BuildBrief would have written for the same goal and thread, and the prompt is the goal itself.
-func TestDelegate_SendsTheBriefAsSystemPromptAndGoalAsPrompt(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{result: "done"}
-	thread := []db.Turn{{Role: "you", Text: "earlier thing", Kind: "ask"}}
-	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "fix the bug", CWD: t.TempDir()}, thread); err != nil {
-		t.Fatal(err)
 	}
 	if run.gotPrompt != "fix the bug" {
 		t.Errorf("prompt = %q", run.gotPrompt)
 	}
 	if !strings.Contains(run.gotSystemPrompt, "Goal: fix the bug") || !strings.Contains(run.gotSystemPrompt, "user: earlier thing") {
 		t.Errorf("system prompt = %s", run.gotSystemPrompt)
-	}
-}
-
-// Delegate returns the runner's result trimmed.
-func TestDelegate_ReturnsTheRunnerResult(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{result: "  the answer  "}
-	result, err := a.delegate(t.Context(), run, Delegation{Brief: "do it"}, nil)
-	if err != nil {
-		t.Fatal(err)
 	}
 	if result != "the answer" {
 		t.Errorf("result = %q", result)
@@ -278,21 +241,14 @@ func TestDelegate_TimesOut(t *testing.T) {
 	}
 }
 
-// delegateHandler with no brief argument returns a toolError sentence rather than calling the runner or panicking.
+// delegateHandler with no brief argument, or one that is only whitespace, returns a toolError sentence rather than calling the runner or panicking; a blank brief is treated the same as a missing one.
 func TestDelegateHandler_MissingBriefReturnsToolError(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	got := delegateHandler(t.Context(), a, map[string]any{})
-	if !strings.HasPrefix(got, "error: ") {
-		t.Errorf("got = %q, want an error: prefixed message", got)
-	}
-}
-
-// delegateHandler with a brief that is only whitespace is treated the same as a missing one.
-func TestDelegateHandler_BlankBriefReturnsToolError(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	got := delegateHandler(t.Context(), a, map[string]any{"brief": "   "})
-	if !strings.HasPrefix(got, "error: ") {
-		t.Errorf("got = %q, want an error: prefixed message", got)
+	for _, args := range []map[string]any{{}, {"brief": "   "}} {
+		got := delegateHandler(t.Context(), a, args)
+		if !strings.HasPrefix(got, "error: ") {
+			t.Errorf("args %v: got = %q, want an error: prefixed message", args, got)
+		}
 	}
 }
 

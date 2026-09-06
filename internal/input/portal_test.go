@@ -87,35 +87,37 @@ func TestParseResponseMalformed(t *testing.T) {
 	}
 }
 
-// parseStream pulls the PipeWire node id and, when present, the monitor's (width, height) out of the Start response's "streams" array of (u, a{sv}) structs, which godbus decodes as []interface{} of []interface{} since the struct's Go shape isn't known statically. The "size" property is itself a (ii) struct, decoded the same way.
+// parseStream pulls the PipeWire node id and, when present, the monitor's (width, height) and (x, y) position out of the Start response's "streams" array of (u, a{sv}) structs, which godbus decodes as []interface{} of []interface{} since the struct's Go shape isn't known statically. The "size" and "position" properties are themselves (ii) structs, decoded the same way. No "size" property (some compositors omit it) yields width and height 0, which callers treat as "unknown bounds", and an empty or malformed streams value yields all zeros rather than panicking; ClickAt still works for relative-only compositors, just without absolute positioning.
 func TestParseStreamWithSize(t *testing.T) {
-	streams := dbus.MakeVariant([]interface{}{
-		[]interface{}{uint32(42), map[string]dbus.Variant{
-			"size": dbus.MakeVariant([]interface{}{int32(1920), int32(1080)}),
-		}},
-	})
-	node, rect := parseStream(streams)
-	if node != 42 || rect.W != 1920 || rect.H != 1080 {
-		t.Fatalf("got (%d, %+v), want node 42 sized 1920x1080", node, rect)
+	cases := []struct {
+		name    string
+		streams dbus.Variant
+		node    uint32
+		rect    streamRect
+	}{
+		{"with size", dbus.MakeVariant([]interface{}{
+			[]interface{}{uint32(42), map[string]dbus.Variant{
+				"size": dbus.MakeVariant([]interface{}{int32(1920), int32(1080)}),
+			}},
+		}), 42, streamRect{W: 1920, H: 1080}},
+		{"no size", dbus.MakeVariant([]interface{}{
+			[]interface{}{uint32(7), map[string]dbus.Variant{}},
+		}), 7, streamRect{}},
+		{"empty", dbus.MakeVariant([]interface{}{}), 0, streamRect{}},
+		{"with position", dbus.MakeVariant([]interface{}{
+			[]interface{}{uint32(42), map[string]dbus.Variant{
+				"position": dbus.MakeVariant([]interface{}{int32(1920), int32(0)}),
+				"size":     dbus.MakeVariant([]interface{}{int32(2560), int32(1440)}),
+			}},
+		}), 42, streamRect{X: 1920, Y: 0, W: 2560, H: 1440}},
 	}
-}
-
-// No "size" property (some compositors omit it) yields width and height 0, which callers treat as "unknown bounds".
-func TestParseStreamNoSize(t *testing.T) {
-	streams := dbus.MakeVariant([]interface{}{
-		[]interface{}{uint32(7), map[string]dbus.Variant{}},
-	})
-	node, rect := parseStream(streams)
-	if node != 7 || rect != (streamRect{}) {
-		t.Fatalf("got (%d, %+v), want node 7 with no rectangle", node, rect)
-	}
-}
-
-// An empty or malformed streams value yields all zeros rather than panicking; ClickAt still works for relative-only compositors, just without absolute positioning.
-func TestParseStreamEmpty(t *testing.T) {
-	node, rect := parseStream(dbus.MakeVariant([]interface{}{}))
-	if node != 0 || rect != (streamRect{}) {
-		t.Fatalf("got (%d, %+v), want zeros", node, rect)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			node, rect := parseStream(c.streams)
+			if node != c.node || rect != c.rect {
+				t.Fatalf("got (%d, %+v), want (%d, %+v)", node, rect, c.node, c.rect)
+			}
+		})
 	}
 }
 
@@ -309,20 +311,6 @@ func TestPressKeyReleasesWhatItPressedWhenAPressFails(t *testing.T) {
 	want := [][2]int32{{29, 1}, {42, 1}, {42, 0}, {29, 0}}
 	if len(events) != len(want) || !sameEvents(events, want) {
 		t.Fatalf("events = %v, want %v (Ctrl and Shift released in reverse order after L failed)", events, want)
-	}
-}
-
-// The stream's "position" property says where the granted monitor's top-left corner sits on the desktop, which is what the pointer coordinates have to be measured from.
-func TestParseStreamWithPosition(t *testing.T) {
-	streams := dbus.MakeVariant([]interface{}{
-		[]interface{}{uint32(42), map[string]dbus.Variant{
-			"position": dbus.MakeVariant([]interface{}{int32(1920), int32(0)}),
-			"size":     dbus.MakeVariant([]interface{}{int32(2560), int32(1440)}),
-		}},
-	})
-	node, rect := parseStream(streams)
-	if node != 42 || rect != (streamRect{X: 1920, Y: 0, W: 2560, H: 1440}) {
-		t.Fatalf("got (%d, %+v), want node 42 at 1920,0 sized 2560x1440", node, rect)
 	}
 }
 

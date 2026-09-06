@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"ora/internal/agent"
-	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // TestUsedScreenTool checks the small pure helper run() uses to decide whether a finished trace is worth filing as an act run: true when any hop named a screen tool, false when every hop was a memory tool.
@@ -33,11 +33,7 @@ func TestUsedScreenTool(t *testing.T) {
 
 // TestRun_RecordsAnActRunWhenAScreenToolRan checks run() files a screen-tool trace as an act run with outcome ok and its step names, and leaves no act run behind for a memory-only trace.
 func TestRun_RecordsAnActRunWhenAScreenToolRan(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	convID, err := store.CreateConversation(ctx, "smoke", "")
 	if err != nil {
@@ -92,11 +88,7 @@ func TestRun_RecordsAnActRunWhenAScreenToolRan(t *testing.T) {
 
 // TestRun_RecordsAnActRunWhenOnlyShowMarksRan checks run() files a trace as an act run even when the only tool hop is show_marks, which draws numbered marks on the screen the same way point_at and click do.
 func TestRun_RecordsAnActRunWhenOnlyShowMarksRan(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	convID, err := store.CreateConversation(ctx, "smoke", "")
 	if err != nil {
@@ -125,11 +117,7 @@ func TestRun_RecordsAnActRunWhenOnlyShowMarksRan(t *testing.T) {
 
 // TestRun_RecordsWhatTheTurnCostInTokens checks that a finished ask files its token counts alongside its answer, which is what lets the user see what every model provider is costing them. The provider and model come from the trace's model slug — "codex/gpt-5.5" splits into the two — the channel is "text" because this is /ask, and the counts and duration are the trace's own.
 func TestRun_RecordsWhatTheTurnCostInTokens(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	convID, err := store.CreateConversation(ctx, "cost", "")
 	if err != nil {
@@ -173,11 +161,7 @@ func TestRun_RecordsWhatTheTurnCostInTokens(t *testing.T) {
 
 // TestRun_RecordsAGeminiTurnUnderItsOwnProvider checks the other shape of model slug: the Gemini paths name a bare model with no provider in front of it, so the provider is the one the trace's usage names.
 func TestRun_RecordsAGeminiTurnUnderItsOwnProvider(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	convID, err := store.CreateConversation(ctx, "cost", "")
 	if err != nil {
@@ -207,11 +191,7 @@ func TestRun_RecordsAGeminiTurnUnderItsOwnProvider(t *testing.T) {
 
 // TestRun_RecordsACallThatFailedAndOneThatCountedNothing checks the two rows that must still be written rather than skipped: an ask the model failed, and an ask whose provider reported no counts. Both are calls the user may be charged for, and a missing row is one they cannot see; the counts stay at zero rather than being guessed at.
 func TestRun_RecordsACallThatFailedAndOneThatCountedNothing(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	convID, err := store.CreateConversation(ctx, "cost", "")
 	if err != nil {
@@ -252,11 +232,7 @@ func (a *echoQuestionAsker) AskText(ctx context.Context, question string) (agent
 
 // TestRun_RecordsTheBareQuestionWhenScreenContextWasAttached checks that the "On screen: ..." prefix run() puts in front of the question for the model stays out of both ledgers: act_runs.question and token_use.question hold the question the user actually asked, since GET /usage shows the first 120 runes of that field and the screen text is neither the question nor something to keep.
 func TestRun_RecordsTheBareQuestionWhenScreenContextWasAttached(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
+	store := dbtest.Open(t)
 	ctx := context.Background()
 
 	asker := &echoQuestionAsker{hops: []agent.ToolHop{{Name: "observe_screen", Result: "1. button Save"}}}

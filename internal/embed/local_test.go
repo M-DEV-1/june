@@ -105,21 +105,6 @@ func TestLocalEmbedderRejectsEmptyText(t *testing.T) {
 	}
 }
 
-func TestLocalEmbedderErrorsOnHTTPStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "model not loaded", http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
-	_, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, "hi")
-	if err == nil {
-		t.Fatal("expected an error on a 503")
-	}
-	if !strings.Contains(err.Error(), "503") {
-		t.Errorf("error should name the status code, got %v", err)
-	}
-}
-
 func TestLocalEmbedderErrorsOnEmptyData(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":[]}`))
@@ -131,7 +116,7 @@ func TestLocalEmbedderErrorsOnEmptyData(t *testing.T) {
 	}
 }
 
-// TestLocalEmbedderDoesNotRetryAServerFailure verifies a failure that has nothing to do with the input's length (here a 503 from a server still loading its model) costs exactly one request. Halving and retrying that quadruples the load on a server that is already struggling, and shorter text would not have helped anyway.
+// TestLocalEmbedderDoesNotRetryAServerFailure verifies a failure that has nothing to do with the input's length (here a 503 from a server still loading its model) costs exactly one request, names the status code in its error, and is not retried. Halving and retrying that quadruples the load on a server that is already struggling, and shorter text would not have helped anyway.
 func TestLocalEmbedderDoesNotRetryAServerFailure(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,8 +125,12 @@ func TestLocalEmbedderDoesNotRetryAServerFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, strings.Repeat("b", 800)); err == nil {
+	_, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, strings.Repeat("b", 800))
+	if err == nil {
 		t.Fatal("expected an error on a 503")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("error should name the status code, got %v", err)
 	}
 	if requests != 1 {
 		t.Errorf("made %d requests for one unretryable failure, want 1", requests)

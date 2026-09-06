@@ -40,291 +40,441 @@ func testWAV(t *testing.T) string {
 	return path
 }
 
-// A silent clip is a real outcome, not a failure: whisper-cli exits nonzero when it cannot read or decode the audio, so an empty result with a clean exit is a meeting nobody spoke in.
+// A silent clip is a real outcome, not a failure: whisper-cli exits nonzero when it cannot read or decode the audio, so an empty result with a clean exit is a meeting nobody spoke in. Stderr chatter must not cost us the transcript either: whisper prints progress and banners to stderr on every successful run too.
 func TestTranscribeWAV_SilentClipIsNotAnError(t *testing.T) {
-	bin := fakeWhisper(t, "", "")
-	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0)
-	if err != nil {
-		t.Fatalf("transcribeWAV: %v", err)
+	cases := []struct {
+		name     string
+		stdout   string
+		stderr   string
+		wantLen  int
+		wantText string
+	}{
+		{name: "a clean exit with nothing printed is silence, not an error"},
+		{
+			name:     "stderr noise on a successful run does not cost the transcript",
+			stdout:   "[00:00:00.000 --> 00:00:01.000]   hello there",
+			stderr:   "whisper_model_load: model size = 487.01 MB",
+			wantLen:  1,
+			wantText: "hello there",
+		},
 	}
-	if len(segs) != 0 {
-		t.Errorf("got %+v, want no segments", segs)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bin := fakeWhisper(t, c.stdout, c.stderr)
+			segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0)
+			if err != nil {
+				t.Fatalf("transcribeWAV: %v", err)
+			}
+			if len(segs) != c.wantLen {
+				t.Fatalf("got %+v, want %d segments", segs, c.wantLen)
+			}
+			if c.wantLen == 1 && segs[0].Text != c.wantText {
+				t.Errorf("got %+v, want text %q", segs, c.wantText)
+			}
+		})
 	}
 }
 
-// Stderr chatter must not cost us the transcript: whisper prints progress and banners to stderr on every successful run too.
-func TestTranscribeWAV_KeepsSegmentsWhenStderrIsJustNoise(t *testing.T) {
-	bin := fakeWhisper(t, "[00:00:00.000 --> 00:00:01.000]   hello there", "whisper_model_load: model size = 487.01 MB")
-	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0)
-	if err != nil {
-		t.Fatalf("transcribeWAV: %v", err)
-	}
-	if len(segs) != 1 || segs[0].Text != "hello there" {
-		t.Errorf("got %+v, want the one spoken segment", segs)
-	}
-}
-
-// whisper prints one line per segment as "[start --> end]   text". Everything else it prints (banners, blank lines) is not a segment.
+// whisper prints one line per segment as "[start --> end]   text". Everything else — banners, blank lines, a fractional timestamp of however many digits the build chose to print, a stream's own offset from the recording's start, and a bracketed non-speech marker — has to be read correctly or dropped outright.
 func TestParseSegments(t *testing.T) {
-	out := `
+	cases := []struct {
+		name    string
+		out     string
+		speaker string
+		offset  time.Duration
+		check   func(t *testing.T, segs []Segment)
+	}{
+		{
+			name: "one line per segment, banners and junk lines are not segments",
+			out: `
 [00:00:00.000 --> 00:00:07.640]   This is a LibriVox recording.
 [00:00:07.640 --> 00:01:17.840]   For more information please visit librivox.org.
 not a segment line
 [01:02:03.500 --> 01:02:04.000]
-`
-	segs := parseSegments(out, speakerMe, 0)
-	if len(segs) != 2 {
-		t.Fatalf("got %d segments, want 2 (blank text and junk lines dropped): %+v", len(segs), segs)
+`,
+			speaker: speakerMe,
+			check: func(t *testing.T, segs []Segment) {
+				if len(segs) != 2 {
+					t.Fatalf("got %d segments, want 2 (blank text and junk lines dropped): %+v", len(segs), segs)
+				}
+				if segs[0].Start != 0 || segs[0].End != 7640*time.Millisecond {
+					t.Errorf("segment 0 span = %v..%v, want 0..7.64s", segs[0].Start, segs[0].End)
+				}
+				if segs[0].Text != "This is a LibriVox recording." {
+					t.Errorf("segment 0 text = %q", segs[0].Text)
+				}
+				if segs[1].Start != 7640*time.Millisecond || segs[1].End != 77840*time.Millisecond {
+					t.Errorf("segment 1 span = %v..%v, want 7.64s..1m17.84s", segs[1].Start, segs[1].End)
+				}
+				if segs[0].Speaker != speakerMe {
+					t.Errorf("speaker = %q, want %q", segs[0].Speaker, speakerMe)
+				}
+			},
+		},
+		{
+			// The fractional part of a whisper timestamp is however many digits the build chose to print, so its length sets its scale: ".06" is 60ms, not 6ms, and ".5" is half a second, not half a millisecond.
+			name:    "the fractional part of a timestamp scales by its digit count",
+			out:     "[00:00:00.06 --> 00:00:01.5]   hello",
+			speaker: speakerMe,
+			check: func(t *testing.T, segs []Segment) {
+				if len(segs) != 1 {
+					t.Fatalf("got %d segments, want 1", len(segs))
+				}
+				if segs[0].Start != 60*time.Millisecond {
+					t.Errorf("start = %v, want 60ms", segs[0].Start)
+				}
+				if segs[0].End != 1500*time.Millisecond {
+					t.Errorf("end = %v, want 1.5s", segs[0].End)
+				}
+			},
+		},
+		{
+			// The two streams do not open at the same instant, so each stream's segments are shifted by how late that stream started relative to the recording as a whole.
+			name:    "a stream offset shifts every segment in it",
+			out:     "[00:00:01.000 --> 00:00:02.000]   hello",
+			speaker: speakerCall,
+			offset:  500 * time.Millisecond,
+			check: func(t *testing.T, segs []Segment) {
+				if len(segs) != 1 {
+					t.Fatalf("got %d segments, want 1", len(segs))
+				}
+				if segs[0].Start != 1500*time.Millisecond {
+					t.Errorf("start = %v, want 1.5s", segs[0].Start)
+				}
+				if segs[0].End != 2500*time.Millisecond {
+					t.Errorf("end = %v, want 2.5s", segs[0].End)
+				}
+			},
+		},
+		{
+			// whisper marks silence and non-speech sound as a bracketed pseudo-segment. One side of a call is silent most of the time, so those lines would otherwise be most of the transcript.
+			name:    "non-speech markers are dropped",
+			out:     "[00:00:00.000 --> 00:00:07.000]   [BLANK_AUDIO]\n[00:00:07.000 --> 00:00:08.000]   (upbeat music)\n[00:00:08.000 --> 00:00:09.000]   real words here",
+			speaker: speakerMe,
+			check: func(t *testing.T, segs []Segment) {
+				if len(segs) != 1 || segs[0].Text != "real words here" {
+					t.Errorf("expected only the spoken segment, got %+v", segs)
+				}
+			},
+		},
 	}
-	if segs[0].Start != 0 || segs[0].End != 7640*time.Millisecond {
-		t.Errorf("segment 0 span = %v..%v, want 0..7.64s", segs[0].Start, segs[0].End)
-	}
-	if segs[0].Text != "This is a LibriVox recording." {
-		t.Errorf("segment 0 text = %q", segs[0].Text)
-	}
-	if segs[1].Start != 7640*time.Millisecond || segs[1].End != 77840*time.Millisecond {
-		t.Errorf("segment 1 span = %v..%v, want 7.64s..1m17.84s", segs[1].Start, segs[1].End)
-	}
-	if segs[0].Speaker != speakerMe {
-		t.Errorf("speaker = %q, want %q", segs[0].Speaker, speakerMe)
-	}
-}
-
-// The fractional part of a whisper timestamp is however many digits the build chose to print, so its length sets its scale: ".06" is 60ms, not 6ms, and ".5" is half a second, not half a millisecond.
-func TestParseSegments_FractionalSecondsScaleByDigitCount(t *testing.T) {
-	segs := parseSegments("[00:00:00.06 --> 00:00:01.5]   hello", speakerMe, 0)
-	if len(segs) != 1 {
-		t.Fatalf("got %d segments, want 1", len(segs))
-	}
-	if segs[0].Start != 60*time.Millisecond {
-		t.Errorf("start = %v, want 60ms", segs[0].Start)
-	}
-	if segs[0].End != 1500*time.Millisecond {
-		t.Errorf("end = %v, want 1.5s", segs[0].End)
-	}
-}
-
-// The two streams do not open at the same instant, so each stream's segments are shifted by how late that stream started relative to the recording as a whole.
-func TestParseSegments_AppliesStreamOffset(t *testing.T) {
-	segs := parseSegments("[00:00:01.000 --> 00:00:02.000]   hello", speakerCall, 500*time.Millisecond)
-	if len(segs) != 1 {
-		t.Fatalf("got %d segments, want 1", len(segs))
-	}
-	if segs[0].Start != 1500*time.Millisecond {
-		t.Errorf("start = %v, want 1.5s", segs[0].Start)
-	}
-	if segs[0].End != 2500*time.Millisecond {
-		t.Errorf("end = %v, want 2.5s", segs[0].End)
-	}
-}
-
-// The transcript is the two streams merged into one chronological conversation, each line marked with who spoke.
-func TestRenderTranscript_InterleavesByStartTime(t *testing.T) {
-	mine := []Segment{
-		{Start: 0, End: time.Second, Speaker: speakerMe, Text: "morning all"},
-		{Start: 10 * time.Second, End: 11 * time.Second, Speaker: speakerMe, Text: "sounds good"},
-	}
-	theirs := []Segment{
-		{Start: 2 * time.Second, End: 4 * time.Second, Speaker: speakerCall, Text: "morning"},
-		{Start: 5 * time.Second, End: 6 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
-	}
-	got := renderTranscript(append(mine, theirs...))
-	want := "[00:00:00] [me] morning all\n\n" +
-		"[00:00:02] [call] morning ship it friday\n\n" +
-		"[00:00:10] [me] sounds good\n"
-	if got != want {
-		t.Errorf("transcript mismatch\n got:\n%s\nwant:\n%s", got, want)
-	}
-}
-
-// An empty stream (nobody unmuted their mic, say) still yields the other side's transcript rather than an error.
-func TestRenderTranscript_OneSideEmpty(t *testing.T) {
-	got := renderTranscript([]Segment{{Start: time.Second, Speaker: speakerCall, Text: "anyone there?"}})
-	if got != "[00:00:01] [call] anyone there?\n" {
-		t.Errorf("got %q", got)
-	}
-}
-
-// whisper marks silence and non-speech sound as a bracketed pseudo-segment. One side of a call is silent most of the time, so those lines would otherwise be most of the transcript.
-func TestParseSegments_DropsNonSpeechMarkers(t *testing.T) {
-	out := `[00:00:00.000 --> 00:00:07.000]   [BLANK_AUDIO]
-[00:00:07.000 --> 00:00:08.000]   (upbeat music)
-[00:00:08.000 --> 00:00:09.000]   real words here`
-	segs := parseSegments(out, speakerMe, 0)
-	if len(segs) != 1 || segs[0].Text != "real words here" {
-		t.Errorf("expected only the spoken segment, got %+v", segs)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.check(t, parseSegments(c.out, c.speaker, c.offset))
+		})
 	}
 }
 
-// Whisper loops on thin audio: the same invented sentence came back five times in the real 2026-08-28 recording, scattered between other lines rather than in one run. A sentence of ordinary length repeated verbatim that often is the decoder stuck, not something anyone said, so every copy goes.
-func TestDropHallucinations_DropsAScatteredVerbatimRepeat(t *testing.T) {
-	const dog = "I'm going to try to reach out to my dog."
-	segs := []Segment{
-		{Start: 11 * time.Second, Speaker: speakerCall, Text: dog},
-		{Start: 14 * time.Second, Speaker: speakerCall, Text: "Okay."},
-		{Start: 15 * time.Second, Speaker: speakerCall, Text: dog},
-		{Start: 18 * time.Second, Speaker: speakerCall, Text: "Okay."},
-		{Start: 19 * time.Second, Speaker: speakerCall, Text: dog},
-		{Start: 33 * time.Second, Speaker: speakerCall, Text: "Are you sharing something?"},
+// dropHallucinations has to tell a real repeat from a loop: a phrase said twice, whether across segments or inside one, is emphasis and survives; three or more identical segments in a row, or the same sentence repeated verbatim within one segment, is whisper stuck and collapses; and whisper's real loops drift, sliding the repeated phrase's word offset or even a number inside it between copies, so the drop has to catch those too.
+func TestDropHallucinations(t *testing.T) {
+	cases := []struct {
+		name  string
+		segs  []Segment
+		check func(t *testing.T, got []Segment)
+	}{
+		{
+			// Whisper loops on thin audio: the same invented sentence came back five times in a real recording, scattered between other lines rather than in one run.
+			name: "a scattered verbatim repeat is dropped everywhere it occurs",
+			segs: []Segment{
+				{Start: 11 * time.Second, Speaker: speakerCall, Text: "I'm going to try to reach out to my dog."},
+				{Start: 14 * time.Second, Speaker: speakerCall, Text: "Okay."},
+				{Start: 15 * time.Second, Speaker: speakerCall, Text: "I'm going to try to reach out to my dog."},
+				{Start: 18 * time.Second, Speaker: speakerCall, Text: "Okay."},
+				{Start: 19 * time.Second, Speaker: speakerCall, Text: "I'm going to try to reach out to my dog."},
+				{Start: 33 * time.Second, Speaker: speakerCall, Text: "Are you sharing something?"},
+			},
+			check: func(t *testing.T, got []Segment) {
+				for _, s := range got {
+					if s.Text == "I'm going to try to reach out to my dog." {
+						t.Fatalf("the looped sentence survived: %+v", got)
+					}
+				}
+			},
+		},
+		{
+			name: "a phrase said twice across segments survives",
+			segs: []Segment{
+				{Start: 37 * time.Second, Speaker: speakerCall, Text: "It will be same for all of them in the same country."},
+				{Start: 41 * time.Second, Speaker: speakerCall, Text: "It will be same for all of them in the same country."},
+			},
+			check: func(t *testing.T, got []Segment) {
+				if len(got) != 2 {
+					t.Errorf("got %d segments, want both kept: %+v", len(got), got)
+				}
+			},
+		},
+		{
+			name: "three or more identical segments in a row collapse to one",
+			segs: []Segment{
+				{Start: 21 * time.Second, Speaker: speakerCall, Text: "Okay."},
+				{Start: 22 * time.Second, Speaker: speakerCall, Text: "Okay."},
+				{Start: 23 * time.Second, Speaker: speakerCall, Text: "Okay."},
+				{Start: 24 * time.Second, Speaker: speakerCall, Text: "Okay."},
+				{Start: 33 * time.Second, Speaker: speakerCall, Text: "Are you sharing something?"},
+			},
+			check: func(t *testing.T, got []Segment) {
+				if len(got) != 2 || got[0].Text != "Okay." || got[1].Text != "Are you sharing something?" {
+					t.Errorf("got %+v, want one Okay. and the real line", got)
+				}
+			},
+		},
+		{
+			// Whisper also loops inside a single segment: one line of a real transcript was the word "Okay." thirteen times over.
+			name: "a repeat inside one segment collapses without touching the words around it",
+			segs: []Segment{{Speaker: speakerMe, Text: "read. Okay. Okay. Okay. Okay. Okay. Okay. Okay. Okay."}},
+			check: func(t *testing.T, got []Segment) {
+				if len(got) != 1 || got[0].Text != "read. Okay." {
+					t.Errorf("got %+v, want \"read. Okay.\"", got)
+				}
+			},
+		},
+		{
+			name: "a sentence said twice inside one segment is emphasis and stays",
+			segs: []Segment{{Speaker: speakerMe, Text: "We have to do it. We have to do it."}},
+			check: func(t *testing.T, got []Segment) {
+				if got[0].Text != "We have to do it. We have to do it." {
+					t.Errorf("got %q, want the pair kept", got[0].Text)
+				}
+			},
+		},
+		{
+			// Whisper's real loops drift: each decode window slides a little further into the repeated phrase, so consecutive segments carry the same sentence at a different word offset and are never byte-identical.
+			name: "a drifting loop is dropped even without an exact match",
+			segs: []Segment{
+				{Speaker: speakerCall, Text: "Now coming to the question which he asked."},
+				{Speaker: speakerCall, Text: "In X, if you saw that video, there is something called as positive engagement and negative engagement."},
+				{Speaker: speakerCall, Text: "That means that for example, you are not in a positive mood. You are in a positive mood. You are not in a positive mood. You are"},
+				{Speaker: speakerCall, Text: "not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are"},
+				{Speaker: speakerCall, Text: "not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are not in"},
+				{Speaker: speakerCall, Text: "a positive mood. You are not in a positive mood. You are not in a positive mood. You are"},
+			},
+			check: func(t *testing.T, got []Segment) {
+				for _, s := range got {
+					if strings.Contains(s.Text, "positive mood") {
+						t.Fatalf("the drifting loop survived: %+v", got)
+					}
+				}
+				if len(got) == 0 || !strings.Contains(got[0].Text, "Now coming to the question") {
+					t.Errorf("the real opening sentence should have survived, got %+v", got)
+				}
+			},
+		},
+		{
+			// The same drift, with the loop's own wording sliding too: a real recording reworded "55%" to "56%" and back between copies. A window of words away from the changed one still has to match, so the loop goes even though no two copies agree on the number.
+			name: "a drifting loop is dropped even when a number inside it changes between copies",
+			segs: []Segment{
+				{Speaker: speakerMe, Text: "so now you have used a total of 56% right, yes, okay, so now you have used a total"},
+				{Speaker: speakerMe, Text: "of 56% right, so now you have used a total of 56% right, so now you have used a total"},
+				{Speaker: speakerMe, Text: "of 55% right, so now you have used a total of 56% right, so now you have used a total of 55% right, so now you have used a total"},
+			},
+			check: func(t *testing.T, got []Segment) {
+				for _, s := range got {
+					if strings.Contains(s.Text, "used a total") {
+						t.Fatalf("the drifting loop survived: %+v", got)
+					}
+				}
+			},
+		},
 	}
-	for _, s := range dropHallucinations(segs) {
-		if s.Text == dog {
-			t.Fatalf("the looped sentence survived: %+v", dropHallucinations(segs))
-		}
-	}
-}
-
-// A phrase people really do repeat must survive. Twice is emphasis, not a loop.
-func TestDropHallucinations_KeepsAPhraseSaidTwice(t *testing.T) {
-	const line = "It will be same for all of them in the same country."
-	segs := []Segment{
-		{Start: 37 * time.Second, Speaker: speakerCall, Text: line},
-		{Start: 41 * time.Second, Speaker: speakerCall, Text: line},
-	}
-	if got := dropHallucinations(segs); len(got) != 2 {
-		t.Errorf("got %d segments, want both kept: %+v", len(got), got)
-	}
-}
-
-// Runs of a bare acknowledgement are whisper filling silence. Three or more in a row from one stream collapse to one; two stay as they are.
-func TestDropHallucinations_CollapsesARunOfIdenticalSegments(t *testing.T) {
-	segs := []Segment{
-		{Start: 21 * time.Second, Speaker: speakerCall, Text: "Okay."},
-		{Start: 22 * time.Second, Speaker: speakerCall, Text: "Okay."},
-		{Start: 23 * time.Second, Speaker: speakerCall, Text: "Okay."},
-		{Start: 24 * time.Second, Speaker: speakerCall, Text: "Okay."},
-		{Start: 33 * time.Second, Speaker: speakerCall, Text: "Are you sharing something?"},
-	}
-	got := dropHallucinations(segs)
-	if len(got) != 2 || got[0].Text != "Okay." || got[1].Text != "Are you sharing something?" {
-		t.Errorf("got %+v, want one Okay. and the real line", got)
-	}
-}
-
-// Whisper also loops inside a single segment: one line of the real transcript was the word "Okay." thirteen times over. The repeat is collapsed without touching the words around it.
-func TestDropHallucinations_CollapsesARepeatInsideOneSegment(t *testing.T) {
-	segs := []Segment{{Speaker: speakerMe, Text: "read. Okay. Okay. Okay. Okay. Okay. Okay. Okay. Okay."}}
-	got := dropHallucinations(segs)
-	if len(got) != 1 || got[0].Text != "read. Okay." {
-		t.Errorf("got %+v, want \"read. Okay.\"", got)
-	}
-}
-
-// A sentence said twice inside one segment is emphasis and stays.
-func TestDropHallucinations_KeepsADoubleInsideOneSegment(t *testing.T) {
-	segs := []Segment{{Speaker: speakerMe, Text: "We have to do it. We have to do it."}}
-	if got := dropHallucinations(segs); got[0].Text != "We have to do it. We have to do it." {
-		t.Errorf("got %q, want the pair kept", got[0].Text)
-	}
-}
-
-// Whisper's real loops drift: each decode window slides a little further into the repeated phrase, so consecutive segments carry the same sentence at a different word offset and are never byte-identical. This is verbatim (retimed) from the 2026-09-01 22:47 recording, where it ran for the full 15 minutes and none of the exact-match rules above caught a single copy of it.
-func TestDropHallucinations_DropsADriftingLoop(t *testing.T) {
-	segs := []Segment{
-		{Speaker: speakerCall, Text: "Now coming to the question which he asked."},
-		{Speaker: speakerCall, Text: "In X, if you saw that video, there is something called as positive engagement and negative engagement."},
-		{Speaker: speakerCall, Text: "That means that for example, you are not in a positive mood. You are in a positive mood. You are not in a positive mood. You are"},
-		{Speaker: speakerCall, Text: "not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are"},
-		{Speaker: speakerCall, Text: "not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are not in a positive mood. You are not in"},
-		{Speaker: speakerCall, Text: "a positive mood. You are not in a positive mood. You are not in a positive mood. You are"},
-	}
-	got := dropHallucinations(segs)
-	for _, s := range got {
-		if strings.Contains(s.Text, "positive mood") {
-			t.Fatalf("the drifting loop survived: %+v", got)
-		}
-	}
-	if len(got) == 0 || !strings.Contains(got[0].Text, "Now coming to the question") {
-		t.Errorf("the real opening sentence should have survived, got %+v", got)
-	}
-}
-
-// The same drift, with the loop's own wording sliding too: on the 2026-09-03 23:44 recording the loop reworded "55%" to "56%" and back between copies. A window of words away from the changed one still matches, so the loop goes even though no two copies agree on the number.
-func TestDropHallucinations_DropsADriftingLoopWithWordSubstitution(t *testing.T) {
-	segs := []Segment{
-		{Speaker: speakerMe, Text: "so now you have used a total of 56% right, yes, okay, so now you have used a total"},
-		{Speaker: speakerMe, Text: "of 56% right, so now you have used a total of 56% right, so now you have used a total"},
-		{Speaker: speakerMe, Text: "of 55% right, so now you have used a total of 56% right, so now you have used a total of 55% right, so now you have used a total"},
-	}
-	got := dropHallucinations(segs)
-	for _, s := range got {
-		if strings.Contains(s.Text, "used a total") {
-			t.Fatalf("the drifting loop survived: %+v", got)
-		}
-	}
-}
-
-// A line-per-segment transcript shreds both speakers into fragments. Consecutive segments from one stream are one turn, printed as one paragraph timestamped at its start.
-func TestRenderTranscript_MergesConsecutiveSegmentsIntoOneTurn(t *testing.T) {
-	segs := []Segment{
-		{Start: 0, End: 2 * time.Second, Speaker: speakerMe, Text: "morning all"},
-		{Start: 2 * time.Second, End: 4 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
-		{Start: 5 * time.Second, End: 6 * time.Second, Speaker: speakerCall, Text: "yes."},
-		{Start: 7 * time.Second, End: 9 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
-		{Start: 10 * time.Second, End: 11 * time.Second, Speaker: speakerMe, Text: "sounds good"},
-	}
-	want := "[00:00:00] [me] morning all did you see the sheet\n\n" +
-		"[00:00:05] [call] yes. ship it friday\n\n" +
-		"[00:00:10] [me] sounds good\n"
-	if got := renderTranscript(segs); got != want {
-		t.Errorf("transcript mismatch\n got:\n%s\nwant:\n%s", got, want)
-	}
-}
-
-// The priming prompt is built out of what Ora already saw on screen during the meeting, so whisper spells the domain's own words: the acronyms and the proper nouns, plus the people whose names were on screen.
-func TestPrimingPrompt_CarriesTheWindowsAcronymsAndNames(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Priya Shah: ok sure ping me. Alex Rivera: I also found this INFORM Risk Scoring formula and the GRDI numbers. INFORM again. GRDI again."},
-		{Title: "Acme Essentials - Climate Reporting Platform - Brave", ScreenText: "Climate Risk Studio Double Materiality Assessment ASRS"},
-	}
-	got := primingPromptFor(eps, nil)
-	for _, want := range []string{"INFORM", "GRDI", "ASRS", "Priya Shah", "Climate Risk Studio"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("priming prompt is missing %q:\n%s", want, got)
-		}
-	}
-	if len(got) > primingPromptBudget {
-		t.Errorf("priming prompt is %d chars, over the %d-char budget", len(got), primingPromptBudget)
-	}
-	// Whisper continues the prompt's register as well as its words: primed with raw lowercase screen text it returns the whole transcript lowercase and unpunctuated, so the prompt has to read as capitalised, punctuated sentences.
-	if !strings.HasPrefix(got, "Meeting notes.") || !strings.HasSuffix(got, ".") {
-		t.Errorf("priming prompt must read as sentences, got:\n%s", got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.check(t, dropHallucinations(c.segs))
+		})
 	}
 }
 
-// Browser and app chrome is on every screen Ora captures and is not what the meeting is about, so it must not crowd the real terms out of the prompt.
-func TestPrimingPrompt_LeavesOutBrowserChrome(t *testing.T) {
-	eps := []db.Episode{{Title: "GitHub - Brave", ScreenText: "Type / to search Pull requests Add file Code Insights Settings Search Search Ctrl K"}}
-	got := primingPromptFor(eps, nil)
-	for _, junk := range []string{"Ctrl K", "Search Search", "Add file"} {
-		if strings.Contains(got, junk) {
-			t.Errorf("priming prompt carries chrome %q:\n%s", junk, got)
-		}
+// The transcript is the two streams merged into one chronological conversation: consecutive segments from one stream are one turn printed as one paragraph at its start time, a run within the continuity gap stays one turn, an empty stream still yields the other side's transcript, and a long unbroken run still has to end somewhere rather than becoming one enormous paragraph with every timestamp thrown away.
+func TestRenderTranscript(t *testing.T) {
+	cases := []struct {
+		name  string
+		segs  []Segment
+		check func(t *testing.T, got string)
+	}{
+		{
+			name: "interleaves both sides by start time, merging each side's own consecutive segments",
+			segs: append([]Segment{
+				{Start: 0, End: time.Second, Speaker: speakerMe, Text: "morning all"},
+				{Start: 10 * time.Second, End: 11 * time.Second, Speaker: speakerMe, Text: "sounds good"},
+			}, []Segment{
+				{Start: 2 * time.Second, End: 4 * time.Second, Speaker: speakerCall, Text: "morning"},
+				{Start: 5 * time.Second, End: 6 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
+			}...),
+			check: func(t *testing.T, got string) {
+				want := "[00:00:00] [me] morning all\n\n" +
+					"[00:00:02] [call] morning ship it friday\n\n" +
+					"[00:00:10] [me] sounds good\n"
+				if got != want {
+					t.Errorf("transcript mismatch\n got:\n%s\nwant:\n%s", got, want)
+				}
+			},
+		},
+		{
+			name: "an empty stream still yields the other side's transcript",
+			segs: []Segment{{Start: time.Second, Speaker: speakerCall, Text: "anyone there?"}},
+			check: func(t *testing.T, got string) {
+				if got != "[00:00:01] [call] anyone there?\n" {
+					t.Errorf("got %q", got)
+				}
+			},
+		},
+		{
+			name: "consecutive segments from one speaker merge into one turn",
+			segs: []Segment{
+				{Start: 0, End: 2 * time.Second, Speaker: speakerMe, Text: "morning all"},
+				{Start: 2 * time.Second, End: 4 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
+				{Start: 5 * time.Second, End: 6 * time.Second, Speaker: speakerCall, Text: "yes."},
+				{Start: 7 * time.Second, End: 9 * time.Second, Speaker: speakerCall, Text: "ship it friday"},
+				{Start: 10 * time.Second, End: 11 * time.Second, Speaker: speakerMe, Text: "sounds good"},
+			},
+			check: func(t *testing.T, got string) {
+				want := "[00:00:00] [me] morning all did you see the sheet\n\n" +
+					"[00:00:05] [call] yes. ship it friday\n\n" +
+					"[00:00:10] [me] sounds good\n"
+				if got != want {
+					t.Errorf("transcript mismatch\n got:\n%s\nwant:\n%s", got, want)
+				}
+			},
+		},
+		{
+			// Segments a couple of seconds apart with nothing between them are one person still talking, and splitting there is what shredded the transcript into fragments before turns existed.
+			name: "a run within the continuity gap stays one turn",
+			segs: []Segment{
+				{Start: 0, End: 2 * time.Second, Speaker: speakerMe, Text: "morning all"},
+				{Start: 2200 * time.Millisecond, End: 4 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
+			},
+			check: func(t *testing.T, got string) {
+				if got != "[00:00:00] [me] morning all did you see the sheet\n" {
+					t.Errorf("got %q", got)
+				}
+			},
+		},
+		{
+			// Ten minutes of back-to-back call audio, no pauses and no speaker markers, once rendered as a single 21,158-character turn with every timestamp thrown away and no boundary anywhere to attribute against. A turn has to end somewhere.
+			name: "a long unbroken run breaks into more than one turn",
+			segs: func() []Segment {
+				var segs []Segment
+				for i := 0; i < 120; i++ {
+					at := time.Duration(i) * 5 * time.Second
+					segs = append(segs, Segment{Start: at, End: at + 5*time.Second, Speaker: speakerCall, Text: "and then we looked at the numbers again."})
+				}
+				return segs
+			}(),
+			check: func(t *testing.T, got string) {
+				if lines := strings.Count(got, "[00:"); lines < 2 {
+					t.Fatalf("ten minutes of unbroken call audio rendered as %d turn(s); a turn must be bounded", lines)
+				}
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.check(t, renderTranscript(c.segs))
+		})
 	}
 }
 
-// Nothing on screen means no prompt at all, rather than a prompt made of nothing that whisper would try to continue.
-func TestPrimingPrompt_EmptyWhenThereIsNoContext(t *testing.T) {
-	if got := primingPromptFor(nil, nil); got != "" {
-		t.Errorf("got %q, want no prompt", got)
+// The priming prompt is built out of what Ora already saw on screen during the meeting: it carries the domain's own acronyms, proper nouns and participant names within budget and readable as sentences, leaves out browser chrome, produces nothing at all when there is no context, orders names after terms so truncation can't reach them, takes participants only from the meeting's own window, and includes the people the personal-context store already knows.
+func TestPrimingPrompt(t *testing.T) {
+	cases := []struct {
+		name  string
+		eps   []db.Episode
+		known []string
+		check func(t *testing.T, got string)
+	}{
+		{
+			name: "carries the window's acronyms and names, within budget, as sentences",
+			eps: []db.Episode{
+				{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Priya Shah: ok sure ping me. Alex Rivera: I also found this INFORM Risk Scoring formula and the GRDI numbers. INFORM again. GRDI again."},
+				{Title: "Acme Essentials - Climate Reporting Platform - Brave", ScreenText: "Climate Risk Studio Double Materiality Assessment ASRS"},
+			},
+			check: func(t *testing.T, got string) {
+				for _, want := range []string{"INFORM", "GRDI", "ASRS", "Priya Shah", "Climate Risk Studio"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("priming prompt is missing %q:\n%s", want, got)
+					}
+				}
+				if len(got) > primingPromptBudget {
+					t.Errorf("priming prompt is %d chars, over the %d-char budget", len(got), primingPromptBudget)
+				}
+				// Whisper continues the prompt's register as well as its words: primed with raw lowercase screen text it returns the whole transcript lowercase and unpunctuated.
+				if !strings.HasPrefix(got, "Meeting notes.") || !strings.HasSuffix(got, ".") {
+					t.Errorf("priming prompt must read as sentences, got:\n%s", got)
+				}
+			},
+		},
+		{
+			name: "leaves out browser chrome",
+			eps:  []db.Episode{{Title: "GitHub - Brave", ScreenText: "Type / to search Pull requests Add file Code Insights Settings Search Search Ctrl K"}},
+			check: func(t *testing.T, got string) {
+				for _, junk := range []string{"Ctrl K", "Search Search", "Add file"} {
+					if strings.Contains(got, junk) {
+						t.Errorf("priming prompt carries chrome %q:\n%s", junk, got)
+					}
+				}
+			},
+		},
+		{
+			name: "nothing on screen means no prompt at all",
+			check: func(t *testing.T, got string) {
+				if got != "" {
+					t.Errorf("got %q, want no prompt", got)
+				}
+			},
+		},
+		{
+			// Whisper keeps only the last whisperMaxContext tokens of this prompt, so participant names matter more than terms for getting the transcript right and have to come after them, where truncation can't reach them.
+			name: "names come after terms so they survive truncation",
+			eps:  []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"}},
+			check: func(t *testing.T, got string) {
+				termsAt, participantsAt := strings.Index(got, "Terms:"), strings.Index(got, "Participants:")
+				if termsAt == -1 || participantsAt == -1 {
+					t.Fatalf("expected both a Terms and a Participants section, got:\n%s", got)
+				}
+				if participantsAt < termsAt {
+					t.Errorf("participants must come after terms, got:\n%s", got)
+				}
+				if !strings.HasSuffix(got, "Priya Shah.") {
+					t.Errorf("the participant name should be the last thing in the prompt, got:\n%s", got)
+				}
+			},
+		},
+		{
+			// Only the window the call is actually running in names the people on the call: a WhatsApp tab open at the same time must not contribute its chat senders as participants.
+			name: "participants come only from the meeting window",
+			eps: []db.Episode{
+				{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Rohit Verma: Abhi renew hua"},
+				{App: "Brave Browser", Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vikram Goel: sharing my screen now"},
+			},
+			check: func(t *testing.T, got string) {
+				_, participants, _ := strings.Cut(got, "Participants:")
+				if strings.Contains(participants, "Rohit") {
+					t.Errorf("a WhatsApp sender was named as a meeting participant: %q", participants)
+				}
+				if !strings.Contains(participants, "Vikram Goel") {
+					t.Errorf("the meeting window's own chat sender was dropped: %q", participants)
+				}
+			},
+		},
+		{
+			// The names the store already knows are the cheapest priming there is, so they go into the prompt after the screen's own terms.
+			name:  "known people from personal context are included",
+			known: []string{"Priya Shah", "Sneha"},
+			check: func(t *testing.T, got string) {
+				for _, want := range []string{"Priya Shah", "Sneha"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("prompt %q lacks known person %q", got, want)
+					}
+				}
+				if len(got) > primingPromptBudget {
+					t.Errorf("prompt is %d chars, over the %d budget", len(got), primingPromptBudget)
+				}
+			},
+		},
 	}
-}
-
-// Whisper keeps only the last whisperMaxContext tokens of this prompt, so whatever sits at the front is what gets cut when the prompt runs long. Participant names matter more than terms for getting the transcript right, so terms have to come first and the names last, where truncation can't reach them.
-func TestPrimingPrompt_NamesComeAfterTermsSoTheySurviveTruncation(t *testing.T) {
-	eps := []db.Episode{
-		{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"},
-	}
-	got := primingPromptFor(eps, nil)
-	termsAt, participantsAt := strings.Index(got, "Terms:"), strings.Index(got, "Participants:")
-	if termsAt == -1 || participantsAt == -1 {
-		t.Fatalf("expected both a Terms and a Participants section, got:\n%s", got)
-	}
-	if participantsAt < termsAt {
-		t.Errorf("participants must come after terms, got:\n%s", got)
-	}
-	if !strings.HasSuffix(got, "Priya Shah.") {
-		t.Errorf("the participant name should be the last thing in the prompt, got:\n%s", got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.check(t, primingPromptFor(c.eps, c.known))
+		})
 	}
 }
 
@@ -384,47 +534,7 @@ func TestTranscribeWAV_PassesThresholdsAndPrompt(t *testing.T) {
 	}
 }
 
-// The 2026-08-31 standup rendered as a single [call] turn of 21,158 characters covering the last thirty minutes of a thirty-nine minute meeting: whisper produced hundreds of timestamped segments and the turn merge threw every one of their timestamps away. Six people spoke in that block and the minutes model had no boundary anywhere to attribute against. A turn has to end somewhere.
-func TestRenderTranscript_BreaksALongUnbrokenRunIntoTurns(t *testing.T) {
-	// Ten minutes of back-to-back call audio, no pauses and no speaker markers — the shape that produced the 21k paragraph.
-	var segs []Segment
-	for i := 0; i < 120; i++ {
-		at := time.Duration(i) * 5 * time.Second
-		segs = append(segs, Segment{Start: at, End: at + 5*time.Second, Speaker: speakerCall, Text: "and then we looked at the numbers again."})
-	}
-	lines := strings.Count(renderTranscript(segs), "[00:")
-	if lines < 2 {
-		t.Fatalf("ten minutes of unbroken call audio rendered as %d turn(s); a turn must be bounded", lines)
-	}
-}
-
-// Segments a couple of seconds apart with nothing between them are one person still talking, and splitting there is what shredded the transcript into fragments before turns existed.
-func TestRenderTranscript_KeepsAContinuousRunTogether(t *testing.T) {
-	segs := []Segment{
-		{Start: 0, End: 2 * time.Second, Speaker: speakerMe, Text: "morning all"},
-		{Start: 2200 * time.Millisecond, End: 4 * time.Second, Speaker: speakerMe, Text: "did you see the sheet"},
-	}
-	if got := renderTranscript(segs); got != "[00:00:00] [me] morning all did you see the sheet\n" {
-		t.Errorf("got %q", got)
-	}
-}
-
-// The 2026-08-31 standup: a WhatsApp tab was open five minutes in, and its chat senders went into the priming prompt as the meeting's participants. Only the window the call is actually running in names the people on the call.
-func TestPrimingPrompt_TakesParticipantsOnlyFromTheMeetingWindow(t *testing.T) {
-	eps := []db.Episode{
-		{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Rohit Verma: Abhi renew hua"},
-		{App: "Brave Browser", Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vikram Goel: sharing my screen now"},
-	}
-	_, participants, _ := strings.Cut(primingPromptFor(eps, nil), "Participants:")
-	if strings.Contains(participants, "Rohit") {
-		t.Errorf("a WhatsApp sender was named as a meeting participant: %q", participants)
-	}
-	if !strings.Contains(participants, "Vikram Goel") {
-		t.Errorf("the meeting window's own chat sender was dropped: %q", participants)
-	}
-}
-
-// Whisper reads its priming prompt back as speech: the 2026-08-31 transcript opened with "Participants: Rohit Verma, Claude Artifact." timestamped at 00:00:00, which the minutes model then treated as something a person said.
+// Whisper reads its priming prompt back as speech on occasion, which then reads as something a person said. stripPromptEcho is what removes it, and this is the test that it is actually wired into the run rather than merely defined.
 func TestStripPromptEcho_DropsTheEchoedPrompt(t *testing.T) {
 	const prompt = "Meeting notes. Terms: INFORM, GRDI. Participants: Vikram Goel."
 	segs := []Segment{
@@ -460,7 +570,7 @@ func TestAssignSpeakers_TakesTheMostOverlappedCluster(t *testing.T) {
 	}
 }
 
-// On the 2026-09-02 17:32 call the priming prompt made whisper decode the whole 21-minute call side as 308 lines of "[ Silence ]" plus one invented sentence, while the same file without the prompt gave 42 real lines. A run whose output is mostly one repeated non-speech marker is that loop, and the cure is to run again without the prompt.
+// A run whose output is mostly one repeated non-speech marker is the priming-prompt silence loop and must be redone without the prompt; a quiet stream with real words between its markers, or empty output, is not that loop.
 func TestMarkerLooped(t *testing.T) {
 	looped := "[00:00:00.000 --> 00:00:30.000]   [ Silence ]\n[00:00:30.000 --> 00:01:00.000]   [ Silence ]\n[00:01:00.000 --> 00:01:30.000]   [ Silence ]\n[00:01:30.000 --> 00:01:32.000]   Me, I am frustrated.\n"
 	if !markerLooped(looped) {
@@ -472,19 +582,6 @@ func TestMarkerLooped(t *testing.T) {
 	}
 	if markerLooped("") {
 		t.Error("empty output is not a loop")
-	}
-}
-
-// Whisper spells a name the way it is primed to. On 2026-09-03 a call with Sneha was primed with "Meeting notes. Terms: API." because the screen had nothing, and the transcript said "Ashar", which then became a person in memory. The names the store already knows are the cheapest priming there is, so they go into the prompt after the screen's own terms.
-func TestPrimingPromptFor_IncludesKnownPeople(t *testing.T) {
-	got := primingPromptFor(nil, []string{"Priya Shah", "Sneha"})
-	for _, want := range []string{"Priya Shah", "Sneha"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("prompt %q lacks known person %q", got, want)
-		}
-	}
-	if len(got) > primingPromptBudget {
-		t.Errorf("prompt is %d chars, over the %d budget", len(got), primingPromptBudget)
 	}
 }
 
@@ -531,7 +628,7 @@ func runArgs(t *testing.T, argLog string) []string {
 	return out
 }
 
-// The priming prompt is a spelling aid, and whisper sometimes reads it back as the first thing said in the meeting: on 2026-08-31 the transcript opened with "Participants: Rohit Verma, Claude Artifact." at 00:00:00, which the minutes model then took as evidence about who was in the call. stripPromptEcho is what removes it, and this is the test that it is actually wired into the run rather than merely defined.
+// The priming prompt is a spelling aid, and whisper sometimes reads it back as the first thing said in the meeting, which the minutes model then takes as evidence about who was in the call. This is the test that stripPromptEcho is actually wired into the run rather than merely defined.
 func TestTranscribeWAV_DropsThePromptWhisperReadBackAsSpeech(t *testing.T) {
 	prompt := "A meeting recording. Participants: Rohit Verma, Claude Artifact."
 	bin := fakeWhisper(t, "[00:00:00.000 --> 00:00:02.000]   Participants: Rohit Verma, Claude Artifact.\n[00:00:03.000 --> 00:00:05.000]   shall we ship on friday", "")
@@ -545,7 +642,7 @@ func TestTranscribeWAV_DropsThePromptWhisperReadBackAsSpeech(t *testing.T) {
 	}
 }
 
-// A run that loops on a silence marker is redone without the prompt, and the redo has to keep everything else the first run had — above all the model flags, without which whisper-cli looks for a model that is not there and the whole meeting fails. Dropping the last two arguments only removed the prompt while the prompt was last, which it stopped being the moment the model flags were appended after it.
+// A run that loops on a silence marker is redone without the prompt, and the redo has to keep everything else the first run had — above all the model flags, without which whisper-cli looks for a model that is not there and the whole meeting fails.
 func TestTranscribeWAV_TheUnprimedRetryKeepsTheModelFlags(t *testing.T) {
 	looped := "[00:00:00.000 --> 00:00:01.000]   [ Silence ]\n[00:00:01.000 --> 00:00:02.000]   [ Silence ]\n[00:00:02.000 --> 00:00:03.000]   hello"
 	bin, argLog := fakeWhisperLogging(t, looped)
@@ -571,7 +668,7 @@ func TestTranscribeWAV_TheUnprimedRetryKeepsTheModelFlags(t *testing.T) {
 	}
 }
 
-// A whisper run that decodes on the GPU holds GPURun for the whole decode, so the two streams of a call run one after the other and each has the machine to itself. Splitting the cores four ways there leaves three quarters of them idle for the length of every meeting. Only the CPU path really overlaps.
+// A whisper run that decodes on the GPU holds GPURun for the whole decode, so the two streams of a call run one after the other and each has the machine to itself. Splitting the cores four ways there leaves three quarters of them idle for the length of every meeting. Only the CPU path really overlaps, and the thread count on either path is a property of the machine, so an explicit override wins on both.
 func TestWhisperThreads_AGPURunGetsMoreThanACPURunBecauseItIsAlone(t *testing.T) {
 	cpu, gpu := whisperThreads(false), whisperThreads(true)
 	if cpu < 1 || gpu < 1 {
@@ -583,10 +680,7 @@ func TestWhisperThreads_AGPURunGetsMoreThanACPURunBecauseItIsAlone(t *testing.T)
 	if max := runtime.NumCPU()/2 + 1; gpu > max {
 		t.Errorf("a GPU run asked for %d threads on %d cores, want no more than %d", gpu, runtime.NumCPU(), max)
 	}
-}
 
-// The thread count is a property of the machine, so an explicit setting wins on either path.
-func TestWhisperThreads_HonoursTheOverrideOnEitherPath(t *testing.T) {
 	t.Setenv("ORA_TRANSCRIBE_THREADS", "6")
 	if cpu, gpu := whisperThreads(false), whisperThreads(true); cpu != 6 || gpu != 6 {
 		t.Errorf("whisperThreads = %d on the CPU and %d on the GPU, want the configured 6 either way", cpu, gpu)
@@ -618,7 +712,7 @@ func fakeWhisperDyingOnTheGPUFirst(t *testing.T, stdout string) (bin, argLog str
 	return bin, argLog
 }
 
-// The card is shared with the embedding server and a shadow model, so a decode can find no memory on it and die mid-run: on 2026-09-06 at 18:30 a dictation was lost to "ggml_vulkan: Device memory allocation of size 462323712 failed ... ErrorOutOfDeviceMemory" and a segmentation fault. The same audio decodes on the CPU, so the run is redone there instead of the words being thrown away.
+// The card is shared with the embedding server and a shadow model, so a decode can find no memory on it and die mid-run. The same audio decodes on the CPU, so the run is redone there instead of the words being thrown away.
 func TestTranscribeWAV_RetriesOnTheCPUWhenTheGPURunDies(t *testing.T) {
 	bin, argLog := fakeWhisperDyingOnTheGPUFirst(t, "[00:00:00.000 --> 00:00:01.000]   shall we ship on friday")
 

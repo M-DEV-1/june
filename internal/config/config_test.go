@@ -48,7 +48,7 @@ func TestConfigPath_UnderDataDir(t *testing.T) {
 	}
 }
 
-// TestEmbedConfigDefaults verifies a config file with no "embed" key at all (every install before the local embedder existed) still comes back with the local port and idle timeout filled in, so the daemon never spawns llama-server on port 0 or reaps it instantly.
+// TestEmbedConfigDefaults verifies a config file with no "embed" key at all (every install before the local embedder existed) still comes back with the local port and idle timeout filled in, so the daemon never spawns llama-server on port 0 or reaps it instantly. It also checks that a half-written embed block — a binary named with no model path — leaves LocalEnabled false too: a half-written config must not take embeddings down.
 func TestEmbedConfigDefaults(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ORA_DATA_DIR", dir)
@@ -65,6 +65,15 @@ func TestEmbedConfigDefaults(t *testing.T) {
 	}
 	if cfg.Embed.LocalEnabled() {
 		t.Error("Embed.LocalEnabled() should be false with no llama_server/model_path configured")
+	}
+
+	dir2 := t.TempDir()
+	t.Setenv("ORA_DATA_DIR", dir2)
+	if err := os.WriteFile(filepath.Join(dir2, "ora-config.json"), []byte(`{"embed":{"llama_server":"/opt/llama-server"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if LoadConfig().Embed.LocalEnabled() {
+		t.Error("Embed.LocalEnabled() = true with a binary but no model_path, want false")
 	}
 }
 
@@ -89,19 +98,6 @@ func TestEmbedConfigLocalEnabled(t *testing.T) {
 	}
 	if got, want := cfg.Embed.BaseURL(), "http://127.0.0.1:6943"; got != want {
 		t.Errorf("Embed.BaseURL() = %q, want %q", got, want)
-	}
-}
-
-// TestEmbedConfigHalfConfiguredStaysOnGemini verifies that a binary with no model (or the reverse) does not switch the daemon over — a half-written config must not take embeddings down.
-func TestEmbedConfigHalfConfiguredStaysOnGemini(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("ORA_DATA_DIR", dir)
-	if err := os.WriteFile(filepath.Join(dir, "ora-config.json"), []byte(`{"embed":{"llama_server":"/opt/llama-server"}}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if LoadConfig().Embed.LocalEnabled() {
-		t.Error("Embed.LocalEnabled() = true with no model_path, want false")
 	}
 }
 
@@ -191,7 +187,7 @@ func TestDreamConfig_DefaultsAndDisable(t *testing.T) {
 	}
 }
 
-// TestBackgroundModel_ConfigPinsAJob checks that a model named in the config's background_models map wins for that job and leaves every other job on the default.
+// TestBackgroundModel_ConfigPinsAJob checks that a model named in the config's background_models map wins for that job, that every other known job falls back to the default, and that a job name with no entry and no default of its own still answers with the default rather than an empty model name that would fail the call.
 func TestBackgroundModel_ConfigPinsAJob(t *testing.T) {
 	SetBackgroundModels(map[string]string{JobMeetingMinutes: "gemini-3.5-flash"})
 	t.Cleanup(func() { SetBackgroundModels(nil) })
@@ -202,11 +198,6 @@ func TestBackgroundModel_ConfigPinsAJob(t *testing.T) {
 	if got := BackgroundModel(JobWorkingState); got != DefaultBackgroundModel {
 		t.Errorf("unpinned job = %q, want the default %q", got, DefaultBackgroundModel)
 	}
-}
-
-// TestBackgroundModel_UnknownJobStillAnswers checks that a job name with no entry and no default of its own falls back to the default model rather than returning an empty model name that would fail the call.
-func TestBackgroundModel_UnknownJobStillAnswers(t *testing.T) {
-	SetBackgroundModels(nil)
 	if got := BackgroundModel("not-a-job"); got != DefaultBackgroundModel {
 		t.Errorf("unknown job = %q, want the default %q", got, DefaultBackgroundModel)
 	}

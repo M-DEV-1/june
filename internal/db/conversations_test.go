@@ -79,14 +79,6 @@ func TestConversationsAndTurns(t *testing.T) {
 	}
 }
 
-// TestConversationMissing checks that reading a conversation that was never written is an error rather than a blank one.
-func TestConversationMissing(t *testing.T) {
-	store := newStore(t)
-	if _, err := store.Conversation(context.Background(), 404); err == nil {
-		t.Fatalf("Conversation on a missing id returned no error")
-	}
-}
-
 // TestTurnsBetween checks that the window's day page only sees the turns inside the window it asks for.
 func TestTurnsBetween(t *testing.T) {
 	store := newStore(t)

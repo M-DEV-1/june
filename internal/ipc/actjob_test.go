@@ -12,7 +12,7 @@ import (
 
 	"ora/internal/act"
 	"ora/internal/actjob"
-	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // jobExec answers every tool from a script, so the routes can be driven end to end without a screen.
@@ -49,11 +49,7 @@ func (e *heldExec) CheckHolds(ctx context.Context, check act.Check) bool { retur
 // jobServer builds a Server with a job runner wired to its own event hub, and returns the routes, the runner and a reader of the events that went out.
 func jobServer(t *testing.T, exec actjob.Executor, replies ...string) (*ActJobs, *actjob.Runner, func() []Event) {
 	t.Helper()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
+	store := dbtest.Open(t)
 	s := New(nil, store, nil, nil)
 
 	var i int
@@ -297,10 +293,7 @@ func TestActStart_BadRequestOnlyForValidationErrors(t *testing.T) {
 	}
 
 	// A store that has already been closed stands in for one that cannot take the write: everything the caller sent is fine, so this is the daemon's failure to report.
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
+	store := dbtest.Open(t)
 	store.Close()
 	model := func(ctx context.Context, prompt string) (string, actjob.Usage, error) {
 		return stepJSON, actjob.Usage{}, nil

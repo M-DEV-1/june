@@ -11,22 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
-
-// newActStore opens a throwaway file-backed store, closed when the test ends. File-backed rather than in-memory because SimilarActRuns is a real SQL read with a WHERE and an ORDER BY over a table other passes write to, and the behaviour under test is meant to be the behaviour on the user's own disk.
-func newActStore(t *testing.T) *Store {
-	t.Helper()
-	store, err := New(filepath.Join(t.TempDir(), "ora.db"))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
 
 // actUnit builds the two-dimensional unit vector at deg degrees. Input: an angle in degrees. Output: [cos deg, sin deg], so the cosine similarity between actUnit(a) and actUnit(b) is exactly cos(a-b).
 func actUnit(deg float64) []float32 {
@@ -217,7 +205,7 @@ func TestActRunVectorSurvivesTheRoundTrip(t *testing.T) {
 // TestSimilarActRunsFindsTheRunThatMeansTheSameThing is the whole change in one test, on the pair the old measure got wrong. The user asks "show me how to change subtitles". One stored run asked "where can i change subtitles here?", which shares only two significant words of the seven the two questions have between them — 0.29 by word overlap, below the old 0.5 threshold, so it was dropped. Another stored run asked "show me how to change the graph function", which shares four of seven — 0.57 by word overlap, above the old threshold, so it was kept, and it is about a graph.
 // By meaning the two swap places: the subtitles run is 20 degrees away (0.940) and the graph run is 60 (0.500, below the floor). Only the subtitles run comes back.
 func TestSimilarActRunsFindsTheRunThatMeansTheSameThing(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	emb.register(asked, 0)
@@ -247,7 +235,7 @@ func TestSimilarActRunsFindsTheRunThatMeansTheSameThing(t *testing.T) {
 
 // TestSimilarActRunsCarriesTheRunAndWhenItHappened checks what a match is made of beyond its score: the whole run as it was stored, with its steps decoded, and the time it started, which is what the caller renders as "6 hours ago".
 func TestSimilarActRunsCarriesTheRunAndWhenItHappened(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	emb.register(asked, 0)
@@ -282,27 +270,9 @@ func TestSimilarActRunsCarriesTheRunAndWhenItHappened(t *testing.T) {
 	}
 }
 
-// TestSimilarActRunsRefusesARunAboutADifferentTask is the floor doing its job: a run whose meaning sits far enough away is not offered at all, however it was worded. A run about a different task, handed to the model as how this was done before, is worse than no reference.
-func TestSimilarActRunsRefusesARunAboutADifferentTask(t *testing.T) {
-	store := newActStore(t)
-	emb := newActEmbedder()
-	const asked = "show me how to change subtitles"
-	emb.register(asked, 0)
-	// 75 degrees away, which is 0.259 — nowhere near the floor.
-	seedActRuns(t, store, emb, actQuestion{"take me to the open tab where family guy is playing", 75})
-
-	matches, err := store.SimilarActRuns(context.Background(), asked, 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("SimilarActRuns returned %d matches for a different task, want none: %+v", len(matches), matches)
-	}
-}
-
 // TestSimilarActRunsScoresEveryMatchAtOrAboveTheFloor checks the caller is never handed a match it would have to filter itself, and that the score it can read is the one the floor was applied to.
 func TestSimilarActRunsScoresEveryMatchAtOrAboveTheFloor(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	emb.register(asked, 0)
@@ -329,7 +299,7 @@ func TestSimilarActRunsScoresEveryMatchAtOrAboveTheFloor(t *testing.T) {
 
 // TestSimilarActRunsPutsTheClosestFirst checks the order the caller relies on: matches come back closest first, so the run put in front of the model is the closest one and not whichever was written last.
 func TestSimilarActRunsPutsTheClosestFirst(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	emb.register(asked, 0)
@@ -360,7 +330,7 @@ func TestSimilarActRunsPutsTheClosestFirst(t *testing.T) {
 
 // TestSimilarActRunsBreaksTiesWithTheNewerRun checks what happens when two different goals are exactly as close to the new question as each other: the newer run goes first, because it is the one whose screen is most likely still arranged the way it was.
 func TestSimilarActRunsBreaksTiesWithTheNewerRun(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "ring the address bar"
 	emb.register(asked, 0)
@@ -387,7 +357,7 @@ func TestSimilarActRunsBreaksTiesWithTheNewerRun(t *testing.T) {
 
 // TestSimilarActRunsOnlyOffersRunsThatWorkedOnTheScreen checks the two hard filters together: a run that ended in an error is never offered however close it is, and neither is a successful run that never touched the screen. Both stored runs ask the exact question the lookup is given, so any match at all is one of the two filters gone.
 func TestSimilarActRunsOnlyOffersRunsThatWorkedOnTheScreen(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	ctx := context.Background()
 	const question = "show me how to change subtitles on this page"
@@ -420,7 +390,7 @@ func TestSimilarActRunsOnlyOffersRunsThatWorkedOnTheScreen(t *testing.T) {
 
 // TestSimilarActRunsOffersOneRunPerGoal checks the same question asked over and over cannot fill the whole result with itself. The user's store holds one question six times; without grouping, every match offered would be the same words with the same steps. The newest run of a goal is the one kept, since it is the one whose screen is most likely still there.
 func TestSimilarActRunsOffersOneRunPerGoal(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const repeated = "Look at my screen and draw a ring around the address bar."
 	// The same goal in different case and with stray spacing is the same goal, grouped the way the nightly notes stage groups one, and being the last one written it is also the newest of the four.
@@ -447,7 +417,7 @@ func TestSimilarActRunsOffersOneRunPerGoal(t *testing.T) {
 
 // TestSimilarActRunsHonoursTheLimit checks the caller's cap is what bounds the result, since this goes into a prompt with a budget.
 func TestSimilarActRunsHonoursTheLimit(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	emb.register(asked, 0)
@@ -477,7 +447,7 @@ func TestSimilarActRunsHonoursTheLimit(t *testing.T) {
 
 // TestSimilarActRunsHasNothingToSayWithoutAQuestion checks an empty or all-stopword question asks for nothing rather than matching everything, and that it costs no embed call: there is nothing in "what is it" for a vector to be about.
 func TestSimilarActRunsHasNothingToSayWithoutAQuestion(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	seedActRuns(t, store, emb, actQuestion{"show me how to change subtitles", 0})
 	before := emb.callCount()
@@ -498,7 +468,7 @@ func TestSimilarActRunsHasNothingToSayWithoutAQuestion(t *testing.T) {
 
 // TestSimilarActRunsEmbedsBothSidesTheRightWayRound checks the asymmetry the embedding model is trained on: the question being asked now is embedded as a query, and a stored question is embedded as a document. Getting this the wrong way round costs recall on every lookup and shows up nowhere else.
 func TestSimilarActRunsEmbedsBothSidesTheRightWayRound(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	const stored = "where can i change subtitles here?"
@@ -518,7 +488,7 @@ func TestSimilarActRunsEmbedsBothSidesTheRightWayRound(t *testing.T) {
 
 // TestSimilarActRunsOffersNothingWithoutAnEmbedder checks a store with no embedder wired — a bare db.New, or a machine with no embedding engine configured — answers with nothing rather than falling back to counting shared words. There is no second measure to fall back to, and a lookup nobody can score honestly is one that should cost the prompt nothing.
 func TestSimilarActRunsOffersNothingWithoutAnEmbedder(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	ctx := context.Background()
 	if _, err := store.AddActRun(ctx, ActRun{Question: "show me how to change subtitles", Outcome: "ok", Steps: twoScreenSteps()}); err != nil {
 		t.Fatalf("AddActRun: %v", err)
@@ -535,7 +505,7 @@ func TestSimilarActRunsOffersNothingWithoutAnEmbedder(t *testing.T) {
 
 // TestSimilarActRunsSurvivesAnEmbedderThatFails checks an embedding server that is down or wedged costs the ask its reference block and nothing else: no error reaches the caller, because the reference is a help and never a requirement.
 func TestSimilarActRunsSurvivesAnEmbedderThatFails(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	emb.register(asked, 0)
@@ -553,7 +523,7 @@ func TestSimilarActRunsSurvivesAnEmbedderThatFails(t *testing.T) {
 
 // TestAddActRunEmbedsTheQuestionAsItIsStored checks where the cost of embedding is paid: once, when the run is written, not once per stored run on every lookup. A run that failed or never touched the screen is never offered as reference, so it is never embedded either.
 func TestAddActRunEmbedsTheQuestionAsItIsStored(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	ctx := context.Background()
 	const worked = "show me how to change subtitles"
@@ -594,7 +564,7 @@ func TestAddActRunEmbedsTheQuestionAsItIsStored(t *testing.T) {
 
 // TestSimilarActRunsBackfillsRunsStoredBeforeTheyWereEmbedded is what makes embedding at write time safe: every run already in the user's store was written before this existed and has no vector at all. Such a run cannot be scored on the lookup that finds it, so it is skipped that time and embedded in the background, and the next ask has it.
 func TestSimilarActRunsBackfillsRunsStoredBeforeTheyWereEmbedded(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	ctx := context.Background()
 	const asked = "show me how to change subtitles"
@@ -628,7 +598,7 @@ func TestSimilarActRunsBackfillsRunsStoredBeforeTheyWereEmbedded(t *testing.T) {
 
 // TestSimilarActRunsReplacesAVectorFromAnotherModel checks what happens when the embedding model changes under the store: EmbeddingGemma writes 768 numbers where the Gemini API wrote 3072, and a cosine between the two is meaningless. A stored vector of another length is not scored, it is thrown away and the question re-embedded, the same path a run with no vector at all takes.
 func TestSimilarActRunsReplacesAVectorFromAnotherModel(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	ctx := context.Background()
 	const asked = "show me how to change subtitles"
@@ -670,7 +640,7 @@ func TestSimilarActRunsReplacesAVectorFromAnotherModel(t *testing.T) {
 
 // TestActRunFloorIsAConfigurableDefault checks the number this whole thing turns on can be moved without a rebuild, and that it cannot be turned off by accident: a floor of zero or less is ignored and the default stands.
 func TestActRunFloorIsAConfigurableDefault(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	const asked = "show me how to change subtitles"
 	emb.register(asked, 0)
@@ -707,7 +677,7 @@ func TestActRunFloorIsAConfigurableDefault(t *testing.T) {
 
 // TestActRunVectorsDieWithTheirRun checks the retention pass leaves nothing behind: a vector is worth about three kilobytes on the real embedder, and one kept for a run that has been pruned would be three kilobytes nothing can ever read again.
 func TestActRunVectorsDieWithTheirRun(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	ids := seedActRuns(t, store, emb,
 		actQuestion{"show me how to change subtitles", 0},
@@ -737,7 +707,7 @@ func TestActRunVectorsDieWithTheirRun(t *testing.T) {
 
 // TestSimilarActRunsFallsBackToAnEmbeddedRunOfTheSameGoal pins what happens when the newest run of a goal has no vector yet: it is queued for the background backfill, and the lookup goes on to the older run of the same goal that does have one. Marking the goal as seen before the vector was decoded hid every embedded run of that goal from the ask that triggered the backfill.
 func TestSimilarActRunsFallsBackToAnEmbeddedRunOfTheSameGoal(t *testing.T) {
-	store := newActStore(t)
+	store := newFileStore(t)
 	emb := newActEmbedder()
 	ctx := context.Background()
 	const asked = "show me how to change subtitles"

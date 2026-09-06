@@ -1120,45 +1120,8 @@ func TestShadowLifecycle_StartFailureRunsShadowless(t *testing.T) {
 	}
 }
 
-// A lifecycle whose Start succeeds is stopped exactly once, after the night's stages, whether or not a Shadow ever answered anything useful.
+// A lifecycle whose Start succeeds is stopped exactly once, after the night's stages, whether or not a Shadow ever answered anything useful. GPUReleaser is asked to free the card before the shadow lifecycle starts, since the embedding server may still be sitting on the GPU the shadow needs.
 func TestShadowLifecycle_StartSucceeds_StopRunsAfterNight(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
-	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
-		t.Fatal(err)
-	}
-	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
-	r := newRunner(store, primary, yesProbes(), at(23, 30))
-	r.DataDir = t.TempDir()
-	r.Shadow = func(ctx context.Context, prompt string) (string, error) { return "ok", nil }
-
-	started, stopped := false, false
-	r.ShadowLifecycle = ShadowLifecycle{
-		Start: func(ctx context.Context) error {
-			if stopped {
-				t.Error("Start observed after Stop already ran")
-			}
-			started = true
-			return nil
-		},
-		Stop: func() {
-			if !started {
-				t.Error("Stop ran without a prior successful Start")
-			}
-			stopped = true
-		},
-	}
-
-	r.Tick(ctx)
-
-	if !started || !stopped {
-		t.Errorf("started=%v stopped=%v, want both true", started, stopped)
-	}
-}
-
-// GPUReleaser is asked to free the card before the shadow lifecycle starts, since the embedding server may still be sitting on the GPU the shadow needs.
-func TestGPUReleaser_CalledBeforeShadowLifecycleStart(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
@@ -1175,16 +1138,29 @@ func TestGPUReleaser_CalledBeforeShadowLifecycleStart(t *testing.T) {
 		released = true
 		return true
 	}
+	started, stopped := false, false
 	r.ShadowLifecycle = ShadowLifecycle{
 		Start: func(ctx context.Context) error {
+			if stopped {
+				t.Error("Start observed after Stop already ran")
+			}
 			startedAfterReleased = released
+			started = true
 			return nil
 		},
-		Stop: func() {},
+		Stop: func() {
+			if !started {
+				t.Error("Stop ran without a prior successful Start")
+			}
+			stopped = true
+		},
 	}
 
 	r.Tick(ctx)
 
+	if !started || !stopped {
+		t.Errorf("started=%v stopped=%v, want both true", started, stopped)
+	}
 	if !released {
 		t.Error("GPUReleaser was never called")
 	}

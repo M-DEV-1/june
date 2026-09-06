@@ -12,12 +12,17 @@ import (
 	"google.golang.org/genai"
 )
 
-// TestGeminiSummarizer_DeriveState_EmptyInputsShortCircuit checks that DeriveState returns ("", nil) on empty inputs instead of calling the API with nothing to summarize.
+// TestGeminiSummarizer_DeriveState_EmptyInputsShortCircuit checks that DeriveState returns ("", nil) on empty inputs instead of calling the API with nothing to summarize, and that the short circuit happens before even a local backend would be asked.
 func TestGeminiSummarizer_DeriveState_EmptyInputsShortCircuit(t *testing.T) {
 	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
 	if err != nil {
 		t.Fatalf("NewGeminiSummarizer: %v", err)
 	}
+	called := false
+	summarizer.SetStateBackend(func(ctx context.Context, prompt string) (string, error) {
+		called = true
+		return "x", nil
+	})
 
 	state, err := summarizer.DeriveState(context.Background(), nil, nil)
 	if err != nil {
@@ -25,6 +30,9 @@ func TestGeminiSummarizer_DeriveState_EmptyInputsShortCircuit(t *testing.T) {
 	}
 	if state != "" {
 		t.Errorf("expected empty state for empty inputs, got %q", state)
+	}
+	if called {
+		t.Error("local backend was called with nothing to summarize, want the empty-input short circuit to skip even the local call")
 	}
 }
 
@@ -46,18 +54,7 @@ func TestStateGate_TenMinuteFloor(t *testing.T) {
 	}
 }
 
-// TestStateGate_UnchangedMaterialIsRefused checks that the floor passing is not on its own enough: with the same apps and titles and too few new summaries, the derive is skipped.
-func TestStateGate_UnchangedMaterialIsRefused(t *testing.T) {
-	var gate memory.StateGate
-	start := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
-	gate.Derived(start, "code|main.go", 100)
-
-	if gate.ShouldDerive(start.Add(30*time.Minute), "code|main.go", 102) {
-		t.Error("derive allowed for the same signature and 2 new summaries, want refused")
-	}
-}
-
-// TestStateGate_ChangeTriggers checks the two things that do earn a derive once the floor has passed: a new app or window title, and enough new summaries under an unchanged signature.
+// TestStateGate_ChangeTriggers checks that the floor passing is not on its own enough — with the same apps and titles and too few new summaries the derive is still skipped — against the two things that do earn a derive once the floor has passed: a new app or window title, and enough new summaries under an unchanged signature.
 func TestStateGate_ChangeTriggers(t *testing.T) {
 	start := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 	later := start.Add(11 * time.Minute)
@@ -68,6 +65,7 @@ func TestStateGate_ChangeTriggers(t *testing.T) {
 		summaries  int
 		wantDerive bool
 	}{
+		{"the same signature and far too few new summaries does not derive", "code|main.go", 102, false},
 		{"a new window title derives", "code|other.go", 100, true},
 		{"a new app derives", "browser|main.go", 100, true},
 		{"enough new summaries derive without a signature change", "code|main.go", 100 + memory.StateSummaryThreshold, true},
@@ -149,24 +147,5 @@ func TestDeriveState_LocalBackendReplacesTheAPI(t *testing.T) {
 		if !strings.Contains(seen, want) {
 			t.Errorf("prompt is missing %q, want every pending summary combined into the one call", want)
 		}
-	}
-}
-
-// TestDeriveState_EmptyInputsSkipEvenTheLocalCall checks that nothing to summarize still costs no call at all, local or metered.
-func TestDeriveState_EmptyInputsSkipEvenTheLocalCall(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	called := false
-	summarizer.SetStateBackend(func(ctx context.Context, prompt string) (string, error) {
-		called = true
-		return "x", nil
-	})
-	if _, err := summarizer.DeriveState(context.Background(), nil, nil); err != nil {
-		t.Fatalf("DeriveState: %v", err)
-	}
-	if called {
-		t.Error("local backend was called with nothing to summarize")
 	}
 }

@@ -37,18 +37,9 @@ func TestRuneKeysymNamedControls(t *testing.T) {
 	}
 }
 
-// DEL and the C1 control range must not be identity-mapped: they aren't printable Latin-1 and have no named keysym, so they are dropped.
+// DEL, the C1 control range, and other control characters (outside \n, \t, \b) must not be identity-mapped or turned into a bogus chord: they aren't printable Latin-1 and have no named keysym, so they are dropped.
 func TestRuneKeysymDelAndC1Dropped(t *testing.T) {
-	for _, r := range []rune{0x7f, 0x80, 0x9f, 0x90} {
-		if _, ok := runeKeysym(r); ok {
-			t.Fatalf("runeKeysym(%#x) should be dropped, was not", r)
-		}
-	}
-}
-
-// Other control characters (outside \n, \t, \b) are dropped rather than turned into a bogus chord.
-func TestRuneKeysymOtherControlsDropped(t *testing.T) {
-	for _, r := range []rune{0x00, 0x01, 0x1b, 0x1f} {
+	for _, r := range []rune{0x7f, 0x80, 0x9f, 0x90, 0x00, 0x01, 0x1b, 0x1f} {
 		if _, ok := runeKeysym(r); ok {
 			t.Fatalf("runeKeysym(%#x) should be dropped, was not", r)
 		}

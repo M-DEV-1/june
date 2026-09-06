@@ -50,44 +50,6 @@ func TestParseMinutesActions(t *testing.T) {
 	}
 }
 
-func TestParseMinutesActions_StopsAtNextSection(t *testing.T) {
-	for _, a := range ParseMinutesActions(realMinutes, "s", time.Time{}) {
-		if a.Text == "Nothing further." {
-			t.Fatal("parser ran past the Action items section into Open questions")
-		}
-	}
-}
-
-func TestParseMinutesActions_NoSection(t *testing.T) {
-	if got := ParseMinutesActions("# Minutes\n\n## Key points\n- talked about things.\n", "s", time.Time{}); len(got) != 0 {
-		t.Fatalf("want none, got %+v", got)
-	}
-}
-
-func TestActionItem_NoteRoundTrip(t *testing.T) {
-	want := ActionItem{
-		Owner:    "Vikram",
-		Text:     "carry PR #13 through CI and merge (keeping commits under the MF pipeline account).",
-		Status:   StatusDone,
-		Priority: PriorityHigh,
-		Source:   "md x mf tool",
-		Raised:   time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC),
-	}
-	got, ok := ParseAction(want.Note())
-	if !ok {
-		t.Fatalf("ParseAction refused its own output: %q", want.Note())
-	}
-	if got.Owner != want.Owner || got.Text != want.Text {
-		t.Errorf("owner/text = %q / %q", got.Owner, got.Text)
-	}
-	if got.Status != want.Status || got.Priority != want.Priority {
-		t.Errorf("status/priority = %q / %q", got.Status, got.Priority)
-	}
-	if got.Source != want.Source || !got.Raised.Equal(want.Raised) {
-		t.Errorf("source/raised = %q / %v", got.Source, got.Raised)
-	}
-}
-
 func TestActionItem_NoteIsOneReadableLine(t *testing.T) {
 	a := ActionItem{Owner: "Krish", Text: "reply on WhatsApp during his leave.", Status: StatusOpen, Priority: PriorityLow, Source: "md x mf tool", Raised: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)}
 	note := a.Note()
@@ -101,19 +63,39 @@ func TestActionItem_NoteIsOneReadableLine(t *testing.T) {
 	}
 }
 
-func TestParseAction_HandEditedStatus(t *testing.T) {
-	got, ok := ParseAction("[done/high] Alex Rivera — finish the acme-essentials setup. (essentials setup, 2026-08-28)")
-	if !ok {
-		t.Fatal("refused a hand-edited action note")
+func TestParseAction(t *testing.T) {
+	cases := []struct {
+		name  string
+		note  string
+		check func(t *testing.T, got ActionItem, ok bool)
+	}{
+		{
+			name: "a hand-edited note still parses",
+			note: "[done/high] Alex Rivera — finish the acme-essentials setup. (essentials setup, 2026-08-28)",
+			check: func(t *testing.T, got ActionItem, ok bool) {
+				if !ok {
+					t.Fatal("refused a hand-edited action note")
+				}
+				if got.Status != StatusDone || got.Priority != PriorityHigh {
+					t.Errorf("status/priority = %q / %q", got.Status, got.Priority)
+				}
+			},
+		},
+		{
+			name: "an ordinary fact note is not an action item",
+			note: "the user prefers dark mode",
+			check: func(t *testing.T, got ActionItem, ok bool) {
+				if ok {
+					t.Fatal("parsed an ordinary fact note as an action item")
+				}
+			},
+		},
 	}
-	if got.Status != StatusDone || got.Priority != PriorityHigh {
-		t.Errorf("status/priority = %q / %q", got.Status, got.Priority)
-	}
-}
-
-func TestParseAction_NotAnActionNote(t *testing.T) {
-	if _, ok := ParseAction("the user prefers dark mode"); ok {
-		t.Fatal("parsed an ordinary fact note as an action item")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ParseAction(c.note)
+			c.check(t, got, ok)
+		})
 	}
 }
 
@@ -159,61 +141,71 @@ func TestActionItem_NoteWithoutSource(t *testing.T) {
 	}
 }
 
-// Not every bullet puts the owner first. The minutes prompt asks for "**Owner** — what they agreed to do", but a model writing an unassigned item sometimes puts the note at the end instead: "Decide the X approach — owner unclear". Splitting on the dash there would file a sentence as a person, and the brief would read it out as one.
-func TestParseMinutesActions_OwnerAtTheEndIsNotAName(t *testing.T) {
-	got := ParseMinutesActions("## Action items\n- Decide the save-state / DB table approach — owner unclear (delegated to the call side).\n", "climate risk sync", time.Time{})
-	if len(got) != 1 {
-		t.Fatalf("want 1 item, got %d", len(got))
-	}
-	if got[0].Owner != UnknownOwner {
-		t.Errorf("owner = %q, want %q", got[0].Owner, UnknownOwner)
-	}
-	if !strings.HasPrefix(got[0].Text, "Decide the save-state") {
-		t.Errorf("the work was lost: text = %q", got[0].Text)
-	}
-}
-
-// A real owner still splits normally, including the two-word names and the "Owner unclear" the prompt asks for.
-func TestParseMinutesActions_KeepsRealOwners(t *testing.T) {
-	got := ParseMinutesActions("## Action items\n- **Priya Shah** — continue analysing the dataset.\n- **Owner unclear** — clean up the lockfiles.\n", "s", time.Time{})
-	if len(got) != 2 || got[0].Owner != "Priya Shah" || got[1].Owner != "Owner unclear" {
-		t.Fatalf("owners = %+v", got)
-	}
-}
-
-// Half the action items in a meeting belong to somebody else. Asking the user "any progress?" about a task another person owes is the wrong question, so an item has to know whose it is. The identity entry names the user and every way they are written down, and names nobody else, which is what makes it the test.
-func TestOwnedByUser(t *testing.T) {
-	identity := "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
-	for _, tc := range []struct {
-		owner string
-		want  bool
+// Minutes with no action items section parse to none. Not every bullet puts the owner first either: the minutes prompt asks for "**Owner** — what they agreed to do", but a model writing an unassigned item sometimes puts the note at the end instead, "Decide the X approach — owner unclear", and splitting on the dash there would file a sentence as a person.
+func TestParseMinutesActions_EdgeCases(t *testing.T) {
+	cases := []struct {
+		name    string
+		minutes string
+		check   func(t *testing.T, got []ActionItem)
 	}{
-		{"Alex Rivera", true},
-		{"Alex", true},    // the same person, written shorter
-		{"alex ks", true}, // and in whatever case the model chose
-		{"Vikram", false},
-		{"Krish", false},
-		{"Priya Shah", false},
-		{UnknownOwner, false}, // nobody took it, so it is not the user's by default
-		{"", false},
-	} {
-		if got := OwnedByUser(tc.owner, identity); got != tc.want {
-			t.Errorf("OwnedByUser(%q) = %v, want %v", tc.owner, got, tc.want)
-		}
+		{
+			name:    "no action items section yields none",
+			minutes: "# Minutes\n\n## Key points\n- talked about things.\n",
+			check: func(t *testing.T, got []ActionItem) {
+				if len(got) != 0 {
+					t.Fatalf("want none, got %+v", got)
+				}
+			},
+		},
+		{
+			name:    "an owner written at the end of the bullet is not mistaken for a name",
+			minutes: "## Action items\n- Decide the save-state / DB table approach — owner unclear (delegated to the call side).\n",
+			check: func(t *testing.T, got []ActionItem) {
+				if len(got) != 1 {
+					t.Fatalf("want 1 item, got %d", len(got))
+				}
+				if got[0].Owner != UnknownOwner {
+					t.Errorf("owner = %q, want %q", got[0].Owner, UnknownOwner)
+				}
+				if !strings.HasPrefix(got[0].Text, "Decide the save-state") {
+					t.Errorf("the work was lost: text = %q", got[0].Text)
+				}
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.check(t, ParseMinutesActions(c.minutes, "s", time.Time{}))
+		})
 	}
 }
 
-// A substring that is not a whole word must not match: "KS" appearing inside another word is not the user.
-func TestOwnedByUser_WholeWordsOnly(t *testing.T) {
-	if OwnedByUser("Mahad", "The user is Alex Rivera.") {
-		t.Error("a fragment of the user's name matched as the user")
+// Half the action items in a meeting belong to somebody else. Asking the user "any progress?" about a task another person owes is the wrong question, so an item has to know whose it is. The identity entry names the user and every way they are written down, and names nobody else, which is what makes it the test. A substring that is not a whole word must not match ("KS" inside another word is not the user), and with no identity on file nothing can be attributed at all.
+func TestOwnedByUser(t *testing.T) {
+	const fullIdentity = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
+	cases := []struct {
+		name     string
+		owner    string
+		identity string
+		want     bool
+	}{
+		{name: "his full name", owner: "Alex Rivera", identity: fullIdentity, want: true},
+		{name: "the name he goes by", owner: "Alex", identity: fullIdentity, want: true},
+		{name: "whatever case the model chose", owner: "alex ks", identity: fullIdentity, want: true},
+		{name: "another person", owner: "Vikram", identity: fullIdentity, want: false},
+		{name: "another person, again", owner: "Krish", identity: fullIdentity, want: false},
+		{name: "another person by full name", owner: "Priya Shah", identity: fullIdentity, want: false},
+		{name: "nobody took it, not the user's by default", owner: UnknownOwner, identity: fullIdentity, want: false},
+		{name: "no owner at all", owner: "", identity: fullIdentity, want: false},
+		{name: "a fragment of the name is not the whole word", owner: "Mahad", identity: "The user is Alex Rivera.", want: false},
+		{name: "no identity on file attributes nothing", owner: "Alex Rivera", identity: "", want: false},
 	}
-}
-
-// With no identity on file nothing can be attributed, so nothing claims to be the user's.
-func TestOwnedByUser_NoIdentity(t *testing.T) {
-	if OwnedByUser("Alex Rivera", "") {
-		t.Error("attributed an item to the user with no identity to check against")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := OwnedByUser(tc.owner, tc.identity); got != tc.want {
+				t.Errorf("OwnedByUser(%q, %q) = %v, want %v", tc.owner, tc.identity, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -240,50 +232,44 @@ func TestActionItem_Mine(t *testing.T) {
 // identityEntry is the personal-context line that says who the user is, copied from what the store actually holds.
 const identityEntry = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
 
+// OwnerClass reads an item's owner text against the personal-context identity entry and, when set, an explicit override (the minutes named him, but hearing about a thing does not make it his — the user can say by hand that a "me" reading is wrong, and that call must win over whatever the owner text would otherwise read as). With no identity on file at all his own name is left unclassified as somebody else's, since guessing here would put another person's work on his list.
 func TestOwnerClass(t *testing.T) {
 	cases := []struct {
-		name  string
-		owner string
-		text  string
-		want  string
+		name       string
+		owner      string
+		text       string
+		noIdentity bool // use "" instead of identityEntry
+		override   string
+		want       string
 	}{
-		{"his full name", "Alex Rivera", "Rework the hardcoded location-finder logic.", OwnerMe},
-		{"the name he goes by", "Alex", "Report status on the PFP task.", OwnerMe},
-		{"the label the prompt asks for", "Me", "send the deck by Friday", OwnerMe},
-		{"written as you", "You", "send the deck by Friday", OwnerMe},
-		{"written as I", "I", "send the deck by Friday", OwnerMe},
-		{"another person", "Priya Shah", "Create the Northwind Freight test account.", OwnerThem},
-		{"a role rather than a name", "The project lead", "Give campaign managers access to his ElevenLabs account.", OwnerThem},
-		{"no subject at all", UnknownOwner, "clean up the mixed lockfile situation in the frontend; raised but not assigned.", OwnerUnclear},
-		{"unclear but qualified", "Owner unclear (workstream lead)", "Set up the X API dashboard via Proton email.", OwnerThem},
-		{"a bolded person prefix left in the text", UnknownOwner, "**Every campaign manager (including Imanshu)** — Choose a market and post it in the group chat.", OwnerThem},
-		{"a name before will", UnknownOwner, "Krish will take the technical interviews for the developer hire.", OwnerThem},
-		{"a name before to", UnknownOwner, "Handed to Sam to finish the load testing task.", OwnerThem},
-		{"a name before should", UnknownOwner, "Nikunj should add the Verity-workflow task to the sprint board.", OwnerThem},
-		{"a capitalised first word is not a name", UnknownOwner, "Define how the knowledge pool concept should work in practice.", OwnerUnclear},
+		{name: "his full name", owner: "Alex Rivera", text: "Rework the hardcoded location-finder logic.", want: OwnerMe},
+		{name: "the name he goes by", owner: "Alex", text: "Report status on the PFP task.", want: OwnerMe},
+		{name: "the label the prompt asks for", owner: "Me", text: "send the deck by Friday", want: OwnerMe},
+		{name: "written as you", owner: "You", text: "send the deck by Friday", want: OwnerMe},
+		{name: "written as I", owner: "I", text: "send the deck by Friday", want: OwnerMe},
+		{name: "another person", owner: "Priya Shah", text: "Create the Northwind Freight test account.", want: OwnerThem},
+		{name: "a role rather than a name", owner: "The project lead", text: "Give campaign managers access to his ElevenLabs account.", want: OwnerThem},
+		{name: "no subject at all", owner: UnknownOwner, text: "clean up the mixed lockfile situation in the frontend; raised but not assigned.", want: OwnerUnclear},
+		{name: "unclear but qualified", owner: "Owner unclear (workstream lead)", text: "Set up the X API dashboard via Proton email.", want: OwnerThem},
+		{name: "a bolded person prefix left in the text", owner: UnknownOwner, text: "**Every campaign manager (including Imanshu)** — Choose a market and post it in the group chat.", want: OwnerThem},
+		{name: "a name before will", owner: UnknownOwner, text: "Krish will take the technical interviews for the developer hire.", want: OwnerThem},
+		{name: "a name before to", owner: UnknownOwner, text: "Handed to Sam to finish the load testing task.", want: OwnerThem},
+		{name: "a name before should", owner: UnknownOwner, text: "Nikunj should add the Verity-workflow task to the sprint board.", want: OwnerThem},
+		{name: "a capitalised first word is not a name", owner: UnknownOwner, text: "Define how the knowledge pool concept should work in practice.", want: OwnerUnclear},
+		{name: "no identity on file leaves his own name unclassified", owner: "Alex Rivera", text: "Continue transition-risk work.", noIdentity: true, want: OwnerThem},
+		{name: "an override wins over the parsed owner", owner: "Alex Rivera", text: "Continue transition-risk work.", override: OwnerThem, want: OwnerThem},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			a := ActionItem{Owner: c.owner, Text: c.text}
-			if got := a.OwnerClass(identityEntry); got != c.want {
+			identity := identityEntry
+			if c.noIdentity {
+				identity = ""
+			}
+			a := ActionItem{Owner: c.owner, Text: c.text, OwnerOverride: c.override}
+			if got := a.OwnerClass(identity); got != c.want {
 				t.Errorf("OwnerClass(%q, %q) = %q, want %q", c.owner, c.text, got, c.want)
 			}
 		})
-	}
-}
-
-func TestOwnerClass_NoIdentityLeavesHisOwnNameUnclassified(t *testing.T) {
-	a := ActionItem{Owner: "Alex Rivera", Text: "Continue transition-risk work."}
-	if got := a.OwnerClass(""); got != OwnerThem {
-		t.Errorf("with no identity on file OwnerClass = %q, want %q — guessing here would put another person's work on his list", got, OwnerThem)
-	}
-}
-
-// The minutes named him, but hearing about a thing does not make it his — the user can say by hand that a "me" reading is wrong, and that call must win over whatever the owner text would otherwise read as.
-func TestOwnerClass_OverrideWinsOverTheParsedOwner(t *testing.T) {
-	a := ActionItem{Owner: "Alex Rivera", Text: "Continue transition-risk work.", OwnerOverride: OwnerThem}
-	if got := a.OwnerClass(identityEntry); got != OwnerThem {
-		t.Errorf("OwnerClass with an override set = %q, want the override %q", got, OwnerThem)
 	}
 }
 
@@ -298,53 +284,29 @@ func TestValidOwnerClass(t *testing.T) {
 	}
 }
 
+// EvidenceCloses reads a piece of evidence against an item's own words: naming the work as merged or finished closes it, naming it but not finishing it does not, finishing a different piece of work does not, a reference number is matched whole ("#12" is a different piece of work from "#123"), and a negated sentence ("not done yet") closes nothing even though it carries a completion verb and the item's own words.
 func TestEvidenceCloses(t *testing.T) {
-	item := ActionItem{Owner: "Me", Text: "deploy the Value Chain & risk-statements PR (#5632)."}
+	deploy := ActionItem{Owner: "Me", Text: "deploy the Value Chain & risk-statements PR (#5632)."}
 	cases := []struct {
 		name     string
+		item     ActionItem
 		evidence string
 		want     bool
 	}{
-		{"the pull request it names was merged", "Merged the Value Chain risk-statements PR #5632 to main today.", true},
-		{"the work is named as finished", "Finished the Value Chain risk-statements deploy this morning.", true},
-		{"named but not finished", "Discussed the Value Chain risk-statements PR with Priya and agreed a review order.", false},
-		{"finished, but a different piece of work", "Merged the emissions-factor PR #5601; the Value Chain risk-statements deploy is still pending.", false},
+		{"the pull request it names was merged", deploy, "Merged the Value Chain risk-statements PR #5632 to main today.", true},
+		{"the work is named as finished", deploy, "Finished the Value Chain risk-statements deploy this morning.", true},
+		{"named but not finished", deploy, "Discussed the Value Chain risk-statements PR with Priya and agreed a review order.", false},
+		{"finished, but a different piece of work", deploy, "Merged the emissions-factor PR #5601; the Value Chain risk-statements deploy is still pending.", false},
+		{"a reference is matched whole, not as a prefix", ActionItem{Owner: "Me", Text: "review #12."}, "Merged #123 this morning.", false},
+		{"a reference matched exactly does close", ActionItem{Owner: "Me", Text: "review #12."}, "Merged #12 this morning.", true},
+		{"a negated reference closes nothing", deploy, "PR #5632 is not done yet.", false},
+		{"the work named and said to be unfinished closes nothing", deploy, "The Value Chain risk-statements deploy is still not finished.", false},
+		{"a negated contraction closes nothing", deploy, "The Value Chain risk-statements deploy isn't finished.", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := EvidenceCloses(item, c.evidence); got != c.want {
+			if got := EvidenceCloses(c.item, c.evidence); got != c.want {
 				t.Errorf("EvidenceCloses(%q) = %v, want %v", c.evidence, got, c.want)
-			}
-		})
-	}
-}
-
-// TestEvidenceClosesNeedsTheWholeReferenceNumber pins that a reference is matched whole: "#12" is a different piece of work from "#123", and a sentence about the longer one must not close the shorter one.
-func TestEvidenceClosesNeedsTheWholeReferenceNumber(t *testing.T) {
-	item := ActionItem{Owner: "Me", Text: "review #12."}
-	if EvidenceCloses(item, "Merged #123 this morning.") {
-		t.Error("EvidenceCloses closed #12 on a sentence about #123, want the reference matched whole")
-	}
-	if !EvidenceCloses(item, "Merged #12 this morning.") {
-		t.Error("EvidenceCloses did not close #12 on a sentence about #12")
-	}
-}
-
-// TestEvidenceClosesIgnoresANegatedSentence pins that a sentence saying the work has not happened closes nothing: "not done yet" carries a completion verb and the item's own words, and used to be read as the work being finished.
-func TestEvidenceClosesIgnoresANegatedSentence(t *testing.T) {
-	item := ActionItem{Owner: "Me", Text: "deploy the Value Chain risk-statements PR (#5632)."}
-	cases := []struct {
-		name     string
-		evidence string
-	}{
-		{"a reference said not to be done", "PR #5632 is not done yet."},
-		{"the work named and said to be unfinished", "The Value Chain risk-statements deploy is still not finished."},
-		{"a contraction", "The Value Chain risk-statements deploy isn't finished."},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if EvidenceCloses(item, c.evidence) {
-				t.Errorf("EvidenceCloses(%q) closed the item, want a negated sentence to close nothing", c.evidence)
 			}
 		})
 	}

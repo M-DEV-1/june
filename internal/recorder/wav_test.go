@@ -100,61 +100,62 @@ func TestWAV_HeaderNeverEndsOnA512FrameBoundary(t *testing.T) {
 	}
 }
 
-// A recording killed mid-flight leaves zeroed size fields. repairWAV recomputes them from the file length so the audio is still transcribable.
-func TestRepairWAV_FixesCrashedFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "system.wav")
-	w, err := newWAV(path)
-	if err != nil {
-		t.Fatalf("newWAV: %v", err)
-	}
-	if _, err := w.Write(make([]byte, 1600)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	// Simulate a crash: close the fd without patching the header.
-	if err := w.f.Close(); err != nil {
-		t.Fatalf("raw close: %v", err)
-	}
+// A recording killed mid-flight leaves zeroed size fields, and repairWAV recomputes them from the file length so the audio is still transcribable. It also has to be idempotent, so it can run unconditionally before transcription without corrupting a file that closed cleanly.
+func TestRepairWAV(t *testing.T) {
+	t.Run("fixes a crashed file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "system.wav")
+		w, err := newWAV(path)
+		if err != nil {
+			t.Fatalf("newWAV: %v", err)
+		}
+		if _, err := w.Write(make([]byte, 1600)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		// Simulate a crash: close the fd without patching the header.
+		if err := w.f.Close(); err != nil {
+			t.Fatalf("raw close: %v", err)
+		}
 
-	if _, _, _, data := readHeader(t, path); data != 0 {
-		t.Fatalf("precondition: expected an unpatched header, got data size %d", data)
-	}
-	if err := repairWAV(path); err != nil {
-		t.Fatalf("repairWAV: %v", err)
-	}
-	riff, _, _, data := readHeader(t, path)
-	if data != 1600 {
-		t.Errorf("repaired data size = %d, want 1600", data)
-	}
-	if riff != 36+1600 {
-		t.Errorf("repaired riff size = %d, want %d", riff, 36+1600)
-	}
-}
+		if _, _, _, data := readHeader(t, path); data != 0 {
+			t.Fatalf("precondition: expected an unpatched header, got data size %d", data)
+		}
+		if err := repairWAV(path); err != nil {
+			t.Fatalf("repairWAV: %v", err)
+		}
+		riff, _, _, data := readHeader(t, path)
+		if data != 1600 {
+			t.Errorf("repaired data size = %d, want 1600", data)
+		}
+		if riff != 36+1600 {
+			t.Errorf("repaired riff size = %d, want %d", riff, 36+1600)
+		}
+	})
 
-// repairWAV is idempotent, so it can run unconditionally before transcription without corrupting a cleanly closed file.
-func TestRepairWAV_Idempotent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mic.wav")
-	w, err := newWAV(path)
-	if err != nil {
-		t.Fatalf("newWAV: %v", err)
-	}
-	if _, err := w.Write(make([]byte, 640)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if err := repairWAV(path); err != nil {
-		t.Fatalf("repairWAV: %v", err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(before) != string(after) {
-		t.Error("repairWAV changed a cleanly closed file")
-	}
+	t.Run("is idempotent on a cleanly closed file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "mic.wav")
+		w, err := newWAV(path)
+		if err != nil {
+			t.Fatalf("newWAV: %v", err)
+		}
+		if _, err := w.Write(make([]byte, 640)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if err := repairWAV(path); err != nil {
+			t.Fatalf("repairWAV: %v", err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if string(before) != string(after) {
+			t.Error("repairWAV changed a cleanly closed file")
+		}
+	})
 }

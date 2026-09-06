@@ -34,164 +34,194 @@ func waitOverlay(t *testing.T, ch chan Event) (Event, OverlayRequest) {
 	return Event{}, OverlayRequest{}
 }
 
-func TestOverlay_RingBroadcastsNormalisedPayload(t *testing.T) {
-	s := New(&fakeAsker{}, nil, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	rec := postOverlay(t, s, `{"kind":"ring","label":"here","rects":[{"x":10,"y":20,"w":30,"h":40,"label":"box"}],"ttl_ms":99000}`)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
+// TestOverlay_KindFieldMapping is one table over every kind POST /overlay accepts, one row each,
+// checking that kind's own field mapping into the broadcast payload: ring's rects and its ttl_ms
+// cap, clear needing no rects and defaulting its ttl, arrow and line's points, path's three-point
+// minimum, and box/circle's rects.
+func TestOverlay_KindFieldMapping(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		check func(t *testing.T, got OverlayRequest)
+	}{
+		{
+			"ring broadcasts its rect, label and a capped ttl", `{"kind":"ring","label":"here","rects":[{"x":10,"y":20,"w":30,"h":40,"label":"box"}],"ttl_ms":99000}`,
+			func(t *testing.T, got OverlayRequest) {
+				if got.Kind != "ring" || got.Label != "here" {
+					t.Fatalf("payload = %+v, want kind ring label here", got)
+				}
+				if got.TTLMs != maxOverlayTTLMs {
+					t.Fatalf("ttl_ms = %d, want it capped at %d", got.TTLMs, maxOverlayTTLMs)
+				}
+				if len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40, Label: "box"}) {
+					t.Fatalf("rects = %+v, want the one posted", got.Rects)
+				}
+			},
+		},
+		{
+			"clear needs no rects and defaults its ttl", `{"kind":"clear"}`,
+			func(t *testing.T, got OverlayRequest) {
+				if got.Kind != "clear" || len(got.Rects) != 0 {
+					t.Fatalf("payload = %+v, want an empty clear", got)
+				}
+				if got.TTLMs != defaultOverlayTTLMs {
+					t.Fatalf("ttl_ms = %d, want the default %d", got.TTLMs, defaultOverlayTTLMs)
+				}
+			},
+		},
+		{
+			"arrow broadcasts its points", `{"kind":"arrow","label":"press here","points":[[10,20],[30,40],[50,60]]}`,
+			checkOverlayPoints("arrow", "press here", [][2]int{{10, 20}, {30, 40}, {50, 60}}),
+		},
+		{
+			"line broadcasts its points", `{"kind":"line","label":"press here","points":[[10,20],[30,40],[50,60]]}`,
+			checkOverlayPoints("line", "press here", [][2]int{{10, 20}, {30, 40}, {50, 60}}),
+		},
+		{
+			"path through three points", `{"kind":"path","points":[[1,1],[2,2],[3,3]]}`,
+			func(t *testing.T, got OverlayRequest) {
+				if got.Kind != "path" || len(got.Points) != 3 {
+					t.Fatalf("payload = %+v, want kind path through 3 points", got)
+				}
+			},
+		},
+		{
+			"box broadcasts its rect", `{"kind":"box","label":"drop here","rects":[{"x":1,"y":2,"w":3,"h":4}]}`,
+			func(t *testing.T, got OverlayRequest) {
+				if got.Kind != "box" || len(got.Rects) != 1 {
+					t.Fatalf("box payload = %+v, want one rect", got)
+				}
+			},
+		},
+		{
+			"circle broadcasts its rect", `{"kind":"circle","label":"click here","rects":[{"x":1,"y":2,"w":3,"h":4}]}`,
+			func(t *testing.T, got OverlayRequest) {
+				if got.Kind != "circle" || len(got.Rects) != 1 {
+					t.Fatalf("circle payload = %+v, want one rect", got)
+				}
+			},
+		},
 	}
-
-	ev, got := waitOverlay(t, ch)
-	if ev.Type != "overlay" {
-		t.Fatalf("event type = %q, want overlay", ev.Type)
-	}
-	if got.Kind != "ring" || got.Label != "here" {
-		t.Fatalf("payload = %+v, want kind ring label here", got)
-	}
-	if got.TTLMs != maxOverlayTTLMs {
-		t.Fatalf("ttl_ms = %d, want it capped at %d", got.TTLMs, maxOverlayTTLMs)
-	}
-	if len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40, Label: "box"}) {
-		t.Fatalf("rects = %+v, want the one posted", got.Rects)
-	}
-}
-
-func TestOverlay_DefaultTTLAndClearNeedsNoRects(t *testing.T) {
-	s := New(&fakeAsker{}, nil, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	if rec := postOverlay(t, s, `{"kind":"clear"}`); rec.Code != http.StatusAccepted {
-		t.Fatalf("clear status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
-	}
-	_, got := waitOverlay(t, ch)
-	if got.Kind != "clear" || len(got.Rects) != 0 {
-		t.Fatalf("payload = %+v, want an empty clear", got)
-	}
-	if got.TTLMs != defaultOverlayTTLMs {
-		t.Fatalf("ttl_ms = %d, want the default %d", got.TTLMs, defaultOverlayTTLMs)
-	}
-}
-
-func TestOverlay_ArrowAndLineBroadcastPoints(t *testing.T) {
-	for _, kind := range []string{"arrow", "line"} {
-		t.Run(kind, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			s := New(&fakeAsker{}, nil, nil, nil)
 			ch := s.hub.subscribe()
 			defer s.hub.unsubscribe(ch)
 
-			rec := postOverlay(t, s, `{"kind":"`+kind+`","label":"press here","points":[[10,20],[30,40],[50,60]]}`)
+			rec := postOverlay(t, s, tc.body)
 			if rec.Code != http.StatusAccepted {
 				t.Fatalf("status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
 			}
-
 			ev, got := waitOverlay(t, ch)
 			if ev.Type != "overlay" {
 				t.Fatalf("event type = %q, want overlay", ev.Type)
 			}
-			if got.Kind != kind || got.Label != "press here" {
-				t.Fatalf("payload = %+v, want kind %s label %q", got, kind, "press here")
-			}
-			want := [][2]int{{10, 20}, {30, 40}, {50, 60}}
-			if len(got.Points) != len(want) {
-				t.Fatalf("points = %+v, want %+v", got.Points, want)
-			}
-			for i := range want {
-				if got.Points[i] != want[i] {
-					t.Fatalf("points = %+v, want %+v", got.Points, want)
-				}
-			}
+			tc.check(t, got)
 		})
 	}
 }
 
-func TestOverlay_PathNeedsThreePoints(t *testing.T) {
-	s := New(&fakeAsker{}, nil, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	rec := postOverlay(t, s, `{"kind":"path","points":[[1,1],[2,2],[3,3]]}`)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
-	}
-	if _, got := waitOverlay(t, ch); got.Kind != "path" || len(got.Points) != 3 {
-		t.Fatalf("payload = %+v, want kind path through 3 points", got)
-	}
-}
-
-func TestOverlay_BoxAndCircleBroadcastRects(t *testing.T) {
-	s := New(&fakeAsker{}, nil, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	rec := postOverlay(t, s, `{"kind":"box","label":"drop here","rects":[{"x":1,"y":2,"w":3,"h":4}]}`)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("box status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
-	}
-	if _, got := waitOverlay(t, ch); got.Kind != "box" || len(got.Rects) != 1 {
-		t.Fatalf("box payload = %+v, want one rect", got)
-	}
-
-	rec = postOverlay(t, s, `{"kind":"circle","label":"click here","rects":[{"x":1,"y":2,"w":3,"h":4}]}`)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("circle status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
-	}
-	if _, got := waitOverlay(t, ch); got.Kind != "circle" || len(got.Rects) != 1 {
-		t.Fatalf("circle payload = %+v, want one rect", got)
+// checkOverlayPoints builds the check func an arrow/line row of TestOverlay_KindFieldMapping shares: the payload's kind, label and points must match what was posted.
+func checkOverlayPoints(kind, label string, points [][2]int) func(t *testing.T, got OverlayRequest) {
+	return func(t *testing.T, got OverlayRequest) {
+		if got.Kind != kind || got.Label != label {
+			t.Fatalf("payload = %+v, want kind %s label %q", got, kind, label)
+		}
+		if len(got.Points) != len(points) {
+			t.Fatalf("points = %+v, want %+v", got.Points, points)
+		}
+		for i := range points {
+			if got.Points[i] != points[i] {
+				t.Fatalf("points = %+v, want %+v", got.Points, points)
+			}
+		}
 	}
 }
 
-// Arrow and Line are how the agent's draw tool reaches the screen: a path through points, broadcast on the hub exactly like a POST /overlay arrow or line so the extension needs no second path, stamped with the id of the ask that drew it.
-func TestArrowAndLine_BroadcastAPathOverlay(t *testing.T) {
+// TestOverlayMethods_BroadcastFieldMapping is the same field-mapping check as
+// TestOverlay_KindFieldMapping, but over the Go methods (Ring, Marks, Arrow, Line, Path, Box,
+// Circle) the agent's tools call directly rather than through POST /overlay — one row per method,
+// each also checking the ask id passed through onto the broadcast event.
+func TestOverlayMethods_BroadcastFieldMapping(t *testing.T) {
 	cases := []struct {
-		kind string
-		call func(s *Server, points [][2]int, label string)
+		name  string
+		call  func(s *Server) error
+		check func(t *testing.T, ev Event, got OverlayRequest)
 	}{
-		{"arrow", func(s *Server, points [][2]int, label string) { s.Arrow("ask-7", points, label) }},
-		{"line", func(s *Server, points [][2]int, label string) { s.Line("ask-7", points, label) }},
+		{"Ring", func(s *Server) error { return s.Ring("ask-7", 10, 20, 30, 40, "here") }, func(t *testing.T, ev Event, got OverlayRequest) {
+			if ev.ID != "ask-7" {
+				t.Errorf("event id = %q, want ask-7, the ask whose point_at drew the ring", ev.ID)
+			}
+			if got.Kind != "ring" || got.Label != "here" || len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
+				t.Errorf("overlay = %+v, want a ring labelled here around 10,20 30x40", got)
+			}
+			if got.TTLMs != defaultOverlayTTLMs {
+				t.Errorf("ttl = %d, want the default %d", got.TTLMs, defaultOverlayTTLMs)
+			}
+		}},
+		{"Marks", func(s *Server) error {
+			return s.Marks("ask-7", []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}, {X: 5, Y: 6, W: 7, H: 8, Label: "2"}})
+		}, func(t *testing.T, ev Event, got OverlayRequest) {
+			if ev.ID != "ask-7" {
+				t.Errorf("event id = %q, want ask-7, the ask whose show_marks drew the marks", ev.ID)
+			}
+			want := []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}, {X: 5, Y: 6, W: 7, H: 8, Label: "2"}}
+			if got.Kind != "marks" || len(got.Rects) != 2 || got.Rects[0] != want[0] || got.Rects[1] != want[1] {
+				t.Errorf("overlay = %+v, want marks over the given rects", got)
+			}
+			if got.TTLMs != defaultOverlayTTLMs {
+				t.Errorf("ttl = %d, want the default %d", got.TTLMs, defaultOverlayTTLMs)
+			}
+		}},
+		{"Arrow", func(s *Server) error { return s.Arrow("ask-7", [][2]int{{1, 2}, {3, 4}}, "here") }, func(t *testing.T, ev Event, got OverlayRequest) {
+			if ev.ID != "ask-7" {
+				t.Errorf("event id = %q, want ask-7, the ask whose draw drew it", ev.ID)
+			}
+			points := [][2]int{{1, 2}, {3, 4}}
+			if got.Kind != "arrow" || got.Label != "here" || len(got.Points) != 2 || got.Points[0] != points[0] || got.Points[1] != points[1] {
+				t.Errorf("overlay = %+v, want an arrow labelled here through %v", got, points)
+			}
+		}},
+		{"Line", func(s *Server) error { return s.Line("ask-7", [][2]int{{1, 2}, {3, 4}}, "here") }, func(t *testing.T, ev Event, got OverlayRequest) {
+			if ev.ID != "ask-7" {
+				t.Errorf("event id = %q, want ask-7, the ask whose draw drew it", ev.ID)
+			}
+			points := [][2]int{{1, 2}, {3, 4}}
+			if got.Kind != "line" || got.Label != "here" || len(got.Points) != 2 || got.Points[0] != points[0] || got.Points[1] != points[1] {
+				t.Errorf("overlay = %+v, want a line labelled here through %v", got, points)
+			}
+		}},
+		{"Path", func(s *Server) error { return s.Path("ask-7", [][2]int{{1, 2}, {3, 4}, {5, 6}}, "route") }, func(t *testing.T, ev Event, got OverlayRequest) {
+			if got.Kind != "path" || len(got.Points) != 3 {
+				t.Errorf("path overlay = %+v, want kind path through 3 points", got)
+			}
+		}},
+		{"Box", func(s *Server) error { return s.Box("ask-7", 10, 20, 30, 40, "drop here") }, func(t *testing.T, ev Event, got OverlayRequest) {
+			if got.Kind != "box" || len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
+				t.Errorf("box overlay = %+v, want kind box around 10,20 30x40", got)
+			}
+		}},
+		{"Circle", func(s *Server) error { return s.Circle("ask-7", 10, 20, 30, 40, "click here") }, func(t *testing.T, ev Event, got OverlayRequest) {
+			if got.Kind != "circle" || len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
+				t.Errorf("circle overlay = %+v, want kind circle inscribed in 10,20 30x40", got)
+			}
+		}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.kind, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			s := New(&fakeAsker{}, nil, nil, nil)
 			ch := s.hub.subscribe()
 			defer s.hub.unsubscribe(ch)
 
-			points := [][2]int{{1, 2}, {3, 4}}
-			tc.call(s, points, "here")
-
+			if err := tc.call(s); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
 			ev, got := waitOverlay(t, ch)
-			if ev.ID != "ask-7" {
-				t.Errorf("event id = %q, want ask-7, the ask whose draw drew it", ev.ID)
+			if ev.Type != "overlay" {
+				t.Errorf("event type = %q, want overlay", ev.Type)
 			}
-			if got.Kind != tc.kind || got.Label != "here" || len(got.Points) != 2 || got.Points[0] != points[0] || got.Points[1] != points[1] {
-				t.Errorf("overlay = %+v, want a %s labelled here through %v", got, tc.kind, points)
-			}
+			tc.check(t, ev, got)
 		})
-	}
-}
-
-// Path, Box and Circle are the other three shapes the agent's draw tool can reach: a free-form stroke, a dashed rectangle and a dashed circle, each broadcast on the hub exactly like the matching POST /overlay kind.
-func TestPathBoxCircle_BroadcastTheirOwnKind(t *testing.T) {
-	s := New(&fakeAsker{}, nil, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	s.Path("ask-7", [][2]int{{1, 2}, {3, 4}, {5, 6}}, "route")
-	if _, got := waitOverlay(t, ch); got.Kind != "path" || len(got.Points) != 3 {
-		t.Errorf("path overlay = %+v, want kind path through 3 points", got)
-	}
-
-	s.Box("ask-7", 10, 20, 30, 40, "drop here")
-	if _, got := waitOverlay(t, ch); got.Kind != "box" || len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
-		t.Errorf("box overlay = %+v, want kind box around 10,20 30x40", got)
-	}
-
-	s.Circle("ask-7", 10, 20, 30, 40, "click here")
-	if _, got := waitOverlay(t, ch); got.Kind != "circle" || len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
-		t.Errorf("circle overlay = %+v, want kind circle inscribed in 10,20 30x40", got)
 	}
 }
 

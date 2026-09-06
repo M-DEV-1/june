@@ -4,20 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 )
-
-// testStore builds a throwaway file-backed store for this file's tests. It cannot use internal/db/dbtest.Open: that package imports db, and this file is compiled into package db itself, so importing it back would be a cycle. Input: the test that owns the temp directory and the cleanup. Output: a ready *Store.
-func testStore(t *testing.T) *Store {
-	t.Helper()
-	store, err := New(filepath.Join(t.TempDir(), "db"))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
 
 // fakeConsolidator is a NoteConsolidator double that never calls a real model. Input: nothing until called. Output: the canned out/err this test set, and it remembers whether it was called and what it was asked to consolidate.
 type fakeConsolidator struct {
@@ -44,7 +32,7 @@ func seedFacts(t *testing.T, store *Store, n int) {
 }
 
 func TestNoteCompactor_BelowThresholdSkips(t *testing.T) {
-	store := testStore(t)
+	store := newFileStore(t)
 	seedFacts(t, store, minNotesToConsolidate-1)
 	llm := &fakeConsolidator{}
 	nc := NewNoteCompactor(llm, store)
@@ -58,7 +46,7 @@ func TestNoteCompactor_BelowThresholdSkips(t *testing.T) {
 }
 
 func TestNoteCompactor_ReducesAndReplaces(t *testing.T) {
-	store := testStore(t)
+	store := newFileStore(t)
 	seedFacts(t, store, minNotesToConsolidate)
 	llm := &fakeConsolidator{out: []string{"a", "b", "c"}}
 	nc := NewNoteCompactor(llm, store)
@@ -76,7 +64,7 @@ func TestNoteCompactor_ReducesAndReplaces(t *testing.T) {
 }
 
 func TestNoteCompactor_NeverWipesOnEmptyResult(t *testing.T) {
-	store := testStore(t)
+	store := newFileStore(t)
 	seedFacts(t, store, minNotesToConsolidate)
 	llm := &fakeConsolidator{out: []string{}}
 	nc := NewNoteCompactor(llm, store)
@@ -94,7 +82,7 @@ func TestNoteCompactor_NeverWipesOnEmptyResult(t *testing.T) {
 }
 
 func TestNoteCompactor_SkipsWhenNoReduction(t *testing.T) {
-	store := testStore(t)
+	store := newFileStore(t)
 	seedFacts(t, store, minNotesToConsolidate)
 	out := make([]string, minNotesToConsolidate)
 	for i := range out {
@@ -121,7 +109,7 @@ func TestNoteCompactor_SkipsWhenNoReduction(t *testing.T) {
 }
 
 func TestNoteCompactor_LLMErrorDoesNotReplace(t *testing.T) {
-	store := testStore(t)
+	store := newFileStore(t)
 	seedFacts(t, store, minNotesToConsolidate)
 	llm := &fakeConsolidator{err: errors.New("boom")}
 	nc := NewNoteCompactor(llm, store)
