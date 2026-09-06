@@ -104,7 +104,7 @@ describe("startMockVoice", () => {
     async () => {
       const { startMockVoice } = await import("./mock");
 
-      startMockVoice(new URLSearchParams("mock=1&voice=1"));
+      const stop = startMockVoice(new URLSearchParams("mock=1&voice=1"));
       // Index 1 is near-top (see waveform.ts's render(): far-top, near-top, near-bottom, far-bottom).
       const nearTop = () =>
         Array.from(document.querySelectorAll(".vw-spk .vw-row"))[1]
@@ -132,6 +132,14 @@ describe("startMockVoice", () => {
       // The second (odd) cycle bursts the speaker for its first second (see fakeLevelAt) — wait for that to actually show up in the row rather than assuming a fixed amount of wall-clock time reached it.
       await waitUntil(() => nearTop() !== silentNearTop, 8000);
       expect(nearTop()).not.toBe(silentNearTop);
+
+      // The fake session's tick ran for the life of the page until it was given a way to be stopped; ending it here also ends the grid's breath, which would otherwise go on waking every 100ms against a torn-down document.
+      stop();
+      const { dispatch } = await import("./main");
+      dispatch({ kind: "voiceOff" });
+      const settled = nearTop();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(nearTop()).toBe(settled);
     },
     10000,
   );
