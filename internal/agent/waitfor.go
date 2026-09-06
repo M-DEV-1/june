@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"ora/internal/act"
@@ -42,6 +43,11 @@ func (a *Agent) focusedText(ctx context.Context, items []act.Item) string {
 	return clicked.Label
 }
 
+// listCheck reports whether a check is matched against the numbered listing rather than against the window itself. Input: the check's kind. Output: true for item_present and item_absent, false for the other two.
+func listCheck(kind string) bool {
+	return kind == act.ItemPresent || kind == act.ItemAbsent
+}
+
 // waitFor polls the window in front until the expected change shows up or the timeout runs out. Input: the check the caller wrote down before it acted and how long to wait. Output: act.WaitPassPrefix and what was found when the change came, act.WaitFailPrefix with how long it waited and what was there when it did not, or an "error:" line when the check itself says nothing that can be looked for.
 // It reads the screen without storing what it read: the numbered list a click resolves against is the one the last observe_screen produced, and renumbering it behind the model's back is how a click lands on the wrong row.
 func (a *Agent) waitFor(ctx context.Context, check act.Check, timeout time.Duration) string {
@@ -62,6 +68,12 @@ func (a *Agent) waitFor(ctx context.Context, check act.Check, timeout time.Durat
 			items := act.Filter(nodes)
 			var ok bool
 			ok, why = act.Match(check, title, items, a.focusedText(ctx, items))
+			// A list check is only about the window the step acted in. Another window that took focus since carries its own items, and it satisfies item_present by coincidence and item_absent by never having held the thing at all, so while the front window is not the one the list came from neither may pass. A title check is about whatever is in front by definition and is left alone.
+			if ok && listCheck(check.Kind) {
+				if changed := a.frontWindowChanged(ctx); changed != "" {
+					ok, why = false, strings.TrimPrefix(changed, "error: ")
+				}
+			}
 			if ok {
 				return act.WaitPassPrefix + why
 			}

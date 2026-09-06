@@ -50,10 +50,10 @@ func TestWaitFor_FailsWhenTheChangeNeverComes(t *testing.T) {
 // TestWaitFor_ItemAbsentAndPresent checks the two list checks read the same numbered listing observe_screen builds.
 func TestWaitFor_ItemAbsentAndPresent(t *testing.T) {
 	a, _ := observingAgent(t)
-	if got := a.executeTool(context.Background(), "wait_for", map[string]any{"kind": act.ItemPresent, "value": "Merge", "timeout_ms": 600}); !strings.HasPrefix(got, act.WaitPassPrefix) {
+	if got := a.executeTool(context.Background(), "wait_for", map[string]any{"kind": act.ItemPresent, "value": "Merge", "timeout_ms": 600.0}); !strings.HasPrefix(got, act.WaitPassPrefix) {
 		t.Errorf("item_present Merge = %q, want a pass", got)
 	}
-	if got := a.executeTool(context.Background(), "wait_for", map[string]any{"kind": act.ItemAbsent, "value": "Merge", "timeout_ms": 600}); !strings.HasPrefix(got, act.WaitFailPrefix) {
+	if got := a.executeTool(context.Background(), "wait_for", map[string]any{"kind": act.ItemAbsent, "value": "Merge", "timeout_ms": 600.0}); !strings.HasPrefix(got, act.WaitFailPrefix) {
 		t.Errorf("item_absent Merge = %q, want a failure", got)
 	}
 }
@@ -101,5 +101,40 @@ func TestExecuteAskTool_KeepsTheGate(t *testing.T) {
 	a, _ := observingAgent(t)
 	if got := a.ExecuteAskTool(context.Background(), "shell_exec", map[string]any{"command": "rm -rf /"}); !strings.Contains(got, "not available in an ask") {
 		t.Errorf("ExecuteAskTool(shell_exec) = %q, want the ask gate's refusal", got)
+	}
+}
+
+// item_present and item_absent are matched against a walk of whatever window is in front when the poll happens, so a window that took focus after the step acted can satisfy either check with a list from somewhere else entirely — and item_absent passes on a window that never held the item at all. Both refuse to pass while the front window is not the one the list came from.
+func TestWaitFor_ItemChecksRefuseWhenAnotherWindowIsInFront(t *testing.T) {
+	a, _ := observingAgent(t)
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.observe = func(context.Context) (string, string, []act.Node, error) {
+		return "slack", "general", []act.Node{{Role: "push button", Label: "Merge", W: 10, H: 10, Showing: true, Ref: "r-merge"}}, nil
+	}
+
+	present := a.executeTool(ctx, "wait_for", map[string]any{"kind": act.ItemPresent, "value": "Merge", "timeout_ms": 600.0})
+	if !strings.HasPrefix(present, act.WaitFailPrefix) || !strings.Contains(present, "slack") {
+		t.Errorf("item_present = %q, want a failure naming the window that is in front", present)
+	}
+	absent := a.executeTool(ctx, "wait_for", map[string]any{"kind": act.ItemAbsent, "value": "Checks", "timeout_ms": 600.0})
+	if !strings.HasPrefix(absent, act.WaitFailPrefix) || !strings.Contains(absent, "slack") {
+		t.Errorf("item_absent = %q, want a failure naming the window that is in front", absent)
+	}
+}
+
+// The window guard only covers the two list checks: a title check is about the window in front by definition, and holding it to the window the list came from would refuse every check written for a page that opens a new window.
+func TestWaitFor_TitleCheckStillPassesInANewWindow(t *testing.T) {
+	a, _ := observingAgent(t)
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.observe = func(context.Context) (string, string, []act.Node, error) {
+		return "slack", "general", nil, nil
+	}
+
+	got := a.executeTool(ctx, "wait_for", map[string]any{"kind": act.TitleContains, "value": "general", "timeout_ms": 600.0})
+
+	if !strings.HasPrefix(got, act.WaitPassPrefix) {
+		t.Errorf("title_contains = %q, want a pass", got)
 	}
 }

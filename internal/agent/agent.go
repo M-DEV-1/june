@@ -141,6 +141,8 @@ type Agent struct {
 	raiser WindowRaiser
 	// verify re-reads a node's role, label and rectangle right before click acts on it or point_at rings it, since a toolkit can recycle an object path onto a different element after the page re-renders, and a page that scrolls under the list leaves every number pointing at the right element in the wrong place. Takes what observe_screen listed for the node; returns an error naming what changed, or nil when the node still matches. The tracker's in production, a fake in tests.
 	verify func(ctx context.Context, ref, role, label string, x, y, w, h int) error
+	// focused reports whether one element holds the keyboard right now, read from the accessibility focused state, so type_text and a focused key press check their stop line against the field that actually has the keyboard rather than against the one the last click acted on. The tracker's in production, a fake in tests; nil means nothing wired one up and the remembered click stands on its own.
+	focused func(ctx context.Context, ref string) (bool, error)
 	// extents reads where one element is on the screen right now, so point_at and the guarded-click confirmation ring the element where it is rather than where the list left it. The tracker's in production, a fake in tests.
 	extents          func(ctx context.Context, ref string) (x, y, w, h int, err error)
 	apiKey           string
@@ -302,6 +304,7 @@ func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, 
 		doAction:         tracker.DoAction,
 		scrollTo:         tracker.ScrollTo,
 		verify:           tracker.Verify,
+		focused:          tracker.Focused,
 		extents:          tracker.Extents,
 		apiKey:           apiKey,
 		TextChan:         make(chan string, 100),

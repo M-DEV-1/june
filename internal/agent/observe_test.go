@@ -25,6 +25,7 @@ func observingAgent(t *testing.T) (*Agent, *[]string) {
 	}
 	// NewAgent defaults verify and extents to the tracker's, which talk to a real accessibility bus. point_at checks the element is still the one the list described and then reads back where it is before ringing it, so both are stood in for here against the fixture window.
 	a.verify = func(ctx context.Context, ref, role, label string, x, y, w, h int) error { return nil }
+	a.focused = func(context.Context, string) (bool, error) { return true, nil }
 	a.extents = rectFromObserve(a)
 	return a, &rings
 }
