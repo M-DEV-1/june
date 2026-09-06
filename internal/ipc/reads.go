@@ -186,9 +186,9 @@ func contextViewFrom(a tracker.Activity) ContextView {
 	return ContextView{App: a.App, Title: a.Title, Text: strtrunc.Runes(text, maxContextText)}
 }
 
-// Context handles GET /context: the app, window title and text of the window in focus right now. It reads the window in focus synchronously first (see readFocused), so the hotkey never names a stale window; falls back to the tracker's live buffer — the same buffer /buffer serves — when the live read fails, times out, or names Ora itself; and falls back to the newest stored episode when the buffer has just been flushed or no tracker is wired at all. Text is trimmed to 600 runes.
+// Context handles GET /context: the app, window title and text of the window in focus right now. It reads the window in focus synchronously first (see readFocused), so the hotkey never names a stale window; that read applies the same refusals the tracker's own capture loop applies, Ora's own window and the app blocklist, so the hotkey cannot hand the model a window the episode store would never have held; falls back to the tracker's live buffer — the same buffer /buffer serves — when the live read fails, times out, or names Ora itself; and falls back to the newest stored episode when the buffer has just been flushed or no tracker is wired at all. Text is trimmed to 600 runes.
 func (s *Server) Context(w http.ResponseWriter, r *http.Request) {
-	if a, ok := readFocused(r.Context(), s.focused); ok && !tracker.IsOraWindow(a.App, a.Title) {
+	if a, ok := readFocused(r.Context(), s.focused); ok && !tracker.IsOraWindow(a.App, a.Title) && !tracker.Blocklisted(a.App) {
 		writeJSON(w, contextViewFrom(a))
 		return
 	}
