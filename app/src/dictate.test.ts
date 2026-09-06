@@ -104,4 +104,11 @@ describe("dictationKey", () => {
     expect(dictationKey(key("a"), true, false)).toBe("");
     expect(dictationKey(key("a"), true, true)).toBe("");
   });
+
+  // A stop the daemon has not answered yet is still a dictation as far as the view is concerned, and a second stop 404s and comes back with "" — which is then taken as the transcript, so the words the first stop is still waiting for are dropped as a duplicate.
+  it("says nothing while a stop is already on its way to the daemon", () => {
+    expect(dictationKey(key(" "), true, true, true)).toBe("");
+    expect(dictationKey(key("Enter"), true, true, true)).toBe("");
+    expect(dictationKey(key("Escape"), true, true, true)).toBe("");
+  });
 });
