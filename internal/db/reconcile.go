@@ -29,11 +29,28 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 		return report, nil
 	}
 
-	existing := make(map[string]bool)
-	for _, id := range vidx.IDs() {
+	// Backing rows are looked up once per source rather than once per vector: since chunking landed one episode is one vector per passage, so an index holding tens of thousands of ids used to mean tens of thousands of round trips (each episode one pulling its whole screen_text into Go) to answer "does this row still exist".
+	ids := vidx.IDs()
+	refsBySource := map[string][]int64{}
+	seen := map[string]bool{}
+	for _, id := range ids {
 		source, refID := splitCandidateID(id)
-		alive, thinned := s.vectorBackingAlive(ctx, source, refID)
-		if alive && !thinned {
+		key := fmt.Sprintf("%s:%d", source, refID)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		refsBySource[source] = append(refsBySource[source], refID)
+	}
+	live := map[string]map[int64]bool{}
+	for source, refs := range refsBySource {
+		live[source] = s.liveVectorRefs(ctx, source, refs)
+	}
+
+	existing := make(map[string]bool)
+	for _, id := range ids {
+		source, refID := splitCandidateID(id)
+		if alive := live[source]; alive == nil || alive[refID] {
 			existing[id] = true
 			continue
 		}
@@ -232,28 +249,51 @@ func (s *Store) reconcileBackfillCandidates(ctx context.Context, existing map[st
 	return out
 }
 
-// vectorBackingAlive reports whether refID's SQL row still exists for the given source, and — for episodes only — whether its screen_text is empty, since that also means the vector should go even though the row itself remains. Unrecognized sources report alive=true so ReconcileVectors leaves them untouched — vector lifecycle for those isn't in scope here.
-func (s *Store) vectorBackingAlive(ctx context.Context, source string, refID int64) (alive, thinned bool) {
+// vectorBackingChunk is how many ids one backing-existence query asks about at a time, keeping the bound-parameter count well inside SQLite's limit for an index holding tens of thousands of vectors.
+const vectorBackingChunk = 500
+
+// liveVectorRefs reports which of one source's ref ids still have a backing row worth keeping a vector for. Input: the source name and the ref ids the vector index holds for it. Output: the set of those ids that are still alive — for an episode, alive also requires a non-empty screen_text, since a thinned capture's vector describes text the row no longer holds. A source whose vector lifecycle this sweep does not own returns nil, and the caller then leaves every one of its vectors alone.
+// A query error reports the whole chunk alive: a sweep that cannot read the backing table must not take that as licence to delete.
+func (s *Store) liveVectorRefs(ctx context.Context, source string, refs []int64) map[int64]bool {
+	var query string
+	var extra []any
 	switch source {
 	case "note":
-		var exists int
-		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM notes WHERE id = ?`, refID).Scan(&exists)
-		return exists == 1, false
+		query = `SELECT id FROM notes WHERE id IN (%s)`
 	case "summary", "digest":
-		var exists int
-		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id = ? AND type = ?`, refID, source).Scan(&exists)
-		return exists == 1, false
+		query = `SELECT id FROM nodes WHERE id IN (%s) AND type = ?`
+		extra = []any{source}
 	case "thread":
-		var exists int
-		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM threads WHERE id = ?`, refID).Scan(&exists)
-		return exists == 1, false
+		query = `SELECT id FROM threads WHERE id IN (%s)`
 	case "episode":
-		var screenText string
-		if err := s.db.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, refID).Scan(&screenText); err != nil {
-			return false, false
-		}
-		return true, screenText == ""
+		query = `SELECT id FROM episodes WHERE id IN (%s) AND screen_text <> ''`
 	default:
-		return true, false
+		return nil
 	}
+
+	live := make(map[int64]bool, len(refs))
+	for start := 0; start < len(refs); start += vectorBackingChunk {
+		end := start + vectorBackingChunk
+		if end > len(refs) {
+			end = len(refs)
+		}
+		chunk := refs[start:end]
+		placeholders, args := inPlaceholders(chunk)
+		rows, err := s.db.QueryContext(ctx, fmt.Sprintf(query, placeholders), append(args, extra...)...)
+		if err != nil {
+			slog.Error("reconcile: backing-row lookup failed, keeping this chunk's vectors", "source", source, "error", err)
+			for _, id := range chunk {
+				live[id] = true
+			}
+			continue
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err == nil {
+				live[id] = true
+			}
+		}
+		rows.Close()
+	}
+	return live
 }
