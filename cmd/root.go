@@ -86,7 +86,9 @@ func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 
 	if isDaemon {
 		if err := runDaemon(ctx, shutdownObs); err != nil {
+			// Non-zero, so a supervisor calls the start a failure. The commonest cause is a second daemon finding the port held by the first, and exiting 0 there meant systemd and ora-restart both reported a restart that never happened.
 			slog.Error("daemon crashed", "error", err)
+			os.Exit(1)
 		}
 		return
 	}
