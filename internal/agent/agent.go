@@ -24,6 +24,8 @@ type ContextReader interface {
 	RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 	GetNotes(ctx context.Context) ([]db.Note, error)
+	// NotesOfKindSince lists the notes of one kind filed at or after since, newest first, so a reader after the meeting minutes does not page the whole notes table through memory.
+	NotesOfKindSince(ctx context.Context, kind string, since time.Time) ([]db.Note, error)
 	// UpdateNote/DeleteNote back the "revise" tool's note path (tools.go) — the model's only way to fix or remove a wrong note, using the id query_memory's "[note#N]" format gives it.
 	UpdateNote(ctx context.Context, id int64, content string) error
 	DeleteNote(ctx context.Context, id int64) error

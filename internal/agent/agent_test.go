@@ -35,8 +35,11 @@ func (b *mockBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems
 }
 func (b *mockBrain) LogNote(ctx context.Context, content, kind string) (int64, error) { return 0, nil }
 func (b *mockBrain) GetNotes(ctx context.Context) ([]db.Note, error)                  { return nil, nil }
-func (b *mockBrain) UpdateNote(ctx context.Context, id int64, content string) error   { return nil }
-func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                   { return nil }
+func (b *mockBrain) NotesOfKindSince(ctx context.Context, kind string, since time.Time) ([]db.Note, error) {
+	return nil, nil
+}
+func (b *mockBrain) UpdateNote(ctx context.Context, id int64, content string) error { return nil }
+func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                 { return nil }
 func (b *mockBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
 	return nil, nil
 }

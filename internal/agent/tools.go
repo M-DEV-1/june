@@ -1364,7 +1364,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			slog.Warn("query_memory: unreadable date", "error", err)
 			return toolError(dateHint)
 		}
-		slog.Info("querying long-term memory", "query", query, "domain", domain, "since", since, "until", until)
+		slog.Debug("querying long-term memory", "query", query, "domain", domain, "since", since, "until", until)
 
 		// HybridSearchWindow (FTS5 + vector, fused via reciprocal rank fusion) covers episodes/summaries/notes/threads in one fused, domain-aware ranking, with the since/until window enforced store-side — inside the SQL and the vector candidate pool, before any top-k — so a sparse window still yields its items instead of the old over-fetch-and-post-filter returning nothing.
 		hits, err := a.brain.HybridSearchWindow(ctx, query, domain, since, until, queryMemoryHits)
@@ -1863,18 +1863,23 @@ func filterHitsByApp(hits []db.MemoryHit, app string) []db.MemoryHit {
 }
 
 // listMeetingNotes renders every meeting-minutes note whose creation time falls in [since, until] (a zero bound is open), newest first, each as "[note#ID] date — excerpt". It reads the notes table directly rather than ranking, because minutes are the answer to "what was the meeting about" and no query word reliably ranks them above the screens of the user reading them.
+// maxMeetingNotesListed caps how many meetings query_memory kind=meeting lists in one answer; the rest are counted, and a narrower window or a real query reaches them.
+const maxMeetingNotesListed = 30
+
 func (a *Agent) listMeetingNotes(ctx context.Context, since, until time.Time) string {
-	notes, err := a.brain.GetNotes(ctx)
+	notes, err := a.brain.NotesOfKindSince(ctx, "meeting", since)
 	if err != nil {
 		slog.Error("query_memory: reading meeting notes failed", "error", err)
 		return toolError(storeUnavailable)
 	}
 	var lines []string
+	left := 0
 	for _, n := range notes {
-		if n.Kind != "meeting" {
+		if !until.IsZero() && n.CreatedAt.After(until) {
 			continue
 		}
-		if !since.IsZero() && n.CreatedAt.Before(since) || !until.IsZero() && n.CreatedAt.After(until) {
+		if len(lines) == maxMeetingNotesListed {
+			left++
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("[note#%d] %s — %s", n.ID, n.CreatedAt.Format("Mon Jan 2 15:04"), db.FormatNoteHitWithSource(db.MemoryHit{Source: "note", RefID: n.ID, Content: n.Content, CreatedAt: n.CreatedAt}, 0)))
@@ -1884,6 +1889,9 @@ func (a *Agent) listMeetingNotes(ctx context.Context, since, until time.Time) st
 			return "no meeting minutes " + desc
 		}
 		return "no meeting minutes saved yet"
+	}
+	if left > 0 {
+		lines = append(lines, fmt.Sprintf("and %d more, older; narrow the window or ask about one", left))
 	}
 	return strings.Join(lines, "\n")
 }
