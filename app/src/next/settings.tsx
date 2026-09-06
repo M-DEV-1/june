@@ -143,6 +143,15 @@ function errorStatus(e: unknown): number | undefined {
   return typeof status === "number" ? status : undefined;
 }
 
+/** The sentence the daemon sent with a failure. Input: whatever the mutation rejected with. Output: the plain-text body it carried, trimmed to one line, or "" when it carried none — RTK Query puts a text/plain error body in data and reports the status as PARSING_ERROR, since it expected JSON. */
+function errorSentence(e: unknown): string {
+  if (!e || typeof e !== "object" || !("data" in e)) return "";
+  const data = (e as { data: unknown }).data;
+  if (typeof data !== "string") return "";
+  const line = data.split("\n")[0].trim();
+  return line.length > 200 ? line.slice(0, 200) + "…" : line;
+}
+
 /** The voice picker: a single select showing the current voice and the trait that says how it sounds, with every one of Gemini Live's thirty prebuilt voices behind it the same way, and a play button beside it that previews whichever voice is currently picked. Input: none — it reads GET /voices itself. Output: the section. */
 function VoiceSection() {
   const dispatch = useAppDispatch();
@@ -164,7 +173,8 @@ function VoiceSection() {
     try {
       await previewVoice(current.name).unwrap();
     } catch (e) {
-      dispatch(ui.noticed(errorStatus(e) === 503 ? "This machine has no speaker to play it through" : "Could not play that voice"));
+      // The daemon says exactly what went wrong — a spent daily allowance, a line the model refused, no speaker — and "Could not play that voice" threw all three away. It is shown as it came, with the generic line kept only for a failure that carried no words of its own.
+      dispatch(ui.noticed(errorStatus(e) === 503 ? "This machine has no speaker to play it through" : errorSentence(e) || "Could not play that voice"));
     }
   };
 
