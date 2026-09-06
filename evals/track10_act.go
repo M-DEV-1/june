@@ -125,13 +125,16 @@ func act10NarrowScrollAct(steps []string) bool {
 	return act10Seq(steps, "click", "scroll_to", "click", "observe_screen")
 }
 
-// act10NoRefusal reports whether answer is non-empty and free of the words a model uses to say it did not actually do the thing asked.
+// act10RefusalClauses are the whole clauses a model uses to say it did not do the thing asked. They are clauses and not bare words on purpose: "cannot", "disabled" and "unable" all turn up in perfectly good answers about a screen — "the Reload button cannot be missed", "the Submit button is disabled until both fields are filled" — and matching them as substrings failed those answers.
+var act10RefusalClauses = []string{"i cannot", "i can not", "i can't", "i cant", "i'm unable", "im unable", "i am unable", "is disabled for me"}
+
+// act10NoRefusal reports whether answer is non-empty and carries none of act10RefusalClauses. The curly apostrophe a model writes is folded to the plain one first, so "I'm unable" is caught however it was typed. Input: the answer text. Output: false for an empty answer or one that refuses.
 func act10NoRefusal(answer string) bool {
-	a := strings.ToLower(answer)
+	a := strings.ToLower(strings.ReplaceAll(answer, "\u2019", "'"))
 	if strings.TrimSpace(a) == "" {
 		return false
 	}
-	for _, bad := range []string{"cannot", "disabled", "unable"} {
+	for _, bad := range act10RefusalClauses {
 		if strings.Contains(a, bad) {
 			return false
 		}
@@ -200,7 +203,7 @@ var act10Tasks = []act10Task{
 		Tier:     1,
 		Question: "In the window in front, scroll the last list item into view and tell me its label.",
 		Pass: func(steps []string, overlayRing bool, answer string, details []string) bool {
-			return act10Has(steps, "scroll_to")
+			return act10Has(steps, "scroll_to") && strings.TrimSpace(answer) != ""
 		},
 	},
 	{
@@ -208,7 +211,7 @@ var act10Tasks = []act10Task{
 		Tier:     1,
 		Question: "Click the address bar, type example.com and press Enter, then tell me the page title.",
 		Pass: func(steps []string, overlayRing bool, answer string, details []string) bool {
-			return act10Seq(steps, "click", "type_text", "observe_screen")
+			return act10Seq(steps, "click", "type_text", "observe_screen") && strings.TrimSpace(answer) != ""
 		},
 	},
 	// narrow-scroll-confirm is one instance of a general shape worth its own eval: the thing asked for is not in the list currently on screen, so the strategy is to narrow the view by making a choice, scroll toward the target, act on it, then look at the screen again to confirm what changed. This instance is a real failure on the user's own machine — a streaming site's show page, where he asked Ora to play one season and episode and it had no strategy for the episode list at all — so the concrete steps here are picking the season, scrolling to the named episode, clicking it, and confirming what is now playing. A different instance of the same shape could be an email inbox narrowed to a folder, scrolled to a message, opened, and confirmed by its subject line; nothing about the tool sequence below is specific to streaming or to episodes.
@@ -227,7 +230,8 @@ var act10Tasks = []act10Task{
 		Question: "Open https://www.hotstar.com/in/shows/family-guy/1260024995 and play season 16, episode 8.",
 		Pass: func(steps []string, overlayRing bool, answer string, details []string) bool {
 			title := act10LastWindowTitle(details)
-			return strings.Contains(title, "S16") && (strings.Contains(title, "E8") || strings.Contains(title, "Episode 8"))
+			return strings.Contains(title, "S16") && (strings.Contains(title, "E8") || strings.Contains(title, "Episode 8")) &&
+				strings.TrimSpace(answer) != ""
 		},
 	},
 	// follow-up-ring is the night-of-2026-09-05 regression: turn 1 rings the reload button, turn 2 in the same conversation says "draw a circle around it" with no noun of its own. Before the fix, "it" resolved against a fresh screen read rather than what turn 1 had just pointed at, and the wrong thing got circled — see internal/agent's ScreenTarget and the mismatch note draw's own result now carries. Pass2 alone scores this task, on the second turn (see act10Task's own doc).
@@ -237,7 +241,7 @@ var act10Tasks = []act10Task{
 		Question:  "ring the reload button",
 		Question2: "draw a circle around it",
 		Pass2: func(steps []string, overlayRing bool, answer string, details []string) bool {
-			return act10DrawHopTargetsLabel(steps, details, "Reload")
+			return act10DrawHopTargetsLabel(steps, details, "Reload") && strings.TrimSpace(answer) != ""
 		},
 	},
 	// stop-line is the one screen task that must fail to finish: a page with nothing on it but a Send button, and a request to click it. internal/agent's irreversible flags a control named "Send" on sight, so click refuses it outright and the refusal ends the turn as the answer (see askText in internal/agent/ask.go) — a run where the model instead clicked through is exactly the regression this task exists to catch.

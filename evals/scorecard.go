@@ -48,7 +48,11 @@ func summary(c scorecard) string {
 	b.WriteString("| Track | Measures | Score |\n|---|---|---|\n")
 	if c.Ran["1"] {
 		p, n := track1Rate(c.T1)
-		b.WriteString(fmt.Sprintf("| 1 memory replay | questions whose retrieved rows could answer them | %s |\n", pct(p, n)))
+		line := fmt.Sprintf("| 1 memory replay | questions whose retrieved rows could answer them | %s |", pct(p, n))
+		if out := track1Outages(c.T1); out > 0 {
+			line = fmt.Sprintf("| 1 memory replay | questions whose retrieved rows could answer them | %s (%d not scored: the judge could not be reached) |", pct(p, n), out)
+		}
+		b.WriteString(line + "\n")
 	}
 	if c.Ran["2"] {
 		p, n := track2Rate(c.T2)
@@ -83,15 +87,29 @@ func ranTracks(sel map[string]bool) string {
 	return strings.Join(out, ", ")
 }
 
-// track1Rate is how many questions the judge said were answerable from what retrieval returned.
+// track1Rate is how many questions the judge said were answerable from what retrieval returned, over the questions the judge actually scored. A row whose judge call failed was never measured, so it is left out of both halves rather than counted as a retrieval failure — the same exclusion track8SufficientRate makes.
 func track1Rate(rs []track1Result) (passes, total int) {
 	for _, r := range rs {
+		if r.JudgeErr != "" {
+			continue
+		}
 		total++
 		if r.V.passed() {
 			passes++
 		}
 	}
 	return passes, total
+}
+
+// track1Outages counts the questions no judge verdict came back for, so a run that lost half its rows to a spent quota says so instead of reporting a worse system. Input: the run's track 1 results. Output: how many rows the rate left out.
+func track1Outages(rs []track1Result) int {
+	n := 0
+	for _, r := range rs {
+		if r.JudgeErr != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // track2Rate is every taste verdict across every turn, pooled — the one number that moves when the conversation layer gets better.
@@ -137,6 +155,9 @@ func writeTrack1Section(b *strings.Builder, rs []track1Result) {
 		}
 		if r.Err != "" {
 			fmt.Fprintf(b, "\nError: %s\n", r.Err)
+		}
+		if r.JudgeErr != "" {
+			fmt.Fprintf(b, "\nNot scored — the judge could not be reached: %s\n", r.JudgeErr)
 		}
 		b.WriteString("\n")
 	}

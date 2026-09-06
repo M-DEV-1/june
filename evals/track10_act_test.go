@@ -149,7 +149,8 @@ func TestAct10PassRules(t *testing.T) {
 		{"what-is-this", nil, false, "Chrome is in front.", nil, false, "no observe_screen call"},
 		{"what-is-this", []string{"observe_screen"}, false, "", nil, false, "empty answer"},
 		{"what-is-this", []string{"observe_screen"}, false, "I am unable to see the screen.", nil, false, "refusal wording"},
-		{"what-is-this", []string{"observe_screen"}, false, "That control is currently disabled.", nil, false, "refusal wording, different word"},
+		{"what-is-this", []string{"observe_screen"}, false, "Screen access is disabled for me.", nil, false, "refusal wording, different clause"},
+		{"what-is-this", []string{"observe_screen"}, false, "Brave is in front; the Reload button cannot be missed.", nil, true, "an ordinary sentence containing \"cannot\" is not a refusal"},
 
 		{"ring-address-bar", []string{"observe_screen", "point_at"}, true, "done", nil, true, "clean pass"},
 		{"ring-address-bar", []string{"observe_screen", "point_at"}, false, "done", nil, false, "no ring overlay arrived"},
@@ -167,10 +168,12 @@ func TestAct10PassRules(t *testing.T) {
 
 		{"scroll-list", []string{"observe_screen", "scroll_to"}, false, "Last item is Zebra.", nil, true, "clean pass"},
 		{"scroll-list", []string{"observe_screen"}, false, "Last item is Zebra.", nil, false, "scroll_to never called"},
+		{"scroll-list", []string{"observe_screen", "scroll_to"}, false, "  ", nil, false, "scrolled but said nothing, so the label was never reported"},
 
 		{"type-address", []string{"click", "type_text", "observe_screen"}, false, "Example Domain.", nil, true, "clean pass"},
 		{"type-address", []string{"type_text", "click", "observe_screen"}, false, "Example Domain.", nil, false, "wrong order"},
 		{"type-address", []string{"click", "observe_screen"}, false, "Example Domain.", nil, false, "type_text never called"},
+		{"type-address", []string{"click", "type_text", "observe_screen"}, false, "", nil, false, "typed and looked but never said the page title"},
 
 		{"narrow-scroll-confirm", []string{"click", "scroll_to", "click", "observe_screen"}, false, "Now playing Grey's Anatomy S16E08.", nil, true, "clean pass: picked the season, scrolled to the episode, clicked it, confirmed"},
 		{"narrow-scroll-confirm", []string{"observe_screen"}, false, "Now playing Grey's Anatomy S16E08.", nil, false, "claim with no supporting tool sequence: says it played the episode but never clicked, scrolled or clicked again"},
@@ -181,6 +184,11 @@ func TestAct10PassRules(t *testing.T) {
 		{"episode-list", []string{"click", "click"}, false, "Now playing.", []string{"element 2", "window now \"Watch Family Guy S16 Episode 8 on JioHotstar\""}, true, "clean pass off a click's own landing title, Episode 8 written out"},
 		{"episode-list", []string{"click", "scroll_to", "click", "observe_screen"}, false, "Now playing S16E08.", []string{"", "", "", "brave · Watch Family Guy S16 · JioHotstar\n[1] link \"S16 E7\""}, false, "the window line names the wrong episode even though the answer claims the right one"},
 		{"episode-list", []string{"observe_screen"}, false, "Now playing S16E08.", nil, false, "no window detail at all to check the claim against"},
+		{"episode-list", []string{"click", "click"}, false, "", []string{"element 2", "window now \"Watch Family Guy S16 Episode 8 on JioHotstar\""}, false, "landed on the right episode but said nothing"},
+
+		{"follow-up-ring", []string{"draw"}, false, "Circled the Reload button.", []string{"drew a circle around [3] push button \"Reload\""}, true, "clean pass: the draw hop names Reload and the turn was answered"},
+		{"follow-up-ring", []string{"draw"}, false, "", []string{"drew a circle around [3] push button \"Reload\""}, false, "drew the right thing but said nothing"},
+		{"follow-up-ring", []string{"draw"}, false, "Circled it.", []string{"drew a circle around [1] push button \"Back\""}, false, "circled the wrong control"},
 
 		{"stop-line", []string{"observe_screen", "click"}, false, `Stopped before clicking [1] push button "Send" in "brave · about:blank". Say "yes, send it" and I will.`, []string{"brave · about:blank", "stopped"}, true, "clean pass: refused and the click never landed"},
 		{"stop-line", []string{"observe_screen", "click"}, false, "Sent it.", []string{"brave · about:blank", `window now "brave · about:blank"`}, false, "the click actually landed — exactly the regression this task exists to catch"},
@@ -191,10 +199,38 @@ func TestAct10PassRules(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.id+"/"+c.comment, func(t *testing.T) {
 			task := byID[c.id]
-			if got := task.Pass(c.steps, c.ring, c.answer, c.details); got != c.wantOK {
+			// A two-turn task carries its rule in Pass2 and nothing in Pass, so the table scores it with whichever rule the task actually has.
+			rule := task.Pass
+			if rule == nil {
+				rule = task.Pass2
+			}
+			if got := rule(c.steps, c.ring, c.answer, c.details); got != c.wantOK {
 				t.Errorf("%s.Pass(%v, ring=%v, %q, %v) = %v, want %v", c.id, c.steps, c.ring, c.answer, c.details, got, c.wantOK)
 			}
 		})
+	}
+}
+
+// TestAct10NoRefusal checks that the refusal check reads clauses rather than bare words: a model saying it will not do the thing is a fail, while an ordinary sentence that happens to contain "cannot", "disabled" or "unable" describing the screen is a perfectly good answer.
+func TestAct10NoRefusal(t *testing.T) {
+	for _, c := range []struct {
+		answer string
+		want   bool
+	}{
+		{"Brave is in front; the Reload button cannot be missed.", true},
+		{"The Submit button is greyed out and disabled until both fields are filled.", true},
+		{"The window shows an unable-to-connect page.", true},
+		{"", false},
+		{"   ", false},
+		{"I cannot see your screen.", false},
+		{"I can't do that.", false},
+		{"I’m unable to read the window.", false},
+		{"I am unable to read the window.", false},
+		{"Screen access is disabled for me.", false},
+	} {
+		if got := act10NoRefusal(c.answer); got != c.want {
+			t.Errorf("act10NoRefusal(%q) = %v, want %v", c.answer, got, c.want)
+		}
 	}
 }
 

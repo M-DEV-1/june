@@ -58,12 +58,65 @@ type goldTurnSpec struct {
 
 // goldItem is one line of the gold file: a single question, or one conversation whose turns are asked in order with the answers so far as history.
 type goldItem struct {
-	ID     string         `json:"id"`
-	Kind   string         `json:"kind"`
-	Tags   []string       `json:"tags"`
-	Turns  []goldTurnSpec `json:"turns"`
-	Source string         `json:"source"`
-	Note   string         `json:"note"`
+	ID    string         `json:"id"`
+	Kind  string         `json:"kind"`
+	Tags  []string       `json:"tags"`
+	Turns []goldTurnSpec `json:"turns"`
+	// Grade says what a pass on this row actually measures. See goldTruth and goldRetrieval; a row with no grade is read as goldRetrieval.
+	Grade  string `json:"grade,omitempty"`
+	Source string `json:"source"`
+	Note   string `json:"note"`
+}
+
+// goldTruth and goldRetrieval are the two things a row can measure. A truth row's gold answer came from the user, so a pass says the arm was right; most of those exist because the store itself was wrong. A retrieval row's gold answer was read off the store the arms are being asked to search, so a pass only says the arm found that row — a wrong note scores as the right answer. Keeping the two apart is the difference between "the system is right 3 times out of 4" and "the system found the row 28 times out of 36".
+const (
+	goldTruth     = "truth"
+	goldRetrieval = "retrieval"
+)
+
+// goldGrades resolves every item's grade, defaulting a row with none to goldRetrieval: store-derived is what a row is until somebody confirms it. Input: the gold items. Output: item id to grade.
+func goldGrades(items []goldItem) map[string]string {
+	out := make(map[string]string, len(items))
+	for _, it := range items {
+		if it.Grade == goldTruth {
+			out[it.ID] = goldTruth
+			continue
+		}
+		out[it.ID] = goldRetrieval
+	}
+	return out
+}
+
+// goldTallyGraded sums one run's answers per arm over one grade's rows alone. Input: every answer, the item id to grade map, and the grade wanted. Output: the same per-arm stats goldTally returns, over that group.
+func goldTallyGraded(answers []goldAnswer, grades map[string]string, grade string) map[string]goldStat {
+	var kept []goldAnswer
+	for _, a := range answers {
+		if grades[a.ID] == grade {
+			kept = append(kept, a)
+		}
+	}
+	return goldTally(kept)
+}
+
+// goldGradedLine renders one grade's pass rate per arm, as one sentence for the sheet and the run note. Input: the arm names in run order, every answer, the grades, and the grade to report. Output: "truth (answers the user confirmed): claude 3/4, grok 2/4", or "" when the set holds no row of that grade.
+func goldGradedLine(arms []string, answers []goldAnswer, grades map[string]string, grade string) string {
+	tally := goldTallyGraded(answers, grades, grade)
+	var parts []string
+	total := 0
+	for _, arm := range arms {
+		st := tally[arm]
+		n := st.Pass + st.Fail + st.Errors
+		total += n
+		parts = append(parts, fmt.Sprintf("%s %d/%d", arm, st.Pass, n))
+	}
+	if total == 0 {
+		return ""
+	}
+	what := "answers the user confirmed, so a pass means the arm was right"
+	if grade == goldRetrieval {
+		what = "answers read off the store the arms search, so a pass means the arm found the row, not that the row is true"
+	}
+	return fmt.Sprintf("%s (%s): %s", grade, what, strings.Join(parts, ", "))
 }
 
 // goldHop is one tool call an arm made, as it goes into the raw trace.
@@ -601,14 +654,13 @@ func runTrack9(ctx context.Context, dataDir, apiKey, questions, arms, outDir str
 		}
 	}
 
-	tally := goldTally(all)
-	var parts []string
-	for _, name := range run.Arms {
-		st := tally[name]
-		parts = append(parts, fmt.Sprintf("%s %d/%d", name, st.Pass, st.Pass+st.Fail+st.Errors))
-	}
+	grades := goldGrades(items)
 	fmt.Printf("    wrote %s\n    wrote %s\n", sheetPath, tracePath)
-	return fmt.Sprintf("gold set: %d questions over %d items — mechanical pass %s", goldTurnCount(items), len(items), strings.Join(parts, ", ")), nil
+	note := fmt.Sprintf("gold set: %d questions over %d items — mechanical pass, %s", goldTurnCount(items), len(items), goldGradedLine(run.Arms, all, grades, goldTruth))
+	if retrieval := goldGradedLine(run.Arms, all, grades, goldRetrieval); retrieval != "" {
+		note += "; " + retrieval
+	}
+	return note, nil
 }
 
 // goldStem names a run's two output files. The clock is to the minute and the commit is in the name for the same reason track 8's frozen file carries both: two runs of one day is the normal case when a fix is being measured, and a day-only name silently overwrote the earlier of the two — the "before" half of exactly that comparison, and the trace a -gold-resume run was reading. Input: the run's start time and the commit it measured. Output: the shared stem of the trace and the sheet.
@@ -670,6 +722,13 @@ func goldMarkdown(r goldRun) string {
 		}
 	}
 	tally := goldTally(all)
+	// The truth rows are the headline: they are the only ones whose gold answer did not come out of the store being searched.
+	grades := goldGrades(r.Items)
+	for _, grade := range []string{goldTruth, goldRetrieval} {
+		if line := goldGradedLine(r.Arms, all, grades, grade); line != "" {
+			fmt.Fprintf(&b, "**%s**\n\n", line)
+		}
+	}
 	b.WriteString("| Arm | Answered | Pass | Fail | Error/timeout | Tool calls | Median s |\n|---|---|---|---|---|---|---|\n")
 	for _, arm := range r.Arms {
 		st := tally[arm]
@@ -751,6 +810,12 @@ td.tick{width:34px;text-align:center}
 		fmt.Fprintf(&b, "<p class=note>%s</p>", html.EscapeString(n))
 	}
 
+	htmlGrades := goldGrades(r.Items)
+	for _, grade := range []string{goldTruth, goldRetrieval} {
+		if line := goldGradedLine(r.Arms, all, htmlGrades, grade); line != "" {
+			fmt.Fprintf(&b, "<p class=note><b>%s</b></p>", html.EscapeString(line))
+		}
+	}
 	b.WriteString(`<div class=wrap><table><tr><th>Arm</th><th>Answered</th><th>Pass</th><th>Fail</th><th>Error/timeout</th><th>Tool calls</th><th>Median s</th></tr>`)
 	for _, arm := range r.Arms {
 		st := tally[arm]

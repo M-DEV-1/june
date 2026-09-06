@@ -48,7 +48,9 @@ type track1Result struct {
 	Hits    []string
 	Latency time.Duration
 	Err     string
-	V       verdict
+	// JudgeErr is set when the judge could not be reached, which is not the same thing as retrieval failing and must never be counted as one. A spent Gemini minute otherwise reads on the headline as a retrieval regression. Track 8's armAnswer carries the same field for the same reason.
+	JudgeErr string
+	V        verdict
 }
 
 const track1Instruction = `You are judging a personal AI companion's memory retrieval, not its writing.
@@ -141,7 +143,7 @@ func runTrack1(ctx context.Context, search track1Search, j *judge, qs []question
 		r.Hits = rows
 
 		if err := j.ask(ctx, track1Instruction, judgeMaterial(q, r.Hits), &r.V); err != nil {
-			r.Err = err.Error()
+			r.JudgeErr = err.Error()
 			r.V = verdict{Verdict: "fail", Why: "judge call failed"}
 		}
 		fmt.Printf("  [%-3s] %-4s %2d hits %6dms  %s\n", q.ID, r.V.Verdict, len(r.Hits), r.Latency.Milliseconds(), r.V.Why)
