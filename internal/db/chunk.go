@@ -7,7 +7,6 @@ package db
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -68,19 +67,6 @@ func chunkVectorID(source string, id int64, chunk int) string {
 		return fmt.Sprintf("%s:%d", source, id)
 	}
 	return fmt.Sprintf("%s:%d#%d", source, id, chunk)
-}
-
-// episodeIDFromVectorID recovers the episode a vector belongs to, whichever passage it is. Reconciliation needs it to tell "this episode has no vectors at all" from "this episode has its first passage and is missing the rest".
-func episodeIDFromVectorID(vid string) (int64, bool) {
-	rest, ok := strings.CutPrefix(vid, "episode:")
-	if !ok {
-		return 0, false
-	}
-	if i := strings.IndexByte(rest, '#'); i >= 0 {
-		rest = rest[:i]
-	}
-	n, err := strconv.ParseInt(rest, 10, 64)
-	return n, err == nil
 }
 
 // bestPassagePerRow collapses a fused candidate list so each underlying row appears once, represented by its highest-scoring passage. Input: candidates in fused order. Output: the same order with later passages of an already-seen row dropped.

@@ -29,47 +29,6 @@ const (
 // statusInText finds the HTTP status a provider named in a plain error string, for the paths that return no typed API error: another brain's HTTP client, and any error whose typed cause was flattened to text on the way here. It only reads a number that follows a word saying it is one, so a model name or a byte count is never mistaken for a status.
 var statusInText = regexp.MustCompile(`(?i)\b(?:error|status|code|http)\b\W{0,3}(\d{3})\b`)
 
-// AskFailure is a failed model call that reads as one short sentence. Error() is that sentence, so everything downstream — the error event the window draws, the turn the failure is stored as, the act run it is filed under — says something a person can act on; Detail() and errors.Unwrap keep the provider's own message for the log and for anyone who wants to read it.
-type AskFailure struct {
-	sentence string
-	detail   string
-	err      error
-}
-
-// Error returns the one short sentence this failure reads as.
-func (f *AskFailure) Error() string { return f.sentence }
-
-// Detail returns the provider's own message, whole, for the log.
-func (f *AskFailure) Detail() string { return f.detail }
-
-// Unwrap returns the error this failure was made from, so errors.Is and errors.As still find what it was (the API error's status code, for one, which the hand-over to another brain reads).
-func (f *AskFailure) Unwrap() error { return f.err }
-
-// AskError wraps a failed model call so every reader downstream shows the short sentence instead of the provider's whole message. Input: the error a model call returned, wrapped or not. Output: nil when err is nil, otherwise an *AskFailure whose Error() is the sentence and whose Detail() is the provider's own text; an error that is already an *AskFailure comes back unchanged.
-func AskError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var already *AskFailure
-	if errors.As(err, &already) {
-		return err
-	}
-	sentence, detail := AskErrorText(err)
-	return &AskFailure{sentence: sentence, detail: detail, err: err}
-}
-
-// AskDetail returns the provider's own message behind a failed ask. Input: any error. Output: the kept detail when it is an *AskFailure, the error's own text otherwise, and "" for a nil error.
-func AskDetail(err error) string {
-	if err == nil {
-		return ""
-	}
-	var failure *AskFailure
-	if errors.As(err, &failure) {
-		return failure.Detail()
-	}
-	return err.Error()
-}
-
 // AskErrorText turns a failed model call into what the window shows and what the log keeps. Input: the error a model call returned, wrapped or not. Output: sentence, one line a person would say out loud — never longer than 120 characters, never a URL, a status code or a stack of map literals — and detail, the error's whole text unchanged. A nil error gives two empty strings.
 func AskErrorText(err error) (sentence, detail string) {
 	if err == nil {

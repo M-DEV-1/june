@@ -78,30 +78,6 @@ func TestAskSentence_IsTheLineOnItsOwn(t *testing.T) {
 	}
 }
 
-// The other way to wire it is err = AskError(err): from there on every reader — the error event, the stored turn, the act run — reads the sentence, while the provider's own message stays reachable.
-func TestAskError_ReadsAsTheSentenceAndKeepsTheRest(t *testing.T) {
-	original := fmt.Errorf("ask text: generate (iteration 0): %w", genai.APIError{Code: 429, Status: "RESOURCE_EXHAUSTED"})
-
-	wrapped := AskError(original)
-
-	if got := wrapped.Error(); got != "Today's free Gemini requests are used up. It works again tomorrow, or now on another brain." {
-		t.Errorf("Error() = %q, want the short sentence", got)
-	}
-	if got := AskDetail(wrapped); got != original.Error() {
-		t.Errorf("AskDetail = %q, want the provider's own message %q", got, original.Error())
-	}
-	var api genai.APIError
-	if !errors.As(wrapped, &api) || api.Code != 429 {
-		t.Errorf("errors.As lost the API error through the wrapper; the Codex hand-over reads that code")
-	}
-	if AskError(nil) != nil {
-		t.Errorf("AskError(nil) = %v, want nil", AskError(nil))
-	}
-	if again := AskError(wrapped); again != wrapped {
-		t.Errorf("AskError wrapped an already wrapped failure a second time")
-	}
-}
-
 // A failure that reaches the window must be one line whatever the provider sent, since the window sizes itself to what it is given.
 func TestAskErrorText_IsOneShortLineForATextWallOfAnError(t *testing.T) {
 	sentence, detail := AskErrorText(errors.New(strings.Repeat(quotaBlob, 6)))

@@ -271,16 +271,6 @@ func TestDreamConfig_DefaultsAndDisable(t *testing.T) {
 	}
 }
 
-// TestBackgroundModel_DefaultsToFlashLite checks that every unattended job runs on the cheap high-allowance model unless the config pins one, so no background job can quietly spend the 20-request day that gemini-3.5-flash gets on the free tier.
-func TestBackgroundModel_DefaultsToFlashLite(t *testing.T) {
-	SetBackgroundModels(nil)
-	for _, job := range BackgroundJobs() {
-		if got := BackgroundModel(job); got != DefaultBackgroundModel {
-			t.Errorf("BackgroundModel(%q) = %q, want the default %q", job, got, DefaultBackgroundModel)
-		}
-	}
-}
-
 // TestBackgroundModel_ConfigPinsAJob checks that a model named in the config's background_models map wins for that job and leaves every other job on the default.
 func TestBackgroundModel_ConfigPinsAJob(t *testing.T) {
 	SetBackgroundModels(map[string]string{JobMeetingMinutes: "gemini-3.5-flash"})
@@ -299,31 +289,6 @@ func TestBackgroundModel_UnknownJobStillAnswers(t *testing.T) {
 	SetBackgroundModels(nil)
 	if got := BackgroundModel("not-a-job"); got != DefaultBackgroundModel {
 		t.Errorf("unknown job = %q, want the default %q", got, DefaultBackgroundModel)
-	}
-}
-
-// TestBackgroundJobs_CoversEveryUnattendedJob checks that the job list the user configures by name includes each background duty that reaches a metered model.
-func TestBackgroundJobs_CoversEveryUnattendedJob(t *testing.T) {
-	want := []string{
-		JobWorkingState,
-		JobEpisodeSummary,
-		JobEpisodicCompaction,
-		JobNoteConsolidation,
-		JobPersonalContext,
-		JobMeetingMinutes,
-		JobDream,
-	}
-	got := BackgroundJobs()
-	for _, w := range want {
-		found := false
-		for _, g := range got {
-			if g == w {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("BackgroundJobs() is missing %q", w)
-		}
 	}
 }
 

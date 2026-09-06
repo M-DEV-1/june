@@ -342,16 +342,6 @@ func OwnedByUser(owner, identity string) bool {
 	return matched > 0
 }
 
-// UserMeetingActions keeps a meeting's action items only when at least one of them is the user's. A meeting the user owes nothing in was not really their meeting — they sat in on it — and its items are somebody else's business. When they do owe something, every item is kept, including the ones other people took on: work the user is waiting for is work they care about, which is the difference between sitting in on a call and being in it. The minutes themselves always keep the full record either way.
-func UserMeetingActions(items []ActionItem, identity string) []ActionItem {
-	for _, a := range items {
-		if OwnedByUser(a.Owner, identity) {
-			return items
-		}
-	}
-	return nil
-}
-
 // completionVerbs are the words that say a piece of work actually happened. "Deploy" and "review" are not among them: they name the work, not its end.
 var completionVerbs = []string{"done", "finished", "completed", "complete", "merged", "pushed", "deployed", "shipped", "landed", "closed", "resolved", "delivered", "sent", "fixed", "wrote", "ran"}
 
