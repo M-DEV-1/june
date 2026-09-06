@@ -218,6 +218,46 @@ describe("context", () => {
   });
 });
 
+// /context reads the focused window through AT-SPI, which is the one daemon route that routinely blocks for seconds. The hover shows before these three land (see connect in main.ts), so a wedged read costs a stale chip rather than a window that never appears — but only if the read is actually given up on.
+describe("the three card reads have a deadline", () => {
+  /** A fetch that never answers unless its abort signal fires, which is what a wedged AT-SPI read looks like from here. Input: none. Output: the fake. */
+  const wedged = () =>
+    vi.fn(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+
+  it("gives up on a /context that never answers", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", wedged());
+    try {
+      const pending = context();
+      await vi.advanceTimersByTimeAsync(3000);
+      await expect(pending).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("gives up on a /matters and a /voice/status that never answer", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", wedged());
+    try {
+      const rows = matters();
+      const live = voiceStatus();
+      await vi.advanceTimersByTimeAsync(3000);
+      await expect(rows).resolves.toBeNull();
+      await expect(live).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("matters", () => {
   it("returns the matters array on success", async () => {
     const rows = [{ id: "1", title: "a", kind: "action", status: "open", when: "2026-09-04T09:00:00Z", detail: "" }];
