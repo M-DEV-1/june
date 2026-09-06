@@ -173,6 +173,22 @@ describe("the sources under a reply", () => {
     expect(screen.queryByLabelText("What Ora is doing")).toBeNull();
   });
 
+  it("names the block it opens only while that block is in the document", async () => {
+    renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1" },
+    );
+    // A closed fold that still points at the panel's id points at nothing: the panel is only rendered while it is open, and a screen reader offered a jump to it lands nowhere.
+    const shut = await screen.findByRole("button", { name: /Sources/ });
+    expect(shut.getAttribute("aria-controls")).toBeNull();
+
+    await userEvent.click(shut);
+    await screen.findByText("the deadline is Friday");
+    const id = screen.getByRole("button", { name: /Sources/ }).getAttribute("aria-controls");
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id!)).not.toBeNull();
+  });
+
   it("offers no fold on a reply that read nothing", async () => {
     const nothing: ConversationView = {
       ...view,
@@ -364,6 +380,21 @@ describe("asking a question", () => {
     expect(store.getState().progress.run).toBeUndefined();
     // The run held the only other copy of the sentence and it has just been given up, so a box left empty here loses it for good.
     await waitFor(() => expect(box.value).toBe("a long question worth not retyping"));
+  });
+
+  it("sends nothing on Enter while a question is still running, the same as the Send button", async () => {
+    const { calls, store } = renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1" },
+    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await userEvent.type(box, "and what about the flights?{Enter}");
+    await waitFor(() => expect(store.getState().progress.run?.askId).toBe("ask-1"));
+
+    await userEvent.type(box, "and the hotel?{Enter}");
+    expect(calls.filter((c) => c.path === "/ask")).toHaveLength(1);
+    // The second question is still there to send once the first has finished, rather than gone with the run it would have replaced.
+    expect(box.value).toBe("and the hotel?");
   });
 
   it("puts the goal back in the box when the daemon would not start the job", async () => {
@@ -565,6 +596,48 @@ describe("dictating in the composer", () => {
     expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull();
   });
 
+  it("stops the dictation on Escape with something already half-typed, and keeps what is typed", async () => {
+    const { calls } = renderApp(
+      { conversations: summary, turns: { c1: view }, dictateText: "and the hotel" },
+      { conversationId: "c1" },
+    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await userEvent.type(box, "half a question");
+    await userEvent.click(screen.getByRole("button", { name: "Dictate" }));
+    await screen.findByRole("button", { name: "Stop dictation" });
+
+    // The box is read-only rather than disabled while a recording is open, so it still takes the keypress: its own Escape, which gives up the draft, must not be what happens while the words the draft is waiting for are still being spoken.
+    box.focus();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(calls.find((c) => c.path === "/dictate/stop")).toBeDefined());
+    await waitFor(() => expect(box.value).toBe("half a question and the hotel"));
+  });
+
+  it("says nothing when the stop finds the daemon has already finished the dictation itself", async () => {
+    renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1" },
+    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await userEvent.click(screen.getByRole("button", { name: "Dictate" }));
+    await screen.findByRole("button", { name: "Stop dictation" });
+
+    // The daemon's silence gate closes the recording between the press and the stop reaching it, and the stop route then answers 404 for a recording it no longer has; the words are already on their way as a "dictation" event, so there is nothing wrong to say.
+    const daemon = globalThis.fetch;
+    let stopped = false;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(typeof input === "object" && "url" in input ? input.url : String(input)).pathname;
+      if (path !== "/dictate/stop") return daemon(input, init);
+      stopped = true;
+      return Promise.resolve(new Response("no such recording", { status: 404 }));
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Stop dictation" }));
+    await waitFor(() => expect(stopped).toBe(true));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull());
+    expect(box.getAttribute("placeholder")).toBe("Ask Ora, or give it something to do");
+  });
+
   it("says on the composer's own placeholder, for a few seconds, when the daemon would not start a dictation", async () => {
     renderApp(
       { conversations: summary, turns: { c1: view }, fails: ["POST /dictate/start"] },
@@ -759,6 +832,36 @@ describe("starting a job", () => {
       await screen.findByText(/the change did not come after/),
     ).toBeDefined();
     expect(document.querySelector(".lucide-x")).not.toBeNull();
+  });
+
+  it("draws a step whose check already held as neither a pass nor a fail", async () => {
+    const { store } = renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1" },
+    );
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    store.dispatch(
+      progress.eventArrived({
+        id: "act-1",
+        type: "act",
+        detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4", expect: 'an item labelled "Risk" is showing' }),
+      }),
+    );
+    store.dispatch(
+      progress.eventArrived({
+        id: "act-1",
+        type: "act",
+        detail: JSON.stringify({ kind: "verified", state: "stepping", text: 'it was already showing before the click', outcome: "pass", held_before: true }),
+      }),
+    );
+
+    // A check that held before the step took it proves nothing about the step, so it is neither ticked nor crossed.
+    expect(await screen.findByText("it was already showing before the click")).toBeDefined();
+    expect(screen.getByText("already held")).toBeDefined();
+    expect(screen.getByTitle("The check already held before this step, so it says nothing about what the step did")).toBeDefined();
+    expect(document.querySelector(".lucide-check")).toBeNull();
+    expect(document.querySelector(".lucide-x")).toBeNull();
   });
 
   it("shows a stuck job's question, and answers it through the composer rather than asking", async () => {

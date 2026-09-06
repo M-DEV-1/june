@@ -64,7 +64,8 @@ function Fold({
     <button
       type="button"
       aria-expanded={open}
-      aria-controls={controls}
+      // Only while the block is open: it is rendered only then, and a closed row naming an id that is not in the document is an invalid attribute value that offers a screen reader a jump to nothing.
+      aria-controls={open ? controls : undefined}
       onClick={onToggle}
       className="-ml-1.5 mt-1 flex items-center gap-1 rounded-sm px-1.5 py-1 text-meta text-muted-foreground outline-none transition-colors hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
     >

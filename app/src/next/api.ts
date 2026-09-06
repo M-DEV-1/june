@@ -268,11 +268,11 @@ export const oraApi = createApi({
   baseQuery: baseQueryWithFreshToken,
   tagTypes: ["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"],
   endpoints: (build) => ({
-    /** The 50 most recently touched conversations, newest first. */
+    /** The 50 most recently touched conversations, newest first. The list is tagged with an id of its own so it can be read again without every open conversation being read again with it: an invalidation naming the type alone still matches this, which is what every mutation below relies on. */
     conversations: build.query<ConversationSummary[], void>({
       query: () => "/conversations",
       transformResponse: (r: { conversations: ConversationSummary[] }) => r.conversations ?? [],
-      providesTags: ["Conversation"],
+      providesTags: [{ type: "Conversation" as const, id: "LIST" }],
     }),
     /** One conversation and its turns, oldest first. */
     conversation: build.query<ConversationView, string>({
@@ -458,7 +458,9 @@ export const oraApi = createApi({
     stopDictation: build.mutation<{ text: string }, string>({
       async queryFn(id, _api, _extra, baseQuery) {
         const result = await baseQuery({ url: "/dictate/stop", method: "POST", body: { id } });
-        if (result.error?.status === 404) return { data: { text: "" } };
+        // The daemon writes that 404 with http.Error, whose body is plain text: fetchBaseQuery cannot read it as JSON and reports it as a PARSING_ERROR carrying the real code, so the code is read off whichever of the two fields is holding it.
+        const code = result.error && (result.error.status === "PARSING_ERROR" ? result.error.originalStatus : result.error.status);
+        if (code === 404) return { data: { text: "" } };
         if (result.error) return { error: result.error };
         return { data: result.data as { text: string } };
       },

@@ -77,11 +77,13 @@ describe("adding one", () => {
 describe("running one now", () => {
   // The daemon answers 202 as soon as the run has started and delivers the answer as a notice, so the button says the run is under way rather than waiting minutes for the reply.
   it("asks the daemon and says the run is under way", async () => {
-    const { calls } = renderApp({ routines, routineAnswer: "Ship the report — it's due today." }, { place: "routines" });
+    const { calls } = renderApp({ routines }, { place: "routines" });
     await screen.findByText("tell me the one thing I must do today");
     await userEvent.click(screen.getByRole("button", { name: /Run "tell me the one thing I must do today" now/ }));
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/routines/1/run")).toBe(true));
     expect(await screen.findByText("Running…")).toBeDefined();
+    // The 202 says only that the run has started; when it ends and what it said arrive minutes later as a notice, so the row itself is left exactly as it was.
+    expect(list().getByText(/Never run yet/)).toBeDefined();
   });
 
   it("says so when the run could not be started", async () => {

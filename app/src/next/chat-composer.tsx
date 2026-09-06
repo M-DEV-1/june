@@ -94,6 +94,7 @@ export function Composer({
       try {
         takeWords((await stopDictation(id).unwrap()).text);
       } catch {
+        // A daemon that had already closed the recording itself is not a failure and never reaches here: stopDictation answers that 404 with no words rather than an error, since the words are already arriving on the stream.
         flashNotice("Could not finish dictation");
       }
       return;
@@ -252,8 +253,8 @@ export function Composer({
               // Enter sends and Shift+Enter starts a line, which is the way round every chat window has settled on.
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                // Nothing is sent while a dictation is open: the words still to come are part of the question.
-                if (!dictating) void send();
+                // Nothing is sent while a dictation is open: the words still to come are part of the question. Nothing is sent under a question already running either — the same condition the Send button is disabled on, since a second run replaces the first and the first's own finish would then take the second off the screen.
+                if (!dictating && !running) void send();
                 return;
               }
               // Space on an empty box is the same as clicking the mic, the same key the hover window has always used to start one; a modifier or a held-down key means something else, same as there.
@@ -263,7 +264,9 @@ export function Composer({
                 return;
               }
               // Escape gives up the draft — straight away when it is one line, because there is barely anything to lose, and behind a confirm once it runs past one, so a longer draft is not thrown away by a stray keypress. Handled here rather than left to fall through to the window's own Escape, which knows nothing about what is half-typed in this box.
-              if (e.key !== "Escape" || !key || !draft) return;
+              //
+              // While a dictation is open it belongs to the dictation instead: the box is read-only rather than disabled now, so it takes the keypress and would stop it here, on its way to the document listener above that is the only thing that ends a recording — wiping the very text the transcript was about to be added to and leaving the microphone open.
+              if (e.key !== "Escape" || dictating || !key || !draft) return;
               if (draft.includes("\n") && !window.confirm("Clear this draft?"))
                 return;
               e.stopPropagation();
