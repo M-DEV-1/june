@@ -9,15 +9,18 @@ import (
 	"ora/internal/act"
 	"ora/internal/db"
 	"ora/internal/memory"
+	oratext "ora/internal/text"
 	"ora/internal/tracker"
 	"ora/internal/window"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/genai"
 )
@@ -934,8 +937,10 @@ func TestIsSensitivePath(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval verifies a sensitive path blocks on ToolApprovalChan instead of shipping its content straight to the model.
+// TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval verifies a sensitive path blocks on ToolApprovalChan instead of shipping its content straight to the model, once an approver is registered (the terminal UI, which reads that channel — see SetToolApprovals).
 func TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval(t *testing.T) {
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	tmpFile := filepath.Join(t.TempDir(), ".ssh", "id_rsa")
 	if err := os.MkdirAll(filepath.Dir(tmpFile), 0700); err != nil {
@@ -991,8 +996,10 @@ func TestExecuteTool_ReadFile_NonSensitivePath_NoApproval(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_ReadClipboard_BlocksOnApproval verifies read_clipboard always requires approval, regardless of content — the clipboard can carry secrets a password manager just copied.
+// TestExecuteTool_ReadClipboard_BlocksOnApproval verifies read_clipboard always requires approval where an approver is registered, regardless of content — the clipboard can carry secrets a password manager just copied.
 func TestExecuteTool_ReadClipboard_BlocksOnApproval(t *testing.T) {
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 
 	done := make(chan string, 1)
@@ -2940,5 +2947,149 @@ func TestListMeetingNotes_NewestFirstAndCapped(t *testing.T) {
 	// One line per meeting plus the closing count line; the note formatter repeats the reference inside each line, so lines are counted rather than references.
 	if n := len(strings.Split(got, "\n")); n != maxMeetingNotesListed+1 {
 		t.Errorf("listed %d lines, want the cap of %d plus the count line", n, maxMeetingNotesListed)
+	}
+}
+
+// TestExecuteTool_OpenURL_RefusesNonHTTPSchemes checks open_url hands the desktop opener http and https links and nothing else. The url in a tool call is routinely copied out of screen text or a page the model just read, so file:///home/user/.ssh/id_rsa, javascript: and smb: all arrive here as plain strings; ipc.Open makes the same check on the same three commands.
+func TestExecuteTool_OpenURL_RefusesNonHTTPSchemes(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	var opened []string
+	original := openURLCommand
+	openURLCommand = func(raw string) *exec.Cmd {
+		opened = append(opened, raw)
+		return exec.Command("sh", "-c", "exit 0")
+	}
+	t.Cleanup(func() { openURLCommand = original })
+
+	for _, raw := range []string{"file:///home/user/.ssh/id_rsa", "javascript:alert(1)", "smb://share/secrets", "/etc/passwd"} {
+		got := a.executeTool(context.Background(), "open_url", map[string]any{"url": raw})
+		if !strings.HasPrefix(got, "error") {
+			t.Errorf("open_url(%q) = %q, want a refusal", raw, got)
+		}
+	}
+	if len(opened) != 0 {
+		t.Fatalf("a refused url must never reach the opener, got %v", opened)
+	}
+
+	got := a.executeTool(context.Background(), "open_url", map[string]any{"url": "https://example.com/page"})
+	if !strings.Contains(got, "https://example.com/page") {
+		t.Errorf("open_url on an https link = %q, want it opened", got)
+	}
+	if len(opened) != 1 || opened[0] != "https://example.com/page" {
+		t.Fatalf("expected the https link handed to the opener once, got %v", opened)
+	}
+}
+
+// TestLiveTools_OmitsApprovalGatedToolsWithoutAnApprover checks a session with nobody reading ToolApprovalChan never declares the tools that wait on it — the daemon reads that channel nowhere, so a voice session that called one of them parked until the session ended and the model never got a result. With an approver registered (the terminal UI) the same tools are declared again.
+func TestLiveTools_OmitsApprovalGatedToolsWithoutAnApprover(t *testing.T) {
+	declared := func() map[string]bool {
+		names := map[string]bool{}
+		for _, tool := range liveTools() {
+			for _, d := range tool.FunctionDeclarations {
+				names[d.Name] = true
+			}
+		}
+		return names
+	}
+
+	for name := range approvalGatedTools {
+		if declared()[name] {
+			t.Errorf("live tools declare %q with nobody to approve it", name)
+		}
+	}
+
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
+	for name := range approvalGatedTools {
+		if !declared()[name] {
+			t.Errorf("live tools drop %q even though an approver is registered", name)
+		}
+	}
+}
+
+// TestExecuteTool_ApprovalGatedTools_RefuseInsteadOfBlocking checks that with no approver registered — every daemon path: ask, live voice, routines, act jobs — a call to one of the approval-gated tools comes back with a refusal rather than parking on ToolApprovalChan, which is what a model naming an undeclared tool would do.
+func TestExecuteTool_ApprovalGatedTools_RefuseInsteadOfBlocking(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	sensitive := filepath.Join(t.TempDir(), ".ssh", "id_rsa")
+	if err := os.MkdirAll(filepath.Dir(sensitive), 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(sensitive, []byte("-----BEGIN PRIVATE KEY-----"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	calls := []struct {
+		name string
+		args map[string]any
+	}{
+		{"shell_exec", map[string]any{"command": "echo hello"}},
+		{"read_clipboard", map[string]any{}},
+		{"read_file", map[string]any{"path": sensitive}},
+	}
+	for _, call := range calls {
+		done := make(chan string, 1)
+		go func() { done <- a.executeTool(context.Background(), call.name, call.args) }()
+		select {
+		case got := <-done:
+			if !strings.HasPrefix(got, "error") {
+				t.Errorf("%s = %q, want a refusal", call.name, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s blocked instead of refusing", call.name)
+		}
+		select {
+		case req := <-a.ToolApprovalChan:
+			t.Fatalf("%s put an approval request nobody can answer on the channel: %+v", call.name, req)
+		default:
+		}
+	}
+}
+
+// TestRunShellCommand_TruncatesWithoutSplittingARune checks a long command output is cut on a rune boundary. The cut used to be result[:2000], which halves a multi-byte rune and puts an invalid string into a JSON tool response.
+func TestRunShellCommand_TruncatesWithoutSplittingARune(t *testing.T) {
+	got := RunShellCommand("printf %s '" + strings.Repeat("é", 2100) + "'")
+
+	if !utf8.ValidString(got) {
+		t.Error("the truncated shell output is not valid UTF-8")
+	}
+	if !strings.HasSuffix(got, "\n... (truncated)") {
+		t.Fatalf("expected the truncation marker, got the tail %q", oratext.Runes(got, 40))
+	}
+	if n := utf8.RuneCountInString(strings.TrimSuffix(got, "\n... (truncated)")); n != 2000 {
+		t.Errorf("kept %d runes, want 2000", n)
+	}
+}
+
+// TestExecuteTool_ReadFile_TruncatesWithoutSplittingARune is the same rune-boundary check for read_file, which cut at result[:4000].
+func TestExecuteTool_ReadFile_TruncatesWithoutSplittingARune(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	path := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("é", 4100)), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got := a.executeTool(context.Background(), "read_file", map[string]any{"path": path})
+
+	if !utf8.ValidString(got) {
+		t.Error("the truncated file content is not valid UTF-8")
+	}
+	if n := utf8.RuneCountInString(strings.TrimSuffix(got, "\n... (truncated, file too large)")); n != 4000 {
+		t.Errorf("kept %d runes, want 4000", n)
+	}
+}
+
+// TestExecuteTool_WaitFor_RefusesAnUnknownKind checks a check kind outside the four wait_for declares is refused by name rather than polled for five seconds and reported as a real negative.
+func TestExecuteTool_WaitFor_RefusesAnUnknownKind(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+
+	got := a.executeTool(context.Background(), "wait_for", map[string]any{"kind": "spinner_gone", "value": "Loading"})
+
+	if !strings.HasPrefix(got, "error") {
+		t.Fatalf("wait_for with an unknown kind = %q, want a refusal", got)
+	}
+	for _, kind := range []string{"title_contains", "item_present", "item_absent", "field_holds"} {
+		if !strings.Contains(got, kind) {
+			t.Errorf("the refusal %q does not name %s", got, kind)
+		}
 	}
 }

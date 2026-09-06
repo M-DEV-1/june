@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"ora/internal/db"
 )
@@ -317,5 +318,26 @@ func TestDelegate_TimeoutNamesTheRealRunTime(t *testing.T) {
 	}
 	if got := ranFor(90*time.Second + 400*time.Millisecond); got.String() != "1m30s" {
 		t.Errorf("ranFor(90.4s) = %s", got)
+	}
+}
+
+// TestDelegate_CapsTheRunnerResult checks a chatty delegate run is cut to delegateResultBudget runes before it becomes a tool result, on a rune boundary and with the same marker the other tools use. Uncapped, the whole of `claude -p`'s stdout went into the next model prompt.
+func TestDelegate_CapsTheRunnerResult(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	run := &fakeRunner{result: strings.Repeat("é", delegateResultBudget+500)}
+
+	got, err := a.delegate(t.Context(), run, Delegation{Brief: "do it"}, nil)
+
+	if err != nil {
+		t.Fatalf("delegate: %v", err)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("the truncated delegate result is not valid UTF-8")
+	}
+	if !strings.HasSuffix(got, "\n... (truncated)") {
+		t.Fatal("expected the truncation marker on a result over the budget")
+	}
+	if n := utf8.RuneCountInString(strings.TrimSuffix(got, "\n... (truncated)")); n != delegateResultBudget {
+		t.Errorf("kept %d runes, want %d", n, delegateResultBudget)
 	}
 }

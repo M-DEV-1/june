@@ -630,6 +630,8 @@ func (f *fakeLiveSession) SendToolResponse(p genai.LiveSendToolResponseParameter
 //
 // Drives a real blocking shell_exec (not in the allowlist, so it genuinely blocks on ToolApprovalChan/ResultChan) followed immediately by a fast tool call, and asserts the fast call's result comes back first. Under the old synchronous code this would hang until the 2s timeout instead.
 func TestReceiveLoop_ToolCallDoesNotBlockReceivePath(t *testing.T) {
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
 	a := NewAgent(nil, nil, nil, nil, "")
 
 	fs := &fakeLiveSession{
@@ -718,6 +720,8 @@ func TestReceiveLoop_ToolCallDoesNotBlockReceivePath(t *testing.T) {
 //
 // Drives a real blocking HITL call, confirms it's genuinely parked awaiting approval, then cancels the session context WITHOUT resolving the approval — the goroutine must exit on its own and must not try to deliver a response into a session that's gone.
 func TestRunToolCall_SessionEndsBeforeApproval_GoroutineExitsInsteadOfLeaking(t *testing.T) {
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
 	a := NewAgent(nil, nil, nil, nil, "")
 
 	fs := &fakeLiveSession{
@@ -1200,6 +1204,8 @@ func TestRunToolCall_SlowTool_SendsInterimProgressResponse(t *testing.T) {
 	orig := longRunNudgeDelay
 	longRunNudgeDelay = 50 * time.Millisecond
 	defer func() { longRunNudgeDelay = orig }()
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
 
 	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
 	fs := &fakeLiveSession{
