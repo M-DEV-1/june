@@ -206,3 +206,78 @@ func TestAgeDreamArtifacts_RemovesOldTracesAndReplays(t *testing.T) {
 		}
 	}
 }
+
+// TestLateRaiser_AnswersUnavailableUntilTheBusDialFinishes checks the window raiser is handed to the agent as one stable value at startup and filled in afterwards, rather than assigned from the goroutine that dials the session bus. The dial is bounded, so on a wedged bus that goroutine outlives the bound and used to write the agent's field and the shutdown's variable while both were being read from other goroutines.
+func TestLateRaiser_AnswersUnavailableUntilTheBusDialFinishes(t *testing.T) {
+	var late lateRaiser
+
+	if ok, err := late.Available(context.Background()); ok || err != nil {
+		t.Errorf("Available before the dial finished = %v, %v, want false and no error so switch_window takes the keyboard path", ok, err)
+	}
+	if ok, err := late.ByPid(context.Background(), 1234); ok || err != nil {
+		t.Errorf("ByPid before the dial finished = %v, %v, want false and no error", ok, err)
+	}
+	if _, err := late.List(context.Background()); err != nil {
+		t.Errorf("List before the dial finished returned %v, want no error and no windows", err)
+	}
+	if late.raiser.Load() != nil {
+		t.Error("something was published before the dial finished")
+	}
+}
+
+// TestFirstRunDelay_ResumesTheScheduleAcrossARestart pins when a job that spends a model call on every run makes its first run after startup. Before the marker existed every restart ran the safety-net flush, the note consolidation and the episodic compaction two minutes in, so a day of ora-restart cycles spent several background requests per restart against a 500-a-day budget.
+func TestFirstRunDelay_ResumesTheScheduleAcrossARestart(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+
+	if got := firstRunDelay(time.Time{}, 6*time.Hour, jobFirstRunDelay, now); got != jobFirstRunDelay {
+		t.Errorf("delay with no marker = %v, want the plain %v: a store that has never run this job has no schedule to resume", got, jobFirstRunDelay)
+	}
+	if got := firstRunDelay(now.Add(-time.Hour), 6*time.Hour, jobFirstRunDelay, now); got != 5*time.Hour {
+		t.Errorf("delay one hour into a six-hour interval = %v, want the five hours left of it", got)
+	}
+	if got := firstRunDelay(now.Add(-7*time.Hour), 6*time.Hour, jobFirstRunDelay, now); got != jobFirstRunDelay {
+		t.Errorf("delay for an interval already overdue = %v, want the plain %v so it is not run on the startup path", got, jobFirstRunDelay)
+	}
+	if got := firstRunDelay(now.Add(-6*time.Hour).Add(time.Minute), 6*time.Hour, jobFirstRunDelay, now); got != jobFirstRunDelay {
+		t.Errorf("delay for an interval one minute from due = %v, want the floor to win", got)
+	}
+}
+
+// TestEveryMeteredAfter_RecordsEachRun checks the job's last run is written where the next start can read it, so the schedule survives a restart rather than beginning again.
+func TestEveryMeteredAfter_RecordsEachRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer store.Close()
+
+	ran := make(chan struct{}, 4)
+	go everyMeteredAfter(ctx, store, time.Millisecond, 24*time.Hour, "test-metered-job", func() { ran <- struct{}{} })
+
+	select {
+	case <-ran:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the job never ran")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		marker, err := lastJobRun(ctx, store, "test-metered-job")
+		if err != nil {
+			t.Fatalf("lastJobRun: %v", err)
+		}
+		if !marker.IsZero() {
+			if delay := firstRunDelay(marker, 24*time.Hour, jobFirstRunDelay, time.Now()); delay <= jobFirstRunDelay {
+				t.Errorf("a restart right after the run would wait %v, want most of the 24 h interval", delay)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the job ran but recorded no last-run marker, so a restart would run it again two minutes in")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

@@ -36,10 +36,17 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+// exitCode is what the process exits with once runRoot has returned and its deferred cleanup — the telemetry shutdown above all — has run. Written by runRoot on the one goroutine cobra calls it from, read by Execute after that call has come back.
+var exitCode int
+
 // Execute runs the root command. Called once by main.main().
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
+	}
+	// os.Exit skips deferred functions, so the code runRoot chose is applied here, after its defers have run, rather than inside it.
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
 
@@ -87,8 +94,9 @@ func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 	if isDaemon {
 		if err := runDaemon(ctx, shutdownObs); err != nil {
 			// Non-zero, so a supervisor calls the start a failure. The commonest cause is a second daemon finding the port held by the first, and exiting 0 there meant systemd and ora-restart both reported a restart that never happened.
+			// The code is recorded rather than exited on, so the deferred telemetry shutdown and signal-context cancel below still run. os.Exit here skipped both, which was harmless only while the sole error this could return was the port bind, before anything had been traced.
 			slog.Error("daemon crashed", "error", err)
-			os.Exit(1)
+			exitCode = 1
 		}
 		return
 	}

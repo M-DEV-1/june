@@ -261,6 +261,114 @@ func everyAfter(ctx context.Context, delay, interval time.Duration, name string,
 	}
 }
 
+// lateRaiser is the window raiser as the agent and the shutdown see it from the moment startup wires them, before the session-bus dial behind it has finished — or on a wedged bus, before it ever does. Every method answers "no window" until a Raiser is published, which is the same answer an uninstalled shell extension gives, so switch_window falls back to the keyboard exactly as it does on a machine that has none.
+// It exists because the dial is bounded and its goroutine can outlive the bound: assigning the raiser from that goroutine wrote the agent's own field and the shutdown's variable while the ipc server was already answering asks on other goroutines. Publishing through an atomic and handing out this one stable value instead means nothing is written after startup but the pointer.
+type lateRaiser struct {
+	raiser atomic.Pointer[window.Raiser]
+}
+
+// publish makes r the raiser every later call goes to. Input: the dialled raiser. Output: none.
+func (l *lateRaiser) publish(r *window.Raiser) { l.raiser.Store(r) }
+
+// close releases the session-bus connection if one was ever dialled. Output: whatever Close returned, or nil when there is nothing to close.
+func (l *lateRaiser) close() error {
+	if r := l.raiser.Load(); r != nil {
+		return r.Close()
+	}
+	return nil
+}
+
+func (l *lateRaiser) Available(ctx context.Context) (bool, error) {
+	if r := l.raiser.Load(); r != nil {
+		return r.Available(ctx)
+	}
+	return false, nil
+}
+
+func (l *lateRaiser) List(ctx context.Context) ([]window.Window, error) {
+	if r := l.raiser.Load(); r != nil {
+		return r.List(ctx)
+	}
+	return nil, nil
+}
+
+func (l *lateRaiser) ByPid(ctx context.Context, pid uint32) (bool, error) {
+	if r := l.raiser.Load(); r != nil {
+		return r.ByPid(ctx, pid)
+	}
+	return false, nil
+}
+
+func (l *lateRaiser) ByTitle(ctx context.Context, substring string) (bool, error) {
+	if r := l.raiser.Load(); r != nil {
+		return r.ByTitle(ctx, substring)
+	}
+	return false, nil
+}
+
+func (l *lateRaiser) ByWmClass(ctx context.Context, wmClass string) (bool, error) {
+	if r := l.raiser.Load(); r != nil {
+		return r.ByWmClass(ctx, wmClass)
+	}
+	return false, nil
+}
+
+// jobMarkerStore is the slice of the store the metered background jobs use to remember when they last ran. The diary table is where it goes because that is where every other once-per-period marker in the daemon already lives (see proactive.maybeWeeklyStudy); the row has no day, like the understanding doc, since a job's schedule is not a calendar day's.
+type jobMarkerStore interface {
+	DiaryEntry(ctx context.Context, day, kind string) (string, error)
+	SetDiaryEntry(ctx context.Context, day, kind, content string) error
+}
+
+// jobMarkerKind is the diary kind one background job's last run is recorded under. Input: the job's name as it appears in the log lines. Output: the kind, prefixed so nothing else in the diary collides with it.
+func jobMarkerKind(name string) string { return "job-last-run:" + name }
+
+// lastJobRun reads when a background job last ran on this store. Input: ctx, the store, and the job's name. Output: the moment it last ran, or the zero time when it never has or the row could not be parsed.
+func lastJobRun(ctx context.Context, store jobMarkerStore, name string) (time.Time, error) {
+	raw, err := store.DiaryEntry(ctx, "", jobMarkerKind(name))
+	if err != nil || raw == "" {
+		return time.Time{}, err
+	}
+	at, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, nil
+	}
+	return at, nil
+}
+
+// firstRunDelay says how long a metered background job waits before its first run of this process. Input: when it last ran (zero when it never has), its interval, the shortest the first run may be away (jobFirstRunDelay in production), and now. Output: the later of that floor and the time left of the interval, so a restart resumes the schedule instead of starting it again.
+func firstRunDelay(lastRun time.Time, interval, floor time.Duration, now time.Time) time.Duration {
+	if lastRun.IsZero() {
+		return floor
+	}
+	if left := lastRun.Add(interval).Sub(now); left > floor {
+		return left
+	}
+	return floor
+}
+
+// everyMetered is every for a job that spends a model call on every run: same interval, but its last run is remembered in the store, so a restart does not buy another call two minutes in. Input: ctx, the store the marker row lives in, the interval, the job's name, and the job. Output: none — it returns when ctx is done.
+// The plain first run exists because a 12 h or 24 h interval never fires on a machine restarted through the day, and that reasoning holds for the jobs that only read and write the store. For the ones that call the model it inverted the cost: on a day of ora-restart cycles the daemon paid for a flush attribution, a note consolidation and a compaction digest on every start.
+func everyMetered(ctx context.Context, store jobMarkerStore, interval time.Duration, name string, fn func()) {
+	everyMeteredAfter(ctx, store, jobFirstRunDelay, interval, name, fn)
+}
+
+// everyMeteredAfter is everyMetered with the first run's floor passed in, so a test does not wait out jobFirstRunDelay. Input: ctx, the store, the shortest the first run may be away, the interval, the job's name, and the job.
+func everyMeteredAfter(ctx context.Context, store jobMarkerStore, floor, interval time.Duration, name string, fn func()) {
+	delay := floor
+	last, err := lastJobRun(ctx, store, name)
+	if err != nil {
+		slog.Warn("could not read a background job's last run, treating it as never run", "job", name, "error", err)
+	} else {
+		delay = firstRunDelay(last, interval, floor, time.Now())
+	}
+	everyAfter(ctx, delay, interval, name, func() {
+		fn()
+		if err := store.SetDiaryEntry(ctx, "", jobMarkerKind(name), time.Now().Format(time.RFC3339)); err != nil {
+			slog.Warn("could not record a background job's last run", "job", name, "error", err)
+		}
+	})
+}
+
 // within runs one step and comes back at the bound whether or not the step finished, so a step that hangs delays the caller by that bound and no more. Input: the step's name for the log line, how long it may take, and the step itself. Output: none — a step still running when its bound passes is left behind and logged. At shutdown that is the right trade, since the process is about to exit and the alternative is a daemon that never releases its port; at startup it is the right trade because the port is already bound and nothing is accepting on it yet.
 func within(name string, bound time.Duration, step func()) {
 	done := make(chan struct{})
@@ -423,7 +531,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	eventChan := make(chan tracker.Activity, 100)
-	daemon := tracker.NewDaemon(trackerImpl, 2*time.Second, appConfig.Tracker.DwellTime*time.Millisecond, appConfig.Tracker.Blocklist, eventChan)
+	daemon := tracker.NewDaemon(trackerImpl, 2*time.Second, time.Duration(appConfig.Tracker.DwellTime)*time.Millisecond, appConfig.Tracker.Blocklist, eventChan)
 
 	// vision tier: when accessibility text is too thin (browsers, video, games), the tracker grabs a screenshot and asks the model to describe it.
 	// Gated by cost guards inside the daemon (thinTextThreshold + minVisionInterval). Disabled when no model is available.
@@ -441,8 +549,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// tracker loop entry point
 	go daemon.Start(ctx)
 
-	// hourly safety-net flush: catches long idle sessions where no new activities fire
-	go every(ctx, time.Hour, "safety-net-flush", func() {
+	// hourly safety-net flush: catches long idle sessions where no new activities fire.
+	// Metered, because ForceFlush has no minimum-buffer gate: two minutes of captured activity is enough to pay for one attribution call, plus a ReconcileNotes call when the attribution names an identity.
+	go everyMetered(ctx, store, time.Hour, "safety-net-flush", func() {
 		if compiler != nil {
 			compiler.ForceFlush(ctx)
 		}
@@ -452,7 +561,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// skipped when no API key is available (summarizer == nil).
 	if summarizer != nil {
 		compactor := memory.NewCompactor(summarizer, store)
-		go every(ctx, 12*time.Hour, "episodic-compaction", func() {
+		// Metered: one Digest call per day-group older than seven days that has not been rolled up yet, so a restart that finds a backlog pays for it again.
+		go everyMetered(ctx, store, 12*time.Hour, "episodic-compaction", func() {
 			if err := compactor.Compact(ctx, 7*24*time.Hour); err != nil {
 				slog.Error("episodic compaction failed", "error", err)
 			} else {
@@ -462,7 +572,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 		// consolidate the notes table every 6 h: merge near-duplicates and drop transient task detail that leaked in as "facts."
 		noteCompactor := memory.NewNoteCompactor(summarizer, store)
-		go every(ctx, 6*time.Hour, "note-consolidation", func() {
+		// Metered: Compact calls the model whenever there are at least twenty fact notes, which on a real store is always, so every restart bought one call and a full ReconcileVectors sweep behind it.
+		go everyMetered(ctx, store, 6*time.Hour, "note-consolidation", func() {
 			if err := noteCompactor.Compact(ctx); err != nil {
 				slog.Error("note consolidation failed", "error", err)
 			} else {
@@ -479,7 +590,13 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		// recompute the working-state cache from recent summaries + notes.
 		// The tick stays at five minutes, but memory.StateGate decides whether the call is actually made: at least ten minutes since the last derive, and either a window the user was not in before or enough new summaries to be worth re-reading. Before this gate every tick that found a single new summary made an API call, which is how one unattended job spent a 500-request day by noon on 2026-09-04.
 		var gate memory.StateGate
+		// The ten-minute floor belongs to the store, not to this process: an empty gate let the first tick of every restart through however recently the state had been derived, so a day of ora-restart cycles bought a derive call each. The working state's own updated_at is when the last derive succeeded, so the loop starts from there and the first tick inside the floor records it in the gate instead of calling the model.
 		var lastDerive time.Time
+		if at, err := store.MemoryAsOf(ctx, "working_state"); err != nil {
+			slog.Warn("could not read when the working state was last derived, the first tick will derive", "error", err)
+		} else {
+			lastDerive = at
+		}
 		go every(ctx, 5*time.Minute, "working-state-derive", func() {
 			now := time.Now()
 			// The window starts at the last derive, or one interval back on the first tick, so the signature describes the episodes this derive would actually be covering.
@@ -502,6 +619,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			summaryCount, err := store.CountSummariesSince(ctx, time.Time{})
 			if err != nil {
 				slog.Error("working-state derive skipped: could not count the summaries", "error", err)
+				return
+			}
+			// The store says a derive already ran inside the floor, so this tick records that moment and this tick's material in the gate and spends nothing. From the next tick on the gate has its own history and decides on its own.
+			if !lastDerive.IsZero() && now.Sub(lastDerive) < memory.StateInterval {
+				gate.Derived(lastDerive, signature, summaryCount)
 				return
 			}
 			if !gate.ShouldDerive(now, signature, summaryCount) {
@@ -544,6 +666,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// Meeting minutes previously built their own unmetered brain per meeting; pinning to the meeting-minutes job's own model (as defaultBrain did unmetered) and metering it against the same shared quota means an unattended write-up spends the day's allowance in the same place it always spent it, just counted now.
 	meetingRecorder.SetBrain(tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobMeetingMinutes), apiKey, geminiQuota, false, geminiQuotaOpts), store))
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
+	// The evening close makes two brain calls, so its deadline is sized from the limit this machine's config puts on one of them rather than from a fixed number.
+	scheduler.SetBrainTimeout(appConfig.Brain.Timeout())
 	// One-click answers to the morning brief's question about an item that has gone quiet. The notification blocks until it is answered, so the scheduler asks from its own goroutine.
 	scheduler.SetAsk(proactive.NotifySendAsk)
 	// Every other notice is posted straight to the desktop's notification service, carrying the buttons a macOS reminder carries: Open in Ora, Done, In an hour, This evening, Tomorrow. Presses arrive back over the session bus, so nothing blocks waiting for one, and a machine with no session bus falls back to notify-send.
@@ -716,17 +840,17 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// press_key, click_at and scroll_at drive the keyboard and pointer through the desktop portal, which asks the user to allow remote control the first time its session opens. The session opens on the first tool call that needs it, not here, so nobody sees that dialog until a task actually has to press a key or click a point the accessibility tree cannot reach; the grant is then restored from a token in the data directory, so the dialog is asked once rather than on every restart.
 	askAgent.UsePortalInput(config.DataDir())
 	// The bundled GNOME Shell extension, when the user has installed it and logged in again, raises another application's window on request; switch_window asks it first and falls back to the shell's own search through the portal keyboard when it is not there.
-	// dbus.ConnectSessionBus has no timeout of its own and this runs while the IPC port is bound but nothing is accepting on it yet, so a wedged session bus used to hang startup past the client's ten-second readiness poll and print "daemon spawn failed: timed out" for a daemon that was merely stuck here. Two seconds is far longer than a local bus dial takes.
-	var windowRaiser *window.Raiser
-	within("dialling the session bus for the window raiser", 2*time.Second, func() {
+	// dbus.ConnectSessionBus has no timeout of its own and this runs while the IPC port is bound but nothing is accepting on it yet, so a wedged session bus used to hang startup past the client's ten-second readiness poll and print "daemon spawn failed: timed out" for a daemon that was merely stuck here. The dial is off the startup path entirely now, and lateRaiser is what the agent and the shutdown hold in the meantime, so nothing waits on it and nothing is assigned behind their backs when it finishes.
+	windowRaiser := &lateRaiser{}
+	askAgent.UseWindowRaiser(windowRaiser)
+	go func() {
 		raiser, err := window.New()
 		if err != nil {
 			slog.Warn("window raiser unavailable, switch_window will use the keyboard path", "error", err)
 			return
 		}
-		windowRaiser = raiser
-		askAgent.UseWindowRaiser(raiser)
-	})
+		windowRaiser.publish(raiser)
+	}()
 	// Codex answers asks the window routes to it by calling the ChatGPT backend directly with the user's own login, running the same tools through the same gate as the Gemini text path.
 	ipcServer.AddBrain("codex", agent.CodexBrain{Agent: askAgent})
 	// Claude answers through the Claude Code command line on the user's own subscription, with Ora's tools offered to it over MCP, so working on the screen does not depend on Codex's smaller monthly allowance.
@@ -998,10 +1122,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		within("closing the store", 5*time.Second, func() { store.Close() })
 		// The window raiser's session-bus connection is this process's too, so it is released here rather than left to process exit. Two seconds: closing a D-Bus connection is local and takes microseconds; the bound is there for a wedged bus, not for the work.
 		within("closing the window raiser", 2*time.Second, func() {
-			if windowRaiser != nil {
-				if err := windowRaiser.Close(); err != nil {
-					slog.Warn("could not close the window raiser's bus connection", "error", err)
-				}
+			if err := windowRaiser.close(); err != nil {
+				slog.Warn("could not close the window raiser's bus connection", "error", err)
 			}
 		})
 	}
