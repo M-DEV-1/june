@@ -4,6 +4,7 @@ package ipc
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 )
 
@@ -37,7 +38,16 @@ type OverlayRequest struct {
 	TTLMs  int           `json:"ttl_ms"`
 }
 
-// Overlay handles POST /overlay. Input: an OverlayRequest as JSON. Output: 202 and no body once the request has been broadcast on the hub as an event of type "overlay" whose text is the validated request re-encoded as JSON, or 400 when the body is not JSON, names a kind other than ring, marks, arrow, line, path, box, circle or clear, carries no rectangles for a ring, marks or box, carries a rectangle count other than one for a circle, carries a rectangle with a width or height that is not positive, carries fewer than two points for an arrow or line, carries fewer than three points for a path, or carries a point with a negative coordinate. A ttl above maxOverlayTTLMs is capped rather than refused, and a missing one becomes defaultOverlayTTLMs.
+// OverlayResult is the body of a 202 from POST /overlay. Drawn is true when at least one client was reading the event stream at the moment the drawing went out, and false when none was, in which case Reason says so. A 202 on its own only ever meant the request validated, so a drawing that reached nobody was indistinguishable from one that reached the screen; this is the difference, said out loud.
+type OverlayResult struct {
+	Drawn  bool   `json:"drawn"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// overlayNoWindow is the reason a drawing was not drawn: nothing was reading the daemon's event stream, so there was no overlay window to draw it.
+const overlayNoWindow = "no overlay window"
+
+// Overlay handles POST /overlay. Input: an OverlayRequest as JSON. Output: 202 and an OverlayResult saying whether anything was listening, once the request has been broadcast on the hub as an event of type "overlay" whose text is the validated request re-encoded as JSON, or 400 when the body is not JSON, names a kind other than ring, marks, arrow, line, path, box, circle or clear, carries no rectangles for a ring, marks or box, carries a rectangle count other than one for a circle, carries a rectangle with a width or height that is not positive, carries fewer than two points for an arrow or line, carries fewer than three points for a path, or carries a point with a negative coordinate. A ttl above maxOverlayTTLMs is capped rather than refused, and a missing one becomes defaultOverlayTTLMs.
 func (s *Server) Overlay(w http.ResponseWriter, r *http.Request) {
 	var req OverlayRequest
 	if !DecodeJSON(w, r, &req) {
@@ -94,8 +104,14 @@ func (s *Server) Overlay(w http.ResponseWriter, r *http.Request) {
 		req.TTLMs = maxOverlayTTLMs
 	}
 
-	s.draw(overlayNoAsk, req)
+	drawn := s.draw(overlayNoAsk, req)
+	result := OverlayResult{Drawn: drawn}
+	if !drawn {
+		result.Reason = overlayNoWindow
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // Ring draws one ring around a rectangle on the screen for the default time, the way POST /overlay would. Input: the id of the ask whose point_at asked for the ring (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the rectangle in screen pixels and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
@@ -153,11 +169,15 @@ func (s *Server) Draw(shape string, points [][2]int, x, y, w, h int, label strin
 	return nil
 }
 
-// draw broadcasts a validated overlay request as an event of type "overlay" whose text is the request as JSON, under the id of the ask that drew it. Input: that ask's id, and the request. An empty id becomes overlayNoAsk, so every overlay event has an id and no drawing is ever given one of the ask ids newID hands out.
-func (s *Server) draw(askID string, req OverlayRequest) {
+// draw broadcasts a validated overlay request as an event of type "overlay" whose text is the request as JSON, under the id of the ask that drew it. Input: that ask's id, and the request. Output: true when at least one client was subscribed to the hub, false when the drawing went to nobody. An empty id becomes overlayNoAsk, so every overlay event has an id and no drawing is ever given one of the ask ids newID hands out.
+// Every drawing is logged with the number of clients it went to, because a drawing that never appeared on screen is otherwise silent at every step: a line reading clients=0 says the drawing was never on the wire and separates a daemon that did nothing from a window that did nothing.
+func (s *Server) draw(askID string, req OverlayRequest) bool {
 	if askID == "" {
 		askID = overlayNoAsk
 	}
 	body, _ := json.Marshal(req)
+	clients := s.hub.clientCount()
+	slog.Info("overlay: drawing", "ask", askID, "kind", req.Kind, "rects", len(req.Rects), "points", len(req.Points), "ttl_ms", req.TTLMs, "clients", clients)
 	s.hub.broadcast(Event{ID: askID, Type: "overlay", Text: string(body), Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
+	return clients > 0
 }
