@@ -252,10 +252,25 @@ fn open_app(app: &AppHandle) {
     let _ = w.set_focus();
 }
 
+/// Where this process records its pid for the desktop hotkey. Input: none. Output: <data dir>/window.pid, or None when no data directory could be resolved.
+fn pid_path() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("window.pid"))
+}
+
 /// Writes this process's pid to <data dir>/window.pid and toggles the window whenever SIGHUP arrives. A Wayland session never delivers a global key grab to a hidden client, so the desktop's own keybinding (GNOME custom shortcut on Ctrl+Alt+Space) runs `kill -HUP $(cat window.pid)` instead. SIGHUP because JavaScriptCore inside the webview owns SIGUSR1 and SIGUSR2 for its own thread signalling, and chaining into its handler segfaults. Input: the app handle. Output: nothing; a pid file that cannot be written is logged and the signal thread still runs.
 fn listen_for_toggle_signal(app: AppHandle) {
-    if let Some(dir) = data_dir() {
-        if let Err(e) = std::fs::write(dir.join("window.pid"), std::process::id().to_string()) {
+    if let Some(path) = pid_path() {
+        // 0600: it is only ever read by the user's own hotkey, and it named this process to anyone with an account on the machine at the 0664 the default write gave it.
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(std::process::id().to_string().as_bytes()));
+        if let Err(e) = written {
             eprintln!("ora: could not write window.pid: {e}");
         }
     }
@@ -569,8 +584,16 @@ pub fn run() {
             listen_for_toggle_signal(app.handle().clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            // The pid file is removed on the way out, because the hotkey sends SIGHUP to whatever pid it names and SIGHUP's default disposition is terminate: a file left behind by a window that has gone aims that signal at whichever unrelated process the kernel later gives that number to. A kill -9 still leaves the file behind, so the shortcut should also check /proc/<pid>/cmdline before signalling.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(path) = pid_path() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        });
 }
 
 #[cfg(test)]

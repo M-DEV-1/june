@@ -30,7 +30,8 @@ func Generate(path string) (string, error) {
 	token := hex.EncodeToString(buf)
 
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		// 0700: the directory holds the store and the log as well as this token, and it is the user's alone whichever of them creates it first.
+		if err := os.MkdirAll(dir, 0700); err != nil {
 			return "", fmt.Errorf("create ipc token directory: %w", err)
 		}
 	}

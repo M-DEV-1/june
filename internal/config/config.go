@@ -375,6 +375,9 @@ func IsValidVoice(name string) bool {
 	return ok
 }
 
+// DefaultDwellTime is how long a window must hold focus before the tracker records it, in milliseconds. Used both as the built-in default and as the fallback for a config file that carries an explicit zero.
+const DefaultDwellTime time.Duration = 15000
+
 type TrackerConfig struct {
 	Blocklist []string      `json:"blocklist"`
 	DwellTime time.Duration `json:"dwell_time_ms"`
@@ -510,7 +513,7 @@ func LoadConfig() OraConfig {
 		Tracker: TrackerConfig{
 			Blocklist: DefaultBlocklist,
 			// 3s is too less to be a dwell time, so 15s sounded better. honestly, it has to be tab switching + dwell, and im not sure what the right number is?
-			DwellTime: 15000,
+			DwellTime: DefaultDwellTime,
 		},
 		Voice:     DefaultVoice,
 		Autostart: false,
@@ -554,21 +557,33 @@ func LoadConfig() OraConfig {
 	if cfg.Embed.IdleTimeout <= 0 {
 		cfg.Embed.IdleTimeout = DefaultEmbedIdleTimeout
 	}
+	// The tracker block needs the same two guards for the same reason: a file carrying "dwell_time_ms": 0 records every window the pointer crosses, and one carrying "blocklist": null silently turns off the password-manager blocklist that keeps 1Password and KeePassXC out of capture.
+	if cfg.Tracker.DwellTime <= 0 {
+		cfg.Tracker.DwellTime = DefaultDwellTime
+	}
+	if cfg.Tracker.Blocklist == nil {
+		cfg.Tracker.Blocklist = DefaultBlocklist
+	}
 
 	return cfg
 }
 
 // SaveConfig persists cfg to disk, creating the data directory if needed.
 func SaveConfig(cfg OraConfig) error {
-	if err := os.MkdirAll(DataDir(), 0755); err != nil {
+	// 0700, matching the legacy-migration path above: the same directory holds the store, the IPC token and the log, so it is the user's alone and must not depend on which of the three writers happened to create it first.
+	if err := os.MkdirAll(DataDir(), 0700); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	if err := os.WriteFile(ConfigPath(), data, 0644); err != nil {
+	if err := os.WriteFile(ConfigPath(), data, 0600); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
+	}
+	// Writing an existing file does not change its mode, so a config left 0644 by an older build stays that way until this tightens it.
+	if err := os.Chmod(ConfigPath(), 0600); err != nil {
+		return fmt.Errorf("failed to secure config: %w", err)
 	}
 	return nil
 }

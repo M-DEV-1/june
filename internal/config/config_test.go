@@ -399,3 +399,46 @@ func TestLoadConfig_KeepsClaudeUsageFromLoginDisabled(t *testing.T) {
 		t.Error("expected an explicitly disabled Claude usage setting to survive a reload")
 	}
 }
+
+// The config sits beside the IPC token and the store in a directory that is the user's alone, and SaveConfig used to write it 0644 into a directory it created 0755.
+func TestSaveConfig_WritesTheConfigAndItsDirectoryPrivateToTheUser(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ora")
+	t.Setenv("ORA_DATA_DIR", dir)
+
+	if err := SaveConfig(OraConfig{Voice: DefaultVoice}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	info, err := os.Stat(ConfigPath())
+	if err != nil {
+		t.Fatalf("stat the config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Errorf("expected the config to be 0600, got %o", got)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat the data dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0700 {
+		t.Errorf("expected the data dir to be 0700, got %o", got)
+	}
+}
+
+// A config written before a field existed leaves it out and json.Unmarshal keeps the default, but one that carries the field with a zero value overwrites it. A zero dwell samples every window the pointer crosses, and a null blocklist turns off the password-manager list that keeps 1Password and KeePassXC out of capture, so both fall back to their defaults.
+func TestLoadConfig_ZeroTrackerFieldsFallBackToTheDefaults(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ORA_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "ora-config.json"), []byte(`{"tracker":{"dwell_time_ms":0,"blocklist":null}}`), 0600); err != nil {
+		t.Fatalf("write the config: %v", err)
+	}
+
+	cfg := LoadConfig()
+
+	if cfg.Tracker.DwellTime != DefaultDwellTime {
+		t.Errorf("dwell time = %v, want the default %v", cfg.Tracker.DwellTime, DefaultDwellTime)
+	}
+	if len(cfg.Tracker.Blocklist) != len(DefaultBlocklist) {
+		t.Errorf("blocklist has %d entries, want the default %d", len(cfg.Tracker.Blocklist), len(DefaultBlocklist))
+	}
+}
