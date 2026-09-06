@@ -164,22 +164,26 @@ func TestCompiler_BuffersWithoutFlushing(t *testing.T) {
 	}
 }
 
-func TestCompiler_FlushesOnAppChange(t *testing.T) {
+// An application switch flushes only above the compiler's floor. Alt-tabbing between two windows produces a switch every few seconds, and each flush is one metered attribution call, so a switch that comes moments after the last flush or with almost nothing buffered leaves the buffer alone — the word limit and the hourly tick still flush it.
+func TestCompiler_AppChangeBelowTheFloorDoesNotFlush(t *testing.T) {
 	llm, store := &fakeSummarizer{}, &fakeStorage{}
 	compiler := memory.NewCompiler(llm, store)
 	ctx := context.Background()
 
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"})
+	// Twenty switches back and forth, all within the minimum interval of the compiler's construction.
+	for i := 0; i < 10; i++ {
+		compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+		compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"})
+	}
 
-	if llm.attrCalls != 1 {
-		t.Errorf("expected 1 LLM call, got %d", llm.attrCalls)
+	if llm.attrCalls != 0 {
+		t.Errorf("expected no attribution call for app switches inside the floor, got %d", llm.attrCalls)
 	}
-	if len(store.semantic) != 1 {
-		t.Errorf("expected 1 store call, got %d", len(store.semantic))
+	if len(store.semantic) != 0 {
+		t.Errorf("expected nothing written for app switches inside the floor, got %d", len(store.semantic))
 	}
-	if compiler.BufferSize() != 1 {
-		t.Errorf("expected buffer size 1 (the new app), got %d", compiler.BufferSize())
+	if compiler.BufferSize() != 20 {
+		t.Errorf("expected all 20 activities still buffered, got %d", compiler.BufferSize())
 	}
 }
 
@@ -226,7 +230,7 @@ func TestCompiler_PassesScreenTextToSummarizer(t *testing.T) {
 	// Pad screen text to exceed minFlushWords so the flush is not discarded.
 	screenText := "func validateToken " + strings.Repeat("word ", 30)
 	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: screenText})
-	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"}) // triggers flush on app change
+	compiler.ForceFlush(ctx)
 
 	if len(llm.received) == 0 {
 		t.Fatal("summarizer was not called")
@@ -252,7 +256,7 @@ func TestCompiler_FallbackOmitsScreenText_KeepsAppAndTitle(t *testing.T) {
 	// Pad screen text to exceed minFlushWords so the flush is not discarded.
 	screenText := "func validateToken " + strings.Repeat("word ", 30)
 	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: screenText})
-	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"})
+	compiler.ForceFlush(ctx)
 
 	if len(store.semantic) != 1 {
 		t.Fatalf("expected 1 fallback summary stored, got %d", len(store.semantic))
@@ -431,7 +435,7 @@ func TestCompiler_ThinTitleActivityFlushes(t *testing.T) {
 	ctx := context.Background()
 
 	compiler.Ingest(ctx, tracker.Activity{App: "Discord", Title: "General (voice)"})
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+	compiler.ForceFlush(ctx)
 
 	if llm.attrCalls != 1 {
 		t.Errorf("expected 1 LLM call for thin-title flush, got %d", llm.attrCalls)
@@ -671,5 +675,36 @@ func TestAttributePrompt_NamesTheUser(t *testing.T) {
 	}
 	if strings.Contains(memory.AttributePrompt(nil, nil, ""), "third party") {
 		t.Error("with no identity known, the prompt should not carry an empty identity rule")
+	}
+}
+
+// The shutdown flush empties the buffer before the model call starts, so a caller whose deadline expires first would walk away from activity that is nowhere else. ForceFlush must instead record the drained buffer as a raw-activity node when the deadline hits.
+func TestCompiler_ForceFlush_WritesTheFallbackWhenTheDeadlineHits(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
+		<-release
+		return nil, fmt.Errorf("the model finally answered, long after the caller gave up")
+	}}
+	store := &fakeStorage{}
+	compiler := memory.NewCompiler(llm, store)
+
+	compiler.Ingest(context.Background(), tracker.Activity{App: "VSCode", Title: "main.go"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	compiler.ForceFlush(ctx)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.semantic) != 1 {
+		t.Fatalf("expected the drained buffer written as 1 fallback node when the deadline hit, got %d writes", len(store.semantic))
+	}
+	if store.semantic[0].TaskName != "Raw Activity Log" {
+		t.Errorf("task name = %q, want %q", store.semantic[0].TaskName, "Raw Activity Log")
+	}
+	if !strings.Contains(store.semantic[0].Summary, "VSCode | main.go") {
+		t.Errorf("fallback summary = %q, want it to carry the drained activity's app and title", store.semantic[0].Summary)
 	}
 }

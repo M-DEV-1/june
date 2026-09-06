@@ -74,6 +74,10 @@ func (g *GeminiSummarizer) ConsolidateNotes(ctx context.Context, notes []string)
 		return nil, nil
 	}
 
+	// The genai client has no HTTP timeout of its own, so this call gets one here.
+	ctx, cancel := context.WithTimeout(ctx, summarizerCallTimeout)
+	defer cancel()
+
 	numbered := make([]string, len(notes))
 	for i, n := range notes {
 		numbered[i] = fmt.Sprintf("%d. %s", i+1, n)

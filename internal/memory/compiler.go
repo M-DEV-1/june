@@ -21,6 +21,8 @@ type TaskSummary struct {
 	TaskName string   `json:"task_name"`
 	Summary  string   `json:"summary"`
 	Notes    []string `json:"notes,omitempty"`
+	// Since is the start of the flush this summary was written from, and bounds the episodes the store votes over when it tags the summary with a domain. Not persisted: the summary node's content is this struct marshalled, and this field describes how the summary was made, not what it says.
+	Since time.Time `json:"-"`
 }
 
 // NoteRef is a lightweight handle to an existing stored note.
@@ -144,6 +146,10 @@ func (g *GeminiSummarizer) ReconcileNotes(ctx context.Context, existing []NoteRe
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.ReconcileNotes")
 	defer span.End()
 
+	// The genai client has no HTTP timeout of its own, so every call this type makes gets one here.
+	ctx, cancel := context.WithTimeout(ctx, summarizerCallTimeout)
+	defer cancel()
+
 	var existingLines []string
 	for _, n := range existing {
 		existingLines = append(existingLines, fmt.Sprintf("%d: %s", n.ID, n.Content))
@@ -211,6 +217,9 @@ func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tr
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AttributeThreads")
 	defer span.End()
 
+	ctx, cancel := context.WithTimeout(ctx, summarizerCallTimeout)
+	defer cancel()
+
 	var identity string
 	if g.identity != nil {
 		identity = g.identity(ctx)
@@ -263,6 +272,9 @@ func (g *GeminiSummarizer) AnalyzeScreen(ctx context.Context, png []byte) Screen
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AnalyzeScreen")
 	defer span.End()
 
+	ctx, cancel := context.WithTimeout(ctx, summarizerCallTimeout)
+	defer cancel()
+
 	parts := []*genai.Part{
 		genai.NewPartFromText(screenSightPrompt),
 		genai.NewPartFromBytes(png, "image/png"),
@@ -307,6 +319,15 @@ type Storage interface {
 }
 
 const wordFlushLimit = 1500
+
+// minAppSwitchGap and minAppSwitchBuffer are the floor under the application-switch flush. Every flush costs one metered attribution call, and alt-tabbing between two windows produces a switch every few seconds; without a floor that is one call per switch, and once the daily gate refuses them every later switch writes a "Raw Activity Log" node into memory instead. A switch below either floor leaves the buffer alone, so the activity is still flushed by the word limit or the hourly tick.
+const (
+	minAppSwitchGap    = 3 * time.Minute
+	minAppSwitchBuffer = 3
+)
+
+// summarizerCallTimeout bounds a single model call made by the compiler or by GeminiSummarizer. The genai client has no HTTP timeout of its own, and Ingest runs the attribution call inline on the daemon's episode-drain goroutine: one connection that never answers stops the drain, fills the event channel, and stops screen capture entirely until the daemon is restarted.
+const summarizerCallTimeout = 2 * time.Minute
 
 // trivialTitles is the minimal set of placeholder window titles that carry no signal.
 var trivialTitles = map[string]struct{}{
@@ -364,7 +385,7 @@ func (c *Compiler) Ingest(ctx context.Context, act tracker.Activity) {
 	var flushedSince, flushedUntil time.Time
 	if len(c.buffer) > 0 {
 		last := c.buffer[len(c.buffer)-1]
-		appChanged := last.App != act.App
+		appChanged := last.App != act.App && len(c.buffer) >= minAppSwitchBuffer && time.Since(c.lastFlush) >= minAppSwitchGap
 		wordLimitHit := c.wordCount+incoming >= wordFlushLimit
 		hourElapsed := time.Since(c.lastFlush) >= time.Hour
 
@@ -443,22 +464,11 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, sin
 	if taErr != nil {
 		slog.Error("flush: ThreadsForAttribution failed", "err", taErr)
 	}
-	attr, err := c.llm.AttributeThreads(ctx, buf, existingThreads)
+	attrCtx, cancelAttr := context.WithTimeout(ctx, summarizerCallTimeout)
+	attr, err := c.llm.AttributeThreads(attrCtx, buf, existingThreads)
+	cancelAttr()
 	if err != nil || attr == nil || len(attr.Threads) == 0 {
-		// log raw activities if LLM fails or produces no usable attribution
-		// app | title lines only — no ScreenText. This fallback fires when the LLM call itself failed, so there's no summarization happening at all; dumping every activity's full raw capture here would create exactly the tens-of-KB junk row other code (truncateUTF8, excerptContent) already defends against reading back out.
-		var fallbackText strings.Builder
-		for _, act := range buf {
-			fallbackText.WriteString(act.App + " | " + act.Title + "\n")
-		}
-		fallbackSummary := TaskSummary{
-			SameTask: false,
-			TaskName: "Raw Activity Log",
-			Summary:  oratext.RunesEllipsis(strings.TrimSpace(fallbackText.String()), fallbackSummaryMaxRunes),
-		}
-		if err := c.store.LogSemanticNode(ctx, fallbackSummary); err != nil {
-			slog.Error("flush: LogSemanticNode (fallback) failed", "err", err)
-		}
+		c.writeFallbackNode(ctx, buf, since)
 	} else {
 		// one update per concurrent thread: refresh its state and log an episodic summary node so history, FTS, and compaction keep working unchanged.
 		for _, u := range attr.Threads {
@@ -469,7 +479,7 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, sin
 				// Best-effort: the thread and its summary are the record, and losing the edge costs the ability to walk from one to its evidence, not the memory itself.
 				slog.Warn("flush: could not link this buffer's episodes to the thread", "subject", u.Subject, "err", err)
 			}
-			if err := c.store.LogSemanticNode(ctx, TaskSummary{SameTask: u.ID != 0, TaskName: u.Subject, Summary: u.Summary}); err != nil {
+			if err := c.store.LogSemanticNode(ctx, TaskSummary{SameTask: u.ID != 0, TaskName: u.Subject, Summary: u.Summary, Since: since}); err != nil {
 				slog.Error("flush: LogSemanticNode failed", "subject", u.Subject, "err", err)
 			}
 		}
@@ -481,7 +491,9 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, sin
 				if exErr != nil {
 					return nil, exErr
 				}
-				return c.llm.ReconcileNotes(ctx, existing, attr.Identity)
+				recCtx, cancelRec := context.WithTimeout(ctx, summarizerCallTimeout)
+				defer cancelRec()
+				return c.llm.ReconcileNotes(recCtx, existing, attr.Identity)
 			}()
 
 			if recErr != nil {
@@ -509,12 +521,31 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, sin
 	}
 }
 
+// writeFallbackNode records a drained buffer as one "Raw Activity Log" node, the record kept when no summary could be made of it. Input: ctx, the drained activities, and the start of the stretch they cover. Output: none; a write failure is logged.
+// App and title lines only, no ScreenText: this path runs when there was no summarization at all, and dumping every activity's full capture would create exactly the tens-of-KB junk row other code (truncateUTF8, excerptContent) already defends against reading back out.
+func (c *Compiler) writeFallbackNode(ctx context.Context, buf []tracker.Activity, since time.Time) {
+	var fallbackText strings.Builder
+	for _, act := range buf {
+		fallbackText.WriteString(act.App + " | " + act.Title + "\n")
+	}
+	fallbackSummary := TaskSummary{
+		SameTask: false,
+		TaskName: "Raw Activity Log",
+		Summary:  oratext.RunesEllipsis(strings.TrimSpace(fallbackText.String()), fallbackSummaryMaxRunes),
+		Since:    since,
+	}
+	if err := c.store.LogSemanticNode(ctx, fallbackSummary); err != nil {
+		slog.Error("flush: LogSemanticNode (fallback) failed", "err", err)
+	}
+}
+
 func (c *Compiler) BufferSize() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.buffer)
 }
 
+// ForceFlush drains the buffer and processes it, and returns when either that finishes or ctx is done. The buffer is emptied before the slow work starts, so a caller whose deadline expires first — the shutdown flush is the one that does — would otherwise walk away from activity that is no longer anywhere else. When the deadline wins, the drained activities are written as a raw-activity node under a context the deadline cannot cancel, so the stretch is still in memory as app and title lines even though it never got a summary. Input: a context whose deadline bounds the wait. Output: none.
 func (c *Compiler) ForceFlush(ctx context.Context) {
 	c.mu.Lock()
 	if len(c.buffer) == 0 {
@@ -524,7 +555,18 @@ func (c *Compiler) ForceFlush(ctx context.Context) {
 	buf, since, until := c.resetBufferLocked()
 	c.mu.Unlock()
 
-	c.processFlush(ctx, buf, since, until)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.processFlush(ctx, buf, since, until)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// The abandoned goroutine is running on the same cancelled ctx, so its own store writes fail rather than racing this one.
+		c.writeFallbackNode(context.WithoutCancel(ctx), buf, since)
+	}
 }
 
 // GetCurrentBuffer returns a copy so callers (the /buffer HTTP handler, Agent.Connect) never read a slice that Ingest/flush might be mutating concurrently.

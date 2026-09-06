@@ -160,6 +160,10 @@ func (g *GeminiSummarizer) DeriveState(ctx context.Context, recentSummaries []st
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.DeriveState")
 	defer span.End()
 
+	// The local backend below and the genai client above both answer over HTTP with no timeout of their own.
+	ctx, cancel := context.WithTimeout(ctx, summarizerCallTimeout)
+	defer cancel()
+
 	var parts []string
 	if len(notes) > 0 {
 		parts = append(parts, "Stable facts about the user:\n"+strings.Join(notes, "\n"))
