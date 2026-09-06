@@ -354,7 +354,7 @@ func TestAct10LastWindowTitle(t *testing.T) {
 	}
 }
 
-// TestAct10HopsWithDetail checks the fold that keeps one Detail per hop alongside act10Hops' one name per hop: the result summary from a hop's "after" event wins over its "before" argument summary when both are there, and a hop with no pair — the stream ended between its two events — keeps the one value it has.
+// TestAct10HopsWithDetail checks the fold that keeps one Detail per hop alongside one name per hop: the result summary from a hop's "after" event wins over its "before" argument summary when both are there, and a hop with no pair — the stream ended between its two events — keeps the one value it has.
 func TestAct10HopsWithDetail(t *testing.T) {
 	names := []string{"observe_screen", "observe_screen", "click", "click", "scroll_to"}
 	details := []string{"", "brave · PR #13 · GitHub", "element 1", `window now "PR #13 · GitHub"`, "element 2"}

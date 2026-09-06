@@ -21,8 +21,6 @@ import (
 type fakeExec struct {
 	mu    sync.Mutex
 	calls []string
-	// waitValues is the "value" argument wait_for was actually called with, one per call, so a test can check the real text still reached verification even where the checkpoint and the events carry a redacted one.
-	waitValues []string
 	// verdicts is the answer wait_for gives, one per call, the last one repeating once the list runs out.
 	verdicts []bool
 	// block, when non-nil, is closed by the test to release a tool call that is standing in for a slow action.
@@ -33,7 +31,7 @@ type fakeExec struct {
 	result string
 	// heldBefore is what the pre-reading of a step's check answers: the step loop takes its check once before the action, with a one-poll timeout, and true here says the check was already true before anything happened.
 	heldBefore bool
-	// preChecks records the "value" of each of those pre-readings, kept apart from calls and waitValues so the tool sequence a test asserts on is still the actions and their checks.
+	// preChecks records the "value" of each of those pre-readings, kept apart from calls so the tool sequence a test asserts on is still the actions and their checks.
 	preChecks []string
 }
 
@@ -48,10 +46,6 @@ func (f *fakeExec) CheckHolds(ctx context.Context, check act.Check) bool {
 func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[string]any) string {
 	f.mu.Lock()
 	f.calls = append(f.calls, name)
-	if name == "wait_for" {
-		value, _ := args["value"].(string)
-		f.waitValues = append(f.waitValues, value)
-	}
 	n := 0
 	for _, c := range f.calls {
 		if c == "wait_for" {
@@ -107,13 +101,6 @@ func (f *fakeExec) names() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
-}
-
-// waitValuesSeen returns the "value" argument wait_for was actually called with, one per call, in call order.
-func (f *fakeExec) waitValuesSeen() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.waitValues...)
 }
 
 // script is a Model that answers with the replies given, in order, and repeats the last one for ever after.

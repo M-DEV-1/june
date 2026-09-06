@@ -292,19 +292,7 @@ type act10Outcome struct {
 	Err string
 }
 
-// act10Hops folds the daemon's paired tool events down to one entry per tool call. Input: the tool names in the order their events arrived. Output: one name per call. The daemon fires its ToolObserver twice around every call — once before it runs, carrying the argument summary, and once after, carrying the result summary (see internal/ipc's run and internal/agent's askText and askCodex) — so one hop reaches the stream as two "tool" events with the same name. Two genuine back-to-back calls of the same tool arrive as four events and are still counted as two.
-func act10Hops(raw []string) []string {
-	var hops []string
-	for i := 0; i < len(raw); i++ {
-		hops = append(hops, raw[i])
-		if i+1 < len(raw) && raw[i+1] == raw[i] {
-			i++
-		}
-	}
-	return hops
-}
-
-// act10HopsWithDetail folds the daemon's paired tool events into one entry per hop the same way act10Hops does, keeping alongside each hop's name the more useful of its two Detail values. A hop's pair is the argument summary before the call and the result summary after it; the result usually says more (a window's own line, a click's landing title), so it wins when both are there, and the lone value stands when the stream ended between the two. Input: the tool names and their Detail values, in arrival order, index for index. Output: one name and one detail per hop, in the same order act10Hops would fold the names alone.
+// act10HopsWithDetail folds the daemon's paired tool events down to one entry per tool call, keeping alongside each hop's name the more useful of its two Detail values. The daemon fires its ToolObserver twice around every call — once before it runs, carrying the argument summary, and once after, carrying the result summary (see internal/ipc's run and internal/agent's askText and askCodex) — so one hop reaches the stream as two "tool" events with the same name. A hop's pair is the argument summary before the call and the result summary after it; the result usually says more (a window's own line, a click's landing title), so it wins when both are there, and the lone value stands when the stream ended between the two. Input: the tool names and their Detail values, in arrival order, index for index. Output: one name and one detail per hop; two genuine back-to-back calls of the same tool arrive as four events and are still counted as two hops.
 func act10HopsWithDetail(names, details []string) (steps, dets []string) {
 	for i := 0; i < len(names); i++ {
 		steps = append(steps, names[i])

@@ -273,22 +273,6 @@ func track8SufficientRate(rs []track8Result) (passes, applicable int) {
 	return rate(vs)
 }
 
-// judgeOutages counts the measurements that never happened — a judge that could not be reached or an arm that could not be run — so a run with an outage reports that plainly instead of reporting a worse system.
-func judgeOutages(rs []track8Result) int {
-	n := 0
-	for _, r := range rs {
-		if r.JudgeErr != "" {
-			n++
-		}
-		for _, a := range r.Answers {
-			if a.JudgeErr != "" || a.Err != "" {
-				n++
-			}
-		}
-	}
-	return n
-}
-
 // track8ArmRate is how often one arm answered well, across every question it was asked. Declining for lack of material is excluded rather than counted against it: an arm that correctly says it cannot answer from thin rows is behaving properly, and scoring that as failure would reward guessing.
 func track8ArmRate(rs []track8Result, name string) (passes, applicable int) {
 	for _, r := range rs {
