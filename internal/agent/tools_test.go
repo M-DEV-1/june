@@ -2009,6 +2009,24 @@ func TestExecuteTool_Draw_RefusesRawCoordinatesWithoutALook(t *testing.T) {
 	}
 }
 
+// A Live voice session takes tool results as text, so a look it makes takes a picture nobody can show it. Telling it to "look first" there is advice that can never be followed: on 2026-09-07 a voice session looped look -> click_at -> refusal three times against an Electron window, then told the user its screen tools were broken and saved a note about it. The refusal has to say the picture cannot be shown and name the path that does work.
+func TestExecuteTool_ClickAt_SaysWhenTheSessionCannotBeShownThePicture(t *testing.T) {
+	a, _, _ := lookingAgent(t)
+	ctx := withAskLookState(context.Background())
+	// The look is taken but never handed over, which is exactly the state a voice session leaves it in.
+	a.executeTool(ctx, "look", map[string]any{})
+
+	got := a.executeTool(ctx, "click_at", map[string]any{"x": 10.0, "y": 20.0})
+	if strings.Contains(got, "call look") {
+		t.Errorf("result = %q, want it to stop telling a blind session to look again", got)
+	}
+	for _, want := range []string{"cannot show it to me", "observe_screen"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("result = %q, want it to say %q", got, want)
+		}
+	}
+}
+
 // A point the model reads off the picture is in the picture's own pixels; the screen is somewhere else entirely, and draw is what maps one to the other.
 func TestExecuteTool_Draw_MapsPicturePointsToTheScreen(t *testing.T) {
 	a, drawn, _ := lookingAgent(t)

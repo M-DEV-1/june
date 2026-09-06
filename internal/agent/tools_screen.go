@@ -266,13 +266,22 @@ func takeLook(ctx context.Context) (tracker.Capture, bool) {
 // seenLook returns the newest picture this ask took and actually showed the model, which is the one draw maps coordinates against. Output: the capture, and false when this ask has not looked or the picture has not been handed over yet.
 // Delivery is the test, not the taking: a channel with no way to carry an image — the Live voice session, which takes tool results as text — leaves every picture undelivered, and a point read off a picture nobody saw is a guess like any other.
 func seenLook(ctx context.Context) (tracker.Capture, bool) {
+	c, ok, _ := lookSeen(ctx)
+	return c, ok
+}
+
+// lookSeen is seenLook with the reason a refusal happened. Output: the capture and true when a picture was taken and handed over; otherwise false, with blind=true when a picture was taken but this channel could not carry it to the model, which no number of further looks will change.
+func lookSeen(ctx context.Context) (capture tracker.Capture, ok bool, blind bool) {
 	s := lookStateFrom(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.look == nil || s.lookUndelivered {
-		return tracker.Capture{}, false
+	if s.look == nil {
+		return tracker.Capture{}, false, false
 	}
-	return *s.look, true
+	if s.lookUndelivered {
+		return tracker.Capture{}, false, true
+	}
+	return *s.look, true, false
 }
 
 // lookTokensSpent is what this ask's pictures are estimated to have cost, for the turn trace.
@@ -286,10 +295,16 @@ func lookTokensSpent(ctx context.Context) int {
 // needLookFirst is what draw says when it is given coordinates with no picture behind them. It names the tool to call, because the refusal is only useful if the model's next move is the look it should have made.
 const needLookFirst = "I need to look at the screen first — call look, then give me points in that picture's own coordinates"
 
+// cannotSeePictures is what draw says when the picture was taken but this session had no way to show it. A Live voice session takes tool results as text, so every look it makes is undelivered and no further look will change that: telling it to look again sends it round the same loop until it gives up and reports that its screen tools are broken, which is what happened on 2026-09-07 against an Electron window. The refusal therefore names the path that does work — the numbered list — and says plainly that this one never will.
+const cannotSeePictures = "I took the picture but this session cannot show it to me, so I have no coordinates to work from and looking again will not help. Use observe_screen and act on an item by its number instead; if observe_screen lists nothing, this window does not expose its contents and I should say so rather than keep trying."
+
 // toScreen turns a point the model read off the last look into the point on the screen it names. Input: the point in the picture's own pixels. Output: the screen point, or a tool error when this ask has not looked or the point is outside the picture, which is the shape a guessed coordinate takes.
 func (a *Agent) toScreen(ctx context.Context, x, y int) (int, int, string) {
-	c, ok := seenLook(ctx)
+	c, ok, blind := lookSeen(ctx)
 	if !ok {
+		if blind {
+			return 0, 0, toolError(cannotSeePictures)
+		}
 		return 0, 0, toolError(needLookFirst)
 	}
 	if !c.Holds(x, y) {
