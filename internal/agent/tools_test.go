@@ -1185,7 +1185,6 @@ func TestExecuteTool_QueryMemory_RealStore_WindowConstrainsResults(t *testing.T)
 	}
 }
 
-
 // TestExecuteTool_Recall_SkipsIdleCaptures is bug 4: the tracker writes the literal string "Unknown" for an app and title it could not read, and a night of idle captures turned 25 of 40 recall rows into "Unknown — Unknown: Unknown". Those rows carry no information and crowd out the ones that do, so they are dropped and counted instead.
 func TestExecuteTool_Recall_SkipsIdleCaptures(t *testing.T) {
 	base := time.Date(2026, 8, 28, 1, 0, 0, 0, time.Local)
@@ -2108,7 +2107,6 @@ func TestExecuteTool_PressKey_SaysWhenThereIsNoKeyboard(t *testing.T) {
 		t.Errorf("result = %q, want an error saying this session cannot reach the keyboard", got)
 	}
 }
-
 
 // The user's own go-ahead for this exact step unlocks the same press, the way it unlocks the click.
 func TestExecuteTool_PressKey_EnterGoesThroughWhenTheUserSaidGo(t *testing.T) {
