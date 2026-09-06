@@ -129,8 +129,8 @@ func TestPersonalContext_RejectsEmptySubjectOrContent(t *testing.T) {
 	}
 }
 
-// TestPersonalContext_MigratesIdentityNote covers the one-time move of the identity fact out of notes and into personal context, which happens when the schema is created on an existing database.
-func TestPersonalContext_MigratesIdentityNote(t *testing.T) {
+// TestPersonalContext_NoteNamingTheUserSurvivesRestart checks that opening the store leaves the notes table alone. The one-time identity migration ran inside createSchema on every open and unconditionally deleted every kind='fact' note naming both the user and their computer, so any later note the compiler or save_note wrote was destroyed on the next daemon start.
+func TestPersonalContext_NoteNamingTheUserSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ora.db")
 
@@ -138,10 +138,8 @@ func TestPersonalContext_MigratesIdentityNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
-	if _, err := store.LogNote(ctx, "Alex Rivera is the owner of this computer and goes by Alex.", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	if _, err := store.LogNote(ctx, "the user was reading about sqlite", "fact"); err != nil {
+	const kept = "Alex Rivera, owner of this computer, wants the daemon to start at login"
+	if _, err := store.LogNote(ctx, kept, "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
 	store.Close()
@@ -152,44 +150,11 @@ func TestPersonalContext_MigratesIdentityNote(t *testing.T) {
 	}
 	defer store.Close()
 
-	entries, err := store.PersonalContext(ctx)
-	if err != nil {
-		t.Fatalf("PersonalContext: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Subject != "identity" {
-		t.Fatalf("want one entry under \"identity\", got %+v", entries)
-	}
-	if !strings.Contains(entries[0].Content, "Alex Rivera") || !strings.Contains(entries[0].Content, "M-DEV-1") {
-		t.Errorf("identity entry lost its content: %q", entries[0].Content)
-	}
-
 	notes, err := store.GetNotes(ctx)
 	if err != nil {
 		t.Fatalf("GetNotes: %v", err)
 	}
-	for _, n := range notes {
-		if strings.Contains(n.Content, "owner of this computer") {
-			t.Errorf("the identity note is still in notes: %q", n.Content)
-		}
-	}
-	if len(notes) != 1 {
-		t.Errorf("the migration touched unrelated notes: %+v", notes)
-	}
-
-	// Idempotent: opening again neither re-adds the note nor overwrites an entry the user has since edited.
-	if err := store.SetPersonalContext(ctx, "identity", "Edited by the user."); err != nil {
-		t.Fatalf("SetPersonalContext: %v", err)
-	}
-	store.Close()
-	store, err = db.New(path)
-	if err != nil {
-		t.Fatalf("db.New third open: %v", err)
-	}
-	entries, err = store.PersonalContext(ctx)
-	if err != nil {
-		t.Fatalf("PersonalContext: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Content != "Edited by the user." {
-		t.Errorf("the migration ran twice or overwrote a user edit: %+v", entries)
+	if len(notes) != 1 || notes[0].Content != kept {
+		t.Errorf("reopening the store destroyed the note: %+v", notes)
 	}
 }

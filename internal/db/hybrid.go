@@ -231,6 +231,17 @@ func lexicalTermOverlap(content string, queryTerms []string) int {
 	return n
 }
 
+// domainTaggedSources are the hit sources whose backing table has a domain column, so a domain filter can genuinely narrow them. A note, thread or diary row has no domain at all, and filtering those on exact equality drops every one of them rather than narrowing them.
+var domainTaggedSources = map[string]bool{"episode": true, "summary": true, "digest": true}
+
+// domainMatches reports whether a candidate survives a domain filter. Input: the candidate's source and domain, and the requested domain. Output: true when the source carries no domain to filter on, or when its domain is the requested one.
+func domainMatches(source, domain, filter string) bool {
+	if !domainTaggedSources[source] {
+		return true
+	}
+	return domain == filter
+}
+
 // HybridSearch fuses lexical (FTS5) and vector search over episodes, summaries, notes, and threads via reciprocalRankFusion, and returns the top `limit` as MemoryHit.
 // If domainFilter is "work" or "personal", results are hard-filtered to that domain (both the lexical SQL query and the vector search's `where` clause). If domainFilter is "", no hard filter is applied, but candidates matching the store's inferred current domain (see currentDomain) get domainBoostFactor applied to their fused score before the final sort.
 // If the Store has no embedder/vector index configured (both nil — the default for a bare db.New(":memory:")), HybridSearch degrades gracefully to lexical-only fusion rather than erroring.
@@ -249,7 +260,7 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	windowed := !since.IsZero() || !until.IsZero()
 
 	// lexical candidates: reuse the existing FTS5 paths, don't reimplement.
-	memHits, err := s.searchMemoryWindow(ctx, query, since, until)
+	memHits, err := s.searchMemoryWindow(ctx, query, "", since, until, 10)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +324,7 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	if domainFilter != "" {
 		filtered := lexical[:0:0]
 		for _, c := range lexical {
-			if c.domain == domainFilter {
+			if domainMatches(c.source, c.domain, domainFilter) {
 				filtered = append(filtered, c)
 			}
 		}
@@ -336,12 +347,8 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 		}
 
 		if queryVec != nil {
-			var where map[string]string
-			if domainFilter != "" {
-				where = map[string]string{"domain": domainFilter}
-			}
-
-			results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, where)
+			// The domain filter is applied in Go below rather than through chromem's where clause, for the same reason the time window is: exact-match metadata would drop every note and thread, which are written with no domain key at all.
+			results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, nil)
 			if err != nil {
 				slog.Warn("hybrid search: vector search failed, degrading to lexical-only", "error", err)
 			} else {
@@ -359,6 +366,9 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 						continue
 					}
 					source, _ := splitCandidateID(r.ID)
+					if domainFilter != "" && !domainMatches(source, r.Metadata["domain"], domainFilter) {
+						continue
+					}
 					createdAt := time.Time{}
 					if ts := r.Metadata["created_at"]; ts != "" {
 						createdAt = parseSQLiteTime(ts)
