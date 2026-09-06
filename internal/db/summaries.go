@@ -198,7 +198,13 @@ type NodeRef = memory.NodeRef
 // TaskSummary is the compiler's structured summary of one flushed buffer, the input side of LogSemanticNode.
 type TaskSummary = memory.TaskSummary
 
-// OldSummaryGroups returns summary nodes older than olderThan, grouped by their ancestor DAY node. Used by the compaction job to decide which days are ready to roll up.
+// MaxSummariesPerGroup caps how many of one day's summaries a single OldSummaryGroups call returns, and MaxDayGroupsPerRun caps how many days it returns at all. Both exist because the compaction job puts a group's summaries into one prompt: an uncapped day (a store where a week of summaries landed under one day node would hold hundreds) builds a prompt past the model's input limit, the call fails, and the day is skipped on every run forever. What is left behind is picked up by the next run, since a compacted summary is reparented under the digest and drops out of this query.
+const (
+	MaxSummariesPerGroup = 200
+	MaxDayGroupsPerRun   = 20
+)
+
+// OldSummaryGroups returns summary nodes older than olderThan, grouped by their ancestor DAY node, capped at MaxSummariesPerGroup rows per day and MaxDayGroupsPerRun days. Used by the compaction job to decide which days are ready to roll up.
 func (s *Store) OldSummaryGroups(ctx context.Context, olderThan time.Duration) ([]memory.SummaryGroup, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.OldSummaryGroups")
@@ -206,15 +212,20 @@ func (s *Store) OldSummaryGroups(ctx context.Context, olderThan time.Duration) (
 
 	secs := int64(olderThan.Seconds())
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT day.id, day.content, sm.id, sm.content
-		FROM nodes sm
-		JOIN nodes task ON sm.parent_id = task.id AND task.type = 'task'
-		JOIN nodes sess ON task.parent_id = sess.id AND sess.type = 'session'
-		JOIN nodes day  ON sess.parent_id = day.id  AND day.type = 'day'
-		WHERE sm.type = 'summary'
-		  AND sm.created_at < datetime('now', '-' || ? || ' seconds')
-		ORDER BY day.id, sm.id
-	`, secs)
+		SELECT day_id, day_content, sm_id, sm_content FROM (
+			SELECT day.id AS day_id, day.content AS day_content, sm.id AS sm_id, sm.content AS sm_content,
+			       ROW_NUMBER() OVER (PARTITION BY day.id ORDER BY sm.id) AS row_in_day,
+			       DENSE_RANK() OVER (ORDER BY day.id) AS day_rank
+			FROM nodes sm
+			JOIN nodes task ON sm.parent_id = task.id AND task.type = 'task'
+			JOIN nodes sess ON task.parent_id = sess.id AND sess.type = 'session'
+			JOIN nodes day  ON sess.parent_id = day.id  AND day.type = 'day'
+			WHERE sm.type = 'summary'
+			  AND sm.created_at < datetime('now', '-' || ? || ' seconds')
+		)
+		WHERE row_in_day <= ? AND day_rank <= ?
+		ORDER BY day_id, sm_id
+	`, secs, MaxSummariesPerGroup, MaxDayGroupsPerRun)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("old summary groups query: %w", err)
@@ -274,6 +285,39 @@ func (s *Store) existingDigestID(ctx context.Context, tx *sql.Tx, dayID int64) (
 		return 0, false, fmt.Errorf("find existing digest: %w", err)
 	}
 	return id, true, nil
+}
+
+// ExistingDigest returns the text of the digest already filed under dayID, or "" when the day has none. The compaction job reads it so the model merging a day's summaries is shown what its earlier digest of that day already said, instead of writing a digest that covers only the batch it happens to be holding. Input: ctx and the day node's id. Output: the digest text, or "" plus any read error.
+func (s *Store) ExistingDigest(ctx context.Context, dayID int64) (string, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx, `SELECT content FROM nodes WHERE type = 'digest' AND parent_id = ?`, dayID).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("existing digest: %w", err)
+	}
+	return content, nil
+}
+
+// digestCreatedAt returns the timestamp the day's digest should carry: the newest created_at among the summaries it covers, or midnight of the day node's own date when none of them resolve. Input: ctx, the open transaction, the day node's id, and the summary ids being rolled up. Output: the timestamp in SQLite's stored format, or "" when neither source yields one, which tells the caller to leave the column default alone.
+//
+// It exists because a digest inserted with CURRENT_TIMESTAMP is dated the moment compaction ran, and every reader that selects summaries and digests by created_at — SummaryTimeline, RecentSummaries, the evening close, the dream — then narrates last week's work as today's.
+func (s *Store) digestCreatedAt(ctx context.Context, tx *sql.Tx, dayID int64, summaryIDs []int64) string {
+	if len(summaryIDs) > 0 {
+		selectSQL, args := inClause("SELECT MAX(created_at) FROM nodes WHERE id IN (", summaryIDs)
+		var newest sql.NullString
+		if err := tx.QueryRowContext(ctx, selectSQL, args...).Scan(&newest); err == nil && newest.Valid && newest.String != "" {
+			return newest.String
+		}
+	}
+	var day string
+	if err := tx.QueryRowContext(ctx, `SELECT content FROM nodes WHERE id = ?`, dayID).Scan(&day); err == nil {
+		if _, perr := time.Parse("2006-01-02", day); perr == nil {
+			return day + " 00:00:00"
+		}
+	}
+	return ""
 }
 
 // dedupeSummaryContent reads back the content of every id in summaryIDs and splits them into keepIDs, one id per distinct content (the first seen), and dropIDs, every later id whose content repeats one already kept or one already parented on digestID. Input: ctx, the open transaction, the digest the batch is about to be reparented under, and the candidate ids. Output: the two sets, covering every input id between them once, or an error from the read.
@@ -337,7 +381,8 @@ func (s *Store) dedupeSummaryContent(ctx context.Context, tx *sql.Tx, digestID i
 
 // ReplaceSummariesWithDigest reparents the given summary nodes under dayID's digest, in a single transaction — the surviving summaries are kept, not deleted, so the day's raw source material survives compaction. The exception is a summary whose content exactly duplicates one already kept (see dedupeSummaryContent below): that node, and its FTS5 and vector-index entries, are deleted, since keeping both would collide on idx_nodes_unique. Every surviving summary's row is left alone, so its existing memory_fts entry is untouched.
 //
-// A day with no digest yet gets one written now, from digest, and the digest insert is what is picked up by the nodes_ai_summary trigger and (see below) embedded. A day that already has a digest — left by an earlier call that reparented some but not all of its summaries, the shape idx_nodes_unique's duplicate-content collision used to leave behind — reuses that digest instead of inserting a second one; digest is not written anywhere and the existing digest's own text and vector are left exactly as they are, since finishing the reparent is all this call is for.
+// A day with no digest yet gets one written now, from digest, and the digest insert is what is picked up by the nodes_ai_summary trigger and (see below) embedded. A day that already has a digest — a day compacted before, whether because an earlier call reparented only some of its summaries or because more summaries crossed the age cutoff since — reuses that node and rewrites its content with digest, so the digest the caller just paid a model call for is the one the day ends up with rather than being discarded. The rewrite fires the nodes_au_summary trigger for FTS and is re-embedded below.
+// The digest is dated the day it covers, not the moment compaction ran; see digestCreatedAt.
 // If the digest insert fails the reparenting never happens — summaries are never left orphaned.
 func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, summaryIDs []int64, digest string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
@@ -360,11 +405,23 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 		span.RecordError(err)
 		return err
 	}
-	if !reused {
+	createdAt := s.digestCreatedAt(ctx, tx, dayID, summaryIDs)
+	// digestWritten says whether this call put digest's text into the row, which is what decides below whether the text is worth embedding.
+	digestWritten := strings.TrimSpace(digest) != ""
+	switch {
+	case !reused:
 		// insert digest node — triggers nodes_ai_summary which indexes into FTS5
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO nodes (parent_id, type, content) VALUES (?, 'digest', ?)`,
-			dayID, digest)
+		var res sql.Result
+		var err error
+		if createdAt != "" {
+			res, err = tx.ExecContext(ctx,
+				`INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?, 'digest', ?, ?)`,
+				dayID, digest, createdAt)
+		} else {
+			res, err = tx.ExecContext(ctx,
+				`INSERT INTO nodes (parent_id, type, content) VALUES (?, 'digest', ?)`,
+				dayID, digest)
+		}
 		if err != nil {
 			span.RecordError(err)
 			return fmt.Errorf("insert digest node: %w", err)
@@ -373,6 +430,19 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 		if err != nil {
 			span.RecordError(err)
 			return fmt.Errorf("digest node id: %w", err)
+		}
+	case digestWritten:
+		// The day was digested before and is being digested again with more of its summaries. Overwrite the old text rather than dropping the new one on the floor, and move created_at forward to cover the newly included summaries.
+		if createdAt != "" {
+			_, err = tx.ExecContext(ctx,
+				`UPDATE nodes SET content = ?, created_at = MAX(created_at, ?) WHERE id = ?`,
+				digest, createdAt, digestID)
+		} else {
+			_, err = tx.ExecContext(ctx, `UPDATE nodes SET content = ? WHERE id = ?`, digest, digestID)
+		}
+		if err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("update digest node: %w", err)
 		}
 	}
 
@@ -427,9 +497,14 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 		}
 	}
 
-	// Async, best-effort embedding of the new digest, same non-blocking pattern as LogSemanticNode's summary embed goroutine. Without this the digest is FTS-only forever — the whole point of a digest is to still answer "what did I do that day" through the semantic half of HybridSearch. Skipped when reused is true: an existing digest's stored content was left untouched above, so embedding the digest text this call was handed would point its vector at words that are not what the row actually says.
-	if !reused && emb != nil && vidx != nil && strings.TrimSpace(digest) != "" {
-		go func(id int64, text string) {
+	// Async, best-effort embedding of the digest text this call wrote, same non-blocking pattern as LogSemanticNode's summary embed goroutine. Without this the digest is FTS-only forever — the whole point of a digest is to still answer "what did I do that day" through the semantic half of HybridSearch. A rewritten digest is re-embedded under the same key, so the vector says what the row now says.
+	if digestWritten && emb != nil && vidx != nil {
+		// The vector's created_at is the day the digest covers, matching the row, so recency ranking does not treat a week-old day as today.
+		stamp := time.Now().UTC().Format(time.RFC3339)
+		if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+			stamp = t.UTC().Format(time.RFC3339)
+		}
+		go func(id int64, text, stamp string) {
 			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
@@ -442,12 +517,12 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 				"domain":     "", // digest nodes don't carry a domain today; key stays present so chromem's exact-match where doesn't drop this vector from domain-filtered searches
 				"source":     "digest",
 				"kind":       string(memory.KindPeriod),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": stamp,
 			}
 			if err := vidx.Add(embedCtx, fmt.Sprintf("digest:%d", id), text, vec, meta); err != nil {
 				slog.Error("async digest vector index add failed", "digest_id", id, "error", err)
 			}
-		}(digestID, digest)
+		}(digestID, digest, stamp)
 	}
 	return nil
 }
@@ -465,14 +540,28 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 	summary.TaskName = memory.StripObjectChars(summary.TaskName)
 	summary.Summary = memory.StripObjectChars(summary.Summary)
 
-	// if new task, and no task id - create task node
-	if !summary.SameTask || s.currentTaskID == 0 {
+	// Resolve the day this write belongs to rather than the one the process started on, so a daemon that runs past local midnight files tomorrow's summaries under tomorrow's day node.
+	sessionID, err := s.sessionForDay(ctx, s.now())
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+	if sessionID != s.currentParentID {
+		s.currentParentID = sessionID
+		// The bookmarked task hangs off the previous day's session and cannot be continued under this one.
+		s.currentTaskID = 0
+		s.currentTaskName = ""
+	}
+
+	// The task node comes from this summary's own task name, every call. SameTask only says the caller believes it is continuing the thread it named, and is honoured just as a way to skip the re-ensure when the name has not changed — with several threads interleaved (the case the attribution call exists for), trusting SameTask alone filed each thread's summary under whichever task was written last.
+	if !summary.SameTask || s.currentTaskID == 0 || summary.TaskName != s.currentTaskName {
 		taskID, err := s.ensureNode(ctx, s.currentParentID, "task", summary.TaskName)
 		if err != nil {
 			span.RecordError(err)
 			return err
 		}
 		s.currentTaskID = taskID
+		s.currentTaskName = summary.TaskName
 	}
 
 	// log summary as child to task node
@@ -483,15 +572,20 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 		return err
 	}
 
-	// Domain: majority vote over episodes logged since the current task started (task.created_at), not a single Classify(app,title) call — a task can span many app switches, so "the domain of this task" is whichever domain dominated the episodes that fed it. Ties broken by domain string for determinism.
+	// Domain: majority vote over the episodes that fed this summary, not a single Classify(app,title) call — a task can span many app switches, so "the domain of this task" is whichever domain dominated those episodes. Ties broken by domain string for determinism.
+	// The window starts at the later of the task node's created_at and summary.Since, the start of the flush this summary came from. Without that floor a task node that is days old (a long-running thread, or one rehydrated at startup) made every summary vote over days of unrelated activity.
+	floor := "0000-01-01 00:00:00"
+	if !summary.Since.IsZero() {
+		floor = sqliteUTC(summary.Since)
+	}
 	var domain string
 	if derr := s.db.QueryRowContext(ctx, `
 		SELECT domain FROM episodes
-		WHERE created_at >= (SELECT created_at FROM nodes WHERE id = ?)
+		WHERE created_at >= MAX((SELECT created_at FROM nodes WHERE id = ?), ?)
 		GROUP BY domain
 		ORDER BY COUNT(*) DESC, domain
 		LIMIT 1
-	`, s.currentTaskID).Scan(&domain); derr != nil && derr != sql.ErrNoRows {
+	`, s.currentTaskID, floor).Scan(&domain); derr != nil && derr != sql.ErrNoRows {
 		span.RecordError(derr)
 		// non-fatal: domain tagging is best-effort, the summary node itself is already committed above.
 	}
