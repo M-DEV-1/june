@@ -585,7 +585,7 @@ func (s *Store) createSchema() error {
 		return fmt.Errorf("rebuild summary fts content: %w", err)
 	}
 
-	return s.migrateIdentityNote()
+	return nil
 }
 
 // ensureColumn adds column to table (with the given SQL type/constraint) if it doesn't already exist, checked via PRAGMA table_info since modernc.org/sqlite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS.

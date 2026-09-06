@@ -106,24 +106,3 @@ func PersonSubjectName(subject string) string {
 	}
 	return strings.Join(words, " ")
 }
-
-// identityEntry is the clean prose the identity note becomes when it moves into personal context.
-const identityEntry = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
-
-// migrateIdentityNote moves the identity fact the memory compiler filed as a note into personal context, where it belongs, and deletes the note. It matches conservatively — kind 'fact', naming both "Alex Rivera" and "owner of this computer" — so no other note can be caught by it.
-// Idempotent in two ways: the note is gone after the first run, and the insert does nothing when an "identity" entry already exists, so a user edit is never overwritten if a similar note is ever written again.
-func (s *Store) migrateIdentityNote() error {
-	const match = `kind = 'fact' AND content LIKE '%Alex Rivera%' AND content LIKE '%owner of this computer%'`
-
-	if _, err := s.db.Exec(
-		`INSERT INTO personal_context (subject, content, updated_at)
-		 SELECT 'identity', ?, CURRENT_TIMESTAMP
-		 WHERE EXISTS (SELECT 1 FROM notes WHERE `+match+`)
-		 ON CONFLICT(subject) DO NOTHING`, identityEntry); err != nil {
-		return fmt.Errorf("migrate identity note into personal context: %w", err)
-	}
-	if _, err := s.db.Exec(`DELETE FROM notes WHERE ` + match); err != nil {
-		return fmt.Errorf("delete migrated identity note: %w", err)
-	}
-	return nil
-}

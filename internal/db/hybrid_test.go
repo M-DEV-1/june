@@ -322,6 +322,10 @@ func TestHybridSearch_AbsentTopicQuery_ReturnsNoJunkRows(t *testing.T) {
 	if _, err := store.LogNote(ctx, "the user works with docker containers", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
+	// This note shares exactly one term with the query, so FTS5 really does return it and the term-overlap floor is what removes it. Without a row like this the lexical half of the property is never exercised: no term overlaps at all, FTS5 returns nothing, and the floor is never reached.
+	if _, err := store.LogNote(ctx, "the user pays a quarterly gym membership", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
 
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	store.SetVectorIndex(&fakeHybridVectorIndex{
@@ -1272,7 +1276,7 @@ func TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest(t *testing.T)
 	}
 }
 
-// TestReconcileVectors_BackfillsThread verifies a thread gets a vector. Threads were never embedded by any write path, so the whole arc layer ("what has the user been working on for weeks") was invisible to the semantic half of hybrid search while vectorBackingAlive still claimed thread vectors were alive.
+// TestReconcileVectors_BackfillsThread verifies a thread gets a vector. Threads were never embedded by any write path, so the whole arc layer ("what has the user been working on for weeks") was invisible to the semantic half of hybrid search while the reconcile sweep still counted thread vectors as alive.
 func TestReconcileVectors_BackfillsThread(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -1847,5 +1851,29 @@ func TestSummaryParents_BatchesOneQueryForEverySummaryCandidate(t *testing.T) {
 	got := store.summaryParents(ctx, []int64{childID, orphanID})
 	if len(got) != 1 || got[childID] != parentID {
 		t.Errorf("summaryParents = %v, want only {%d: %d}", got, childID, parentID)
+	}
+}
+
+// TestHybridSearch_DomainFilter_KeepsUntaggedNote checks that a domain filter narrows the sources that carry a domain instead of emptying the result. Notes, threads and diary rows have no domain column, so filtering them on exact equality dropped every one of them and domain="work" returned nothing but episodes and summaries.
+func TestHybridSearch_DomainFilter_KeepsUntaggedNote(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	if _, err := store.LogNote(ctx, "the user runs the kubernetes migration for the payments team", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	hits, err := store.HybridSearch(ctx, "kubernetes migration payments", "work", 10)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	found := false
+	for _, h := range hits {
+		if h.Source == "note" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf(`domainFilter="work" dropped the note, which carries no domain at all: %+v`, hits)
 	}
 }
