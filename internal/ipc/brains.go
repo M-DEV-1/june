@@ -136,13 +136,14 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 	claudeAccount := plainField(filepath.Join(home, ".claude", ".credentials.json"), "claudeAiOauth", "subscriptionType")
 	codexAccount := plainField(filepath.Join(home, ".codex", "auth.json"), "", "auth_mode")
 
+	// Both rosters come out of the cache rather than off the command line: `agy models` takes about three and a half seconds, and this route runs on every settings render and again after every pick.
 	ollamaModels := []string{}
 	if has("ollama") {
-		ollamaModels = ollamaList()
+		ollamaModels = ollamaCache.get(ollamaList)
 	}
 	agyList := []string{}
 	if has("agy") {
-		agyList = agyModels()
+		agyList = agyCache.get(agyModels)
 	}
 
 	list := []BrainView{

@@ -233,6 +233,8 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/routines", auth(ipcServer.Routines))
 	mux.HandleFunc("/routines/{id}", auth(ipcServer.RoutineDelete))
 	mux.HandleFunc("/routines/{id}/run", auth(ipcServer.RoutineRun))
+	// The model rosters are read once here, in the background, so the first settings render already has them: asking the command lines costs seconds and this route runs on every render.
+	ipc.WarmModelCaches(nil)
 	mux.HandleFunc("/brains", auth(ipc.Brains(liveConfig, brainLimits)))
 	mux.HandleFunc("/overlay", auth(ipcServer.Overlay))
 	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), liveConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
