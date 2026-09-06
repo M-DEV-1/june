@@ -139,6 +139,19 @@ describe("the menu on a row", () => {
     await waitFor(() => expect(store.getState().ui.conversationId).toBe("c2"));
   });
 
+  it("opens an empty draft when the only chat there was is deleted, rather than staying on the deleted one", async () => {
+    const one = [conversations()[0]];
+    const { store } = renderApp({ conversations: one }, { conversationId: "c1" });
+    await row("Flights to Zurich");
+    await userEvent.click(screen.getByRole("button", { name: "More for Flights to Zurich" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const asked = await screen.findByRole("alertdialog");
+    await userEvent.click(within(asked).getByRole("button", { name: "Delete" }));
+    // Clearing conversationId is not enough: App's own "keep some chat picked" effect puts the deleted id straight back off the list RTK Query has not refetched yet. The draft is what makes the composer post no conversation_id at all.
+    await waitFor(() => expect(store.getState().ui.chatDraft).toBe(true));
+    expect(await screen.findByRole("heading", { name: "Ora" })).toBeDefined();
+  });
+
   it("leaves the row where it is and says so when a delete does not go through", async () => {
     renderApp({ conversations: conversations(), fails: ["DELETE /conversations/c1"] }, { conversationId: "c1" });
     await row("Flights to Zurich");
@@ -186,7 +199,7 @@ describe("a live notice's own buttons", () => {
       }),
     );
 
-    await userEvent.click(await screen.findByRole("button", { name: "1 h" }));
+    await userEvent.click(await screen.findByRole("button", { name: /^1 h/ }));
 
     await waitFor(() =>
       expect(calls.find((c) => c.method === "POST" && c.path === "/notices/task/task-42/action")?.body).toEqual({
@@ -195,6 +208,37 @@ describe("a live notice's own buttons", () => {
         action: "hour",
       }),
     );
+  });
+
+  it("names the notice on each button, so the four words are not four unattached labels", async () => {
+    const { store } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Done — Still open" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Tomorrow — Still open" })).toBeDefined();
+  });
+
+  it("takes the buttons away and says so when the daemon will not act on the notice", async () => {
+    const { store } = renderApp({ conversations: conversations(), fails: ["POST /notices/task/task-42/action"] });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+      }),
+    );
+
+    // The daemon answers 404 for a notice whose task has already been closed elsewhere, and it sends no echo notice back, so nothing else would ever clear these buttons.
+    await userEvent.click(await screen.findByRole("button", { name: /^Done/ }));
+    expect(await screen.findByText("Could not do that to that notice")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /^1 h/ })).toBeNull();
   });
 
   it("offers Done alongside the snooze buttons for a task, but only the snooze buttons for a routine", async () => {
@@ -207,7 +251,7 @@ describe("a live notice's own buttons", () => {
         notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
       }),
     );
-    expect(await screen.findByRole("button", { name: "Done" })).toBeDefined();
+    expect(await screen.findByRole("button", { name: /^Done/ })).toBeDefined();
 
     store.dispatch(
       progress.eventArrived({
@@ -216,8 +260,8 @@ describe("a live notice's own buttons", () => {
         notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine" },
       }),
     );
-    expect(await screen.findByRole("button", { name: "Evening" })).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+    expect(await screen.findByRole("button", { name: /^Evening/ })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /^Done/ })).toBeNull();
   });
 
   it("replaces the buttons with the rail line's own text once the daemon answers", async () => {
@@ -230,7 +274,7 @@ describe("a live notice's own buttons", () => {
         notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
       }),
     );
-    await screen.findByRole("button", { name: "1 h" });
+    await screen.findByRole("button", { name: /^1 h/ });
 
     store.dispatch(
       progress.eventArrived({
@@ -241,6 +285,6 @@ describe("a live notice's own buttons", () => {
     );
 
     expect(await screen.findByText("Send the invoice: Done")).toBeDefined();
-    expect(screen.queryByRole("button", { name: "1 h" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^1 h/ })).toBeNull();
   });
 });

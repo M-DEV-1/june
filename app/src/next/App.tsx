@@ -177,7 +177,7 @@ export default function App() {
     }
   };
 
-  /** Removes a conversation and, when it was the one open, moves to the next one the daemon still lists rather than leaving the pane pointed at turns that no longer have a conversation. A delete that does not go through leaves the row where it was, because the store still holds it, and says so on one line. */
+  /** Removes a conversation and, when it was the one open, moves to the next one the daemon still lists rather than leaving the pane pointed at turns that no longer have a conversation. Deleting the last one leaves no next, and an empty draft is what the window opens then: merely clearing conversationId would have the "keep some chat picked" effect above put the deleted id straight back, off the list RTK Query is still holding while its refetch is in flight, and the composer would go on posting to a conversation the daemon no longer has. A delete that does not go through leaves the row where it was, because the store still holds it, and says so on one line. */
   const confirmDelete = async () => {
     const id = confirmingDeleteId;
     if (!id) return;
@@ -185,7 +185,7 @@ export default function App() {
     dispatch(conversationsUi.deleteConfirmed(undefined));
     try {
       await remove(id).unwrap();
-      if (id === conversationId) dispatch(ui.conversationOpened(next));
+      if (id === conversationId) dispatch(next ? ui.conversationOpened(next) : ui.chatDraftOpened());
     } catch {
       dispatch(ui.noticed("Could not delete"));
     }
