@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
+import { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import {
   DEFAULT_HOVER_POSITION,
   dockedArea,
@@ -21,11 +21,15 @@ import {
   type WinLike,
 } from "./winplace";
 
-/** A WinLike that records every call made on it, so a test can assert exactly which window calls a sequence made and in what order. Input: whether the window starts visible. Output: the fake, with `calls` growing as methods are invoked. */
-function fakeWin(startVisible: boolean): WinLike & { calls: string[]; visible: boolean } {
+/** A WinLike that records every call made on it, so a test can assert exactly which window calls a sequence made and in what order. Input: whether the window starts visible. Output: the fake, with `calls` growing as methods are invoked and `sizes` holding the size objects setSize was handed, so a test can tell a logical size from a physical one. */
+function fakeWin(startVisible: boolean): WinLike & { calls: string[]; sizes: (LogicalSize | PhysicalSize)[]; visible: boolean } {
   const win = {
     calls: [] as string[],
+    sizes: [] as (LogicalSize | PhysicalSize)[],
     visible: startVisible,
+    async scaleFactor() {
+      return 1;
+    },
     async isVisible() {
       return win.visible;
     },
@@ -40,7 +44,8 @@ function fakeWin(startVisible: boolean): WinLike & { calls: string[]; visible: b
     async setPosition(pos: PhysicalPosition) {
       win.calls.push(`setPosition(${pos.x},${pos.y})`);
     },
-    async setSize(size: LogicalSize) {
+    async setSize(size: LogicalSize | PhysicalSize) {
+      win.sizes.push(size);
       win.calls.push(`setSize(${size.width}x${size.height})`);
     },
   };
@@ -287,6 +292,28 @@ describe("toggleWindow", () => {
     expect(second.calls).toEqual(first.calls);
   });
 
+  // A throw anywhere in the placement sequence used to leave the hotkey looking dead: the window stayed hidden and the rejection surfaced only in the log.
+  it("still shows the window when setPosition throws", async () => {
+    const win = fakeWin(false);
+    const o = opts(win, ctx);
+    win.setPosition = async () => {
+      throw new Error("the compositor refused");
+    };
+    await toggleWindow(win, o.opts);
+    expect(win.calls).toEqual(["beforeShow", "openContext", "sizeToContent", "show", "raise", "focusInput"]);
+    expect(win.visible).toBe(true);
+  });
+
+  it("still shows the window when the daemon read before it throws", async () => {
+    const win = fakeWin(false);
+    const o = opts(win, ctx);
+    o.opts.beforeShow = async () => {
+      throw new Error("no daemon");
+    };
+    await toggleWindow(win, o.opts);
+    expect(win.calls).toEqual(["show", "raise", "focusInput"]);
+  });
+
   it("hides a visible window and calls nothing else", async () => {
     const win = fakeWin(true);
     await toggleWindow(win, opts(win, ctx).opts);
@@ -331,6 +358,28 @@ describe("fitWindow", () => {
     const win = fakeWin(true);
     await fitWindow(win, { width: 720, height: 700 }, true, null);
     expect(win.calls).toEqual(["setSize(720x700)"]);
+    expect(win.sizes[0].type).toBe("Logical");
+  });
+
+  // A LogicalSize is converted by Tauri with the window's own scale factor while the position is worked out with the pointer monitor's, so on a 1x + 2x desk the window was sized against one screen and placed against the other. Both numbers now come from the one scale factor in the context.
+  it("sizes in physical pixels with the same monitor scale the position uses", async () => {
+    const oneX = fakeWin(true);
+    await fitWindow(oneX, { width: 720, height: 520 }, true, ctx);
+    expect(oneX.sizes[0].type).toBe("Physical");
+    expect([oneX.sizes[0].width, oneX.sizes[0].height]).toEqual([720, 520]);
+
+    const twoX = fakeWin(true);
+    const hidpi: PlaceContext = { work: { x: 0, y: 64, width: 3840, height: 2096 }, scale: 2, dock: bottomDock, position: "bottom" };
+    await fitWindow(twoX, { width: 720, height: 520 }, true, hidpi);
+    expect([twoX.sizes[0].width, twoX.sizes[0].height]).toEqual([1440, 1040]);
+    // The physical size the window is given and the physical position it is moved to are now both in the 2x monitor's own pixels.
+    expect(twoX.calls[1]).toBe("setPosition(1200,828)");
+  });
+
+  it("leaves the moving to its caller when asked only to resize, which is what a notice-only window needs", async () => {
+    const win = fakeWin(true);
+    await fitWindow(win, { width: 456, height: 160 }, true, ctx, false);
+    expect(win.calls).toEqual(["setSize(456x160)"]);
   });
 });
 

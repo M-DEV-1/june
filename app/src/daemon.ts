@@ -67,19 +67,38 @@ export async function voiceStop(): Promise<void> {
   }
 }
 
-/** Asks whether a voice session is already running, which is how the window picks one up again after a reload. Input: none. Output: the daemon's status, or null when it cannot be reached. */
+/** How long one of the three reads that fill the card in may take before it is given up on, in milliseconds. /context reads the focused window through AT-SPI and can block for seconds; the window is already on screen by the time these run (see connect in main.ts), so giving up costs a stale context chip rather than a hover that never appears. */
+const READ_TIMEOUT_MS = 3000;
+
+/** Reads a JSON body from the daemon under READ_TIMEOUT_MS. Input: the path to GET. Output: the parsed body, or null when the daemon answered with an error, could not be reached, or did not answer in time. */
+async function readJson<T>(path: string): Promise<T | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), READ_TIMEOUT_MS);
+  try {
+    const headers: Record<string, string> = {};
+    if (token) headers[TOKEN_HEADER] = token;
+    const res = await fetch(`${base}${path}`, {
+      headers,
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Asks whether a voice session is already running, which is how the window picks one up again after a reload. Input: none. Output: the daemon's status, or null when it cannot be reached or did not answer in time. */
 export async function voiceStatus(): Promise<{
   active: boolean;
   id: string;
   state: string;
 } | null> {
-  try {
-    const res = await fetch(`${base}/voice/status`, { headers: authHeaders() });
-    if (!res.ok) return null;
-    return (await res.json()) as { active: boolean; id: string; state: string };
-  } catch {
-    return null;
-  }
+  return readJson<{ active: boolean; id: string; state: string }>(
+    "/voice/status",
+  );
 }
 
 /** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep. title is the card's bold first line and body the few lines under it; place names the app window's screen a click opens ("tasks", "days") and id the row to select there, both empty when the moment points at nothing in particular; kind names the moment ("brief", "close", "meeting", "note"). action and until are empty on a notice arriving fresh, and set when the user has since pressed a button on the desktop notification it was also posted as: action is "snoozed" or "done", and until is the RFC 3339 moment a snoozed notice comes back. The shape is fixed by the Go side, see internal/ipc/notice.go. */
@@ -192,31 +211,15 @@ export type MatterRow = {
   detail: string;
 };
 
-/** Fetches what the user is currently looking at. Input: none. Output: the app, window title and visible text, or null on any failure (no daemon, bad response, network error). */
+/** Fetches what the user is currently looking at. Input: none. Output: the app, window title and visible text, or null on any failure (no daemon, bad response, network error, or no answer inside READ_TIMEOUT_MS). */
 export async function context(): Promise<ContextInfo | null> {
-  try {
-    const headers: Record<string, string> = {};
-    if (token) headers[TOKEN_HEADER] = token;
-    const res = await fetch(`${base}/context`, { headers });
-    if (!res.ok) return null;
-    return (await res.json()) as ContextInfo;
-  } catch {
-    return null;
-  }
+  return readJson<ContextInfo>("/context");
 }
 
 /** Fetches the daemon's list of open matters. Input: none. Output: the matter rows, or null on any failure. */
 export async function matters(): Promise<MatterRow[] | null> {
-  try {
-    const headers: Record<string, string> = {};
-    if (token) headers[TOKEN_HEADER] = token;
-    const res = await fetch(`${base}/matters`, { headers });
-    if (!res.ok) return null;
-    const body = (await res.json()) as { matters: MatterRow[] };
-    return body.matters;
-  } catch {
-    return null;
-  }
+  const body = await readJson<{ matters: MatterRow[] }>("/matters");
+  return body ? body.matters : null;
 }
 
 /** Starts a long computer-use job on the daemon (POST /act). Input: the goal in the user's own words. Output: the job's id, or null when the daemon refused (an empty goal or an unknown brain) or could not be reached; its progress then arrives on the /events stream tagged with that id. */

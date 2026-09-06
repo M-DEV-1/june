@@ -1,4 +1,4 @@
-import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
+import { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 
 /**
  * The subset of a Tauri window's API this module touches, factored out so the show/hide,
@@ -9,7 +9,9 @@ export interface WinLike {
   show(): Promise<void>;
   hide(): Promise<void>;
   setPosition(pos: PhysicalPosition): Promise<void>;
-  setSize(size: LogicalSize): Promise<void>;
+  setSize(size: LogicalSize | PhysicalSize): Promise<void>;
+  /** The window's own scale factor, which is what one of its CSS pixels is worth. Not the same number as the pointer monitor's scale on a mixed-DPI desk (see threadMaxHeight). */
+  scaleFactor(): Promise<number>;
 }
 
 /** A rectangle in physical pixels on the desktop, where x and y are its top-left corner relative to the whole multi-monitor desktop, not relative to the monitor it sits on. */
@@ -136,9 +138,20 @@ export function usableArea(monitor: MonitorLike): Rect {
   return { x: monitor.position.x, y: monitor.position.y, width: monitor.size.width, height: monitor.size.height };
 }
 
+/** The scale factor to convert this open's logical numbers with, guarding against a monitor that reports 0. Input: the context. Output: the scale factor. */
+function scaleOf(ctx: PlaceContext): number {
+  return ctx.scale > 0 ? ctx.scale : 1;
+}
+
+/** Converts a logical window size to the physical size to set on the window, with the same monitor scale the placement uses. Input: the context captured for this open and the window's logical size. Output: the physical size. */
+export function physicalSizeFor(ctx: PlaceContext, logical: { width: number; height: number }): PhysicalSize {
+  const scale = scaleOf(ctx);
+  return new PhysicalSize(Math.round(logical.width * scale), Math.round(logical.height * scale));
+}
+
 /** Turns a logical window size into the physical position to put that window at, converting the size, the dock's clearance and the inset with the monitor's scale factor. Input: the context captured for this open and the window's logical size. Output: the window's top-left corner in physical desktop coordinates. */
 export function placementFor(ctx: PlaceContext, logical: { width: number; height: number }): { x: number; y: number } {
-  const scale = ctx.scale > 0 ? ctx.scale : 1;
+  const scale = scaleOf(ctx);
   const win = { width: logical.width * scale, height: logical.height * scale };
   const dock: Dock = { edge: ctx.dock.edge, clearance: ctx.dock.clearance * scale };
   const area = dockedArea(ctx.work, dock);
@@ -162,7 +175,7 @@ const NOTICE_GAP = 8;
 
 /** Where a window showing nothing but a notice goes: flush with the right edge of the usable area and just under the top bar, beside the tray where Ora's own indicator sits, which is where the user asked for it. The dock is taken off the same way the hover's placement takes it off, so an auto-hiding dock on the right edge does not end up with the card under it, and everything the window cannot fit inside resolves to the top-left of that area. Input: the placement context captured when the window was shown, and the window's logical size. Output: the window's top-left corner in physical desktop coordinates. */
 export function noticePlacement(ctx: PlaceContext, logical: { width: number; height: number }): { x: number; y: number } {
-  const scale = ctx.scale > 0 ? ctx.scale : 1;
+  const scale = scaleOf(ctx);
   const win = { width: logical.width * scale, height: logical.height * scale };
   const area = dockedArea(ctx.work, { edge: ctx.dock.edge, clearance: ctx.dock.clearance * scale });
   return {
@@ -174,7 +187,7 @@ export function noticePlacement(ctx: PlaceContext, logical: { width: number; hei
 /** How much of the work area the card's thread may take. */
 const THREAD_SHARE = 0.6;
 
-/** The tallest the card's thread may grow before it scrolls inside itself, so an answer that keeps coming grows the card to this and no further. Input: the monitor's usable area in physical pixels and its scale. Output: the cap in logical pixels, six tenths of the usable height. */
+/** The tallest the card's thread may grow before it scrolls inside itself, so an answer that keeps coming grows the card to this and no further. The cap is written into the page as CSS pixels, and a CSS pixel is worth the window's own scale factor, not the pointer monitor's — so the scale passed in is win.scaleFactor(), which is the same number on a single-DPI desk and a factor of two out on a mixed one. Input: the monitor's usable area in physical pixels and the window's scale factor. Output: the cap in CSS pixels, six tenths of the usable height. */
 export function threadMaxHeight(work: Rect, scale: number): number {
   const s = scale > 0 ? scale : 1;
   return Math.floor((work.height / s) * THREAD_SHARE);
@@ -183,13 +196,14 @@ export function threadMaxHeight(work: Rect, scale: number): number {
 /**
  * Resizes the window to fit new content height, and while it is visible moves it so it stays where it opened: a bottom-positioned hover that grows has to move up by the amount it grew, or it would push its own bottom edge through the dock, and a centred one has to move up by half.
  * While hidden this only records the new size, because `toggleWindow` places the window in full the next time it is shown and moving a hidden window would be wasted work.
- * Input: the window, the target logical size, whether the size actually changed since last time, and the context captured when the window was shown (null if placement was skipped).
+ * The size is set in physical pixels, converted with the same monitor scale factor the position is worked out with: a LogicalSize is converted by Tauri using the *window's* current scale factor, so on a 1x + 2x desk the window would be sized against one monitor and placed against another and land half off the screen or half the size.
+ * Input: the window, the target logical size, whether the size actually changed since last time, the context captured when the window was shown (null if placement was skipped), and whether to move the window as well as resize it (false for a notice-only window, which its caller places itself).
  * Output: nothing.
  */
-export async function fitWindow(win: WinLike, size: { width: number; height: number }, changed: boolean, ctx: PlaceContext | null): Promise<void> {
+export async function fitWindow(win: WinLike, size: { width: number; height: number }, changed: boolean, ctx: PlaceContext | null, move = true): Promise<void> {
   if (!changed) return;
-  await win.setSize(new LogicalSize(size.width, size.height));
-  if (!ctx) return;
+  await win.setSize(ctx ? physicalSizeFor(ctx, size) : new LogicalSize(size.width, size.height));
+  if (!ctx || !move) return;
   if (!(await win.isVisible())) return;
   const at = placementFor(ctx, size);
   await win.setPosition(new PhysicalPosition(at.x, at.y));
@@ -215,12 +229,17 @@ export async function toggleWindow(
     await win.hide();
     return;
   }
-  await opts.beforeShow();
-  const ctx = await opts.openContext();
-  const size = await opts.sizeToContent();
-  if (ctx) {
-    const at = placementFor(ctx, size);
-    await win.setPosition(new PhysicalPosition(at.x, at.y));
+  // Everything before show() is best-effort: a hover in the wrong place is still a hover, one that never appears is a dead hotkey. A throw from the daemon read, from the desktop reads or from setPosition itself falls through to show() rather than out of here.
+  try {
+    await opts.beforeShow();
+    const ctx = await opts.openContext();
+    const size = await opts.sizeToContent();
+    if (ctx) {
+      const at = placementFor(ctx, size);
+      await win.setPosition(new PhysicalPosition(at.x, at.y));
+    }
+  } catch (e) {
+    console.error("ora: placing the hover failed", e);
   }
   await win.show();
   await opts.raise();
