@@ -272,6 +272,27 @@ describe("shapesFor", () => {
     ]);
   });
 
+  it("places a rect by the scale of the monitor it sits on, not by the overlay window's own", () => {
+    // The window's own scale places the monitor's corner, because the page's pixel grid is uniform; the rect's offset inside that monitor and its size are the monitor's own business, so a target on a doubled screen beside a plain one is not drawn at twice its true offset.
+    const mixed: Layout = {
+      origin_x: 0,
+      origin_y: 0,
+      scale: 1,
+      monitors: [
+        { x: 0, y: 0, w: 1920, h: 1080, scale: 1 },
+        { x: 1920, y: 0, w: 1920, h: 1080, scale: 2 },
+      ],
+    };
+    const spec = { kind: "ring", rects: [{ x: 2000, y: 100, w: 200, h: 100 }] };
+    expect(shapesFor(spec, mixed)).toEqual([{ kind: "stroke", d: ringPath(1960, 50, 100, 50), width: 3 }]);
+  });
+
+  it("draws nothing at all when the monitor list is empty, rather than drawing in the wrong place", () => {
+    // This is deliberate: an empty list is what a layout read before the overlay window was mapped looks like, and a rect placed against no monitor would land anywhere. The defect that made this look like a bug was that nothing said so out loud; see the log in draw() in main.ts.
+    const blind: Layout = { origin_x: 0, origin_y: 0, scale: 1, monitors: [] };
+    expect(shapesFor({ kind: "ring", rects: [{ x: 10, y: 10, w: 200, h: 20 }] }, blind)).toEqual([]);
+  });
+
   it("treats a nonsense scale as one rather than dividing by zero", () => {
     const broken: Layout = { ...single, scale: 0 };
     expect(shapesFor({ kind: "ring", rects: [{ x: 10, y: 10, w: 200, h: 20 }] }, broken)).toEqual([

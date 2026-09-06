@@ -55,9 +55,36 @@ fn gsetting(schema: &str, key: &str) -> Option<String> {
     )
 }
 
-/// Tauri command: works out which edge the dock is on so the hover can be anchored against it instead of floating in the middle of the screen. Input: none; it reads the dash-to-dock and ubuntu-dock GNOME extension settings, which are where a GNOME desktop keeps the dock's position. Output: the edge and the clearance to leave. An auto-hiding dock reserves no screen space, so its own thickness is reported as clearance and estimated from the configured icon size plus the padding dash-to-dock draws around it. When no dock extension answers — a plain GNOME session, a different desktop, or no gsettings at all — this falls back to a bottom edge with no clearance, which puts the hover along the bottom of the work area, clear of whatever panel the desktop did reserve space for.
+/// How long a dock reading is reused before gsettings is asked again. Reading the dock takes two schemas and three keys, which is up to six forked processes, and it runs at the front of every show and every notice; a dock does not move between one keypress and the next, so the answer is held for this long.
+const DOCK_CACHE_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The last dock reading and when it was taken, or None before the first one.
+static DOCK_CACHE: std::sync::Mutex<Option<(std::time::Instant, String, f64)>> =
+    std::sync::Mutex::new(None);
+
+/// Tauri command: the dock anchor, read from gsettings at most once every DOCK_CACHE_FOR. Input: none. Output: as read_dock_anchor, from the cache when the last reading is still fresh. A poisoned lock simply reads gsettings again, because a stale-cache miss costs a few forks and nothing else.
 #[tauri::command]
 fn dock_anchor() -> DockAnchor {
+    let now = std::time::Instant::now();
+    if let Ok(cache) = DOCK_CACHE.lock() {
+        if let Some((at, edge, clearance)) = cache.as_ref() {
+            if now.duration_since(*at) < DOCK_CACHE_FOR {
+                return DockAnchor {
+                    edge: edge.clone(),
+                    clearance: *clearance,
+                };
+            }
+        }
+    }
+    let fresh = read_dock_anchor();
+    if let Ok(mut cache) = DOCK_CACHE.lock() {
+        *cache = Some((now, fresh.edge.clone(), fresh.clearance));
+    }
+    fresh
+}
+
+/// Works out which edge the dock is on so the hover can be anchored against it instead of floating in the middle of the screen. Input: none; it reads the dash-to-dock and ubuntu-dock GNOME extension settings, which are where a GNOME desktop keeps the dock's position. Output: the edge and the clearance to leave. An auto-hiding dock reserves no screen space, so its own thickness is reported as clearance and estimated from the configured icon size plus the padding dash-to-dock draws around it. When no dock extension answers — a plain GNOME session, a different desktop, or no gsettings at all — this falls back to a bottom edge with no clearance, which puts the hover along the bottom of the work area, clear of whatever panel the desktop did reserve space for.
+fn read_dock_anchor() -> DockAnchor {
     for schema in [
         "org.gnome.shell.extensions.dash-to-dock",
         "org.gnome.shell.extensions.ubuntu-dock",
@@ -302,7 +329,7 @@ fn monitor_rects(app: &AppHandle) -> Vec<(i32, i32, u32, u32)> {
         .collect()
 }
 
-/// Tauri command: tells the overlay page where its own window sits on the desktop and where the monitors are, so it can place a rectangle the daemon gave it in global screen pixels. Input: the app handle. Output: the layout. When no monitor can be enumerated the origin is 0,0 at scale 1 and the monitor list is empty, which makes the page draw nothing rather than draw in the wrong place.
+/// Tauri command: tells the overlay page where its own window sits on the desktop and where the monitors are, so it can place a rectangle the daemon gave it in global screen pixels. Input: the app handle. Output: the layout. The origin is the overlay window's own outer position, falling back to the corner of the smallest rectangle covering every monitor when the window cannot be asked; a window sitting anywhere other than that corner, or sized differently from that rectangle, is logged, because either one offsets every shape the page draws. When no monitor can be enumerated the origin is 0,0 at scale 1 and the monitor list is empty, which makes the page draw nothing rather than draw in the wrong place.
 #[tauri::command]
 fn overlay_layout(app: AppHandle) -> OverlayLayout {
     let monitors = app.available_monitors().unwrap_or_default();
@@ -317,11 +344,26 @@ fn overlay_layout(app: AppHandle) -> OverlayLayout {
             )
         })
         .collect();
-    let (origin_x, origin_y, _, _) = union_bounds(&rects).unwrap_or((0, 0, 1, 1));
-    let scale = app
-        .get_webview_window("overlay")
+    let (union_x, union_y, union_w, union_h) = union_bounds(&rects).unwrap_or((0, 0, 1, 1));
+    let window = app.get_webview_window("overlay");
+    let scale = window
+        .as_ref()
         .and_then(|w| w.scale_factor().ok())
         .unwrap_or(1.0);
+    // The page subtracts this origin from every rectangle the daemon sends, so it has to be where the window actually is, not where it was asked to be. Mutter has moved this window before — the 32 pixel top-bar shift arm_overlay's comment records — and a window put anywhere but the union's corner offsets every shape by the difference.
+    let placed = window.as_ref().and_then(|w| w.outer_position().ok());
+    let sized = window.as_ref().and_then(|w| w.outer_size().ok());
+    if let Some(p) = placed {
+        if p.x != union_x || p.y != union_y {
+            eprintln!("ora: overlay window sits at {},{} but the monitors start at {union_x},{union_y}", p.x, p.y);
+        }
+    }
+    if let Some(size) = sized {
+        if size.width != union_w || size.height != union_h {
+            eprintln!("ora: overlay window is {}x{} but the monitors cover {union_w}x{union_h}", size.width, size.height);
+        }
+    }
+    let (origin_x, origin_y) = placed.map_or((union_x, union_y), |p| (p.x, p.y));
     OverlayLayout {
         origin_x,
         origin_y,

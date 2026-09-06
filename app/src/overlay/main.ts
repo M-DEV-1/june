@@ -119,6 +119,8 @@ const TRACE_TURN_IN = 0.125;
  * When keep is set the layer is left as it is and these shapes are added to it, so several drawings can stand together; the shapes already there keep the animations they are part-way through. */
 function render(shapes: Shape[], arrival = 0, keep = false): number {
   for (const el of [shapesEl, inkEl]) {
+    // The fade runs on the layer itself with fill: forwards, so on a keep it would otherwise survive this render, hold the paths about to be appended at opacity 0, and then delete them when it finished. It is cancelled whether or not the shapes already there are being kept.
+    el.getAnimations().forEach((a) => a.cancel());
     if (!keep) {
       el.getAnimations({ subtree: true }).forEach((a) => a.cancel());
       el.replaceChildren();
@@ -283,6 +285,8 @@ function ripple(at: Point, size: number, delay: number): void {
 
 /** Takes the whole drawing off the screen, gently. Input: none. Output: nothing. */
 function fadeOut(): void {
+  // The layer is on its way out, so nothing may join what is on it: an event from the same ask arriving inside the fade replaces it rather than being appended to ink that is about to be deleted.
+  drawingAsk = null;
   // A stroke trace queued by draw() may still be waiting on its timer; left armed, it would fire mid-fade and re-animate the pointer this fade just set to opacity 0.
   traceTimers.forEach((t) => clearTimeout(t));
   traceTimers = [];
@@ -297,7 +301,7 @@ function fadeOut(): void {
 }
 
 /** Draws one overlay event and schedules its removal. Input: the text of the event, which is the POST /overlay body as JSON, and the id of the ask that drew it. Output: nothing; text that is not a spec leaves whatever is on screen alone, because erasing on a garbled event would take a ring away mid-look. */
-function draw(text: string, askID: string): void {
+async function draw(text: string, askID: string): Promise<void> {
   const spec = parseSpec(text);
   if (!spec) return;
   if (clearTimer !== undefined) clearTimeout(clearTimer);
@@ -306,14 +310,27 @@ function draw(text: string, askID: string): void {
   if (spec.kind === "clear") {
     setMood("done");
     fadeOut();
-    drawingAsk = null;
     return;
   }
 
   const keep = keepsPrevious(askID, drawingAsk, spec);
   drawingAsk = askID;
 
-  const shapes = shapesFor(spec, layout);
+  let shapes = shapesFor(spec, layout);
+  if (shapes.length === 0) {
+    // Every shape was filtered out, which for a drawing that is not a clear means the layout this page is holding does not match the desk the rectangles came from — the commonest cause being a layout read before the window was mapped, when no monitor could be enumerated. So it is read again and the shapes are placed a second time.
+    await readLayout();
+    shapes = shapesFor(spec, layout);
+    if (shapes.length === 0) {
+      console.error("ora: overlay drew nothing", {
+        kind: spec.kind,
+        monitors: layout.monitors.length,
+        origin: [layout.origin_x, layout.origin_y],
+        scale: layout.scale,
+        rect: spec.rects?.[0],
+      });
+    }
+  }
   const rect = spec.rects?.[0];
   const now = Date.now();
   const tap = spec.kind === "ring" && rect !== undefined && shouldRipple(rect.label || spec.label || "", rect, lastRing, now);
@@ -347,7 +364,7 @@ function onEvent(payload: string): void {
   } catch {
     return;
   }
-  if (ev.type === "overlay" && typeof ev.text === "string") draw(ev.text, ev.id);
+  if (ev.type === "overlay" && typeof ev.text === "string") void draw(ev.text, ev.id);
 }
 
 /** Asks Rust where this window sits on the desk and how big its pixels are, so global screen coordinates can be turned into positions on the page. Input: none. Output: nothing; a failed call leaves the last layout in place. */
@@ -364,6 +381,20 @@ const DEMO = '{"kind":"ring","label":"Click demo","rects":[{"x":400,"y":400,"w":
 
 /** Starts the layer: learn the shape of the desk, then take events from Rust. A page opened with ?demo=1 draws one fixed ring instead, and ?demo= followed by the body of a POST /overlay draws that, which is how any of these drawings can be looked at in a plain browser with no daemon and no app around them. */
 async function start(): Promise<void> {
+  // The listener goes on before anything is awaited. Rust starts reading the daemon's stream as the app starts and a Tauri event has no queue of its own, so an event landing during the layout round trip — or during the round trip after a reload of this page — used to be dropped with nothing said. Whatever arrives before the layout is known waits here instead.
+  const waiting: string[] = [];
+  let ready = false;
+  try {
+    await listen<string>(DAEMON_EVENT, (e) => {
+      if (ready) onEvent(e.payload);
+      else waiting.push(e.payload);
+    });
+    // One line, so the window's log shows the moment the page could first have drawn anything.
+    console.log("ora: overlay page listening");
+  } catch {
+    /* Not running inside Tauri: a page opened in a plain browser draws its ?demo= and nothing else. */
+  }
+
   await readLayout();
   // A monitor plugged in or a resolution change makes Rust resize this window, and the resize is the page's cue that the desk it draws on has changed shape.
   window.addEventListener("resize", () => void readLayout());
@@ -375,7 +406,7 @@ async function start(): Promise<void> {
     if (layout.monitors.length === 0) {
       layout = { origin_x: 0, origin_y: 0, scale: 1, monitors: [{ x: 0, y: 0, w: innerWidth, h: innerHeight, scale: 1 }] };
     }
-    draw(demo.startsWith("{") ? demo : DEMO, NO_ASK);
+    await draw(demo.startsWith("{") ? demo : DEMO, NO_ASK);
     // ?at=1500 winds the whole drawing to a millisecond and holds it there, so one frame of it can be looked at or photographed without racing the clock.
     const at = Number(query.get("at"));
     if (at > 0) {
@@ -388,7 +419,9 @@ async function start(): Promise<void> {
     }
     return;
   }
-  await listen<string>(DAEMON_EVENT, (e) => onEvent(e.payload));
+
+  ready = true;
+  for (const payload of waiting) onEvent(payload);
 }
 
 void start();

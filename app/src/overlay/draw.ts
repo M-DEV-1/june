@@ -186,11 +186,12 @@ export function shapesFor(spec: OverlaySpec, layout: Layout): Shape[] {
   spec.rects.slice(0, MARK_CAP).forEach((rect, i) => {
     const monitor = monitorFor(rect, layout.monitors);
     if (!monitor) return;
+    const placed = placeRect(rect, monitor, layout);
     if (spec.kind === "ring" || spec.kind === "box" || spec.kind === "circle") {
-      const x = toX(rect.x);
-      const y = toY(rect.y);
-      const w = rect.w / scale;
-      const h = rect.h / scale;
+      const x = placed.x;
+      const y = placed.y;
+      const w = placed.w;
+      const h = placed.h;
       // The label is placed against the ink rather than against the target, so a pill above a ring clears the whole outline rather than sitting on it.
       let left = x;
       let top = y;
@@ -212,10 +213,24 @@ export function shapesFor(spec: OverlaySpec, layout: Layout): Shape[] {
       const text = rect.label || spec.label || "";
       if (text !== "") shapes.push(labelAt(left, top, bottom, text, layout, monitor));
     } else if (spec.kind === "marks") {
-      shapes.push({ kind: "mark", x: toX(rect.x), y: toY(rect.y), text: String(i + 1) });
+      shapes.push({ kind: "mark", x: placed.x, y: placed.y, text: String(i + 1) });
     }
   });
   return shapes;
+}
+
+/** Turns one rect in global desktop pixels into the overlay page's CSS pixels. Input: the rect, the monitor its centre falls on, and the window's layout. Output: the rect's left, top, width and height in this page's CSS pixels.
+ * The monitor's own corner is placed with the window's scale, because the page has one uniform pixel grid across the whole desk. Everything inside that monitor — how far along the rect sits and how big it is — is divided by that monitor's scale instead, so a target on a doubled screen next to a plain one is not drawn at twice its offset and twice its size. On a desk where every screen has the same scale the two are the same number and this is exactly what it always was.
+ */
+function placeRect(rect: OverlayRect, monitor: Monitor, layout: Layout): { x: number; y: number; w: number; h: number } {
+  const windowScale = layout.scale > 0 ? layout.scale : 1;
+  const own = monitor.scale > 0 ? monitor.scale : windowScale;
+  return {
+    x: (monitor.x - layout.origin_x) / windowScale + (rect.x - monitor.x) / own,
+    y: (monitor.y - layout.origin_y) / windowScale + (rect.y - monitor.y) / own,
+    w: rect.w / own,
+    h: rect.h / own,
+  };
 }
 
 /** Places one label pill. Input: the left edge, the top and the bottom of the ink it names, all in this page's CSS pixels, the text, the layout, and the monitor the ink is on. Output: the label shape, sitting above the ink where there is room and below it where the desktop's own panel would swallow it, and held inside that monitor so no part of the pill runs off the screen. */

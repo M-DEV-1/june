@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::sync::mpsc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
@@ -24,6 +25,29 @@ const RECONNECT: Duration = Duration::from_secs(2);
 
 /// How long to wait for the daemon to accept a connection before giving up and trying again.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The "type" field of one daemon event, for the log line. Input: the JSON text of the event. Output: the type, or "?" when the payload is not an object with a string type.
+fn payload_kind(payload: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Hands payloads to the window on a thread of its own, so the socket is never held open by the handing over. Input: the app handle. Output: the sender to push each payload into; the thread ends when that sender is dropped.
+/// The daemon drops a client that has not read eight events (clientBufferSize in internal/ipc/ipc.go), and window_command can hand work to the main loop while emit_to crosses into the webview, so doing either on the reading thread let a burst of shapes outrun the read and cost the whole connection. The reader now only pushes into this queue.
+fn hand_over(app: AppHandle) -> mpsc::Sender<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for payload in rx {
+            crate::window_command(&app, &payload);
+            if let Err(e) = app.emit_to(OVERLAY_LABEL, PAGE_EVENT, payload) {
+                eprintln!("ora: overlay could not hand an event to the page: {e}");
+            }
+        }
+    });
+    tx
+}
 
 /// Pulls the data payload of every complete server-sent event out of a buffer. Input: everything received and not yet parsed; on return it holds only the tail after the last blank line, which is the event still arriving. Output: one string per complete event, its "data:" lines joined by newlines.
 /// An event carrying no data line at all — a lone comment, which is how a server keeps a connection warm — yields nothing. Both "data: x" and "data:x" are read, because the space after the colon is optional in the format.
@@ -131,6 +155,8 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
     // One line per successful dial, so the window's log shows whether the drawing layer was ever subscribed when a drawing seems not to have appeared.
     eprintln!("ora: overlay event stream: connected");
 
+    let handing = hand_over(app.clone());
+
     let mut buffer = String::new();
     loop {
         let bytes = if chunked {
@@ -148,9 +174,16 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
         };
         buffer.push_str(&String::from_utf8_lossy(&bytes));
         for payload in sse_payloads(&mut buffer) {
-            // Some events ask the window itself to show something rather than asking the drawing layer to draw: that is how the daemon's tray opens the app window, now that this app has no tray of its own. Everything else, and every event that was acted on, still reaches the overlay page, which ignores what is not its business.
-            crate::window_command(app, &payload);
-            let _ = app.emit_to(OVERLAY_LABEL, PAGE_EVENT, payload);
+            // One line per event off the wire, so a drawing that never appeared can be placed: logged here and not drawn is the page's problem, never logged here is the daemon's or the connection's.
+            eprintln!(
+                "ora: overlay event: kind={} bytes={}",
+                payload_kind(&payload),
+                payload.len()
+            );
+            // Some events ask the window itself to show something rather than asking the drawing layer to draw: that is how the daemon's tray opens the app window, now that this app has no tray of its own. Everything else, and every event that was acted on, still reaches the overlay page, which ignores what is not its business. Both happen on the handing thread, so this loop goes straight back to reading the socket.
+            if handing.send(payload).is_err() {
+                return Err(std::io::Error::other("the overlay handing thread has gone"));
+            }
         }
     }
 }
@@ -172,8 +205,15 @@ pub fn stream_events(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_chunk, sse_payloads};
+    use super::{payload_kind, read_chunk, sse_payloads};
     use std::io::BufReader;
+
+    #[test]
+    fn the_kind_of_an_event_is_read_for_the_log() {
+        assert_eq!(payload_kind(r#"{"id":"ask-1","type":"overlay"}"#), "overlay");
+        assert_eq!(payload_kind("not json at all"), "?");
+        assert_eq!(payload_kind(r#"{"id":"ask-1"}"#), "?");
+    }
 
     #[test]
     fn one_whole_event_is_read() {
