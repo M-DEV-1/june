@@ -468,6 +468,27 @@ export function meetingTasks(tasks: Task[], meeting: Meeting): Task[] {
   });
 }
 
+/** The meeting a noticed task was raised in. Input: every meeting the daemon knows about and the task. Output: the meeting whose name and day match the task's detail line ("Lodestone X growth strategy briefing, 2026-08-31"), or undefined for a task the user typed in and for one whose meeting is no longer on file. The match is meetingTasks' own, asked the other way round, so a task and its meeting agree on which of them belongs to the other. */
+export function taskMeeting(meetings: Meeting[], task?: Task): Meeting | undefined {
+  if (!task || task.source !== "noticed") return undefined;
+  return meetings.find((m) => meetingTasks([task], m).length > 0);
+}
+
+/** The lines of one section of a set of minutes. Input: the minutes markdown and the heading to look for, written without its "##". Output: the lines under that heading, read the same way the Meetings page reads them, stopping at the next heading; none when the minutes have no such section. */
+export function minutesSection(minutes: string, heading: string): MinutesLine[] {
+  const want = heading.trim().toLowerCase();
+  const out: MinutesLine[] = [];
+  let inside = false;
+  for (const line of minutesLines(minutes)) {
+    if (line.kind === "h") {
+      inside = line.text.trim().toLowerCase() === want;
+      continue;
+    }
+    if (inside) out.push(line);
+  }
+  return out;
+}
+
 /** What the composer on the Tasks page sends alongside a question, so the answer is about the task rather than about nothing. Input: the task. Output: one short passage naming the task and where it came from, or "" when there is no task. The conversation the question goes into carries the rest of the context by itself, which is why none of it is repeated here.
  */
 export function taskContext(task?: Task): string {

@@ -281,15 +281,15 @@ describe("Mine and Theirs", () => {
     expect(list().getByText("Send the file")).toBeDefined();
     expect(list().queryByText("Re-run the source data")).toBeNull();
     expect(list().queryByText("Write up the findings")).toBeNull();
-    const disclosure = screen.getByRole("button", { name: /Theirs, watching/ });
+    const disclosure = screen.getByRole("button", { name: /Watching/ });
     expect(disclosure.textContent).toContain("2");
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("opens the theirs section on its own disclosure and shows where each one came from", async () => {
     renderApp({ tasks: withWatched }, { place: "tasks" });
-    await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
-    const watched = within(screen.getByRole("list", { name: "Theirs, watching" }));
+    await userEvent.click(await screen.findByRole("button", { name: /Watching/ }));
+    const watched = within(screen.getByRole("list", { name: "Watching" }));
     expect(watched.getByText("Re-run the source data")).toBeDefined();
     expect(watched.getByText(/from TCFD call/)).toBeDefined();
     expect(watched.getByText("Write up the findings")).toBeDefined();
@@ -299,18 +299,18 @@ describe("Mine and Theirs", () => {
     const allWatched = withWatched.filter((t) => t.owner !== "me");
     renderApp({ tasks: allWatched }, { place: "tasks" });
     expect(await screen.findByText("Nothing of yours open.")).toBeDefined();
-    expect(screen.getByRole("button", { name: /Theirs, watching/ })).toBeDefined();
+    expect(screen.getByRole("button", { name: /Watching/ })).toBeDefined();
   });
 
   it("says nothing is being watched at all, rather than showing an empty section, when nothing was raised for anyone else", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    expect(screen.queryByRole("button", { name: /Theirs, watching/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Watching/ })).toBeNull();
   });
 
   it("moves a watched row to Mine from its owner menu, and tells the daemon which class it is now", async () => {
     const { calls } = renderApp({ tasks: withWatched }, { place: "tasks" });
-    await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /Watching/ }));
     await userEvent.click(screen.getByRole("button", { name: /Re-run the source data.*change who owns it/ }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
     await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/21")?.body).toEqual({ owner: "me" }));
@@ -340,7 +340,7 @@ describe("Mine and Theirs", () => {
 
   it("says so and leaves the row where it was when the daemon refuses the owner change", async () => {
     renderApp({ tasks: withWatched, fails: ["PATCH /tasks/21"] }, { place: "tasks" });
-    await userEvent.click(await screen.findByRole("button", { name: /Theirs, watching/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /Watching/ }));
     await userEvent.click(screen.getByRole("button", { name: /Re-run the source data.*change who owns it/ }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
     expect(await screen.findByRole("status")).toHaveProperty("textContent", "Could not change who owns that task");

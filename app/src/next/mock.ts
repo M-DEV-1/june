@@ -317,7 +317,7 @@ export const demo: Canned = {
     { id: "13", title: "Ask Priya for the numbers behind table 4", source: "noticed", when: ago(1, 17, 5), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(1)}`, owner: "me" },
     { id: "14", title: "Rewrite the onboarding note without the second heading", source: "you", when: ago(3, 10, 20), done: false, conversation_id: "c4", detail: "you said", owner: "me" },
     { id: "15", title: "Clear the disk the nightly loop filled", source: "you", when: ago(9, 22, 30), done: true, conversation_id: "c5", detail: "you said", owner: "me" },
-    // Raised by a meeting but not the user's own — this is the "Theirs, watching" section: one clearly someone else's, one nobody named.
+    // Raised by a meeting but not the user's own — this is the "Watching" section: one clearly someone else's, one nobody named.
     { id: "16", title: "Re-run the source data once the register is updated", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(0)}`, owner: "them" },
     { id: "17", title: "Write up what the cap was costing", source: "noticed", when: ago(1, 9, 45), done: false, conversation_id: "", detail: `Daily AI sprint standup, ${day(1)}`, owner: "unclear" },
   ],

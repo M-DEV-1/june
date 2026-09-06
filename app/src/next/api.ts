@@ -323,7 +323,7 @@ export const oraApi = createApi({
       transformResponse: (r: { tasks: Task[] }) => r.tasks ?? [],
       providesTags: ["Task"],
     }),
-    /** Every task regardless of owner. The Tasks screen is the only reader: Mine and "Theirs, watching" are both read off this one list, split by owner client-side, rather than fetched as three separate calls for "me", "them" and "unclear" — one round trip covers every bucket the owner field can hold. Tagged the same as tasks, so ticking a row from either list refetches both. */
+    /** Every task regardless of owner. The Tasks screen is the only reader: Mine and "Watching" are both read off this one list, split by owner client-side, rather than fetched as three separate calls for "me", "them" and "unclear" — one round trip covers every bucket the owner field can hold. Tagged the same as tasks, so ticking a row from either list refetches both. */
     allTasks: build.query<Task[], void>({
       query: () => "/tasks?owner=all",
       transformResponse: (r: { tasks: Task[] }) => r.tasks ?? [],
@@ -360,7 +360,7 @@ export const oraApi = createApi({
       invalidatesTags: ["Task"],
     }),
     /** Applies one of the rail line's own Done/1h/Evening/Tomorrow buttons to a live notice, exactly as pressing it on the desktop notification would (see internal/proactive/notify.go's Act, which both call). id is "-" when the notice has none of its own (a morning brief, say) — an empty path segment is not a URL Go's own router will match, so the daemon resolves this placeholder back to "" before calling Act. title and body are the notice's own, since a snooze needs them to re-fire it later. The daemon answers 200 with no body and reports what happened back over the SSE stream as the same "notice" event a desktop press produces, which is what replaces these buttons with the line reactToNotice already draws (see store.ts) — this mutation does not touch the cache itself. 400 for an action that is none of the four; 404 when the notice names a task that no longer exists. */
-    actOnNotice: build.mutation<void, { kind: string; id: string; title: string; body: string; action: "done" | "hour" | "evening" | "tomorrow" }>({
+    actOnNotice: build.mutation<void, { kind: string; id: string; title: string; body: string; action: string }>({
       query: ({ kind, id, title, body, action }) => ({
         url: `/notices/${encodeURIComponent(kind)}/${encodeURIComponent(id || "-")}/action`,
         method: "POST",
@@ -510,6 +510,8 @@ export type Notice = {
   kind: string;
   action?: string;
   until?: string;
+  /** The buttons this notice can answer, named by the daemon rather than guessed by the window: a task and the stale-task question carry their own, and anything with nothing to complete carries only Open (see openOnlyActions and noticeActions in internal/proactive). Key is what goes back to POST /notices/{kind}/{id}/action. */
+  actions?: { key: string; label: string }[];
 };
 
 /** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, "act" is one line of a computer-use job's progress, and "overlay" and "window" are the daemon telling the on-screen accessories and the window itself what to do. This window draws none of the last five, but they do arrive on the same stream, so they are named here rather than left to widen the type at the point of use. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */

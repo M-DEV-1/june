@@ -31,7 +31,7 @@ export function OwnerControl({ task }: { task: Task }) {
           variant="ghost"
           size="icon-xs"
           aria-label={`${task.title}: ${ownerLabels[task.owner]} — change who owns it`}
-          className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
+          className="shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
           onClick={(e) => e.stopPropagation()}
         >
           <ArrowRightLeft />
