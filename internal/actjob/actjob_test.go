@@ -36,18 +36,16 @@ type fakeExec struct {
 	preChecks []string
 }
 
+// CheckHolds is the PreChecker half of the seam: the step loop's one reading of a check before it acts, which never goes through wait_for and so never shows up among the tool calls a test asserts on.
+func (f *fakeExec) CheckHolds(ctx context.Context, check act.Check) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.preChecks = append(f.preChecks, check.Value)
+	return f.heldBefore
+}
+
 func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[string]any) string {
 	f.mu.Lock()
-	if name == "wait_for" && preCheckArgs(args) {
-		value, _ := args["value"].(string)
-		f.preChecks = append(f.preChecks, value)
-		held := f.heldBefore
-		f.mu.Unlock()
-		if held {
-			return act.WaitPassPrefix + "the title is \"S16 E8\""
-		}
-		return act.WaitFailPrefix + "0s: the title is \"Netflix\""
-	}
 	f.calls = append(f.calls, name)
 	if name == "wait_for" {
 		value, _ := args["value"].(string)
@@ -95,12 +93,6 @@ func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[str
 		return result
 	}
 	return "did " + name
-}
-
-// preCheckArgs reports whether a wait_for call is the step loop's pre-reading rather than its verification, which is the one-poll timeout it is made with.
-func preCheckArgs(args map[string]any) bool {
-	ms, ok := args["timeout_ms"].(float64)
-	return ok && ms <= float64(preCheckTimeoutMS)
 }
 
 // preChecksSeen returns the value of each pre-reading the step loop took, in order.
@@ -1417,8 +1409,8 @@ func TestRunner_TheWallBudgetStillEndsAJobAfterItHasWaited(t *testing.T) {
 	}
 }
 
-// A check that was already true before the action says nothing about what the action did: a title_contains "Netflix" written after a click passes on a window that was already called that. The step loop takes the check once before it acts, records that pre-reading on the step, and when the verdict did not flip the step is recorded as having already held rather than as a pass — so the model is told, and done cannot ride on it.
-func TestRunner_ACheckThatAlreadyHeldIsNotAPass(t *testing.T) {
+// A check that was already true before the action says nothing about what the action did: a title_contains "Netflix" written after a click passes on a window that was already called that. The step loop takes the check once before it acts and records that pre-reading beside the outcome, so the model is told and done cannot ride on it — while the outcome word itself stays "pass", because the wire carries two outcomes and a flag, not three outcomes.
+func TestRunner_ACheckThatAlreadyHeldCannotCarryADone(t *testing.T) {
 	exec := &fakeExec{heldBefore: true}
 	r, _, events := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("It is playing S16 E8."), stepReply("click", "S16 E8")))
 	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
@@ -1437,8 +1429,8 @@ func TestRunner_ACheckThatAlreadyHeldIsNotAPass(t *testing.T) {
 	if !first.HeldBefore {
 		t.Errorf("step = %+v, want the pre-reading recorded on it", first)
 	}
-	if first.Outcome != alreadyHeld {
-		t.Errorf("outcome = %q, want %q", first.Outcome, alreadyHeld)
+	if first.Outcome != "pass" {
+		t.Errorf("outcome = %q, want the plain pass the check itself gave, with held_before saying what it is worth", first.Outcome)
 	}
 	if !strings.Contains(first.Why, "already held before the action") {
 		t.Errorf("why = %q, want it to say the check already held before the action", first.Why)
@@ -1446,10 +1438,62 @@ func TestRunner_ACheckThatAlreadyHeldIsNotAPass(t *testing.T) {
 	if got := exec.preChecksSeen(); len(got) == 0 || got[0] != "S16 E8" {
 		t.Errorf("pre-readings = %v, want the step's own check taken before the action", got)
 	}
+	var verified []Event
 	for _, ev := range events() {
-		if ev.Kind == "verified" && ev.Outcome == "pass" {
-			t.Errorf("event = %+v, want no step reported as a pass", ev)
+		if ev.Kind == "verified" {
+			verified = append(verified, ev)
 		}
+	}
+	if len(verified) == 0 {
+		t.Fatal("no verified event went out")
+	}
+	if verified[0].Outcome != "pass" || !verified[0].HeldBefore {
+		t.Errorf("verified event = %+v, want outcome pass with held_before set, which is what the window renders", verified[0])
+	}
+}
+
+// A check that already held told the job nothing, so it is neither progress nor a failure: it must not clear the stuck counter and must not move it on. Counting it as a failure is what used to stop a job three ordinary steps into a window whose title its checks all named.
+func TestRunner_ACheckThatAlreadyHeldIsNotCountedAsAFailure(t *testing.T) {
+	exec := &fakeExec{heldBefore: true}
+	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Steps: 4}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Failed, Done, Stuck, Stopped)
+
+	if job.State != Failed || !strings.Contains(job.Err, "step") {
+		t.Fatalf("state = %q (%s), want it to run out of steps rather than get stuck", job.State, job.Err)
+	}
+	if job.FailsInARow != 0 {
+		t.Errorf("fails in a row = %d after %d steps whose checks already held, want 0", job.FailsInARow, len(job.Steps))
+	}
+	if !strings.Contains(BuildPrompt(job), "0 of which checked out") {
+		t.Error("the progress line counted a check that already held as a step that checked out")
+	}
+}
+
+// The pre-reading is one walk of the screen matched against the check, not a wait_for: wait_for polls for up to five seconds and, on a list check, walks the window a second time to see whether another one came to the front, and a job used to pay both on every step before it had acted at all.
+func TestRunner_ThePreReadingDoesNotGoThroughWaitFor(t *testing.T) {
+	exec := &fakeExec{}
+	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("It is playing S16 E8.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Done, Failed, Stuck)
+
+	waits := 0
+	for _, name := range exec.names() {
+		if name == "wait_for" {
+			waits++
+		}
+	}
+	if waits != 1 {
+		t.Errorf("wait_for was called %d time(s) for one step, want only the verification", waits)
+	}
+	if got := exec.preChecksSeen(); len(got) != 1 || got[0] != "S16 E8" {
+		t.Errorf("pre-readings = %v, want one, of the step's own check", got)
 	}
 }
 

@@ -36,14 +36,15 @@ func (e *jobExec) ExecuteAskTool(ctx context.Context, name string, args map[stri
 	case "observe_screen":
 		return "Brave · Netflix\n[1] push button \"Play\" (10,10)"
 	case "wait_for":
-		// The step loop takes each check once before it acts, with a one-poll timeout, to see whether the check already held. Here it never did, so the reading taken after the action is the one that counts and every scripted step verifies as it did before.
-		if ms, ok := args["timeout_ms"].(float64); ok && ms <= 1 {
-			return act.WaitFailPrefix + `0s: the title is "Netflix"`
-		}
 		return act.WaitPassPrefix + `the title is "S16 E8"`
 	}
 	return "did " + name
 }
+
+// heldExec is jobExec with the reading a step takes before it acts answering that the check was already satisfied, which is what a title check written for the window the job is already in looks like.
+type heldExec struct{ jobExec }
+
+func (e *heldExec) CheckHolds(ctx context.Context, check act.Check) bool { return true }
 
 // jobServer builds a Server with a job runner wired to its own event hub, and returns the routes, the runner and a reader of the events that went out.
 func jobServer(t *testing.T, exec actjob.Executor, replies ...string) (*ActJobs, *actjob.Runner, func() []Event) {
@@ -308,4 +309,70 @@ func TestActStart_BadRequestOnlyForValidationErrors(t *testing.T) {
 	if w := post(t, broken, "POST", "/act", `{"goal":"play S16 E8"}`); w.Code != http.StatusInternalServerError {
 		t.Errorf("POST /act against a closed store = %d (%s), want 500", w.Code, w.Body.String())
 	}
+}
+
+
+// The window renders a step as passed or failed and nothing else, so a check that was already true before the action goes out as a pass with held_before beside it rather than as a third outcome word the window would draw as a red cross. Both the event and the job record say it the same way.
+func TestActEvents_ACheckThatAlreadyHeldIsAPassWithTheFlag(t *testing.T) {
+	j, runner, events := jobServer(t, &heldExec{}, stepJSON)
+
+	w := post(t, j, "POST", "/act", `{"goal":"play S16 E8"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("POST /act = %d, want 202", w.Code)
+	}
+	var started struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &started)
+	waitForStep(t, runner, started.ID)
+	runner.Stop(started.ID)
+
+	var verified actjob.Event
+	var line string
+	for _, ev := range events() {
+		var got actjob.Event
+		if json.Unmarshal([]byte(ev.Detail), &got) == nil && got.Kind == "verified" {
+			verified, line = got, ev.Text
+		}
+	}
+	if verified.Kind != "verified" {
+		t.Fatal("no verified event went out on the stream")
+	}
+	if verified.Outcome != "pass" {
+		t.Errorf("outcome = %q, want \"pass\": the wire carries two outcomes and a flag, not three outcomes", verified.Outcome)
+	}
+	if !verified.HeldBefore {
+		t.Error("held_before is not on the event, so the window would draw a plain pass on a check that proved nothing")
+	}
+	if !strings.Contains(line, "already true") {
+		t.Errorf("hover line = %q, want it to say the check was already true", line)
+	}
+
+	w = post(t, j, "GET", "/act/"+started.ID, "")
+	var record struct {
+		Steps []struct {
+			Outcome    string `json:"outcome"`
+			HeldBefore bool   `json:"held_before"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &record); err != nil {
+		t.Fatalf("GET /act/{id}: %v", err)
+	}
+	if len(record.Steps) == 0 || record.Steps[0].Outcome != "pass" || !record.Steps[0].HeldBefore {
+		t.Errorf("step JSON = %+v, want outcome pass with held_before true", record.Steps)
+	}
+}
+
+// waitForStep blocks until a job has recorded its first verified step.
+func waitForStep(t *testing.T, r *actjob.Runner, id string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := r.Job(context.Background(), id)
+		if err == nil && len(job.Steps) > 0 && job.Steps[0].Outcome != "" {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("job %s recorded no verified step", id)
 }

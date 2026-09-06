@@ -133,7 +133,7 @@ type Step struct {
 	Args   map[string]any `json:"args"`
 	Expect act.Check      `json:"expect"`
 	Result string         `json:"result"`
-	// Outcome is "pass", "fail" or alreadyHeld, from the wait_for check alone.
+	// Outcome is "pass" or "fail", from the wait_for check alone. A check that was already satisfied before the action still reads "pass" here, with HeldBefore set beside it; there is no third word, so a reader that knows only the two still gets a true answer.
 	Outcome string `json:"outcome"`
 	// Why is what the check found, in plain words, whichever way it went.
 	Why string `json:"why"`
@@ -176,7 +176,9 @@ type Event struct {
 	Text    string `json:"text"`
 	Expect  string `json:"expect,omitempty"`
 	Outcome string `json:"outcome,omitempty"`
-	Spend   *Spend `json:"spend,omitempty"`
+	// HeldBefore says the step's check was already satisfied before the action ran, so the pass beside it says nothing about what the action did. It rides next to the outcome rather than replacing it, so a client that knows only "pass" and "fail" still reads the event.
+	HeldBefore bool   `json:"held_before,omitempty"`
+	Spend      *Spend `json:"spend,omitempty"`
 }
 
 // Model is one round of a job's thinking: the prompt in, the model's reply and what the round cost out. The daemon wires one per brain name; a brain that reports no token counts leaves them at zero rather than guessing.
@@ -199,6 +201,11 @@ type Executor interface {
 // ScreenScope is the half of the Executor seam a job needs to have a screen of its own: an executor that keeps per-caller screen state — the numbered list observe_screen produced, the picture look took, what the last click focused — hands this job a context carrying its own, so a click by number cannot land in another job's window and the pictures a job takes count against its own allowance. An executor that does not implement it (a scripted one in a test) runs on whatever state it already has. Input: the job's context. Output: a context to make every tool call of that job with.
 type ScreenScope interface {
 	NewScreenScope(ctx context.Context) context.Context
+}
+
+// PreChecker is the half of the Executor seam a job uses for the reading it takes before it acts: one walk of the screen matched against the step's check, with no polling and no second opinion about which window is in front. An executor that does not implement it leaves every pre-reading unanswered, which reads as "the check did not already hold" and puts the step back where it was before this reading existed. Input: the job's context and the change the model wrote down. Output: true when the screen already satisfies it.
+type PreChecker interface {
+	CheckHolds(ctx context.Context, check act.Check) bool
 }
 
 // Store is what a job needs from the database: write its checkpoint after every step, read one back to resume it, and say what the highest job id already on disk is so a restarted daemon carries on numbering from there.
@@ -639,12 +646,6 @@ const storedResultCap = 300
 // waitTimeoutMS is how long wait_for polls for the expected change before calling it a failure, in milliseconds — the tool's own default, passed explicitly so a job's verification time is on record rather than implied.
 const waitTimeoutMS = 5000
 
-// preCheckTimeoutMS is how long the pre-reading of a step's check polls: one look and no waiting, since it is asking what the screen showed before the action rather than waiting for anything to change.
-const preCheckTimeoutMS = 1
-
-// alreadyHeld is the outcome of a step whose check was already satisfied before the action ran. It is not a pass: the model may not end a job on it, and it is not counted as a step that checked out.
-const alreadyHeld = "already held"
-
 // alreadyHeldNote is appended to what the check found, so the round after it reads the verdict as saying nothing about the action rather than as proof it worked.
 const alreadyHeldNote = " — but this already held before the action, so it says nothing about what the action did"
 
@@ -725,7 +726,7 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		if d.Done {
 			// The goal is only reached once something checked that it was: a model may end a job on the step it just watched come true, never on its own say-so before anything has been verified.
 			// A step whose check already held before its action is not something that checked out, so it cannot carry a done either.
-			if n := len(job.Steps); n == 0 || job.Steps[n-1].Outcome != "pass" {
+			if n := len(job.Steps); n == 0 || !checkedOut(job.Steps[n-1]) {
 				l.set(func(j *Job) {
 					j.Results = pushCapped(j.Results, "you said the goal was reached, but nothing has checked out yet; take the action that would make it true and let the check confirm it before you set done", keptResults, resultCap)
 				})
@@ -799,16 +800,20 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			return
 		}
 		step.Outcome, step.Why = readVerdict(verdict)
-		if step.Outcome == "pass" && step.HeldBefore {
-			step.Outcome, step.Why = alreadyHeld, step.Why+alreadyHeldNote
+		toldNothing := step.Outcome == "pass" && step.HeldBefore
+		if toldNothing {
+			step.Why += alreadyHeldNote
 		}
 
 		job = l.set(func(j *Job) {
 			j.Steps[len(j.Steps)-1] = step
 			j.Results = pushCapped(j.Results, step.Tool+": "+step.Result, keptResults, resultCap)
-			if step.Outcome == "pass" {
+			// A check that already held is neither a pass nor a failure: it told us nothing about the action, so it neither clears the stuck counter nor moves it on. Counting it as a failure is what used to stop a job whose every check was the same window title after three ordinary steps.
+			switch {
+			case toldNothing:
+			case step.Outcome == "pass":
 				j.FailsInARow = 0
-			} else {
+			default:
 				j.FailsInARow++
 			}
 			// A pause the user pressed while this check was running stands: both front ends take the state word off every event, so writing stepping here would put a Pause button back on a job that is already held and leave no Resume to press.
@@ -816,7 +821,7 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 				j.State = Stepping
 			}
 		})
-		r.emit(Event{Job: job.ID, Kind: "verified", State: job.State, Step: step.N, Text: step.Why, Expect: step.Expect.Describe(), Outcome: step.Outcome})
+		r.emit(Event{Job: job.ID, Kind: "verified", State: job.State, Step: step.N, Text: step.Why, Expect: step.Expect.Describe(), Outcome: step.Outcome, HeldBefore: step.HeldBefore})
 		r.save(l, job)
 
 		if job.FailsInARow >= stuckAfter {
@@ -923,7 +928,7 @@ func overBudget(j Job) (bool, string) {
 func summarise(j Job, why string) string {
 	verified := 0
 	for _, s := range j.Steps {
-		if s.Outcome == "pass" {
+		if checkedOut(s) {
 			verified++
 		}
 	}
@@ -943,13 +948,17 @@ func stuckQuestion(j Job) string {
 	return fmt.Sprintf("I tried %d times to make it so that %s, and each time %s. What should I do instead?", stuckAfter, last.Expect.Describe(), last.Why)
 }
 
-// checkHolds reads a step's check once, before the action runs, through the same wait_for the verification uses. Input: the job's context and the change the model wrote down. Output: true when the screen already satisfies it, false when it does not or the step named no check at all.
+// checkedOut reports whether a step is one that actually showed the goal moving: a check that passed and was not already true before the action. It is what the done guard, the progress line and the closing sentence all count, so a job cannot end on, or claim progress from, a check that told it nothing.
+func checkedOut(s Step) bool { return s.Outcome == "pass" && !s.HeldBefore }
+
+// checkHolds reads a step's check once, before the action runs, off a single reading of the screen. Input: the job's context and the change the model wrote down. Output: true when the screen already satisfies it, false when it does not, when the step named no check at all, or when this executor cannot take the reading.
+// It does not go through wait_for: that tool polls for up to five seconds and, on a list check that matches, walks the window a second time to see whether another window came to the front. Neither is worth anything here — nothing has acted yet, so there is nothing to wait for and nothing for the front window to have changed under — and both were paid on every step of every job.
 func (r *Runner) checkHolds(ctx context.Context, expect act.Check) bool {
-	if expect.Value == "" {
+	pre, ok := r.exec.(PreChecker)
+	if !ok || expect.Value == "" {
 		return false
 	}
-	outcome, _ := readVerdict(r.exec.ExecuteAskTool(ctx, "wait_for", map[string]any{"kind": expect.Kind, "value": expect.Value, "timeout_ms": float64(preCheckTimeoutMS)}))
-	return outcome == "pass"
+	return pre.CheckHolds(ctx, expect)
 }
 
 // readVerdict turns wait_for's own answer into a step's outcome. Input: the tool result. Output: "pass" or "fail", and what the check found in plain words.

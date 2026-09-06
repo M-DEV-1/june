@@ -43,6 +43,9 @@ func actEventLine(ev actjob.Event) string {
 		return fmt.Sprintf("Step %d: %s — expecting %s", ev.Step, ev.Text, ev.Expect)
 	case "verified":
 		if ev.Outcome == "pass" {
+			if ev.HeldBefore {
+				return fmt.Sprintf("Step %d checked out on something that was already true: %s", ev.Step, ev.Text)
+			}
 			return fmt.Sprintf("Step %d checked out: %s", ev.Step, ev.Text)
 		}
 		return fmt.Sprintf("Step %d did not check out: %s", ev.Step, ev.Text)
