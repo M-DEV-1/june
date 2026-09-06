@@ -11,7 +11,8 @@ import (
 )
 
 // previewPhrase is spoken back for every /voice preview -- short and fixed, so the one-shot TTS call stays cheap and the user hears the same line regardless of which voice they're trying.
-const previewPhrase = "Hi, I'm Ora. This is how I sound."
+// It deliberately claims no identity. Measured against the TTS model on 2026-09-07: "Hi, I'm Ora. This is how I sound." and "Hi, I am Ora. This is how I sound." both came back with no candidates and promptFeedback.blockReason PROHIBITED_CONTENT, while this line alone returned audio -- a synthetic voice introducing itself by name reads to the filter as impersonation. Keep any future wording free of "I am <name>".
+const previewPhrase = "This is how I sound."
 
 // PreviewVoice synthesizes previewPhrase with voiceName via a one-shot (non-live) Gemini TTS call and plays it straight through the agent's own speaker.
 // It never touches the agent's configured/persisted voice (SetVoice/GetVoice) or the Live session -- purely a "let me hear it first" side effect.
@@ -67,9 +68,18 @@ func SpeakPreview(ctx context.Context, apiKey, voiceName string, play func([]byt
 		}
 	}
 	if !played {
-		return fmt.Errorf("voice preview returned no audio for %q", canonical)
+		return fmt.Errorf("voice preview for %q: %s", canonical, noAudioReason(resp))
 	}
 
 	slog.Debug("played voice preview", "voice", canonical)
 	return nil
+}
+
+// noAudioReason says why a TTS response carried no audio, so a refusal is not reported as an empty answer. Input: the response, which may be nil. Output: the safety block reason when the prompt was refused, and a plain sentence otherwise.
+// The two are indistinguishable in the response shape -- both are a response with no usable parts -- and reporting them the same way sent a blocked preview back to the window as "returned no audio", which reads as a bug in Ora rather than a refusal by the model.
+func noAudioReason(resp *genai.GenerateContentResponse) string {
+	if resp != nil && resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" {
+		return fmt.Sprintf("the model refused the line it was given (%s)", resp.PromptFeedback.BlockReason)
+	}
+	return "the model returned no audio"
 }
