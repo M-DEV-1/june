@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	"ora/internal/act"
+
 	"github.com/godbus/dbus/v5"
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
@@ -268,7 +270,7 @@ const netWorkArea = "_NET_WORKAREA"
 // movedBy is how far, in pixels, an element's rectangle may differ from the one observe_screen recorded and still count as the same element in the same place. It covers the rounding a scaled display introduces and little else: a list that has scrolled moves a row by at least its own height, and two entries stacked in a form sit further apart than this even when neither carries a label.
 const movedBy = 8
 
-// Verify checks that a node still is what observe_screen described, since a toolkit can hand a recycled object path to a different element after a page re-renders, and since a page that scrolls under the list leaves every number pointing at the right element in the wrong place. Input: a context, the node's Ref, the role and label the list showed, and the rectangle it showed. Output: nil when the role, the label and the rectangle all still match (the label check is skipped when the list showed none, the rectangle check when it showed no size), or an error naming what changed or that the node has gone.
+// Verify checks that a node still is what observe_screen described, since a toolkit can hand a recycled object path to a different element after a page re-renders, and since a page that scrolls under the list leaves every number pointing at the right element in the wrong place. Input: a context, the node's Ref, the role and label the list showed, and the rectangle it showed. Output: nil when the role, the label and the rectangle all still match (the label check is skipped when the list showed none and when the role is a content role, whose label is the node's own contents, the rectangle check when the list showed no size), or an error naming what changed or that the node has gone.
 func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error {
 	r, err := parseARef(ref)
 	if err != nil {
@@ -279,9 +281,9 @@ func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error 
 		return err
 	}
 	nowRole := getRoleName(ctx, conn, r)
-	// The label and the rectangle each cost a round trip, so neither is read when there is nothing in the list to compare it against.
+	// The label and the rectangle each cost a round trip, so neither is read when there is nothing in the list to compare it against, and the label is not read at all for a content role, whose label is not compared.
 	nowLabel := ""
-	if label != "" {
+	if label != "" && !act.ContentRole(role) {
 		nowLabel = getName(ctx, conn, r)
 		if nowLabel == "" {
 			nowLabel = strings.TrimSpace(getText(ctx, conn, r))
@@ -294,7 +296,7 @@ func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error 
 	return verifyAgainst(nowRole, nowLabel, now, role, label, rect{X: x, Y: y, W: w, H: h})
 }
 
-// verifyAgainst compares what an element is now with what observe_screen recorded for it. Input: the role, label and rectangle read from the element just now, then the role, label and rectangle the numbered list showed. Output: nil when they still describe the same element in the same place, or an error naming what changed; an empty label in the list means the list held none, and a rectangle of no size in the list means it held none either, and neither is then compared.
+// verifyAgainst compares what an element is now with what observe_screen recorded for it. Input: the role, label and rectangle read from the element just now, then the role, label and rectangle the numbered list showed. Output: nil when they still describe the same element in the same place, or an error naming what changed; an empty label in the list means the list held none, and a rectangle of no size in the list means it held none either, and neither is then compared; a content role's label is not compared at all.
 func verifyAgainst(nowRole, nowLabel string, now rect, role, label string, was rect) error {
 	if nowRole == "" {
 		return errors.New("the element has gone")
@@ -302,7 +304,8 @@ func verifyAgainst(nowRole, nowLabel string, now rect, role, label string, was r
 	if nowRole != role {
 		return fmt.Errorf("it is now a %s, not a %s", nowRole, role)
 	}
-	if label != "" && nowLabel != label {
+	// A content role's label is the node's own contents — what is typed in an entry, what a run of page text says — not a name anybody chose for it, so it changes whenever the user types and says nothing about whether this is still the same element. The role and the rectangle still do. Comparing it refused a click on a box the user had just typed into, which is the ordinary thing to happen between listing a box and clicking it.
+	if label != "" && !act.ContentRole(role) && nowLabel != label {
 		return fmt.Errorf("it is now labelled %q, not %q", nowLabel, label)
 	}
 	if was.W <= 0 || was.H <= 0 {
