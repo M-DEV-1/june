@@ -51,7 +51,7 @@ func (s *Store) PruneEmptyConversations(ctx context.Context, olderThan time.Dura
 }
 
 // PruneActRuns caps how many act runs are kept, newest first, and deletes the rest. Input: ctx, keep, the number of ordinary runs to keep (config.OraConfig.ActRunsKept is where that number comes from), and failedGrace, how long a failed run is kept regardless of the cap (config.OraConfig.FailedActRunsKeptDays is where that one comes from, in days). keep of zero or less prunes nothing at all, so an unset number can never empty the table, and a failedGrace of zero or less protects no failure at all. Output: how many rows were deleted.
-// Three kinds of run are exempt from the cap and never counted against it. A run the nightly procedures stage already wrote a "How I did X" note from is kept for good, because the note says how a thing was done and this row is the only record of the steps behind it. A run that failed is kept while it is younger than failedGrace, since a failure is never written up and would otherwise be the first thing the cap took. A long-running job's checkpoint (a row with a job_id, see act_jobs.go) is kept for good as well: it is the only record of a job the user can still resume, nothing rewrites the row of a job that is paused or stuck, and deleting it takes the whole trail in job_json with it. Everything else is ordered newest first and everything past keep is deleted.
+// Three kinds of run are exempt from the cap and never counted against it. A run the nightly procedures stage already wrote a "How I did X" note from is kept for good, because the note says how a thing was done and this row is the only record of the steps behind it. A run that failed is kept while it is younger than failedGrace, since a failure is never written up and would otherwise be the first thing the cap took. A live job's checkpoint (a row with a job_id in a state it can still come back from, see act_jobs.go) is kept for good as well: it is the only record of a job the user can still resume, nothing rewrites the row of a job that is paused or stuck, and deleting it takes the whole trail in job_json with it. A job that reached done, stopped or failed is not exempt, because nothing ever clears job_id and exempting those kept one permanent row and its whole job_json trail per job ever run. Everything else is ordered newest first and everything past keep is deleted.
 func (s *Store) PruneActRuns(ctx context.Context, keep int, failedGrace time.Duration) (int64, error) {
 	if keep <= 0 {
 		return 0, nil
@@ -59,7 +59,8 @@ func (s *Store) PruneActRuns(ctx context.Context, keep int, failedGrace time.Dur
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM act_runs WHERE id IN (
 			SELECT r.id FROM act_runs r
-			WHERE r.job_id = ''
+			-- The three finished states are finishedActJobStates in act_jobs.go; change them there and here together.
+			WHERE (r.job_id = '' OR r.job_state IN ('done', 'stopped', 'failed'))
 			  AND NOT (r.outcome <> 'ok' AND r.started_at >= datetime('now', '-' || ? || ' seconds'))
 			  AND NOT `+runHasNote+`
 			ORDER BY r.id DESC

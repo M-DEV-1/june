@@ -477,3 +477,35 @@ func TestPruneActRunsKeepsALiveJobsCheckpoint(t *testing.T) {
 		t.Errorf("%d unfinished jobs after the prune, want the one job still resumable", len(unfinished))
 	}
 }
+
+// TestPruneActRunsTakesAFinishedJobsCheckpoint checks the live-job exemption is only for jobs that are still live. Nothing ever clears job_id, so exempting every row that has one kept the whole job_json trail of every job ever run, for good: one permanent row per job on a store that runs them daily. A job in a state it never comes back from is an ordinary old row and the count cap may take it.
+func TestPruneActRunsTakesAFinishedJobsCheckpoint(t *testing.T) {
+	store := newFileStore(t)
+	ctx := context.Background()
+
+	for _, job := range []ActJobRow{
+		{ID: "act-done", Goal: "played the last episode", Brain: "codex", State: "done"},
+		{ID: "act-live", Goal: "play the next episode", Brain: "codex", State: "stepping"},
+	} {
+		if err := store.SaveActJob(ctx, job); err != nil {
+			t.Fatalf("SaveActJob(%s): %v", job.ID, err)
+		}
+		if _, err := store.db.Exec(`UPDATE act_runs SET started_at = ? WHERE job_id = ?`, sqliteUTC(time.Now().Add(-400*24*time.Hour)), job.ID); err != nil {
+			t.Fatalf("backdate %s: %v", job.ID, err)
+		}
+	}
+	for _, q := range []string{"ordinary one", "ordinary two", "ordinary three"} {
+		addRun(t, store, q, "ok", time.Hour)
+	}
+
+	if _, err := store.PruneActRuns(ctx, 2, testFailedGrace); err != nil {
+		t.Fatalf("PruneActRuns: %v", err)
+	}
+	left := runQuestions(t, store)
+	if has(left, "played the last episode") {
+		t.Errorf("the finished job's checkpoint survived the cap; kept %v", left)
+	}
+	if !has(left, "play the next episode") {
+		t.Errorf("the live job's checkpoint was pruned; kept %v", left)
+	}
+}

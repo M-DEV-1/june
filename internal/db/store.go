@@ -431,13 +431,9 @@ func (s *Store) createSchema() error {
 		UNIQUE(day, kind)
 	);
 
-	-- Mirrored into memory_fts exactly like threads, so diary entries surface
-	-- through the existing query_memory path with no agent changes. Every kind but
-	-- TaskNoticeWatermarkKind, which is a bare note id the proactive loop rewrites on
-	-- most ticks rather than anything Ora wrote (see diary.go). The insert is written as
-	-- INSERT ... SELECT ... WHERE rather than a trigger-level WHEN so the update
-	-- trigger's DELETE still runs for every kind, which is what clears a watermark row
-	-- an older database had already mirrored.
+	-- Mirrored into memory_fts exactly like threads, so diary entries surface through the existing query_memory path with no agent changes.
+	-- Every kind is mirrored but TaskNoticeWatermarkKind, which is a bare note id the proactive loop rewrites on most ticks rather than anything Ora wrote (see diary.go).
+	-- The insert is written as INSERT ... SELECT ... WHERE rather than a trigger-level WHEN so the update trigger's DELETE still runs for every kind, which is what clears a watermark row an older database had already mirrored.
 	-- Dropped first so a database created before the watermark was excluded picks up the new bodies.
 	DROP TRIGGER IF EXISTS diary_ai;
 	DROP TRIGGER IF EXISTS diary_au;
