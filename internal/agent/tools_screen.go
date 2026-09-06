@@ -263,14 +263,7 @@ func takeLook(ctx context.Context) (tracker.Capture, bool) {
 	return *s.look, true
 }
 
-// seenLook returns the newest picture this ask took and actually showed the model, which is the one draw maps coordinates against. Output: the capture, and false when this ask has not looked or the picture has not been handed over yet.
-// Delivery is the test, not the taking: a channel with no way to carry an image — the Live voice session, which takes tool results as text — leaves every picture undelivered, and a point read off a picture nobody saw is a guess like any other.
-func seenLook(ctx context.Context) (tracker.Capture, bool) {
-	c, ok, _ := lookSeen(ctx)
-	return c, ok
-}
-
-// lookSeen is seenLook with the reason a refusal happened. Output: the capture and true when a picture was taken and handed over; otherwise false, with blind=true when a picture was taken but this channel could not carry it to the model, which no number of further looks will change.
+// lookSeen returns the newest picture this ask took and actually showed the model, which is the one draw maps coordinates against, plus the reason a refusal happened. Delivery is the test, not the taking: a channel with no way to carry an image — the Live voice session, which takes tool results as text — leaves every picture undelivered, and a point read off a picture nobody saw is a guess like any other. Output: the capture and true when a picture was taken and handed over; otherwise false, with blind=true when a picture was taken but this channel could not carry it to the model, which no number of further looks will change.
 func lookSeen(ctx context.Context) (capture tracker.Capture, ok bool, blind bool) {
 	s := lookStateFrom(ctx)
 	s.mu.Lock()

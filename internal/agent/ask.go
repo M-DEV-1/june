@@ -695,7 +695,7 @@ func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Con
 	now := start
 	// See the matching line in askText: a screen tool later in this ctx's lifetime can read the question back off it.
 	ctx = WithQuestion(ctx, question)
-	// The look allowance and the picture draw maps coordinates against belong to this ask; see the matching line in askText. A voice turn never delivers the picture itself (see seenLook), but draw still needs the state a look leaves behind to map a point back onto the screen.
+	// The look allowance and the picture draw maps coordinates against belong to this ask; see the matching line in askText. A voice turn never delivers the picture itself (see lookSeen), but draw still needs the state a look leaves behind to map a point back onto the screen.
 	ctx = withAskLookState(ctx)
 	instruction, handshake := a.HandshakePrompt(ctx, now)
 
