@@ -4,6 +4,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -207,6 +208,15 @@ func (s *Store) SetActionStatus(ctx context.Context, noteID int64, status string
 	})
 }
 
+// SetActionText replaces the work an action item describes, leaving its status, priority, owner and provenance alone. Input: the note id the item is stored as, and the corrected work text. Output: an error when the id is not an action note.
+// It exists because an action item is a rendered line, not a free-text row: writing the correction straight over the content through UpdateNote would take the "[status/priority]" prefix with it, ParseAction would stop reading the row, and the task would silently leave the brief and the Tasks screen.
+func (s *Store) SetActionText(ctx context.Context, noteID int64, text string) error {
+	return s.reviseAction(ctx, noteID, func(a *memory.ActionItem) error {
+		a.Text = strings.TrimSpace(text)
+		return nil
+	})
+}
+
 // SetOwnerClass records whose task the user says this really is, overriding whatever OwnerClass would otherwise read from the owner the minutes named. Input: the note id and the class ("me", "them" or "unclear"). Output: an error when the class is not one of the three, or the id is not an action note — reporting a correction as applied when it was not throws the user's words away.
 func (s *Store) SetOwnerClass(ctx context.Context, noteID int64, class string) error {
 	if !memory.ValidOwnerClass(class) {
@@ -237,19 +247,22 @@ func (s *Store) SetActionPriority(ctx context.Context, noteID int64, priority st
 	})
 }
 
+// ErrNotActionItem says an id names no tracked action item — either there is no notes row of that id under kind 'action', or there is one whose line no longer parses. Callers that can treat the row as an ordinary note read it with errors.Is; the revise tool uses it to tell "correct this item's work text" from "overwrite this plain note".
+var ErrNotActionItem = errors.New("not an action item")
+
 // reviseAction reads one action note, applies revise to it, and writes the re-rendered line back through UpdateNote so the FTS mirror and the vector index follow. An id that is not an action note is an error rather than a silent no-op.
 func (s *Store) reviseAction(ctx context.Context, noteID int64, revise func(*memory.ActionItem) error) error {
 	var content string
 	err := s.db.QueryRowContext(ctx, `SELECT content FROM notes WHERE id = ? AND kind = ?`, noteID, memory.ActionNoteKind).Scan(&content)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("no action item with id %d", noteID)
+		return fmt.Errorf("no action item with id %d: %w", noteID, ErrNotActionItem)
 	}
 	if err != nil {
 		return fmt.Errorf("read action item: %w", err)
 	}
 	a, ok := memory.ParseAction(content)
 	if !ok {
-		return fmt.Errorf("note %d is not a readable action item", noteID)
+		return fmt.Errorf("note %d is not a readable action item: %w", noteID, ErrNotActionItem)
 	}
 	if err := revise(&a); err != nil {
 		return err

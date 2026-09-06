@@ -34,6 +34,8 @@ type ContextReader interface {
 	// SetActionStatus backs the "revise" tool's state path (tools.go). An action item is a notes row whose content carries its own status, so a plain content edit could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead. SetActionPriority is unused by any tool now that revise only exposes state — kept for the store's own callers.
 	SetActionStatus(ctx context.Context, id int64, status string) error
 	SetActionPriority(ctx context.Context, id int64, priority string) error
+	// SetActionText backs the "revise" tool's content path for an action item: it re-renders the line around the corrected work text instead of writing over it, and reports db.ErrNotActionItem for an id that is an ordinary note, which is how revise knows to fall back to UpdateNote.
+	SetActionText(ctx context.Context, id int64, text string) error
 	// OpenActionItems backs the action_items tool (tools.go). "What do I owe?" is a question about a column, not about meaning: the rows say "[open/normal] Alex Rivera — check out develop-essentials-api", which shares no words with the question and sits nowhere near it in embedding space. Asked through query_memory it returned ten summaries about attending meetings and not one action item, so the structural query gets its own door.
 	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
 	// EpisodesForThread backed the retired thread_evidence tool. No tool calls it now; left on the interface rather than rippling its removal into the store.

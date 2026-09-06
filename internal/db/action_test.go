@@ -128,6 +128,44 @@ func TestSetActionPriority(t *testing.T) {
 	}
 }
 
+// Correcting the work an item describes keeps it a tracked action item: the rendered line is re-rendered around the new text, so its status, priority and provenance survive and it stays in the open list rather than dropping out of every read that goes through ParseAction.
+func TestSetActionText_KeepsTheItemTrackedAndItsOtherFields(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the staging PR.")}); err != nil {
+		t.Fatal(err)
+	}
+	open, _ := store.OpenActionItems(ctx)
+	if err := store.SetActionPriority(ctx, open[0].NoteID, memory.PriorityHigh); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.SetActionText(ctx, open[0].NoteID, "deploy the checkout-flow PR."); err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := store.OpenActionItems(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("want the item still open after correcting its text, got %+v", open)
+	}
+	if open[0].Text != "deploy the checkout-flow PR." {
+		t.Errorf("text = %q, want the correction", open[0].Text)
+	}
+	if open[0].Owner != "Me" || open[0].Priority != memory.PriorityHigh || open[0].Source != "md x mf tool" {
+		t.Errorf("correcting the text lost the rest of the item: %+v", open[0])
+	}
+}
+
+// An id the model invented must be reported, not silently ignored — the same guard SetActionStatus has, for the same reason.
+func TestSetActionText_UnknownID(t *testing.T) {
+	if err := newStore(t).SetActionText(context.Background(), 4242, "something else"); err == nil {
+		t.Fatal("want an error for an id that is not an action note")
+	}
+}
+
 // An id the model invented must be reported, not silently ignored — reporting a correction as applied when it was not throws the user's words away.
 func TestSetActionStatus_UnknownID(t *testing.T) {
 	if err := newStore(t).SetActionStatus(context.Background(), 4242, memory.StatusDone); err == nil {
