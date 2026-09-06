@@ -70,11 +70,32 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 	}
 
 	// The candidate builder already drops what the index has for the sources it bounds; this covers the rest, so nothing that already has a vector is embedded twice.
+	batchAdder, hasBatch := vidx.(batchVectorIndex)
+	var batchIDs []string
+	var batchContents []string
+	var batchEmbeddings [][]float32
+	var batchMetadatas []map[string]string
+
+	flushBatch := func() {
+		if len(batchIDs) == 0 {
+			return
+		}
+		if err := batchAdder.AddBatch(ctx, batchIDs, batchContents, batchEmbeddings, batchMetadatas); err != nil {
+			slog.Error("reconcile: backfill batch add failed", "count", len(batchIDs), "error", err)
+		} else {
+			report.Backfilled += len(batchIDs)
+		}
+		batchIDs = batchIDs[:0]
+		batchContents = batchContents[:0]
+		batchEmbeddings = batchEmbeddings[:0]
+		batchMetadatas = batchMetadatas[:0]
+	}
+
 	for _, c := range s.reconcileBackfillCandidates(ctx, existing, embedCap) {
 		if existing[c.id] {
 			continue
 		}
-		if report.Backfilled >= embedCap {
+		if report.Backfilled+len(batchIDs) >= embedCap {
 			break
 		}
 		vec, err := emb.Embed(ctx, "RETRIEVAL_DOCUMENT", c.content)
@@ -82,11 +103,24 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 			slog.Error("reconcile: backfill embed failed", "id", c.id, "error", err)
 			continue
 		}
-		if err := vidx.Add(ctx, c.id, c.content, vec, c.metadata); err != nil {
-			slog.Error("reconcile: backfill add failed", "id", c.id, "error", err)
-			continue
+		if hasBatch {
+			batchIDs = append(batchIDs, c.id)
+			batchContents = append(batchContents, c.content)
+			batchEmbeddings = append(batchEmbeddings, vec)
+			batchMetadatas = append(batchMetadatas, c.metadata)
+			if len(batchIDs) >= 50 {
+				flushBatch()
+			}
+		} else {
+			if err := vidx.Add(ctx, c.id, c.content, vec, c.metadata); err != nil {
+				slog.Error("reconcile: backfill add failed", "id", c.id, "error", err)
+				continue
+			}
+			report.Backfilled++
 		}
-		report.Backfilled++
+	}
+	if hasBatch {
+		flushBatch()
 	}
 
 	return report, nil

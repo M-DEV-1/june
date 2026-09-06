@@ -164,11 +164,39 @@ func (c *ChromemIndex) Add(ctx context.Context, id, content string, embedding []
 	}
 
 	c.createdAt[id] = time.Now()
-	if err := c.persistSidecar(); err != nil {
+	if err := c.evictOverCap(ctx); err != nil {
 		return err
 	}
+	return c.persistSidecar()
+}
 
-	return c.evictOverCap(ctx)
+// AddBatch inserts or overwrites multiple documents in a single locked transaction, evicting over-cap documents and persisting the sidecar once.
+func (c *ChromemIndex) AddBatch(ctx context.Context, ids []string, contents []string, embeddings [][]float32, metadatas []map[string]string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if c.dim > 0 {
+		for i, emb := range embeddings {
+			if len(emb) != c.dim {
+				return fmt.Errorf("chromem add_batch %s: embedding has %d dimensions, index expects %d", ids[i], len(emb), c.dim)
+			}
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.col.Add(ctx, ids, embeddings, metadatas, contents); err != nil {
+		return fmt.Errorf("chromem add batch: %w", err)
+	}
+
+	now := time.Now()
+	for _, id := range ids {
+		c.createdAt[id] = now
+	}
+	if err := c.evictOverCap(ctx); err != nil {
+		return err
+	}
+	return c.persistSidecar()
 }
 
 // evictOverCap removes oldest entries (by c.createdAt) until count is back at or under maxDocs. Caller must hold mu.
@@ -197,7 +225,7 @@ func (c *ChromemIndex) evictOverCap(ctx context.Context) error {
 		}
 		delete(c.createdAt, id)
 	}
-	return c.persistSidecar()
+	return nil
 }
 
 // Search runs a nearest-neighbor query, capped at n and filtered by exact-match where.
