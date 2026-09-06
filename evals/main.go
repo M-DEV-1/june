@@ -42,6 +42,9 @@ func main() {
 	// The judge is chatty on stderr through slog if internal packages log; keep it to warnings so the run's own output stays readable.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
+	// The tool surface an eval arm is handed drops shell_exec, read_file and read_clipboard unless something says a human could approve them, and an eval's arms answer all three from their own stubs, so without this tracks 7 and 9 measure a smaller tool list than the voice session actually offers.
+	agent.SetToolApprovals(true)
+
 	if err := run(*tracks, *turnCap, *outDir, *questionsPath, *toolPath, *session, *trajTurns, *trajModel); err != nil {
 		fmt.Fprintf(os.Stderr, "eval run failed: %v\n", err)
 		os.Exit(1)

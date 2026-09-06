@@ -194,3 +194,18 @@ func TestFocused_RefusesAMalformedRef(t *testing.T) {
 		t.Error("Focused must refuse a ref with no bus name and object path in it")
 	}
 }
+
+// readStates answers nil for every way a read can fail — a D-Bus timeout, an element that has gone, a toolkit that publishes no state — and reporting that as "not focused" is what made a caller refuse to type into fields that were perfectly focused. An empty answer is an error; a real answer with the bit clear is a plain false.
+func TestFocusedFromStates_TellsAnEmptyReadFromANotFocusedOne(t *testing.T) {
+	if _, err := focusedFromStates(nil, "r-address"); err == nil {
+		t.Error("a state read that came back with nothing must be an error, not a false")
+	}
+	held, err := focusedFromStates([]uint32{1 << stateFocused, 0}, "r-address")
+	if err != nil || !held {
+		t.Errorf("focusedFromStates(focused) = (%v, %v), want (true, nil)", held, err)
+	}
+	held, err = focusedFromStates([]uint32{0, 0}, "r-address")
+	if err != nil || held {
+		t.Errorf("focusedFromStates(not focused) = (%v, %v), want (false, nil)", held, err)
+	}
+}
