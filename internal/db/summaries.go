@@ -500,7 +500,7 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 	// Async, best-effort embedding of the digest text this call wrote, same non-blocking pattern as LogSemanticNode's summary embed goroutine. Without this the digest is FTS-only forever — the whole point of a digest is to still answer "what did I do that day" through the semantic half of HybridSearch. A rewritten digest is re-embedded under the same key, so the vector says what the row now says.
 	if digestWritten && emb != nil && vidx != nil {
 		// The vector's created_at is the day the digest covers, matching the row, so recency ranking does not treat a week-old day as today.
-		stamp := time.Now().UTC().Format(time.RFC3339)
+		stamp := nowStamp()
 		if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
 			stamp = t.UTC().Format(time.RFC3339)
 		}
@@ -618,7 +618,7 @@ func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary)
 				"domain":     domain,
 				"source":     "summary",
 				"kind":       string(memory.KindPeriod),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": nowStamp(),
 			}
 			if err := vidx.Add(embedCtx, fmt.Sprintf("summary:%d", id), text, vec, meta); err != nil {
 				slog.Error("async summary vector index add failed", "node_id", id, "error", err)

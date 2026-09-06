@@ -113,7 +113,7 @@ func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error
 			meta := map[string]string{
 				"source":     "note",
 				"kind":       string(memory.KindFact),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": nowStamp(),
 			}
 			if err := vidx.Add(embedCtx, fmt.Sprintf("note:%d", id), text, vec, meta); err != nil {
 				slog.Error("async note vector index add failed", "note_id", id, "error", err)
@@ -312,7 +312,7 @@ func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error 
 			meta := map[string]string{
 				"source":     "note",
 				"kind":       string(memory.KindFact),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": nowStamp(),
 			}
 			if err := vidx.Add(vecCtx, vecID, text, vec, meta); err != nil {
 				slog.Error("async note vector re-add failed", "note_id", id, "error", err)

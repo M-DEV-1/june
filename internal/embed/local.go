@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"ora/internal/netx"
 	oratext "ora/internal/text"
 )
 
@@ -108,8 +108,7 @@ func (l *LocalEmbedder) embedOnce(ctx context.Context, input string) ([]float32,
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		text := strings.TrimSpace(string(snippet))
+		text := netx.BodySnippet(resp.Body)
 		return nil, inputTooLong(resp.StatusCode, text), fmt.Errorf("embed: server returned %d: %s", resp.StatusCode, text)
 	}
 

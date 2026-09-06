@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ora/internal/config"
+	"ora/internal/fsx"
 
 	"google.golang.org/genai"
 )
@@ -100,19 +101,9 @@ func (s *QuotaState) save(counts dayCounts) {
 		slog.Warn("brain: could not encode quota counts", "error", err)
 		return
 	}
-	if err := writeFileAtomic(s.path, data); err != nil {
+	if err := fsx.WriteFileAtomic(s.path, data, 0o600); err != nil {
 		slog.Warn("brain: could not write quota file", "path", s.path, "error", err)
 	}
-}
-
-// writeFileAtomic replaces path with data by writing path+".tmp" first and renaming it over path, which is one filesystem operation within a directory. Input: the destination path and the bytes. Output: the first error from the write or the rename.
-// os.WriteFile truncates first, so a crash or power loss in the middle of one left a short file behind; load treats a short quota file as "meter from zero", which hands the whole day's free-tier allowance back.
-func writeFileAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 // take reports whether model already had cap or more requests today and, if not, records one more. It holds the state's lock for the whole read-check-write so two goroutines racing on the same model never both slip through on the last request. Input: the model name, today's cap for the caller asking (already reservation-adjusted). Output: true when the request is refused.
