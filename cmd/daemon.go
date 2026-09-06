@@ -147,14 +147,40 @@ func (v *vectorIndexAdapter) Delete(ctx context.Context, id string) error {
 
 func (v *vectorIndexAdapter) IDs() []string { return v.inner.IDs() }
 
-// brainProviderName names a configured brain for the tally counters (see internal/tally.Wrap): the config's own provider constant when it's one of the recognised CLIs, "gemini" for the default/empty/explicit-Gemini-API case.
+// brainProviderName names a configured brain for the tally counters (see internal/tally.Wrap): the config's own provider constant when it's one of the recognised providers, "gemini" for the default/empty/explicit-Gemini-API case. Codex and Ollama belong here as much as the CLIs do — left out, a machine configured for either filed every counter it kept under gemini.
 func brainProviderName(cfg config.BrainConfig) string {
 	switch cfg.Provider {
-	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI:
+	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI, config.BrainCodex, config.BrainOllama:
 		return cfg.Provider
 	default:
 		return "gemini"
 	}
+}
+
+// drainEpisodes writes every activity the tracker publishes to the store and hands the same activity to the compiler, until events is closed. Input: the daemon's root context (its cancellation is dropped here), the tracker's channel, the store's episode writer, and the compiler's Ingest or nil when no compiler was built. Output: none — a failed write is logged and the next activity is still read.
+// The cancellation is dropped because SIGTERM cancels the root context before stop() runs: every activity still in the channel, and every write already in flight, would otherwise fail with context canceled and the last minutes of a session would be lost. The context's values (the trace span) are kept.
+func drainEpisodes(ctx context.Context, events <-chan tracker.Activity, write func(context.Context, db.EpisodeWrite) (int64, error), ingest func(context.Context, tracker.Activity)) {
+	ctx = context.WithoutCancel(ctx)
+	for ev := range events {
+		if _, err := write(ctx, db.EpisodeWrite{
+			App: ev.App, Title: ev.Title, ScreenText: ev.ScreenText,
+			UserActivity: ev.UserActivity, VisibleText: ev.VisibleText, ImageJPEG: ev.ImageJPEG,
+			ExtraJPEG: ev.ExtraJPEG,
+		}); err != nil {
+			slog.Error("log episode failed", "error", err)
+		}
+		if ingest != nil {
+			ingest(ctx, ev)
+		}
+	}
+}
+
+// weeklyStudyMaterial finds what the Sunday distillation pass reads. Input: the data directory. Output: the replay transcripts and the dream traces, either of which may be empty. Replays are looked for in two places because the working directory is not the repo on every install: ora-restart pins it there, but the login autostart entry pins it to the binary's own directory and a packaged install has no evals/ at all, so <data>/replays is where a packaged install keeps them.
+func weeklyStudyMaterial(dataDir string) (replays, traces []string) {
+	repoReplays, _ := filepath.Glob("evals/replays/*.md")
+	installedReplays, _ := filepath.Glob(filepath.Join(dataDir, "replays", "*.md"))
+	traces, _ = filepath.Glob(filepath.Join(dataDir, "dreams", "*.jsonl"))
+	return append(repoReplays, installedReplays...), traces
 }
 
 // every runs fn on a ticker every interval until ctx is done — the ticker/select/ctx.Done skeleton every one of the daemon's background jobs otherwise repeated by hand. Each job's own logging/error-handling stays inside its fn closure; name is only for the stop-log line below.
@@ -172,8 +198,8 @@ func every(ctx context.Context, interval time.Duration, name string, fn func()) 
 	}
 }
 
-// closeWithin runs one shutdown step and comes back at the bound whether or not the step finished, so a step that hangs delays the daemon's exit by that bound and no more. Input: the step's name for the log line, how long it may take, and the step itself. Output: none — a step still running when its bound passes is left behind and logged, which is the right trade at shutdown: the process is about to exit and the alternative is a daemon that never releases its port.
-func closeWithin(name string, bound time.Duration, step func()) {
+// within runs one step and comes back at the bound whether or not the step finished, so a step that hangs delays the caller by that bound and no more. Input: the step's name for the log line, how long it may take, and the step itself. Output: none — a step still running when its bound passes is left behind and logged. At shutdown that is the right trade, since the process is about to exit and the alternative is a daemon that never releases its port; at startup it is the right trade because the port is already bound and nothing is accepting on it yet.
+func within(name string, bound time.Duration, step func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -184,7 +210,7 @@ func closeWithin(name string, bound time.Duration, step func()) {
 	select {
 	case <-done:
 	case <-t.C:
-		slog.Warn("a shutdown step did not finish in time and was left behind", "step", name, "bound", bound)
+		slog.Warn("a bounded step did not finish in time and was left behind", "step", name, "bound", bound)
 	}
 }
 
@@ -194,8 +220,10 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 	// port binding instance lock to prevent double spawning
 	listener, err := net.Listen("tcp", "127.0.0.1:"+DaemonPort)
 	if err != nil {
-		slog.Warn("failed to bind daemon port", "port", DaemonPort, "error", err)
-		return nil
+		// A bind failure means another daemon already holds the port, and this one must say so on stderr and exit non-zero. Returning nil made the process exit 0, so systemd called a restart a success and the /ping that followed was answered by the old daemon still running the old build.
+		fmt.Fprintf(os.Stderr, "ora: port %s is already in use, so another daemon is still running: %v\n", DaemonPort, err)
+		slog.Error("failed to bind daemon port", "port", DaemonPort, "error", err)
+		return fmt.Errorf("bind daemon port %s: %w", DaemonPort, err)
 	}
 
 	runDaemonSupervisor(ctx, listener)
@@ -235,11 +263,6 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	// The config file is the switch for start-on-login: make the on-disk login entry agree with it on every daemon start, so a config edited by hand (or an entry left behind by an older build) is corrected here rather than drifting.
 	reconcileAutostart(appConfig.Autostart)
-
-	// Names the tray mark as the desktop window's dock icon (GNOME otherwise shows a generic gear); never fatal.
-	if err := installDesktopEntry(); err != nil {
-		slog.Warn("failed to install desktop entry", "error", err)
-	}
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
 
@@ -484,8 +507,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		if err := tally.RunWeeklyLog(ctx, store, now); err != nil {
 			slog.Warn("weekly system log failed", "error", err)
 		}
-		replays, _ := filepath.Glob("evals/replays/*.md")
-		traces, _ := filepath.Glob(filepath.Join(config.DataDir(), "dreams", "*.jsonl"))
+		replays, traces := weeklyStudyMaterial(config.DataDir())
+		if len(replays) == 0 && len(traces) == 0 {
+			slog.Info("weekly distillation study skipped: no replays and no dream traces to read")
+			return nil
+		}
 		if res, err := study.Study(ctx, mainBrain, replays, traces, filepath.Join(config.DataDir(), "study")); err != nil {
 			slog.Warn("weekly distillation study failed", "error", err)
 		} else {
@@ -542,20 +568,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 	})
 
-	go func() {
-		for ev := range eventChan {
-			if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{
-				App: ev.App, Title: ev.Title, ScreenText: ev.ScreenText,
-				UserActivity: ev.UserActivity, VisibleText: ev.VisibleText, ImageJPEG: ev.ImageJPEG,
-				ExtraJPEG: ev.ExtraJPEG,
-			}); err != nil {
-				slog.Error("log episode failed", "error", err)
-			}
-			if compiler != nil {
-				compiler.Ingest(ctx, ev)
-			}
-		}
-	}()
+	var ingestEpisode func(context.Context, tracker.Activity)
+	if compiler != nil {
+		ingestEpisode = compiler.Ingest
+	}
+	go drainEpisodes(ctx, eventChan, store.WriteEpisode, ingestEpisode)
 
 	// IPC token: every handler below except /ping requires it (see requireIPCToken) — without this, any local process (or, since browsers can reach 127.0.0.1, any webpage) could read the live activity buffer, inject/wipe "memories" via /vector/add|delete, or toggle tracking. Regenerated on every startup so a leftover/stale process's copy stops working.
 	ipcToken, err := ipctoken.Generate(ipctoken.DefaultPath)
@@ -620,13 +637,17 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// press_key, click_at and scroll_at drive the keyboard and pointer through the desktop portal, which asks the user to allow remote control the first time its session opens. The session opens on the first tool call that needs it, not here, so nobody sees that dialog until a task actually has to press a key or click a point the accessibility tree cannot reach; the grant is then restored from a token in the data directory, so the dialog is asked once rather than on every restart.
 	askAgent.UsePortalInput(config.DataDir())
 	// The bundled GNOME Shell extension, when the user has installed it and logged in again, raises another application's window on request; switch_window asks it first and falls back to the shell's own search through the portal keyboard when it is not there.
+	// dbus.ConnectSessionBus has no timeout of its own and this runs while the IPC port is bound but nothing is accepting on it yet, so a wedged session bus used to hang startup past the client's ten-second readiness poll and print "daemon spawn failed: timed out" for a daemon that was merely stuck here. Two seconds is far longer than a local bus dial takes.
 	var windowRaiser *window.Raiser
-	if raiser, err := window.New(); err != nil {
-		slog.Warn("window raiser unavailable, switch_window will use the keyboard path", "error", err)
-	} else {
+	within("dialling the session bus for the window raiser", 2*time.Second, func() {
+		raiser, err := window.New()
+		if err != nil {
+			slog.Warn("window raiser unavailable, switch_window will use the keyboard path", "error", err)
+			return
+		}
 		windowRaiser = raiser
 		askAgent.UseWindowRaiser(raiser)
-	}
+	})
 	// Codex answers asks the window routes to it by calling the ChatGPT backend directly with the user's own login, running the same tools through the same gate as the Gemini text path.
 	ipcServer.AddBrain("codex", agent.CodexBrain{Agent: askAgent})
 	// Claude answers through the Claude Code command line on the user's own subscription, with Ora's tools offered to it over MCP, so working on the screen does not depend on Codex's smaller monthly allowance.
@@ -853,6 +874,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 	}()
 
+	// Names the tray mark as the desktop window's dock icon (GNOME otherwise shows a generic gear); never fatal. It runs here, after Serve, rather than on the way up: it writes a .desktop file and execs gtk-update-icon-cache, and doing that between binding the port and accepting on it meant a slow exec held every client's readiness poll on a port that was bound but answering nothing.
+	if err := installDesktopEntry(); err != nil {
+		slog.Warn("failed to install desktop entry", "error", err)
+	}
+
 	// The desktop window runs as the daemon's child, so the login entry starts one thing and stopping the daemon takes the window with it. It is started here, last, because the window reads the IPC token file once at startup: started any earlier it would read the token of the daemon that just exited, and every request it made would be refused for the life of the window.
 	runWindow(ctx, appConfig.Window)
 
@@ -860,11 +886,18 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		// Every step here gets a bound, because shutdown runs them one after another and a step that never finishes keeps the process alive holding port 6942, which is the one thing that stops the next daemon from starting.
 		// A recording in progress is closed first, before anything it depends on goes away. Nothing did this until a daemon restart on 2026-09-01 abandoned a meeting fourteen minutes in.
 		// Five seconds: this stops the audio capture, closes mic.wav and system.wav, and calls the tray's state observer, which emits over D-Bus. All of it is local and takes milliseconds; the bound is there for a wedged session bus, not for the work.
-		closeWithin("closing the running meeting recording", 5*time.Second, func() {
+		within("closing the running meeting recording", 5*time.Second, func() {
 			if meetingRecorder != nil {
 				if _, err := meetingRecorder.StopForShutdown(); err != nil {
 					slog.Warn("could not close the running meeting recording on shutdown", "error", err)
 				}
+			}
+		})
+		// The compiler's activity buffer is written out next, before the store it writes into is closed. It is otherwise flushed only on the hourly tick, so a logout or an ora-restart lost up to an hour of activity — the same loss the recorder above was given a shutdown step for on 2026-09-01.
+		// The context is Background, not the root one: SIGTERM has already cancelled the root context by the time stop() runs, and a flush started with it would fail on its first query. Ten seconds is a summarizer call plus its writes.
+		within("flushing the activity buffer", 10*time.Second, func() {
+			if compiler != nil {
+				compiler.ForceFlush(context.Background())
 			}
 		})
 		// The event streams are ended first: Shutdown waits for open handlers but never cancels their requests, so a daemon with the window connected would otherwise hold its port for the whole timeout and the next daemon could not bind.
@@ -874,16 +907,16 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		server.Shutdown(shutdownCtx)
 		// The embedding server is this process's child and must never outlive it — a stranded llama-server holds ~600 MB and the port the next daemon needs.
 		// Ten seconds: Close interrupts the child and waits up to five for it to exit before sending SIGKILL, then waits for the reap. That is its own five plus room for the kill, so this bound only fires if the child is unkillable.
-		closeWithin("stopping the embedding server", 10*time.Second, func() {
+		within("stopping the embedding server", 10*time.Second, func() {
 			textEngine.Close()
 			if embedEngine != nil {
 				embedEngine.Close()
 			}
 		})
 		// Five seconds: database/sql's Close waits for every connection in use to come back, and the daemon's background sweeps — vector reconciliation, note consolidation, episodic compaction — hold one for the length of their query. Five is long enough for a statement to finish and short enough that a sweep caught mid-flight does not keep the port bound.
-		closeWithin("closing the store", 5*time.Second, func() { store.Close() })
+		within("closing the store", 5*time.Second, func() { store.Close() })
 		// The window raiser's session-bus connection is this process's too, so it is released here rather than left to process exit. Two seconds: closing a D-Bus connection is local and takes microseconds; the bound is there for a wedged bus, not for the work.
-		closeWithin("closing the window raiser", 2*time.Second, func() {
+		within("closing the window raiser", 2*time.Second, func() {
 			if windowRaiser != nil {
 				if err := windowRaiser.Close(); err != nil {
 					slog.Warn("could not close the window raiser's bus connection", "error", err)

@@ -5,13 +5,13 @@ import (
 	"time"
 )
 
-// Shutdown runs its steps one after another, and a step that never finishes holds the process open for good: the port stays bound and the next daemon cannot start. Each step gets a bound, and closeWithin is what makes it real, so a step still running when its bound passes is left behind rather than waited on.
-func TestCloseWithin_ReturnsWhenAStepNeverFinishes(t *testing.T) {
+// Shutdown runs its steps one after another, and a step that never finishes holds the process open for good: the port stays bound and the next daemon cannot start. Each step gets a bound, and within is what makes it real, so a step still running when its bound passes is left behind rather than waited on.
+func TestWithin_ReturnsWhenAStepNeverFinishes(t *testing.T) {
 	forever := make(chan struct{})
 	defer close(forever)
 
 	start := time.Now()
-	closeWithin("a step that hangs", 20*time.Millisecond, func() { <-forever })
+	within("a step that hangs", 20*time.Millisecond, func() { <-forever })
 	elapsed := time.Since(start)
 
 	if elapsed > time.Second {
@@ -20,10 +20,10 @@ func TestCloseWithin_ReturnsWhenAStepNeverFinishes(t *testing.T) {
 }
 
 // A step that finishes must not be waited on for its whole bound: shutdown should cost what the steps cost, not the sum of their ceilings.
-func TestCloseWithin_ReturnsAsSoonAsTheStepIsDone(t *testing.T) {
+func TestWithin_ReturnsAsSoonAsTheStepIsDone(t *testing.T) {
 	ran := false
 	start := time.Now()
-	closeWithin("a step that finishes", 10*time.Second, func() { ran = true })
+	within("a step that finishes", 10*time.Second, func() { ran = true })
 	elapsed := time.Since(start)
 
 	if !ran {
