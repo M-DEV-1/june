@@ -105,7 +105,11 @@ describe("submit", () => {
     const { view: next, effect } = step(v, { kind: "submit" });
     expect(next.state).toBe("asking");
     expect(next.input).toBe("");
-    expect(next.matters[0].turns[0]).toEqual({ q: "reload the page", a: "" });
+    expect(next.matters[0].turns[0]).toEqual({
+      q: "reload the page",
+      a: "",
+      at: expect.any(Number),
+    });
     expect(effect).toEqual({ kind: "startJob", goal: "reload the page" });
   });
 

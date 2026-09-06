@@ -94,6 +94,9 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .W .prev { color: var(--mute); font-size: 15px; line-height: 1.62; letter-spacing: -.003em; display: grid; gap: 4px; opacity: .75; }
 .W .prev b { font-weight: 500; color: var(--fg); opacity: .75; }
 
+/* The quiet break the thread draws wherever one conversation lapsed and the next began (see state.ts's conversationSeparator) — a hairline rule topped with the clock time the newer conversation opened, no louder than the meta text elsewhere on the card, so it reads as a boundary and not a heading. */
+.W .conv-sep { padding-top: 10px; border-top: 1px solid var(--line); font: 400 13px/1.45 var(--mono); color: var(--mute); }
+
 /* The live step list, shown in place of the answer while an ask is still running (see main.ts's stepsHtml) — one row per tool call, in the order they ran. Every row plays a brief slide-and-fade entrance on mount (step-in), once: main.ts patches a running turn's list in place (see patchLiveSteps) rather than rebuilding it on every event, so a finished row is appended exactly once and never touched again, and this only plays for the row it is actually new for. */
 .W .steps { display: grid; gap: 8px; }
 /* DESIGN.md's text-read, the same size and rhythm every step row in the main window's own document view reads at. */
