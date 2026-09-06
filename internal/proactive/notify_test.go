@@ -419,6 +419,17 @@ func TestMaybeTaskNotices_WindowUp_SendsOnlyToTheWindow(t *testing.T) {
 	if len(sent) != 1 || sent[0].Kind != "task" || sent[0].Title != "New task from Standup" {
 		t.Errorf("window got %+v, want the one task notice", sent)
 	}
+	// A task is the one thing that can be completed or pushed to later, so its card carries the full set; the window draws what the notice names rather than assuming every notice can answer them.
+	if len(sent) == 1 && len(sent[0].Actions) != len(noticeActions) {
+		t.Errorf("task notice carried %d actions, want all %d", len(sent[0].Actions), len(noticeActions))
+	}
+
+	// Everything else reaching a window carries the one button it can answer. A routine's report is Ora saying what it found: nothing to complete, nowhere to push it to, and its card offered Done and three snoozes that all came back "Could not do that".
+	sent = nil
+	s.say(Notice{Title: "Routine", Body: "The window in front is Discord.", Kind: "routine"})
+	if len(sent) != 1 || len(sent[0].Actions) != 1 || sent[0].Actions[0].Key != actionOpen {
+		t.Errorf("routine notice carried %+v, want just Open in Ora", sent)
+	}
 	if f.count() != 0 {
 		t.Errorf("desktop got %d notifications, want none while a window is up", f.count())
 	}
@@ -452,8 +463,8 @@ func TestAct_DoesNotCloseABannerOnABadAction(t *testing.T) {
 	}
 }
 
-// TestNotify_UsesTheBusWithOpen checks the meeting-prep path (proactive.Notify) posts through the wired bus notifier, carrying a single "Open in Ora" button, once no window is listening — rather than falling straight to bare notify-send, which is what left meeting notices with no buttons at all.
-func TestNotify_UsesTheBusWithOpen(t *testing.T) {
+// TestNotify_CarriesOnlyOpen checks that a moment posted through proactive.Notify offers one button, "Open in Ora", on both surfaces it can reach: the bus notifier when no window is listening, and the window's own card when one is. Nothing posted this way has a task behind it, so Done and the three snoozes have nothing to act on — a "Transcribing meeting" card that offered them answered "Could not do that" when one was pressed.
+func TestNotify_CarriesOnlyOpen(t *testing.T) {
 	s, _, f := testScheduler(t)
 	opened := 0
 	s.SetOpenWindow(func() { opened++ })

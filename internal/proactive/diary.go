@@ -93,7 +93,7 @@ func (s *Scheduler) closeDay(ctx context.Context, now time.Time, day string) err
 	if err := s.store.SetDiaryEntry(ctx, day, "day", entry); err != nil {
 		return err
 	}
-	s.say(Notice{Title: "Day's written down", Body: firstLine(entry), Place: "days", ID: day, Kind: "close"})
+	s.say(Notice{Title: "Day's written down", Body: firstLine(entry), Place: "days", ID: day, Kind: "close", Actions: noticeActions})
 	return nil
 }
 
