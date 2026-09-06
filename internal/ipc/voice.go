@@ -153,10 +153,14 @@ func (v *VoiceSession) setState(id, state string) {
 	v.emit(id, "state", state)
 }
 
-// Start handles POST /voice/start. Input: no body. Output: 202 with JSON {"id": string} once the microphone, the speaker and the live session are up, or 409 when a session is already running (or was stopped while this call was still opening its hardware), or 500 when the audio devices cannot be opened. The session then runs in the background and everything it hears and says arrives on /events under that id.
+// Start handles POST /voice/start. Input: no body. Output: 405 for any method but POST — a GET would otherwise open the microphone; 202 with JSON {"id": string} once the microphone, the speaker and the live session are up, or 409 when a session is already running (or was stopped while this call was still opening its hardware), or 500 when the audio devices cannot be opened. The session then runs in the background and everything it hears and says arrives on /events under that id.
 //
 // The lock is held only to claim the id and to install the opened hardware, never across v.open or mic.StartCapture themselves — those reach real devices and can take a while, and Status and Stop must keep answering while they do, the same shape Dictation.Start already uses. The claim is a reservation under v.id with state "starting": Status sees a session already turning on, a second Start sees one already running, and a Stop landing during the reservation clears v.id, which the check after opening the hardware reads back to know its own start was cancelled out from under it.
 func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	v.mu.Lock()
 	if v.id != "" {
 		v.mu.Unlock()
@@ -382,8 +386,12 @@ func (v *VoiceSession) end() {
 	}
 }
 
-// Stop handles POST /voice/stop. Input: no body. Output: 200 with JSON {"active": false} once the live session has ended and the microphone and speaker are closed. Stopping when nothing is running is not an error.
+// Stop handles POST /voice/stop. Input: no body. Output: 405 for any method but POST; 200 with JSON {"active": false} once the live session has ended and the microphone and speaker are closed. Stopping when nothing is running is not an error.
 func (v *VoiceSession) Stop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	v.end()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"active": false})

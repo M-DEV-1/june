@@ -4,6 +4,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -73,7 +74,7 @@ func NewActJobs(runner *actjob.Runner) *ActJobs { return &ActJobs{runner: runner
 // actJobReadTimeout bounds the store reads a route makes, so a wedged store answers with an error rather than holding the request open.
 const actJobReadTimeout = 5 * time.Second
 
-// Start handles POST /act. Input: JSON body {"goal": string, "window": string, "brain": string, "summary_brain": string, "budget": {"wall_seconds": number, "input_tokens": number, "steps": number}} — everything but the goal optional, and an omitted part of the budget taking the default (five minutes, 200k input tokens, 40 steps). Output: 202 with {"id": string} as soon as the job is on disk; the job then runs in the daemon and its progress arrives on /events as "act" events tagged with that id. A body that will not decode, an empty goal, or a brain this daemon has no model for gets 400.
+// Start handles POST /act. Input: JSON body {"goal": string, "window": string, "brain": string, "summary_brain": string, "budget": {"wall_seconds": number, "input_tokens": number, "steps": number}} — everything but the goal optional, and an omitted part of the budget taking the default (five minutes, 200k input tokens, 40 steps). Output: 202 with {"id": string} as soon as the job is on disk; the job then runs in the daemon and its progress arrives on /events as "act" events tagged with that id. A body that will not decode, an empty goal, or a brain this daemon has no model for gets 400; a failure of the daemon's own — the store refusing the first checkpoint — gets 500.
 func (j *ActJobs) Start(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Goal         string `json:"goal"`
@@ -99,8 +100,13 @@ func (j *ActJobs) Start(w http.ResponseWriter, r *http.Request) {
 			Steps:       req.Budget.Steps,
 		},
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, actjob.ErrNoGoal), errors.Is(err, actjob.ErrUnknownBrain):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case err != nil:
+		// Everything else Start can fail on is the daemon's own: the store would not take the first checkpoint, or the id clashed with a job already running. Reporting those as 400 sends the user looking at the goal they typed.
+		fail(w, err, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

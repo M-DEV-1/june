@@ -5,6 +5,7 @@ package actjob
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -257,21 +258,27 @@ func New(store Store, exec Executor, models map[string]Model, defaultBrain strin
 	return r
 }
 
-// Start opens a job for a goal and runs it in the background. Input: a context used only for the first checkpoint write — the job itself outlives the request that asked for it — the goal in the user's own words, and the options. Output: the job's id, or an error when the goal is empty or the brain is one this daemon has no model for.
+// ErrNoGoal and ErrUnknownBrain are the two ways a caller can get Start wrong, as opposed to the ways the daemon itself can fail it (a store that will not take the checkpoint, an id that clashes with a live job). POST /act tells them apart with errors.Is to answer 400 rather than 500 — see internal/ipc/actjob.go.
+var (
+	ErrNoGoal       = errors.New("a job needs a goal")
+	ErrUnknownBrain = errors.New("no such brain")
+)
+
+// Start opens a job for a goal and runs it in the background. Input: a context used only for the first checkpoint write — the job itself outlives the request that asked for it — the goal in the user's own words, and the options. Output: the job's id, or an error: ErrNoGoal for an empty goal, ErrUnknownBrain for a brain this daemon has no model for, and anything else for a failure of the daemon's own.
 func (r *Runner) Start(ctx context.Context, goal string, opts Opts) (string, error) {
 	if strings.TrimSpace(goal) == "" {
-		return "", fmt.Errorf("a job needs a goal")
+		return "", ErrNoGoal
 	}
 	brain := opts.Brain
 	if brain == "" {
 		brain = r.brain
 	}
 	if _, ok := r.models[brain]; !ok {
-		return "", fmt.Errorf("no brain called %q; this daemon has %s", brain, r.brainNames())
+		return "", fmt.Errorf("%w called %q; this daemon has %s", ErrUnknownBrain, brain, r.brainNames())
 	}
 	if opts.SummaryBrain != "" {
 		if _, ok := r.models[opts.SummaryBrain]; !ok {
-			return "", fmt.Errorf("no summary brain called %q; this daemon has %s", opts.SummaryBrain, r.brainNames())
+			return "", fmt.Errorf("%w for the summary: %q; this daemon has %s", ErrUnknownBrain, opts.SummaryBrain, r.brainNames())
 		}
 	}
 	job := Job{

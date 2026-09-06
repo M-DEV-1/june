@@ -78,7 +78,7 @@ func firstRunSteps(v FirstRunView) []string {
 	}
 }
 
-// LiveConfig is the daemon's loaded config as the request goroutines see it: every read hands back a copy of the struct taken under the lock, and the one field a request can change is written under that same lock, so POST /settings and the GET /brains and GET /usage handlers reading the same setting are not touching one struct from several goroutines at once. ponytail: one mutex over the whole config, not per-field — these are a handful of requests a minute. POST /brains still writes cfg.Brain on the same struct without taking this lock (see ipc.Brains); the upgrade path is handing Brains this accessor too.
+// LiveConfig is the daemon's loaded config as the request goroutines see it: every read hands back a copy of the struct taken under the lock, and the one field a request can change is written under that same lock, so POST /settings and the GET /brains and GET /usage handlers reading the same setting are not touching one struct from several goroutines at once. ponytail: one mutex over the whole config, not per-field — these are a handful of requests a minute.
 type LiveConfig struct {
 	mu   sync.Mutex
 	cfg  *config.OraConfig
