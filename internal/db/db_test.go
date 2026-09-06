@@ -29,31 +29,6 @@ func memStore(t *testing.T) *db.Store {
 	return store
 }
 
-// t param is test controller. object to provide methods to control the flow of the test + reporting
-func TestStore_Notes_DeleteAndDedupe(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	id, _ := store.LogNote(ctx, "user works at Acme ESG", "fact")
-
-	// re-logging same content + kind is a no-op (idempotent)
-	id2, err := store.LogNote(ctx, "user works at Acme ESG", "fact")
-	if err != nil {
-		t.Fatalf("LogNote dedupe: %v", err)
-	}
-	if id2 != id {
-		t.Errorf("expected idempotent insert to return same id, got %d != %d", id2, id)
-	}
-
-	if err := store.DeleteNote(ctx, id); err != nil {
-		t.Fatalf("DeleteNote: %v", err)
-	}
-
-	notes, _ := store.GetNotes(ctx)
-	if len(notes) != 0 {
-		t.Fatalf("want 0 notes after delete, got %d", len(notes))
-	}
-}
 
 // TestStore_LogNote_NormalizesCaseAndWhitespaceForDedup proves the fix for the "paraphrased restatement creates a duplicate row" problem: LogNote used to dedupe on an exact (content, kind) match only, so re-logging the same fact with different casing/whitespace created a second row instead of reconciling. Content is now normalized (trimmed, whitespace collapsed, lowercased) before the dedup check.
 func TestStore_LogNote_NormalizesCaseAndWhitespaceForDedup(t *testing.T) {
@@ -2087,8 +2062,8 @@ func TestFormatHit_EpisodeProvenance_TableShapes(t *testing.T) {
 	}
 }
 
-// TestRetrieveRelevant_EmptyFocus_ReturnsNilWithoutSearching verifies an empty focus returns nil directly instead of substituting the literal string "recent context" and running a real search for those words — which could spuriously match unrelated stored content that happens to contain "recent" and "context".
-func TestRetrieveRelevant_EmptyFocus_ReturnsNilWithoutSearching(t *testing.T) {
+// TestRetrieveRelevant_EmptyFocus_SkipsLiteralMatch verifies that an empty focus skips running relevance searches (for RetrieveRelevant, RelevantNotes, and GetImplicitContext) rather than substituting literal strings like "recent context" that would spuriously match unrelated stored notes.
+func TestRetrieveRelevant_EmptyFocus_SkipsLiteralMatch(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
@@ -2096,51 +2071,37 @@ func TestRetrieveRelevant_EmptyFocus_ReturnsNilWithoutSearching(t *testing.T) {
 		t.Fatalf("LogNote: %v", err)
 	}
 
-	out, err := store.RetrieveRelevant(ctx, "", 4)
-	if err != nil {
-		t.Fatalf("RetrieveRelevant: %v", err)
-	}
-	if out != nil {
-		t.Errorf("expected nil for an empty focus, got %v", out)
-	}
-}
-
-// TestRelevantNotes_EmptyFocus_ReturnsNilWithoutSearching is the same property for RelevantNotes.
-func TestRelevantNotes_EmptyFocus_ReturnsNilWithoutSearching(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	if _, err := store.LogNote(ctx, "stayed in a very recent context of debugging", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	out, err := store.RelevantNotes(ctx, "", 4)
-	if err != nil {
-		t.Fatalf("RelevantNotes: %v", err)
-	}
-	if out != nil {
-		t.Errorf("expected nil for an empty focus, got %v", out)
-	}
-}
-
-// TestGetImplicitContext_NoWorkingStateNoRecentTasks_SkipsRelevanceSearch verifies a cold-start store (no working_state, no recent task nodes) never runs the old literal "recent context" relevance search — proven by a note containing exactly those words that the buggy search would have matched, but which the fixed code must not surface via relevance at all.
-func TestGetImplicitContext_NoWorkingStateNoRecentTasks_SkipsRelevanceSearch(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	if _, err := store.LogNote(ctx, "stayed in a very recent context of debugging", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	branch, err := store.GetImplicitContext(ctx)
-	if err != nil {
-		t.Fatalf("GetImplicitContext: %v", err)
-	}
-	for _, line := range branch {
-		if strings.Contains(line, "stayed in a very recent context of debugging") {
-			t.Errorf("expected the placeholder-matching note NOT to surface via relevance search, got it in branch: %v", branch)
+	t.Run("RetrieveRelevant", func(t *testing.T) {
+		out, err := store.RetrieveRelevant(ctx, "", 4)
+		if err != nil {
+			t.Fatalf("RetrieveRelevant: %v", err)
 		}
-	}
+		if out != nil {
+			t.Errorf("expected nil for empty focus, got %v", out)
+		}
+	})
+
+	t.Run("RelevantNotes", func(t *testing.T) {
+		out, err := store.RelevantNotes(ctx, "", 4)
+		if err != nil {
+			t.Fatalf("RelevantNotes: %v", err)
+		}
+		if out != nil {
+			t.Errorf("expected nil for empty focus, got %v", out)
+		}
+	})
+
+	t.Run("GetImplicitContext", func(t *testing.T) {
+		branch, err := store.GetImplicitContext(ctx)
+		if err != nil {
+			t.Fatalf("GetImplicitContext: %v", err)
+		}
+		for _, line := range branch {
+			if strings.Contains(line, "stayed in a very recent context of debugging") {
+				t.Errorf("placeholder-matching note must not surface in branch: %v", branch)
+			}
+		}
+	})
 }
 
 // TestNew_RestrictsDirectoryAndFilePermissions verifies db.New locks down the db directory to 0700 and the main db file to 0600 — the user's entire captured memory shouldn't default to world-readable (0755 dir / 0644 file) on a multi-user machine. POSIX permission bits don't map on Windows, so this is skipped there.
@@ -2341,7 +2302,7 @@ func TestNoteConsolidation_LeavesOtherKindsAlone(t *testing.T) {
 	}
 
 	llm := &fixedConsolidator{out: []string{"the user knows a handful of things", "the user ships software"}}
-	if err := memory.NewNoteCompactor(llm, store).Compact(ctx); err != nil {
+	if err := db.NewNoteCompactor(llm, store).Compact(ctx); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
 
@@ -2600,3 +2561,4 @@ func TestDeleteNote_MissingID_Errors(t *testing.T) {
 		t.Error("expected an error deleting a nonexistent note id, got nil")
 	}
 }
+

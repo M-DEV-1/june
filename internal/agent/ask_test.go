@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,8 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"ora/internal/config"
 	"ora/internal/db"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -376,10 +378,10 @@ func TestHistoryFromTurns_DropsOldestWhenTheThreadIsTooBig(t *testing.T) {
 		t.Errorf("history is %d bytes, over the cap of %d", total, maxHistoryBytes)
 	}
 	if !strings.HasPrefix(textOf(got[len(got)-1]), "newest") {
-		t.Errorf("the newest turn must survive, last kept = %q", oratext.Runes(textOf(got[len(got)-1]), 20))
+		t.Errorf("the newest turn must survive, last kept = %q", util.Runes(textOf(got[len(got)-1]), 20))
 	}
 	if strings.HasPrefix(textOf(got[0]), "oldest") {
-		t.Errorf("the oldest turn should have been dropped first, first kept = %q", oratext.Runes(textOf(got[0]), 20))
+		t.Errorf("the oldest turn should have been dropped first, first kept = %q", util.Runes(textOf(got[0]), 20))
 	}
 
 	long := HistoryFromTurns([]db.Turn{{Role: "ora", Text: strings.Repeat("y", maxHistoryTurnBytes*2), Kind: "ask"}})
@@ -1017,3 +1019,28 @@ func TestHandshakeInstruction_EverythingStableComesBeforeAnythingThatChanges(t *
 		}
 	}
 }
+
+// On 2026-09-04 gemini-3.5-flash-lite answered 503 UNAVAILABLE ("high demand") for a whole evening and every ask through the window died with it. A 503 is the one failure a second model can answer; everything else (a bad key, a bad request, a cancelled context) would fail the same way on any model and must not be retried.
+func TestShouldFallBack_OnlyOnUnavailable(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"503":         {genai.APIError{Code: 503, Status: "UNAVAILABLE"}, true},
+		"503 pointer": {&genai.APIError{Code: 503}, true},
+		"wrapped 503": {fmt.Errorf("ask text: generate (iteration 0): %w", genai.APIError{Code: 503}), true},
+		"429":         {genai.APIError{Code: 429, Status: "RESOURCE_EXHAUSTED"}, false},
+		"400":         {genai.APIError{Code: 400}, false},
+		"plain":       {errors.New("dial tcp: connection refused"), false},
+		"nil":         {nil, false},
+	}
+	for name, c := range cases {
+		if got := shouldFallBack(c.err); got != c.want {
+			t.Errorf("%s: shouldFallBack = %v, want %v", name, got, c.want)
+		}
+	}
+	if config.TextFallbackModel == "" || config.TextFallbackModel == config.TextModel {
+		t.Errorf("TextFallbackModel = %q, want a model other than TextModel %q", config.TextFallbackModel, config.TextModel)
+	}
+}
+
