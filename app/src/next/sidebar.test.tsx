@@ -224,7 +224,7 @@ describe("a live notice's own buttons", () => {
     expect(screen.getByRole("button", { name: "Tomorrow — Still open" })).toBeDefined();
   });
 
-  it("takes the buttons away and says so when the daemon will not act on the notice", async () => {
+  it("keeps the card up and says so on it when the daemon will not act on the notice", async () => {
     const { store } = renderApp({ conversations: conversations(), fails: ["POST /notices/task/task-42/action"] });
     await row("Flights to Zurich");
     store.dispatch(
@@ -235,10 +235,11 @@ describe("a live notice's own buttons", () => {
       }),
     );
 
-    // The daemon answers 404 for a notice whose task has already been closed elsewhere, and it sends no echo notice back, so nothing else would ever clear these buttons.
+    // A press that did not take is one quiet line in the same card (DESIGN.md rule 18), the way the hover window says it: the card stays up and the buttons can be pressed again, since the press is the thing that failed, not the notice.
     await userEvent.click(await screen.findByRole("button", { name: /^Done/ }));
-    expect(await screen.findByText("Could not do that to that notice")).toBeDefined();
-    expect(screen.queryByRole("button", { name: /^1 h/ })).toBeNull();
+    expect(await screen.findByText("Could not do that")).toBeDefined();
+    expect(screen.getByRole("button", { name: /^1 h/ })).toBeDefined();
+    expect(store.getState().ui.liveNotice).toBeDefined();
   });
 
   it("offers Done alongside the snooze buttons for a task, but only the snooze buttons for a routine", async () => {

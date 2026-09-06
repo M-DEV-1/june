@@ -1,6 +1,6 @@
 /** The one rail every screen shares: New chat, a search over the conversations, the conversations themselves under their date headings with a menu on each row, and the rows at the foot that lead to Tasks, Meetings, Days and Settings. Clicking a conversation from any screen is the way back to Chats, and clicking the lit foot row is the way back too, which is the behaviour the current window settled on. */
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Calendar, ListTodo, MoreHorizontal, Pencil, Plus, Repeat, Search, Settings as SettingsIcon, Trash2, Video } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -51,15 +51,17 @@ export function AppSidebar() {
   const [actOnNotice] = useActOnNoticeMutation();
   const list = useRef<HTMLDivElement>(null);
 
-  /** Presses one of the live notice's own buttons. The daemon's answer comes back as the same "notice" event a desktop press produces (see reactToNotice in store.ts), which is what replaces these buttons with the rail line's plain text. A refusal sends no such event — the daemon answers 404 for a notice whose task has already been closed elsewhere and returns before it would echo anything — so the buttons are taken away here instead, with one line saying why. */
+  /** Whether the last press on the live notice's buttons did not go through. Cleared whenever the card is showing a different notice, so the line belongs to the notice it was said about and to no other. */
+  const [pressFailed, setPressFailed] = useState(false);
+  useEffect(() => setPressFailed(false), [liveNotice?.kind, liveNotice?.id]);
+
+  /** Presses one of the live notice's own buttons. The daemon's answer comes back as the same "notice" event a desktop press produces (see reactToNotice in store.ts), which is what replaces these buttons with the rail line's plain text. A refusal sends no such event — the daemon answers 404 for a notice whose task has already been closed elsewhere and returns before it would echo anything — so it is said as one quiet line on the card itself (DESIGN.md rule 18), which stays up with its buttons: the press is what failed, not the notice, and the hover window keeps its own card up for the same reason (noticeFailed in src/main.ts). */
   const act = (action: "done" | "hour" | "evening" | "tomorrow") => {
     if (!liveNotice) return;
+    setPressFailed(false);
     void actOnNotice({ ...liveNotice, action })
       .unwrap()
-      .catch(() => {
-        dispatch(ui.liveNoticeSet(undefined));
-        dispatch(ui.noticed("Could not do that to that notice"));
-      });
+      .catch(() => setPressFailed(true));
   };
 
   const now = new Date();
@@ -115,6 +117,11 @@ export function AppSidebar() {
                 Tomorrow
               </Button>
             </div>
+            {pressFailed ? (
+              <p role="status" className="text-meta text-muted-foreground">
+                Could not do that
+              </p>
+            ) : null}
           </div>
         ) : notice ? (
           <p role="status" className="px-1 text-meta text-destructive group-data-[collapsible=icon]:hidden">
