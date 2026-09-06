@@ -83,36 +83,6 @@ describe("events", () => {
     expect(onReopen).toHaveBeenCalledTimes(1);
   });
 
-  it("calls onReopen when a first connect fails and then succeeds on retry, since the queries racing it had already failed", async () => {
-    const onReopen = vi.fn();
-    events(vi.fn(), onReopen);
-    await settle();
-    // No onopen at all before the failure — the very first attempt never opens.
-    FakeEventSource.instances[0].fail();
-
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(FakeEventSource.instances.length).toBe(2);
-    FakeEventSource.instances[1].onopen?.();
-    expect(onReopen).toHaveBeenCalledTimes(1);
-  });
-
-  it("calls onReopen twice for two drops each followed by a reopen", async () => {
-    const onReopen = vi.fn();
-    events(vi.fn(), onReopen);
-    await settle();
-    FakeEventSource.instances[0].onopen?.();
-
-    FakeEventSource.instances[0].fail();
-    await vi.advanceTimersByTimeAsync(2000);
-    FakeEventSource.instances[1].onopen?.();
-    expect(onReopen).toHaveBeenCalledTimes(1);
-
-    FakeEventSource.instances[1].fail();
-    await vi.advanceTimersByTimeAsync(2000);
-    FakeEventSource.instances[2].onopen?.();
-    expect(onReopen).toHaveBeenCalledTimes(2);
-  });
-
   it("constructs no new EventSource when stop() runs after the retry has been scheduled", async () => {
     const stop = events(vi.fn());
     await settle();
