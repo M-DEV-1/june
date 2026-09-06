@@ -355,6 +355,9 @@ func UserMeetingActions(items []ActionItem, identity string) []ActionItem {
 // completionVerbs are the words that say a piece of work actually happened. "Deploy" and "review" are not among them: they name the work, not its end.
 var completionVerbs = []string{"done", "finished", "completed", "complete", "merged", "pushed", "deployed", "shipped", "landed", "closed", "resolved", "delivered", "sent", "fixed", "wrote", "ran"}
 
+// negationWords are the words that turn a completion verb into a report that the work has not happened, when one of them comes before the verb in the same sentence: "not done yet", "isn't merged", "still not shipped".
+var negationWords = []string{"not", "isn't", "isnt", "never", "still", "yet"}
+
 // evidenceStopwords are words too common to count as naming a particular task.
 var evidenceStopwords = []string{"the", "and", "with", "that", "this", "from", "into", "then", "than", "when", "what", "which", "have", "been", "will", "should", "would", "about", "over", "only", "more", "some", "other", "their", "them", "they", "there", "before", "after", "today", "work"}
 
@@ -365,7 +368,7 @@ var referenceNumber = regexp.MustCompile(`#\d+`)
 var sentenceBreak = regexp.MustCompile(`[.;\n!?]+`)
 
 // EvidenceCloses reports whether a piece of later writing says this item's work is finished. Input: the item, and the text of a meeting summary, a day's page or a compiled note. Output: true when one sentence of it both names the work and says it happened.
-// Naming the work means either the same pull request or ticket number the item names, or at least half of the item's distinctive words, never fewer than two. A sentence that names the work without a completion verb, or carries a completion verb about something else, closes nothing.
+// Naming the work means either the same pull request or ticket number the item names, matched whole so "#123" does not answer for "#12", or at least half of the item's distinctive words, never fewer than two. A sentence that names the work without a completion verb, or carries a completion verb about something else, closes nothing, and neither does one that negates the verb ("not done yet", "isn't merged").
 func EvidenceCloses(a ActionItem, evidence string) bool {
 	want := distinctiveWords(a.Text)
 	refs := referenceNumber.FindAllString(a.Text, -1)
@@ -377,11 +380,16 @@ func EvidenceCloses(a ActionItem, evidence string) bool {
 		for i := range words {
 			words[i] = strings.Trim(words[i], ".,;:—-()[]*`\"'")
 		}
-		if !containsAnyWord(words, completionVerbs) {
+		verb := firstWordIn(words, completionVerbs)
+		if verb < 0 {
+			continue
+		}
+		// "PR #412 is not done yet" names the work and carries a completion verb, and used to close the item on both halves. A negation in front of the verb is the sentence saying the opposite.
+		if neg := firstWordIn(words, negationWords); neg >= 0 && neg < verb {
 			continue
 		}
 		for _, ref := range refs {
-			if strings.Contains(sentence, ref) {
+			if namesRef(sentence, ref) {
 				return true
 			}
 		}
@@ -398,12 +406,28 @@ func EvidenceCloses(a ActionItem, evidence string) bool {
 	return false
 }
 
-// containsAnyWord reports whether any of wanted appears in words as a whole word.
-func containsAnyWord(words, wanted []string) bool {
-	for _, w := range words {
+// firstWordIn reports where the first of wanted appears in words, as a whole word. Input: one sentence's words, already lower-cased and stripped of punctuation, and the words being looked for. Output: the index in words, or -1 when none of them is there.
+func firstWordIn(words, wanted []string) int {
+	for i, w := range words {
 		if slices.Contains(wanted, w) {
+			return i
+		}
+	}
+	return -1
+}
+
+// namesRef reports whether a sentence names one reference number exactly. Input: the sentence as written, and a reference such as "#12". Output: true when the sentence carries it with no further digit after it, so a sentence about "#123" does not answer for "#12".
+func namesRef(sentence, ref string) bool {
+	for i := 0; i+len(ref) <= len(sentence); {
+		j := strings.Index(sentence[i:], ref)
+		if j < 0 {
+			return false
+		}
+		end := i + j + len(ref)
+		if end == len(sentence) || sentence[end] < '0' || sentence[end] > '9' {
 			return true
 		}
+		i = end
 	}
 	return false
 }

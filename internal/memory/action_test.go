@@ -344,6 +344,37 @@ func TestEvidenceCloses(t *testing.T) {
 	}
 }
 
+// TestEvidenceClosesNeedsTheWholeReferenceNumber pins that a reference is matched whole: "#12" is a different piece of work from "#123", and a sentence about the longer one must not close the shorter one.
+func TestEvidenceClosesNeedsTheWholeReferenceNumber(t *testing.T) {
+	item := ActionItem{Owner: "Me", Text: "review #12."}
+	if EvidenceCloses(item, "Merged #123 this morning.") {
+		t.Error("EvidenceCloses closed #12 on a sentence about #123, want the reference matched whole")
+	}
+	if !EvidenceCloses(item, "Merged #12 this morning.") {
+		t.Error("EvidenceCloses did not close #12 on a sentence about #12")
+	}
+}
+
+// TestEvidenceClosesIgnoresANegatedSentence pins that a sentence saying the work has not happened closes nothing: "not done yet" carries a completion verb and the item's own words, and used to be read as the work being finished.
+func TestEvidenceClosesIgnoresANegatedSentence(t *testing.T) {
+	item := ActionItem{Owner: "Me", Text: "deploy the Value Chain risk-statements PR (#5632)."}
+	cases := []struct {
+		name     string
+		evidence string
+	}{
+		{"a reference said not to be done", "PR #5632 is not done yet."},
+		{"the work named and said to be unfinished", "The Value Chain risk-statements deploy is still not finished."},
+		{"a contraction", "The Value Chain risk-statements deploy isn't finished."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if EvidenceCloses(item, c.evidence) {
+				t.Errorf("EvidenceCloses(%q) closed the item, want a negated sentence to close nothing", c.evidence)
+			}
+		})
+	}
+}
+
 func TestActionItem_DoneSourceRoundTrip(t *testing.T) {
 	a := ActionItem{Owner: "Me", Text: "deploy the PR", Status: StatusDone, Priority: PriorityNormal, DoneSource: "Daily AI Sprint Standup 2026-09-04", Source: "standup", Raised: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)}
 	back, ok := ParseAction(a.Note())
