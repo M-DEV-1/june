@@ -11,6 +11,7 @@ import (
 
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 const (
@@ -104,7 +105,7 @@ func addPrunableRun(t *testing.T, store *db.Store, question, outcome string, age
 // The stage prunes conversations first and act runs second. The order is the policy's: the procedures stage that ran a moment ago writes the notes that make the store keep an act run for good, and the conversation pass is the one that can never take anything the user said, so it goes first and the count-capped table goes last.
 func TestPruneStageRunsConversationsBeforeActRuns(t *testing.T) {
 	ctx := context.Background()
-	store := &countingStore{Store: testStore(t)}
+	store := &countingStore{Store: dbtest.Open(t)}
 	r, _ := pruneRunner(store)
 
 	if _, err := r.pruneStage(ctx); err != nil {
@@ -145,7 +146,7 @@ func TestPruneStageStopsWhenTheStoreCannotBeReached(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			store := &countingStore{Store: testStore(t)}
+			store := &countingStore{Store: dbtest.Open(t)}
 			c.fail(store)
 			r, _ := pruneRunner(store)
 
@@ -166,7 +167,7 @@ func TestPruneStageStopsWhenTheStoreCannotBeReached(t *testing.T) {
 // The report carries both halves of what the night should log: what each pass removed, and what the policy held back. Three conversations and five act runs go in, one of each is removable, and every other number names the rule that saved a row.
 func TestPruneStageReportsWhatItRemovedAndKept(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	spokenIn, err := store.CreateConversation(ctx, "what did priya ask about", "claude")
 	if err != nil {
@@ -228,7 +229,7 @@ func TestPruneStageRunsOnceANight(t *testing.T) {
 	night := at(23, 30).Format(dayFormat)
 
 	t.Run("a night that has not pruned yet does, and commits the token", func(t *testing.T) {
-		store := &countingStore{Store: testStore(t)}
+		store := &countingStore{Store: dbtest.Open(t)}
 		if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 			t.Fatal(err)
 		}
@@ -265,7 +266,7 @@ func TestPruneStageRunsOnceANight(t *testing.T) {
 	})
 
 	t.Run("a night that already pruned does not prune again", func(t *testing.T) {
-		store := &countingStore{Store: testStore(t)}
+		store := &countingStore{Store: dbtest.Open(t)}
 		if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 			t.Fatal(err)
 		}
@@ -288,7 +289,7 @@ func TestPruneStageRunsOnceANight(t *testing.T) {
 func TestPruneStageLeavesTheTokenOffWhenItFails(t *testing.T) {
 	ctx := context.Background()
 	night := at(23, 30).Format(dayFormat)
-	store := &countingStore{Store: testStore(t)}
+	store := &countingStore{Store: dbtest.Open(t)}
 	store.pruneConversationsErr = errors.New("database is locked")
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
@@ -309,7 +310,7 @@ func TestPruneStageLeavesTheTokenOffWhenItFails(t *testing.T) {
 // The retention numbers a live Runner prunes with come from the config file, not from anything chosen in this package: an unwritten config yields the two documented defaults.
 func TestRetentionComesFromTheConfig(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	store := testStore(t)
+	store := dbtest.Open(t)
 	b := &fakeBrain{}
 	r := New(store, b.fn, yesProbes(), 23, 9)
 
@@ -325,7 +326,7 @@ func TestRetentionComesFromTheConfig(t *testing.T) {
 // A config edit takes effect on the very next night, with no restart: r.retention is configRetention, which calls config.LoadConfig fresh every time it is called rather than reading a value cached at Runner construction. This test proves that end to end on one live Runner — write the config once, read retention, edit the config file on disk, read retention again on the same Runner — rather than trusting the wiring by inspection.
 func TestRetention_SeesAConfigEditWithoutRestart(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	store := testStore(t)
+	store := dbtest.Open(t)
 	r := New(store, (&fakeBrain{}).fn, yesProbes(), 23, 9)
 
 	if err := config.SaveConfig(config.OraConfig{ActRunKeep: 500, ActRunFailedKeepDays: 10}); err != nil {

@@ -17,10 +17,11 @@ import (
 	"time"
 )
 
-// memStore opens a throwaway in-memory store that is closed when the test ends.
+// memStore opens a throwaway store in a fresh temp directory that is closed when the test ends.
+// File-backed rather than ":memory:" because a second connection against ":memory:" sees an empty, unrelated database in database/sql plus modernc/sqlite, which breaks any test that queries concurrently or reopens the store.
 func memStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.New(":memory:")
+	store, err := db.New(filepath.Join(t.TempDir(), "db"))
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}

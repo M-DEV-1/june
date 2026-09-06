@@ -12,6 +12,7 @@ import (
 
 	"ora/internal/agent"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // newWindowServer wires a Server behind a real HTTP server with the conversation, task and day routes registered under the same patterns cmd/daemon.go gives them, so the path values ({id}, {date}) resolve exactly as they do in the daemon.
@@ -65,7 +66,7 @@ func patchJSON(t *testing.T, srv *httptest.Server, path, body string) int {
 }
 
 func TestConversationsEmptyListIsNotNull(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 
 	var raw json.RawMessage
@@ -76,7 +77,7 @@ func TestConversationsEmptyListIsNotNull(t *testing.T) {
 }
 
 func TestCreateAndReadConversation(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 
 	var created struct{ ID string }
@@ -113,7 +114,7 @@ func TestCreateAndReadConversation(t *testing.T) {
 }
 
 func TestConversationMissingIs404(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 	resp, err := http.Get(srv.URL + "/conversations/999")
 	if err != nil {
@@ -127,7 +128,7 @@ func TestConversationMissingIs404(t *testing.T) {
 
 // TestAskStoresTurns checks the whole contract /ask gained: an ask with no conversation opens one titled from the question's first eight words, both turns are stored with the answer's evidence and tool names, and the answer event carries the conversation id.
 func TestAskStoresTurns(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	asker := &fakeAsker{trace: agent.TurnTrace{
 		Answer:   "at half past four",
 		ToolHops: []agent.ToolHop{{Name: "query_memory"}},
@@ -190,7 +191,7 @@ func TestAskStoresTurns(t *testing.T) {
 
 // TestAskJoinsAnExistingConversation checks that an ask naming a conversation appends to it instead of opening another.
 func TestAskJoinsAnExistingConversation(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{trace: agent.TurnTrace{Answer: "yes"}}, store)
 
 	var created struct{ ID string }
@@ -224,7 +225,7 @@ func TestAskJoinsAnExistingConversation(t *testing.T) {
 
 // TestConversationErrorTurnCarriesAReason checks that a failed turn's stored error text is summarised as a plain reason on GET /conversations/{id}, and that the same reason stands in for the raw error on GET /conversations' "last".
 func TestConversationErrorTurnCarriesAReason(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	id, err := store.CreateConversation(ctx, "flaky", "")
 	if err != nil {
@@ -281,7 +282,7 @@ func TestErrorReason(t *testing.T) {
 
 // TestConversationTitle checks the rename route: a good title sticks and answers 204, a blank one is refused, and renaming a conversation that does not exist is 404.
 func TestConversationTitle(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 
 	var created struct{ ID string }
@@ -306,7 +307,7 @@ func TestConversationTitle(t *testing.T) {
 
 // TestConversationDelete checks the DELETE route: 204 on success, the conversation is then unreadable, and deleting it again (or one that never existed) is 404.
 func TestConversationDelete(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 
 	var created struct{ ID string }
@@ -363,7 +364,7 @@ func TestTitleFromQuestion(t *testing.T) {
 
 // TestAskWithAStaleConversationIs404 checks that an ask naming a conversation that no longer exists is refused rather than accepted: AddTurn refuses the orphan turn, so answering 202 would draw an answer the window loses the moment it reloads.
 func TestAskWithAStaleConversationIs404(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{trace: agent.TurnTrace{Answer: "yes"}}, store)
 
 	var created struct{ ID string }

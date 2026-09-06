@@ -5,11 +5,13 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"ora/internal/db/dbtest"
 )
 
 // A tray click reaches the window as an event on the stream it is already reading, so the daemon needs no second channel to the window it started.
 func TestWindow_BroadcastsTheInstruction(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
 
@@ -32,7 +34,7 @@ func TestWindow_BroadcastsTheInstruction(t *testing.T) {
 
 // An action the daemon does not know is refused with the ones it does, rather than broadcast for the window to puzzle over.
 func TestWindow_RefusesAnUnknownAction(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
 

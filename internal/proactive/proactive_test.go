@@ -13,19 +13,9 @@ import (
 
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 )
-
-// testStore opens a throwaway in-memory store that is closed when the test ends.
-func testStore(t *testing.T) *db.Store {
-	t.Helper()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
 
 // notification is one captured notify call.
 type notification struct {
@@ -37,7 +27,7 @@ type notification struct {
 // TestScheduler_Close_WritesDiaryUnderstandingAndNotifies is the tracer bullet for the evening close: with activity today, past the close hour, one tick must produce a diary entry grounded in the assembled material, a rewritten understanding doc, and exactly one notification carrying the entry's first line — and a second tick must do nothing more.
 func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	if _, err := store.LogEpisode(ctx, "code", "ora — diary.go", "building the diary seam"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
@@ -102,7 +92,7 @@ func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 // TestScheduler_Close_WaitsForCloseHour verifies the close does nothing before the configured hour. The hour gate is checked before any store read, so a fully fake clock is safe here.
 func TestScheduler_Close_WaitsForCloseHour(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -124,7 +114,7 @@ func TestScheduler_Close_WaitsForCloseHour(t *testing.T) {
 // TestScheduler_Close_RequiresActivityToday verifies a day with no episodes at all is not closed — there is nothing to write about, and an idle machine must not diary about it every evening.
 func TestScheduler_Close_RequiresActivityToday(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	calls := 0
 	s := New(store, func(ctx context.Context, prompt string) (string, error) { calls++; return "entry", nil },
@@ -143,7 +133,7 @@ func TestScheduler_Close_RequiresActivityToday(t *testing.T) {
 // TestScheduler_Close_RetriesAfterBrainFailure verifies a failed close leaves no partial state and succeeds on a later tick once the brain recovers and the backoff its failure earned has passed.
 func TestScheduler_Close_RetriesAfterBrainFailure(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -178,7 +168,7 @@ func TestScheduler_Close_RetriesAfterBrainFailure(t *testing.T) {
 // TestScheduler_Brief_DeliversOncePerDay is the tracer bullet for the morning brief: past the brief hour with fresh activity, one tick must deliver a brief built from the minutes and yesterday's entry, record its marker, and never deliver again that day.
 func TestScheduler_Brief_DeliversOncePerDay(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
@@ -226,7 +216,7 @@ func TestScheduler_Brief_DeliversOncePerDay(t *testing.T) {
 // TestScheduler_Brief_WaitsForUserActivity verifies the brief holds until an episode shows the user is actually present, so it lands when they sit down instead of at an empty desk.
 func TestScheduler_Brief_WaitsForUserActivity(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	calls := 0
 	s := New(store, func(ctx context.Context, prompt string) (string, error) { calls++; return "brief", nil },
@@ -250,7 +240,7 @@ func lastSunday(base time.Time) time.Time {
 // TestScheduler_WeeklyStudy_FiresOnceOnSunday is the tracer bullet for the Sunday trigger: past the brief hour, on a Sunday, with fresh activity, one tick must call the wired weeklyStudy func exactly once and write the once-per-Sunday marker, and a second tick must not call it again.
 func TestScheduler_WeeklyStudy_FiresOnceOnSunday(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	sunday := lastSunday(time.Now())
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
@@ -290,7 +280,7 @@ func TestScheduler_WeeklyStudy_FiresOnceOnSunday(t *testing.T) {
 // TestScheduler_WeeklyStudy_NeverFiresOnANonSunday verifies the same hour/activity conditions on any other day of the week never call weeklyStudy — it is strictly a Sunday-only trigger.
 func TestScheduler_WeeklyStudy_NeverFiresOnANonSunday(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	monday := lastSunday(time.Now()).AddDate(0, 0, 1)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
@@ -313,7 +303,7 @@ func TestScheduler_WeeklyStudy_NeverFiresOnANonSunday(t *testing.T) {
 // TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking verifies a failing weeklyStudy does not write the once-per-Sunday marker, so the pass is tried again rather than recorded as done. It backs off like the close and the brief instead: the next tick inside the wait does nothing, and the first tick past it runs the study again.
 func TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	sunday := lastSunday(time.Now())
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
@@ -355,7 +345,7 @@ func TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking(t *testing.T) {
 // TestScheduler_WeeklyStudy_MarksDoneWhenNothingWasThereToRead verifies the "nothing to read" nil — cmd/daemon.go returns it when the machine has no replays and no dream traces — still writes the marker, since there is nothing to retry.
 func TestScheduler_WeeklyStudy_MarksDoneWhenNothingWasThereToRead(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 
 	sunday := lastSunday(time.Now())
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
@@ -392,7 +382,7 @@ func openItem(t *testing.T, store *db.Store, owner, text string, priority string
 // An open action item reaches the brief however old the meeting that raised it is. This is the whole point of lifting action items out of the minutes: the minutes fall out of briefMinutesWindow after three days, and an owed task must not vanish with them.
 func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +410,7 @@ func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 // A closed item stops appearing. This is what a correction has to buy the user: saying something is done makes it go away.
 func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +436,7 @@ func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
 // An item that has sat open for a while is asked about rather than restated: the user said they would rather be asked "were you able to make any progress here?" and answer, than be told the same thing every morning.
 func TestScheduler_Brief_AsksAboutStaleItems(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +464,7 @@ func TestScheduler_Brief_AsksAboutStaleItems(t *testing.T) {
 // An item that has gone quiet is asked about in a notification the user can answer with one click, and the answer updates the item. This is the other half of "ask me and I'll tell you": the brief asks in words, this asks in a button.
 func TestScheduler_Brief_AsksAboutAStaleItemAndAppliesTheAnswer(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +510,7 @@ func TestScheduler_Brief_AsksAboutAStaleItemAndAppliesTheAnswer(t *testing.T) {
 // Nothing stale means no question — the notification only fires when there is something worth asking about.
 func TestScheduler_Brief_NoQuestionWhenNothingIsStale(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +536,7 @@ func TestScheduler_Brief_NoQuestionWhenNothingIsStale(t *testing.T) {
 // An item filed under somebody else's name never reaches the user at all, brief or question: OpenActionItems already keeps only the user's own work, so this is not something deliverBrief has to guard against itself.
 func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +570,7 @@ func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 // TestScheduler_Brief_GoesToTheWindow checks the morning brief is handed to the window as a notice — title, body, the place a click opens and the moment it came from — and that no desktop notification is posted alongside it, since the window's card is the only surface while a window is up.
 func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -610,7 +600,7 @@ func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 // TestScheduler_Brief_FallsBackToNotifySend checks the brief still arrives through notify-send when no window is subscribed to the event stream, which is what the sender reports by returning false.
 func TestScheduler_Brief_FallsBackToNotifySend(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -633,7 +623,7 @@ func TestScheduler_Brief_FallsBackToNotifySend(t *testing.T) {
 // TestScheduler_Close_GoesToTheWindow checks the evening close is handed over as a notice pointing at the day it just wrote, so clicking the card opens that day's page, and that no desktop notification is posted alongside it while a window is up.
 func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "an evening on the diary seam"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -747,7 +737,7 @@ func (s *stubStore) SetRoutineRun(ctx context.Context, id int64, when time.Time,
 // TestTick_HungDutyDoesNotStopTheNext checks every duty gets its own deadline: a close whose brain call never returns must not stop the brief running on the same tick. A wedged Gemini call used to freeze every later duty for the life of the daemon.
 func TestTick_HungDutyDoesNotStopTheNext(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -772,7 +762,7 @@ func TestTick_HungDutyDoesNotStopTheNext(t *testing.T) {
 // TestTick_StoreOnlyDutiesRunBeforeTheBrainOnes checks the cheap store-only duties are run first, so a "remind me in an hour" is not held up by a brain call that takes minutes.
 func TestTick_StoreOnlyDutiesRunBeforeTheBrainOnes(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -800,7 +790,7 @@ func TestTick_StoreOnlyDutiesRunBeforeTheBrainOnes(t *testing.T) {
 // TestScheduler_Close_BacksOffAfterAFailure checks a close whose brain call failed is not retried on the very next tick: five minutes after the first failure, thirty after each one after that. Before this a broken brain cost one counted request a minute for the rest of the day.
 func TestScheduler_Close_BacksOffAfterAFailure(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
@@ -838,7 +828,7 @@ func TestScheduler_Close_BacksOffAfterAFailure(t *testing.T) {
 // TestScheduler_Close_CatchesUpADaySleptThrough checks a day the machine was asleep through at the close hour still gets its diary entry on the first tick after the next day's close hour, written from that day's own timeline. The lost row is also the next day's "yesterday's entry" prompt input.
 func TestScheduler_Close_CatchesUpADaySleptThrough(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	n := time.Now()
 	today := time.Date(n.Year(), n.Month(), n.Day(), 23, 0, 0, 0, n.Location())
 	yesterdayNoon := today.AddDate(0, 0, -1).Add(-11 * time.Hour)
@@ -874,7 +864,7 @@ func TestScheduler_Close_CatchesUpADaySleptThrough(t *testing.T) {
 // TestScheduler_Close_GivesEachDayItsOwnDeadline checks the catch-up day and today are closed under a deadline each, not both under one. Each close makes two brain calls, so four calls had to fit in one duty timeout on the first tick after a night the machine slept through, and the deadline expiring made yesterday's close eat the budget today's needed.
 func TestScheduler_Close_GivesEachDayItsOwnDeadline(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	n := time.Now()
 	today := time.Date(n.Year(), n.Month(), n.Day(), 23, 0, 0, 0, n.Location())
 
@@ -914,14 +904,14 @@ func TestDutyTimeoutFor_HoldsTwoBrainCallsWithHeadroom(t *testing.T) {
 	if got := dutyTimeoutFor(60 * time.Second); got >= dutyTimeoutFor(300*time.Second) {
 		t.Error("the duty deadline does not follow the configured brain timeout")
 	}
-	if New(testStore(t), nil, nil, config.ProactiveConfig{}).dutyTimeout != dutyTimeoutFor(call) {
+	if New(dbtest.Open(t), nil, nil, config.ProactiveConfig{}).dutyTimeout != dutyTimeoutFor(call) {
 		t.Error("New's default duty timeout is not derived from the default brain timeout")
 	}
 }
 
 // TestSetBrainTimeout_WidensTheDutyDeadline checks the daemon can hand the scheduler the brain timeout its config actually carries, so a machine that raised the CLI ceiling does not keep a deadline sized for the default.
 func TestSetBrainTimeout_WidensTheDutyDeadline(t *testing.T) {
-	s := New(testStore(t), nil, nil, config.ProactiveConfig{})
+	s := New(dbtest.Open(t), nil, nil, config.ProactiveConfig{})
 	s.SetBrainTimeout(20 * time.Minute)
 	if got := s.dutyTimeout; got != dutyTimeoutFor(20*time.Minute) {
 		t.Errorf("dutyTimeout = %v after SetBrainTimeout(20m), want %v", got, dutyTimeoutFor(20*time.Minute))
@@ -955,7 +945,7 @@ func openCount(t *testing.T, store *db.Store) int {
 // The daily "Still open" question used to go straight to notify-send, which is why it kept appearing as a GNOME banner while every other moment had moved to Ora's own card. With a window up it is now a notice carrying its own three answers, and the answer comes back through the same POST /notices/{kind}/{id}/action route the card's other buttons use.
 func TestAskAbout_WindowUp_AsksOnTheCardAndAppliesTheAnswer(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	item := staleItem(t, store)
 
 	sent := make(chan Notice, 4)
@@ -1005,7 +995,7 @@ func TestAskAbout_WindowUp_AsksOnTheCardAndAppliesTheAnswer(t *testing.T) {
 // With no window listening the question stays exactly where it was: a notify-send banner carrying the same three buttons, answered the same way.
 func TestAskAbout_NoWindow_KeepsTheNotifySendBanner(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	item := staleItem(t, store)
 
 	SetNoticeSender(func(Notice) bool { return false })
@@ -1036,7 +1026,7 @@ func TestAskAbout_NoWindow_KeepsTheNotifySendBanner(t *testing.T) {
 // A card nobody ever answers changes nothing and does not leave a waiter behind: the item is asked about again another morning, and a later press with one of its own keys is a plain unknown action again.
 func TestAskAbout_WindowUp_UnansweredChangesNothing(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	item := staleItem(t, store)
 
 	SetNoticeSender(func(Notice) bool { return true })
@@ -1063,7 +1053,7 @@ func TestAskAbout_WindowUp_UnansweredChangesNothing(t *testing.T) {
 // A key none of a notice's own buttons carries is still refused, so the route answers 400 for it exactly as it did before the registry existed.
 func TestAct_UnknownKeyOnAWaitingNotice(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	item := staleItem(t, store)
 
 	SetNoticeSender(func(Notice) bool { return true })

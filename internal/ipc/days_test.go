@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 )
 
 // TestDaysListsActiveDays checks that a day with a meeting on it shows up, and that a day with a diary entry is marked as having a page.
 func TestDaysListsActiveDays(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	storeWithMeeting(t, store)
 	if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Brave", Title: "a tab", ScreenText: "text"}); err != nil {
@@ -55,7 +56,7 @@ func TestDaysListsActiveDays(t *testing.T) {
 
 // TestDaysOmitsEmptyDays checks that a day ActiveDays surfaces but that turns out to hold nothing at all is left off the list rather than shown as an empty day. A diary entry dated after today is exactly such a day: ActiveDays' union of the diary table has no upper bound, so it surfaces, but DiaryDays (bounded to [from, now]) never returns its page, and it has no episode or meeting of its own — seen, meetings and has_page all come back zero.
 func TestDaysOmitsEmptyDays(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
 	if err := store.SetDiaryEntry(ctx, tomorrow, "day", "not really today yet"); err != nil {
@@ -81,7 +82,7 @@ func TestDaysOmitsEmptyDays(t *testing.T) {
 
 // TestDayPage checks the day page itself: the diary text, the user's own turns that day, and the day's action items with their state.
 func TestDayPage(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	today := time.Now().Format("2006-01-02")
 	if err := store.SetDiaryEntry(ctx, today, "day", "The demo went out."); err != nil {
@@ -137,7 +138,7 @@ func TestDayPage(t *testing.T) {
 
 // TestDayPageCarriesBriefAndClose checks that GET /days/{date} reports the morning brief and evening close as their own fields, alongside the existing page (which stays the close text, unchanged from before these fields existed).
 func TestDayPageCarriesBriefAndClose(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	today := time.Now().Format("2006-01-02")
 	if err := store.SetDiaryEntry(ctx, today, "day", "The demo went out."); err != nil {
@@ -163,7 +164,7 @@ func TestDayPageCarriesBriefAndClose(t *testing.T) {
 
 // TestDayPageEmpty checks that a day nothing happened on answers with empty lists rather than an error.
 func TestDayPageEmpty(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 	var page DayView
 	getJSON(t, srv, "/days/2020-01-01", &page)
@@ -177,7 +178,7 @@ func TestDayPageEmpty(t *testing.T) {
 
 // TestDayHeading checks the one-line summary GET /days/{date} adds: singular and plural both read right, and the meeting's recorded duration rounds to whole minutes.
 func TestDayHeading(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	today := time.Now().Format("2006-01-02")
 
@@ -203,7 +204,7 @@ func TestDayHeading(t *testing.T) {
 
 // TestDayBadDate checks that a path that is not a date is refused instead of being read as one.
 func TestDayBadDate(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 	resp, err := http.Get(srv.URL + "/days/yesterday")
 	if err != nil {

@@ -5,11 +5,13 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"ora/internal/db/dbtest"
 )
 
 // Ora's own moments reach the desktop window as an event on the stream it is already reading, the same way a tray click does, so the card the window draws replaces GNOME's notification rather than sitting beside it.
 func TestNotice_BroadcastsToEveryWindow(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	one := s.hub.subscribe()
 	defer s.hub.unsubscribe(one)
 	two := s.hub.subscribe()
@@ -35,7 +37,7 @@ func TestNotice_BroadcastsToEveryWindow(t *testing.T) {
 
 // The window reads the card straight off these field names, so they are pinned here: renaming one on this side stops the card drawing and nothing else would say so.
 func TestNotice_JSONShape(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
 
@@ -81,7 +83,7 @@ func TestNotice_LeavesEveryOtherEventAlone(t *testing.T) {
 
 // Subscribed is what decides whether a moment can be drawn by a window at all, so notify-send is the fallback only when nothing is there to draw it.
 func TestSubscribed_AsksTheHubWhoIsListening(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	if s.Subscribed(time.Minute) {
 		t.Error("a daemon no window has ever opened a stream on says one is subscribed")
 	}
@@ -102,7 +104,7 @@ func TestSubscribed_AsksTheHubWhoIsListening(t *testing.T) {
 
 // A notice the user has already dealt with from its own desktop notification comes back over the same event with action and until filled in, which is how the window learns to show "snoozed until 18:00" rather than drawing the card again. The window reads these two names, so they are pinned here.
 func TestNotice_SnoozedJSONShape(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
 
@@ -126,7 +128,7 @@ func TestNotice_SnoozedJSONShape(t *testing.T) {
 
 // A notice that asks its own question carries its own buttons, and the window draws them straight off these names. The stale-item question is the first one: "Done", "Not happening", "Not urgent" are none of the five a desktop notification offers, so the card has to be told what to draw.
 func TestNotice_ActionsJSONShape(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
 
@@ -154,7 +156,7 @@ func TestNotice_ActionsJSONShape(t *testing.T) {
 
 // A notice with no buttons of its own must not grow an actions field: every other card reads its buttons from its kind, and an empty list would have the window draw a rail with nothing on it.
 func TestNotice_NoActionsFieldWhenThereAreNone(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
 

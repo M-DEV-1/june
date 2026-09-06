@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // insertActRun writes one act run through the db package's own insert method, so the stage reads exactly what a real ask files.
@@ -42,7 +43,7 @@ func procedureNotes(t *testing.T, store *db.Store) []string {
 // Every ok run becomes one note per distinct goal, written in plain words from the tool names and arguments — item numbers and labels, never an accessibility ref, an object path or a raw result dump.
 func TestProceduresStage_WritesOnePlainNotePerGoal(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 
 	insertActRun(t, store, "  Open the settings page  ", "ok", []db.ActStep{
@@ -91,7 +92,7 @@ func TestProceduresStage_WritesOnePlainNotePerGoal(t *testing.T) {
 // A run that ended in an error teaches nothing, so it is never written up — even when it is the only run for its goal.
 func TestProceduresStage_IgnoresFailedRuns(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 
 	insertActRun(t, store, "log in to the bank", "error", []db.ActStep{
@@ -115,7 +116,7 @@ func TestProceduresStage_IgnoresFailedRuns(t *testing.T) {
 // Running the stage twice in a row writes nothing the second time: a goal whose note already exists is skipped on its exact "How I did <goal>" prefix.
 func TestProceduresStage_SecondRunWritesNothingNew(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 
 	insertActRun(t, store, "open the settings page", "ok", []db.ActStep{
@@ -147,7 +148,7 @@ func TestProceduresStage_SecondRunWritesNothingNew(t *testing.T) {
 // When several ok runs share a goal, the one with the fewest steps is the one written up — the shortest way that worked.
 func TestProceduresStage_ShortestRunWins(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 
 	insertActRun(t, store, "open the settings page", "ok", []db.ActStep{
@@ -180,7 +181,7 @@ func TestProceduresStage_ShortestRunWins(t *testing.T) {
 // A night whose 'procedures' token is already committed does not read the act runs again on a later wake, even when a fresh eligible run is sitting there ready to become a note — the same done-token gate the other stages use.
 func TestProceduresStage_SkippedWhenTokenAlreadyPresent(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A quiet day."); err != nil {
 		t.Fatal(err)
@@ -221,7 +222,7 @@ func TestProceduresStage_SkippedWhenTokenAlreadyPresent(t *testing.T) {
 // A wake that finds an eligible act run and no 'procedures' token yet writes the note and commits the token in the same run, so a later wake the same night (covered above) will not redo the work.
 func TestProceduresStage_TokenCommittedAfterSuccessfulRun(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A quiet day."); err != nil {
 		t.Fatal(err)
@@ -251,7 +252,7 @@ func TestProceduresStage_TokenCommittedAfterSuccessfulRun(t *testing.T) {
 // End to end through the store: a run that typed a passphrase into a password box is written up as a procedure with neither the passphrase nor the box's contents anywhere in the note.
 func TestProceduresStage_WritesNoSecretFromAPasswordScreen(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	const secret = "correct horse battery staple"
 

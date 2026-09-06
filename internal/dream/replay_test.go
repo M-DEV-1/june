@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // insertSummaryNode writes one 'summary' node with a controlled created_at, JSON-shaped the way the compiler writes them, for the replay stage to read back through SummaryTimeline.
@@ -69,7 +70,7 @@ func (c *stepClock) now() time.Time {
 // With no shadow brain configured, the replay stage skips outright: no calls, no artifact, and — deliberately — no stage token, so a shadow configured later still gets its first night.
 func TestReplayStage_NoShadowSkipsCleanly(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
 	if err := store.StartDreamRun(ctx, night); err != nil {
@@ -92,7 +93,7 @@ func TestReplayStage_NoShadowSkipsCleanly(t *testing.T) {
 // The accumulator: salience 0 drops an item's contribution entirely, facts merge case-insensitively across items with an occurrence count, people accumulate the same way, a hallucinated thread that names no active subject falls into the "none" pile alongside an explicit "none", and the artifact renders the piles with "none" last regardless of score.
 func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	if err := store.StartDreamRun(ctx, night); err != nil {
 		t.Fatal(err)
@@ -166,7 +167,7 @@ func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testin
 // A call error and an unparsable reply both count as a failure and skip the item; neither fails the stage, and the token still commits.
 func TestReplayStage_ParseFailureCountedNotFatal(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	if err := store.StartDreamRun(ctx, night); err != nil {
 		t.Fatal(err)
@@ -204,7 +205,7 @@ func TestReplayStage_ParseFailureCountedNotFatal(t *testing.T) {
 // Running out of the stage's time budget mid-night still writes the partial piles built so far and commits the token, so the next wake does not redo the work.
 func TestReplayStage_BudgetCutoffWritesPartialArtifactAndToken(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	if err := store.StartDreamRun(ctx, night); err != nil {
 		t.Fatal(err)
@@ -249,7 +250,7 @@ func TestReplayStage_BudgetCutoffWritesPartialArtifactAndToken(t *testing.T) {
 // End to end: with a shadow brain configured, one full Tick runs every stage in order, and the replay stage's token lands in stages_done after compact and before procedures.
 func TestTick_ReplayRunsLastAfterCompact(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := at(23, 30).Format(dayFormat)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A quiet day."); err != nil {
 		t.Fatal(err)

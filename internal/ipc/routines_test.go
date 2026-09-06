@@ -11,6 +11,7 @@ import (
 
 	"ora/internal/agent"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // newRoutinesServer wires a Server behind a real HTTP server with just the routines routes registered, under the same patterns cmd/daemon.go gives them.
@@ -28,7 +29,7 @@ func newRoutinesServer(t *testing.T, asker Asker, store *db.Store) (*Server, *ht
 
 // TestRoutinesCreateListDelete walks the basic lifecycle: POST creates one, GET lists it with the fields a fresh routine should carry, and DELETE removes it — a second DELETE and one against an id that never existed both answer 404.
 func TestRoutinesCreateListDelete(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newRoutinesServer(t, &fakeAsker{}, store)
 
 	var created map[string]string
@@ -65,7 +66,7 @@ func TestRoutinesCreateListDelete(t *testing.T) {
 
 // TestCreateRoutineRequiresTextAndSchedule checks a blank instruction or schedule is 400.
 func TestCreateRoutineRequiresTextAndSchedule(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newRoutinesServer(t, &fakeAsker{}, store)
 
 	cases := []string{`{"text":"","schedule":"every day at 8"}`, `{"text":"tell me something","schedule":""}`}
@@ -97,7 +98,7 @@ func waitForRoutineAnswer(t *testing.T, store *db.Store, id int64, want string) 
 
 // TestRoutineRunAsksRecordsAndNotifies checks the run-now route answers 202 with the routine's id straight away, then puts the instruction plus the answer-shape suffix to the asker in the background, records the answer as the routine's last run, and delivers it through the same say path a scheduled run uses — under place "routine" with the routine's id.
 func TestRoutineRunAsksRecordsAndNotifies(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
 	if err != nil {
 		t.Fatalf("AddRoutine: %v", err)
@@ -133,7 +134,7 @@ func TestRoutineRunAsksRecordsAndNotifies(t *testing.T) {
 
 // TestRoutineRunAnswersBeforeTheAskFinishes checks the run-now route no longer holds the request open for the length of the ask: the window's Run button must come back at once and let the notice carry the result, rather than spinning for up to the five-minute ask timeout.
 func TestRoutineRunAnswersBeforeTheAskFinishes(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
 	if err != nil {
 		t.Fatalf("AddRoutine: %v", err)
@@ -158,7 +159,7 @@ func TestRoutineRunAnswersBeforeTheAskFinishes(t *testing.T) {
 
 // TestRoutineRunSendsNoNoticeForNothing checks that an exact "NOTHING" answer is still recorded as the run but says nothing to the user.
 func TestRoutineRunSendsNoNoticeForNothing(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	id, err := store.AddRoutine(t.Context(), "tell me if anything is on fire", "every 1 hour")
 	if err != nil {
 		t.Fatalf("AddRoutine: %v", err)
@@ -182,7 +183,7 @@ func TestRoutineRunSendsNoNoticeForNothing(t *testing.T) {
 
 // TestRoutineRunMissingIDIs404 checks POST /routines/{id}/run against an id that names no routine.
 func TestRoutineRunMissingIDIs404(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newRoutinesServer(t, &fakeAsker{}, store)
 	if code := postJSON(t, srv, "/routines/999/run", `{}`, nil); code != http.StatusNotFound {
 		t.Errorf("POST /routines/999/run = %d, want 404", code)
@@ -191,7 +192,7 @@ func TestRoutineRunMissingIDIs404(t *testing.T) {
 
 // TestRoutineRunSkipsAlreadyRunning checks the in-flight guard RoutineRun shares with the scheduler tick: a routine store.TryStart already holds — standing in for the scheduler's own tick asking it right now — answers 409 rather than asking and recording the run a second time.
 func TestRoutineRunSkipsAlreadyRunning(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
 	if err != nil {
 		t.Fatalf("AddRoutine: %v", err)
@@ -229,7 +230,7 @@ func (a *ctxCapturingAsker) AskText(ctx context.Context, question string) (agent
 
 // TestRoutineRunSurvivesRequestCancellation checks that a run-now ask keeps going, and still records its result, after the client that started it disconnects — the same "the window closing must not silently abort a minutes-long ask" guarantee /ask's own run() gives, via its own askTimeout-bounded context rather than r.Context().
 func TestRoutineRunSurvivesRequestCancellation(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
 	if err != nil {
 		t.Fatalf("AddRoutine: %v", err)

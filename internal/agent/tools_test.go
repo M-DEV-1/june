@@ -1899,27 +1899,28 @@ func TestExecuteTool_Draw_CircleRefusesWithNeitherOnNorRect(t *testing.T) {
 	}
 }
 
-func TestExecuteTool_Draw_RefusesABadShape(t *testing.T) {
-	a, drawn := drawingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "draw", map[string]any{"shape": "sparkle", "from": float64(1), "to": float64(2)})
-	if len(*drawn) != 0 {
-		t.Errorf("drawn = %v, want nothing drawn for a bad shape", *drawn)
+// draw's bad-input validation refuses two different problems the same way: a shape name it does not recognise, and a from/to element number observe_screen never listed. Neither draws anything, and each names its own problem in the result text.
+func TestExecuteTool_Draw_RefusesBadInput(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"bad shape", map[string]any{"shape": "sparkle", "from": float64(1), "to": float64(2)}, "arrow, line, path, box or circle"},
+		{"unknown element number", map[string]any{"shape": "arrow", "from": float64(1), "to": float64(9)}, "no element 9"},
 	}
-	if !strings.Contains(got, "arrow, line, path, box or circle") {
-		t.Errorf("result = %q, want it to name the allowed shapes", got)
-	}
-}
-
-func TestExecuteTool_Draw_RefusesAnUnknownElementNumber(t *testing.T) {
-	a, drawn := drawingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "draw", map[string]any{"shape": "arrow", "from": float64(1), "to": float64(9)})
-	if len(*drawn) != 0 {
-		t.Errorf("drawn = %v, want nothing drawn for an unknown element", *drawn)
-	}
-	if !strings.Contains(got, "no element 9") {
-		t.Errorf("result = %q, want it to name the missing element", got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, drawn := drawingAgent(t)
+			a.executeTool(context.Background(), "observe_screen", map[string]any{})
+			got := a.executeTool(context.Background(), "draw", c.args)
+			if len(*drawn) != 0 {
+				t.Errorf("drawn = %v, want nothing drawn for %s", *drawn, c.name)
+			}
+			if !strings.Contains(got, c.want) {
+				t.Errorf("result = %q, want it to contain %q", got, c.want)
+			}
+		})
 	}
 }
 
