@@ -518,10 +518,10 @@ export type Notice = {
   until?: string;
 };
 
-/** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said" and "state" belong to a live voice session, "notice" is Ora speaking first, and "act" is one line of a computer-use job's progress. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */
+/** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, "act" is one line of a computer-use job's progress, and "overlay" and "window" are the daemon telling the on-screen accessories and the window itself what to do. This window draws none of the last five, but they do arrive on the same stream, so they are named here rather than left to widen the type at the point of use. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */
 export type DaemonEvent = {
   id: string;
-  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "act" | "notice";
+  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "level" | "act" | "notice" | "overlay" | "window";
   text?: string;
   detail?: string;
   evidence?: Evidence[];

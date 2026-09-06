@@ -266,11 +266,12 @@ function parseActDetail(detail: string | undefined): ActDetail {
   }
 }
 
-type ProgressState = { run?: Run; job?: JobRun; streaming: boolean };
+/** What the daemon is doing right now: the one question in flight, the computer-use jobs in flight keyed by the conversation each was started from, the transcript of a dictation the daemon closed by itself, and whether the event stream is open. Jobs are keyed rather than held one at a time because a job runs for minutes and the user goes on to another chat while it does; a single slot would lose the first job the moment a second was started and fold the first's events into the second. */
+type ProgressState = { run?: Run; jobs: Record<string, JobRun>; dictation?: { id: string; text: string }; streaming: boolean };
 
 const progressSlice = createSlice({
   name: "progress",
-  initialState: { streaming: false } as ProgressState,
+  initialState: { streaming: false, jobs: {} } as ProgressState,
   reducers: {
     /** Opens the daemon's event stream. The middleware below acts on this; the reducer only records that it happened, so a second dispatch is a no-op. */
     streamOpened(s) {
@@ -290,25 +291,36 @@ const progressSlice = createSlice({
     askFailed(s) {
       s.run = undefined;
     },
+    /** Gives up the question in flight once its finished turn has been read back into the thread. Kept apart from the "done" event itself: the thread draws the question and the streamed answer out of the run alone, so clearing it on the event would blank the whole exchange until GET /conversations/{id} came back. */
+    runEnded(s) {
+      s.run = undefined;
+    },
     /** Records that a "do:" goal has been sent, before the daemon has answered, so the thread shows the goal as its own turn straight away. */
     jobSent(s, a: PayloadAction<{ conversationId: string; goal: string }>) {
-      s.job = { conversationId: a.payload.conversationId, goal: a.payload.goal, state: "planning", steps: [], startedAt: Date.now() };
+      s.jobs[a.payload.conversationId] = { conversationId: a.payload.conversationId, goal: a.payload.goal, state: "planning", steps: [], startedAt: Date.now() };
     },
     /** Records what POST /act answered: the id every "act" message on the stream carries. */
     jobAccepted(s, a: PayloadAction<{ id: string; conversationId: string }>) {
-      if (s.job) s.job.id = a.payload.id;
+      const job = s.jobs[a.payload.conversationId];
+      if (job) job.id = a.payload.id;
     },
-    /** Gives up on a job the daemon never accepted. */
-    jobFailed(s) {
-      s.job = undefined;
+    /** Gives up on a job the daemon never accepted. Input: the conversation it was started from, which is the key it was filed under. */
+    jobFailed(s, a: PayloadAction<string>) {
+      delete s.jobs[a.payload];
     },
-    /** Folds one message from the stream into the question or the job in flight. An ask's own five event types are unchanged from before; "act" is a job's progress instead, folded into the job in state.progress.job rather than into run — a job is never the answer to a chat turn, only something the window shows beside one. "status" sets the working line, "tool" adds a step and says what it is doing, "answer" is the reply, and "done" and "error" end the run — the finished turn, failed or not, is then read back from the conversation itself. A message carrying another ask's or another job's id, or arriving with no question or job in flight, changes nothing. */
+    /** Folds one message from the stream into the question, the job or the dictation it belongs to. "status" sets the working line, "tool" adds a step and says what it is doing, and "answer" is the reply; "done" and "error" are left to the middleware below, which reads the finished turn back before giving the run up. "act" is a job's progress, folded into that job in state.progress.jobs rather than into run — a job is never the answer to a chat turn, only something the window shows beside one. "dictation" is a recording the daemon closed by itself. A message carrying another ask's or another job's id, or arriving with no question or job in flight, changes nothing. */
     eventArrived(s, a: PayloadAction<DaemonEvent>) {
       const ev = a.payload;
+      // The daemon ends a dictation itself once it has heard 1.2s of silence, and the words come back on this event rather than on the stop reply, which by then answers 404 (see finish in internal/ipc/dictate.go). The composer takes them from here into whatever is half-typed.
+      if (ev.type === "dictation") {
+        s.dictation = { id: ev.id, text: ev.text ?? "" };
+        return;
+      }
       if (ev.type === "act") {
-        const job = s.job;
+        // The job this belongs to is the one whose id matches; a job whose POST /act has not answered yet has no id to match, and takes what arrives, the same tolerance an ask's own id race gets.
+        const jobs = Object.values(s.jobs);
+        const job = jobs.find((j) => j.id && j.id === ev.id) ?? jobs.find((j) => !j.id);
         if (!job) return;
-        if (job.id && ev.id && ev.id !== job.id) return;
         const d = parseActDetail(ev.detail);
         if (d.state) job.state = d.state;
         switch (d.kind) {
@@ -343,7 +355,8 @@ const progressSlice = createSlice({
       const run = s.run;
       if (!run) return;
       if (run.askId && ev.id && ev.id !== run.askId) return;
-      if (ev.conversation_id && run.conversationId && ev.conversation_id !== run.conversationId) return;
+      // Only once POST /ask has answered is run.conversationId the daemon's own id: a question asked from a fresh draft is tracked under DRAFT_CHAT until then, and the answer event — the only one carrying a conversation_id — would otherwise be dropped whenever it beats the 202 back. Same condition as the askId guard above, and for the same race.
+      if (run.askId && ev.conversation_id && run.conversationId && ev.conversation_id !== run.conversationId) return;
       switch (ev.type) {
         case "status":
           run.status = ev.text ?? "";
@@ -357,11 +370,8 @@ const progressSlice = createSlice({
           run.answer += ev.text ?? "";
           if (ev.evidence?.length) run.evidence = ev.evidence;
           break;
-        case "done":
-        case "error":
-          s.run = undefined;
-          break;
         default:
+          // "done" and "error" end the run, but not here: the middleware below reads the conversation back first and dispatches runEnded once the finished turn is in the thread.
           break;
       }
     },
@@ -395,10 +405,16 @@ export function streamMiddleware(open: typeof events = events) {
     effect: async (_action, api) => {
       if (stop) return;
       stop = open(
-        (ev) => {
+        async (ev) => {
+          // A live voice session sends up to twenty of these a second and nothing in this window draws them; dropping them here keeps them out of both listener matchers and the sidebar patch below.
+          if (ev.type === "level") return;
           api.dispatch(progressSlice.actions.eventArrived(ev));
-          // A finished ask is what changes the conversation list, the turns inside it and what has been spent, so the cache is told to read them again rather than polling on a timer.
-          if (ev.type === "done" || ev.type === "error") api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Usage"]));
+          if (ev.type !== "done" && ev.type !== "error") return;
+          // A finished ask is what changes the conversation list, the turns inside it and what has been spent, so the cache is told to read them again rather than polling on a timer. The conversation the question landed in is read back first and the run given up only then: the thread draws the question and the streamed answer out of the run alone, so giving it up on the event itself blanks the exchange until the refetch lands.
+          const id = (api.getState() as RootState).progress.run?.conversationId;
+          if (id) await api.dispatch(oraApi.endpoints.conversation.initiate(id, { forceRefetch: true }));
+          api.dispatch(progressSlice.actions.runEnded());
+          api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Usage"]));
         },
         () => {
           // The stream opening again is this window's one signal that the daemon it had lost is answering, so everything that failed while it was gone is read once more. Without it a window left open across a daemon restart keeps showing "Nothing is answering" until something happens to focus it.
@@ -420,12 +436,14 @@ export function streamMiddleware(open: typeof events = events) {
   startTyped({
     matcher: isAnyOf(progressSlice.actions.jobSent, progressSlice.actions.jobAccepted, progressSlice.actions.eventArrived),
     effect: (_action, api) => {
-      const job = api.getState().progress.job;
-      if (!job) return;
+      const jobs = Object.values(api.getState().progress.jobs);
+      if (!jobs.length) return;
       api.dispatch(
         oraApi.util.updateQueryData("conversations", undefined, (draft) => {
-          const row = draft.find((c) => c.id === job.conversationId);
-          if (row) row.last = jobStateWord(job.state);
+          for (const job of jobs) {
+            const row = draft.find((c) => c.id === job.conversationId);
+            if (row) row.last = jobStateWord(job.state);
+          }
         }),
       );
     },
