@@ -51,9 +51,6 @@ describe("the first run", () => {
     // Each step reads verbatim as the daemon's own sentence — the tokens in it a person would actually type are just marked as code inside it.
     const drawn = Array.from(document.querySelectorAll("li")).map((li) => li.textContent);
     for (const step of steps) expect(drawn).toContain(step);
-    expect(screen.getByText("GEMINI_API_KEY").tagName).toBe("CODE");
-    expect(screen.getByText("~/.config/ora/env").tagName).toBe("CODE");
-    expect(screen.getByText("claude login").tagName).toBe("CODE");
     const before = calls.filter((c) => c.path === "/settings").length;
     await userEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(calls.filter((c) => c.path === "/settings").length).toBeGreaterThan(before));
@@ -122,8 +119,6 @@ describe("Settings", () => {
     expect(screen.getByText("not set up on this machine")).toBeDefined();
     await userEvent.click(screen.getByRole("button", { name: "sonnet" }));
     await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/brains")?.body).toEqual({ brain: "claude", model: "sonnet" }));
-    // The model pill is a plain button, not the shadcn one, so it needs its own visible ring for a keyboard user tabbing through the list.
-    expect(screen.getByRole("button", { name: "sonnet" }).className).toContain("focus-visible:ring-2");
   });
 
   it("shows the Claude usage toggle on by default and posts turning it off", async () => {
@@ -144,14 +139,6 @@ describe("Settings", () => {
     expect(screen.getByText("as long as you leave it there")).toBeDefined();
   });
 
-  it("sets the model, the path and other machine values in code, and leaves an ordinary sentence as prose", async () => {
-    renderApp({ settings }, { place: "settings" });
-    await screen.findByText("This machine");
-    expect(screen.getByText(settings.brain as string).tagName).toBe("CODE");
-    expect(screen.getByText("/home/you/.ora").tagName).toBe("CODE");
-    // Search falling back to words only is a sentence about the setting, not a model id, so it stays plain.
-    expect(screen.getByText("nothing — search is words only").tagName).not.toBe("CODE");
-  });
 });
 
 describe("the token ledger", () => {

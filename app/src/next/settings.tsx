@@ -78,23 +78,19 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   );
 }
 
-/** One label-and-value line in the machine block, shaped like a settings Row: a noun for a label, the sentence fragment that used to be the label as the subtitle under it, and the value on the right. Input: the label, the phrase under it when there is one, the value, and whether the value is something the machine chose rather than prose. Output: the line, or nothing when there is no value, so a field the daemon could not fill draws no row. */
+/** One label-and-value line in the machine block, shaped like a settings Row: a noun for a label, the sentence fragment that used to be the label as the subtitle under it, and the value on the right. Input: the label, the phrase under it when there is one, the value, and whether the value is something the machine chose rather than prose. Output: the line, or nothing when there is no value, so a field the daemon could not fill draws no row. The value wraps onto as many lines as it needs — a data directory or a model name can run long, and a truncated one would say nothing that its own hover tooltip had to finish. */
 function Fact({ label, hint, value, mono }: { label: string; hint?: string; value: string; mono?: boolean }) {
   if (!value) return null;
   return (
-    <div className="flex items-baseline justify-between gap-6 px-3.5 py-2">
+    <div className="flex items-start justify-between gap-6 px-3.5 py-2">
       <div className="min-w-0 shrink-0">
         <div className="text-ui">{label}</div>
         {hint ? <div className="mt-0.5 text-meta text-muted-foreground">{hint}</div> : null}
       </div>
       {mono ? (
-        <code className="max-w-[62%] truncate text-right font-mono text-[0.92em]" title={value}>
-          {value}
-        </code>
+        <code className="min-w-0 break-words text-right font-mono text-[0.92em]">{value}</code>
       ) : (
-        <span className="max-w-[62%] truncate text-right text-ui" title={value}>
-          {value}
-        </span>
+        <span className="min-w-0 break-words text-right text-ui">{value}</span>
       )}
     </div>
   );
@@ -258,7 +254,7 @@ export function UsageLedger({ usage, up }: { usage?: Usage; up: boolean }) {
         <h3 className="mb-2 text-ui font-medium">Recent calls</h3>
         {/* Each row is already one whole question, not one round of it: the daemon sums a turn's tokens over every round of its tool loop before it ever files a row (see TokenUsage in internal/agent/ask.go and recordTokenUse in internal/ipc/ipc.go), so In/Out/Total here are what that question cost end to end. What the daemon does not carry yet is how many rounds a question took — TurnTrace has no round counter, so that count is not drawn here rather than guessed from tool-call counts, which would undercount a round that called more than one tool. The bar behind Total is that row's share of the priciest row in this list, so an expensive question is the tall bar rather than a number a person has to read every row to compare. */}
         {usage.recent?.length ? (
-          // Fixed layout gives every column the share of the table's width its header names below, so a long question is capped by that share and truncates in its own cell instead of stretching the table and squeezing In/Out/Total/Took into each other — a real question can run to a full sentence, not the short fixture text auto layout is normally proven against.
+          // Fixed layout gives every column the share of the table's width its header names below, so a long question wraps onto more lines in its own cell instead of stretching the table and squeezing In/Out/Total/Took into each other — a real question can run to a full sentence, not the short fixture text auto layout is normally proven against.
           <div className="overflow-x-auto">
             <table className="w-full min-w-[30rem] table-fixed text-ui">
               <thead>
@@ -277,13 +273,9 @@ export function UsageLedger({ usage, up }: { usage?: Usage; up: boolean }) {
                   return (
                     <tr key={c.id} className="border-b align-top">
                       <td className="py-1.5 tabular-nums text-muted-foreground">{hhmm(c.when)}</td>
-                      <td className="truncate py-1.5">
+                      <td className="break-words py-1.5">
                         <span className="font-medium">{c.provider}</span> <span className="text-muted-foreground">{[c.model, c.channel].filter(Boolean).join(" · ")}</span>
-                        {c.question ? (
-                          <div className="truncate text-meta text-muted-foreground" title={c.question}>
-                            {c.question}
-                          </div>
-                        ) : null}
+                        {c.question ? <div className="text-meta text-muted-foreground">{c.question}</div> : null}
                       </td>
                       <td className="py-1.5 text-right tabular-nums">{tokens(c.input_tokens)}</td>
                       <td className="py-1.5 text-right tabular-nums">{tokens(c.output_tokens)}</td>
