@@ -433,7 +433,83 @@ func Focused(ctx context.Context, ref string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return focusedFromStates(readStates(ctx, conn, r), ref)
+	held, err := focusedFromStates(readStates(ctx, conn, r), ref)
+	if err != nil || held {
+		return held, err
+	}
+	// The bit is not on this node, which is not the same as the keyboard being elsewhere: Chromium and Electron publish it on a node under the one the walk listed, so a text input reads as unfocused while the keys are going straight into it. The subtree is walked before the answer is no.
+	budget := maxNodes
+	_, found := findFocused(r, 0, &budget, busFocus(ctx, conn))
+	return found, nil
+}
+
+// FocusedElement reports which element of the window in front holds the keyboard. Input: a context. Output: that element's ref, role and name as an act.Node, and false when the accessibility bus is unreachable, no window is in front, or nothing in that window's tree carries STATE_FOCUSED.
+// It exists because reading the bit on one remembered element cannot say where the keyboard went when the answer is no: a click made at a point on the screen leaves no element to read at all, and a page that moved the focus into its own search box leaves the remembered field reading unfocused with nothing to name in its place. A caller about to type asks the window itself who holds the keys.
+func FocusedElement(ctx context.Context) (act.Node, bool) {
+	w := focus()
+	if w == nil {
+		return act.Node{}, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	defer cancel()
+	win, _, ok := w.state.get()
+	if !ok {
+		return act.Node{}, false
+	}
+	budget := maxNodes
+	hit, ok := findFocused(win, 0, &budget, busFocus(ctx, w.conn))
+	if !ok {
+		return act.Node{}, false
+	}
+	role := getRoleName(ctx, w.conn, hit)
+	if kid, kidRole, ok := editableChild(ctx, w.conn, hit, role); ok {
+		hit, role = kid, kidRole
+	}
+	return act.Node{Role: role, Label: getName(ctx, w.conn, hit), Ref: refString(hit)}, true
+}
+
+// busFocus is the read findFocused makes over the accessibility bus. Input: a context bounding the calls and a live connection. Output: a function giving one element's focused bit and, when the bit is not set, its children — a focused element's children are never walked, so they are never read.
+func busFocus(ctx context.Context, conn *dbus.Conn) func(aref) (bool, []aref) {
+	return func(r aref) (bool, []aref) {
+		if stateSet(readStates(ctx, conn, r), stateFocused) {
+			return true, nil
+		}
+		kids, _ := getChildren(ctx, conn, r)
+		return false, kids
+	}
+}
+
+// findFocused walks a tree depth first for the element that holds the keyboard. Input: the element to start at, how deep this call already is, how many more elements the whole walk may read, and a read giving one element's focused bit and children. Output: the element carrying STATE_FOCUSED and true, or false when nothing at or under the start carries it and when the depth bound or the budget ran out first.
+func findFocused(ref aref, depth int, budget *int, read func(aref) (bool, []aref)) (aref, bool) {
+	if depth > maxDepth || *budget <= 0 {
+		return aref{}, false
+	}
+	*budget--
+	focused, kids := read(ref)
+	if focused {
+		return ref, true
+	}
+	for _, kid := range kids {
+		if hit, ok := findFocused(kid, depth+1, budget, read); ok {
+			return hit, true
+		}
+	}
+	return aref{}, false
+}
+
+// editableChild resolves a combo box that holds the keyboard to the box inside it the keys actually reach. Input: a context, the connection, the element carrying the focused bit and the role it publishes. Output: that child and its role, and false when the element is not a combo box or holds no child of a role text goes into.
+// A combo box that can be typed into — a browser's address bar, a form's country picker with a filter — is a text box in a frame, and it is the child's role, not the frame's, that says the keys have somewhere to land.
+func editableChild(ctx context.Context, conn *dbus.Conn, ref aref, role string) (aref, string, bool) {
+	if role != "combo box" {
+		return aref{}, "", false
+	}
+	kids, _ := getChildren(ctx, conn, ref)
+	for _, kid := range kids {
+		if r := getRoleName(ctx, conn, kid); typableRoles[r] {
+			return kid, r, true
+		}
+	}
+	return aref{}, "", false
 }
 
 // focusedFromStates turns one GetState answer into the focus verdict. Input: the packed state words, which readStates returns as nil for every failure, and the ref they were read for. Output: whether STATE_FOCUSED is set, or an error when there are no words to read it from.
