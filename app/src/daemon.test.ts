@@ -37,6 +37,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** Answers every fetch with one queued response and records what was asked. Input: the responses in order. Output: the calls the code under test made. */
+function fakeFetch(...responses: { status: number; body?: unknown }[]) {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    const r = responses.shift() ?? { status: 200, body: {} };
+    return { ok: r.status >= 200 && r.status < 300, status: r.status, json: async () => r.body } as Response;
+  }));
+  return calls;
+}
+
 describe("ask", () => {
   it("posts the question and context, and hands back the ids the daemon answered with", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "abc123", conversation_id: "70" }) });
@@ -280,17 +291,6 @@ describe("matters", () => {
 });
 
 describe("voice", () => {
-  /** Answers every fetch with one queued response and records what was asked. Input: the responses in order. Output: the calls the code under test made. */
-  function fakeFetch(...responses: { status: number; body?: unknown }[]) {
-    const calls: { url: string; init?: RequestInit }[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      const r = responses.shift() ?? { status: 200, body: {} };
-      return { ok: r.status >= 200 && r.status < 300, status: r.status, json: async () => r.body } as Response;
-    }));
-    return calls;
-  }
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -327,17 +327,6 @@ describe("voice", () => {
 });
 
 describe("act", () => {
-  /** Answers every fetch with one queued response and records what was asked. Same shape as the voice suite's own helper above. */
-  function fakeFetch(...responses: { status: number; body?: unknown }[]) {
-    const calls: { url: string; init?: RequestInit }[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      const r = responses.shift() ?? { status: 204 };
-      return { ok: r.status >= 200 && r.status < 300, status: r.status, json: async () => r.body } as Response;
-    }));
-    return calls;
-  }
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });

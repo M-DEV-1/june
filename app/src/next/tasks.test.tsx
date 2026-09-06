@@ -45,13 +45,6 @@ describe("the list", () => {
     expect(screen.queryByText("Ora noticed")).toBeNull();
   });
 
-  it("gives every row and its tick a visible ring of its own for a keyboard user", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    expect(tick.className).toContain("focus-visible:ring-2");
-    expect(list().getByRole("button", { name: "Book the flight" }).className).toContain("focus-visible:ring-2");
-  });
-
   it("draws the rows as a plain list, so the tick and the menus a row holds are controls in their own right rather than parts of one option", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });

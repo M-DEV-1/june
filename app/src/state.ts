@@ -25,7 +25,7 @@ export type JobMeta = {
   spend?: { rounds: number; input: number; cached: number; output: number };
 };
 
-export type Turn = {
+type Turn = {
   q: string;
   a: string;
   evidence?: Evidence[];
@@ -67,7 +67,7 @@ export type MatterRow = {
 /** The daemon's GET /context, shape fixed by the Go side. */
 export type ContextInfo = { app: string; title: string; text: string };
 
-export type ViewState = "empty" | "asking" | "answered";
+type ViewState = "empty" | "asking" | "answered";
 
 /** What a live voice session is doing right now, straight from the daemon's "state" events. */
 export type VoiceState = "idle" | "listening" | "speaking" | "thinking";
@@ -169,7 +169,7 @@ export function noticeActionLine(n: Notice, now: Date): string | undefined {
 }
 
 /** close hides the hover. openNotice opens the main app window at the screen and row the clicked notice named, which are empty when it named none and the window should just open. ask sends the question that has just gone on the card to the daemon, in the conversation named, or in a new one the daemon opens when none is named. */
-export type Effect =
+type Effect =
   | { kind: "close" }
   | { kind: "openNotice"; place: string; id: string }
   /** Sends Done or a snooze for the notice to the daemon's notice route. */
@@ -240,7 +240,7 @@ function patchPendingTurn(view: View, patch: Partial<Turn>): Matter[] {
   return patchCurrent(view, { turns });
 }
 
-/** The one line a failed ask reads as. Input: the message the daemon sent, which may be a provider's whole error. Output: line, its first line cut on a word boundary with an ellipsis (see truncateAtWord's ERROR_LINE_CAP), and detail, the whole message when anything was left out of the line and undefined when nothing was. */
+/** The one line a failed ask reads as. Input: the message the daemon sent, which may be a provider's whole error. Output: line, its first line cut on a word boundary with an ellipsis (see truncateAtWord's own default cap), and detail, the whole message when anything was left out of the line and undefined when nothing was. */
 export function errorLine(text: string): { line: string; detail?: string } {
   const { line, more } = truncateAtWord(text);
   return more ? { line, detail: text } : { line };
