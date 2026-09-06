@@ -82,8 +82,8 @@ func usedScreenTool(trace agent.TurnTrace) bool {
 	return false
 }
 
-// recordActRun files trace as an act run when it used a screen tool, on its own context so a wedged store cannot hold the ask goroutine open. Input: the finished trace, its outcome ("ok" or "error") and the error message ("" for ok). Failures are logged, never returned: recording a run must never fail the ask itself.
-func (s *Server) recordActRun(trace agent.TurnTrace, outcome, errMsg string) {
+// recordActRun files trace as an act run when it used a screen tool, on its own context so a wedged store cannot hold the ask goroutine open. Input: the finished trace, the bare question the user asked, its outcome ("ok" or "error") and the error message ("" for ok). The question is passed in rather than read off the trace because the trace carries the question as the model saw it, which on a window ask is prefixed with up to 600 runes of whatever was on screen; that text is not the question and has no business sitting in a table nothing ages out. Failures are logged, never returned: recording a run must never fail the ask itself.
+func (s *Server) recordActRun(trace agent.TurnTrace, question, outcome, errMsg string) {
 	if !usedScreenTool(trace) {
 		return
 	}
@@ -94,7 +94,7 @@ func (s *Server) recordActRun(trace agent.TurnTrace, outcome, errMsg string) {
 	storeCtx, storeCancel := context.WithTimeout(context.Background(), storeActRunTimeout)
 	defer storeCancel()
 	if _, err := s.store.AddActRun(storeCtx, db.ActRun{
-		Question:   trace.Question,
+		Question:   question,
 		Model:      trace.Model,
 		Outcome:    outcome,
 		Answer:     trace.Answer,
@@ -114,8 +114,8 @@ func splitModelSlug(slug string) (provider, model string) {
 	return "", slug
 }
 
-// recordTokenUse files what a finished turn cost in tokens, so the user can see what each model provider is costing them. Input: the finished trace and the channel the question came in on ("text" for /ask). The provider is the one named in front of the model slug, falling back to the provider the trace's own usage names when the slug is a bare model. The counts are the provider's own, summed over the turn's rounds: a call that reported none is filed as zeroes rather than a guess, so it still shows up as a call that happened. The write runs on its own bounded context, and a failure is logged rather than returned: recording usage must never fail the ask.
-func (s *Server) recordTokenUse(trace agent.TurnTrace, channel string) {
+// recordTokenUse files what a finished turn cost in tokens, so the user can see what each model provider is costing them. Input: the finished trace, the bare question the user asked, and the channel the question came in on ("text" for /ask). The question is passed in rather than read off the trace for the same reason recordActRun does it: GET /usage shows this field, and the screen context the trace's own question is prefixed with is not the question. The provider is the one named in front of the model slug, falling back to the provider the trace's own usage names when the slug is a bare model. The counts are the provider's own, summed over the turn's rounds: a call that reported none is filed as zeroes rather than a guess, so it still shows up as a call that happened. The write runs on its own bounded context, and a failure is logged rather than returned: recording usage must never fail the ask.
+func (s *Server) recordTokenUse(trace agent.TurnTrace, question, channel string) {
 	provider, model := splitModelSlug(trace.Model)
 	if provider == "" {
 		provider = trace.Usage.Provider
@@ -132,7 +132,7 @@ func (s *Server) recordTokenUse(trace agent.TurnTrace, channel string) {
 		CachedTokens: trace.Usage.CachedInputTokens,
 		Rounds:       trace.Usage.Rounds,
 		DurationMS:   trace.Duration.Milliseconds(),
-		Question:     trace.Question,
+		Question:     question,
 	}); err != nil {
 		slog.Error("ask: could not record the token use", "error", err)
 	}
@@ -330,7 +330,11 @@ func (s *Server) Ask(w http.ResponseWriter, r *http.Request) {
 		asker = named
 	}
 
-	convID := s.conversationFor(r.Context(), req.ConversationID, req.Question, req.Brain)
+	convID, ok := s.conversationFor(r.Context(), req.ConversationID, req.Question, req.Brain)
+	if !ok {
+		http.Error(w, "no conversation with id "+req.ConversationID, http.StatusNotFound)
+		return
+	}
 	// The thread so far is read before this question is stored, so the model is given what was said before rather than a copy of what is being asked right now.
 	history := s.historyFor(r.Context(), convID)
 	if convID != 0 {
@@ -347,22 +351,27 @@ func (s *Server) Ask(w http.ResponseWriter, r *http.Request) {
 	go s.run(asker, id, convID, req.Question, req.Context, req.Go, history)
 }
 
-// conversationFor decides which conversation this ask belongs to. Input: the request context, the conversation id the caller named (empty when it named none), the question, and the brain the caller asked for. Output: the conversation's row id, or 0 when the store could not open one — an ask whose turns cannot be stored still runs and still streams its answer, it just leaves no record.
-func (s *Server) conversationFor(ctx context.Context, named, question, brain string) int64 {
+// conversationFor decides which conversation this ask belongs to. Input: the request context, the conversation id the caller named (empty when it named none), the question, and the brain the caller asked for. Output: the conversation's row id and true, or 0 and false when the caller named a conversation this daemon does not have — an id that is not a number, or one whose row has since been deleted. A named id is read back from the store before it is used, because AddTurn refuses a turn on a conversation that is not there: without this check the handler would answer 202 with an id the window then draws an answer under and loses on its next reload.
+// A 0 with true means no conversation could be opened for an ask that named none: that ask still runs and still streams its answer, it just leaves no record.
+func (s *Server) conversationFor(ctx context.Context, named, question, brain string) (int64, bool) {
 	if named != "" {
 		id, err := strconv.ParseInt(named, 10, 64)
 		if err != nil {
 			slog.Error("ask: conversation_id is not an id", "conversation_id", named)
-			return 0
+			return 0, false
 		}
-		return id
+		if _, err := s.store.Conversation(ctx, id); err != nil {
+			slog.Error("ask: no such conversation", "conversation_id", id, "error", err)
+			return 0, false
+		}
+		return id, true
 	}
 	id, err := s.store.CreateConversation(ctx, titleFromQuestion(question), brain)
 	if err != nil {
 		slog.Error("ask: could not open a conversation", "error", err)
-		return 0
+		return 0, true
 	}
-	return id
+	return id, true
 }
 
 // conversationIDString renders a conversation id for the window, or "" for the 0 that means no conversation was opened.
@@ -421,8 +430,8 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 		trace, err = asker.AskText(ctx, q)
 	}
 	if err != nil {
-		s.recordActRun(trace, "error", err.Error())
-		s.recordTokenUse(trace, "text")
+		s.recordActRun(trace, question, "error", err.Error())
+		s.recordTokenUse(trace, question, "text")
 		if convID != 0 {
 			// Filed as Ora's turn of kind "error" so the thread never shows a question with nothing under it.
 			storeCtx, storeCancel := context.WithTimeout(context.Background(), storeTurnTimeout)
@@ -437,8 +446,8 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 		return
 	}
 
-	s.recordActRun(trace, "ok", "")
-	s.recordTokenUse(trace, "text")
+	s.recordActRun(trace, question, "ok", "")
+	s.recordTokenUse(trace, question, "text")
 	// The tool events themselves already went out live, via the ToolObserver wired onto ctx above — this only rebuilds the list of names for storage, not for broadcast, so they are not shown twice.
 	tools := make([]string, 0, len(trace.ToolHops))
 	for _, hop := range trace.ToolHops {

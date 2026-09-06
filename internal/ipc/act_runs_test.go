@@ -242,3 +242,48 @@ func TestRun_RecordsACallThatFailedAndOneThatCountedNothing(t *testing.T) {
 		}
 	}
 }
+
+// echoQuestionAsker is an Asker whose trace carries back the question it was handed, the way the real ask path fills TurnTrace.Question, so a test can see exactly what the recorders file.
+type echoQuestionAsker struct{ hops []agent.ToolHop }
+
+func (a *echoQuestionAsker) AskText(ctx context.Context, question string) (agent.TurnTrace, error) {
+	return agent.TurnTrace{Question: question, Answer: "done", ToolHops: a.hops}, nil
+}
+
+// TestRun_RecordsTheBareQuestionWhenScreenContextWasAttached checks that the "On screen: ..." prefix run() puts in front of the question for the model stays out of both ledgers: act_runs.question and token_use.question hold the question the user actually asked, since GET /usage shows the first 120 runes of that field and the screen text is neither the question nor something to keep.
+func TestRun_RecordsTheBareQuestionWhenScreenContextWasAttached(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	asker := &echoQuestionAsker{hops: []agent.ToolHop{{Name: "observe_screen", Result: "1. button Save"}}}
+	s := New(asker, store, nil, nil)
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+	s.run(s.asker, "ask-1", 0, "click save", "Bank of Somewhere — balance 12,431.02", false, nil)
+
+	runs, err := store.ActRuns(ctx, 10)
+	if err != nil {
+		t.Fatalf("ActRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("ActRuns = %d, want 1", len(runs))
+	}
+	if runs[0].Question != "click save" {
+		t.Errorf("act run question = %q, want the bare question", runs[0].Question)
+	}
+
+	uses, err := store.TokenUseRecent(ctx, 10)
+	if err != nil {
+		t.Fatalf("TokenUseRecent: %v", err)
+	}
+	if len(uses) != 1 {
+		t.Fatalf("TokenUseRecent = %d, want 1", len(uses))
+	}
+	if uses[0].Question != "click save" {
+		t.Errorf("token use question = %q, want the bare question", uses[0].Question)
+	}
+}

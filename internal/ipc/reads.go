@@ -27,14 +27,18 @@ const (
 	maxEntryText   = 200
 )
 
-// mattersCap, meetingsCap, timelineCap, searchCap and threadsCap bound each screen's list so one long-running store never hands the window a page it cannot draw.
+// mattersCap, meetingsCap, timelineCap, searchCap, threadsCap and peopleCap bound each screen's list so one long-running store never hands the window a page it cannot draw.
 const (
 	mattersCap  = 30
 	meetingsCap = 30
 	timelineCap = 60
 	searchCap   = 20
 	threadsCap  = 5
+	peopleCap   = 100
 )
+
+// peopleWindow is how far back GET /people reads meeting notes for names it has nothing else on. Ninety days because a name heard once in a meeting a season ago is not someone the user is working with now, and the read costs one FTS count query per name it finds.
+const peopleWindow = 90 * 24 * time.Hour
 
 // ContextView is GET /context: the window and text of the most recent capture.
 type ContextView struct {
@@ -335,7 +339,8 @@ func (s *Server) Today(w http.ResponseWriter, r *http.Request) {
 		add(sum.CreatedAt, "seen", text, source)
 	}
 
-	notes, err := s.store.GetNotes(ctx)
+	// Bounded by the same midnight the entries are then filtered against, rather than reading every note ever written on every poll of this screen. The store's own bound is on created_at or updated_at, which is what keeps an action item written last week and closed this morning on today's page.
+	notes, err := s.store.NotesSince(ctx, since)
 	if err != nil {
 		fail(w, err, http.StatusInternalServerError)
 		return
@@ -397,7 +402,7 @@ func (s *Server) Meetings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"meetings": meetings})
 }
 
-// MemorySearch handles GET /memory/search?q=: 20 hybrid-search hits over notes, summaries, episodes and threads, followed by every archived note whose text contains the query. A blank q is 400 — an empty search would otherwise read as "everything Ora knows".
+// MemorySearch handles GET /memory/search?q=: 20 hybrid-search hits over notes, summaries, episodes and threads, filled up to that same total with archived notes whose text contains the query. A blank q is 400 — an empty search would otherwise read as "everything Ora knows".
 func (s *Server) MemorySearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -434,6 +439,10 @@ func (s *Server) MemorySearch(w http.ResponseWriter, r *http.Request) {
 	}
 	lower := strings.ToLower(q)
 	for _, a := range archived {
+		// The whole page is bounded by searchCap, archive included: a query as short as "a" matches most of the archive, and each row carries up to 600 runes.
+		if len(facts) >= searchCap {
+			break
+		}
 		if !strings.Contains(strings.ToLower(a.Content), lower) {
 			continue
 		}
@@ -449,7 +458,7 @@ func (s *Server) MemorySearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"facts": facts})
 }
 
-// People handles GET /people: the people personal context holds, then the names meetings only ever heard. A personal-context entry is a person unless its subject is the user's own identity, the store's "unsure" bucket, or an area of preference.
+// People handles GET /people: the people personal context holds, then the names meetings of the last peopleWindow only ever heard, up to peopleCap in all. A personal-context entry is a person unless its subject is the user's own identity, the store's "unsure" bucket, or an area of preference.
 func (s *Server) People(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	entries, err := s.store.PersonalContext(ctx)
@@ -474,13 +483,16 @@ func (s *Server) People(w http.ResponseWriter, r *http.Request) {
 		people = append(people, Person{Name: name, Seen: true, Note: strings.TrimSpace(e.Content), Count: count})
 	}
 
-	notes, err := s.store.NotesOfKindSince(ctx, meetingNoteKind, time.Time{})
+	notes, err := s.store.NotesOfKindSince(ctx, meetingNoteKind, time.Now().Add(-peopleWindow))
 	if err != nil {
 		fail(w, err, http.StatusInternalServerError)
 		return
 	}
 	for _, n := range notes {
 		for _, name := range heardNames(n.Content) {
+			if len(people) >= peopleCap {
+				break
+			}
 			if known[strings.ToLower(name)] {
 				continue
 			}
