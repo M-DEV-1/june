@@ -8,6 +8,7 @@ import (
 	"image"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -57,14 +58,11 @@ func screenshotShell(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("%s unavailable (reply %d)", shellScreenshotName, reply)
 	}
 
-	// gnome-shell writes the PNG itself, so we only need a unique path it can create.
-	f, err := os.CreateTemp("", "ora-shot-*.png")
+	path, cleanup, err := shotTempPath()
 	if err != nil {
-		return nil, fmt.Errorf("temp file: %w", err)
+		return nil, err
 	}
-	path := f.Name()
-	f.Close()             //nolint:errcheck
-	defer os.Remove(path) //nolint:errcheck — best-effort cleanup
+	defer cleanup()
 
 	// Signature is (include_cursor, flash, filename) -> (success, filename_used). flash=false is the whole point of this path.
 	var ok bool
@@ -85,6 +83,21 @@ func screenshotShell(ctx context.Context) ([]byte, error) {
 		os.Remove(used) //nolint:errcheck
 	}
 	return data, nil
+}
+
+// shotTempPath makes a private directory for gnome-shell to write one screenshot into. Input: none. Output: the path to hand the shell, a function that removes the file and the directory, and an error when the directory cannot be made.
+// The mode has to sit on the directory rather than the file: gnome-shell creates the PNG itself, under its own umask, so a file we pre-created 0600 can come back 0644 and a picture of the whole desktop is readable by every other account on the machine for as long as it is on disk.
+func shotTempPath() (string, func(), error) {
+	dir, err := os.MkdirTemp("", "ora-shot-")
+	if err != nil {
+		return "", nil, fmt.Errorf("temp dir: %w", err)
+	}
+	// MkdirTemp already makes the directory 0700, but the mode is set again so a change there cannot silently widen it.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		os.RemoveAll(dir) //nolint:errcheck
+		return "", nil, fmt.Errorf("temp dir mode: %w", err)
+	}
+	return filepath.Join(dir, "screen.png"), func() { os.RemoveAll(dir) }, nil //nolint:errcheck — best-effort cleanup
 }
 
 // screenshotGranted reports whether the stored permissions already allow screenshots, so warm-up can skip prompting. Portal stores ["yes"] for allow.

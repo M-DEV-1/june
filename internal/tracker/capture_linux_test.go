@@ -5,8 +5,12 @@ package tracker
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -336,52 +340,107 @@ func TestSuperviseReconnectsAfterTheBusDrops(t *testing.T) {
 	close(second)
 }
 
-// The remembered window can go stale without a deactivate ever arriving — the window that took focus belonged to another session's systemd scope, or its activation came from mutter-x11-frames rather than the app, so no signal named it. current() covers that gap by checking STATE_ACTIVE on the remembered window and, when it is unset, taking whatever the desktop scan says is active instead; activeOrFallback is that decision with the bus reads already resolved, so it can be tested without one.
+// The remembered window can go stale without a deactivate ever arriving — the window that took focus belonged to another session's systemd scope, or its activation came from mutter-x11-frames rather than the app, so no signal named it. STATE_ACTIVE on its own does not close that gap: probed on 2026-09-04, the Chrome window hosting the Teams PWA kept the bit set after losing focus, so the remembered window looked active while somebody else had the keyboard. STATE_FOCUSED is the second opinion, and activeOrFallback is that decision with the bus reads already resolved, so it can be tested without one.
 func TestActiveOrFallback(t *testing.T) {
 	files := aref{Name: ":1.4001", Path: "/org/a11y/atspi/accessible/1"}
 	brave := aref{Name: ":1.4002", Path: "/org/a11y/atspi/accessible/1"}
 
 	t.Run("a scan that finds only Ora's own window reports no focus", func(t *testing.T) {
-		scan := func() (aref, string, string, bool) {
-			return aref{Name: ":1.9", Path: "/org/a11y/atspi/accessible/1"}, "ora", "Ora", true
+		scan := func() (activeWindow, bool) {
+			return activeWindow{ref: aref{Name: ":1.9", Path: "/org/a11y/atspi/accessible/1"}, app: "ora", title: "Ora", focused: true}, true
 		}
-		if _, _, _, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, scan); ok {
+		if _, _, _, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, false, scan); ok {
 			t.Fatal("activeOrFallback adopted Ora's own window as the focus")
 		}
 	})
 
-	t.Run("remembered window still active is reported unchanged", func(t *testing.T) {
+	t.Run("remembered window still active and focused is reported unchanged", func(t *testing.T) {
 		scanCalled := false
-		scan := func() (aref, string, string, bool) {
+		scan := func() (activeWindow, bool) {
 			scanCalled = true
-			return aref{}, "", "", false
+			return activeWindow{}, false
 		}
-		ref, app, title, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", true, scan)
+		ref, app, title, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", true, true, scan)
 		if !ok || ref != files || app != "org.gnome.Nautilus" || title != "Home" {
 			t.Fatalf("activeOrFallback = %v, %q, %q, %v, want the remembered window unchanged", ref, app, title, ok)
 		}
 		if scanCalled {
-			t.Fatal("an active window still triggered a desktop scan")
+			t.Fatal("a window holding both the active and the focused bit still triggered a desktop scan")
 		}
 	})
 
 	t.Run("remembered window inactive and another active reports the other", func(t *testing.T) {
-		scan := func() (aref, string, string, bool) {
-			return brave, "brave", "Ora - GitHub", true
+		scan := func() (activeWindow, bool) {
+			return activeWindow{ref: brave, app: "brave", title: "Ora - GitHub"}, true
 		}
-		ref, app, title, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, scan)
+		ref, app, title, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, false, scan)
 		if !ok || ref != brave || app != "brave" || title != "Ora - GitHub" {
 			t.Fatalf("activeOrFallback = %v, %q, %q, %v, want the window the scan found active", ref, app, title, ok)
 		}
 	})
 
+	// This is the failure the file documents and the code did not cover: Chrome hosting the Teams PWA keeps STATE_ACTIVE after losing focus, and the window that really took focus never announced itself, so the remembered window was reported for as long as the user worked elsewhere and the meeting's conversation was walked and stored the whole time.
+	t.Run("remembered window active but not focused loses to the window that claims the keyboard", func(t *testing.T) {
+		scan := func() (activeWindow, bool) {
+			return activeWindow{ref: brave, app: "brave", title: "Ora - GitHub", focused: true}, true
+		}
+		ref, app, title, ok := activeOrFallback(files, "chrome", "Chat | Priya | Microsoft Teams", true, false, scan)
+		if !ok || ref != brave || app != "brave" || title != "Ora - GitHub" {
+			t.Fatalf("activeOrFallback = %v, %q, %q, %v, want the window that claims the keyboard focus", ref, app, title, ok)
+		}
+	})
+
+	// The other half of the same bit being untrustworthy: when nothing on the desktop claims the keyboard, a second window that merely kept STATE_ACTIVE is no better evidence than the remembered one, so the remembered window stands.
+	t.Run("remembered window active but not focused keeps its place against another stale window", func(t *testing.T) {
+		scan := func() (activeWindow, bool) {
+			return activeWindow{ref: brave, app: "brave", title: "Ora - GitHub"}, true
+		}
+		ref, app, title, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", true, false, scan)
+		if !ok || ref != files || app != "org.gnome.Nautilus" || title != "Home" {
+			t.Fatalf("activeOrFallback = %v, %q, %q, %v, want the remembered window kept", ref, app, title, ok)
+		}
+	})
+
 	t.Run("no active window anywhere reports nothing", func(t *testing.T) {
-		scan := func() (aref, string, string, bool) { return aref{}, "", "", false }
-		_, _, _, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, scan)
+		scan := func() (activeWindow, bool) { return activeWindow{}, false }
+		_, _, _, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, false, scan)
 		if ok {
 			t.Fatal("activeOrFallback reported a window when nothing on the desktop is active")
 		}
 	})
+}
+
+// Captured text is cut to a fixed length before it is stored, and cutting a UTF-8 string by bytes lands mid-rune on any screen that is not pure ASCII, so invalid UTF-8 reached episodes.screen_text and its FTS5 index. The cut is by runes.
+func TestTrimText_CutsByRunesNotBytes(t *testing.T) {
+	// Every rune here is three bytes, so a byte cut at maxTextLen falls inside one.
+	long := strings.Repeat("\u3042", maxTextLen)
+	got := trimText(long)
+	if !utf8.ValidString(got) {
+		t.Fatal("trimText produced invalid UTF-8: the cut landed inside a rune")
+	}
+	if n := utf8.RuneCountInString(got); n != maxTextLen {
+		t.Fatalf("trimText kept %d runes, want %d", n, maxTextLen)
+	}
+}
+
+// gnome-shell writes the screenshot file itself, under its own umask, so the path we hand it cannot be relied on to stay 0600. The directory around it is what keeps a picture of the whole desktop away from other accounts on the machine.
+func TestShotTempPath_PutsTheFileInADirectoryOnlyWeCanRead(t *testing.T) {
+	path, cleanup, err := shotTempPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("the screenshot directory is %o, want 700", perm)
+	}
+	if !info.IsDir() {
+		t.Fatal("shotTempPath did not put the screenshot inside a directory of its own")
+	}
 }
 
 // scanForActive is current()'s fallback and observeDesktop's stand-in for STATE_ACTIVE, so it must find a real window with the bit set wherever one is running.
@@ -393,14 +452,14 @@ func TestScanForActive_FindsARealWindow(t *testing.T) {
 		t.Skip("no accessibility bus:", err)
 	}
 	defer conn.Close()
-	ref, app, title, ok := scanForActive(ctx, conn)
+	found, ok := scanForActive(ctx, conn)
 	if !ok {
 		t.Skip("nothing on this desktop reports STATE_ACTIVE")
 	}
-	if ref.Name == "" {
-		t.Fatalf("scanForActive reported %q · %q as active with an empty ref", app, title)
+	if found.ref.Name == "" {
+		t.Fatalf("scanForActive reported %q · %q as active with an empty ref", found.app, found.title)
 	}
-	t.Logf("active: %s · %s", app, title)
+	t.Logf("active: %s · %s", found.app, found.title)
 }
 
 // waitFor polls a condition until it holds or two seconds pass. Input: the test, what is being waited for, and the condition. It exists because the supervisor publishes its watcher from its own goroutine, so the test has no send to synchronise on there.
