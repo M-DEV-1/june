@@ -216,52 +216,36 @@ func TestSplitParts_KeepsThoughtsApartFromText(t *testing.T) {
 	}
 }
 
-// A turn's token counts are the sum of every round of its tool loop, not the last round's counts: a question answered after two tool calls cost what all three model calls cost together. On the text channel the counts arrive on the response's UsageMetadata, where the prompt count is the input and the candidates count plus the thoughts count is the output, because thinking tokens are billed as output and are reported apart from the candidates.
-func TestTokenUsage_AddGeminiSumsEveryRound(t *testing.T) {
+// A turn's token counts are the sum of every round of its tool loop, not the last round's counts: a question answered after two tool calls cost what all three model calls cost together. On the text channel the counts arrive on the response's UsageMetadata, where the prompt count is the input and the candidates count plus the thoughts count is the output, because thinking tokens are billed as output and are reported apart from the candidates. Gemini also reports the part of a prompt it served from its own cache as cachedContentTokenCount, and it is part of the prompt count rather than extra to it — until this was read, every Gemini turn filed zero cached tokens whatever the API said, so the usage screen could not tell a cache that was working from one that was not.
+func TestTokenUsage_AddGemini(t *testing.T) {
 	var use TokenUsage
 	use.addGemini(&genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CandidatesTokenCount: 20, ThoughtsTokenCount: 5, TotalTokenCount: 125})
-	use.addGemini(&genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 200, CandidatesTokenCount: 10, TotalTokenCount: 210})
+	use.addGemini(&genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 200, CandidatesTokenCount: 10, CachedContentTokenCount: 80, TotalTokenCount: 210})
 	if use.InputTokens != 300 || use.OutputTokens != 35 || use.TotalTokens != 335 {
 		t.Errorf("two rounds summed to %+v, want 300 in, 35 out, 335 total", use)
 	}
+	// The cached count is part of the input, so reading it must not change what the input count says.
+	if use.CachedInputTokens != 80 {
+		t.Errorf("cached tokens = %d, want 80", use.CachedInputTokens)
+	}
 	// A round the API reported nothing for adds nothing: a made-up count is worse than a zero.
 	use.addGemini(nil)
-	if use.InputTokens != 300 || use.OutputTokens != 35 || use.TotalTokens != 335 {
+	if use.InputTokens != 300 || use.OutputTokens != 35 || use.TotalTokens != 335 || use.CachedInputTokens != 80 {
 		t.Errorf("a round with no usage metadata changed the counts to %+v", use)
 	}
 }
 
-// Gemini reports the part of a prompt it served from its own cache as cachedContentTokenCount, and it is part of the prompt count rather than extra to it. Until this was read, every Gemini turn filed zero cached tokens whatever the API said, so the usage screen could not tell a cache that was working from one that was not.
-func TestTokenUsage_AddGeminiRecordsCachedPromptTokens(t *testing.T) {
+// The Live API reports usage on the server message rather than on a response, naming the prompt, response, thoughts and cached-prompt counts under the same field names Gemini uses, so a spoken turn reports the same way a typed one does. Most messages of a turn carry none, and those must add nothing.
+func TestTokenUsage_AddLive(t *testing.T) {
 	var use TokenUsage
-	use.addGemini(&genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10000, CachedContentTokenCount: 8000, CandidatesTokenCount: 50, TotalTokenCount: 10050})
-	use.addGemini(&genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 2000, CandidatesTokenCount: 10, TotalTokenCount: 2010})
-	if use.CachedInputTokens != 8000 {
-		t.Errorf("cached tokens summed to %d, want 8000", use.CachedInputTokens)
-	}
-	// The cached count is part of the input, so reading it must not change what the input count says.
-	if use.InputTokens != 12000 {
-		t.Errorf("input tokens are %d, want 12000 — the cached count is part of the input, not extra to it", use.InputTokens)
-	}
-}
-
-// The Live API names the same field on its own usage message, so a spoken turn reports its cache the way a typed one does.
-func TestTokenUsage_AddLiveRecordsCachedPromptTokens(t *testing.T) {
-	var use TokenUsage
-	use.addLive(&genai.UsageMetadata{PromptTokenCount: 5000, CachedContentTokenCount: 4096, ResponseTokenCount: 12, TotalTokenCount: 5012})
-	if use.CachedInputTokens != 4096 || use.InputTokens != 5000 {
-		t.Errorf("got %d cached of %d input, want 4096 of 5000", use.CachedInputTokens, use.InputTokens)
-	}
-}
-
-// The Live API reports usage on the server message rather than on a response, naming the prompt, response and thoughts counts. Most messages of a turn carry none, and those must add nothing.
-func TestTokenUsage_AddLiveSumsEveryMessage(t *testing.T) {
-	var use TokenUsage
-	use.addLive(&genai.UsageMetadata{PromptTokenCount: 40, ResponseTokenCount: 8, ThoughtsTokenCount: 2, TotalTokenCount: 50})
+	use.addLive(&genai.UsageMetadata{PromptTokenCount: 40, ResponseTokenCount: 8, ThoughtsTokenCount: 2, CachedContentTokenCount: 4, TotalTokenCount: 50})
 	use.addLive(nil)
 	use.addLive(&genai.UsageMetadata{PromptTokenCount: 60, ResponseTokenCount: 4, TotalTokenCount: 64})
 	if use.InputTokens != 100 || use.OutputTokens != 14 || use.TotalTokens != 114 {
 		t.Errorf("two reporting messages summed to %+v, want 100 in, 14 out, 114 total", use)
+	}
+	if use.CachedInputTokens != 4 {
+		t.Errorf("cached tokens = %d, want 4 — the cached count is part of the input, not extra to it", use.CachedInputTokens)
 	}
 }
 

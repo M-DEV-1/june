@@ -307,32 +307,6 @@ func TestReceiveLoop_Interrupted_EmitsSystemStoppedChunk(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_InputTranscriptionFinished_EmitsAsYouText verifies a finished voice utterance is forwarded to TextResponseChan as ResponseChunk{Sender: SenderYou} — the UI transcript's only source of what the user actually said in voice mode.
-func TestReceiveLoop_InputTranscriptionFinished_EmitsAsYouText(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	fs := &fakeLiveSession{
-		msgCh:     make(chan *genai.LiveServerMessage, 1),
-		responses: make(chan genai.LiveSendToolResponseParameters, 1),
-		closeErr:  errors.New("fake session closed"),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
-
-	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
-		InputTranscription: &genai.Transcription{Text: "what show am I watching", Finished: true},
-	}}
-
-	select {
-	case chunk := <-a.TextResponseChan:
-		if chunk.Text != "what show am I watching" || chunk.Sender != SenderYou {
-			t.Errorf("expected {Text: %q, Sender: %q}, got %+v", "what show am I watching", SenderYou, chunk)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the finished utterance on TextResponseChan")
-	}
-}
-
 // TestReceiveLoop_InputFragmentsNeverFinished_FlushedAsYouBeforeOutputTranscription is WP10 Part A: current Live API model versions never set InputTranscription.Finished (documented: googleapis/js-genai#1429 — only text fragments arrive, the finished flag never updates), so waiting on it exclusively left the accumulated utterance stuck in the buffer forever — the user's own speech never rendered ("no way to know if Ora heard me"). The fix flushes the pending buffer as a SenderYou chunk on the first sign the model is responding; here that's the first OutputTranscription fragment. The "you" chunk must arrive before the ora chunk that triggered the flush.
 func TestReceiveLoop_InputFragmentsNeverFinished_FlushedAsYouBeforeOutputTranscription(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
@@ -434,7 +408,7 @@ func TestReceiveLoop_NoInputFragments_OutputTranscription_NoEmptyYouChunk(t *tes
 	}
 }
 
-// TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject is a regression guard: receiveLoop must NOT call RetrieveRelevant or send anything back into the session when a transcription finishes. A real live session on 2026-08-09 showed exactly this — an unsolicited SendClientContent call fired automatically on every finished transcription — caused the model to loop on "is the user still there?" reasoning for 3+ minutes with zero final replies; an unsolicited client turn mid-session breaks native-audio turn-taking. The auto-injection code (injectVoiceRecalls) was deleted in WP6 as dead — parked and never called from anywhere since that regression — but the risk it was parked for is unchanged, so this guard stays. If this starts failing because someone re-wires a call site to send context back into an active session on transcription-finished, the safety of doing so against a real Live session needs to be re-verified first, not assumed.
+// TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject checks two things about the one finished voice utterance: it is forwarded to TextResponseChan as ResponseChunk{Sender: SenderYou} — the UI transcript's only source of what the user actually said in voice mode — and, as a regression guard, receiveLoop must NOT call RetrieveRelevant or send anything back into the session when a transcription finishes. A real live session on 2026-08-09 showed exactly this — an unsolicited SendClientContent call fired automatically on every finished transcription — caused the model to loop on "is the user still there?" reasoning for 3+ minutes with zero final replies; an unsolicited client turn mid-session breaks native-audio turn-taking. The auto-injection code (injectVoiceRecalls) was deleted in WP6 as dead — parked and never called from anywhere since that regression — but the risk it was parked for is unchanged, so this guard stays. If this starts failing because someone re-wires a call site to send context back into an active session on transcription-finished, the safety of doing so against a real Live session needs to be re-verified first, not assumed.
 func TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject(t *testing.T) {
 	brain := &toolTestBrain{retrieveRelevantCalled: make(chan string, 1)}
 	a := NewAgent(nil, nil, brain, nil, "")
@@ -452,6 +426,15 @@ func TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject(t *testing.T) 
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
 		InputTranscription: &genai.Transcription{Text: "what show am I watching", Finished: true},
 	}}
+
+	select {
+	case chunk := <-a.TextResponseChan:
+		if chunk.Text != "what show am I watching" || chunk.Sender != SenderYou {
+			t.Errorf("expected {Text: %q, Sender: %q}, got %+v", "what show am I watching", SenderYou, chunk)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the finished utterance on TextResponseChan")
+	}
 
 	select {
 	case focus := <-brain.retrieveRelevantCalled:
@@ -820,7 +803,7 @@ func TestReceiveLoop_TurnComplete_EmitsTurnBoundaryChunk(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_VoiceUsage_AccumulatesAcrossMessagesInATurn verifies the production voice session totals Live API token usage the same way the eval path does (askVoice in ask.go calls TokenUsage.addLive on every server message's UsageMetadata) — until now receiveLoop never read UsageMetadata at all, so a real spoken turn counted as zero tokens on the usage screen. Two messages in the same turn, each carrying usage, must sum rather than the second overwriting the first.
+// TestReceiveLoop_VoiceUsage_AccumulatesAcrossMessagesInATurn verifies the production voice session totals Live API token usage the same way the eval path does (askVoice in ask.go calls TokenUsage.addLive on every server message's UsageMetadata) — until now receiveLoop never read UsageMetadata at all, so a real spoken turn counted as zero tokens on the usage screen. Messages in the same turn that carry usage must sum rather than the later one overwriting the earlier, and a message carrying no UsageMetadata — most messages of a turn — must leave the running total exactly where the last usage-bearing message left it, neither zeroing it nor adding a spurious count.
 func TestReceiveLoop_VoiceUsage_AccumulatesAcrossMessagesInATurn(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -838,42 +821,7 @@ func TestReceiveLoop_VoiceUsage_AccumulatesAcrossMessagesInATurn(t *testing.T) {
 	fs.msgCh <- &genai.LiveServerMessage{
 		UsageMetadata: &genai.UsageMetadata{PromptTokenCount: 3, ResponseTokenCount: 4, TotalTokenCount: 7},
 	}
-	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
-
-	select {
-	case chunk := <-a.TextResponseChan:
-		if !chunk.TurnBoundary {
-			t.Fatalf("expected the turn boundary chunk, got %+v", chunk)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the turn boundary chunk")
-	}
-
-	got := a.VoiceUsage()
-	if got.InputTokens != 13 || got.OutputTokens != 11 || got.TotalTokens != 24 {
-		t.Errorf("expected the two messages' usage summed (Input:13 Output:11 Total:24), got %+v — looks overwritten rather than added", got)
-	}
-	if got.Provider != ProviderGemini {
-		t.Errorf("expected Provider %q, got %q", ProviderGemini, got.Provider)
-	}
-}
-
-// TestReceiveLoop_VoiceUsage_MessageWithNoUsageAddsNothing verifies a server message carrying no UsageMetadata — most messages of a turn — leaves the running total exactly where the last usage-bearing message left it, neither zeroing it nor adding a spurious count.
-func TestReceiveLoop_VoiceUsage_MessageWithNoUsageAddsNothing(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	fs := &fakeLiveSession{
-		msgCh:     make(chan *genai.LiveServerMessage, 3),
-		responses: make(chan genai.LiveSendToolResponseParameters, 1),
-		closeErr:  errors.New("fake session closed"),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
-
-	fs.msgCh <- &genai.LiveServerMessage{
-		UsageMetadata: &genai.UsageMetadata{PromptTokenCount: 8, ResponseTokenCount: 6, TotalTokenCount: 14},
-	}
-	// No UsageMetadata at all — this is what most messages in a turn look like.
+	// No UsageMetadata at all — this is what most messages in a turn look like — and it must add nothing.
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{}}
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
 
@@ -887,8 +835,11 @@ func TestReceiveLoop_VoiceUsage_MessageWithNoUsageAddsNothing(t *testing.T) {
 	}
 
 	got := a.VoiceUsage()
-	if got.InputTokens != 8 || got.OutputTokens != 6 || got.TotalTokens != 14 {
-		t.Errorf("expected the no-usage message to add nothing (Input:8 Output:6 Total:14), got %+v", got)
+	if got.InputTokens != 13 || got.OutputTokens != 11 || got.TotalTokens != 24 {
+		t.Errorf("expected the two usage-bearing messages summed and the no-usage one to add nothing (Input:13 Output:11 Total:24), got %+v", got)
+	}
+	if got.Provider != ProviderGemini {
+		t.Errorf("expected Provider %q, got %q", ProviderGemini, got.Provider)
 	}
 }
 
