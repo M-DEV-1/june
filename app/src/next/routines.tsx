@@ -16,6 +16,7 @@ import {
 import { shortWhen } from "./format";
 import {
   Group,
+  HEAD,
   Nothing,
   PageHeader,
   Reading,
@@ -123,7 +124,7 @@ function RoutineRow({ routine }: { routine: Routine }) {
     : `Last said: ${routine.last_answer === "NOTHING" ? "nothing worth saying" : routine.last_answer} · ${shortWhen(routine.last_run)}`;
 
   return (
-    <li className="flex flex-col gap-1 px-3 py-2.5">
+    <li className="flex flex-col gap-1 px-3.5 py-2.5">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="text-ui">{routine.text}</p>
@@ -175,7 +176,7 @@ export function RoutinesScreen() {
       <PageHeader wide={wide}>
         <h1 className="text-ui font-medium">Routines</h1>
       </PageHeader>
-      <Scroller bodyClassName={`pt-4 ${TAIL}`}>
+      <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
         <Reading wide={wide}>
           <div className="flex flex-col gap-4">
             <NewRoutine />
