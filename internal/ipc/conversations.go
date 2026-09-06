@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"ora/internal/db"
-	strtrunc "ora/internal/text"
+	"ora/internal/util"
 )
 
 // conversationsCap bounds the list the window's sidebar draws.
@@ -60,7 +60,7 @@ func (s *Server) Conversations(w http.ResponseWriter, r *http.Request) {
 		}
 		out := make([]ConversationSummary, 0, len(convs))
 		for _, c := range convs {
-			last := strtrunc.Runes(strings.TrimSpace(c.Last), maxEntryText)
+			last := util.Runes(strings.TrimSpace(c.Last), maxEntryText)
 			if c.LastKind == "error" {
 				last = errorReason(c.Last)
 			}

@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"ora/internal/act"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // What one round's prompt is allowed to carry. The whole trail of a forty-step job lives in the checkpoint, not here: a round deciding which button to press next needs the plan, where the job has got to, what the screen looks like now and what the last few tools said, and nothing else. Sized so that the prompt of a job forty steps in is about the same as the prompt of a job one step in, which is what makes a long job affordable on a subscription.
@@ -32,7 +32,7 @@ const (
 func EstimateTokens(s string) int { return len(s) / 4 }
 
 // capRunes cuts a string to n runes.
-func capRunes(s string, n int) string { return oratext.Runes(s, n) }
+func capRunes(s string, n int) string { return util.Runes(s, n) }
 
 // pushCapped adds one entry to a rolling list, cutting the entry to cap runes and keeping only the newest keep entries. Input: the list, the new entry, how many to keep and the per-entry rune cap. Output: the new list.
 func pushCapped(list []string, entry string, keep, cap int) []string {

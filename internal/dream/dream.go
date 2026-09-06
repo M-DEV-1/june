@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	oratext "ora/internal/text"
 	"os"
 	"path/filepath"
 	"slices"

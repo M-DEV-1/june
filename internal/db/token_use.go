@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // questionRuneCap bounds how much of the asked question is kept on a token_use row. Enough to recognise a call in a log view, short enough that a pasted page cannot bloat the ledger.
@@ -44,7 +44,7 @@ func (s *Store) AddTokenUse(ctx context.Context, use TokenUse) (int64, error) {
 		`INSERT INTO token_use (provider, model, channel, input_tokens, output_tokens, total_tokens, cached_tokens, rounds, duration_ms, question, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		use.Provider, use.Model, use.Channel, use.InputTokens, use.OutputTokens, total, use.CachedTokens, use.Rounds, use.DurationMS,
-		oratext.Runes(use.Question, questionRuneCap), sqliteUTC(at))
+		util.Runes(use.Question, questionRuneCap), sqliteUTC(at))
 	if err != nil {
 		return 0, fmt.Errorf("add token use: %w", err)
 	}

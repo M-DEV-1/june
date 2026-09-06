@@ -14,8 +14,8 @@ import (
 
 	"ora/internal/db"
 	"ora/internal/memory"
-	strtrunc "ora/internal/text"
 	"ora/internal/tracker"
+	"ora/internal/util"
 )
 
 // meetingNoteKind is the notes.kind a meeting's minutes are filed under by internal/recorder.
@@ -187,7 +187,7 @@ func contextViewFrom(a tracker.Activity) ContextView {
 	if text == "" {
 		text = a.UserActivity
 	}
-	return ContextView{App: a.App, Title: a.Title, Text: strtrunc.Runes(text, maxContextText)}
+	return ContextView{App: a.App, Title: a.Title, Text: util.Runes(text, maxContextText)}
 }
 
 // Context handles GET /context: the app, window title and text of the window in focus right now. It reads the window in focus synchronously first (see readFocused), so the hotkey never names a stale window; that read applies the same refusals the tracker's own capture loop applies, Ora's own window and the app blocklist, so the hotkey cannot hand the model a window the episode store would never have held; falls back to the tracker's live buffer — the same buffer /buffer serves — when the live read fails, times out, or names Ora itself; and falls back to the newest stored episode when the buffer has just been flushed or no tracker is wired at all. Text is trimmed to 600 runes.
@@ -222,7 +222,7 @@ func (s *Server) Context(w http.ResponseWriter, r *http.Request) {
 		if text == "" {
 			text = e.UserActivity
 		}
-		writeJSON(w, ContextView{App: e.App, Title: e.Title, Text: strtrunc.Runes(text, maxContextText)})
+		writeJSON(w, ContextView{App: e.App, Title: e.Title, Text: util.Runes(text, maxContextText)})
 		return
 	}
 	writeJSON(w, ContextView{})
@@ -265,7 +265,7 @@ func (s *Server) Matters(w http.ResponseWriter, r *http.Request) {
 			Kind:   "thread",
 			Status: "watching",
 			When:   rfc3339(t.LastSeen),
-			Detail: strtrunc.Runes(t.State, maxEntryText),
+			Detail: util.Runes(t.State, maxEntryText),
 		})
 	}
 
@@ -284,7 +284,7 @@ func (s *Server) Matters(w http.ResponseWriter, r *http.Request) {
 			Kind:   "meeting",
 			Status: "done",
 			When:   rfc3339(m.CreatedAt),
-			Detail: strtrunc.Runes(strings.TrimSpace(m.Content), maxEntryText),
+			Detail: util.Runes(strings.TrimSpace(m.Content), maxEntryText),
 		})
 	}
 
@@ -322,7 +322,7 @@ func (s *Server) Today(w http.ResponseWriter, r *http.Request) {
 		if text == "" {
 			return
 		}
-		rows = append(rows, dated{at: at, entry: Entry{When: rfc3339(at), Kind: kind, Text: strtrunc.Runes(text, maxEntryText), Source: source}})
+		rows = append(rows, dated{at: at, entry: Entry{When: rfc3339(at), Kind: kind, Text: util.Runes(text, maxEntryText), Source: source}})
 	}
 
 	summaries, err := s.store.SummaryTimeline(ctx, since, now)
@@ -425,7 +425,7 @@ func (s *Server) MemorySearch(w http.ResponseWriter, r *http.Request) {
 		facts = append(facts, Fact{
 			ID:          h.Source + ":" + strconv.FormatInt(h.RefID, 10),
 			Kind:        h.Source,
-			Text:        strtrunc.Runes(h.Content, maxContextText),
+			Text:        util.Runes(h.Content, maxContextText),
 			SourceTitle: title,
 			When:        rfc3339(h.CreatedAt),
 		})
@@ -449,7 +449,7 @@ func (s *Server) MemorySearch(w http.ResponseWriter, r *http.Request) {
 		facts = append(facts, Fact{
 			ID:          "archive:" + strconv.FormatInt(a.NoteID, 10),
 			Kind:        a.Kind,
-			Text:        strtrunc.Runes(a.Content, maxContextText),
+			Text:        util.Runes(a.Content, maxContextText),
 			SourceTitle: "archived note",
 			When:        rfc3339(a.ArchivedAt),
 			Archived:    true,

@@ -7,7 +7,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"math"
 	"ora/internal/obs"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 	"sort"
 	"strings"
 	"time"
@@ -31,7 +31,7 @@ func excerptContent(content string, maxRunes int) string {
 	if maxRunes <= 0 {
 		maxRunes = maxEpisodeExcerpt
 	}
-	return oratext.Runes(content, maxRunes)
+	return util.Runes(content, maxRunes)
 }
 
 // FormatHit renders a hit for the model in the established tool/inject shape:

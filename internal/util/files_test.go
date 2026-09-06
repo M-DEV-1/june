@@ -1,4 +1,4 @@
-package fsx
+package util
 
 import (
 	"os"

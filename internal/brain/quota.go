@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"ora/internal/config"
-	"ora/internal/fsx"
+	"ora/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -101,7 +101,7 @@ func (s *QuotaState) save(counts dayCounts) {
 		slog.Warn("brain: could not encode quota counts", "error", err)
 		return
 	}
-	if err := fsx.WriteFileAtomic(s.path, data, 0o600); err != nil {
+	if err := util.WriteFileAtomic(s.path, data, 0o600); err != nil {
 		slog.Warn("brain: could not write quota file", "path", s.path, "error", err)
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // Kind classifies a memory item for retrieval policy.
@@ -149,7 +149,7 @@ func extractSignal(raw, title string, maxWords int) (string, SignalKind) {
 	if maxWords > 0 {
 		text = capWords(text, maxWords)
 	} else {
-		text = oratext.OneLine(text)
+		text = util.OneLine(text)
 	}
 
 	if text == "" {

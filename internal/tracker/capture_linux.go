@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	oratext "ora/internal/text"
-
 	"github.com/godbus/dbus/v5"
 )
 

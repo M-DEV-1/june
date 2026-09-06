@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // stepResultRuneCap bounds how many runes of a tool's result are kept per step, so a chatty tool (observe_screen listing a long page) cannot make one run's steps_json unbounded.
@@ -46,7 +46,7 @@ func storableArgs(name string, args map[string]any) map[string]any {
 			continue
 		}
 		if s, ok := v.(string); ok {
-			out[k] = oratext.Runes(s, stepArgRuneCap)
+			out[k] = util.Runes(s, stepArgRuneCap)
 			continue
 		}
 		out[k] = v
@@ -80,7 +80,7 @@ func (s *Store) AddActRun(ctx context.Context, run ActRun) (int64, error) {
 		if !ScreenTool(step.Name) {
 			continue
 		}
-		steps = append(steps, ActStep{Name: step.Name, Args: storableArgs(step.Name, step.Args), Result: oratext.Runes(step.Result, stepResultRuneCap)})
+		steps = append(steps, ActStep{Name: step.Name, Args: storableArgs(step.Name, step.Args), Result: util.Runes(step.Result, stepResultRuneCap)})
 	}
 	stepsJSON, err := json.Marshal(steps)
 	if err != nil {

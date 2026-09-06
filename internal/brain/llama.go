@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/netx"
+	"ora/internal/util"
 )
 
 // LlamaServer answers by posting to a local llama-server's OpenAI-compatible /v1/chat/completions endpoint. It exists for the dream package's shadow brain: a second, local model that shadows the primary dream brain on the same prompts for offline comparison and never itself decides anything.
@@ -45,7 +45,7 @@ func LlamaServer(baseURL string, timeoutSeconds int) Brain {
 		defer resp.Body.Close()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return "", fmt.Errorf("llama-server: server returned %d: %s", resp.StatusCode, head(netx.BodySnippet(resp.Body)))
+			return "", fmt.Errorf("llama-server: server returned %d: %s", resp.StatusCode, head(util.BodySnippet(resp.Body)))
 		}
 
 		var parsed struct {

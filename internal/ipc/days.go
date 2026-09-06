@@ -13,7 +13,7 @@ import (
 
 	"ora/internal/db"
 	"ora/internal/memory"
-	strtrunc "ora/internal/text"
+	"ora/internal/util"
 )
 
 // daysBack is how far the history goes: the last sixty days that have anything in them.
@@ -270,7 +270,7 @@ func firstLine(page string) string {
 		if line == "" {
 			continue
 		}
-		return strtrunc.Runes(strings.TrimLeft(line, "# "), dayTitleCap)
+		return util.Runes(strings.TrimLeft(line, "# "), dayTitleCap)
 	}
 	return ""
 }

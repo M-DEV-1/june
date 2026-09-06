@@ -8,7 +8,7 @@ import (
 	"net"
 	"regexp"
 
-	strtrunc "ora/internal/text"
+	"ora/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -56,7 +56,7 @@ func askSentence(err error, text string) string {
 		switch code {
 		case 429:
 			// RESOURCE_EXHAUSTED is the free tier's day being spent; a bare 429 is the per-minute rate, which comes back on its own.
-			if strtrunc.ContainsAny(text, "resource_exhausted", "quota") {
+			if util.ContainsAny(text, "resource_exhausted", "quota") {
 				return askQuotaSpent
 			}
 			return askTooFast
@@ -71,10 +71,10 @@ func askSentence(err error, text string) string {
 	if noNetwork(err, text) {
 		return askNoNetwork
 	}
-	if strtrunc.ContainsAny(text, "context deadline exceeded", "deadline exceeded", "timed out", "timeout") {
+	if util.ContainsAny(text, "context deadline exceeded", "deadline exceeded", "timed out", "timeout") {
 		return askTooLong
 	}
-	if strtrunc.ContainsAny(text, "context canceled", "context cancelled") {
+	if util.ContainsAny(text, "context canceled", "context cancelled") {
 		return askStopped
 	}
 	return askUnexplained
@@ -107,5 +107,5 @@ func noNetwork(err error, text string) bool {
 	if errors.As(err, &dns) || errors.As(err, &op) {
 		return true
 	}
-	return strtrunc.ContainsAny(text, "no such host", "connection refused", "network is unreachable", "no route to host", "dial tcp", "server misbehaving")
+	return util.ContainsAny(text, "no such host", "connection refused", "network is unreachable", "no route to host", "dial tcp", "server misbehaving")
 }

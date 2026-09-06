@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 	"regexp"
 	"runtime"
 	"strings"
@@ -368,7 +368,7 @@ func HistoryFromTurns(turns []db.Turn) History {
 		if t.Role == "you" {
 			role = genai.RoleUser
 		}
-		kept = append(kept, &genai.Content{Role: role, Parts: []*genai.Part{{Text: oratext.UTF8Bytes(text, maxHistoryTurnBytes)}}})
+		kept = append(kept, &genai.Content{Role: role, Parts: []*genai.Part{{Text: util.UTF8Bytes(text, maxHistoryTurnBytes)}}})
 	}
 	if len(kept) > 0 && kept[len(kept)-1].Role == genai.RoleUser {
 		kept = kept[:len(kept)-1]
@@ -916,7 +916,7 @@ func toolLogDetail(name, result string) string {
 	if screenToolNames[name] {
 		return ""
 	}
-	return oratext.Runes(result, 160)
+	return util.Runes(result, 160)
 }
 
 var askAllowedTools = map[string]bool{

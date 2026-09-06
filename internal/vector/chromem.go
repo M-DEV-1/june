@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/fsx"
+	"ora/internal/util"
 
 	chromem "github.com/philippgille/chromem-go"
 )
@@ -57,7 +57,7 @@ func (c *ChromemIndex) persistSidecar() error {
 	if err != nil {
 		return fmt.Errorf("marshal sidecar: %w", err)
 	}
-	if err := fsx.WriteFileAtomic(c.sidecarPath, data, 0o600); err != nil {
+	if err := util.WriteFileAtomic(c.sidecarPath, data, 0o600); err != nil {
 		return fmt.Errorf("write sidecar: %w", err)
 	}
 	return nil
