@@ -67,6 +67,7 @@ import {
   type Desktop,
   type Dock,
   type PlaceContext,
+  type WinLike,
 } from "./winplace";
 
 const root = document.getElementById("w") as HTMLElement;
@@ -126,7 +127,20 @@ const VOICE_WAVE_WIDTH = 40;
 /** The speaker's smoothed amplitude for the live-voice waveform (Ora's voice, not the user's mic — see voiceWaveInnerHtml), owned here rather than in the view: it updates up to 20 times a second off the daemon's "level" events (see voiceEvent in state.ts), and running that through the full reducer-and-render path on every tick would rebuild the whole card that often for nothing. Reset to a fresh (silent) instance every time a session starts, in dispatch's "voiceOn" case, so a new session never shows the tail end of the last one's bar. */
 let speakerWave = new Waveform(VOICE_WAVE_WIDTH);
 
-/** Re-reads the daemon's token (it changes on every daemon restart), probes it, opens the event stream once, and loads the screen context. Input: none. Output: nothing; leaves daemonUp set and the view rendered either way. */
+/** How many probes in a row have gone unanswered. The probe gives the daemon 500ms (see probe in daemon.ts), and a daemon mid-whisper-decode or mid-AT-SPI-read can miss that and still be there, so one miss is not enough to call it gone: the last known-good answer stands until a second miss in a row. */
+let probeMisses = 0;
+
+/** Whether the daemon counts as up after this probe. Input: what the probe answered. Output: true while it is up, false once it has missed twice in a row; a single miss leaves the last answer standing, so a busy daemon does not turn the card to "Not connected" and send the next question to the offline sentence instead. */
+function daemonUpAfter(probed: boolean): boolean {
+  if (probed) {
+    probeMisses = 0;
+    return true;
+  }
+  probeMisses++;
+  return probeMisses >= 2 ? false : daemonUp;
+}
+
+/** Re-reads the daemon's token (it changes on every daemon restart), probes it and opens the event stream once. Input: none. Output: nothing; leaves daemonUp set and the view rendered either way. This is everything the hotkey waits on before the window is shown, and the probe is the only call in it with a network round trip — what fills the card in (the context chip, the matters, a live session) runs after the window is up, see hydrate. */
 async function connect(): Promise<void> {
   try {
     setToken(await invoke<string>("ipc_token"));
@@ -134,14 +148,16 @@ async function connect(): Promise<void> {
     // Not inside Tauri, or the daemon has not written its token file yet; in the dev server the token can come from the query string instead.
     if (devToken) setToken(devToken);
   }
-  daemonUp = await probe();
+  daemonUp = daemonUpAfter(await probe());
   if (daemonUp) {
     if (!eventsStarted) {
       eventsStarted = true;
       events((ev) => {
         // Ora speaking first, which is nobody's answer and belongs to no session: taken before every filter below, all of which are about matching an event to something this window asked for.
         if (ev.type === "notice" && ev.notice) {
-          void showNotice(ev.notice);
+          void showNotice(ev.notice).catch((e) =>
+            console.error("ora: showing the notice failed", e),
+          );
           return;
         }
         // Everything a live voice session hears, says and calls arrives on this same stream under the session's id.
@@ -166,25 +182,48 @@ async function connect(): Promise<void> {
         dispatch({ kind: "daemonEvent", ev });
       });
     }
-    await loadFromDaemon();
-    // Hiding this window does not end a session, and neither does reloading it, so every time the window comes back it matches itself to whatever the daemon is actually running: it joins a session it was not part of, picks up the state that session moved to while nothing was on screen, and drops one that has already ended — by the spoken "stop", or from another window.
-    const live = await voiceStatus();
-    if (live?.active) {
-      if (live.id !== view.voice) {
-        dispatch({ kind: "voiceOn", id: live.id });
-        clearHintSoon();
-      }
-      dispatch({
-        kind: "voiceEvent",
-        ev: { id: live.id, type: "state", text: live.state },
-      });
-    } else if (live && view.voice) {
-      dispatch({ kind: "voiceOff" });
-    }
   }
+  // The breath runs on this window's own clock and is stopped when the window is hidden (see hideWindow), so a live session that outlived a hide gets its grid moving again here, on the way back to being shown.
+  syncBreath(Boolean(view.voice));
   render(view);
 }
-void connect().then(runDevSwitches);
+
+/** Fills the card in from the daemon after the window is already up: the context chip, the matters behind it, and whatever live voice session the daemon is running. Input: none. Output: nothing, and nothing is awaited by the caller — /context reads the focused window through AT-SPI and can take seconds, and the hover must not wait on it (each of the three reads gives up after its own deadline, see readJson in daemon.ts). */
+function hydrate(): void {
+  if (!daemonUp) return;
+  void loadFromDaemon().catch((e) => console.error("ora: context read failed", e));
+  void syncVoice().catch((e) => console.error("ora: voice status read failed", e));
+}
+
+/** Matches the window to whatever live session the daemon is actually running. Hiding this window does not end a session, and neither does reloading it, so every time the window comes back it joins a session it was not part of, picks up the state that session moved to while nothing was on screen, and drops one that has already ended — by the spoken "stop", or from another window. Input: none. Output: nothing. */
+async function syncVoice(): Promise<void> {
+  const live = await voiceStatus();
+  if (live?.active) {
+    if (live.id !== view.voice) {
+      dispatch({ kind: "voiceOn", id: live.id });
+      clearHintSoon();
+    }
+    dispatch({
+      kind: "voiceEvent",
+      ev: { id: live.id, type: "state", text: live.state },
+    });
+  } else if (live && view.voice) {
+    dispatch({ kind: "voiceOff" });
+  }
+}
+
+/** What the hotkey runs before the window is shown: the probe and the event stream, then the slower reads fired off behind them. Input: none. Output: a promise that settles as soon as the window can be put on screen. */
+async function beforeShow(): Promise<void> {
+  await connect();
+  hydrate();
+}
+
+void connect()
+  .then(() => {
+    hydrate();
+    runDevSwitches();
+  })
+  .catch((e) => console.error("ora: first connect failed", e));
 
 /** Runs the dev-only URL switches once the daemon is connected: the queued ?q= questions, a four-second dictation, a live voice session. Input: none. Output: nothing. */
 function runDevSwitches(): void {
@@ -226,13 +265,15 @@ function hasContent(v: View, m: Matter): boolean {
 /** Rebuilds the window's whole innerHTML from the current state, resizes the OS window to fit it, and puts the caret back in the input. Input: the view. Output: nothing, the DOM is the output. */
 function render(v: View): void {
   const m = v.matters[v.current] ?? placeholderMatter();
+  // Every deferred write into the card is dropped here: the elements they were measured against are about to be thrown away, and what they were going to write is in this render already.
+  clearDeferredWrites();
   root.innerHTML = cardHtml(v, m);
   root.classList.toggle("bare", !hasContent(v, m));
   // Past its ceiling the thread scrolls inside itself (see threadMaxHeight and --thread-max), and the newest turn is at the bottom of it — but this rebuild has just thrown the old element and its scroll position away, so the freshly built one starts at the top. Pinning it to the bottom is what keeps the answer being written in view.
   const thread = root.querySelector<HTMLElement>(".thread");
   if (thread) thread.scrollTop = thread.scrollHeight;
   renderNotice(v);
-  void fitWindow();
+  fit();
 
   const input = root.querySelector<HTMLInputElement>(".q");
   if (input) {
@@ -245,17 +286,17 @@ function render(v: View): void {
         "bare",
         input.value.trim() === "" && m.turns.length === 0,
       );
-      void fitWindow();
+      fit();
       dispatch({ kind: "type", value: input.value });
     });
     input.addEventListener("keydown", onInputKeydown);
   }
-  root
-    .querySelector(".evd .h")
-    ?.addEventListener("click", () => dispatch({ kind: "toggleEvidence" }));
-  root
-    .querySelector(".stepsum")
-    ?.addEventListener("click", () => dispatch({ kind: "toggleSteps" }));
+  bindFold(root.querySelector(".evd .h"), v.evidenceOpen, () =>
+    dispatch({ kind: "toggleEvidence" }),
+  );
+  bindFold(root.querySelector(".stepsum"), v.stepsOpen === true, () =>
+    dispatch({ kind: "toggleSteps" }),
+  );
   root.querySelector(".job-stop")?.addEventListener("click", () => {
     const job = currentJobView();
     if (job) void actStop(job.id);
@@ -269,10 +310,39 @@ function render(v: View): void {
     ?.addEventListener("click", () => void toggleVoice());
 }
 
+/** Resizes the OS window to the card that was just drawn, without anyone waiting on it. Input: none. Output: nothing; a window call that fails is logged rather than left as an unhandled rejection, which is all a page with no window to resize can do about it. */
+function fit(): void {
+  void fitWindow().catch((e) => console.error("ora: resizing the window failed", e));
+}
+
+/** Makes one of the card's two fold-out headers — the evidence line and the collapsed step summary — a control rather than a div with a click handler: reachable by Tab, operable with Enter and Space, and announced with whether it is open. Input: the header element (or null when the card has none), whether its fold is open, and what to run when it is pressed. Output: nothing. */
+function bindFold(el: Element | null, open: boolean, toggle: () => void): void {
+  if (!(el instanceof HTMLElement)) return;
+  el.setAttribute("role", "button");
+  el.tabIndex = 0;
+  el.setAttribute("aria-expanded", String(open));
+  el.addEventListener("click", toggle);
+  el.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    toggle();
+  });
+}
+
+/** The two writes this window defers into a card it may no longer be looking at: the 150ms half of a label's cross-fade (see crossFadeText) and the render that lands after a finished turn's step list has shrunk (see collapseStepsThenRender). Cleared whenever the card is rebuilt or the window is hidden, so neither can write into markup that has since been thrown away. */
+let fadeTimer: ReturnType<typeof setTimeout> | undefined;
+let collapseTimer: ReturnType<typeof setTimeout> | undefined;
+function clearDeferredWrites(): void {
+  clearTimeout(fadeTimer);
+  fadeTimer = undefined;
+  clearTimeout(collapseTimer);
+  collapseTimer = undefined;
+}
+
 /** The notice drawn into the bubble right now, so an unrelated render — a tool event landing while the notice is up — leaves it alone instead of rewriting its markup and replaying its entrance. The reducer builds a new view object for every event but only replaces the notice itself when the notice changes, so identity is what says whether anything has to be redrawn. */
 let drawnNotice: Notice | undefined;
 
-/** Draws the notice bubble from the current state: the title in bold, up to three lines of body under it, a tail on the side facing the screen edge the hover is anchored to, and the card underneath hidden when the notice is the only thing this window is up to say. Input: the view. Output: nothing, the DOM is the output. */
+/** Draws the notice bubble from the current state: the title in bold, up to three lines of body under it, and the card underneath hidden when the notice is the only thing this window is up to say. Input: the view. Output: nothing, the DOM is the output. */
 function renderNotice(v: View): void {
   const n = v.notice;
   noticeEl.hidden = n === undefined;
@@ -286,8 +356,8 @@ function renderNotice(v: View): void {
     noticeEl.innerHTML = "";
     return;
   }
-  // A hover that opens at the top of the screen has its nearest edge above it, so its tail points up; the bottom and middle positions both hang off the dock below.
-  noticeEl.className = storedHoverPosition() === "top" ? "N up" : "N down";
+  // The two classes are margins, one above and one below (see styles.css): a card on its own is placed under the top bar by noticePlacement whatever position the hover itself is set to, so it takes its air above; one stacked over an open card takes its air below, between itself and that card. Which of the two it is comes from noticeOnly, not from the stored hover position, which says nothing about where a notice-only window went.
+  noticeEl.className = noticeOnly ? "N up" : "N down";
   // A notice whose action is set is the desktop notification's own follow-up, not a fresh card: it shows what happened, one line, instead of the title and body drawn the first time.
   const actionLine = noticeActionLine(n, new Date());
   noticeEl.innerHTML =
@@ -425,7 +495,7 @@ function displayPlaceholder(v: View): string {
   return p === RESTING_PLACEHOLDER ? "Ask Ora" : p;
 }
 
-/** The whole card: the input line, the thread of what has been asked so far, and the footer — or, for the whole length of a live voice session, the voice-mode surface instead (see voiceSurfaceHtml). Input: the view and the matter the turns belong to. Output: the card's HTML. */
+/** The whole card: the input line, the thread of what has been asked so far, and the footer — or, for the whole length of a live voice session, the voice-mode surface instead (see voiceSurfaceHtml). The input carries a fixed aria-label rather than leaning on its placeholder for a name: the placeholder is also this window's status line ("Listening…", "Live voice on"), so it changes under a user who is part way through typing, and a control whose name moves has no name. Input: the view and the matter the turns belong to. Output: the card's HTML. */
 function cardHtml(v: View, m: Matter): string {
   if (v.voice) return voiceSurfaceHtml(v, m);
   const tag = daemonUp ? "daemon" : mockMode ? "mock" : "daemon offline";
@@ -441,7 +511,7 @@ function cardHtml(v: View, m: Matter): string {
   return `
     <div class="in${v.dictating ? " holding" : ""}">
       ${status}
-      <input class="q" value="${esc(v.input)}" placeholder="${esc(displayPlaceholder(v))}" />
+      <input class="q" value="${esc(v.input)}" aria-label="Ask Ora" placeholder="${esc(displayPlaceholder(v))}" />
       <span class="wave"><i></i><i></i><i></i></span>
       ${ctx}
     </div>
@@ -479,6 +549,8 @@ let breathTimer: ReturnType<typeof setInterval> | undefined;
 function syncBreath(voiceOn: boolean): void {
   if (voiceOn && breathTimer === undefined && !reduce) {
     breathTimer = setInterval(() => {
+      // A session outlives a hide of this window, and nothing this draws is on screen while it is hidden, so the ten wakeups a second do no work until it comes back — the same guard tickSteps has. hideWindow stops the timer outright as well, because a hidden GTK window under X11 does not reliably set document.hidden.
+      if (document.hidden) return;
       if (Date.now() - lastLevelAt < BREATH_AFTER_MS) return;
       speakerWave.update(voiceGridAmplitude(0));
       scheduleVoiceWaveRepaint();
@@ -545,7 +617,9 @@ function crossFadeText(el: HTMLElement, html: string): void {
     return;
   }
   el.style.opacity = "0";
-  setTimeout(() => {
+  clearTimeout(fadeTimer);
+  fadeTimer = setTimeout(() => {
+    fadeTimer = undefined;
     el.innerHTML = html;
     el.style.opacity = "1";
   }, 150);
@@ -594,7 +668,7 @@ function patchLiveSteps(v: View): boolean {
       wrap.insertBefore(tmp.content.firstChild, row);
   }
   updateLiveRow(row, openIdx < steps.length ? steps[openIdx] : undefined);
-  void fitWindow();
+  fit();
   return true;
 }
 
@@ -824,7 +898,11 @@ function collapseStepsThenRender(): void {
     wrap.style.height = "0px";
     wrap.style.opacity = "0";
   });
-  setTimeout(() => render(view), 200);
+  clearTimeout(collapseTimer);
+  collapseTimer = setTimeout(() => {
+    collapseTimer = undefined;
+    render(view);
+  }, 200);
 }
 
 /** Sends the question that has just been put on the pending turn: to the daemon when it answered the last probe, to the mock script under ?mock=1, and otherwise straight to the offline sentence in the answer slot. Input: the question, and the conversation to append it to, or undefined to have the daemon open one (see askConversation). Output: nothing; the answer arrives later as daemon events. */
@@ -892,15 +970,21 @@ function beginDictation(): void {
     .catch(() => failDictation());
 }
 
+/** Whether a stop has gone to the daemon and not come back. The transcript can take minutes to arrive (whisper queues behind a meeting decode), and until it does the view still says the window is dictating — so without this a second Space would call endDictation again, and the daemon, having already closed that recording, would answer that second stop with a 404 and an empty transcript, which is then taken as the words and drops the real ones as a duplicate. */
+let dictateStopping = false;
+
 /** Closes the microphone, if the daemon has not already closed it itself. Input: none. Output: a promise for when the transcript has been applied. */
 async function endDictation(): Promise<void> {
   const started = dictation;
-  if (!started) return;
+  if (!started || dictateStopping) return;
+  dictateStopping = true;
   const { base, token } = endpoint();
   try {
     finishDictation(await stopDictation(base, token, await started));
   } catch {
     failDictation();
+  } finally {
+    dictateStopping = false;
   }
 }
 
@@ -987,11 +1071,14 @@ document.addEventListener(
       void toggleVoice();
       return;
     }
+    // The card's two fold-out headers are keyboard controls (see bindFold), and Space is how a button is pressed; a Space that belongs to one of them is not a Space that opens the microphone.
+    if ((e.target as HTMLElement | null)?.closest?.('[role="button"]')) return;
     const value = root.querySelector<HTMLInputElement>(".q")?.value ?? "";
     const action = dictationKey(
       e,
       value.trim() === "",
       view.dictating === true,
+      dictateStopping,
     );
     if (!action) return;
     e.preventDefault();
@@ -1021,7 +1108,11 @@ let hidden: Promise<void> = Promise.resolve();
 /** Hides the hover and stops the step ticker with it, whichever way the hide was asked for — Escape, a notice's six seconds running out, or the card being clicked through. Input: none. Output: nothing; the hide's promise is kept in `hidden` for showNotice to wait on. */
 function hideWindow(): void {
   stopStepTicker();
-  hidden = hide();
+  // A live voice session outlives a hide, so its grid's breath is stopped here rather than left running ten times a second against a window nobody can see; connect() starts it again on the way back to being shown.
+  syncBreath(false);
+  clearDeferredWrites();
+  // showNotice waits on this before asking whether the window is visible, so a hide that failed has to settle rather than reject there.
+  hidden = hide().catch((e) => console.error("ora: hiding the window failed", e));
 }
 /** Shows the hover so it can say one of Ora's own moments, and takes no focus doing it: the notice arrives while the user is working in another window, so the window is placed and shown exactly as the hotkey path places and shows it but with no raise() and nothing else that asks GNOME for focus. Input: the notice off the daemon's stream. Output: a promise for when the window is up. */
 let showNotice: (n: Notice) => Promise<void> = async () => {};
@@ -1035,25 +1126,25 @@ let fitWindow: () => Promise<{ width: number; height: number }> = async () => ({
   width: HOVER_WIDTH,
   height: 0,
 });
-try {
-  const win = getCurrentWindow();
+
+/** Whether this window is up only to show a notice, which is a different window from the hover: it is the width of the notice card rather than of the ask card, it sits under the top bar at the right rather than where the hover opens, and it goes again when the notice does. Set when a notice arrives at a shut window and cleared when the hotkey opens the hover proper, so a second notice landing on top of the first is still treated as a notice-only window rather than as a hover the user opened. Read by renderNotice as well as by the sizing, which is why it lives out here rather than inside wireWindow. */
+let noticeOnly = false;
+
+/** What the Tauri shell hands this module: the window itself, the desktop the placement reads, the one focus request, and a way to hear the toggle hotkey. Passed in rather than reached for, so the show, the notice-only window and the sizing can all be driven from a fake — under jsdom getCurrentWindow() throws, and everything wired up below it was unreachable from any test. */
+export interface Shell {
+  win: WinLike;
+  desktop: Desktop;
+  raise: () => Promise<void>;
+  onToggle: (run: () => void) => void;
+}
+
+/** Wires the window calls this module cannot make on its own: hide, fitWindow, showNotice and the toggle hotkey. Input: the shell. Output: nothing; the four module-level bindings above are what it leaves behind. */
+export function wireWindow(shell: Shell): void {
+  const { win, desktop } = shell;
   hide = () => win.hide();
 
-  // Where the dock is, re-read from the desktop on every open so moving the dock takes effect on the next hotkey press instead of on the next restart. The last answer is kept as the fallback, and the first one is a bottom dock that reserves no space, which is also what the Rust side returns when it can read nothing.
-  let dock: Dock = { edge: "bottom", clearance: 0 };
-  const desktop: Desktop = {
-    monitors: () => availableMonitors(),
-    pointer: () => cursorPosition(),
-    focused: () => currentMonitor(),
-    dock: async () => {
-      dock = await invoke<Dock>("dock_anchor").catch(() => dock);
-      return dock;
-    },
-  };
   // The monitor, dock and chosen position this open used, held for as long as the window stays up so that an answer growing the window keeps sitting where it opened instead of following the pointer onto another screen.
   let placeCtx: PlaceContext | null = null;
-  // Whether this window is up only to show a notice, which is a different window from the hover: it is the width of the notice card rather than of the ask card, it sits under the top bar at the right rather than where the hover opens, and it goes again when the notice does. Set when a notice arrives at a shut window and cleared when the hotkey opens the hover proper, so a second notice landing on top of the first is still treated as a notice-only window rather than as a hover the user opened.
-  let noticeOnly = false;
 
   // The card does not fill the window: the body keeps a gutter around it so the card's shadow has somewhere to fall, so the window has to be as tall as the card's bottom edge plus that gutter. Growing it downwards alone would walk it off the position it opened at, so every height change is followed by a move (see winplace.fitWindow).
   let lastHeight = 0;
@@ -1074,8 +1165,8 @@ try {
     lastHeight = height;
     lastWidth = width;
     const size = { width, height };
-    // A notice-only window is placed where notices go on every resize as well as on the first show, so a second notice with a taller body does not fly off to the hover's own position (winplace.fitWindow moves a visible window with placementFor, which is the hover's bottom-centre by default).
-    await winplaceFitWindow(win, size, changed, noticeOnly ? null : placeCtx);
+    // Both kinds of window are sized here and each is then moved exactly once: the hover by winplace.fitWindow, which puts it back where it opened, and a notice-only window by placeNotice, which puts it under the top bar at the right. winplace.fitWindow is told not to move a notice-only window, or it would fly off to the hover's own position (placementFor, which is bottom-centre by default) and be moved back a moment later.
+    await winplaceFitWindow(win, size, changed, placeCtx, !noticeOnly);
     if (noticeOnly && changed) await placeNotice(size);
     return size;
   };
@@ -1085,45 +1176,75 @@ try {
     const at = noticePlacement(placeCtx, size);
     await win.setPosition(new PhysicalPosition(at.x, at.y));
   };
-  // The thread's ceiling is a share of the screen it is on, so it is set from the placement each open resolves; the stylesheet reads it as --thread-max and scrolls the thread inside itself past it.
-  const capThread = (ctx: PlaceContext | null): void => {
-    if (ctx) document.body.style.setProperty("--thread-max", `${threadMaxHeight(ctx.work, ctx.scale)}px`);
+  /** Sets the thread's ceiling for the screen this open landed on; the stylesheet reads it as --thread-max and scrolls the thread inside itself past it. The cap is written as CSS pixels, so it is worked out with this window's own scale factor rather than with the pointer monitor's, which is a different number on a mixed-DPI desk. Input: the placement context, or null when no monitor was resolved. Output: nothing. */
+  const capThread = async (ctx: PlaceContext | null): Promise<void> => {
+    if (!ctx) return;
+    const cap = threadMaxHeight(ctx.work, await win.scaleFactor());
+    document.body.style.setProperty("--thread-max", `${cap}px`);
   };
   showNotice = async (n) => {
     // A notice pressed on a notice-only window hides that window and the daemon's confirmation follows milliseconds later; without waiting for the hide to land, isVisible() answers true for a window on its way out and the confirmation takes the "already open" branch below and is never seen.
     await hidden;
     const open = await win.isVisible();
     // A hover already on screen keeps the position it opened at; one that is shut is placed for this notice the same way the hotkey path places it, before anything is shown.
-    if (!open) placeCtx = await resolveContext(desktop, storedHoverPosition());
-    capThread(placeCtx);
+    if (!open) {
+      placeCtx = await resolveContext(desktop, storedHoverPosition());
+      // A shut window is about to be placed for this notice against a context that may name a different monitor from the last one's, so the fit below has to run even if the card comes out exactly the height the last one was.
+      lastHeight = 0;
+    }
+    await capThread(placeCtx);
     // A window that is up only for the notice before this one is still a notice-only window: the card stays on its own and goes with the notice, rather than un-hiding an empty ask card that nothing would then take down.
     if (!open) noticeOnly = true;
     dispatch({ kind: "notice", notice: n, hoverOpen: open && !noticeOnly });
     if (open) return;
-    // A window up only to show a notice sits under the top bar at the right, beside the tray, not where the hover opens for a question.
-    await placeNotice(await fitWindow());
+    // One call: fitWindow sizes the window and, for a notice-only window, puts it under the top bar at the right — where notices go, not where the hover opens for a question.
+    await fitWindow();
     // show() and nothing else. No raise(), no setFocus(): the user is typing in another window and a notice must not take the keyboard off them.
     await win.show();
   };
 
-  // The desktop hotkey signals the Rust side, which emits this event; showing and hiding from here keeps every window call on the main loop.
-  void listen("ora://toggle", () =>
-    toggleWindow(win, {
-      // Ask the daemon what is on screen before this window takes focus, or the context would be Ora itself.
-      beforeShow: connect,
+  // The desktop hotkey signals the Rust side, which emits an event the shell passes on here; showing and hiding from here keeps every window call on the main loop.
+  shell.onToggle(() => {
+    void toggleWindow(win, {
+      // Probe the daemon and open its stream before this window takes focus; what fills the card in follows behind the show (see beforeShow and hydrate).
+      beforeShow,
       openContext: async () => {
         // The hotkey opens the hover proper, so whatever notice-only window came before it is over: full width, the chosen position, and the card underneath on show again.
         noticeOnly = false;
         // The position is re-read from storage on every open, so choosing a different one on the Settings screen takes effect on the next hotkey press without a restart.
         placeCtx = await resolveContext(desktop, storedHoverPosition());
-        capThread(placeCtx);
+        await capThread(placeCtx);
         return placeCtx;
       },
       sizeToContent: fitWindow,
-      raise: () => invoke("raise"),
+      raise: shell.raise,
       focusInput: () => root.querySelector<HTMLInputElement>(".q")?.focus(),
-    }),
-  );
+    }).catch((e) => console.error("ora: the toggle failed", e));
+  });
+}
+
+try {
+  const win = getCurrentWindow();
+  // Where the dock is, re-read from the desktop on every open so moving the dock takes effect on the next hotkey press instead of on the next restart. The last answer is kept as the fallback, and the first one is a bottom dock that reserves no space, which is also what the Rust side returns when it can read nothing.
+  let dock: Dock = { edge: "bottom", clearance: 0 };
+  wireWindow({
+    win,
+    desktop: {
+      monitors: () => availableMonitors(),
+      pointer: () => cursorPosition(),
+      focused: () => currentMonitor(),
+      dock: async () => {
+        dock = await invoke<Dock>("dock_anchor").catch(() => dock);
+        return dock;
+      },
+    },
+    raise: () => invoke("raise"),
+    onToggle: (run) => {
+      void listen("ora://toggle", run).catch((e) =>
+        console.error("ora: the toggle listener would not attach", e),
+      );
+    },
+  });
 } catch {
   /* not inside Tauri */
 }

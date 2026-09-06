@@ -1,7 +1,10 @@
 /** @vitest-environment jsdom */
 /** Regression test for the "stuttering" status line: main.ts used to rebuild the whole card's innerHTML on every daemon event while an ask was running (and once a second besides, from the elapsed-time ticker), tearing down and recreating the live step row on every one of them. A CSS animation restarts from its first frame whenever the element carrying it is removed and recreated, so the shimmer and breathe never got to run a full pass — that restart, not the animations themselves, was the stutter. patchLiveSteps (see main.ts) now patches that row in place instead. This checks the fix holds: the row survives a run of daemon events as the same DOM node instead of being swapped for a fresh one. */
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import type { DaemonEvent } from "./daemon";
+import type { Desktop, MonitorLike, WinLike } from "./winplace";
 
 // jsdom does not implement matchMedia at all; main.ts reads prefers-reduced-motion at module load.
 if (!window.matchMedia) {
@@ -698,5 +701,284 @@ describe("the step ticker rests while the window is not on screen", () => {
     const before = label.textContent;
     await vi.advanceTimersByTimeAsync(600);
     expect(label.textContent).toBe(before);
+  });
+});
+
+// A live voice session deliberately survives a hide of this window, so the grid's breath — a 10Hz interval driving a waveform nobody can see — went on running for the whole session with the window off screen.
+describe("the voice grid's breath rests while the window is hidden", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("stops breathing once Escape hides the hover, with the session still running", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+    dispatch({ kind: "voiceOn", id: "voice-1" });
+    const rows = () => Array.from(document.querySelectorAll(".vw-spk .vw-row")).map((r) => r.textContent).join("|");
+
+    const quiet = rows();
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(rows()).not.toBe(quiet);
+
+    // Escape only hides this window; the session goes on, and the surface is still what the card is showing when it comes back.
+    dispatch({ kind: "escape" });
+    const hiddenAt = rows();
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(rows()).toBe(hiddenAt);
+    expect(document.querySelector(".voicebox")).toBeTruthy();
+  });
+});
+
+/** A WinLike and a Desktop that record what they were asked to do, so the whole Tauri path — the show, the notice-only window, the sizing and the thread cap — can be driven headless. Under jsdom getCurrentWindow() throws, so none of it used to be reachable from a test at all. Input: the window's own scale factor and the monitor's. Output: the shell to hand wireWindow, the call log, and a way to fire the toggle hotkey. */
+function fakeShell(winScale = 1, monitorScale = 1) {
+  const calls: string[] = [];
+  let visible = false;
+  let toggle: () => void = () => {};
+  const win: WinLike = {
+    async isVisible() {
+      return visible;
+    },
+    async show() {
+      visible = true;
+      calls.push("show");
+    },
+    async hide() {
+      visible = false;
+      calls.push("hide");
+    },
+    async setPosition(pos: PhysicalPosition) {
+      calls.push(`setPosition(${pos.x},${pos.y})`);
+    },
+    async setSize(size: LogicalSize | PhysicalSize) {
+      calls.push(`setSize(${size.width}x${size.height})`);
+    },
+    async scaleFactor() {
+      return winScale;
+    },
+  };
+  // One 1920x1080 monitor with a 32px top bar and no dock, the same screen winplace.test.ts places against.
+  const screen: MonitorLike = {
+    position: { x: 0, y: 0 },
+    size: { width: 1920, height: 1080 },
+    workArea: { position: { x: 0, y: 32 }, size: { width: 1920, height: 1048 } },
+    scaleFactor: monitorScale,
+  };
+  const desktop: Desktop = {
+    monitors: async () => [screen],
+    pointer: async () => ({ x: 100, y: 100 }),
+    focused: async () => screen,
+    dock: async () => ({ edge: "bottom", clearance: 0 }),
+  };
+  return {
+    calls,
+    shell: {
+      win,
+      desktop,
+      raise: async () => {
+        calls.push("raise");
+      },
+      onToggle: (run: () => void) => {
+        toggle = run;
+      },
+    },
+    pressHotkey: () => toggle(),
+  };
+}
+
+describe("the window the hotkey shows", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+    document.body.style.removeProperty("--thread-max");
+  });
+
+  // The show used to await the context read, which goes through AT-SPI and can block for seconds; a wedged read made the hotkey look dead.
+  it("shows without waiting for the context read to answer", async () => {
+    const { context } = await import("./daemon");
+    vi.mocked(context).mockReturnValue(new Promise(() => {}));
+    const { wireWindow } = await import("./main");
+    const { shell, calls, pressHotkey } = fakeShell();
+    wireWindow(shell);
+
+    pressHotkey();
+    await vi.waitFor(() => expect(calls).toContain("show"));
+    expect(calls.indexOf("show")).toBeLessThan(calls.indexOf("raise"));
+  });
+
+  // The probe gives the daemon 500ms; a daemon mid-decode can miss that and still be there, and the card turning to "Not connected" sends the next question to the offline sentence instead of to the daemon.
+  it("keeps the daemon up through one missed probe and gives up on the second", async () => {
+    const { probe } = await import("./daemon");
+    const { wireWindow } = await import("./main");
+    const { shell, calls, pressHotkey } = fakeShell();
+    wireWindow(shell);
+    await vi.waitFor(() => expect(document.querySelector(".dot")).toBeTruthy());
+
+    vi.mocked(probe).mockResolvedValue(false);
+    pressHotkey();
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+    expect(document.querySelector(".dot")).toBeTruthy();
+
+    // Hide, then show again: the second miss in a row is the one that is believed.
+    pressHotkey();
+    await vi.waitFor(() => expect(calls).toContain("hide"));
+    pressHotkey();
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(document.querySelector(".in")?.textContent).toContain("Not connected"));
+  });
+
+  // The cap is written into the page as CSS pixels, and a CSS pixel is worth the window's own scale factor — not the pointer monitor's, which is a different number on a mixed-DPI desk.
+  it("caps the thread with the window's own scale factor, not the monitor's", async () => {
+    const { wireWindow } = await import("./main");
+    const { shell, pressHotkey } = fakeShell(2, 1);
+    wireWindow(shell);
+
+    pressHotkey();
+    // 1048 physical of work area at the window's scale of 2 is 524 CSS pixels; six tenths of that is 314. At the monitor's scale of 1 it would have been 628.
+    await vi.waitFor(() => expect(document.body.style.getPropertyValue("--thread-max")).toBe("314px"));
+  });
+});
+
+// A notice arriving at a shut window opens a window of its own: the notice card's width rather than the hover's, under the top bar at the right, and nothing but the bubble on it.
+describe("the window a notice opens on its own", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  /** Wires a fake shell and hands back the daemon's own stream callback, which is what a notice actually arrives on. Input: none. Output: the call log, the stream callback and the shell's hotkey. */
+  async function notifiable() {
+    const { events } = await import("./daemon");
+    let onEvent: (ev: DaemonEvent) => void = () => {};
+    vi.mocked(events).mockImplementation((cb) => {
+      onEvent = cb;
+      return () => {};
+    });
+    const { wireWindow } = await import("./main");
+    const shell = fakeShell();
+    wireWindow(shell.shell);
+    await vi.waitFor(() => expect(events).toHaveBeenCalled());
+    return { ...shell, send: (ev: DaemonEvent) => onEvent(ev) };
+  }
+
+  const notice = {
+    title: "Morning brief",
+    body: "Nothing urgent.",
+    place: "",
+    id: "",
+    kind: "brief",
+  };
+
+  it("is the notice card's width, is moved exactly once, and hides the card under it", async () => {
+    const { calls, send } = await notifiable();
+    send({ id: "", type: "notice", notice });
+
+    await vi.waitFor(() => expect(calls).toContain("show"));
+    // 456 logical: the card's own 420 maximum plus the body's 18 of padding either side.
+    expect(calls.filter((c) => c.startsWith("setSize(456x"))).toHaveLength(1);
+    // One move per fit, not the two the double placement used to make.
+    expect(calls.filter((c) => c.startsWith("setPosition"))).toHaveLength(1);
+    expect(calls.indexOf("show")).toBe(calls.length - 1);
+    expect(document.body.classList.contains("alone")).toBe(true);
+    expect(calls).not.toContain("raise");
+  });
+
+  // The class is a margin, and which side it goes on follows where the window actually is: a notice-only window is put under the top bar whatever hover position is stored.
+  it("takes its air above the card, whatever hover position is stored", async () => {
+    localStorage.setItem("ora-hover-position", "bottom");
+    const { send } = await notifiable();
+    send({ id: "", type: "notice", notice });
+    await vi.waitFor(() => expect(document.getElementById("n")?.hidden).toBe(false));
+    expect(document.getElementById("n")?.className).toBe("N up");
+    localStorage.removeItem("ora-hover-position");
+  });
+});
+
+// The evidence header and the collapsed step summary were divs with click handlers and a pointer cursor: no role, no tab stop, no way to open them from the keyboard.
+describe("the card's fold-out headers are keyboard controls", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    const { probe } = await import("./daemon");
+    vi.mocked(probe).mockResolvedValue(true);
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  /** Asks a question and answers it with one source, which is the state the evidence fold-out is drawn in. Input: main's dispatch. Output: nothing. */
+  const askAndAnswer = (dispatch: (e: Parameters<typeof import("./state").step>[1]) => void) => {
+    dispatch({ kind: "type", value: "what did Priya say" });
+    dispatch({ kind: "enter" });
+    dispatch({
+      kind: "daemonEvent",
+      ev: { id: "", type: "answer", text: "She said yes.", evidence: [{ title: "Re: venue", meta: "Priya · 08:40", body: "Tuesday works." }] },
+    });
+  };
+
+  it("names the evidence header a button, puts it in the tab order and says whether it is open", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    askAndAnswer(dispatch);
+
+    const h = document.querySelector<HTMLElement>(".evd .h")!;
+    expect(h.getAttribute("role")).toBe("button");
+    expect(h.tabIndex).toBe(0);
+    expect(h.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("opens the fold on Enter and closes it again on Space", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    askAndAnswer(dispatch);
+
+    document.querySelector<HTMLElement>(".evd .h")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(document.querySelector(".evd .items")).toBeTruthy();
+    expect(document.querySelector(".evd .h")?.getAttribute("aria-expanded")).toBe("true");
+
+    document.querySelector<HTMLElement>(".evd .h")!.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    expect(document.querySelector(".evd .items")).toBeNull();
+  });
+
+  // Space on the card with an empty input opens the microphone, which would swallow the press that operates the header.
+  it("leaves the microphone shut when Space presses the header", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+    askAndAnswer(dispatch);
+
+    document.querySelector<HTMLElement>(".evd .h")!.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    expect(document.querySelector(".in.holding")).toBeNull();
+  });
+});
+
+// The notice card is sized to itself and the window is sized to the card, with no minimum height and a clamp that pins a window too tall for its area to the top of the screen; a long title and a wrapped row of buttons had nothing stopping them running off the bottom.
+describe("what the stylesheet and the page hold the notice to", () => {
+  // Read off disk rather than imported: what is asserted here is what the browser will be handed, and a CSS import in a jsdom test resolves to an empty module.
+  const css = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
+  /** The body of one CSS rule. Input: the selector, exactly as written in the file. Output: what is between its braces. */
+  const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`)).slice(0, css.slice(css.indexOf(`${selector} {`)).indexOf("}"));
+
+  it("caps the card's height and hides what runs past it", () => {
+    expect(rule(".N")).toContain("max-height: 300px");
+    expect(rule(".N")).toContain("overflow: hidden");
+  });
+
+  it("clamps the title to two lines, the way the body is clamped to three", () => {
+    expect(rule(".N .nt")).toContain("-webkit-line-clamp: 2");
+    expect(rule(".N .nb")).toContain("-webkit-line-clamp: 3");
+  });
+
+  it("makes the bubble a live region, since a notice is Ora talking first", () => {
+    const html = readFileSync(`${process.cwd()}/index.html`, "utf8");
+    expect(html).toContain('id="n" role="status" aria-live="polite"');
   });
 });
