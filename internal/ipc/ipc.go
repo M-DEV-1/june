@@ -206,10 +206,19 @@ func (h *hub) broadcast(ev Event) {
 		select {
 		case ch <- ev:
 		default:
+			// A client dropped here loses every event from this one on until it reconnects, which for the drawing layer means a drawing that simply never appears, so the drop is said out loud rather than left to be inferred from the silence.
+			slog.Warn("events: dropping a client that is not keeping up", "type", ev.Type, "id", ev.ID, "buffered", len(ch))
 			delete(h.clients, ch)
 			close(ch)
 		}
 	}
+}
+
+// clientCount is how many clients are subscribed to the hub right now. Input: none. Output: that count, which is zero when no window is reading the event stream and whatever is broadcast next reaches nobody.
+func (h *hub) clientCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.clients)
 }
 
 // Server holds the state every route shares: the asker that answers questions, the hub that broadcasts their progress, the store the read-only screens are drawn from, the tracker's live activity buffer, and a synchronous read of the window in focus right now.

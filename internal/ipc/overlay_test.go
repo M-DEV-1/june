@@ -283,3 +283,38 @@ func TestOverlay_DirectRouteCarriesANonAskID(t *testing.T) {
 		t.Errorf("first ask id after a direct overlay = %q, want ask-1: the drawing spent an id real asks are numbered from", got)
 	}
 }
+
+// A 202 with no body said only that the request validated, so a drawing broadcast to nobody looked exactly like one that reached the screen. The response now says which of the two happened, because that is the one fact a caller cannot find out any other way.
+func TestOverlay_ReportsWhetherAnyoneWasListening(t *testing.T) {
+	s := New(&fakeAsker{}, nil, nil, nil)
+
+	rec := postOverlay(t, s, `{"kind":"ring","rects":[{"x":1,"y":2,"w":3,"h":4}]}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
+	}
+	var quiet OverlayResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &quiet); err != nil {
+		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
+	}
+	if quiet.Drawn {
+		t.Errorf("drawn = true with no client on the hub, want false")
+	}
+	if quiet.Reason == "" {
+		t.Errorf("reason is empty, want a sentence naming why nothing was drawn")
+	}
+
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+	rec = postOverlay(t, s, `{"kind":"ring","rects":[{"x":1,"y":2,"w":3,"h":4}]}`)
+	var heard OverlayResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &heard); err != nil {
+		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
+	}
+	if !heard.Drawn {
+		t.Errorf("drawn = false with a client on the hub, want true (reason %q)", heard.Reason)
+	}
+	if heard.Reason != "" {
+		t.Errorf("reason = %q, want empty when the drawing went out", heard.Reason)
+	}
+	waitOverlay(t, ch)
+}
