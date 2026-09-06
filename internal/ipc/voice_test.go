@@ -591,29 +591,6 @@ func TestVoiceTurn_RecordsWhatItCostInTokens(t *testing.T) {
 	}
 }
 
-// TestVoiceTurn_RecordsATurnThatCountedNothing checks the row that must still be written rather than skipped: a turn whose live session reported no usage at all is a call the user may have been charged for, and a missing row is a cost they cannot see. The counts stay at zero rather than being guessed at, and the call is still filed under the voice model.
-func TestVoiceTurn_RecordsATurnThatCountedNothing(t *testing.T) {
-	store := dbtest.Open(t)
-	srv, _, _, _, run := newVoiceServerStore(t, store)
-
-	start := voicePost(t, srv, "/voice/start")
-	start.Body.Close()
-	<-run.running
-
-	run.text <- agent.ResponseChunk{TurnBoundary: true}
-
-	u := waitTokenUse(t, store, 1)[0]
-	if u.InputTokens != 0 || u.OutputTokens != 0 || u.TotalTokens != 0 {
-		t.Errorf("counts = %+v, want zeroes rather than a guess", u)
-	}
-	if u.Channel != "voice" || u.Model != config.VoiceModel {
-		t.Errorf("channel/model = %q/%q, want voice and %q", u.Channel, u.Model, config.VoiceModel)
-	}
-	if u.Provider != agent.ProviderGemini {
-		t.Errorf("provider = %q, want %q — a live turn is a Gemini call whatever it counted", u.Provider, agent.ProviderGemini)
-	}
-}
-
 // TestStart_DoesNotHoldTheLockAcrossOpeningHardware checks that Start releases the session mutex before it dials the microphone and the speaker, so GET /voice/status and POST /voice/stop keep answering while that hardware call is in flight — the same shape Dictation.Start already uses. Held across it, a slow (or wedged) device open blocks every other voice route for as long as the open takes.
 func TestStart_DoesNotHoldTheLockAcrossOpeningHardware(t *testing.T) {
 	srv, v, mic, spk, run := newVoiceServer(t)
@@ -793,5 +770,23 @@ func TestVoiceStartAndStopRefuseAGet(t *testing.T) {
 	}
 	if mic.captured.Load() {
 		t.Errorf("a GET opened the microphone")
+	}
+}
+
+// A live session sends an end-of-turn boundary for every turn but snapshots the token count on only some of them, so filing every boundary wrote one real row and one all-zero row per turn — half the usage ledger was a duplicate of the other half, and the Recent calls table on 2026-09-07 alternated a count with a zero all the way down.
+func TestEmptyUsage_TellsACountedTurnFromAnUncountedBoundary(t *testing.T) {
+	if !emptyUsage(agent.TokenUsage{Provider: agent.ProviderGemini}) {
+		t.Error("a boundary carrying no counts reads as countable, so it would be filed as a zero row")
+	}
+	for name, u := range map[string]agent.TokenUsage{
+		"input only":  {InputTokens: 19324},
+		"output only": {OutputTokens: 259},
+		"total only":  {TotalTokens: 19501},
+		"cached only": {CachedInputTokens: 8192},
+		"rounds only": {Rounds: 1},
+	} {
+		if emptyUsage(u) {
+			t.Errorf("%s reads as empty, so a turn that did cost something would go unfiled", name)
+		}
 	}
 }

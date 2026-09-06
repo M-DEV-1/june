@@ -326,9 +326,10 @@ func (v *VoiceSession) watch(ctx context.Context, id string, run voiceRunner) {
 	}
 }
 
-// recordTurnUsage files what one finished voice turn cost in tokens, so the user can see what the voice model is costing them rather than reading zero however long they talk. Input: the turn's usage as the live session accumulated it. The model is the configured voice model, the channel is "voice", and the provider is the one the usage names, falling back to Gemini since a Live session is a Gemini call whatever it counted. A turn that reported nothing is filed with zeroes rather than skipped: the user was still charged for it, and a row missing from the ledger is a cost they cannot see. The write runs on its own bounded context and a failure is logged rather than returned — recording usage must never disturb the session, the same as it never fails an ask (see recordTokenUse in ipc.go).
+// recordTurnUsage files what one finished voice turn cost in tokens, so the user can see what the voice model is costing them rather than reading zero however long they talk. Input: the turn's usage as the live session accumulated it. The model is the configured voice model, the channel is "voice", and the provider is the one the usage names, falling back to Gemini since a Live session is a Gemini call whatever it counted. The write runs on its own bounded context and a failure is logged rather than returned — recording usage must never disturb the session, the same as it never fails an ask (see recordTokenUse in ipc.go).
+// A turn that reported nothing at all is not filed. Zeroes used to be written on the argument that the user was charged for a turn whose count never arrived, but the ledger says otherwise: on 2026-09-07 the Recent calls table alternated a real count with a zero, turn after turn, because a boundary arrives for every turn while the usage is snapshotted and reset on only some of them. So a zero row is the same turn counted twice, once with its tokens and once without, and half the ledger was a duplicate of the other half.
 func (v *VoiceSession) recordTurnUsage(usage agent.TokenUsage) {
-	if v.store == nil {
+	if v.store == nil || emptyUsage(usage) {
 		return
 	}
 	provider := usage.Provider
@@ -405,4 +406,9 @@ func (v *VoiceSession) Status(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"active": active, "id": id, "state": state})
+}
+
+// emptyUsage reports whether a turn's usage carries no count of any kind, which is what a boundary that arrived between snapshots looks like. Input: the usage. Output: true when every field the ledger stores is zero.
+func emptyUsage(u agent.TokenUsage) bool {
+	return u.InputTokens == 0 && u.OutputTokens == 0 && u.TotalTokens == 0 && u.CachedInputTokens == 0 && u.Rounds == 0
 }
