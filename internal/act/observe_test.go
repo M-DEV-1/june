@@ -1,6 +1,7 @@
 package act
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -130,13 +131,27 @@ func TestFilterNeverCarriesAPasswordFieldsText(t *testing.T) {
 	}
 }
 
-// The cap is what a look at the screen costs: each item is a line of roughly thirteen tokens, so a hundred and fifty of them is about two thousand tokens on every look, and a screen task takes many looks. It was cut from a hundred and fifty to a hundred on 2026-09-05 from the numbers the model had actually acted on across every run in the user's store — 49 clicks, rings and scrolls, the largest of them item 84 and the 95th of them item 56 — which leaves the cap about a fifth above the highest number ever needed. A cap that loses the item the model needed costs more than the tokens it saved, so this fails in both directions.
-func TestMaxItems_SitsAboveTheHighestNumberEverActedOn(t *testing.T) {
-	const highestEverActedOn = 84
-	if MaxItems <= highestEverActedOn {
-		t.Errorf("MaxItems = %d, at or below item %d, the highest number a recorded run has ever acted on", MaxItems, highestEverActedOn)
+// highestEverActedOn is the largest item number the model has ever clicked, ringed or scrolled, counted on 2026-09-05 across the 49 such actions in every run then in the user's store; the 95th of them was item 56. It is a reading taken once, not one this test can retake — the store it came from is not available here — so it is written down as a number and the test below holds the list to it.
+const highestEverActedOn = 84
+
+// maxAffordableItems is the longest list worth sending: each line is roughly thirteen tokens, so 120 of them is about 1,560 tokens on every look, and a screen task takes many looks.
+const maxAffordableItems = 120
+
+// A screen with far more actionable nodes than the cap must still produce a list that reaches item 84, because a cap that loses the item the model needed costs more than the tokens it saved, and must still stop short of maxAffordableItems. This fails in both directions, and it fails through Filter rather than by reading MaxItems, so a change to how the cap is applied is caught as well as a change to the number.
+func TestFilter_ListReachesTheHighestNumberEverActedOn(t *testing.T) {
+	nodes := make([]Node, 500)
+	for i := range nodes {
+		nodes[i] = Node{Role: "push button", Label: fmt.Sprintf("Button %d", i+1), X: 0, Y: i * 20, W: 100, H: 18, Showing: true}
 	}
-	if MaxItems > 120 {
-		t.Errorf("MaxItems = %d, about %d tokens a look, and nothing in the record has ever needed a list that long", MaxItems, MaxItems*13)
+	items := Filter(nodes)
+
+	if len(items) < highestEverActedOn {
+		t.Errorf("Filter gave %d items from a 500-node screen, so item %d — the highest number a recorded run has ever acted on — cannot be reached", len(items), highestEverActedOn)
+	}
+	if len(items) > maxAffordableItems {
+		t.Errorf("Filter gave %d items, about %d tokens a look, and nothing in the record has ever needed a list that long", len(items), len(items)*13)
+	}
+	if n := len(items); n > 0 && items[n-1].N != n {
+		t.Errorf("last item is numbered %d in a list of %d; the numbers must run 1..n so a number the model holds resolves", items[n-1].N, n)
 	}
 }
