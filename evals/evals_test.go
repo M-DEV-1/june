@@ -148,3 +148,18 @@ func TestToolPathSearch_RunsQuestionsThroughTheRealQueryMemoryTool(t *testing.T)
 		t.Errorf(`expected "no memory matches" to come back as zero rows, got: %v`, rows)
 	}
 }
+
+// TestLiveGuard covers the refusal that keeps tracks 10 and 11 off the user's own machine by accident: both drive the running daemon over HTTP, so every click, every keystroke and every tool the model reaches for lands on the live screen and the live store. Running them there has to be asked for with -live; a daemon started on another port for the purpose is allowed without it.
+func TestLiveGuard(t *testing.T) {
+	if why := liveGuard(daemonAddr, false); why == "" {
+		t.Errorf("liveGuard(%s, live=false) allowed the run; want a refusal naming the live daemon", daemonAddr)
+	} else if !strings.Contains(why, "-live") {
+		t.Errorf("liveGuard refusal does not say how to proceed: %q", why)
+	}
+	if why := liveGuard(daemonAddr, true); why != "" {
+		t.Errorf("liveGuard(%s, live=true) = %q, want the run allowed", daemonAddr, why)
+	}
+	if why := liveGuard("http://127.0.0.1:7777", false); why != "" {
+		t.Errorf("liveGuard on a non-default port = %q, want the run allowed", why)
+	}
+}

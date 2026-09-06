@@ -220,7 +220,13 @@ func geminiArm(client *genai.Client, model string, decls []*genai.FunctionDeclar
 		var lastErr error
 		for attempt := 0; attempt < 3; attempt++ {
 			pace.wait(ctx, attempt)
-			resp, err := client.Models.GenerateContent(ctx, model, contents, cfg)
+			// The call goes through the daemon's own daily counter (see meteredGemini) so an arm's tool rounds are spent out of the same free-tier budget the daemon meters, rather than invisibly beside it.
+			var resp *genai.GenerateContentResponse
+			err := meteredGemini(ctx, model, func(c context.Context) error {
+				var callErr error
+				resp, callErr = client.Models.GenerateContent(c, model, contents, cfg)
+				return callErr
+			})
 			if err != nil {
 				lastErr = err
 				continue
@@ -692,7 +698,9 @@ func runTrack7(ctx context.Context, j *judge, apiKey, dataDir, model string, tur
 		{Name: "gemini", Step: geminiArm(client, model, decls, pace)},
 		{Name: "claude", Step: claudeArm(teacherBrain(), decls)},
 	}
-	roleplay := pacedBrain(brain.GeminiAPI(apiKey, config.TextModel, config.DefaultBrainTimeoutSeconds), pace)
+	// The roleplay user is a Gemini call like any other, so it is metered against the same daily counter the daemon uses, in the background band.
+	roleplay := pacedBrain(brain.WithDailyQuota(evalQuota, config.TextModel, false, brain.DefaultQuotaOptions(),
+		brain.GeminiAPI(apiKey, config.TextModel, config.DefaultBrainTimeoutSeconds)), pace)
 
 	now := time.Now()
 	sys := trajSystemPrompt(ctx, store, now)

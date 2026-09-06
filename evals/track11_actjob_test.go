@@ -20,12 +20,12 @@ import (
 	"ora/internal/ipctoken"
 )
 
-// TestAct11Selected checks the -act11-tasks selector: blank runs every task in table order, a comma list keeps only the named ones in table order, and an unknown id is silently dropped rather than erroring.
+// TestAct11Selected checks the -act11-tasks selector: blank names no task and so runs none, a comma list keeps only the named ones in table order, and an unknown id is silently dropped rather than erroring. Blank running everything is what made `go run ./evals -tracks 11` drive the user's real desktop through all five jobs.
 func TestAct11Selected(t *testing.T) {
 	tasks := []act11Task{{ID: "a"}, {ID: "b"}, {ID: "c"}}
 
-	if got := act11Selected(tasks, ""); len(got) != 3 {
-		t.Fatalf("blank selector = %d tasks, want all 3", len(got))
+	if got := act11Selected(tasks, ""); len(got) != 0 {
+		t.Fatalf("blank selector = %d tasks, want none", len(got))
 	}
 	got := act11Selected(tasks, "c,a")
 	if len(got) != 2 || got[0].ID != "a" || got[1].ID != "c" {
@@ -36,6 +36,21 @@ func TestAct11Selected(t *testing.T) {
 	}
 	if got := act11Selected(tasks, " b , c "); len(got) != 2 {
 		t.Fatalf("whitespace around ids: got %v, want [b c]", got)
+	}
+}
+
+// TestAct11TasksUpTo checks track 11's tier gate, the one track 10 already has: every job in the real table clicks, types or switches windows on the user's live screen, so the default tier of 0 must run none of them, and asking for tier 1 must run them all.
+func TestAct11TasksUpTo(t *testing.T) {
+	if got := act11TasksUpTo(act11Tasks, 0); len(got) != 0 {
+		t.Errorf("act11TasksUpTo(tier 0) = %d tasks, want none: every track 11 job drives the live screen", len(got))
+	}
+	if got := act11TasksUpTo(act11Tasks, 1); len(got) != len(act11Tasks) {
+		t.Errorf("act11TasksUpTo(tier 1) = %d tasks, want all %d", len(got), len(act11Tasks))
+	}
+	mixed := []act11Task{{ID: "look", Tier: 0}, {ID: "click", Tier: 1}}
+	got := act11TasksUpTo(mixed, 0)
+	if len(got) != 1 || got[0].ID != "look" {
+		t.Errorf("act11TasksUpTo(mixed, 0) = %v, want [look]", got)
 	}
 }
 

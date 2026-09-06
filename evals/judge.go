@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -28,6 +29,18 @@ func (v verdict) na() bool     { return strings.EqualFold(v.Verdict, "na") }
 // judgeInterval paces judging calls. The free tier allows 15 generate_content requests a minute on flash-lite, and firing a track's calls back to back spends that in twenty seconds and then 429s the rest of the run into blank rows. One call every four seconds stays under the limit with room to spare.
 // ponytail: a fixed interval, not a token bucket. If this ever runs on a paid key, delete the pacing rather than tuning it.
 const judgeInterval = 4 * time.Second
+
+// evalQuota is the daily counter every Gemini call this runner makes is metered against: brain_quota.json under config.DataDir(), the same file the daemon meters its own background jobs and asks against. Without it a default run's forty-odd judge calls spent the day's free-tier allowance on the same key with the count never moving, so the daemon went on believing the requests it reserves for the user's own asks were still there. Tests point it at a temp directory.
+var evalQuota = brain.NewQuotaState(config.DataDir())
+
+// meteredGemini runs one Gemini call under that counter, in the background band, so an eval run can never eat the requests reserved for an interactive ask. Input: the context, the model the call is billed under, and the call itself. Output: the call's own error, or *brain.ErrDailyQuota when today's background allowance for that model is already spent, in which case call is never made.
+func meteredGemini(ctx context.Context, model string, call func(context.Context) error) error {
+	gated := brain.WithDailyQuota(evalQuota, model, false, brain.DefaultQuotaOptions(), func(c context.Context, _ string) (string, error) {
+		return "", call(c)
+	})
+	_, err := gated(ctx, "")
+	return err
+}
 
 // judge holds the one genai client every judged call reuses, and the clock that keeps the run under the request-per-minute limit.
 type judge struct {
@@ -66,10 +79,20 @@ func (j *judge) ask(ctx context.Context, instruction, material string, out any) 
 			}
 		}
 		j.last = time.Now()
-		resp, err := j.client.Models.GenerateContent(ctx, config.TextModel,
-			[]*genai.Content{genai.NewContentFromText(material, genai.RoleUser)}, cfg)
+		// Every attempt is its own request to Google, so every attempt takes its own slot; a refusal ends the loop, because waiting cannot give back a day's allowance.
+		var resp *genai.GenerateContentResponse
+		err := meteredGemini(ctx, config.TextModel, func(c context.Context) error {
+			var callErr error
+			resp, callErr = j.client.Models.GenerateContent(c, config.TextModel,
+				[]*genai.Content{genai.NewContentFromText(material, genai.RoleUser)}, cfg)
+			return callErr
+		})
 		if err != nil {
 			lastErr = err
+			var spent *brain.ErrDailyQuota
+			if errors.As(err, &spent) {
+				return err
+			}
 			continue
 		}
 		text := resp.Text()

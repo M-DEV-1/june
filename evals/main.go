@@ -2,7 +2,9 @@ package main
 
 // The eval runner. `go run ./evals` runs all three tracks against the live machine's real data and writes a timestamped scorecard into evals/runs/, one file per run, keyed by the commit it measured. That directory is the quality history: a run from a later commit sits next to a run from an earlier one and the difference is what changed.
 //
-// Nothing here writes to live data. The sqlite store is snapshotted with VACUUM INTO before it is opened, because db.New runs its schema migrations on open and the live daemon is using that file. ora.log and the recordings directory are read and never written. The vector index is the daemon's own, reached over /vector/search, which only reads.
+// Tracks 1 to 9 write no live data. The sqlite store is snapshotted with VACUUM INTO before it is opened, because db.New runs its schema migrations on open and the live daemon is using that file. ora.log and the recordings directory are read and never written. The vector index is the daemon's own, reached over /vector/search, which only reads.
+//
+// Tracks 10 and 11 are the exception and do the opposite: they drive the running daemon over HTTP, so every tool the model reaches for runs for real — clicks and keystrokes land on whatever is on screen, and act runs, episodes and any note the model saves stay in the live store (track 10 deletes only the conversation it opened; track 11 deletes nothing). That is why liveGuard refuses to run either against the default port unless -live says so.
 
 import (
 	"context"
@@ -234,9 +236,15 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 	if sel["10"] {
 		fmt.Println("track 10 — computer-use eval")
 		// The screen-task table and its own --brain flag live beside it in track10_act.go.
-		note, err := runTrack10(ctx, daemonAddr)
-		if err != nil {
-			return fmt.Errorf("track 10: %w", err)
+		note := liveGuard(daemonAddr, *live)
+		if note != "" {
+			note = "track 10 " + note
+		} else {
+			var err error
+			note, err = runTrack10(ctx, daemonAddr)
+			if err != nil {
+				return fmt.Errorf("track 10: %w", err)
+			}
 		}
 		card.Notes = append(card.Notes, note)
 		fmt.Println("  " + note)
@@ -245,9 +253,15 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 	if sel["11"] {
 		fmt.Println("track 11 — long-task job eval")
 		// The job task table and its own -act11-tasks selector live beside it in track11_actjob.go; it shares track 10's -brain flag and daemon plumbing.
-		note, err := runTrack11(ctx, daemonAddr)
-		if err != nil {
-			return fmt.Errorf("track 11: %w", err)
+		note := liveGuard(daemonAddr, *live)
+		if note != "" {
+			note = "track 11 " + note
+		} else {
+			var err error
+			note, err = runTrack11(ctx, daemonAddr)
+			if err != nil {
+				return fmt.Errorf("track 11: %w", err)
+			}
 		}
 		card.Notes = append(card.Notes, note)
 		fmt.Println("  " + note)
@@ -260,6 +274,17 @@ func run(tracks string, turnCap int, outDir, questionsPath string, toolPath bool
 	fmt.Printf("\nscorecard: %s\n", path)
 	fmt.Print(summary(card))
 	return nil
+}
+
+// live is the flag that lets tracks 10 and 11 run against the daemon on the default port. It is off by default because both drive whatever is on the user's screen and write to the user's own store.
+var live = flag.Bool("live", false, "tracks 10 and 11: let them drive the daemon on the default port, which clicks and types on the real screen and writes to the real store")
+
+// liveGuard is the refusal that keeps tracks 10 and 11 off the user's own machine unless the run asked for it. Input: the daemon base URL the track would drive, and whether -live was passed. Output: the one-line reason to print and record on the scorecard, or "" when the run may go ahead — which it may whenever -live was passed, or whenever the track is pointed at a daemon other than the one on the default port.
+func liveGuard(baseURL string, live bool) string {
+	if live || baseURL != daemonAddr {
+		return ""
+	}
+	return fmt.Sprintf("skipped: %s is the live daemon, and these tasks click and type on whatever is on screen and leave their act runs, episodes and notes in the real store. Pass -live to run them there anyway, or start a daemon on its own ORA_PORT and ORA_DATA_DIR over a snapshot and point the track at that.", daemonAddr)
 }
 
 // needsGeminiKey reports whether the selected tracks need a Gemini API key and the Gemini judge built from it. Input: the set of track names the run selected. Output: false only when tracks 10 and 11 are the only ones selected — both drive the running daemon over HTTP and score each task against a fixed rule, so neither calls Gemini directly and both must still run on a day the Gemini quota is spent.
