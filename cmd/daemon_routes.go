@@ -3,11 +3,13 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"ora/internal/agent"
+	"ora/internal/audio"
 	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
@@ -212,6 +214,9 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/voice/start", auth(voiceSession.Start))
 	mux.HandleFunc("/voice/stop", auth(voiceSession.Stop))
 	mux.HandleFunc("/voice/status", auth(voiceSession.Status))
+	// Which voice that session speaks in, and hearing one before adopting it. The preview is a one-shot TTS call played through a speaker opened for it alone, so it works whether or not a session is running. Route bodies are in internal/ipc/voices.go.
+	mux.HandleFunc("/voices", auth(ipc.Voices(liveConfig, nil)))
+	mux.HandleFunc("/voices/preview", auth(ipc.VoicePreview(liveConfig, previewVoice(apiKey))))
 
 	// The window's own record: the conversations it keeps and the turns inside them, the one list of work (action items plus the tasks the user typed in), the day pages, and which brains this machine is signed in to. Route bodies are in internal/ipc/conversations.go, tasks.go, days.go and brains.go.
 	mux.HandleFunc("/conversations", auth(ipcServer.Conversations))
@@ -250,5 +255,22 @@ func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *ipc.
 			}
 		}
 		return usage.Get(id)
+	}
+}
+
+// previewVoice builds the previewer POST /voices/preview speaks through. It opens a speaker for the one line and closes it again, so nothing is held open between previews and a machine with no working audio fails this one request rather than the daemon's startup. Input: the Gemini API key. Output: the previewer, or nil when this build has no speaker at all, which the route answers 503 for.
+func previewVoice(apiKey string) ipc.VoicePreviewer {
+	return func(ctx context.Context, name string) error {
+		speaker, err := audio.NewSpeaker()
+		if err != nil {
+			return fmt.Errorf("no speaker to preview through: %w", err)
+		}
+		defer speaker.Close()
+		if err := agent.SpeakPreview(ctx, apiKey, name, speaker.Play); err != nil {
+			return err
+		}
+		// Play only queues the audio; without waiting for the device to drain the speaker is closed mid-line and the preview is cut off.
+		speaker.Flush()
+		return nil
 	}
 }

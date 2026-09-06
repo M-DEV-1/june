@@ -1,13 +1,28 @@
 /** The Settings screen: how the window looks, where the hover opens, the hotkey that opens it, what the daemon is allowed to watch, which brain answers and on which model, what the daemon is running on this machine, and the token ledger. Every value is read off GET /settings, GET /brains, GET /status and GET /usage, and every control writes through the route that owns the setting, except the theme and the hover position, which the window and the hover share through localStorage rather than through the daemon (see HOVER_POSITION_KEY in src/winplace.ts). The page is a stack of grouped cards, the way a desktop settings pane is built, rather than a run of rows under grey capitals. */
 
-import { Fragment, useState } from "react";
-import { RotateCcw } from "lucide-react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { Loader2, Play, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { HOVER_POSITION_KEY, storedHoverPosition, type HoverPosition } from "../winplace";
-import { useBrainsQuery, usePickBrainMutation, useSetCaptureMutation, useSetClaudeUsageFromLoginMutation, useSettingsQuery, useTrackerQuery, useUsageQuery, type SettingsView, type Usage, type UsageWindow } from "./api";
+import {
+  useBrainsQuery,
+  usePickBrainMutation,
+  usePreviewVoiceMutation,
+  useSetCaptureMutation,
+  useSetClaudeUsageFromLoginMutation,
+  useSetVoiceMutation,
+  useSettingsQuery,
+  useTrackerQuery,
+  useUsageQuery,
+  useVoicesQuery,
+  type SettingsView,
+  type Usage,
+  type UsageWindow,
+  type Voice,
+} from "./api";
 import { bytes, cachedInput, compact, hhmm, hotkeyKeys, perQuestion, tokens, took } from "./format";
 import { Blank, Group, HEAD, PageHeader, Reading, Scroller, SectionHeading, TAIL, useWide } from "./parts";
 import { settings as settingsUi, ui, useAppDispatch, useAppSelector, type Theme } from "./store";
@@ -114,6 +129,85 @@ function Machine({ s }: { s: SettingsView }) {
           <Fact label="Audio kept for" value={s.keep_audio_days < 0 ? "as long as you leave it there" : `${s.keep_audio_days} days`} />
           <Fact label="Running since" value={Number.isNaN(started.getTime()) ? "" : `${hhmm(s.daemon_started)}, build ${s.version}`} />
         </div>
+      </Group>
+    </section>
+  );
+}
+
+/** Reads the HTTP status out of whatever .unwrap() threw. Input: the caught value. Output: the status code, or undefined when there is none to read. The daemon's error routes answer plain text through http.Error, which fetchBaseQuery cannot parse as JSON, so it reports the real code as a PARSING_ERROR carrying originalStatus rather than as status itself — the same shape stopDictation above already reads apart. */
+function errorStatus(e: unknown): number | undefined {
+  if (!e || typeof e !== "object" || !("status" in e)) return undefined;
+  const status = (e as { status: unknown }).status;
+  if (status === "PARSING_ERROR") return (e as { originalStatus?: number }).originalStatus;
+  return typeof status === "number" ? status : undefined;
+}
+
+/** One row of the voice roster: its name and the one-word trait that says how it actually sounds, the current voice marked, and a play button that speaks a line in that voice without picking it. Input: the voice. Output: the row. Each row runs its own previewVoice mutation, so one row showing "playing" and disabled never touches any other row's button. */
+function VoiceRow({ voice }: { voice: Voice }) {
+  const dispatch = useAppDispatch();
+  const [setVoice] = useSetVoiceMutation();
+  const [previewVoice, { isLoading: playing }] = usePreviewVoiceMutation();
+
+  const pick = async () => {
+    try {
+      await setVoice(voice.name).unwrap();
+    } catch {
+      dispatch(ui.noticed("Could not change the voice"));
+    }
+  };
+
+  const preview = async () => {
+    try {
+      await previewVoice(voice.name).unwrap();
+    } catch (e) {
+      dispatch(ui.noticed(errorStatus(e) === 503 ? "This machine has no speaker to play it through" : "Could not play that voice"));
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2 px-3.5 py-2.5">
+      <button type="button" onClick={() => void pick()} className="flex min-w-0 flex-1 items-baseline gap-2 rounded-xs text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <span className="text-ui">
+          {voice.name} — {voice.trait}
+        </span>
+        {voice.current ? <span className="text-meta text-muted-foreground">Current</span> : null}
+      </button>
+      <Button variant="ghost" size="icon-sm" aria-label={`Play ${voice.name}`} disabled={playing} onClick={() => void preview()}>
+        {playing ? <Loader2 className="animate-spin" /> : <Play />}
+      </Button>
+    </div>
+  );
+}
+
+/** The voice picker: every one of Gemini Live's thirty prebuilt voices with the trait that says how it sounds, the current one marked and scrolled into view on open, and a play button on each row to hear it before picking it. Input: none — it reads GET /voices itself. Output: the section, in its own bounded scroll area so thirty rows do not push the rest of Settings off the page. */
+function VoiceSection() {
+  const { data: voices = [] } = useVoicesQuery();
+  const listRef = useRef<HTMLDivElement>(null);
+  const opened = useRef(false);
+
+  // Scrolls the current voice into view the first time the roster arrives, so the list opens on it rather than at the top of thirty names in no order a person chose.
+  useEffect(() => {
+    if (opened.current || voices.length === 0) return;
+    opened.current = true;
+    listRef.current?.querySelector('[data-current="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [voices]);
+
+  return (
+    <section className="mt-10">
+      <SectionHeading>Voice</SectionHeading>
+      <p className="mb-3 text-meta text-muted-foreground">Heard the next time a live voice session starts, not the one already running — the daemon reads this when it dials.</p>
+      <Group>
+        {voices.length === 0 ? (
+          <p className="px-3.5 py-3 text-ui text-muted-foreground">No voices reported.</p>
+        ) : (
+          <div ref={listRef} className="max-h-80 divide-y overflow-y-auto">
+            {voices.map((v) => (
+              <div key={v.name} data-current={v.current}>
+                <VoiceRow voice={v} />
+              </div>
+            ))}
+          </div>
+        )}
       </Group>
     </section>
   );
@@ -460,6 +554,8 @@ export function SettingsScreen() {
               )}
             </Group>
           </section>
+
+          <VoiceSection />
 
           {daemon ? <Machine s={daemon} /> : null}
 
