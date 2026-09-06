@@ -1606,7 +1606,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			if remove {
 				if err := a.brain.DeleteNote(ctx, id); err != nil {
 					slog.Error("revise: delete failed", "id", id, "error", err)
-					return toolError("nothing was deleted — look it up again with query_memory and use the id it shows")
+					return toolError("nothing was there to delete — look it up again with query_memory and use the id it shows")
 				}
 				return "deleted"
 			}
@@ -1636,7 +1636,12 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 				}
 			}
 			if hasContent {
-				if err := a.brain.UpdateNote(ctx, id, content); err != nil {
+				// An action item's content is a rendered "[state/priority] Owner — work (Meeting, date)" line, so its text is corrected through SetActionText, which re-renders the line: writing the model's prose straight over it would strip the prefix and drop the item out of every read that goes through ParseAction. An id that names an ordinary note is not an action item, and that one is written whole.
+				err := a.brain.SetActionText(ctx, id, content)
+				if errors.Is(err, db.ErrNotActionItem) {
+					err = a.brain.UpdateNote(ctx, id, content)
+				}
+				if err != nil {
 					slog.Error("revise: content write failed", "id", id, "error", err)
 					return toolError("nothing was updated — look it up again with query_memory and use the id it shows")
 				}

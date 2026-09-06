@@ -70,6 +70,7 @@ func (b *mockBrain) SetActionStatus(ctx context.Context, id int64, status string
 func (b *mockBrain) SetActionPriority(ctx context.Context, id int64, priority string) error {
 	return nil
 }
+func (b *mockBrain) SetActionText(ctx context.Context, id int64, text string) error      { return nil }
 func (b *mockBrain) UpdateThreadState(ctx context.Context, id int64, state string) error { return nil }
 func (b *mockBrain) QueryStore(ctx context.Context, query string, rowCap int) (string, error) {
 	return "", nil
