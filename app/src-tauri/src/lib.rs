@@ -397,6 +397,23 @@ fn overlay_layout(app: AppHandle) -> OverlayLayout {
 }
 
 /// Sizes the overlay window to cover every monitor, makes it ignore the mouse, and shows it. Input: the app handle. Output: nothing; every step is best effort, because a window call that fails only means the app is shutting down.
+/// Stacks the hover above ordinary windows and keeps it there, without the flag that breaks focus elsewhere.
+/// Clicking anything else used to put that window in front of the hover, which read as the hover vanishing: it carried no stacking hint at all. Always-on-top is not the answer — mutter refuses focus to any newly opened window that an `_NET_WM_STATE_ABOVE` window would cover (window_would_be_covered in window.c reads that state alone), which is what made every app open unfocused. The dock type hint stacks a window over ordinary ones without setting that state, which is why the drawing overlay already uses it (see arm_overlay).
+/// Unlike the overlay this one must still take the keyboard, so accept_focus is left alone. Mutter never focuses a dock of its own accord and a click on one moves no focus, so the page calls `raise` on every press inside the hover, and the hotkey path already did; present_with_time works on a dock.
+/// The type hint has to be set while the window is unmapped, which it is: the hover is created hidden and the page shows it.
+fn arm_hover(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    #[cfg(target_os = "linux")]
+    if let Ok(gtk_win) = w.gtk_window() {
+        use gtk::prelude::GtkWindowExt;
+        gtk_win.set_type_hint(gtk::gdk::WindowTypeHint::Dock);
+    }
+    // A question asked, then a switch to another window to check on something, then a switch back: the hover is on whichever workspace the user is on rather than the one it opened on.
+    let _ = w.set_visible_on_all_workspaces(true);
+}
+
 /// The order matters. The window is created hidden so it is never mapped at the placeholder size tauri.conf.json gives it, and set_ignore_cursor_events comes after show() because the GTK call behind it needs a realised GDK window; both travel down the same ordered request channel, so by the time the shape is applied the window exists.
 fn arm_overlay(app: &AppHandle) {
     let Some(w) = app.get_webview_window("overlay") else {
@@ -543,6 +560,11 @@ pub(crate) fn window_command(app: &AppHandle, payload: &str) -> bool {
             toggle(app);
             true
         }
+        // The daemon is about to photograph the screen. Ora's own hover is drawn over whatever the user was looking at, so it steps off the screen for the moment the picture is taken and comes back exactly as it was; a hover that was already hidden stays hidden, which the page decides, not this.
+        Some(action @ ("conceal" | "reveal")) => {
+            let _ = app.emit(if action == "conceal" { "ora://conceal" } else { "ora://reveal" }, ());
+            true
+        }
         _ => false,
     }
 }
@@ -580,6 +602,7 @@ pub fn run() {
             hush_overlay(app.handle());
             // The daemon's stream is read here rather than in the page, because this app's WebKit holds a trickle of response body back long enough to lose a three second ring; see overlay.rs.
             overlay::stream_events(app.handle().clone());
+            arm_hover(app.handle());
             // Nothing places the window here: it starts hidden and the page positions it against the dock, on the monitor the pointer is on, immediately before every show.
             listen_for_toggle_signal(app.handle().clone());
             Ok(())

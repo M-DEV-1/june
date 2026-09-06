@@ -44,6 +44,16 @@ function noticeLabel(word: string, title: string): string {
 }
 
 /** The rail. Input: none — everything it draws comes from the store and the conversations cache. Output: the sidebar element, which SidebarProvider in App.tsx places. */
+/** Short labels for the buttons a notice can carry, so the rail keeps its own compact wording for the answers it knows and still draws anything else the daemon names. */
+const NOTICE_LABELS: Record<string, string> = { done: "Done", hour: "1 h", evening: "Evening", tomorrow: "Tomorrow" };
+
+/** The buttons the rail draws for a live notice. Input: the actions the notice named, which the daemon decides — a task and the stale-task question carry their own, and a notice with nothing to complete carries only Open (see openOnlyActions and noticeActions in internal/proactive). Output: key and label per button, dropping Open, which the app window is already the answer to. Before this, both windows drew Done and three snoozes for every notice, so a routine's report or a transcription offered four buttons the daemon then refused with "Could not do that". */
+function noticeButtons(actions: { key: string; label: string }[] | undefined): { key: string; label: string }[] {
+  return (actions ?? [])
+    .filter(({ key }) => key !== "default" && key !== "open")
+    .map(({ key, label }) => ({ key, label: NOTICE_LABELS[key] ?? label }));
+}
+
 export function AppSidebar() {
   const dispatch = useAppDispatch();
   const { place, conversationId, query, notice, liveNotice } = useAppSelector((s) => s.ui);
@@ -56,7 +66,7 @@ export function AppSidebar() {
   useEffect(() => setPressFailed(false), [liveNotice?.kind, liveNotice?.id]);
 
   /** Presses one of the live notice's own buttons. The daemon's answer comes back as the same "notice" event a desktop press produces (see reactToNotice in store.ts), which is what replaces these buttons with the rail line's plain text. A refusal sends no such event — the daemon answers 404 for a notice whose task has already been closed elsewhere and returns before it would echo anything — so it is said as one quiet line on the card itself (DESIGN.md rule 18), which stays up with its buttons: the press is what failed, not the notice, and the hover window keeps its own card up for the same reason (noticeFailed in src/main.ts). */
-  const act = (action: "done" | "hour" | "evening" | "tomorrow") => {
+  const act = (action: string) => {
     if (!liveNotice) return;
     setPressFailed(false);
     void actOnNotice({ ...liveNotice, action })
@@ -101,21 +111,11 @@ export function AppSidebar() {
             </p>
             {/* The four words on their own tell a screen reader nothing about what is being done or snoozed, so each button's own label names the notice it belongs to. */}
             <div className="flex gap-1">
-              {/* Done closes a task through the daemon's own task-done path (see Act in internal/proactive/notify.go); a routine has nothing to complete — it is Ora reporting, not work owed — so only the snooze buttons show for one. */}
-              {liveNotice.kind !== "routine" ? (
-                <Button variant="outline" size="xs" aria-label={noticeLabel("Done", liveNotice.title)} onClick={() => act("done")}>
-                  Done
+              {noticeButtons(liveNotice.actions).map(({ key, label }) => (
+                <Button key={key} variant="outline" size="xs" aria-label={noticeLabel(label, liveNotice.title)} onClick={() => act(key)}>
+                  {label}
                 </Button>
-              ) : null}
-              <Button variant="outline" size="xs" aria-label={noticeLabel("1 h", liveNotice.title)} onClick={() => act("hour")}>
-                1 h
-              </Button>
-              <Button variant="outline" size="xs" aria-label={noticeLabel("Evening", liveNotice.title)} onClick={() => act("evening")}>
-                Evening
-              </Button>
-              <Button variant="outline" size="xs" aria-label={noticeLabel("Tomorrow", liveNotice.title)} onClick={() => act("tomorrow")}>
-                Tomorrow
-              </Button>
+              ))}
             </div>
             {pressFailed ? (
               <p role="status" className="text-meta text-muted-foreground">

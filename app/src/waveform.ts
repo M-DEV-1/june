@@ -120,11 +120,22 @@ export const WORKING_PERIOD_MS = 2400;
 /** One row of the braille grid for "Ora is working": a slow wave travelling along the row, each cell filled upward from its bottom edge by 0 to 4 dots (ROW0_LEVELS, the masks that grow from the bottom). It is the same signature as the voice grid with nothing to measure, so it is drawn from the clock alone. Input: the row's width in cells and the moment in milliseconds. Output: the row as a string of braille characters, identical for the same moment and back where it started after WORKING_PERIOD_MS. */
 export function workingRow(width: number, tMs: number): string {
   const phase = (2 * Math.PI * (tMs % WORKING_PERIOD_MS)) / WORKING_PERIOD_MS;
+  const samples = width * 2;
   let out = "";
   for (let x = 0; x < width; x++) {
-    const wave = Math.sin((2 * Math.PI * x) / width - phase);
-    const level = Math.round(2 + 1.6 * wave);
-    out += String.fromCodePoint(ROW0_LEVELS[Math.max(0, Math.min(4, level))]);
+    let cell = 0x2800;
+    // A braille cell is two columns of four dots, so each cell carries two samples of the wave rather than one: the same row of characters draws twice as much of the curve, which is what takes the steps out of it.
+    for (const [col, masks] of [[0, LEFT_COLUMN], [1, RIGHT_COLUMN]] as const) {
+      const i = x * 2 + col;
+      const wave = Math.sin((2 * Math.PI * i) / samples - phase);
+      const level = Math.max(0, Math.min(4, Math.round(2 + 1.6 * wave)));
+      for (let d = 0; d < level; d++) cell |= masks[d];
+    }
+    out += String.fromCodePoint(cell);
   }
   return out;
 }
+
+// The dots of one braille column, bottom first, so a column can be filled to its own height independently of its neighbour. Left is dots 7,3,2,1 and right is dots 8,6,5,4.
+const LEFT_COLUMN = [0x40, 0x04, 0x02, 0x01];
+const RIGHT_COLUMN = [0x80, 0x20, 0x10, 0x08];

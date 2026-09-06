@@ -26,8 +26,8 @@ export interface Rect {
 /** Where on the screen the hover opens. All three are centred left to right; they differ only in how far down the screen the window sits. */
 export type HoverPosition = "top" | "center" | "bottom";
 
-/** The position the hover opens at when nothing has been chosen. Bottom, because the hover is opened by a hotkey while the user is working in another window and the bottom of the screen is where their dock and their attention already are; it is also the least likely of the three to land on top of what they were reading. */
-export const DEFAULT_HOVER_POSITION: HoverPosition = "bottom";
+/** The position the hover opens at when nothing has been chosen. Centre, where the eye already is when the hotkey is pressed. It was bottom while the hover had to stay clear of whatever the user was reading, because a picture of the screen had Ora's own card in the middle of it; the window now steps off the screen for the moment that picture is taken (see the conceal handler in main.ts), so the hover no longer has to hide from the thing it is being asked about. */
+export const DEFAULT_HOVER_POSITION: HoverPosition = "center";
 
 /** The localStorage key the chosen position is kept under, alongside "ora-theme". Both windows are served from one origin, so the Settings screen in the app window writes it and the hover window reads it. */
 export const HOVER_POSITION_KEY = "ora-hover-position";

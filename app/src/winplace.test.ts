@@ -172,10 +172,10 @@ describe("storedHoverPosition", () => {
   });
 
   it("falls back to the default when nothing valid is stored or storage is blocked", () => {
-    expect(DEFAULT_HOVER_POSITION).toBe("bottom");
-    expect(storedHoverPosition(store(null))).toBe("bottom");
-    expect(storedHoverPosition(store("sideways"))).toBe("bottom");
-    expect(storedHoverPosition(store("throw"))).toBe("bottom");
+    expect(DEFAULT_HOVER_POSITION).toBe("center");
+    expect(storedHoverPosition(store(null))).toBe("center");
+    expect(storedHoverPosition(store("sideways"))).toBe("center");
+    expect(storedHoverPosition(store("throw"))).toBe("center");
   });
 });
 

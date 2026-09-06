@@ -381,10 +381,14 @@ export function applyToolEvent(
   if (running && running.finishedAt === undefined) {
     return [...steps.slice(0, -1), { ...running, finishedAt: now }];
   }
-  return [
-    ...steps,
-    { name: ev.text ?? "", detail: ev.detail ?? "", startedAt: now },
-  ];
+  const name = ev.text ?? "";
+  const detail = ev.detail ?? "";
+  // A screen task calls observe_screen and look over and over, and both of them say "Looking at the screen": a row each meant the card filled with the same sentence repeated. A call that would say what the row above it already says reopens that row instead of adding another, so the list has one line per thing Ora is doing rather than one per tool call.
+  const done = steps[steps.length - 1];
+  if (done && stepLabel(done.name, done.detail) === stepLabel(name, detail)) {
+    return [...steps.slice(0, -1), { ...done, finishedAt: undefined }];
+  }
+  return [...steps, { name, detail, startedAt: now }];
 }
 
 /** Marks the step still running, if any, as failed instead of finished — for when the daemon's whole ask fails partway through a tool call, which never sends that call its own finishing "tool" event. Input: the steps so far, the daemon's error text, and the current time. Output: the updated steps, unchanged when none is running. */
@@ -422,6 +426,8 @@ const TOOL_STEP = new Map<
   { icon: string; verb: string; template?: (detail: string) => string }
 >([
   ["observe_screen", { icon: "look", verb: "Looking at the screen" }],
+  // look takes the picture that observe_screen reads, so it says the same thing rather than printing its own name; two of them in a row fold into one row (see applyToolEvent).
+  ["look", { icon: "look", verb: "Looking at the screen" }],
   ["show_marks", { icon: "look", verb: "Marking the screen" }],
   [
     "point_at",
@@ -858,8 +864,12 @@ export function step(
     }
 
     case "mattersLoaded": {
+      // Anything with something on screen survives the reload, answered or not, until the thread lapses. The list is read again every time the hover is shown, and while it kept only questions still waiting for an answer, asking something, switching to another window to check on it and coming back threw the whole exchange away.
+      // The lapse is the same CONVERSATION_MS the daemon side already used to decide which thread a question joins (see askConversation): once the thread has been quiet that long the card opens clean, so a hotkey press an hour later is a fresh start with nothing to dismiss. A question still waiting for its answer is never dropped, however long it has taken. Ctrl+Enter clears it before then.
+      const lapsed =
+        view.conversationAt !== undefined && now - view.conversationAt > CONVERSATION_MS;
       const isMidQuestion = (m: Matter) =>
-        m.turns.length > 0 && m.turns[m.turns.length - 1].a === "";
+        m.turns.length > 0 && (!lapsed || m.turns[m.turns.length - 1].a === "");
       const openId = view.matters[view.current]?.id;
       const kept = view.matters.filter(isMidQuestion);
       const fresh = event.rows
@@ -995,8 +1005,8 @@ export function step(
     case "noticeAct": {
       const notice = view.notice;
       if (!notice) return { view };
-      // Open is the click the card has always answered, and it takes the card down because it leaves for the app window.
-      if (event.act === "open")
+      // Open is the click the card has always answered, and it takes the card down because it leaves for the app window. "default" is the same button under the name the desktop gives a press on the notification body, which is the key the daemon's own Open carries (actionOpen in internal/proactive/notify.go); posting it back would be refused, since opening a window is not something the daemon can do for the card.
+      if (event.act === "open" || event.act === "default")
         return {
           view: { ...view, notice: undefined, noticeAlone: false, noticeHeld: false },
           effect: { kind: "openNotice", place: notice.place, id: notice.id },

@@ -50,6 +50,9 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // maxDeriveStateNotes bounds how many relevance-ranked notes feed the 5-minute working-state derive, instead of the full notes table.
+// concealSettle is how long the daemon waits after telling the hover to take itself off the screen, before the picture is taken. The instruction reaches the window over the event stream it is already reading, and the compositor needs one frame to redraw without it; a tenth of a second is about six frames.
+const concealSettle = 100 * time.Millisecond
+
 const maxDeriveStateNotes = 10
 
 // maxDeriveStateEpisodes bounds how many tracked episodes the change gate reads to build its app-and-window-title signature. Two hundred: this store logged at most 60 episodes in its busiest hour on 2026-09-04, so it covers well over the ten-minute window the gate compares across, and the signature is a set so reading extra rows only costs the query.
@@ -483,6 +486,22 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 		return *a, true
 	})
+	// Ora's own hover is drawn over whatever the user was looking at, so a picture of the screen taken while it is up has Ora's card sitting in the middle of the thing the question was about. The window takes itself off the screen for the moment the picture is taken and puts itself back exactly as it was — a window already hidden stays hidden, so this costs nothing when the hover is not up.
+	// ponytail: a fixed settle wait rather than an acknowledgement from the window. The instruction reaches it over the event stream in a millisecond or two and the compositor needs a frame to redraw; if that ever proves too short the window should answer that it is hidden and this should wait for that instead.
+	tracker.SetScreenGuard(func() func() {
+		if !ipcServer.Subscribed(time.Minute) {
+			return nil
+		}
+		// Only when Ora's own window is the one in front, which is what it is whenever a question was asked from the hover. Every background capture the tracker takes on its own runs while the user is in something else, and those must not pay the settle wait.
+		a, err := trackerImpl.GetActiveWindow()
+		if err != nil || a == nil || !tracker.IsOraWindow(a.App, a.Title) {
+			return nil
+		}
+		ipcServer.Tell("conceal")
+		time.Sleep(concealSettle)
+		return func() { ipcServer.Tell("reveal") }
+	})
+
 	// A proactive moment goes to Ora's own card in the hover window when a window is there to show it, and falls back to the desktop's notifications only when none has been listening for a minute. Returning false is what makes that fallback happen, so a window that has just gone away does not swallow the notice.
 	proactive.SetNoticeSender(func(n proactive.Notice) bool {
 		if !ipcServer.Subscribed(time.Minute) {

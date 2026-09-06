@@ -31,7 +31,6 @@ import {
   type JobMeta,
   type Matter,
   type Notice,
-  type NoticeAction,
   type Theme,
   type ToolStep,
   type View,
@@ -381,18 +380,10 @@ function renderNotice(v: View): void {
       : `<div class="nh">Ora</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml(n)}`;
 }
 
-/** The default answers, in the order the desktop banner offered them, for every notice that does not name its own. */
-const DEFAULT_NOTICE_ACTIONS: NoticeAction[] = [
-  { key: "done", label: "Done" },
-  { key: "hour", label: "In an hour" },
-  { key: "evening", label: "This evening" },
-  { key: "tomorrow", label: "Tomorrow" },
-  { key: "open", label: "Open" },
-];
-
-/** The buttons a fresh notice carries, so the card is dealt with where it appears. Input: the notice. Output: the row's HTML — the notice's own actions in the order it named them when it named any (the daily stale-task question does: Done / Not happening / Not urgent), the default Done/snooze/Open set otherwise. Each button also names its notice in an aria-label, because "Not happening" read on its own says nothing about what is not happening. */
+/** The buttons a fresh notice carries, so the card is dealt with where it appears. Input: the notice. Output: the row's HTML — exactly the actions the notice named, in that order, and an empty row when it named none. Each button also names its notice in an aria-label, because "Not happening" read on its own says nothing about what is not happening.
+ * The daemon decides which buttons a notice can answer: a task carries the full Done/snooze/Open set, the stale-task question carries its own three, and a moment with nothing to complete carries only Open (see openOnlyActions and noticeActions in internal/proactive). The card used to fall back to the full set for any notice that named none, which is how "Transcribing meeting" came to offer Done and three snoozes and answer "Could not do that" when one was pressed. */
 function noticeButtonsHtml(n: Notice): string {
-  const acts = n.actions?.length ? n.actions : DEFAULT_NOTICE_ACTIONS;
+  const acts = n.actions ?? [];
   return `<div class="nr">${acts.map(({ key, label }) => `<button class="na" data-act="${esc(key)}" type="button" aria-label="${esc(`${label} — ${n.title}`)}">${esc(label)}</button>`).join("")}</div>`;
 }
 
@@ -458,7 +449,7 @@ function openNotice(place: string, id: string): void {
 }
 
 /** Ticks the live step list's elapsed-seconds numbers up and advances its braille working grid while an ask is running; nothing else re-renders on its own between daemon events, so a slow tool call would otherwise sit on a stale number and a frozen grid until the next one arrives. It runs ten times a second because that is the rate the grid needs to read as motion; the seconds numbers, which only ever changed once a second, cost nothing extra for being written more often. Input: none. Output: nothing. */
-const STEP_TICK_MS = 100;
+const STEP_TICK_MS = 40;
 let stepTicker: ReturnType<typeof setInterval> | undefined;
 function startStepTicker(): void {
   stopStepTicker();
@@ -629,9 +620,41 @@ function gridRowHtml(): string {
 /** The live step list shown in place of an answer while an ask is still running. A row of the braille dot grid stands in until the first tool call arrives, so the daemon's own "Checking." status text is never what the user sees — that hardcoded, unchanging line was the entire complaint this replaces. Only ever builds the list from scratch, for the first render of a turn; every event after that patches this same markup in place instead (see patchLiveSteps), which is what keeps the running row's animations from restarting on every tool call. Input: the turn's steps so far. Output: the list's HTML. */
 function stepsHtml(steps: ToolStep[]): string {
   if (steps.length === 0)
-    return `<div class="steps">${gridRowHtml()}</div>`;
+    return `<div class="steps" data-made="0">${gridRowHtml()}</div>`;
   const now = Date.now();
-  return `<div class="steps">${steps.map((s) => stepRowHtml(s, now)).join("")}</div>`;
+  const shown = steps.slice(-STEP_ROWS);
+  return `<div class="steps" data-made="${steps.length}">${moreRowHtml(steps.length - shown.length)}${shown.map((s) => stepRowHtml(s, now)).join("")}</div>`;
+}
+
+/** How many step rows the card keeps. A screen task calls the same few tools over and over — look, see, look, see — and a row for every one of them filled the card and pushed everything else off it. The rest are counted into one line instead. */
+const STEP_ROWS = 4;
+
+/** The one line standing in for the steps the card is no longer showing. Input: how many were folded away. Output: the line's HTML, or "" when none were. */
+function moreRowHtml(hidden: number): string {
+  return hidden > 0 ? `<div class="step-more">${hidden} earlier step${hidden === 1 ? "" : "s"}</div>` : "";
+}
+
+/** Drops the oldest rows once the list is longer than STEP_ROWS and keeps the folded-away count on the line above them. Input: the list element. Output: nothing; the live row is never removed, so the animation running on it is untouched. */
+function trimStepRows(wrap: HTMLElement): void {
+  let more = wrap.firstElementChild?.classList.contains("step-more") ? (wrap.firstElementChild as HTMLElement) : null;
+  let hidden = more ? parseInt(more.textContent ?? "0", 10) || 0 : 0;
+  // A step that failed writes a second element after its row, so rows are counted rather than children.
+  const rows = () => wrap.querySelectorAll(":scope > .step");
+  while (rows().length > STEP_ROWS) {
+    const oldest = rows()[0];
+    // The error line a failed step wrote sits right after it and goes with it.
+    const err = oldest.nextElementSibling;
+    if (err?.classList.contains("step-err")) err.remove();
+    oldest.remove();
+    hidden++;
+  }
+  if (hidden === 0) return;
+  if (!more) {
+    more = document.createElement("div");
+    more.className = "step-more";
+    wrap.insertBefore(more, wrap.firstChild);
+  }
+  more.textContent = `${hidden} earlier step${hidden === 1 ? "" : "s"}`;
 }
 
 /** Fades one animated element's contents out and back in instead of swapping the element itself, so a CSS animation running on it (the live row's shimmer, its icon's breathe) keeps running through the change instead of restarting the way replacing the element with a fresh one would. Input: the element and its next inner HTML. Output: nothing; skipped under reduced motion, where every other animation on the card is already cut. */
@@ -684,13 +707,16 @@ function patchLiveSteps(v: View): boolean {
   // The index of the step still running, or steps.length when none is (the gap between one finishing and the next starting).
   const openIdx =
     last && last.finishedAt === undefined ? steps.length - 1 : steps.length;
-  // Every already-finished step not yet its own row gets appended now, in the order they ran, just before the live row.
-  for (let i = wrap.children.length - 1; i < openIdx; i++) {
+  // Every already-finished step not yet its own row gets appended now, in the order they ran, just before the live row. How many have been drawn is kept on the list itself rather than counted from its children, because trimStepRows removes the oldest rows and a failed step writes two elements for one step.
+  const made = parseInt(wrap.dataset.made ?? "0", 10) || 0;
+  for (let i = made; i < openIdx; i++) {
     const tmp = document.createElement("template");
     tmp.innerHTML = stepRowHtml(steps[i], now);
     while (tmp.content.firstChild)
       wrap.insertBefore(tmp.content.firstChild, row);
   }
+  wrap.dataset.made = String(Math.max(made, openIdx));
+  trimStepRows(wrap);
   updateLiveRow(row, openIdx < steps.length ? steps[openIdx] : undefined);
   fit();
   return true;
@@ -1146,6 +1172,9 @@ let showNotice: (n: Notice) => Promise<void> = async () => {};
 const HOVER_WIDTH = 720;
 /** How wide a window showing nothing but a notice is, in logical pixels: the notice card's own 420 maximum (see .N in styles.css) plus the 18 of body padding on each side. The window is transparent and paints nothing outside the card, but it still takes the pointer, so a window any wider than this would sit as an invisible band over the top right of the screen swallowing clicks meant for whatever is under it. */
 const NOTICE_WIDTH = 456;
+/** How wide the hover is while a live voice session runs, in logical pixels. A voice session has no composer and no thread — a state word, Ora's forty braille columns, two clipped transcript lines and the stop control — and all of that sits centred, so at the ask card's own 720 the sides were empty.
+ * The wave is what sets this rather than the transcript: measured off a screenshot of a live session, forty braille columns at 16px came to about 460 logical pixels, so ~430 at the 15px they are drawn at now. 500 clears that plus the 18 of body padding each side with room to spare; anything near the transcript's own 420 maximum would cut the ends off the wave, which does not wrap. */
+const VOICE_WIDTH = 580;
 
 /** Sizes the OS window to the rendered content so the empty state is a short strip and an answer grows the window, keeping it anchored to the dock whenever that height changes while the window is visible. Input: none. Output: the logical size the window was set to. */
 let fitWindow: () => Promise<{ width: number; height: number }> = async () => ({
@@ -1162,6 +1191,8 @@ export interface Shell {
   desktop: Desktop;
   raise: () => Promise<void>;
   onToggle: (run: () => void) => void;
+  /** Called with true when the daemon is about to photograph the screen and false once it has. Ora's hover is drawn over whatever the user was looking at, so a picture taken while it is up has Ora's own card in the middle of the thing the question was about. Optional: a shell that cannot listen for it simply never steps out of the picture. */
+  onConceal?: (run: (hiding: boolean) => void) => void;
 }
 
 /** Wires the window calls this module cannot make on its own: hide, fitWindow, showNotice and the toggle hotkey. Input: the shell. Output: nothing; the four module-level bindings above are what it leaves behind. */
@@ -1186,7 +1217,7 @@ export function wireWindow(shell: Shell): void {
     // The 96px floor is the card's own minimum height; a notice showing on its own has no card under it, so it is only as tall as the bubble and would otherwise float half a card's height off the dock.
     const floor = noticeOnly ? 0 : 96;
     const height = Math.max(floor, Math.ceil(bottom + gutter));
-    const width = noticeOnly ? NOTICE_WIDTH : HOVER_WIDTH;
+    const width = noticeOnly ? NOTICE_WIDTH : view.voice ? VOICE_WIDTH : HOVER_WIDTH;
     const changed = height !== lastHeight || width !== lastWidth;
     lastHeight = height;
     lastWidth = width;
@@ -1229,6 +1260,30 @@ export function wireWindow(shell: Shell): void {
     await win.show();
   };
 
+  // The hover is a dock-type window so that it stacks above ordinary windows without the always-on-top flag that stops other windows being focused (see arm_hover in lib.rs). Mutter never gives a dock the keyboard on its own and a click on one moves no focus at all, so a press inside the hover has to ask for it, or everything typed after clicking the card would go to whatever window had the keyboard before.
+  root.addEventListener("pointerdown", () => {
+    void shell.raise().catch((e) => console.error("ora: could not take the keyboard", e));
+  });
+  noticeEl.addEventListener("pointerdown", () => {
+    void shell.raise().catch(() => {});
+  });
+
+  // The daemon takes the hover off the screen for the moment it photographs the screen, and puts it back only if it was up in the first place. Nothing else about the window changes: no re-placing, no re-sizing, so it comes back where it was rather than where it would be opened.
+  let concealed = false;
+  shell.onConceal?.((hiding) => {
+    void (async () => {
+      if (hiding) {
+        if (concealed || !(await win.isVisible())) return;
+        concealed = true;
+        await win.hide();
+        return;
+      }
+      if (!concealed) return;
+      concealed = false;
+      await win.show();
+    })().catch((e) => console.error("ora: could not step out of the picture", e));
+  });
+
   // The desktop hotkey signals the Rust side, which emits an event the shell passes on here; showing and hiding from here keeps every window call on the main loop.
   shell.onToggle(() => {
     void toggleWindow(win, {
@@ -1268,6 +1323,14 @@ try {
     onToggle: (run) => {
       void listen("ora://toggle", run).catch((e) =>
         console.error("ora: the toggle listener would not attach", e),
+      );
+    },
+    onConceal: (run) => {
+      void listen("ora://conceal", () => run(true)).catch((e) =>
+        console.error("ora: the conceal listener would not attach", e),
+      );
+      void listen("ora://reveal", () => run(false)).catch((e) =>
+        console.error("ora: the reveal listener would not attach", e),
       );
     },
   });
