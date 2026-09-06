@@ -20,8 +20,9 @@ func observingAgent(t *testing.T) (*Agent, *[]string) {
 		}, nil
 	}
 	var rings []string
-	a.Point = func(x, y, w, h int, label string) {
+	a.Point = func(x, y, w, h int, label string) error {
 		rings = append(rings, label+" "+strconv.Itoa(x)+" "+strconv.Itoa(y)+" "+strconv.Itoa(w)+" "+strconv.Itoa(h))
+		return nil
 	}
 	// NewAgent defaults verify and extents to the tracker's, which talk to a real accessibility bus. point_at checks the element is still the one the list described and then reads back where it is before ringing it, so both are stood in for here against the fixture window.
 	a.verify = func(ctx context.Context, ref, role, label string, x, y, w, h int) error { return nil }
@@ -304,7 +305,7 @@ func TestToolDefinitions_DeclareTheActionTools(t *testing.T) {
 func TestExecuteTool_ShowMarks_MarksEveryObservedItem(t *testing.T) {
 	a, _ := observingAgent(t)
 	var marked []act.Item
-	a.Marks = func(items []act.Item) { marked = items }
+	a.Marks = func(items []act.Item) error { marked = items; return nil }
 	a.executeTool(context.Background(), "observe_screen", map[string]any{})
 	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
 	if len(marked) != 2 || marked[0].N != 1 || marked[1].N != 2 {
@@ -318,7 +319,7 @@ func TestExecuteTool_ShowMarks_MarksEveryObservedItem(t *testing.T) {
 func TestExecuteTool_ShowMarks_RefusesWhatItHasNotSeen(t *testing.T) {
 	a, _ := observingAgent(t)
 	var marked []act.Item
-	a.Marks = func(items []act.Item) { marked = items }
+	a.Marks = func(items []act.Item) error { marked = items; return nil }
 	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
 	if marked != nil || !strings.Contains(got, "observe_screen") {
 		t.Errorf("before any observation show_marks must refuse and say to observe first; marked=%v result=%q", marked, got)
@@ -346,7 +347,7 @@ func TestExecuteTool_ShowMarks_CapsAt40(t *testing.T) {
 		return "brave", "many", nodes, nil
 	}
 	var marked []act.Item
-	a.Marks = func(items []act.Item) { marked = items }
+	a.Marks = func(items []act.Item) error { marked = items; return nil }
 	a.executeTool(context.Background(), "observe_screen", map[string]any{})
 	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
 	if len(marked) != 40 {
@@ -372,7 +373,7 @@ func TestToolDefinitions_DeclareShowMarks(t *testing.T) {
 func TestEvalExecute_AllowsShowMarks(t *testing.T) {
 	a, _ := observingAgent(t)
 	var marked []act.Item
-	a.Marks = func(items []act.Item) { marked = items }
+	a.Marks = func(items []act.Item) error { marked = items; return nil }
 	a.evalExecute(context.Background(), "observe_screen", map[string]any{})
 	got := a.evalExecute(context.Background(), "show_marks", map[string]any{})
 	if len(marked) != 2 || strings.Contains(got, "not available in an ask") {
@@ -449,7 +450,7 @@ func TestExecuteTool_ObserveScreen_SendsTheWholeListWhenTheWindowChanged(t *test
 func TestExecuteTool_ShowMarks_UsesFreshRectsAndDropsTheGone(t *testing.T) {
 	a, _ := observingAgent(t)
 	var marked []act.Item
-	a.Marks = func(items []act.Item) { marked = items }
+	a.Marks = func(items []act.Item) error { marked = items; return nil }
 	a.executeTool(context.Background(), "observe_screen", map[string]any{})
 	seen := a.seen(context.Background())
 	if len(seen) != 2 {
@@ -467,5 +468,24 @@ func TestExecuteTool_ShowMarks_UsesFreshRectsAndDropsTheGone(t *testing.T) {
 	}
 	if !strings.Contains(got, "1 of 2") || !strings.Contains(got, "no longer showing") {
 		t.Errorf("result = %q, want it to say one of two was marked and one is gone", got)
+	}
+}
+
+// A drawing call that reached no window used to be thrown away, so point_at answered "ringed [1] ..." and show_marks "marked 2 element(s)" about a screen with nothing on it, and the model then talked the user through marks the user could not see. Both now hand back what the overlay said.
+func TestExecuteTool_PointAtAndShowMarks_SayWhenTheDrawingReachedNoWindow(t *testing.T) {
+	a, _ := observingAgent(t)
+	noWindow := errors.New("the drawing reached no window, so nothing appeared on the screen")
+	a.Point = func(x, y, w, h int, label string) error { return noWindow }
+	a.Marks = func(items []act.Item) error { return noWindow }
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+
+	got := a.executeTool(ctx, "point_at", map[string]any{"n": float64(1)})
+	if !strings.Contains(got, "reached no window") || strings.Contains(got, "ringed") {
+		t.Errorf("point_at = %q, want what the overlay said rather than a claim that it ringed anything", got)
+	}
+	got = a.executeTool(ctx, "show_marks", map[string]any{})
+	if !strings.Contains(got, "reached no window") || strings.Contains(got, "marked") {
+		t.Errorf("show_marks = %q, want what the overlay said rather than a claim that it marked anything", got)
 	}
 }

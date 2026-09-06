@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -105,7 +106,7 @@ func guardedClickAgent(t *testing.T) (*Agent, *fakeActions, *[]string) {
 		}, nil
 	}
 	var rings []string
-	a.Point = func(x, y, w, h int, label string) { rings = append(rings, label) }
+	a.Point = func(x, y, w, h int, label string) error { rings = append(rings, label); return nil }
 	f := &fakeActions{}
 	a.doAction = func(ctx context.Context, ref string) (string, error) {
 		f.clicked = append(f.clicked, ref)
@@ -236,5 +237,38 @@ func TestExecuteTool_Click_RefusesWhenVerifyFails(t *testing.T) {
 	}
 	if !strings.Contains(got, "look again") {
 		t.Errorf("result = %q, want it to say to look again", got)
+	}
+}
+
+// The keyboard-focus read has three answers, not two: focused, not focused, and nothing either way. A definite not-focused is what the guard is for — the click landed somewhere the keys will not reach — and typing is refused.
+func TestExecuteTool_TypeText_RefusesWhenTheFieldNoLongerHoldsTheKeyboard(t *testing.T) {
+	a, f := actingAgent(t)
+	a.focused = func(context.Context, string) (bool, error) { return false, nil }
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+	a.executeTool(context.Background(), "click", map[string]any{"n": float64(2)})
+
+	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "ora"})
+
+	if len(f.typed) != 0 {
+		t.Errorf("typed = %v, want nothing typed when the field definitely does not hold the keyboard", f.typed)
+	}
+	if !strings.Contains(got, "could not identify the field") {
+		t.Errorf("result = %q, want the refusal", got)
+	}
+}
+
+// A read that says nothing either way — the bus timed out, the element has gone, or the toolkit does not publish the focused bit on the node the walk listed, which Chromium and Electron often do not — is not evidence that the focus moved, and refusing on it stops typing into fields that are perfectly focused. The remembered click stands and the text goes in.
+func TestExecuteTool_TypeText_TypesWhenTheFocusCannotBeRead(t *testing.T) {
+	a, f := actingAgent(t)
+	a.focused = func(context.Context, string) (bool, error) {
+		return false, errors.New("the accessibility bus gave no state for r-address")
+	}
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+	a.executeTool(context.Background(), "click", map[string]any{"n": float64(2)})
+
+	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "ora"})
+
+	if len(f.typed) != 1 || !strings.Contains(got, "typed") {
+		t.Errorf("typed = %v, result = %q, want the text typed on an unreadable focus rather than a refusal", f.typed, got)
 	}
 }

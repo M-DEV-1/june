@@ -825,17 +825,17 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	})
 
 	// point_at rings through the same overlay path POST /overlay uses, so the extension has one thing to listen to. One agent answers every ask, so the ring itself says nothing about which question drew it; the server names the ask running at that moment (see ipc.Server.DrawingAsk) and the overlay event goes out under that id, so a client watching /events can tie the ring to the question.
-	askAgent.Point = func(x, y, w, h int, label string) {
-		ipcServer.Ring(ipcServer.DrawingAsk(), x, y, w, h, label)
+	askAgent.Point = func(x, y, w, h int, label string) error {
+		return ipcServer.Ring(ipcServer.DrawingAsk(), x, y, w, h, label)
 	}
 	askAgent.Draw = ipcServer.Draw
 	// show_marks marks through the same overlay path, one rect per observed item, labelled with the item's own number so the marks line up with what observe_screen just listed.
-	askAgent.Marks = func(items []act.Item) {
+	askAgent.Marks = func(items []act.Item) error {
 		rects := make([]ipc.OverlayRect, len(items))
 		for i, it := range items {
 			rects[i] = ipc.OverlayRect{X: it.X, Y: it.Y, W: it.W, H: it.H, Label: strconv.Itoa(it.N)}
 		}
-		ipcServer.Marks(ipcServer.DrawingAsk(), rects)
+		return ipcServer.Marks(ipcServer.DrawingAsk(), rects)
 	}
 	// press_key, click_at and scroll_at drive the keyboard and pointer through the desktop portal, which asks the user to allow remote control the first time its session opens. The session opens on the first tool call that needs it, not here, so nobody sees that dialog until a task actually has to press a key or click a point the accessibility tree cannot reach; the grant is then restored from a token in the data directory, so the dialog is asked once rather than on every restart.
 	askAgent.UsePortalInput(config.DataDir())
