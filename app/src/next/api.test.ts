@@ -113,11 +113,24 @@ describe("events", () => {
     expect(onReopen).toHaveBeenCalledTimes(2);
   });
 
-  it("constructs no new EventSource when stop() runs before the retry timer fires", async () => {
+  it("constructs no new EventSource when stop() runs after the retry has been scheduled", async () => {
     const stop = events(vi.fn());
     await settle();
+    // The timer is already scheduled by the time stop() runs, so what saves this is connect()'s own check on the way back in.
     FakeEventSource.instances[0].fail();
     stop();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(FakeEventSource.instances.length).toBe(1);
+  });
+
+  it("schedules no retry at all for a stream that errors after stop() has run", async () => {
+    const stop = events(vi.fn());
+    await settle();
+    const src = FakeEventSource.instances[0];
+    stop();
+    // A stream closed by stop() can still report the error of its own teardown; a timer scheduled then keeps a stopped stream reconnecting on a two-second beat for the life of the page.
+    src.fail();
+    expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(2000);
     expect(FakeEventSource.instances.length).toBe(1);
   });

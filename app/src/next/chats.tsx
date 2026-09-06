@@ -27,7 +27,7 @@ export function ChatsScreen() {
   const conversationId = useAppSelector((s) => s.ui.conversationId);
   const chatDraft = useAppSelector((s) => s.ui.chatDraft);
   const run = useAppSelector((s) => s.progress.run);
-  const job = useAppSelector((s) => s.progress.job);
+  const jobs = useAppSelector((s) => s.progress.jobs);
   // A chat draft shows as though nothing were picked, even though conversationId still names whatever was open before "New chat" — cleared would only have App.tsx's own "keep some chat picked" effect put it straight back the instant one exists.
   const shownId = chatDraft ? undefined : conversationId;
   const {
@@ -51,7 +51,7 @@ export function ChatsScreen() {
   // A fresh draft has no conversationId yet, tracked under this sentinel until the first message sent from it opens a real one and the composer's own send() moves everything over to that id.
   const key = shownId ?? DRAFT_CHAT;
   const mine = run && run.conversationId === key ? run : undefined;
-  const mineJob = job && job.conversationId === key ? job : undefined;
+  const mineJob = jobs[key];
 
   return (
     <div ref={pane} data-pane className="flex h-full min-h-0 flex-col">

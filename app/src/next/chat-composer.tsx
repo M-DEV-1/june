@@ -51,8 +51,8 @@ export function Composer({
   const dispatch = useAppDispatch();
   const key = draftKey ?? conversationId;
   const draft = useAppSelector((s) => (key ? (s.ui.ask[key] ?? "") : ""));
-  const job = useAppSelector((s) => s.progress.job);
-  const mineJob = job && key && job.conversationId === key ? job : undefined;
+  const mineJob = useAppSelector((s) => (key ? s.progress.jobs[key] : undefined));
+  const dictation = useAppSelector((s) => s.progress.dictation);
   const running =
     useAppSelector((s) => Boolean(s.progress.run)) || Boolean(mineJob && isJobLive(mineJob.state) && !mineJob.question);
   const [ask] = useAskMutation();
@@ -82,13 +82,17 @@ export function Composer({
     noticeTimer.current = setTimeout(() => setDictateNotice(undefined), 4000);
   };
 
+  /** Puts a finished dictation's words into the box. Input: the transcript, which is "" when the daemon heard nothing. Output: nothing; what is already half-typed keeps its place and the words are added after it. */
+  const takeWords = (text: string) => {
+    if (text && key) dispatch(ui.asked({ conversationId: key, text: draft ? `${draft} ${text}` : text }));
+  };
+
   const toggleDictate = async () => {
     if (dictating) {
       const id = dictating;
       setDictating(undefined);
       try {
-        const { text } = await stopDictation(id).unwrap();
-        if (text && key) dispatch(ui.asked({ conversationId: key, text: draft ? `${draft} ${text}` : text }));
+        takeWords((await stopDictation(id).unwrap()).text);
       } catch {
         flashNotice("Could not finish dictation");
       }
@@ -102,18 +106,27 @@ export function Composer({
     }
   };
 
-  // Escape stops a dictation from anywhere, not only from inside the box, because the box is disabled for as long as one is open and so cannot be the thing carrying the keypress.
+  // The daemon closes a recording itself once it has heard enough silence, or at the two-minute cap, and broadcasts the transcript as a "dictation" event; the stop route then has nothing left to answer with. Whichever of the two arrives first is the one applied: clearing `dictating` here is what keeps the stop reply from adding the same words a second time, since that path only runs while a recording is still open. The hover window matches this, at finishDictation in src/main.ts.
+  useEffect(() => {
+    if (!dictation || dictation.id !== dictating) return;
+    setDictating(undefined);
+    takeWords(dictation.text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dictation, dictating]);
+
+  // Escape stops a dictation from anywhere, not only from inside the box, because the box does not have to be focused for one to be running. Read off a ref rather than closed over: the listener is only rebuilt when `dictating` changes, so a conversation switched to in between would otherwise have Escape write the words under the conversation that was open when the dictation started.
+  const latestToggle = useRef(toggleDictate);
+  latestToggle.current = toggleDictate;
   useEffect(() => {
     if (!dictating) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        void toggleDictate();
+        void latestToggle.current();
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dictating]);
 
   const send = async () => {
@@ -126,6 +139,8 @@ export function Composer({
       try {
         await answerJob({ id: mineJob.id, text: question }).unwrap();
       } catch {
+        // What was typed exists nowhere else once the box has been cleared, so a write that did not go through gives it back rather than making the user write it again.
+        dispatch(ui.asked({ conversationId: key, text: question }));
         dispatch(ui.noticed("Could not send that answer"));
       }
       return;
@@ -140,7 +155,8 @@ export function Composer({
         const res = await startJob({ goal, brain }).unwrap();
         dispatch(progress.jobAccepted({ id: res.id, conversationId: key }));
       } catch {
-        dispatch(progress.jobFailed());
+        dispatch(progress.jobFailed(key));
+        dispatch(ui.asked({ conversationId: key, text: question }));
         dispatch(ui.noticed("Could not start that job"));
       }
       return;
@@ -174,6 +190,7 @@ export function Composer({
       if (fresh && !conversationId && res.conversation_id) dispatch(ui.conversationOpened(res.conversation_id));
     } catch {
       dispatch(progress.askFailed());
+      dispatch(ui.asked({ conversationId: key, text: question }));
       dispatch(ui.noticed("Could not send that question"));
     }
   };
@@ -218,7 +235,10 @@ export function Composer({
             ref={box}
             rows={1}
             value={draft}
-            disabled={!ready || Boolean(dictating)}
+            disabled={!ready}
+            // Read-only rather than disabled while a dictation is open: a disabled box drops the caret and leaves the accessibility tree altogether, so a screen reader loses the field the words are about to land in.
+            readOnly={Boolean(dictating)}
+            aria-busy={Boolean(dictating)}
             placeholder={
               dictateNotice ?? (ready ? placeholder : "Open a chat first, or start a new one")
             }
@@ -232,7 +252,8 @@ export function Composer({
               // Enter sends and Shift+Enter starts a line, which is the way round every chat window has settled on.
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                void send();
+                // Nothing is sent while a dictation is open: the words still to come are part of the question.
+                if (!dictating) void send();
                 return;
               }
               // Space on an empty box is the same as clicking the mic, the same key the hover window has always used to start one; a modifier or a held-down key means something else, same as there.

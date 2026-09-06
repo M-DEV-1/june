@@ -29,7 +29,8 @@ export function Quotes({
             <span className="truncate" title={e.title}>
               {e.title}
             </span>
-            <time className="shrink-0">{e.meta}</time>
+            {/* "meeting · 3 Sep" is a label for where the quote came from, not a machine-readable time, so it is not a <time>. */}
+            <span className="shrink-0">{e.meta}</span>
           </div>
           <p
             className={
@@ -44,22 +45,26 @@ export function Quotes({
   );
 }
 
-/** The row that folds a reply's sources away and back. Input: how many there are, whether they are showing, what the row is called, and what to do when it is clicked. Output: the row — a chevron, the word, and the count — which is the same control on an answer's quotes and on a failed ask's provider message. */
+/** The row that folds a reply's sources away and back. Input: how many there are, whether they are showing, what the row is called, the id of the block it opens, and what to do when it is clicked. Output: the row — a chevron, the word, and the count — which is the same control on an answer's quotes and on a failed ask's provider message. */
 function Fold({
   label,
   count,
   open,
+  controls,
   onToggle,
 }: {
   label: string;
   count?: number;
   open: boolean;
+  /** The id of the block this row opens, so aria-expanded says what it is expanding. */
+  controls: string;
   onToggle: () => void;
 }) {
   return (
     <button
       type="button"
       aria-expanded={open}
+      aria-controls={controls}
       onClick={onToggle}
       className="-ml-1.5 mt-1 flex items-center gap-1 rounded-sm px-1.5 py-1 text-meta text-muted-foreground outline-none transition-colors hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
     >
@@ -95,11 +100,12 @@ export function ReplyMeta({ turn, folded = true }: { turn: Turn; folded?: boolea
           <Fold
             label="The whole message"
             open={open}
+            controls={`fold-${turn.id}`}
             onToggle={() => dispatch(ui.railToggled(turn.id))}
           />
         ) : null}
         {open && whole && folded ? (
-          <pre className="mt-2 max-h-[220px] overflow-auto rounded-md bg-sunken p-3 font-mono text-meta whitespace-pre-wrap">
+          <pre id={`fold-${turn.id}`} className="mt-2 max-h-[220px] overflow-auto rounded-md bg-sunken p-3 font-mono text-meta whitespace-pre-wrap">
             {turn.text}
           </pre>
         ) : null}
@@ -121,11 +127,14 @@ export function ReplyMeta({ turn, folded = true }: { turn: Turn; folded?: boolea
           label="Sources"
           count={evidence.length}
           open={open}
+          controls={`fold-${turn.id}`}
           onToggle={() => dispatch(ui.railToggled(turn.id))}
         />
       ) : null}
       {open && evidence.length && folded ? (
-        <Quotes evidence={evidence} />
+        <div id={`fold-${turn.id}`}>
+          <Quotes evidence={evidence} />
+        </div>
       ) : null}
     </>
   );

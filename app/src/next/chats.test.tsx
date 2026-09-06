@@ -350,20 +350,31 @@ describe("asking a question", () => {
     await waitFor(() => expect((box as HTMLInputElement).value).toBe(""));
   });
 
-  it("says on one line when the daemon would not take the question, and stops waiting", async () => {
+  it("says on one line when the daemon would not take the question, stops waiting, and puts what was typed back in the box", async () => {
     const { store } = renderApp(
       { conversations: summary, turns: { c1: view }, fails: ["POST /ask"] },
       { conversationId: "c1" },
     );
-    await userEvent.type(
-      await screen.findByLabelText("Ask Ora"),
-      "a question{Enter}",
-    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await userEvent.type(box, "a long question worth not retyping{Enter}");
     expect(await screen.findByRole("status")).toHaveProperty(
       "textContent",
       "Could not send that question",
     );
     expect(store.getState().progress.run).toBeUndefined();
+    // The run held the only other copy of the sentence and it has just been given up, so a box left empty here loses it for good.
+    await waitFor(() => expect(box.value).toBe("a long question worth not retyping"));
+  });
+
+  it("puts the goal back in the box when the daemon would not start the job", async () => {
+    renderApp(
+      { conversations: summary, turns: { c1: view }, fails: ["POST /act"] },
+      { conversationId: "c1" },
+    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await userEvent.type(box, "do: reorder the slides{Enter}");
+    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Could not start that job");
+    await waitFor(() => expect(box.value).toBe("do: reorder the slides"));
   });
 
   it("shows the working line, then the steps and the answer as they arrive, all in the thread", async () => {
@@ -538,6 +549,22 @@ describe("dictating in the composer", () => {
     expect(calls.find((c) => c.path === "/dictate/start")).toBeUndefined();
   });
 
+  it("takes the words of a dictation the daemon ended by itself off the event stream, and stops listening", async () => {
+    const { store } = renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1" },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Dictate" }));
+    await screen.findByRole("button", { name: "Stop dictation" });
+    // The daemon's silence gate closes the recording on its own and broadcasts the transcript (see finish in internal/ipc/dictate.go); nothing is going to answer a stop for it.
+    store.dispatch(
+      progress.eventArrived({ id: "dictate-1", type: "dictation", text: "book the flight to Zurich" }),
+    );
+    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe("book the flight to Zurich"));
+    expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull();
+  });
+
   it("says on the composer's own placeholder, for a few seconds, when the daemon would not start a dictation", async () => {
     renderApp(
       { conversations: summary, turns: { c1: view }, fails: ["POST /dictate/start"] },
@@ -656,7 +683,7 @@ describe("starting a job", () => {
     );
     expect(calls.some((c) => c.path === "/ask")).toBe(false);
     await waitFor(() =>
-      expect(store.getState().progress.job?.id).toBe("act-1"),
+      expect(store.getState().progress.jobs.c1.id).toBe("act-1"),
     );
   });
 

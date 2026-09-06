@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ConversationSummary, DaemonEvent } from "./api";
 import { events, oraApi } from "./api";
-import { conversationsUi, escaped, makeStore, progress, settings, ui } from "./store";
+import { conversationsUi, DRAFT_CHAT, escaped, makeStore, progress, settings, ui } from "./store";
 
 describe("what the window is showing", () => {
   it("remembers where to come back to when Settings is opened, and Escape goes back there", () => {
@@ -149,13 +149,44 @@ describe("the question in flight", () => {
     expect(store.getState().progress.run?.evidence).toHaveLength(1);
   });
 
-  it("ends the run when the daemon says it is done, and when it says it failed", () => {
+  it("keeps the question and its answer on screen until the finished turn has been read back, then ends the run", async () => {
     for (const type of ["done", "error"] as const) {
-      const store = makeStore();
+      // The stream middleware reads GET /conversations/{id} itself before giving the run up, so this test needs a fetch to answer it and a location for the token fallback to read.
+      const read: string[] = [];
+      vi.stubGlobal("location", { port: "", search: "" });
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+        const url = new URL(typeof input === "object" && "url" in input ? (input as Request).url : String(input));
+        read.push(url.pathname);
+        return new Response(JSON.stringify({ id: "c1", title: "", brain: "", turns: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+      const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
+      const store = makeStore(undefined, open);
+      store.dispatch(progress.streamOpened());
+      const onEvent = open.mock.calls[0][0];
       store.dispatch(progress.askSent({ conversationId: "c1", question: "a question" }));
-      store.dispatch(progress.eventArrived(event({ type })));
-      expect(store.getState().progress.run).toBeUndefined();
+      store.dispatch(progress.askAccepted({ askId: "ask-1", conversationId: "c1" }));
+
+      onEvent(event({ type }));
+      // Still there on the tick the event landed: clearing it here is what blanked the exchange until the refetch came back.
+      expect(store.getState().progress.run).toBeDefined();
+      await vi.waitFor(() => expect(store.getState().progress.run).toBeUndefined());
+      expect(read).toContain("/conversations/c1");
+      vi.unstubAllGlobals();
     }
+  });
+
+  it("takes an answer that beats POST /ask's reply for a question asked from a fresh draft", () => {
+    const store = makeStore();
+    // A draft's run is tracked under the sentinel key until askAccepted replaces it, and the answer event is the only one carrying the id of the conversation the daemon opened for it.
+    store.dispatch(progress.askSent({ conversationId: DRAFT_CHAT, question: "a question" }));
+    store.dispatch(progress.eventArrived(event({ type: "answer", text: "Booked.", conversation_id: "new-ask" })));
+    expect(store.getState().progress.run?.answer).toBe("Booked.");
+  });
+
+  it("carries a dictation the daemon ended by itself, so the composer can take the words", () => {
+    const store = makeStore();
+    store.dispatch(progress.eventArrived({ id: "dictate-1", type: "dictation", text: "book the flight to Zurich" }));
+    expect(store.getState().progress.dictation).toEqual({ id: "dictate-1", text: "book the flight to Zurich" });
   });
 
   it("ignores a message that belongs to another question, or to no question at all", () => {
@@ -182,21 +213,21 @@ describe("a computer-use job in flight", () => {
   it("folds its steps, its question and its closing spend into the job", () => {
     const store = makeStore();
     store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
-    expect(store.getState().progress.job).toMatchObject({ conversationId: "c1", goal: "reorder the slides", state: "planning", steps: [] });
+    expect(store.getState().progress.jobs.c1).toMatchObject({ conversationId: "c1", goal: "reorder the slides", state: "planning", steps: [] });
     store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
-    expect(store.getState().progress.job?.id).toBe("act-1");
+    expect(store.getState().progress.jobs.c1.id).toBe("act-1");
 
     store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4", expect: "Risk showing" }) }));
-    expect(store.getState().progress.job?.steps).toMatchObject([{ n: 1, text: "Clicking Slide 4", expect: "Risk showing" }]);
-    expect(store.getState().progress.job?.state).toBe("stepping");
+    expect(store.getState().progress.jobs.c1.steps).toMatchObject([{ n: 1, text: "Clicking Slide 4", expect: "Risk showing" }]);
+    expect(store.getState().progress.jobs.c1.state).toBe("stepping");
 
     store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "verified", state: "stepping", text: "found it", outcome: "pass" }) }));
-    expect(store.getState().progress.job?.steps[0]).toMatchObject({ outcome: "pass", why: "found it" });
+    expect(store.getState().progress.jobs.c1.steps[0]).toMatchObject({ outcome: "pass", why: "found it" });
 
     store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "question", state: "stuck", text: "Which deck?" }) }));
-    expect(store.getState().progress.job?.question).toBe("Which deck?");
+    expect(store.getState().progress.jobs.c1.question).toBe("Which deck?");
     store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "answered", state: "stepping", text: "the review one" }) }));
-    expect(store.getState().progress.job?.question).toBeUndefined();
+    expect(store.getState().progress.jobs.c1.question).toBeUndefined();
 
     store.dispatch(
       progress.eventArrived({
@@ -205,25 +236,40 @@ describe("a computer-use job in flight", () => {
         detail: JSON.stringify({ kind: "done", state: "done", text: "Done.", spend: { rounds: 2, input: 100, cached: 40, output: 20 } }),
       }),
     );
-    expect(store.getState().progress.job).toMatchObject({ state: "done", say: "Done.", spend: { rounds: 2, input: 100, cached: 40, output: 20 } });
+    expect(store.getState().progress.jobs.c1).toMatchObject({ state: "done", say: "Done.", spend: { rounds: 2, input: 100, cached: 40, output: 20 } });
   });
 
   it("ignores an event carrying another job's id, or arriving with no job in flight", () => {
     const store = makeStore();
     store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "x" }) }));
-    expect(store.getState().progress.job).toBeUndefined();
+    expect(store.getState().progress.jobs).toEqual({});
 
     store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
     store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
     store.dispatch(progress.eventArrived({ id: "act-2", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "somebody else's" }) }));
-    expect(store.getState().progress.job?.steps).toEqual([]);
+    expect(store.getState().progress.jobs.c1.steps).toEqual([]);
   });
 
-  it("gives up on a job the daemon never accepted", () => {
+  it("keeps one job per conversation, so starting a second in another chat loses neither", () => {
     const store = makeStore();
     store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
-    store.dispatch(progress.jobFailed());
-    expect(store.getState().progress.job).toBeUndefined();
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    store.dispatch(progress.jobSent({ conversationId: "c2", goal: "rename the file" }));
+
+    // The first job's own events still reach it by id, and the second, whose POST /act has not answered yet, is not the one they are folded into.
+    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4" }) }));
+    expect(store.getState().progress.jobs.c1.steps).toHaveLength(1);
+    expect(store.getState().progress.jobs.c2.steps).toHaveLength(0);
+    expect(store.getState().progress.jobs.c2.state).toBe("planning");
+  });
+
+  it("gives up on a job the daemon never accepted, leaving any other chat's alone", () => {
+    const store = makeStore();
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobSent({ conversationId: "c2", goal: "rename the file" }));
+    store.dispatch(progress.jobFailed("c2"));
+    expect(store.getState().progress.jobs.c2).toBeUndefined();
+    expect(store.getState().progress.jobs.c1).toBeDefined();
   });
 
   it("patches the sidebar's own row with the job's state word while it runs, since the daemon knows nothing about a job being tied to a conversation", async () => {
