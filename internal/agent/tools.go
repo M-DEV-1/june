@@ -2573,11 +2573,6 @@ func (a *Agent) livePoint(ctx context.Context, it act.Item) ([2]int, string) {
 	return [2]int{x + w/2, y + h/2}, ""
 }
 
-// itemCentre returns the middle point of an observed item's rectangle, the point draw's from/to form draws through.
-func itemCentre(it act.Item) [2]int {
-	return [2]int{it.X + it.W/2, it.Y + it.H/2}
-}
-
 // drawRect resolves the draw tool's arguments into the rectangle to draw around, for shapes box and circle. Input: the tool's arguments, carrying either "on" (an element number from the latest observe_screen list) or "rect" ({"x":,"y":,"w":,"h":} read off the picture the last look took). Output: the rectangle in screen pixels, the item it was resolved from when "on" named one (nil for the "rect" form, which names no item), or all zero and a tool error when neither is present, the element number is not in the last list, rect is missing a numeric field, no look has been taken this turn, or the rectangle falls outside that picture.
 func (a *Agent) drawRect(ctx context.Context, args map[string]any) (x, y, w, h int, it *act.Item, errText string) {
 	if on, ok := args["on"].(float64); ok {

@@ -23,11 +23,6 @@ const (
 	TTSModel = "gemini-3.1-flash-tts-preview"
 )
 
-// VoiceModelIsLive3 reports whether the Live model is a Gemini 3 generation one. The 3.x Live models take a thinking level instead of a thinking budget and, as of 2026-09-02, do not support proactive audio or affective dialog, so a config carrying those fields must not be sent to them.
-func VoiceModelIsLive3() bool {
-	return strings.HasPrefix(VoiceModel, "gemini-3")
-}
-
 // The background job names accepted as keys in OraConfig.BackgroundModels, one per unattended duty that reaches a metered model. They are strings rather than an enum so a user can pin a model per job in the config file by name.
 const (
 	// JobWorkingState is the five-minute working-state derive in internal/memory.DeriveState.
@@ -73,11 +68,6 @@ func BackgroundModel(job string) string {
 		return m
 	}
 	return DefaultBackgroundModel
-}
-
-// BackgroundJobs lists every job name BackgroundModel understands, so the config UI and the tests can enumerate what the user may pin without repeating the list.
-func BackgroundJobs() []string {
-	return []string{JobWorkingState, JobEpisodeSummary, JobEpisodicCompaction, JobNoteConsolidation, JobPersonalContext, JobScreenSight, JobMeetingMinutes, JobDream}
 }
 
 // BackgroundBrainConfig returns cfg with its Model filled in from BackgroundModel(job) when the config names no model of its own and the provider is the Gemini API. Input: the brain block a background duty is about to run on, and the Job* name it runs as. Output: the same block with the background model pinned, or unchanged.

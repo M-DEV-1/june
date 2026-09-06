@@ -459,11 +459,6 @@ func isMeetingWindow(app, title string) bool {
 	return tracker.IsMeetingWindow(app, title)
 }
 
-// primingPrompt builds the text whisper is primed with, out of what the desktop tracker recorded on screen while the meeting ran. Priming biases whisper's spelling towards the words in the prompt, so feeding it the meeting's own acronyms and proper nouns is what turns "ND game and GRDI" into "INFORM and GDIS".
-// The prompt is deliberately written as capitalised, punctuated English. Whisper continues the prompt's register as well as its vocabulary: primed with a raw lowercase chat log it returns the whole transcript lowercase and unpunctuated, which is worse to read and worse to summarise from.
-// Input: the episodes captured during the recording window. Output: one line of text, capped at primingPromptBudget characters, or "" when there was nothing on screen to learn from.
-func primingPrompt(eps []db.Episode) string { return primingPromptFor(eps, nil) }
-
 // personNamesFromContext turns the store's person subjects into names whisper can be primed with. Input: the personal-context entries. Output: one display name per person subject, hyphens to spaces and each word capitalised, in store order; the identity entry and preference entries are skipped.
 func personNamesFromContext(entries []db.PersonalEntry) []string {
 	var names []string

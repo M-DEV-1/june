@@ -416,19 +416,6 @@ func (r *Runner) resumable(ctx context.Context, id string, budget Budget) (Job, 
 	return job, nil
 }
 
-// ResumeAll picks up every job that was still in flight when the daemon last stopped, each on the budget its own checkpoint carries. Input: a context for the store reads and the unfinished rows (see db.UnfinishedActJobs). Output: how many were resumed; a job whose checkpoint will not read back is logged and skipped rather than failing the rest.
-func (r *Runner) ResumeAll(ctx context.Context, rows []db.ActJobRow) int {
-	n := 0
-	for _, row := range rows {
-		if err := r.Resume(ctx, row.ID, Budget{}); err != nil {
-			slog.Warn("act job: could not resume", "job", row.ID, "error", err)
-			continue
-		}
-		n++
-	}
-	return n
-}
-
 // finished reports whether a state is one a job never comes back from.
 func finished(s State) bool { return s == Done || s == Stopped || s == Failed }
 

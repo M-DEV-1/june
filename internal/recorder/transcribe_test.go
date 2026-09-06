@@ -277,7 +277,7 @@ func TestPrimingPrompt_CarriesTheWindowsAcronymsAndNames(t *testing.T) {
 		{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Priya Shah: ok sure ping me. Alex Rivera: I also found this INFORM Risk Scoring formula and the GRDI numbers. INFORM again. GRDI again."},
 		{Title: "Acme Essentials - Climate Reporting Platform - Brave", ScreenText: "Climate Risk Studio Double Materiality Assessment ASRS"},
 	}
-	got := primingPrompt(eps)
+	got := primingPromptFor(eps, nil)
 	for _, want := range []string{"INFORM", "GRDI", "ASRS", "Priya Shah", "Climate Risk Studio"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("priming prompt is missing %q:\n%s", want, got)
@@ -295,7 +295,7 @@ func TestPrimingPrompt_CarriesTheWindowsAcronymsAndNames(t *testing.T) {
 // Browser and app chrome is on every screen Ora captures and is not what the meeting is about, so it must not crowd the real terms out of the prompt.
 func TestPrimingPrompt_LeavesOutBrowserChrome(t *testing.T) {
 	eps := []db.Episode{{Title: "GitHub - Brave", ScreenText: "Type / to search Pull requests Add file Code Insights Settings Search Search Ctrl K"}}
-	got := primingPrompt(eps)
+	got := primingPromptFor(eps, nil)
 	for _, junk := range []string{"Ctrl K", "Search Search", "Add file"} {
 		if strings.Contains(got, junk) {
 			t.Errorf("priming prompt carries chrome %q:\n%s", junk, got)
@@ -305,7 +305,7 @@ func TestPrimingPrompt_LeavesOutBrowserChrome(t *testing.T) {
 
 // Nothing on screen means no prompt at all, rather than a prompt made of nothing that whisper would try to continue.
 func TestPrimingPrompt_EmptyWhenThereIsNoContext(t *testing.T) {
-	if got := primingPrompt(nil); got != "" {
+	if got := primingPromptFor(nil, nil); got != "" {
 		t.Errorf("got %q, want no prompt", got)
 	}
 }
@@ -315,7 +315,7 @@ func TestPrimingPrompt_NamesComeAfterTermsSoTheySurviveTruncation(t *testing.T) 
 	eps := []db.Episode{
 		{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"},
 	}
-	got := primingPrompt(eps)
+	got := primingPromptFor(eps, nil)
 	termsAt, participantsAt := strings.Index(got, "Terms:"), strings.Index(got, "Participants:")
 	if termsAt == -1 || participantsAt == -1 {
 		t.Fatalf("expected both a Terms and a Participants section, got:\n%s", got)
@@ -415,7 +415,7 @@ func TestPrimingPrompt_TakesParticipantsOnlyFromTheMeetingWindow(t *testing.T) {
 		{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Rohit Verma: Abhi renew hua"},
 		{App: "Brave Browser", Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vikram Goel: sharing my screen now"},
 	}
-	_, participants, _ := strings.Cut(primingPrompt(eps), "Participants:")
+	_, participants, _ := strings.Cut(primingPromptFor(eps, nil), "Participants:")
 	if strings.Contains(participants, "Rohit") {
 		t.Errorf("a WhatsApp sender was named as a meeting participant: %q", participants)
 	}
@@ -485,9 +485,6 @@ func TestPrimingPromptFor_IncludesKnownPeople(t *testing.T) {
 	}
 	if len(got) > primingPromptBudget {
 		t.Errorf("prompt is %d chars, over the %d budget", len(got), primingPromptBudget)
-	}
-	if primingPrompt(nil) != primingPromptFor(nil, nil) {
-		t.Error("primingPrompt must stay the no-people form of primingPromptFor")
 	}
 }
 

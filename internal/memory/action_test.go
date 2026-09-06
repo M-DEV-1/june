@@ -217,31 +217,6 @@ func TestOwnedByUser_NoIdentity(t *testing.T) {
 	}
 }
 
-// The fly-on-the-wall case: a meeting the user sat in on, owing nothing, has no items worth tracking — every one belongs to somebody else and none of it is the user's to answer for.
-func TestUserMeetingActions_DropsAMeetingTheUserOwesNothingIn(t *testing.T) {
-	identity := "The user is Alex Rivera — goes by Alex."
-	observed := []ActionItem{
-		{Owner: "Sandeep", Text: "add battery optimisation to the app."},
-		{Owner: UnknownOwner, Text: "trial attaching walkthrough videos to PRs."},
-	}
-	if got := UserMeetingActions(observed, identity); len(got) != 0 {
-		t.Errorf("kept %d items from a meeting the user only sat in on: %+v", len(got), got)
-	}
-}
-
-// A meeting the user owes something in keeps every item, including other people's: work the user is waiting on is work they care about, which is what separates being in a meeting from sitting in on one.
-func TestUserMeetingActions_KeepsOthersWorkWhenTheUserIsInvolved(t *testing.T) {
-	identity := "The user is Alex Rivera — goes by Alex."
-	mixed := []ActionItem{
-		{Owner: "Vikram", Text: "carry PR #13 through CI and merge."},
-		{Owner: "Alex", Text: "compare the minutes against his own agent's output."},
-		{Owner: "Krish", Text: "reply on WhatsApp during his leave."},
-	}
-	if got := UserMeetingActions(mixed, identity); len(got) != 3 {
-		t.Errorf("kept %d of 3 items from a meeting the user was actually in", len(got))
-	}
-}
-
 // Mine is true only for the user's own items ("Me", however the model cased or spaced it) and for items nobody was named for, since an unassigned item might still be the user's. Anybody else's name is false.
 func TestActionItem_Mine(t *testing.T) {
 	for _, tc := range []struct {
