@@ -18,17 +18,17 @@ import (
 
 // fakeBrain answers each of the dream prompts with a canned reply, dispatching on the instruction text, and records what it was asked. Safe for the watcher goroutine's world: only Tick's goroutine calls it, but the mutex keeps the record readable after Tick returns.
 type fakeBrain struct {
-	mu        sync.Mutex
-	verdicts  string
-	extract   string
-	und       string
-	compact   string
+	mu       sync.Mutex
+	verdicts string
+	extract  string
+	und      string
+	compact  string
 	// compactFailAfter, when above zero, makes every compact call past that number return an error, so a test can fail one week of a multi-week compaction.
 	compactFailAfter int
 	compacts         int
 	report           string
-	reportErr error
-	asked     []string
+	reportErr        error
+	asked            []string
 }
 
 func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {

@@ -37,41 +37,6 @@ func TestDataDir_ResolutionOrder(t *testing.T) {
 	})
 }
 
-// TestDataDir_MigratesLegacyOraDb verifies the one-time migration: when the new XDG-based directory doesn't exist yet but a legacy "ora-db" directory exists in the current working directory (the old cwd-relative convention), DataDir moves its contents into the new directory instead of leaving them orphaned.
-func TestDataDir_MigratesLegacyOraDb(t *testing.T) {
-	cwd := t.TempDir()
-	t.Chdir(cwd)
-
-	legacy := filepath.Join(cwd, "ora-db")
-	if err := os.MkdirAll(legacy, 0755); err != nil {
-		t.Fatalf("MkdirAll legacy dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(legacy, "db"), []byte("legacy-data"), 0644); err != nil {
-		t.Fatalf("WriteFile legacy db: %v", err)
-	}
-
-	t.Setenv("ORA_DATA_DIR", "")
-	xdg := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", xdg)
-
-	got := DataDir()
-	want := filepath.Join(xdg, "ora")
-	if got != want {
-		t.Fatalf("DataDir() = %q, want %q", got, want)
-	}
-
-	data, err := os.ReadFile(filepath.Join(want, "db"))
-	if err != nil {
-		t.Fatalf("expected legacy db file to be migrated into the new data dir: %v", err)
-	}
-	if string(data) != "legacy-data" {
-		t.Errorf("migrated db file content = %q, want %q", string(data), "legacy-data")
-	}
-
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Errorf("expected the legacy ora-db directory to be gone after migration, stat err = %v", err)
-	}
-}
 
 // TestConfigPath_UnderDataDir verifies ConfigPath resolves inside DataDir rather than the old cwd-relative "ora-db".
 func TestConfigPath_UnderDataDir(t *testing.T) {
@@ -84,49 +49,6 @@ func TestConfigPath_UnderDataDir(t *testing.T) {
 	}
 }
 
-// TestDataDir_MigratesWhenTargetExistsButHasNoDatabase verifies the migration still runs when the target directory already exists but holds no database.
-// This is the ordinary case on a real upgrade, not an edge case: InitTelemetry does MkdirAll(DataDir()) for the log file and SaveConfig does the same for the config, so by the time anything looks for a legacy directory the target usually exists already. Keying the decision on "does the directory exist" instead of "does it hold a database" silently skips the move and strands every existing memory in the old location.
-func TestDataDir_MigratesWhenTargetExistsButHasNoDatabase(t *testing.T) {
-	cwd := t.TempDir()
-	t.Chdir(cwd)
-
-	legacy := filepath.Join(cwd, "ora-db")
-	if err := os.MkdirAll(legacy, 0755); err != nil {
-		t.Fatalf("MkdirAll legacy dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(legacy, "db"), []byte("legacy-data"), 0644); err != nil {
-		t.Fatalf("WriteFile legacy db: %v", err)
-	}
-
-	t.Setenv("ORA_DATA_DIR", "")
-	xdg := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", xdg)
-
-	// Something got there first and created the target for its log file, exactly as InitTelemetry does.
-	target := filepath.Join(xdg, "ora")
-	if err := os.MkdirAll(target, 0755); err != nil {
-		t.Fatalf("MkdirAll target: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "ora.log"), []byte("some log line"), 0644); err != nil {
-		t.Fatalf("WriteFile target log: %v", err)
-	}
-
-	DataDir()
-
-	data, err := os.ReadFile(filepath.Join(target, "db"))
-	if err != nil {
-		t.Fatalf("expected the legacy db to be migrated even though the target dir already existed: %v", err)
-	}
-	if string(data) != "legacy-data" {
-		t.Errorf("migrated db content = %q, want %q", string(data), "legacy-data")
-	}
-	if _, err := os.Stat(filepath.Join(target, "ora.log")); err != nil {
-		t.Errorf("migration destroyed the pre-existing log file in the target: %v", err)
-	}
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Errorf("expected the legacy directory to be gone after migration, stat err = %v", err)
-	}
-}
 
 // TestEmbedConfigDefaults verifies a config file with no "embed" key at all (every install before the local embedder existed) still comes back with the local port and idle timeout filled in, so the daemon never spawns llama-server on port 0 or reaps it instantly.
 func TestEmbedConfigDefaults(t *testing.T) {

@@ -311,7 +311,6 @@ func TestActStart_BadRequestOnlyForValidationErrors(t *testing.T) {
 	}
 }
 
-
 // The window renders a step as passed or failed and nothing else, so a check that was already true before the action goes out as a pass with held_before beside it rather than as a third outcome word the window would draw as a red cross. Both the event and the job record say it the same way.
 func TestActEvents_ACheckThatAlreadyHeldIsAPassWithTheFlag(t *testing.T) {
 	j, runner, events := jobServer(t, &heldExec{}, stepJSON)
