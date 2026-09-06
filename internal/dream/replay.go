@@ -302,10 +302,11 @@ func (r *Runner) writeReplayArtifact(night string, rep replayReport, piles map[s
 	}
 
 	dir := filepath.Join(r.DataDir, "dreams")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0600 in a 0700 directory, matching the night trace next to it: the artifact holds the same raw brain replies and people's names.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("replay artifact dir: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, night+"-replay.md"), []byte(b.String()), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, night+"-replay.md"), []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("write replay artifact: %w", err)
 	}
 	return nil

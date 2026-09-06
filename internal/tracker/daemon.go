@@ -460,11 +460,12 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 		return shot{png: png, err: err}
 	})
 	cancelShot()
+	// The limiter is stamped on the attempt, not on the success: a portal that refuses, or a compositor too busy to answer, otherwise left the interval unstarted and the next capture two seconds later tried the screenshot again.
+	*lastVisionTime = time.Now()
 	if grab.err != nil || len(grab.png) == 0 {
 		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
 	}
 	png := grab.png
-	*lastVisionTime = time.Now()
 
 	visionCtx, cancelVision := context.WithTimeout(ctx, d.bounds.vision)
 	sight := withBudget(visionCtx, func() Sight { return d.visionFn(visionCtx, png) })

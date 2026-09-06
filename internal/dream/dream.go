@@ -746,11 +746,12 @@ func (r *Runner) traceCall(night, kind, reply string, callErr error) {
 		return
 	}
 	dir := filepath.Join(r.DataDir, "dreams")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// The trace holds raw brain replies — diary text, screen summaries, people's names — so it gets the same 0600 in a 0700 directory the frames and the database already use, rather than relying on the data dir's own mode to cover it.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		slog.Warn("dreaming: could not create the traces dir", "dir", dir, "error", err)
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(dir, night+".jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(dir, night+".jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		slog.Warn("dreaming: could not open the night's trace file", "night", night, "error", err)
 		return
@@ -899,6 +900,8 @@ func (r *Runner) compactStage(ctx context.Context, night string) (compactReport,
 		byMonday[mondayOf(d.Day)] = append(byMonday[mondayOf(d.Day)], d)
 	}
 	var weekComps []db.DiaryCompaction
+	// A failing week stops the loop but is not returned yet: every week already compacted is a brain call that has been paid for, and returning here dropped all of them, so a single week that always failed meant the tier never made progress on any night.
+	var weekErr error
 	for _, monday := range slices.Sorted(maps.Keys(byMonday)) {
 		days := byMonday[monday]
 		if len(days) != 7 {
@@ -907,7 +910,8 @@ func (r *Runner) compactStage(ctx context.Context, night string) (compactReport,
 		}
 		entry, err := r.compactEntry(ctx, night, "compact-week", fmt.Sprintf("The week of Monday %s through Sunday %s.", monday, nightMinus(monday, -6)), days)
 		if err != nil {
-			return rep, err
+			weekErr = err
+			break
 		}
 		weekComps = append(weekComps, db.DiaryCompaction{Day: monday, Kind: "week", Content: entry, ConstituentKind: "day", ConstituentDays: dayKeys(days)})
 	}
@@ -916,6 +920,9 @@ func (r *Runner) compactStage(ctx context.Context, night string) (compactReport,
 			return rep, err
 		}
 		rep.weeks = len(weekComps)
+	}
+	if weekErr != nil {
+		return rep, weekErr
 	}
 
 	// Month tier. A month is ready once every one of its Mondays has a week entry inside the ten-week horizon; the capped query again doubles as the age gate.

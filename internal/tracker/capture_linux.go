@@ -348,9 +348,9 @@ func (w *focusWatcher) run(sigs chan *dbus.Signal) {
 		app := getName(ctx, w.conn, getParent(ctx, w.conn, ref))
 		title := getName(ctx, w.conn, ref)
 		if app == "mutter-x11-frames" {
-			// An X11 window's activation is announced by the compositor's frame process, not by the app inside it: the frame's own Name is already the window's title, which title holds, but there is no cheaper way from AT-SPI alone to reach the real client's name. Logged once so it is visible without repeating for every such window.
+			// An X11 window's activation is announced by the compositor's frame process, not by the app inside it: the frame's own Name is already the window's title, which title holds, but there is no cheaper way from AT-SPI alone to reach the real client's name. Logged once so it is visible without repeating for every such window, and at Debug because the title is often a mail subject or a document name — the same reason WriteEpisode keeps the title off its trace span.
 			frameAppLogged.Do(func() {
-				slog.Info("an X11 window activated through its mutter frame; reporting the frame as the app name since the accessibility bus does not expose the real client here", "title", title)
+				slog.Debug("an X11 window activated through its mutter frame; reporting the frame as the app name since the accessibility bus does not expose the real client here", "title", title)
 			})
 		}
 		return app, title

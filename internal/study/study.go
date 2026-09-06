@@ -258,12 +258,15 @@ func appendLessons(outDir string, lessons []Lesson) (string, int, error) {
 
 	var b strings.Builder
 	added := 0
+	// Each heading written is added to the text the next lesson is checked against, so a title repeated inside one teacher reply is dropped the same way a title already in the file is.
+	seen := string(existing)
 	for _, l := range lessons {
 		heading := "## " + l.Title
-		if strings.Contains(string(existing), heading+"\n") {
+		if strings.Contains(seen, heading+"\n") {
 			continue
 		}
 		fmt.Fprintf(&b, "%s\n\n%s\n\n", heading, l.Lesson)
+		seen += heading + "\n"
 		added++
 	}
 	if added == 0 {
