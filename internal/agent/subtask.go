@@ -100,7 +100,7 @@ func (a *Agent) runSubtask(ctx context.Context, model subtaskModel, task string)
 	cfg := &genai.GenerateContentConfig{Tools: subtaskTools()}
 
 	for i := 0; i < maxSubtaskIterations; i++ {
-		resp, err := model.GenerateContent(ctx, config.TextModel, contents, cfg)
+		resp, err := model.GenerateContent(ctx, config.SubtaskModel, contents, cfg)
 		if err != nil {
 			return "", fmt.Errorf("subtask: generate content (iteration %d): %w", i, err)
 		}

@@ -50,67 +50,55 @@ func functionCallResponse(name string, args map[string]any) *genai.GenerateConte
 
 // TestRunSubtask_ReturnsPlainTextWhenNoToolCallsNeeded is the tracer bullet: the model answers the branched task directly with no tool calls at all.
 // runSubtask must make exactly one GenerateContent call and return the model's text verbatim — proving the loop's exit path works end-to-end before any tool-dispatch behavior is added.
+// TestRunSubtask_ReturnsPlainTextWhenNoToolCallsNeeded drives runSubtask with one canned response per row and checks the text it extracts: a plain text response is returned as-is in exactly one model call; runSubtask does not blindly return parts[0].Text — with thinking enabled, Gemini routinely puts an empty THOUGHT part first and the real answer in a later part, and returning parts[0].Text there would silently return "" as a successful answer; and a response split across several non-thought text parts is joined in full, not truncated to the first part.
 func TestRunSubtask_ReturnsPlainTextWhenNoToolCallsNeeded(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	model := &fakeSubtaskModel{
-		responses: []*genai.GenerateContentResponse{
-			textResponse("the answer is 42"),
+	cases := []struct {
+		name string
+		resp *genai.GenerateContentResponse
+		want string
+	}{
+		{
+			name: "plain text response",
+			resp: textResponse("the answer is 42"),
+			want: "the answer is 42",
+		},
+		{
+			name: "skips a leading thought part",
+			resp: &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+				Content: genai.NewContentFromParts([]*genai.Part{
+					{Text: "", Thought: true},
+					{Text: "real answer"},
+				}, genai.RoleModel),
+			}}},
+			want: "real answer",
+		},
+		{
+			name: "joins a multi-part text response",
+			resp: &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+				Content: genai.NewContentFromParts([]*genai.Part{
+					{Text: "first half. "},
+					{Text: "second half."},
+				}, genai.RoleModel),
+			}}},
+			want: "first half. second half.",
 		},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := NewAgent(nil, nil, nil, nil, "")
+			model := &fakeSubtaskModel{responses: []*genai.GenerateContentResponse{c.resp}}
 
-	got, err := a.runSubtask(context.Background(), model, "what is the answer")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "the answer is 42" {
-		t.Errorf("runSubtask result = %q, want %q", got, "the answer is 42")
-	}
-	if len(model.calls) != 1 {
-		t.Errorf("GenerateContent called %d times, want exactly 1", len(model.calls))
-	}
-}
-
-// TestRunSubtask_SkipsThoughtPartAndReturnsRealAnswer verifies runSubtask does not blindly return parts[0].Text: with thinking enabled, Gemini routinely puts an empty THOUGHT part first, and the real answer in a later part. Returning parts[0].Text here would silently return "" as a successful answer.
-func TestRunSubtask_SkipsThoughtPartAndReturnsRealAnswer(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	resp := &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{
-			Content: genai.NewContentFromParts([]*genai.Part{
-				{Text: "", Thought: true},
-				{Text: "real answer"},
-			}, genai.RoleModel),
-		}},
-	}
-	model := &fakeSubtaskModel{responses: []*genai.GenerateContentResponse{resp}}
-
-	got, err := a.runSubtask(context.Background(), model, "what is the answer")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "real answer" {
-		t.Errorf("runSubtask result = %q, want %q", got, "real answer")
-	}
-}
-
-// TestRunSubtask_JoinsMultiPartTextResponse verifies a response split across several non-thought text parts is joined in full, not truncated to the first part.
-func TestRunSubtask_JoinsMultiPartTextResponse(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	resp := &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{
-			Content: genai.NewContentFromParts([]*genai.Part{
-				{Text: "first half. "},
-				{Text: "second half."},
-			}, genai.RoleModel),
-		}},
-	}
-	model := &fakeSubtaskModel{responses: []*genai.GenerateContentResponse{resp}}
-
-	got, err := a.runSubtask(context.Background(), model, "what is the answer")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "first half. second half." {
-		t.Errorf("runSubtask result = %q, want %q", got, "first half. second half.")
+			got, err := a.runSubtask(context.Background(), model, "what is the answer")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("runSubtask result = %q, want %q", got, c.want)
+			}
+			if len(model.calls) != 1 {
+				t.Errorf("GenerateContent called %d times, want exactly 1", len(model.calls))
+			}
+		})
 	}
 }
 
