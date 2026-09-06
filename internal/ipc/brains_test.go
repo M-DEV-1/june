@@ -49,8 +49,8 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 	if !byID["claude"].Default {
 		t.Errorf("claude is the configured brain but is not marked default")
 	}
-	if got := byID["claude"].Models; len(got) != 2 || got[0] != "sonnet" || got[1] != "opus" {
-		t.Errorf("claude models = %v, want sonnet and opus", got)
+	if got := byID["claude"].Models; len(got) != 3 || got[0] != "haiku" || got[1] != "sonnet" || got[2] != "opus" {
+		t.Errorf("claude models = %v, want haiku, sonnet and opus", got)
 	}
 	if byID["claude"].Model != "sonnet" {
 		t.Errorf("claude model = %q, want the config's sonnet since it is the default brain and no per-brain choice was ever posted", byID["claude"].Model)
@@ -102,8 +102,8 @@ func TestBrainsHandlerShape(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(out.Brains) != 5 {
-		t.Errorf("brains = %d, want the five Ora knows about", len(out.Brains))
+	if len(out.Brains) != len(brainIDs) {
+		t.Errorf("brains = %d, want the %d Ora knows about", len(out.Brains), len(brainIDs))
 	}
 	var defaults int
 	for _, b := range out.Brains {
@@ -285,8 +285,8 @@ func TestBrainsCarriesTheUsageBars(t *testing.T) {
 	}
 
 	// The existing rows must be untouched by the new ones.
-	if len(out.Brains) != 5 || byID["claude"].Note == "" || byID["ollama"].Name == "" {
-		t.Errorf("the five rows lost a field: %+v", out.Brains)
+	if len(out.Brains) != len(brainIDs) || byID["claude"].Note == "" || byID["ollama"].Name == "" {
+		t.Errorf("a row lost a field: %+v", out.Brains)
 	}
 }
 
@@ -362,7 +362,8 @@ func TestBrains_OllamaIsUnavailableWithTheReason(t *testing.T) {
 		t.Errorf("the ollama row lost a field: %+v", byID["ollama"])
 	}
 	// Every other brain still reads its own signal off the machine.
-	if !byID["grok"].SignedIn || !byID["gemini"].SignedIn {
+	// Antigravity rather than Gemini: the gemini row reads the metered API key out of the environment, where every other row reads a binary or a login file off the machine.
+	if !byID["grok"].SignedIn || !byID["antigravity"].SignedIn {
 		t.Errorf("a brain with a working backend was marked unavailable: %+v", list)
 	}
 }

@@ -48,7 +48,7 @@ func (c *LiveConfig) Update(fn func(*config.OraConfig)) error {
 	return c.save(*c.cfg)
 }
 
-// Brains builds the /brains handler. GET answers the five brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would. An id outside the five known ones is 400 and changes nothing, and so is an id whose provider has no backend in internal/brain, with the reason in the body. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
+// Brains builds the /brains handler. GET answers the brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would. An id outside the known ones is 400 and changes nothing, and so is an id whose provider has no backend in internal/brain, with the reason in the body. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
 func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -94,13 +94,13 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 	}
 }
 
-// writeBrains writes the five brain rows for cfg as JSON, the body both GET and POST /brains answer with.
+// writeBrains writes the brain rows for cfg as JSON, the body both GET and POST /brains answer with.
 func writeBrains(ctx context.Context, w http.ResponseWriter, cfg config.OraConfig, limitsFor BrainLimits) {
 	home, _ := os.UserHomeDir()
 	writeJSON(w, map[string]any{"brains": brainList(ctx, cfg, home, onPath, limitsFor)})
 }
 
-// providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every one of the five ids gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's has no backend at all, which is why brainList marks that row unavailable rather than letting a pick land on a provider that cannot answer. ok is false when id names none of the five brains Ora knows about, and the caller must leave the config untouched in that case.
+// providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every id gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's has no backend at all, which is why brainList marks that row unavailable rather than letting a pick land on a provider that cannot answer. ok is false when id names none of the brains Ora knows about, and the caller must leave the config untouched in that case.
 func providerForBrainID(id string) (provider string, ok bool) {
 	switch id {
 	case "claude":
@@ -113,13 +113,16 @@ func providerForBrainID(id string) (provider string, ok bool) {
 		return config.BrainOllama, true
 	case "gemini":
 		return config.BrainGeminiAPI, true
+	case "antigravity":
+		return config.BrainAgyCLI, true
 	default:
 		return "", false
 	}
 }
 
 // brainIDs are the brains Ora knows about, in the order the picker draws them. GET /usage keys its per-provider allowance windows by the same ids, so the settings page and the picker name a brain the same way.
-var brainIDs = []string{"claude", "codex", "gemini", "grok", "ollama"}
+// Claude is last on purpose: that subscription is the user's own coding workhorse, so Ora treats it as the fallback the ask path already makes it (Gemini, then Codex, then Claude — see internal/agent/ask.go), not as the brain a picker offers first.
+var brainIDs = []string{"antigravity", "gemini", "codex", "grok", "ollama", "claude"}
 
 // onPath reports whether a binary of that name can be run from this process's PATH.
 func onPath(name string) bool {
@@ -127,7 +130,7 @@ func onPath(name string) bool {
 	return err == nil
 }
 
-// brainList builds the five rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them, with signed_in false on any brain internal/brain cannot actually answer with and limits_note saying why.
+// brainList builds the rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them, with signed_in false on any brain internal/brain cannot actually answer with and limits_note saying why.
 func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(string) bool, limitsFor BrainLimits) []BrainView {
 	def := defaultBrainID(cfg.Brain.Provider)
 	claudeAccount := plainField(filepath.Join(home, ".claude", ".credentials.json"), "claudeAiOauth", "subscriptionType")
@@ -140,12 +143,18 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 
 	list := []BrainView{
 		{
-			ID:       "claude",
-			Name:     "Claude",
-			SignedIn: exists(filepath.Join(home, ".claude", ".credentials.json")),
-			Account:  claudeAccount,
-			Models:   []string{"sonnet", "opus"},
-			Note:     "Ora runs Claude through Anthropic's own command line, because a third-party login is billed as extra usage on top of the subscription.",
+			ID:       "antigravity",
+			Name:     "Antigravity",
+			SignedIn: has("agy"),
+			Models:   []string{},
+			Note:     "Antigravity runs Gemini under the Google plan the user already pays for, so a duty answered here costs nothing against the metered API key. Its command line exposes no model choice, so there is nothing to pick.",
+		},
+		{
+			ID:       "gemini",
+			Name:     "Gemini",
+			SignedIn: os.Getenv("GEMINI_API_KEY") != "",
+			Models:   geminiModels(cfg.Brain),
+			Note:     "Gemini answers on the metered API key in ~/.config/ora/env, which has a free tier that a day of duties can run through; the model comes from ora-config.json.",
 		},
 		{
 			ID:       "codex",
@@ -154,13 +163,6 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 			Account:  codexAccount,
 			Models:   []string{"gpt-5.5", "gpt-5.6-luna"},
 			Note:     "OpenAI endorses using a Codex login from open-source harnesses, so Ora may call it under the plan the user already pays for.",
-		},
-		{
-			ID:       "gemini",
-			Name:     "Gemini",
-			SignedIn: has("agy"),
-			Models:   geminiModels(cfg.Brain),
-			Note:     "Gemini answers through the Antigravity command line when it is installed; the model comes from ora-config.json.",
 		},
 		{
 			ID:         "grok",
@@ -177,7 +179,16 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 			Models:   ollamaModels,
 			Note:     "Ollama runs a model on this machine, so the list is whatever `ollama list` reports and nothing leaves the laptop.",
 		},
+		{
+			ID:       "claude",
+			Name:     "Claude",
+			SignedIn: exists(filepath.Join(home, ".claude", ".credentials.json")),
+			Account:  claudeAccount,
+			Models:   []string{"haiku", "sonnet", "opus"},
+			Note:     "Ora runs Claude through Anthropic's own command line, because a third-party login is billed as extra usage on top of the subscription. It is drawn last because the same subscription is the user's own coding workhorse, so Ora spends it only when the others are out.",
+		},
 	}
+
 	for i := range list {
 		list[i].Default = list[i].ID == def
 		list[i].Model = modelFor(list[i].ID, cfg, def)
@@ -234,6 +245,8 @@ func defaultBrainID(provider string) string {
 		return "codex"
 	case config.BrainOllama:
 		return "ollama"
+	case config.BrainAgyCLI:
+		return "antigravity"
 	default:
 		return "gemini"
 	}
