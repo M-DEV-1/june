@@ -1603,8 +1603,9 @@ func ringingAgent(t *testing.T, listed act.Node) (*Agent, *screenFake) {
 	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
 		return "mail", "Inbox", []act.Node{listed}, nil
 	}
-	a.Point = func(x, y, w, h int, label string) {
+	a.Point = func(x, y, w, h int, label string) error {
 		f.rings = append(f.rings, fmt.Sprintf("%s %d,%d %dx%d", label, x, y, w, h))
+		return nil
 	}
 	a.extents = func(ctx context.Context, ref string) (int, int, int, int, error) {
 		if f.readErr != nil {

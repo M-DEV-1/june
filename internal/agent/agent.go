@@ -119,10 +119,10 @@ type Agent struct {
 	bufferProvider func() []tracker.Activity
 	// observe reads the window in front for the observe_screen tool: tracker.Observe in production, a fake in tests.
 	observe func(ctx context.Context) (app, title string, nodes []act.Node, err error)
-	// Point draws a ring around a rectangle on the screen with a label beside it, for the point_at tool. The daemon sets it to the overlay hub; nil means this session cannot draw, and point_at says so.
-	Point func(x, y, w, h int, label string)
-	// Marks draws one numbered mark over each of the given items, for the show_marks tool. The daemon sets it to the overlay hub; nil means this session cannot draw, and show_marks says so.
-	Marks func(items []act.Item)
+	// Point draws a ring around a rectangle on the screen with a label beside it, for the point_at tool. The daemon sets it to the overlay hub; nil means this session cannot draw, and point_at says so. It answers an error when the drawing reached no window, which point_at hands back rather than claiming it ringed anything.
+	Point func(x, y, w, h int, label string) error
+	// Marks draws one numbered mark over each of the given items, for the show_marks tool. The daemon sets it to the overlay hub; nil means this session cannot draw, and show_marks says so. Its error is what Point's is.
+	Marks func(items []act.Item) error
 	// Draw draws an arrow, line, path, box or circle on the screen with a label beside it, for the draw tool. Points carries the path for arrow/line/path; x, y, w, h carry the rectangle to draw around or inscribe within for box/circle, and are ignored otherwise. The daemon sets it to the overlay hub's Draw method; nil means this session cannot draw, and draw says so. Returns an error naming what was wrong when shape is none of the five.
 	Draw func(shape string, points [][2]int, x, y, w, h int, label string) error
 	// lastTarget holds the newest ScreenTarget a point_at, click or draw(on) call recorded, so a later ask's bare "it" resolves against what was actually done rather than a fresh screen read. It is the one piece of screen memory that outlives an ask on purpose — see rememberTarget in tools.go. The list observe_screen produced, the answer it gave and the field a click focused all belong to one ask and live on its context instead; see askLookState and askState in tools.go.

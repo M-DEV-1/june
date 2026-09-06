@@ -48,6 +48,21 @@ func listCheck(kind string) bool {
 	return kind == act.ItemPresent || kind == act.ItemAbsent
 }
 
+// CheckHolds reads the screen once and says whether a check is already satisfied. Input: a context and the check a job wrote down for the action it is about to take. Output: true when that one reading matches it, false when it does not, when the check names nothing to look for, or when the screen cannot be read at all.
+// It is the reading a job takes before it acts, to tell a check that was true either way from one the action made true, so it does none of what wait_for does around the same match: no polling, since nothing has acted yet and there is nothing to wait for, and no second walk to ask whether another window came to the front, since nothing has happened that could have brought one.
+func (a *Agent) CheckHolds(ctx context.Context, check act.Check) bool {
+	if check.Value == "" {
+		return false
+	}
+	_, title, nodes, err := a.observe(ctx)
+	if err != nil {
+		return false
+	}
+	items := act.Filter(nodes)
+	held, _ := act.Match(check, title, items, a.focusedText(ctx, items))
+	return held
+}
+
 // waitFor polls the window in front until the expected change shows up or the timeout runs out. Input: the check the caller wrote down before it acted and how long to wait. Output: act.WaitPassPrefix and what was found when the change came, act.WaitFailPrefix with how long it waited and what was there when it did not, or an "error:" line when the check itself says nothing that can be looked for.
 // It reads the screen without storing what it read: the numbered list a click resolves against is the one the last observe_screen produced, and renumbering it behind the model's back is how a click lands on the wrong row.
 func (a *Agent) waitFor(ctx context.Context, check act.Check, timeout time.Duration) string {

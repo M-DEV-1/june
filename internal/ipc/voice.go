@@ -124,14 +124,14 @@ func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store
 		a.SetBufferProvider(s.screen)
 	}
 	// point_at rings through the same overlay path POST /overlay uses, so the extension has one thing to listen to whether the ring came from a typed ask or from speech. A spoken ring belongs to no /ask, so it is stamped with the non-ask id rather than with an id that names a question the user never typed.
-	a.Point = func(x, y, w, h int, label string) { s.Ring(overlayNoAsk, x, y, w, h, label) }
+	a.Point = func(x, y, w, h int, label string) error { return s.Ring(overlayNoAsk, x, y, w, h, label) }
 	// show_marks marks through the same overlay path, one rect per observed item, labelled with the item's own number so the marks line up with what observe_screen just listed.
-	a.Marks = func(items []act.Item) {
+	a.Marks = func(items []act.Item) error {
 		rects := make([]OverlayRect, len(items))
 		for i, it := range items {
 			rects[i] = OverlayRect{X: it.X, Y: it.Y, W: it.W, H: it.H, Label: strconv.Itoa(it.N)}
 		}
-		s.Marks(overlayNoAsk, rects)
+		return s.Marks(overlayNoAsk, rects)
 	}
 	return a
 }

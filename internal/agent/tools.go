@@ -1123,7 +1123,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		label, _ := args["label"].(string)
 		remembered, hadRemembered := a.screenTarget()
-		a.Point(x, y, w, h, label)
+		if err := a.Point(x, y, w, h, label); err != nil {
+			return toolError(err.Error())
+		}
 		a.rememberTarget(ScreenTarget{Label: it.Label, Role: it.Role, Window: a.currentWindow(ctx), HasRect: true, X: x, Y: y, W: w, H: h})
 		note := ""
 		if hadRemembered {
@@ -1155,7 +1157,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			it.X, it.Y, it.W, it.H = x, y, w, h
 			fresh = append(fresh, it)
 		}
-		a.Marks(fresh)
+		if err := a.Marks(fresh); err != nil {
+			return toolError(err.Error())
+		}
 		switch {
 		case gone > 0:
 			return fmt.Sprintf("marked %d of %d elements on the screen; %d are no longer showing", len(fresh), total, gone)
@@ -2163,7 +2167,12 @@ func (a *Agent) focusHeld(ctx context.Context, it act.Item) bool {
 		return true
 	}
 	held, err := a.focused(ctx, it.Ref)
-	return err == nil && held
+	if err != nil {
+		// The read said nothing rather than saying no: the bus timed out, the element has gone, or its toolkit does not publish the focused bit on the node the walk listed, which Chromium and Electron often do not. Refusing on that stops typing into fields that are perfectly focused, so the remembered click stands and the guard bites only on a definite not-focused.
+		slog.Warn("could not read whether the field still holds the keyboard, so typing goes ahead on the remembered click", "ref", it.Ref, "error", err)
+		return true
+	}
+	return held
 }
 
 // rememberClick records the item a numbered click just acted on as the control the keyboard is now pointing at. Input: the call's context and the clicked item. Output: none.
@@ -2616,14 +2625,18 @@ func labelNote(label string) string {
 
 // stopBeforeClick refuses to click an element that trips the stop-line rule (irreversible) without the user's explicit go-ahead for this exact step. It rings the element first when this session can draw, so the user sees exactly what would have been clicked before being asked to say go — and the ring goes around where the element is now, since that ring is the whole of what the user is answering. Input: a context, the observed item that tripped irreversible, and the window it sits in. Output: a result beginning "Stopped before " naming the control and window plus the one-line question to unlock it; when the element cannot be read the refusal is replaced by the error telling the model to look again, and either way the click does not happen.
 func (a *Agent) stopBeforeClick(ctx context.Context, it act.Item, window string) string {
+	unseen := ""
 	if a.Point != nil {
 		x, y, w, h, errText := a.freshRect(ctx, it)
 		if errText != "" {
 			return errText
 		}
-		a.Point(x, y, w, h, it.Label)
+		if err := a.Point(x, y, w, h, it.Label); err != nil {
+			// The refusal stands either way — the click is what matters — but the question below asks the user to look at a ring, so say when there was none to look at.
+			unseen = " I could not ring it: " + err.Error() + "."
+		}
 	}
-	return fmt.Sprintf("Stopped before clicking [%d] %s %q in %q. %s", it.N, it.Role, it.Label, window, consentPrompt(matchedVerb(it, window)))
+	return fmt.Sprintf("Stopped before clicking [%d] %s %q in %q.%s %s", it.N, it.Role, it.Label, window, unseen, consentPrompt(matchedVerb(it, window)))
 }
 
 // stillThere runs the staleness check on an element the model named by number, before anything is drawn around it or done to it. Input: a context and the item observe_screen listed. Output: "" when the element is still the role, label and rectangle the list showed, or the tool error to hand back when it is not.
