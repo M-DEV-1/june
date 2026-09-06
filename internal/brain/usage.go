@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ora/internal/agent"
+	"ora/internal/fsx"
 )
 
 // UsageLimit is one allowance window a provider reports for the user's account: the window ("5h", "daily", "weekly", "monthly"), how much of it is spent as a fraction from 0 to 1, when it resets, and the field or header the reading came from.
@@ -59,7 +60,7 @@ func (s *UsageStore) Record(provider string, limits []UsageLimit) {
 		slog.Warn("brain: could not encode the usage readings", "error", err)
 		return
 	}
-	if err := writeFileAtomic(s.path, data); err != nil {
+	if err := fsx.WriteFileAtomic(s.path, data, 0o600); err != nil {
 		slog.Warn("brain: could not write the usage file", "path", s.path, "error", err)
 	}
 }

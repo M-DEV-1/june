@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"ora/internal/fsx"
+
 	chromem "github.com/philippgille/chromem-go"
 )
 
@@ -55,23 +57,8 @@ func (c *ChromemIndex) persistSidecar() error {
 	if err != nil {
 		return fmt.Errorf("marshal sidecar: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(c.sidecarPath), filepath.Base(c.sidecarPath)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create sidecar temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("write sidecar temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("close sidecar temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, c.sidecarPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename sidecar temp file: %w", err)
+	if err := fsx.WriteFileAtomic(c.sidecarPath, data, 0o600); err != nil {
+		return fmt.Errorf("write sidecar: %w", err)
 	}
 	return nil
 }

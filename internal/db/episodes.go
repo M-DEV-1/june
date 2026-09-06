@@ -162,7 +162,7 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 				"domain":     string(domain),
 				"source":     "episode",
 				"kind":       string(memory.KindMoment),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": nowStamp(),
 			}
 			// One vector per passage, not per screen. A capture longer than the embedder's cap used to be represented by its first 4,000 runes and nothing else; a capture shorter than one chunk still produces exactly one, under the same id it always had.
 			for i, chunk := range chunkText(text, chunkRunes, chunkOverlap) {

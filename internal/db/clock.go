@@ -8,3 +8,8 @@ func DayStart(t time.Time) time.Time {
 	t = t.In(time.Local)
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
 }
+
+// nowStamp returns the current instant as a UTC RFC 3339 string, the format every created_at column in this package is stored in. Output: the formatted stamp, no input.
+func nowStamp() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}

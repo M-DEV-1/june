@@ -119,7 +119,7 @@ func (s *Store) UpdateThreadState(ctx context.Context, id int64, state string) e
 		meta := map[string]string{
 			"source":     "thread",
 			"kind":       string(memory.KindArc),
-			"created_at": time.Now().UTC().Format(time.RFC3339),
+			"created_at": nowStamp(),
 		}
 		if err := vidx.Add(vecCtx, vecID, text, vec, meta); err != nil {
 			slog.Error("async thread vector re-add failed", "thread_id", id, "error", err)

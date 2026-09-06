@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"ora/internal/config"
+	"ora/internal/fsx"
 	"ora/internal/netx"
 )
 
@@ -319,11 +320,7 @@ func writeCodexTokens(path string, tok codexTokens) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".ora.tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsx.WriteFileAtomic(path, out, 0o600)
 }
 
 // refresh trades the refresh token for a new access token at the OAuth token endpoint, the way Codex CLI does, and writes the rotated pair back to the auth file because OpenAI spends a refresh token on use and the CLI would otherwise find itself logged out. Input: the access token the failed request used, so a refresh another ask already did is not repeated. Output: an error when there is no refresh token or the endpoint refuses.
@@ -698,9 +695,8 @@ func (c *codexClient) round(ctx context.Context, instructions string, input []an
 	// Every response carries the account's allowance windows in its headers, the refusals included, so the picker's bars come from the calls Ora already makes rather than a call of their own.
 	recordUsage(ProviderCodex, codexRateLimits(resp.Header, time.Now()))
 	if resp.StatusCode/100 != 2 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		wait, _ := netx.ParseRetryAfter(resp.Header, time.Now())
-		return codexRound{}, codexHTTPError{Code: resp.StatusCode, Body: strings.TrimSpace(string(snippet)), RetryAfter: wait}
+		return codexRound{}, codexHTTPError{Code: resp.StatusCode, Body: netx.BodySnippet(resp.Body), RetryAfter: wait}
 	}
 	return parseCodexStream(resp.Body, onShape)
 }
