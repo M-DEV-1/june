@@ -12,6 +12,7 @@ import {
   dotClass,
   dotLabel,
   voiceStateWord,
+  conversationSeparator,
   isJobLive,
   noticeActionLine,
   NOTICE_MS,
@@ -791,7 +792,13 @@ function spendLineHtml(spend: NonNullable<JobMeta["spend"]>): string {
   return `<div class="spend">${spend.rounds} round${spend.rounds === 1 ? "" : "s"} · ${spend.input} in · ${spend.cached} cached · ${spend.output} out</div>`;
 }
 
-/** The thread under the input line: every finished turn folded to a grey question-and-answer pair, then the turn on screen with its question in grey; the live step list or its collapsed summary; the answer in big type; and the evidence fold-out. Input: the view and the matter. Output: the thread's HTML, or "" when nothing has been asked. */
+/** The quiet rule between two conversations in the thread, drawn just above the turn at index i when state.ts's conversationSeparator says one lapsed and the next began there. Input: the matter's turns and the index about to be drawn. Output: the rule's HTML, or "" when no break belongs above that turn. */
+function conversationSepHtml(turns: Matter["turns"], i: number): string {
+  const label = conversationSeparator(turns, i);
+  return label ? `<div class="conv-sep">${esc(label)}</div>` : "";
+}
+
+/** The thread under the input line: every finished turn folded to a grey question-and-answer pair, then the turn on screen with its question in grey; the live step list or its collapsed summary; the answer in big type; and the evidence fold-out. A quiet separator breaks the thread wherever one conversation lapsed and the next began (see conversationSepHtml), so a follow-up asked minutes later does not read as carrying on from an exchange it has nothing to do with. Input: the view and the matter. Output: the thread's HTML, or "" when nothing has been asked. */
 function threadHtml(v: View, m: Matter): string {
   const last = m.turns[m.turns.length - 1];
   if (!last) return "";
@@ -799,8 +806,8 @@ function threadHtml(v: View, m: Matter): string {
   const folded = m.turns
     .slice(0, -1)
     .map(
-      (t) =>
-        `<div class="prev"><b>${esc(t.q)}</b>${esc(t.a.replace(/<\/?b>/g, ""))}</div>`,
+      (t, i) =>
+        `${conversationSepHtml(m.turns, i)}<div class="prev"><b>${esc(t.q)}</b>${esc(t.a.replace(/<\/?b>/g, ""))}</div>`,
     )
     .join("");
   const evidence = last.evidence ?? [];
@@ -818,6 +825,7 @@ function threadHtml(v: View, m: Matter): string {
 
   return `<div class="thread">
       ${folded}
+      ${conversationSepHtml(m.turns, m.turns.length - 1)}
       ${qqHtml(v, last)}
       ${last.job && isJobLive(last.job.state) ? jobControlsHtml(last.job) : ""}
       ${stepsBlock}

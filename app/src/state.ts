@@ -39,6 +39,8 @@ type Turn = {
   detail?: string;
   steps?: ToolStep[];
   job?: JobMeta;
+  /** When this turn was asked, set only by a typed submit (see the "submit" case below); a voice turn or one already sitting in a matter before this window ever read it carries none. This is what conversationSeparator compares against the turn before it to say whether a thread break belongs above this one. */
+  at?: number;
 };
 /** One answer button a notice names for itself: key is what goes to the daemon's notice route as the action, label is what the button reads. The daily stale-task question ("Still open — any progress?") is the first notice to name its own, because Done / Not happening / Not urgent are not the Done / snooze / Open set every other notice takes. */
 export type NoticeAction = { key: string; label: string };
@@ -157,11 +159,14 @@ export type Event =
 /** How long a notice stays on screen before it goes by itself, in milliseconds. Long enough to read three lines, short enough that a card the user is not interested in is gone before it becomes something to dismiss. The timer itself runs in main.ts; the pointer being over the card pauses it (see noticeHeld). */
 export const NOTICE_MS = 6000;
 
+/** The clock reading on a moment, 24-hour and to the minute ("18:00"), with no date on it. Shared by a snoozed notice's "until" line and the thread's own separator between two conversations, so the hover has one way of writing a time rather than one per place that needed one. Input: the moment. Output: the label. */
+function clockLabel(d: Date): string {
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
 /** The one-line text a notice whose action is set shows instead of its usual title and body: "Snoozed until 18:00" for one snoozed from its own desktop notification's buttons, "Snoozed until tomorrow 09:00" once the snooze crosses midnight, or "Done" for one dismissed outright. Input: the notice, and the current moment, used only to tell whether until falls on today. Output: the line, or undefined for a notice with no action, which draws exactly as it always has (see renderNotice in main.ts). */
 export function noticeActionLine(n: Notice, now: Date): string | undefined {
-  return noticeActionSuffix(n, now, (d) =>
-    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }),
-  );
+  return noticeActionSuffix(n, now, clockLabel);
 }
 
 /** close hides the hover. openNotice opens the main app window at the screen and row the clicked notice named, which are empty when it named none and the window should just open. ask sends the question that has just gone on the card to the daemon, in the conversation named, or in a new one the daemon opens when none is named. */
@@ -190,6 +195,18 @@ export function askConversation(v: View, now: number): string | undefined {
   return now - v.conversationAt <= CONVERSATION_MS
     ? v.conversationId
     : undefined;
+}
+
+/** Whether the thread should draw a separator above the turn at index i of a matter's turns — the point where one conversation lapsed and the next began. Input: the matter's turns and an index into them. Output: undefined for the first turn (nothing came before it to separate it from) and for a turn on either side with no timestamp (a voice exchange, or one already sitting in a matter before this window read it, carries none — see Turn.at); otherwise, once the gap between the two turns' timestamps runs longer than CONVERSATION_MS, the clock time the later one opened, for the separator to show. This reads the gap between the two turns' own moments rather than the view's conversationAt, so it still works once those turns are long past and nothing about the conversation they were in is left in the live view — the two agree in the ordinary case (a turn opens a conversation, is answered, and the next one either follows soon after or waits out the same five minutes) and can disagree only when a single turn takes longer than CONVERSATION_MS to answer and the very next question follows within a heartbeat of that answer, which the daemon still counts as the same conversation but this draws as a break anyway. */
+export function conversationSeparator(
+  turns: Matter["turns"],
+  i: number,
+): string | undefined {
+  if (i <= 0) return undefined;
+  const prev = turns[i - 1].at;
+  const at = turns[i].at;
+  if (prev === undefined || at === undefined) return undefined;
+  return at - prev > CONVERSATION_MS ? clockLabel(new Date(at)) : undefined;
 }
 
 /** What a storage event means for the theme. Input: the event's key and new value; a key of null is the whole store being cleared. Output: the choice to apply now, or undefined when the event was about some other key and the theme has not changed. */
@@ -631,7 +648,7 @@ export function step(
 
       const goal = jobGoal(text);
       if (goal) {
-        const turns = [...(m?.turns ?? []), { q: goal, a: "" }];
+        const turns = [...(m?.turns ?? []), { q: goal, a: "", at: now }];
         return {
           view: {
             ...view,
@@ -643,7 +660,7 @@ export function step(
         };
       }
 
-      const turns = [...(m?.turns ?? []), { q: text, a: "" }];
+      const turns = [...(m?.turns ?? []), { q: text, a: "", at: now }];
       // A question asked as a fresh thread names no conversation, so the daemon opens one and the model starts with nothing to refer to; so does the first question of all, and one asked after the thread in hand went quiet.
       const conversation = event.fresh ? undefined : askConversation(view, now);
       return {
