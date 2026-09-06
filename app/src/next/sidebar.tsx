@@ -38,6 +38,11 @@ const FEET: Foot[] = [
   { place: "settings", label: "Settings", icon: SettingsIcon },
 ];
 
+/** What one of a live notice's buttons is called out loud. Input: the word on the button and the notice's own title, which is stored but never drawn. Output: the two joined, or the word alone for a notice with no title. */
+function noticeLabel(word: string, title: string): string {
+  return title ? `${word} — ${title}` : word;
+}
+
 /** The rail. Input: none — everything it draws comes from the store and the conversations cache. Output: the sidebar element, which SidebarProvider in App.tsx places. */
 export function AppSidebar() {
   const dispatch = useAppDispatch();
@@ -46,10 +51,15 @@ export function AppSidebar() {
   const [actOnNotice] = useActOnNoticeMutation();
   const list = useRef<HTMLDivElement>(null);
 
-  /** Presses one of the live notice's own buttons. The daemon's answer comes back as the same "notice" event a desktop press produces (see reactToNotice in store.ts), which is what replaces these buttons with the rail line's plain text — nothing here reacts to the mutation's own response. */
+  /** Presses one of the live notice's own buttons. The daemon's answer comes back as the same "notice" event a desktop press produces (see reactToNotice in store.ts), which is what replaces these buttons with the rail line's plain text. A refusal sends no such event — the daemon answers 404 for a notice whose task has already been closed elsewhere and returns before it would echo anything — so the buttons are taken away here instead, with one line saying why. */
   const act = (action: "done" | "hour" | "evening" | "tomorrow") => {
     if (!liveNotice) return;
-    void actOnNotice({ ...liveNotice, action });
+    void actOnNotice({ ...liveNotice, action })
+      .unwrap()
+      .catch(() => {
+        dispatch(ui.liveNoticeSet(undefined));
+        dispatch(ui.noticed("Could not do that to that notice"));
+      });
   };
 
   const now = new Date();
@@ -87,20 +97,21 @@ export function AppSidebar() {
             <p role="status" className="text-meta text-muted-foreground">
               {liveNotice.body}
             </p>
+            {/* The four words on their own tell a screen reader nothing about what is being done or snoozed, so each button's own label names the notice it belongs to. */}
             <div className="flex gap-1">
               {/* Done closes a task through the daemon's own task-done path (see Act in internal/proactive/notify.go); a routine has nothing to complete — it is Ora reporting, not work owed — so only the snooze buttons show for one. */}
               {liveNotice.kind !== "routine" ? (
-                <Button variant="outline" size="xs" onClick={() => act("done")}>
+                <Button variant="outline" size="xs" aria-label={noticeLabel("Done", liveNotice.title)} onClick={() => act("done")}>
                   Done
                 </Button>
               ) : null}
-              <Button variant="outline" size="xs" onClick={() => act("hour")}>
+              <Button variant="outline" size="xs" aria-label={noticeLabel("1 h", liveNotice.title)} onClick={() => act("hour")}>
                 1 h
               </Button>
-              <Button variant="outline" size="xs" onClick={() => act("evening")}>
+              <Button variant="outline" size="xs" aria-label={noticeLabel("Evening", liveNotice.title)} onClick={() => act("evening")}>
                 Evening
               </Button>
-              <Button variant="outline" size="xs" onClick={() => act("tomorrow")}>
+              <Button variant="outline" size="xs" aria-label={noticeLabel("Tomorrow", liveNotice.title)} onClick={() => act("tomorrow")}>
                 Tomorrow
               </Button>
             </div>
