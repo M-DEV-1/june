@@ -191,7 +191,7 @@ async function connect(): Promise<void> {
 /** Fills the card in from the daemon after the window is already up: the context chip, the matters behind it, and whatever live voice session the daemon is running. Input: none. Output: nothing, and nothing is awaited by the caller — /context reads the focused window through AT-SPI and can take seconds, and the hover must not wait on it (each of the three reads gives up after its own deadline, see readJson in daemon.ts). */
 function hydrate(): void {
   if (!daemonUp) return;
-  void loadFromDaemon().catch((e) => console.error("ora: context read failed", e));
+  contextRead = loadFromDaemon().catch((e) => console.error("ora: context read failed", e));
   void syncVoice().catch((e) => console.error("ora: voice status read failed", e));
 }
 
@@ -240,6 +240,9 @@ function askNextDevQuestion(): void {
   dispatch({ kind: "enter" });
 }
 
+/** The context read fired off behind the last show, still in flight, or already settled, or undefined before the first one. A question asked in the first seconds after the hotkey waits on it (see startAsk) so it goes with the screen text rather than without it; nothing else does, and it never rejects. */
+let contextRead: Promise<void> | undefined;
+
 /** Refreshes the context chip from the daemon, and the matters list behind it. Nothing on the window draws the matters yet — the user is still deciding what belongs in the empty state — but the reducer keeps them so a later screen can read them without another round trip. Input: none. Output: nothing; leaves the current state alone when a call fails. */
 async function loadFromDaemon(): Promise<void> {
   const [ctx, rows] = await Promise.all([context(), matters()]);
@@ -267,6 +270,10 @@ function render(v: View): void {
   const m = v.matters[v.current] ?? placeholderMatter();
   // Every deferred write into the card is dropped here: the elements they were measured against are about to be thrown away, and what they were going to write is in this render already.
   clearDeferredWrites();
+  // Whether the input holds the keyboard, and where its caret sits, both read before this rebuild throws that element away. A render can land seconds after the window is shown — the context read answering, see hydrate — and must not pull the user off a fold header or a notice button, nor throw the caret to the end of a line they had gone back into.
+  const had = root.querySelector<HTMLInputElement>(".q");
+  const keepFocus = had === null || had === document.activeElement;
+  const caret = had?.selectionStart ?? null;
   root.innerHTML = cardHtml(v, m);
   root.classList.toggle("bare", !hasContent(v, m));
   // Past its ceiling the thread scrolls inside itself (see threadMaxHeight and --thread-max), and the newest turn is at the bottom of it — but this rebuild has just thrown the old element and its scroll position away, so the freshly built one starts at the top. Pinning it to the bottom is what keeps the answer being written in view.
@@ -277,9 +284,12 @@ function render(v: View): void {
 
   const input = root.querySelector<HTMLInputElement>(".q");
   if (input) {
-    // preventScroll: focusing on every render must not jerk a long answer out of view.
-    input.focus({ preventScroll: true });
-    input.setSelectionRange(input.value.length, input.value.length);
+    if (keepFocus) {
+      // preventScroll: focusing on every render must not jerk a long answer out of view.
+      input.focus({ preventScroll: true });
+      const at = caret ?? input.value.length;
+      input.setSelectionRange(at, at);
+    }
     input.addEventListener("input", () => {
       // A full render on every keystroke would move the caret and resize the window each time (see dispatch below), but the footer appearing the moment text shows up needs no re-render, just this class flip; fitWindow no-ops unless the height actually changed.
       root.classList.toggle(
@@ -345,19 +355,18 @@ let drawnNotice: Notice | undefined;
 /** Draws the notice bubble from the current state: the title in bold, up to three lines of body under it, and the card underneath hidden when the notice is the only thing this window is up to say. Input: the view. Output: nothing, the DOM is the output. */
 function renderNotice(v: View): void {
   const n = v.notice;
+  // One fact, read once: this notice is the only thing this window is up to say. It decides both the card's margin and whether the ask card under it is hidden, which used to be read from two flags that only agreed on the Tauri path.
+  const alone = n !== undefined && v.noticeAlone === true;
   noticeEl.hidden = n === undefined;
-  document.body.classList.toggle(
-    "alone",
-    n !== undefined && v.noticeAlone === true,
-  );
+  document.body.classList.toggle("alone", alone);
+  // The two classes are margins, one above and one below (see styles.css): a card on its own is placed under the top bar by noticePlacement whatever position the hover itself is set to, so it takes its air above; one stacked over an open card takes its air below, between itself and that card.
+  noticeEl.className = alone ? "N up" : "N down";
   if (n === drawnNotice) return;
   drawnNotice = n;
   if (!n) {
     noticeEl.innerHTML = "";
     return;
   }
-  // The two classes are margins, one above and one below (see styles.css): a card on its own is placed under the top bar by noticePlacement whatever position the hover itself is set to, so it takes its air above; one stacked over an open card takes its air below, between itself and that card. Which of the two it is comes from noticeOnly, not from the stored hover position, which says nothing about where a notice-only window went.
-  noticeEl.className = noticeOnly ? "N up" : "N down";
   // A notice whose action is set is the desktop notification's own follow-up, not a fresh card: it shows what happened, one line, instead of the title and body drawn the first time.
   const actionLine = noticeActionLine(n, new Date());
   noticeEl.innerHTML =
@@ -911,7 +920,9 @@ function startAsk(q: string, conversation: string | undefined): void {
   if (!m) return;
   if (daemonUp) {
     askId = undefined;
-    void ask(q, view.contextText || m.context, conversation)
+    // The screen context is read behind the show rather than before it (see hydrate), and a question about what is on screen is worth nothing without it, so the ask waits for that read. The wait is bounded by the read's own deadline: readJson gives up after READ_TIMEOUT_MS (3s, see daemon.ts) and answers null, which leaves contextText as it was and sends the question with whatever the matter already carried.
+    void Promise.resolve(contextRead)
+      .then(() => ask(q, view.contextText || m.context, conversation))
       .then((res) => {
         askId = res.id;
         // The daemon says which conversation it stored the question in. Writing it down here is the whole of the follow-up: the next question names it, and the daemon then puts the turns already in it in front of the model.
@@ -1071,8 +1082,8 @@ document.addEventListener(
       void toggleVoice();
       return;
     }
-    // The card's two fold-out headers are keyboard controls (see bindFold), and Space is how a button is pressed; a Space that belongs to one of them is not a Space that opens the microphone.
-    if ((e.target as HTMLElement | null)?.closest?.('[role="button"]')) return;
+    // Every control on the card is pressed with Space: the two fold-out headers, which carry role="button" (see bindFold), and the notice's own actions, the voice stop and a job's stop and pause, which are native buttons and so carry no role attribute at all. A Space that belongs to one of them is not a Space that opens the microphone.
+    if ((e.target as HTMLElement | null)?.closest?.('button, [role="button"]')) return;
     const value = root.querySelector<HTMLInputElement>(".q")?.value ?? "";
     const action = dictationKey(
       e,
@@ -1127,7 +1138,7 @@ let fitWindow: () => Promise<{ width: number; height: number }> = async () => ({
   height: 0,
 });
 
-/** Whether this window is up only to show a notice, which is a different window from the hover: it is the width of the notice card rather than of the ask card, it sits under the top bar at the right rather than where the hover opens, and it goes again when the notice does. Set when a notice arrives at a shut window and cleared when the hotkey opens the hover proper, so a second notice landing on top of the first is still treated as a notice-only window rather than as a hover the user opened. Read by renderNotice as well as by the sizing, which is why it lives out here rather than inside wireWindow. */
+/** Whether this window is up only to show a notice, which is a different window from the hover: it is the width of the notice card rather than of the ask card, it sits under the top bar at the right rather than where the hover opens, and it goes again when the notice does. Set when a notice arrives at a shut window and cleared when the hotkey opens the hover proper, so a second notice landing on top of the first is still treated as a notice-only window rather than as a hover the user opened. Read by the sizing and the placement, which is why it lives out here rather than inside wireWindow; what the card itself draws comes from the view's own noticeAlone (see renderNotice), which the mock sets too. */
 let noticeOnly = false;
 
 /** What the Tauri shell hands this module: the window itself, the desktop the placement reads, the one focus request, and a way to hear the toggle hotkey. Passed in rather than reached for, so the show, the notice-only window and the sizing can all be driven from a fake — under jsdom getCurrentWindow() throws, and everything wired up below it was unreachable from any test. */
@@ -1225,7 +1236,7 @@ export function wireWindow(shell: Shell): void {
 
 try {
   const win = getCurrentWindow();
-  // Where the dock is, re-read from the desktop on every open so moving the dock takes effect on the next hotkey press instead of on the next restart. The last answer is kept as the fallback, and the first one is a bottom dock that reserves no space, which is also what the Rust side returns when it can read nothing.
+  // Where the dock is, asked for on every open and every notice. The Rust side answers from a reading it holds for 30 seconds (DOCK_CACHE_FOR in lib.rs), because reading it forks up to six gsettings processes, so moving the dock takes effect on the first hotkey press after that cache expires rather than on the very next one. Nothing here needs a fresher answer than that: the notice is placed against the same reading as the hover, and a dock does not move between one keypress and the next. The last answer is kept as the fallback, and the first one is a bottom dock that reserves no space, which is also what the Rust side returns when it can read nothing.
   let dock: Dock = { edge: "bottom", clearance: 0 };
   wireWindow({
     win,
