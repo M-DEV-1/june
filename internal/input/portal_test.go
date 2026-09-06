@@ -387,3 +387,50 @@ func TestCallTimesOutWhenThePortalDoesNotAnswer(t *testing.T) {
 		t.Fatal("PressKey never returned; the call has no timeout")
 	}
 }
+
+// The stream's position is in the compositor's logical layout space while its size is the stream's own video size, which on a scaled monitor is that monitor's device resolution. A logical x of 1900 on a 2x monitor is 3800 stream pixels, not 1900: sending it unscaled passed the bound check against a 3840-wide stream and landed the pointer at half the intended position.
+func TestToStreamScalesToTheStreamsOwnPixels(t *testing.T) {
+	// A 1920x1080 monitor at the desktop origin whose stream is 3840x2160: two stream pixels to one logical pixel.
+	rect := withScaleFrom(streamRect{X: 0, Y: 0, W: 3840, H: 2160}, func(x, y int) (int, int, bool) { return 1920, 1080, true })
+	if rect.Scale != 2 {
+		t.Fatalf("scale = %v, want 2 from a 3840-wide stream on a 1920-wide monitor", rect.Scale)
+	}
+	x, y, err := toStream(1900, 1000, rect)
+	if err != nil || x != 3800 || y != 2000 {
+		t.Fatalf("toStream = (%v, %v, %v), want (3800, 2000, nil)", x, y, err)
+	}
+	// The far corner of the monitor is still the far corner of the stream, and a point beyond it is still refused.
+	if _, _, err := toStream(1921, 0, rect); err == nil {
+		t.Fatal("a point past the monitor's logical width should be refused")
+	}
+
+	// A second monitor at 1920,0 logical, 2560x1440 logical, streamed at 5120x2880.
+	second := withScaleFrom(streamRect{X: 1920, Y: 0, W: 5120, H: 2880}, func(x, y int) (int, int, bool) { return 2560, 1440, true })
+	x, y, err = toStream(2020, 100, second)
+	if err != nil || x != 200 || y != 200 {
+		t.Fatalf("toStream on the second monitor = (%v, %v, %v), want (200, 200, nil)", x, y, err)
+	}
+}
+
+// An unscaled monitor, and a desktop whose monitor layout cannot be read at all, both map exactly as they did before the scale existed.
+func TestToStreamAtScaleOneIsUnchanged(t *testing.T) {
+	unscaled := withScaleFrom(streamRect{X: 1920, Y: 0, W: 2560, H: 1440}, func(x, y int) (int, int, bool) { return 2560, 1440, true })
+	unknown := withScaleFrom(streamRect{X: 1920, Y: 0, W: 2560, H: 1440}, func(x, y int) (int, int, bool) { return 0, 0, false })
+	if unscaled.Scale != 1 || unknown.Scale != 1 {
+		t.Fatalf("scales = %v and %v, want 1 and 1", unscaled.Scale, unknown.Scale)
+	}
+	for _, rect := range []streamRect{unscaled, unknown, {X: 1920, Y: 0, W: 2560, H: 1440}} {
+		x, y, err := toStream(2020, 100, rect)
+		if err != nil || x != 100 || y != 100 {
+			t.Errorf("toStream(%+v) = (%v, %v, %v), want (100, 100, nil)", rect, x, y, err)
+		}
+	}
+}
+
+// withScaleFrom is withStreamScale against a stubbed monitor layout, so the scale can be worked out in a test without a desktop.
+func withScaleFrom(r streamRect, layout func(x, y int) (int, int, bool)) streamRect {
+	old := monitorLayout
+	monitorLayout = layout
+	defer func() { monitorLayout = old }()
+	return withStreamScale(r)
+}

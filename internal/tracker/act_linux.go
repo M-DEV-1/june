@@ -237,6 +237,20 @@ func forgetDesk() {
 	deskCache.at = time.Time{}
 }
 
+// MonitorLogicalSize reports how big the monitor holding a desktop point is, in the logical pixels the accessibility bus, the work area and the portal's pointer all work in. Input: the point in those logical desktop pixels, which for the portal is the top-left corner its granted stream reported. Output: the monitor's logical width and height, and false when the desktop cannot be read or no monitor covers that point.
+// It exists for the portal's pointer mapping (see input.UseMonitorLayout): a screen-cast stream is sized in the monitor's device pixels, and dividing the two is the only way to know how many stream pixels one logical pixel is worth on a scaled display.
+func MonitorLogicalSize(x, y int) (w, h int, ok bool) {
+	d, ok := deskNow()
+	if !ok {
+		return 0, 0, false
+	}
+	m, ok := monitorAt(x, y, d.mons)
+	if !ok {
+		return 0, 0, false
+	}
+	return m.W, m.H, true
+}
+
 // monitorRects converts the monitor rectangles screenLayout reports into the rectangle type this file works in. Input: the monitors as image rectangles. Output: one rect per monitor, empty when the list is empty.
 func monitorRects(mons []image.Rectangle) []rect {
 	out := make([]rect, 0, len(mons))
@@ -406,7 +420,8 @@ func moved(now, was rect) bool {
 // away reports whether two pixel counts differ by more than movedBy.
 func away(a, b int) bool { return a-b > movedBy || b-a > movedBy }
 
-// Focused reports whether an element holds the keyboard focus right now, so a caller about to type can check that the box it is typing into is the box its guards were applied to: a click that opened a dialog, or an application that moved the focus itself, leaves the remembered element no longer the one the keys reach. Input: a context and the node's Ref from act.Node. Output: true when STATE_FOCUSED is set on that element, or an error when the ref is malformed or the accessibility bus is unreachable; an element that no longer answers reads as not focused, which is the safe direction for a caller that refuses to type without it.
+// Focused reports whether an element holds the keyboard focus right now, so a caller about to type can check that the box it is typing into is the box its guards were applied to: a click that opened a dialog, or an application that moved the focus itself, leaves the remembered element no longer the one the keys reach. Input: a context and the node's Ref from act.Node. Output: true when STATE_FOCUSED is set on that element, false when the element answered and the bit is not set, and an error when the answer says nothing either way — a malformed ref, an unreachable bus, or a GetState that timed out, named an element that has gone, or came back with no state words at all.
+// The empty answer is an error rather than a false because the two are not the same thing to the caller: a toolkit that does not publish the bit on the node the walk listed, which Chromium and Electron often do not, would otherwise read as "some other element has the keyboard" and stop a legitimate typing.
 func Focused(ctx context.Context, ref string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, actTimeout)
 	defer cancel()
@@ -418,7 +433,15 @@ func Focused(ctx context.Context, ref string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return hasState(ctx, conn, r, stateFocused), nil
+	return focusedFromStates(readStates(ctx, conn, r), ref)
+}
+
+// focusedFromStates turns one GetState answer into the focus verdict. Input: the packed state words, which readStates returns as nil for every failure, and the ref they were read for. Output: whether STATE_FOCUSED is set, or an error when there are no words to read it from.
+func focusedFromStates(states []uint32, ref string) (bool, error) {
+	if len(states) == 0 {
+		return false, fmt.Errorf("the accessibility bus gave no state for %s: the element may have gone, the read may have timed out, or its toolkit may not publish the focused bit", ref)
+	}
+	return stateSet(states, stateFocused), nil
 }
 
 // scrollAnywhere is ATSPI_SCROLL_ANYWHERE: bring the node into view wherever is cheapest.

@@ -3,6 +3,7 @@ package ipc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -46,6 +47,9 @@ type OverlayResult struct {
 
 // overlayNoWindow is the reason a drawing was not drawn: nothing was reading the daemon's event stream, so there was no overlay window to draw it.
 const overlayNoWindow = "no overlay window"
+
+// ErrNoOverlayWindow is what every drawing call returns when nothing was reading the event stream at the moment it went out. The drawing was still broadcast; there was simply nobody there to put it on the screen. Callers that report back to a person or a model must say so rather than claiming the drawing was made (see errors.Is).
+var ErrNoOverlayWindow = errors.New("the drawing reached no window, so nothing appeared on the screen")
 
 // Overlay handles POST /overlay. Input: an OverlayRequest as JSON. Output: 202 and an OverlayResult saying whether anything was listening, once the request has been broadcast on the hub as an event of type "overlay" whose text is the validated request re-encoded as JSON, or 400 when the body is not JSON, names a kind other than ring, marks, arrow, line, path, box, circle or clear, carries no rectangles for a ring, marks or box, carries a rectangle count other than one for a circle, carries a rectangle with a width or height that is not positive, carries fewer than two points for an arrow or line, carries fewer than three points for a path, or carries a point with a negative coordinate. A ttl above maxOverlayTTLMs is capped rather than refused, and a missing one becomes defaultOverlayTTLMs.
 func (s *Server) Overlay(w http.ResponseWriter, r *http.Request) {
@@ -114,57 +118,63 @@ func (s *Server) Overlay(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(result)
 }
 
-// Ring draws one ring around a rectangle on the screen for the default time, the way POST /overlay would. Input: the id of the ask whose point_at asked for the ring (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the rectangle in screen pixels and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
-func (s *Server) Ring(askID string, x, y, w, h int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "ring", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: defaultOverlayTTLMs})
+// Ring draws one ring around a rectangle on the screen for the default time, the way POST /overlay would. Input: the id of the ask whose point_at asked for the ring (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the rectangle in screen pixels and the label drawn beside it. Output: nil once the drawing has been broadcast on the hub for the extension, stamped with that ask's id, or ErrNoOverlayWindow when nothing was listening for it.
+func (s *Server) Ring(askID string, x, y, w, h int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "ring", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: defaultOverlayTTLMs})
 }
 
-// Marks draws a numbered mark over every rect for the default time, the way POST /overlay with kind marks would. Input: the id of the ask whose show_marks asked for them (empty, or overlayNoAsk, when no ask did) and the rectangles in screen pixels, in the order they should be numbered. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
-func (s *Server) Marks(askID string, rects []OverlayRect) {
-	s.draw(askID, OverlayRequest{Kind: "marks", Rects: rects, TTLMs: defaultOverlayTTLMs})
+// Marks draws a numbered mark over every rect for the default time, the way POST /overlay with kind marks would. Input: the id of the ask whose show_marks asked for them (empty, or overlayNoAsk, when no ask did) and the rectangles in screen pixels, in the order they should be numbered. Output: nil once the drawing has been broadcast on the hub for the extension, stamped with that ask's id, or ErrNoOverlayWindow when nothing was listening for it.
+func (s *Server) Marks(askID string, rects []OverlayRect) error {
+	return s.drew(askID, OverlayRequest{Kind: "marks", Rects: rects, TTLMs: defaultOverlayTTLMs})
 }
 
-// Arrow draws an arrowed path through the given points for as long as the overlay judges its ink needs, the way POST /overlay with kind arrow would. Input: the id of the ask whose draw asked for it (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the points in screen pixels (at least two, in the order the arrow should follow) and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
-func (s *Server) Arrow(askID string, points [][2]int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "arrow", Label: label, Points: points, TTLMs: overlayTTLFromInk})
+// Arrow draws an arrowed path through the given points for as long as the overlay judges its ink needs, the way POST /overlay with kind arrow would. Input: the id of the ask whose draw asked for it (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the points in screen pixels (at least two, in the order the arrow should follow) and the label drawn beside it. Output: nil once the drawing has been broadcast on the hub for the extension, stamped with that ask's id, or ErrNoOverlayWindow when nothing was listening for it.
+func (s *Server) Arrow(askID string, points [][2]int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "arrow", Label: label, Points: points, TTLMs: overlayTTLFromInk})
 }
 
 // Line draws a plain path through the given points for as long as the overlay judges its ink needs, the way POST /overlay with kind line would. Input and output are as Arrow, but the extension draws it with no arrowhead.
-func (s *Server) Line(askID string, points [][2]int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "line", Label: label, Points: points, TTLMs: overlayTTLFromInk})
+func (s *Server) Line(askID string, points [][2]int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "line", Label: label, Points: points, TTLMs: overlayTTLFromInk})
 }
 
 // Path draws a free-form smooth stroke through the given points (at least three) with no arrowhead, for as long as the overlay judges its ink needs, the way POST /overlay with kind path would. Input and output are as Arrow.
-func (s *Server) Path(askID string, points [][2]int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "path", Label: label, Points: points, TTLMs: overlayTTLFromInk})
+func (s *Server) Path(askID string, points [][2]int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "path", Label: label, Points: points, TTLMs: overlayTTLFromInk})
 }
 
-// Box draws a dashed rectangle around a region for as long as the overlay judges its ink needs, the way POST /overlay with kind box would. Input: the id of the ask, the rectangle in screen pixels and the label drawn beside it. Output: none; the drawing is broadcast on the hub for the extension, stamped with that ask's id.
-func (s *Server) Box(askID string, x, y, w, h int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "box", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
+// Box draws a dashed rectangle around a region for as long as the overlay judges its ink needs, the way POST /overlay with kind box would. Input: the id of the ask, the rectangle in screen pixels and the label drawn beside it. Output: nil once the drawing has been broadcast on the hub for the extension, stamped with that ask's id, or ErrNoOverlayWindow when nothing was listening for it.
+func (s *Server) Box(askID string, x, y, w, h int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "box", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
 }
 
 // Circle draws a dashed circle inscribed in a rectangle, timed by its ink like Box, the way POST /overlay with kind circle would. Input and output are as Box; the extension draws the circle inscribed in the given rectangle rather than the rectangle itself.
-func (s *Server) Circle(askID string, x, y, w, h int, label string) {
-	s.draw(askID, OverlayRequest{Kind: "circle", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
+func (s *Server) Circle(askID string, x, y, w, h int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "circle", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: overlayTTLFromInk})
 }
 
-// Draw dispatches to Arrow, Line, Path, Box or Circle by shape, for the agent's draw tool to call directly without knowing which ask is running. Input: the shape, the points to draw through (arrow, line, path — ignored otherwise) and the rectangle to draw around or inscribe within (box, circle — ignored otherwise), and the label. Output: nil once broadcast under the ask DrawingAsk names, or an error naming the bad shape when it is none of the five.
+// Draw dispatches to Arrow, Line, Path, Box or Circle by shape, for the agent's draw tool to call directly without knowing which ask is running. Input: the shape, the points to draw through (arrow, line, path — ignored otherwise) and the rectangle to draw around or inscribe within (box, circle — ignored otherwise), and the label. Output: nil once broadcast under the ask DrawingAsk names, ErrNoOverlayWindow when nothing was listening for it, or an error naming the bad shape when it is none of the five.
 func (s *Server) Draw(shape string, points [][2]int, x, y, w, h int, label string) error {
 	askID := s.DrawingAsk()
 	switch shape {
 	case "arrow":
-		s.Arrow(askID, points, label)
+		return s.Arrow(askID, points, label)
 	case "line":
-		s.Line(askID, points, label)
+		return s.Line(askID, points, label)
 	case "path":
-		s.Path(askID, points, label)
+		return s.Path(askID, points, label)
 	case "box":
-		s.Box(askID, x, y, w, h, label)
+		return s.Box(askID, x, y, w, h, label)
 	case "circle":
-		s.Circle(askID, x, y, w, h, label)
-	default:
-		return fmt.Errorf("shape must be arrow, line, path, box or circle, got %q", shape)
+		return s.Circle(askID, x, y, w, h, label)
+	}
+	return fmt.Errorf("shape must be arrow, line, path, box or circle, got %q", shape)
+}
+
+// drew is draw with its answer turned into an error, for the callers that hand one back. Input: the ask's id and the request. Output: nil once the drawing went out to at least one client, ErrNoOverlayWindow when it went to nobody.
+func (s *Server) drew(askID string, req OverlayRequest) error {
+	if !s.draw(askID, req) {
+		return ErrNoOverlayWindow
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -317,4 +318,37 @@ func TestOverlay_ReportsWhetherAnyoneWasListening(t *testing.T) {
 		t.Errorf("reason = %q, want empty when the drawing went out", heard.Reason)
 	}
 	waitOverlay(t, ch)
+}
+
+// The drawing calls the agent's tools go through used to throw away the one fact only they knew: whether anybody was there to draw it. A model told "drew it" then narrates a diagram the user cannot see, so every one of them now hands back ErrNoOverlayWindow when the drawing went to nobody, and nil once a client is on the hub.
+func TestDraw_SaysWhenTheDrawingReachedNoWindow(t *testing.T) {
+	s := New(&fakeAsker{}, nil, nil, nil)
+
+	calls := map[string]func() error{
+		"Ring":   func() error { return s.Ring("", 1, 2, 3, 4, "here") },
+		"Marks":  func() error { return s.Marks("", []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}}) },
+		"Arrow":  func() error { return s.Arrow("", [][2]int{{1, 1}, {2, 2}}, "go") },
+		"Line":   func() error { return s.Line("", [][2]int{{1, 1}, {2, 2}}, "go") },
+		"Path":   func() error { return s.Path("", [][2]int{{1, 1}, {2, 2}, {3, 3}}, "go") },
+		"Box":    func() error { return s.Box("", 1, 2, 3, 4, "go") },
+		"Circle": func() error { return s.Circle("", 1, 2, 3, 4, "go") },
+		"Draw":   func() error { return s.Draw("box", nil, 1, 2, 3, 4, "go") },
+	}
+	for name, call := range calls {
+		if err := call(); !errors.Is(err, ErrNoOverlayWindow) {
+			t.Errorf("%s with nothing on the hub = %v, want ErrNoOverlayWindow", name, err)
+		}
+	}
+
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+	go func() {
+		for range ch {
+		}
+	}()
+	for name, call := range calls {
+		if err := call(); err != nil {
+			t.Errorf("%s with a client on the hub = %v, want nil", name, err)
+		}
+	}
 }

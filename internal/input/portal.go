@@ -130,7 +130,7 @@ func Open(ctx context.Context, dataDir string) (*Session, error) {
 	if err := saveToken(dataDir, newToken); err != nil {
 		return nil, fmt.Errorf("save token: %w", err)
 	}
-	return &Session{conn: conn, handle: handle, stream: stream, rect: rect}, nil
+	return &Session{conn: conn, handle: handle, stream: stream, rect: withStreamScale(rect)}, nil
 }
 
 // portalOps is the set of fallible RemoteDesktop/ScreenCast steps openSequence drives. Splitting it out from Session lets the failure-cleanup logic in openSequence be tested against a fake, without a live D-Bus session.
@@ -176,14 +176,41 @@ func (s *Session) Close() error {
 }
 
 // streamRect is where the granted ScreenCast stream's monitor sits on the desktop and how big it is, read from the stream's "position" and "size" properties. All zero when the compositor reported neither, which is the case the mapping falls back to leaving a point alone.
+// The two properties are not in the same units: position is in the compositor's logical layout space, while size is the stream's own video size, which on a scaled monitor is that monitor's device resolution. Scale is how many stream pixels one logical pixel is worth, worked out once when the session opens (see withStreamScale); it is 1 whenever the monitor's logical size is not known, which is what this assumed before it was worked out at all.
 type streamRect struct {
-	X, Y int
-	W, H int
+	X, Y  int
+	W, H  int
+	Scale float64
 }
 
-// toStream maps a point in whole-desktop coordinates into the granted stream's own coordinate space, which is what NotifyPointerMotionAbsolute takes, and rejects one that is not on that monitor. Input: the desktop point and the granted stream's rectangle. Output: the point measured from the monitor's own top-left corner, or a CoordinateError when the monitor's size is known and the point is outside it. With no size reported the point is passed through with only the origin taken off and only a negative result refused, which is what this did before the position was read.
+// monitorLayout reports the logical size of the monitor holding a desktop point. It is nil until something wires a reader in (see UseMonitorLayout), and while it is nil every stream is taken to be one stream pixel to one logical pixel.
+var monitorLayout func(x, y int) (w, h int, ok bool)
+
+// UseMonitorLayout wires in the reader of the desktop's monitor layout, which is what lets a granted stream's scale be worked out from its size. Input: a function answering the logical width and height of the monitor holding a desktop point, and false when it cannot say (tracker.MonitorLogicalSize in the daemon, a stub in tests). Output: none. Call it before Open; a session already open keeps the scale it was opened with.
+func UseMonitorLayout(f func(x, y int) (w, h int, ok bool)) { monitorLayout = f }
+
+// withStreamScale fills in a granted stream's scale from its size against the logical size of the monitor it covers. Input: the rectangle as the portal reported it. Output: the same rectangle with Scale set — the stream's width divided by the monitor's logical width, or 1 when either is unknown.
+func withStreamScale(r streamRect) streamRect {
+	r.Scale = 1
+	if monitorLayout == nil || r.W <= 0 {
+		return r
+	}
+	logicalW, _, ok := monitorLayout(r.X, r.Y)
+	if !ok || logicalW <= 0 {
+		return r
+	}
+	r.Scale = float64(r.W) / float64(logicalW)
+	return r
+}
+
+// toStream maps a point in whole-desktop logical coordinates into the granted stream's own coordinate space, which is what NotifyPointerMotionAbsolute takes, and rejects one that is not on that monitor. Input: the logical desktop point and the granted stream's rectangle. Output: the point measured from the monitor's own top-left corner and multiplied by the stream's scale, or a CoordinateError when the monitor's size is known and the point is outside it. With no size reported the point is passed through with only the origin taken off and only a negative result refused, which is what this did before the position was read.
+// The origin is taken off before the scale goes on, because the stream's position is in logical pixels and its size is in the stream's own. A stream whose scale could not be worked out is mapped at 1, which is right on an unscaled monitor and is the assumption that still stands everywhere else.
 func toStream(x, y float64, r streamRect) (float64, float64, error) {
-	sx, sy := x-float64(r.X), y-float64(r.Y)
+	scale := r.Scale
+	if scale <= 0 {
+		scale = 1
+	}
+	sx, sy := (x-float64(r.X))*scale, (y-float64(r.Y))*scale
 	if r.W > 0 || r.H > 0 {
 		if sx < 0 || sy < 0 || sx > float64(r.W) || sy > float64(r.H) {
 			return 0, 0, &CoordinateError{X: x, Y: y, Width: r.W, Height: r.H}
