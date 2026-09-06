@@ -79,6 +79,8 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	orchestrator.SetModel(config.VoiceModel)
 
 	orchestrator.SetVoice(appConfig.Voice)
+	// The TUI reads ToolApprovalChan and answers it (internal/ui), so this process may run the approval-gated tools; the daemon never sets this and refuses them instead.
+	agent.SetToolApprovals(true)
 
 	// Reconnect loop: if the Gemini session drops (idle timeout, network blip, session limit), restart automatically.
 	// Mic stays running throughout.

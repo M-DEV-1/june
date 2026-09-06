@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	neturl "net/url"
 	"ora/internal/act"
 	"ora/internal/config"
 	"ora/internal/db"
@@ -21,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -403,10 +405,35 @@ func liveTools() []*genai.Tool {
 // liveToolsFor is liveTools for a named Live model. Google Search grounding rides beside the function tools on the 2.5 model; on the 3.x Live models the same pairing closes the session with "You exceeded your current quota" before the first word (probed on 2026-09-02, every other part of the handshake passes), so there it is left out and the model has no web search.
 func liveToolsFor(model string) []*genai.Tool {
 	tools := toolDefinitions()
+	if !HasApprover() {
+		tools = dropApprovalGated(tools)
+	}
 	if strings.HasPrefix(model, "gemini-3") {
 		return tools
 	}
 	return append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
+}
+
+// dropApprovalGated returns the tools with every approvalGatedTools declaration taken out, the same shape askTools builds through askAllowedTools. A tool the session cannot actually run must not be declared: the model spends a round finding out, and for these three the finding out is a call that never comes back. Input: the declared tools; the originals are not modified. Output: a copy of each tool that still has a declaration left, plus any entry carrying no declarations at all (Gemini's own search grounding) as it is.
+func dropApprovalGated(tools []*genai.Tool) []*genai.Tool {
+	out := make([]*genai.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if len(tool.FunctionDeclarations) == 0 {
+			out = append(out, tool)
+			continue
+		}
+		copyTool := *tool
+		copyTool.FunctionDeclarations = nil
+		for _, d := range tool.FunctionDeclarations {
+			if !approvalGatedTools[d.Name] {
+				copyTool.FunctionDeclarations = append(copyTool.FunctionDeclarations, d)
+			}
+		}
+		if len(copyTool.FunctionDeclarations) > 0 {
+			out = append(out, &copyTool)
+		}
+	}
+	return out
 }
 
 // ToolDeclarations returns the function declarations the live session exposes, the same list liveTools builds. Gemini's native search tool is not included because it has no declaration to hand a non-live model. The trajectory eval in evals/ uses it to give a text-mode model the identical tool surface the voice session has. Input: none. Output: the declarations, in the order the live session sends them.
@@ -881,14 +908,44 @@ func RunShellCommand(command string) string {
 		// The command's own output is the answer to why it failed and the model needs it; only Go's exit-status wrapper is dropped.
 		return toolError("that command didn't run cleanly") + "\noutput: " + string(output)
 	}
-	result := string(output)
-	if len(result) > 2000 {
-		result = result[:2000] + "\n... (truncated)"
-	}
-	return result
+	return capRunes(string(output), 2000, "... (truncated)")
 }
 
-// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the TUI's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the TUI to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
+// capRunes bounds a tool result, cutting on a rune boundary. Input: the result, the most runes to keep, and the line appended after a cut. Output: the result unchanged when it fits, else its first n runes with note on a line of its own. Cutting on bytes instead halves a multi-byte rune and puts an invalid string into a JSON tool response.
+func capRunes(s string, n int, note string) string {
+	capped := oratext.Runes(s, n)
+	if capped == s {
+		return s
+	}
+	return capped + "\n" + note
+}
+
+// openURLCommand builds the command that hands a url to the desktop's browser, per platform. A var so a test can swap it and never launch a real browser. Input: the url, already checked to be http or https. Output: the command, not yet started.
+var openURLCommand = func(url string) *exec.Cmd {
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		return exec.Command("open", url)
+	default:
+		return exec.Command("xdg-open", url)
+	}
+}
+
+// approvalGatedTools are the tools whose handler waits on ToolApprovalChan for a human to approve the call. The terminal UI reads that channel and answers it; the daemon reads it nowhere, so there a call parked until the session ended, the model never got a result for it, and every later call was told another approval was already pending. Where nothing has called SetToolApprovals they are kept out of the tool list the live session declares (liveToolsFor) and refused if a model names one anyway; where an approver is registered they behave as they always did. They are out of the ask's list (askAllowedTools) either way.
+var approvalGatedTools = map[string]bool{"shell_exec": true, "read_clipboard": true, "read_file": true}
+
+// approverRegistered is true while something in this process is reading ToolApprovalChan and will answer what it finds there. Only the terminal UI does (internal/ui, run in-process by cmd/client.go, which calls SetToolApprovals); the daemon reads that channel nowhere, so its asks, voice sessions, routines and act jobs must refuse an approval-gated tool rather than park on it forever.
+// ponytail: one flag for the whole process, not one per Agent, because the tool list is built by package functions (liveToolsFor) that have no Agent in hand; move it onto Agent if a single process ever has to run both an approving and a non-approving session.
+var approverRegistered atomic.Bool
+
+// SetToolApprovals records whether this process has something answering ToolApprovalChan. Input: true when an approver is now reading the channel, false when it stops. Output: none. Called by the terminal UI's process before it connects; a test that turns it on must turn it back off.
+func SetToolApprovals(on bool) { approverRegistered.Store(on) }
+
+// HasApprover reports whether an approval request would reach a human. Output: true only after SetToolApprovals(true).
+func HasApprover() bool { return approverRegistered.Load() }
+
+// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the TUI's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check HasApprover and AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the TUI to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
 func (a *Agent) requestApproval(ctx context.Context, allowKey, description string, execute func() string, editableCommand string) string {
 	resChan := make(chan string, 1)
 	req := ToolRequest{
@@ -912,6 +969,12 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 		slog.Warn("HITL approval abandoned: session ended before user responded", "description", description)
 		return toolError("that ended before it was approved")
 	}
+}
+
+// refuseApproval is what a tool returns instead of asking for an approval nobody is listening for. Input: what the tool wanted to do, for the log. Output: one refusal sentence for the model.
+func refuseApproval(what string) string {
+	slog.Warn("refusing a tool that needs approval: nothing in this session can ask for one", "what", what)
+	return toolError("that needs your say-so and there's no way to ask for it here — do it yourself, or tell me exactly what to do instead")
 }
 
 // ExecuteTool is just executeTool but exported, so eval tests outside this package can call the real tool (query_memory, recall, etc) the same way the model does.
@@ -944,6 +1007,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return RunShellCommand(command)
 		}
 
+		if !HasApprover() {
+			return refuseApproval("shell: " + command)
+		}
 		slog.Warn("intercepting shell command for HITL", "command", command)
 		return a.requestApproval(ctx, command, "shell: "+command, func() string { return RunShellCommand(command) }, command)
 
@@ -951,6 +1017,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		// Always gated — a password manager routinely leaves a secret sitting in the clipboard, and there's no way to distinguish that from a benign copy ahead of time.
 		if _, allowed := a.AllowedCmds.Load("read_clipboard"); allowed {
 			return readClipboard()
+		}
+		if !HasApprover() {
+			return refuseApproval("read the clipboard")
 		}
 		slog.Warn("intercepting clipboard read for HITL")
 		return a.requestApproval(ctx, "read_clipboard", "read the clipboard", readClipboard, "")
@@ -966,11 +1035,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 				slog.Warn("read_file failed", "path", path, "error", err)
 				return toolError("I couldn't read that file — check the path")
 			}
-			result := string(data)
-			if len(result) > 4000 {
-				result = result[:4000] + "\n... (truncated, file too large)"
-			}
-			return result
+			return capRunes(string(data), 4000, "... (truncated, file too large)")
 		}
 		if !isSensitivePath(path) {
 			return execute()
@@ -978,6 +1043,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		allowKey := "read_file:" + path
 		if _, allowed := a.AllowedCmds.Load(allowKey); allowed {
 			return execute()
+		}
+		if !HasApprover() {
+			return refuseApproval("read file: " + path)
 		}
 		slog.Warn("intercepting sensitive file read for HITL", "path", path)
 		return a.requestApproval(ctx, allowKey, "read file: "+path, execute, "")
@@ -1320,24 +1388,23 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		return a.switchWindow(ctx, strings.TrimSpace(app))
 
 	case "open_url":
-		url, ok := args["url"].(string)
+		raw, ok := args["url"].(string)
 		if !ok {
 			return toolError("open_url needs a url")
 		}
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "windows":
-			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-		case "darwin":
-			cmd = exec.Command("open", url)
-		default:
-			cmd = exec.Command("xdg-open", url)
+		// Only http and https ever reach the opener. The url in a tool call is routinely copied out of screen text or a page the model just read, and the opener is a shell command: file:///home/…/.ssh/id_rsa, a .desktop path, a smb:// share or a javascript: link would all be acted on. ipc.Open makes the same check for the same reason.
+		if parsed, err := neturl.Parse(raw); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			slog.Warn("open_url refused: not an http(s) link", "url", raw)
+			return toolError("I can only open http and https links")
 		}
+		cmd := openURLCommand(raw)
 		if err := cmd.Start(); err != nil {
-			slog.Warn("open_url failed", "url", url, "error", err)
+			slog.Warn("open_url failed", "url", raw, "error", err)
 			return toolError("I couldn't open that link")
 		}
-		return fmt.Sprintf("opened %s in browser", url)
+		// Reaped in the background: the opener exits in milliseconds, and an unwaited child stays a zombie in the daemon's process table for the life of the daemon.
+		go func() { _ = cmd.Wait() }()
+		return fmt.Sprintf("opened %s in browser", raw)
 
 	case "query_memory":
 		if msg := checkArgs(args, "query", "domain", "app", "since", "until", "kind"); msg != "" {
