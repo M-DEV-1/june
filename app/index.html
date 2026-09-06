@@ -10,8 +10,8 @@
   </head>
 
   <body>
-    <!-- The notice bubble: what Ora says when it speaks first. Empty and hidden until a "notice" event arrives on the daemon's stream, and above the card in the flow so a notice that lands while a question is on screen stacks over that question instead of replacing it. -->
-    <div class="N" id="n" hidden></div>
+    <!-- The notice bubble: what Ora says when it speaks first. Empty and hidden until a "notice" event arrives on the daemon's stream, and above the card in the flow so a notice that lands while a question is on screen stacks over that question instead of replacing it. It is a live region because a notice is Ora talking first with nothing else announcing it: a screen reader would otherwise not know the card had appeared until the user happened to land on it. -->
+    <div class="N" id="n" role="status" aria-live="polite" hidden></div>
     <!-- The whole window is this one card; main.ts rebuilds its contents from state on every event. -->
     <div class="W" id="w"></div>
   </body>
