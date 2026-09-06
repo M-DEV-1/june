@@ -2181,6 +2181,14 @@ func TestStore_SummaryFTS_IndexesSummaryTextNotJSONKeys(t *testing.T) {
 	}
 }
 
+// unapplyFTSCleanup makes an already-migrated store look like one written by a binary from before the search-index cleanup migration landed, by deleting that migration's row from schema_migrations. Input: an open store. Output: nothing, but the next db.New on the same file runs the cleanup again, which is what these legacy-row tests are about.
+func unapplyFTSCleanup(t *testing.T, store *db.Store) {
+	t.Helper()
+	if _, err := store.DB().Exec(`DELETE FROM schema_migrations WHERE version = 7`); err != nil {
+		t.Fatalf("unapply the fts cleanup migration: %v", err)
+	}
+}
+
 // TestCreateSchema_RebuildsSummaryFTSContent checks the migration for DBs written before the trigger extracted $.summary: their memory_fts rows still hold raw TaskSummary JSON, so reopening the store must rewrite them to the summary text.
 func TestCreateSchema_RebuildsSummaryFTSContent(t *testing.T) {
 	dir := t.TempDir()
@@ -2196,6 +2204,7 @@ func TestCreateSchema_RebuildsSummaryFTSContent(t *testing.T) {
 	if _, err := first.DB().Exec(`INSERT INTO memory_fts(content, source, ref_id) VALUES (?, 'summary', 4242)`, raw); err != nil {
 		t.Fatalf("seed legacy fts row: %v", err)
 	}
+	unapplyFTSCleanup(t, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
