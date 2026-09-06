@@ -9,7 +9,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -363,16 +362,14 @@ func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 		args = append(args, "--prompt", prompt)
 	}
 
-	var out, errOut strings.Builder
-	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("whisper: %w (%s)", err, strings.TrimSpace(errOut.String()))
+	// recorder.RunWhisper redoes the run on the CPU when the card has no memory for it, so a dictation that would have been lost to ErrorOutOfDeviceMemory comes back as words a little later instead. Both attempts happen inside the GPU turn finish is holding, and finish deletes the WAV only once this has returned.
+	out, errOut, err := recorder.RunWhisper(ctx, bin, args)
+	if err != nil {
+		return "", fmt.Errorf("whisper: %w (%s)", err, strings.TrimSpace(errOut))
 	}
 
 	var words []string
-	for _, line := range strings.Split(out.String(), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || util.NonSpeechLine.MatchString(line) {
 			continue
