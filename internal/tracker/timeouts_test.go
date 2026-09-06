@@ -141,3 +141,33 @@ func TestStart_ASlowCaptureDoesNotStopTheTickLoop(t *testing.T) {
 		t.Fatalf("the active window was polled %d times while a capture was in flight, so the capture is still on the tick goroutine", after-atStart)
 	}
 }
+
+// A lock probe that never answers must not stop the tick loop. sessionLocked runs first thing on every tick, before the window read, so a gnome-shell wedged on the screensaver property held the loop for as long as it liked: no polling, no dwell emission, no recapture, and the ticker's one-slot buffer dropping every tick missed meanwhile.
+func TestStart_AWedgedLockProbeDoesNotStopTheTickLoop(t *testing.T) {
+	forever := make(chan struct{})
+
+	restore := sessionLocked
+	sessionLocked = func() bool { <-forever; return true }
+
+	eye := &countingTracker{act: Activity{App: "Code", Title: "daemon.go"}}
+	d := NewDaemon(eye, 5*time.Millisecond, 10*time.Millisecond, nil, make(chan Activity, 32))
+	d.bounds.lock = 10 * time.Millisecond
+	d.SetCapturer(func() string { return "" })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Start(ctx); close(done) }()
+
+	time.Sleep(200 * time.Millisecond)
+	polls := eye.polls.Load()
+
+	cancel()
+	close(forever)
+	<-done
+	sessionLocked = restore
+
+	// 200ms of 5ms ticks against a 10ms probe budget is roughly thirteen polls; five is a floor loose enough for a loaded machine and far above the zero a wedged loop manages.
+	if polls < 5 {
+		t.Fatalf("the active window was polled %d times while the lock probe was wedged, want the tick loop still running", polls)
+	}
+}
