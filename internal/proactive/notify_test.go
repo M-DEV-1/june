@@ -11,6 +11,7 @@ import (
 
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 )
 
@@ -67,7 +68,7 @@ func (f *fakeNotifier) count() int {
 // testScheduler builds a scheduler with both daily hours disabled and a fake notifier wired, which is every snooze test's starting point.
 func testScheduler(t *testing.T) (*Scheduler, *db.Store, *fakeNotifier) {
 	t.Helper()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	s := New(store, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
 	f := &fakeNotifier{}
 	s.SetNotifier(f)
@@ -625,7 +626,7 @@ func TestBusNotifier_FinishForgetsTheKey(t *testing.T) {
 // TestMaybeTaskNotices_FailedWatermarkWriteDoesNotReannounce checks a watermark the store would not write is still remembered for this process, so the same items are not announced again on the next tick, once a minute, for as long as the disk is full.
 func TestMaybeTaskNotices_FailedWatermarkWriteDoesNotReannounce(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if err := store.SetDiaryEntry(ctx, "", taskNoticeWatermarkKind, "0"); err != nil {
 		t.Fatalf("SetDiaryEntry: %v", err)
 	}
@@ -663,7 +664,7 @@ func TestSnooze_RefiredNoticeCarriesItsPlace(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.kind, func(t *testing.T) {
 			ctx := context.Background()
-			store := testStore(t)
+			store := dbtest.Open(t)
 			if _, err := store.AddSnooze(ctx, c.kind, "42", "Still open", "Send the invoice", time.Now().Add(-time.Minute)); err != nil {
 				t.Fatalf("AddSnooze: %v", err)
 			}

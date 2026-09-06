@@ -17,6 +17,7 @@ import (
 
 	"ora/internal/agent"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/tracker"
 )
 
@@ -92,7 +93,7 @@ func mustEvent(t *testing.T, ch <-chan Event) Event {
 }
 
 func TestAsk_ReturnsAcceptedWithID(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{trace: agent.TurnTrace{Answer: "hi"}}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, &fakeAsker{trace: agent.TurnTrace{Answer: "hi"}}, dbtest.Open(t), nil, nil)
 
 	resp, err := http.Post(srv.URL+"/ask", "application/json", strings.NewReader(`{"question":"what time is it","context":""}`))
 	if err != nil {
@@ -115,7 +116,7 @@ func TestAsk_ReturnsAcceptedWithID(t *testing.T) {
 }
 
 func TestAsk_BadJSON(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, &fakeAsker{}, dbtest.Open(t), nil, nil)
 
 	resp, err := http.Post(srv.URL+"/ask", "application/json", strings.NewReader(`{not json`))
 	if err != nil {
@@ -133,7 +134,7 @@ func TestEvents_DeliversStatusAnswerDoneInOrder(t *testing.T) {
 		ToolHops: []agent.ToolHop{{Name: "search_memory"}, {Name: "query_store"}},
 		Answer:   "it's 3pm",
 	}
-	srv := newTestServer(t, &fakeAsker{trace: trace}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, &fakeAsker{trace: trace}, dbtest.Open(t), nil, nil)
 
 	ch, closeFn := readSSE(t, srv)
 	defer closeFn()
@@ -161,7 +162,7 @@ func TestEvents_DeliversStatusAnswerDoneInOrder(t *testing.T) {
 }
 
 func TestEvents_ErrorInsteadOfAnswerOnFailure(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{err: errors.New("boom")}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, &fakeAsker{err: errors.New("boom")}, dbtest.Open(t), nil, nil)
 
 	ch, closeFn := readSSE(t, srv)
 	defer closeFn()
@@ -188,7 +189,7 @@ func TestEvents_ErrorInsteadOfAnswerOnFailure(t *testing.T) {
 
 func TestEvents_TwoClientsBothReceiveEvents(t *testing.T) {
 	trace := agent.TurnTrace{Answer: "42"}
-	srv := newTestServer(t, &fakeAsker{trace: trace}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, &fakeAsker{trace: trace}, dbtest.Open(t), nil, nil)
 
 	chA, closeA := readSSE(t, srv)
 	defer closeA()
@@ -309,7 +310,7 @@ func TestAsk_HungModelCallEndsWithAnErrorEvent(t *testing.T) {
 	old := askTimeout
 	askTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { askTimeout = old })
-	srv := newTestServer(t, hangingAsker{}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, hangingAsker{}, dbtest.Open(t), nil, nil)
 	events, closeEvents := readSSE(t, srv)
 	defer closeEvents()
 
@@ -553,7 +554,7 @@ func waitFor(t *testing.T, cond func() bool) {
 
 // The event stream opens with enough bytes to get past a client that buffers a small response body, and keeps a quiet connection warm. A webview held the first ring for seconds and sometimes dropped it entirely, because it counts bytes rather than events before it delivers anything.
 func TestEvents_OpensWithEnoughBytesToGetPastAClientThatBuffers(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
 
 	resp, err := http.Get(srv.URL + "/events")
@@ -590,7 +591,7 @@ func TestEvents_OpensWithEnoughBytesToGetPastAClientThatBuffers(t *testing.T) {
 
 // Shutting down ends every open event stream at once. The HTTP server waits for its handlers but never cancels their requests, so a daemon with the desktop window connected used to hold its port for the whole shutdown timeout, and the next daemon to start found the address in use.
 func TestCloseStreams_EndsEveryOpenStream(t *testing.T) {
-	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
 	a, b := s.hub.subscribe(), s.hub.subscribe()
 
 	s.CloseStreams()

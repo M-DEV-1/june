@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"ora/internal/db/dbtest"
 )
 
 // fakeLedger stands in for the store's token ledger: it answers with whatever rows a test seeded, remembers the windows it was asked for, and can be made to fail.
@@ -341,7 +343,7 @@ func getUsageRaw(t *testing.T, srv *httptest.Server) string {
 
 // TestUsage_AgainstTheRealStore runs the route against a real store rather than a fake, so the day keys the ledger groups by and the ones the bar series fills in are checked against each other.
 func TestUsage_AgainstTheRealStore(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	for _, use := range []TokenUse{
 		{Provider: "claude", Model: "sonnet", Channel: "text", InputTokens: 1200, OutputTokens: 80, TotalTokens: 1280, DurationMS: 3100, Question: "what did the review land on", At: time.Now()},

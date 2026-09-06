@@ -142,19 +142,28 @@ func TestClaudeCLI_invocation(t *testing.T) {
 	}
 }
 
-// A headless hang is cut off by the timeout.
-func TestClaudeCLI_timeout(t *testing.T) {
-	bin := fakeCLI(t, "claude", `sleep 5`)
-	_, err := ClaudeCLI(bin, "", 1)(context.Background(), "summarise this")
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("error = %v, want it to contain %q", err, "timed out")
+// ClaudeCLI's error paths: a headless hang is cut off by the timeout, and a missing binary is an error rather than an empty answer.
+func TestClaudeCLI_ErrorPaths(t *testing.T) {
+	cases := []struct {
+		name        string
+		bin         string
+		timeout     int
+		prompt      string
+		wantErrText string
+	}{
+		{"headless hang is cut off by the timeout", fakeCLI(t, "claude", `sleep 5`), 1, "summarise this", "timed out"},
+		{"missing binary is an error, not an empty answer", filepath.Join(t.TempDir(), "not-installed"), 10, "hi", ""},
 	}
-}
-
-func TestClaudeCLI_missingBinary(t *testing.T) {
-	_, err := ClaudeCLI(filepath.Join(t.TempDir(), "not-installed"), "", 10)(context.Background(), "hi")
-	if err == nil {
-		t.Fatal("a missing binary should be an error, not an empty answer")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ClaudeCLI(c.bin, "", c.timeout)(context.Background(), c.prompt)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if c.wantErrText != "" && !strings.Contains(err.Error(), c.wantErrText) {
+				t.Fatalf("error = %v, want it to contain %q", err, c.wantErrText)
+			}
+		})
 	}
 }
 

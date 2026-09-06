@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 )
 
 // TestTasksListsBothSources checks that /tasks shows the action items a meeting raised as "noticed" and the tasks the user typed in as "you".
 func TestTasksListsBothSources(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Lodestone sync", Raised: time.Now()}}); err != nil {
 		t.Fatalf("seed action item: %v", err)
@@ -70,7 +71,7 @@ func TestTasksListsBothSources(t *testing.T) {
 
 // TestTaskDone checks both halves of the tick: a task the user typed in flips in user_tasks, and a noticed one closes the action note the same way the agent's revise tool does.
 func TestTaskDone(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
 		t.Fatalf("seed action item: %v", err)
@@ -113,7 +114,7 @@ func TestTaskDone(t *testing.T) {
 
 // TestTaskDoneStatusBody checks that POST /tasks/{id}/done also accepts {"status": "open"|"done"|"dropped"} for a noticed task, and that a dropped one drops off GET /tasks without ever coming back as done.
 func TestTaskDoneStatusBody(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
 		t.Fatalf("seed action item: %v", err)
@@ -158,7 +159,7 @@ func TestTaskDoneStatusBody(t *testing.T) {
 
 // TestTaskDoneStatusBodyUserTask checks that a task the user typed in takes status open/done through the same body, and rejects dropped since user_tasks has no such state.
 func TestTaskDoneStatusBodyUserTask(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 
 	var created struct{ ID string }
@@ -180,7 +181,7 @@ func TestTaskDoneStatusBodyUserTask(t *testing.T) {
 
 // TestTaskDoneUnknownID checks that ticking a task that does not exist is refused rather than silently accepted.
 func TestTaskDoneUnknownID(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 	for _, id := range []string{"task-999", "999", "nonsense"} {
 		if code := postJSON(t, srv, "/tasks/"+id+"/done", `{"done":true}`, nil); code == http.StatusOK {
@@ -191,7 +192,7 @@ func TestTaskDoneUnknownID(t *testing.T) {
 
 // TestPatchTaskOwner checks that PATCH /tasks/{id} lets the user correct whose task a noticed item really is, and that the new class is what GET /tasks reports afterwards — hearing about a thing in a meeting does not make it his, and the user is the one who can say so.
 func TestPatchTaskOwner(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "look into the vendor's new pricing", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
 		t.Fatalf("seed action item: %v", err)
@@ -220,7 +221,7 @@ func TestPatchTaskOwner(t *testing.T) {
 
 // TestPatchTaskOwner_Rejects checks the three ways PATCH /tasks/{id} refuses a request: a value that is not me/them/unclear, an id naming no action item, and a "task-N" id, since a task the user typed in is always his and has nothing to correct.
 func TestPatchTaskOwner_Rejects(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "renew the domain", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
 		t.Fatalf("seed action item: %v", err)
@@ -247,7 +248,7 @@ func TestPatchTaskOwner_Rejects(t *testing.T) {
 
 // TestTasksEmptyListIsNotNull guards the shape the window renders directly.
 func TestTasksEmptyListIsNotNull(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
 	var list struct{ Tasks []Task }
 	getJSON(t, srv, "/tasks", &list)
@@ -266,7 +267,7 @@ func storeWithMeeting(t *testing.T, store *db.Store) {
 
 // TestTasksListsOnlyTheUsersOwnNoticedItems checks that GET /tasks, which reads action notes directly rather than through OpenActionItems, applies the same rule: an item owed by somebody else never appears, an item owed by "Me" does. On 2026-09-05 all 47 other people's items were still listed after the store-side filter went in, because this route never went through it.
 func TestTasksListsOnlyTheUsersOwnNoticedItems(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	items := []memory.ActionItem{
 		{Owner: "Priya", Text: "send the workbook", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
@@ -287,7 +288,7 @@ func TestTasksListsOnlyTheUsersOwnNoticedItems(t *testing.T) {
 
 // TestTasksOwnerFilter checks the three lists behind one page: his own work by default, other people's work on request, and everything at once. Before this, the default list was the exact opposite — his own items were hidden because they carry his name, and every item nobody was named for was shown as his.
 func TestTasksOwnerFilter(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera — goes by Alex."); err != nil {
 		t.Fatal(err)

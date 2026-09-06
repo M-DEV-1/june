@@ -151,37 +151,26 @@ func TestSessionHandleRaceWithClose(t *testing.T) {
 	<-done
 }
 
-// openSequence must close any session it opened before returning an error, at every failure point after createSession succeeds, so a failed Open never leaks a live portal session.
-func TestOpenSequenceClosesOnSelectDevicesFailure(t *testing.T) {
-	p := &fakePortal{selectDevicesErr: errBoom}
-	_, _, _, _, err := openSequence(context.Background(), p, "")
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("err = %v, want errBoom", err)
+// openSequence must close any session it opened before returning an error, at every failure point after createSession succeeds, so a failed Open never leaks a live portal session. The three portal calls that can fail after createSession — SelectDevices, SelectSources, and Start — must all trigger the same close.
+func TestOpenSequenceClosesOnFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		p    *fakePortal
+	}{
+		{"SelectDevices fails", &fakePortal{selectDevicesErr: errBoom}},
+		{"SelectSources fails", &fakePortal{selectSourcesErr: errBoom}},
+		{"Start fails", &fakePortal{startErr: errBoom}},
 	}
-	if p.closedHandle != "session-1" {
-		t.Fatalf("closedHandle = %q, want session-1", p.closedHandle)
-	}
-}
-
-func TestOpenSequenceClosesOnSelectSourcesFailure(t *testing.T) {
-	p := &fakePortal{selectSourcesErr: errBoom}
-	_, _, _, _, err := openSequence(context.Background(), p, "")
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("err = %v, want errBoom", err)
-	}
-	if p.closedHandle != "session-1" {
-		t.Fatalf("closedHandle = %q, want session-1", p.closedHandle)
-	}
-}
-
-func TestOpenSequenceClosesOnStartFailure(t *testing.T) {
-	p := &fakePortal{startErr: errBoom}
-	_, _, _, _, err := openSequence(context.Background(), p, "")
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("err = %v, want errBoom", err)
-	}
-	if p.closedHandle != "session-1" {
-		t.Fatalf("closedHandle = %q, want session-1", p.closedHandle)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, _, _, err := openSequence(context.Background(), c.p, "")
+			if !errors.Is(err, errBoom) {
+				t.Fatalf("err = %v, want errBoom", err)
+			}
+			if c.p.closedHandle != "session-1" {
+				t.Fatalf("closedHandle = %q, want session-1", c.p.closedHandle)
+			}
+		})
 	}
 }
 

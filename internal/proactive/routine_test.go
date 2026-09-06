@@ -9,6 +9,7 @@ import (
 
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
 
 // TestParseScheduleAcceptedForms checks every form ParseSchedule documents itself as accepting.
@@ -127,7 +128,7 @@ func TestScheduleDueWhen(t *testing.T) {
 // TestSchedulerRunsDueRoutineAndNotifies is the tracer bullet for the runner: a due routine is asked, its answer is recorded as its last run, and a notice goes out.
 func TestSchedulerRunsDueRoutineAndNotifies(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.AddRoutine(ctx, "tell me the one thing I must do today", "every 1 hour"); err != nil {
 		t.Fatalf("AddRoutine: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestSchedulerRunsDueRoutineAndNotifies(t *testing.T) {
 // TestSchedulerSkipsNothingAnswerAndDisabledRoutine checks that an exact "NOTHING" answer records the run but sends no notice, and a disabled routine is never asked at all.
 func TestSchedulerSkipsNothingAnswerAndDisabledRoutine(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	quiet, err := store.AddRoutine(ctx, "tell me if anything is on fire", "every 1 hour")
 	if err != nil {
 		t.Fatalf("AddRoutine: %v", err)
@@ -198,7 +199,7 @@ func TestSchedulerSkipsNothingAnswerAndDisabledRoutine(t *testing.T) {
 // TestSchedulerSkipsRoutineAlreadyRunning checks runRoutine's in-flight guard: a routine TryStart already holds — standing in for a POST /routines/{id}/run in flight on the same routine — is skipped by the tick rather than asked and recorded a second time, and the guard is released again afterward so a later tick can pick it up.
 func TestSchedulerSkipsRoutineAlreadyRunning(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	id, err := store.AddRoutine(ctx, "tell me the one thing I must do today", "every 1 hour")
 	if err != nil {
 		t.Fatalf("AddRoutine: %v", err)
@@ -240,7 +241,7 @@ func TestSchedulerSkipsRoutineAlreadyRunning(t *testing.T) {
 // TestSchedulerNeverAsksWithNoRoutineAsk checks the runner does nothing at all when SetRoutineAsk was never called, the same "unwired disables it" contract SetAsk and SetWeeklyStudy already carry.
 func TestSchedulerNeverAsksWithNoRoutineAsk(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.AddRoutine(ctx, "tell me something", "every 1 hour"); err != nil {
 		t.Fatalf("AddRoutine: %v", err)
 	}
@@ -262,7 +263,7 @@ func TestSchedulerNeverAsksWithNoRoutineAsk(t *testing.T) {
 // TestTick_RoutineRunsWithoutHoldingUpTheTick checks a due routine's ask runs on its own goroutine: the tick must return while the ask is still in flight, since one ask goes through the whole tool loop and would otherwise delay every later tick.
 func TestTick_RoutineRunsWithoutHoldingUpTheTick(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.AddRoutine(ctx, "tell me the one thing I must do today", "every 1 hour"); err != nil {
 		t.Fatalf("AddRoutine: %v", err)
 	}
@@ -296,7 +297,7 @@ func TestTick_RoutineRunsWithoutHoldingUpTheTick(t *testing.T) {
 // TestRoutine_LastRunIsStampedAfterTheAsk checks the run is stamped with the clock as it stands once the ask returns, not the tick's own timestamp: an ask that itself outran the "when" throttle used to be due again the moment it returned, asking continuously.
 func TestRoutine_LastRunIsStampedAfterTheAsk(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.AddRoutine(ctx, "tell me if Priya replied", "when Priya replies about the venue"); err != nil {
 		t.Fatalf("AddRoutine: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestRoutine_LastRunIsStampedAfterTheAsk(t *testing.T) {
 // TestRoutine_StoreFailureStillPostsAndDoesNotReask checks a routine whose run the store would not record still reaches the user, and is not asked again on the very next tick — the answer is already paid for, and a store that keeps refusing must not turn one routine into an ask a minute.
 func TestRoutine_StoreFailureStillPostsAndDoesNotReask(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.AddRoutine(ctx, "tell me the one thing I must do today", "every 1 hour"); err != nil {
 		t.Fatalf("AddRoutine: %v", err)
 	}

@@ -11,20 +11,10 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 	"ora/internal/tracker"
 )
-
-// newReadStore opens a throwaway in-memory store the same way internal/db's own tests do, closed when the test ends.
-func newReadStore(t *testing.T) *db.Store {
-	t.Helper()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
 
 // getJSON performs a GET against the test server and decodes the body into out, failing the test on any status other than 200.
 func getJSON(t *testing.T, srv *httptest.Server, path string, out any) {
@@ -60,7 +50,7 @@ const sampleMinutes = `# Lodestone sync
 `
 
 func TestContext_ReadsTheLatestCapture(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Brave", Title: "an old tab", ScreenText: "older text"}); err != nil {
 		t.Fatalf("seed episode: %v", err)
@@ -131,7 +121,7 @@ func TestContext_ReadsTheLatestCapture(t *testing.T) {
 
 // TestContext_LiveFocusWinsOverBuffer covers the reported lag: the hotkey must name the window in focus right now, even when the tracker's sampled buffer still holds an older, different window.
 func TestContext_LiveFocusWinsOverBuffer(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	screen := func() []tracker.Activity {
 		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
 	}
@@ -148,7 +138,7 @@ func TestContext_LiveFocusWinsOverBuffer(t *testing.T) {
 
 // TestContext_LiveFocusOraFallsThroughToBuffer covers the moment the hotkey itself takes focus: the live read names Ora, so /context must still fall through to the buffer's newest non-Ora capture, exactly as it does for a stale buffer entry.
 func TestContext_LiveFocusOraFallsThroughToBuffer(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	screen := func() []tracker.Activity {
 		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
 	}
@@ -165,7 +155,7 @@ func TestContext_LiveFocusOraFallsThroughToBuffer(t *testing.T) {
 
 // TestContext_LiveFocusFailureFallsThroughToBuffer covers a live reader that finds nothing (no accessibility bus, no focused window): /context must behave exactly as it did before a live reader existed.
 func TestContext_LiveFocusFailureFallsThroughToBuffer(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	screen := func() []tracker.Activity {
 		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
 	}
@@ -180,7 +170,7 @@ func TestContext_LiveFocusFailureFallsThroughToBuffer(t *testing.T) {
 
 // TestContext_LiveFocusTimeoutDoesNotDelayResponse covers a hung accessibility read: /context must fall back to the buffer rather than wait for it, and the whole request must still finish quickly rather than blocking for as long as the reader takes.
 func TestContext_LiveFocusTimeoutDoesNotDelayResponse(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	screen := func() []tracker.Activity {
 		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
 	}
@@ -224,7 +214,7 @@ func TestReadFocused_AbandonedWhenRequestContextEnds(t *testing.T) {
 }
 
 func TestMatters_ActionsThenThreadsThenMeetings(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
@@ -268,7 +258,7 @@ func TestMatters_ActionsThenThreadsThenMeetings(t *testing.T) {
 }
 
 func TestMatters_EmptyStoreGivesAnEmptyList(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, &fakeAsker{}, dbtest.Open(t), nil, nil)
 	resp, err := http.Get(srv.URL + "/matters")
 	if err != nil {
 		t.Fatalf("GET /matters: %v", err)
@@ -282,7 +272,7 @@ func TestMatters_EmptyStoreGivesAnEmptyList(t *testing.T) {
 }
 
 func TestToday_BriefAndTimelineOldestFirst(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	day := time.Now().Format("2006-01-02")
 
@@ -337,7 +327,7 @@ func TestToday_BriefAndTimelineOldestFirst(t *testing.T) {
 }
 
 func TestToday_BriefFallsBackToTheLatestDigest(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	if _, err := store.DB().Exec(`INSERT INTO nodes(parent_id, type, content) VALUES(NULL, 'digest', 'yesterday in one paragraph')`); err != nil {
 		t.Fatalf("seed digest: %v", err)
 	}
@@ -350,7 +340,7 @@ func TestToday_BriefFallsBackToTheLatestDigest(t *testing.T) {
 }
 
 func TestMeetings_NewestFirstWithAttendees(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.LogNote(ctx, "# Older meeting\n**Older meeting — Tue 2 Sep 2026 09:00 to 09:20**\n", "meeting"); err != nil {
 		t.Fatalf("seed older meeting: %v", err)
@@ -398,7 +388,7 @@ func TestMeetings_NewestFirstWithAttendees(t *testing.T) {
 
 // A note internal/recorder filed carries a trailing duration marker after the minutes text. GET /meetings must turn that into duration_s and never let the marker itself leak into the minutes text the window renders.
 func TestMeetings_ReadsDurationMarkerAndStripsIt(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	minutes := "# Standup\n\n## Key points\n- shipped it.\n"
 	// This is the exact shape internal/recorder's fileMinutes stores: the minutes text, then a blank line and the marker, matching withMeetingDuration in internal/recorder/recorder.go.
@@ -428,7 +418,7 @@ func TestMeetings_ReadsDurationMarkerAndStripsIt(t *testing.T) {
 }
 
 func TestMemorySearch(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	if _, err := store.LogNote(ctx, "Priya wants the invoice before Friday", "fact"); err != nil {
 		t.Fatalf("seed note: %v", err)
@@ -463,7 +453,7 @@ func TestMemorySearch(t *testing.T) {
 }
 
 func TestMemorySearch_EmptyQueryIs400(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{}, newReadStore(t), nil, nil)
+	srv := newTestServer(t, &fakeAsker{}, dbtest.Open(t), nil, nil)
 	for _, path := range []string{"/memory/search", "/memory/search?q=", "/memory/search?q=%20"} {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil {
@@ -477,7 +467,7 @@ func TestMemorySearch_EmptyQueryIs400(t *testing.T) {
 }
 
 func TestPeople_PersonalEntriesThenHeardOnlyNames(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	for _, e := range [][2]string{
 		{"identity", "The user is Alex Rivera."},
@@ -521,7 +511,7 @@ func TestPeople_PersonalEntriesThenHeardOnlyNames(t *testing.T) {
 
 // TestContext_StoredEpisodeFallbackSkipsOra covers the last resort: no live focus, no buffer, and the newest episodes in the store are Ora's own window, filed before the tracker learned to skip it. The answer must be the newest episode that is some other window.
 func TestContext_StoredEpisodeFallbackSkipsOra(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	for _, e := range []db.EpisodeWrite{
 		{App: "Brave", Title: "docs", ScreenText: "doc text"},
@@ -544,7 +534,7 @@ func TestContext_StoredEpisodeFallbackSkipsOra(t *testing.T) {
 
 // A meeting is dated by when it ran, not by when its write-up was filed. A recording deferred to mains, or one the startup sweep recovered after a crash, is filed hours or days after the call — and the window groups the list by this field, so the call would sit under the wrong day and read as "today".
 func TestMeetings_DatedByTheRecordingsStartNotTheNote(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 	withMarker := "# Standup\n\n## Key points\n- shipped it.\n\n<!--ora:duration start=2026-09-04T16:10:00Z stop=2026-09-04T16:41:00Z-->\n"
 	if _, err := store.LogNote(ctx, withMarker, "meeting"); err != nil {
@@ -593,7 +583,7 @@ func TestContext_LiveFocusOnTheBlocklistFallsThroughToBuffer(t *testing.T) {
 	tracker.SetBlocklist([]string{"1password"})
 	t.Cleanup(func() { tracker.SetBlocklist(nil) })
 
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	screen := func() []tracker.Activity {
 		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
 	}
@@ -610,7 +600,7 @@ func TestContext_LiveFocusOnTheBlocklistFallsThroughToBuffer(t *testing.T) {
 
 // TestToday_ReadsOnlyTheNotesTodayNeeds checks the bound GET /today reads its notes under: a note written days ago and untouched since is not on today's page, while an action item written days ago and closed this morning still is — the store's bound is on created_at or updated_at for exactly that reason.
 func TestToday_ReadsOnlyTheNotesTodayNeeds(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 
 	stale, err := store.LogNote(ctx, "the user prefers short answers", "fact")
@@ -646,7 +636,7 @@ func TestToday_ReadsOnlyTheNotesTodayNeeds(t *testing.T) {
 
 // TestMemorySearch_CapsArchivedMatches checks that the archived notes appended after the hybrid hits are bounded by the same searchCap the rest of the page is: without a cap, a one-letter query hands the window the whole archive, each row up to 600 runes.
 func TestMemorySearch_CapsArchivedMatches(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	for i := 0; i < searchCap+10; i++ {
 		if _, err := store.DB().Exec(
 			`INSERT INTO notes_archive(note_id, content, kind, created_at, archived_at) VALUES(?, ?, 'fact', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
@@ -668,7 +658,7 @@ func TestMemorySearch_CapsArchivedMatches(t *testing.T) {
 
 // TestPeople_BoundsTheMeetingNoteRead checks the window GET /people reads meeting notes over: a name only ever heard in a meeting older than peopleWindow is not on the page, so this screen does not grow one FTS count query per name for the life of the store.
 func TestPeople_BoundsTheMeetingNoteRead(t *testing.T) {
-	store := newReadStore(t)
+	store := dbtest.Open(t)
 	ctx := context.Background()
 
 	old, err := store.LogNote(ctx, sampleMinutes, meetingNoteKind)

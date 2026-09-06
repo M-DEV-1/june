@@ -6,24 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
-
-// testStore opens a throwaway in-memory store that is closed when the test ends.
-func testStore(t *testing.T) *db.Store {
-	t.Helper()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
 
 // TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows seeds one week's worth of brain-call, vector-contribution, dream-run, and diary fixture rows, and asserts the rendered text names every section and reflects the fixture numbers — the render is the whole point of the weekly log, so every input this package can produce must show up somewhere in the output.
 func TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	now := time.Now()
 
 	// Brain calls: three claude-cli calls, one of which failed.
@@ -90,7 +79,7 @@ func TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows(t *testing.T) {
 // TestRenderWeeklyLog_OnlyLooksAtLastSevenDays verifies a tally row older than the window is excluded from the render — otherwise the "weekly" log would grow to cover the store's entire lifetime.
 func TestRenderWeeklyLog_OnlyLooksAtLastSevenDays(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	now := time.Now()
 
 	oldDay := now.AddDate(0, 0, -30).Format(weeklyDayFormat)
