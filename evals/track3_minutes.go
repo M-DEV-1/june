@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"ora/internal/text"
+	"ora/internal/util"
 )
 
 // track3Result is one minutes file scored against the attendee and taste rules.
@@ -104,7 +104,7 @@ func runTrack3(ctx context.Context, j *judge, dirs []string) []track3Result {
 // truncateRunes caps s to n runes, cutting on a rune boundary so a multi-byte transcript is never sliced mid-character.
 // truncateRunes cuts s to at most n runes, appending a "(truncated)" marker on its own line when it does.
 func truncateRunes(s string, n int) string {
-	cut := text.Runes(s, n)
+	cut := util.Runes(s, n)
 	if cut == s {
 		return s
 	}

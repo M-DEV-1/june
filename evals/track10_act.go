@@ -19,8 +19,7 @@ import (
 
 	"ora/internal/ipc"
 	"ora/internal/ipctoken"
-	"ora/internal/netx"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // act10Brain is the model /ask is asked to use for every task in this track, "" meaning the daemon's own configured default.
@@ -448,7 +447,7 @@ func postAttempt(ctx context.Context, client *http.Client, rawURL, token string,
 		return nil, 0, false, fmt.Errorf("POST %s: %w", rawURL, err)
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
-		w, ok := netx.ParseRetryAfter(resp.Header, time.Now())
+		w, ok := util.ParseRetryAfter(resp.Header, time.Now())
 		if !ok {
 			w = act10DefaultRetryWait
 		}
@@ -654,9 +653,9 @@ func act10Line(r act10Result) string {
 	if r.Pass {
 		status = "PASS"
 	}
-	detail := oratext.OneLine(r.Err)
+	detail := util.OneLine(r.Err)
 	if detail == "" {
-		detail = oratext.OneLine(truncateRunes(r.Answer, 120))
+		detail = util.OneLine(truncateRunes(r.Answer, 120))
 	}
 	ring := ""
 	if r.Ring {
@@ -664,7 +663,7 @@ func act10Line(r act10Result) string {
 	}
 	line := fmt.Sprintf("[%-16s] tier %d %s %6.1fs  %-34s %-4s  %s", r.ID, r.Tier, status, r.Seconds, strings.Join(r.Steps, ">"), ring, detail)
 	if r.Note != "" {
-		line += "  NOTE: " + oratext.OneLine(r.Note)
+		line += "  NOTE: " + util.OneLine(r.Note)
 	}
 	return line
 }
@@ -684,10 +683,10 @@ func act10Note(brain string, tier int, results []act10Result) string {
 			part += " ring"
 		}
 		if r.Err != "" {
-			part += " (" + oratext.OneLine(truncateRunes(r.Err, 90)) + ")"
+			part += " (" + util.OneLine(truncateRunes(r.Err, 90)) + ")"
 		}
 		if r.Note != "" {
-			part += " [" + oratext.OneLine(truncateRunes(r.Note, 90)) + "]"
+			part += " [" + util.OneLine(truncateRunes(r.Note, 90)) + "]"
 		}
 		parts = append(parts, strings.TrimSpace(part))
 	}

@@ -9,7 +9,7 @@ import (
 
 	"ora/internal/brain"
 	"ora/internal/db"
-	strtrunc "ora/internal/text"
+	"ora/internal/util"
 )
 
 // usageDays is how many days the week window and the bar series cover, today counted as one of them.
@@ -246,7 +246,7 @@ func usageCalls(rows []TokenUse) []UsageCall {
 			ID: r.ID, When: rfc3339(r.At), Provider: r.Provider, Model: r.Model, Channel: r.Channel,
 			InputTokens: r.InputTokens, OutputTokens: r.OutputTokens, TotalTokens: r.TotalTokens,
 			CachedInputTokens: r.CachedTokens, Rounds: r.Rounds,
-			DurationMS: r.DurationMS, Question: strtrunc.Runes(r.Question, usageQuestionCap),
+			DurationMS: r.DurationMS, Question: util.Runes(r.Question, usageQuestionCap),
 		})
 	}
 	return calls

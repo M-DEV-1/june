@@ -1,7 +1,8 @@
-package netx
+package util
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,5 +36,16 @@ func TestParseRetryAfter(t *testing.T) {
 				t.Errorf("ParseRetryAfter(%q) = %v, %v; want %v, %v", c.value, got, ok, c.want, c.ok)
 			}
 		})
+	}
+}
+
+// TestBodySnippet checks the read is trimmed and capped, so a failed HTTP response body never fills the log with an unbounded error page.
+func TestBodySnippet(t *testing.T) {
+	if got := BodySnippet(strings.NewReader("  hello  ")); got != "hello" {
+		t.Errorf("BodySnippet trimmed = %q, want %q", got, "hello")
+	}
+	big := strings.Repeat("x", 1000)
+	if got := BodySnippet(strings.NewReader(big)); len(got) != 512 {
+		t.Errorf("BodySnippet returned %d bytes, want capped at 512", len(got))
 	}
 }

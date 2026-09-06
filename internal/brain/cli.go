@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,5 +165,5 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 
 // head is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line. Cutting on runes rather than bytes keeps the log line valid UTF-8 whatever the CLI printed.
 func head(s string) string {
-	return oratext.RunesEllipsis(oratext.OneLine(s), 300)
+	return util.RunesEllipsis(util.OneLine(s), 300)
 }

@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"ora/internal/memory"
 	"ora/internal/obs"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 	"strings"
 	"time"
 )
@@ -54,7 +54,7 @@ func (s *Store) ArchivedNotes(ctx context.Context) ([]ArchivedNote, error) {
 // normalizeNoteContent trims, collapses internal whitespace to single spaces, and lowercases — used by LogNote's dedup check to catch paraphrased restatements.
 // Does not strip punctuation, so "user likes go" and "user likes go." still stay distinct rows.
 func normalizeNoteContent(s string) string {
-	return oratext.OneLine(strings.ToLower(s))
+	return util.OneLine(strings.ToLower(s))
 }
 
 // LogNote inserts a note. Idempotent on (content, kind) — returns existing id.

@@ -1,4 +1,4 @@
-package text
+package util
 
 import (
 	"strings"
@@ -50,7 +50,7 @@ func TestUTF8Bytes_SplitsExactlyOnMultiByteRuneBoundary(t *testing.T) {
 	}
 }
 
-// TestOneLine pins the whitespace-collapse shape eight packages each re-implemented as strings.Join(strings.Fields(s), " ").
+// TestOneLine pins the whitespace-collapse shape multiple packages once re-implemented as strings.Join(strings.Fields(s), " ").
 func TestOneLine(t *testing.T) {
 	for _, tc := range []struct{ name, s, want string }{
 		{"already one line", "a b c", "a b c"},
@@ -58,7 +58,7 @@ func TestOneLine(t *testing.T) {
 		{"leading and trailing whitespace goes", "  a b  ", "a b"},
 		{"whitespace-only becomes empty", " \n\t ", ""},
 		{"empty stays empty", "", ""},
-		{"unicode spaces count as whitespace", "a b", "a b"},
+		{"unicode spaces count as whitespace", "a b", "a b"},
 	} {
 		if got := OneLine(tc.s); got != tc.want {
 			t.Errorf("%s: OneLine(%q) = %q, want %q", tc.name, tc.s, got, tc.want)
@@ -66,7 +66,7 @@ func TestOneLine(t *testing.T) {
 	}
 }
 
-// TestRunesEllipsis pins the cap-then-mark shape three packages re-implemented, including the non-positive cap that must not append a marker to nothing.
+// TestRunesEllipsis pins the cap-then-mark shape multiple packages once re-implemented, including the non-positive cap that must not append a marker to nothing.
 func TestRunesEllipsis(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -105,5 +105,30 @@ func TestOneLineAndRunesSurviveHugeAndInvalidUTF8(t *testing.T) {
 		if got := Runes(s, 10); utf8.RuneCountInString(got) > 10 {
 			t.Errorf("Runes(%d runes, 10) returned %d runes", utf8.RuneCountInString(s), utf8.RuneCountInString(got))
 		}
+	}
+}
+
+// TestNonSpeechLine checks the shared pattern against whisper's bracketed and parenthesised markers, and against an ordinary line of speech that must not match.
+func TestNonSpeechLine(t *testing.T) {
+	for _, line := range []string{"[BLANK_AUDIO]", "(upbeat music)", "[SOUND]", "[ Silence ]"} {
+		if !NonSpeechLine.MatchString(line) {
+			t.Errorf("NonSpeechLine.MatchString(%q) = false, want true", line)
+		}
+	}
+	if NonSpeechLine.MatchString("this is what someone actually said") {
+		t.Error("NonSpeechLine matched a line of real speech")
+	}
+}
+
+// TestContainsAny checks the case-insensitive substring match, including that no substring given never matches.
+func TestContainsAny(t *testing.T) {
+	if !ContainsAny("Hello World", "world") {
+		t.Error("ContainsAny should match case-insensitively")
+	}
+	if ContainsAny("Hello World", "xyz") {
+		t.Error("ContainsAny should not match an absent substring")
+	}
+	if ContainsAny("Hello World") {
+		t.Error("ContainsAny with no substrings given should never match")
 	}
 }

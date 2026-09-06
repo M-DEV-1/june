@@ -20,7 +20,7 @@ import (
 	"ora/internal/actjob"
 	"ora/internal/ipc"
 	"ora/internal/ipctoken"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // act11TaskSel is which track 11 tasks a run executes, so one long task can be run alone rather than paying for all five every time. Empty names no task and so runs none: every job in the table clicks, types or switches windows on the user's real screen, and running all five was not something a bare `-tracks 11` should have done.
@@ -377,7 +377,7 @@ func act11Line(r act11Result) string {
 	if r.Pass {
 		status = "PASS"
 	}
-	detail := oratext.OneLine(r.Err)
+	detail := util.OneLine(r.Err)
 	if detail == "" {
 		detail = act11CostLine(r.Job.Spend)
 	}
@@ -396,7 +396,7 @@ func act11Note(brain string, results []act11Result) string {
 		}
 		part := fmt.Sprintf("%s %s %.1fs %s", r.ID, status, r.Seconds, act11CostLine(r.Job.Spend))
 		if r.Err != "" {
-			part += " (" + oratext.OneLine(truncateRunes(r.Err, 90)) + ")"
+			part += " (" + util.OneLine(truncateRunes(r.Err, 90)) + ")"
 		}
 		parts = append(parts, strings.TrimSpace(part))
 	}

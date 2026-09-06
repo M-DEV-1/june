@@ -2,18 +2,13 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
-	"ora/internal/config"
 	"ora/internal/obs"
-	oratext "ora/internal/text"
 	"ora/internal/tracker"
+	"ora/internal/util"
 	"strings"
 	"sync"
 	"time"
-
-	"google.golang.org/genai"
 )
 
 type TaskSummary struct {
@@ -531,7 +526,7 @@ func (c *Compiler) writeFallbackNode(ctx context.Context, buf []tracker.Activity
 	fallbackSummary := TaskSummary{
 		SameTask: false,
 		TaskName: "Raw Activity Log",
-		Summary:  oratext.RunesEllipsis(strings.TrimSpace(fallbackText.String()), fallbackSummaryMaxRunes),
+		Summary:  util.RunesEllipsis(strings.TrimSpace(fallbackText.String()), fallbackSummaryMaxRunes),
 		Since:    since,
 	}
 	if err := c.store.LogSemanticNode(ctx, fallbackSummary); err != nil {

@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"ora/internal/db"
-	oratext "ora/internal/text"
 	"ora/internal/tracker"
+	"ora/internal/util"
 )
 
 // Segment is one span of speech from one side of the call, with its start and end measured from the beginning of the recording (not from the beginning of its own stream).
@@ -130,7 +130,7 @@ func markerLooped(out string) bool {
 		if text == "" {
 			continue
 		}
-		if oratext.NonSpeechLine.MatchString(text) {
+		if util.NonSpeechLine.MatchString(text) {
 			markers++
 		} else {
 			words++
@@ -209,7 +209,7 @@ func parseSegments(out, speaker string, offset time.Duration) []Segment {
 			continue
 		}
 		text := strings.TrimSpace(m[9])
-		if text == "" || oratext.NonSpeechLine.MatchString(text) {
+		if text == "" || util.NonSpeechLine.MatchString(text) {
 			continue
 		}
 		segs = append(segs, Segment{

@@ -1,5 +1,4 @@
-// Package fsx holds the small filesystem operations more than one caller needs and the standard library does not provide as one call.
-package fsx
+package util
 
 import (
 	"os"

@@ -8,7 +8,7 @@ import (
 	"math"
 	"ora/internal/memory"
 	"ora/internal/obs"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 	"os"
 	"path/filepath"
 	"strings"
@@ -438,7 +438,7 @@ func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([
 		return nil, err
 	}
 	for _, h := range episodes {
-		out = append(out, fmt.Sprintf("[episode] %s", oratext.Runes(h.Content, maxEpisodeExcerpt)))
+		out = append(out, fmt.Sprintf("[episode] %s", util.Runes(h.Content, maxEpisodeExcerpt)))
 	}
 
 	span.SetAttributes(attribute.Int("db.recall_subject_lines", len(out)))

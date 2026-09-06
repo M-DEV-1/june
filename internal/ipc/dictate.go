@@ -20,7 +20,7 @@ import (
 	"ora/internal/audio"
 	"ora/internal/config"
 	"ora/internal/recorder"
-	strtrunc "ora/internal/text"
+	"ora/internal/util"
 )
 
 // micRate is the sample rate internal/audio's microphone delivers: its PulseAudio record stream is opened at 24 kHz mono s16le (see StartCapture in internal/audio/capture_linux.go), so everything captured here has to come down to whisper's rate before it is written.
@@ -374,7 +374,7 @@ func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 	var words []string
 	for _, line := range strings.Split(out.String(), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strtrunc.NonSpeechLine.MatchString(line) {
+		if line == "" || util.NonSpeechLine.MatchString(line) {
 			continue
 		}
 		words = append(words, line)

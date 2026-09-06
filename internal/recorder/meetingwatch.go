@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"ora/internal/db"
-	oratext "ora/internal/text"
 	"ora/internal/tracker"
+	"ora/internal/util"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -162,7 +162,7 @@ func describe(users []string, eps []db.Episode) []string {
 		}
 		// A name over the cap keeps one rune of the budget for the ellipsis, and is trimmed before it so the marker does not follow a space.
 		if len([]rune(name)) > maxNameRunes {
-			name = strings.TrimSpace(oratext.Runes(name, maxNameRunes-1)) + "…"
+			name = strings.TrimSpace(util.Runes(name, maxNameRunes-1)) + "…"
 		}
 		named = append(named, name)
 	}

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"ora/internal/act"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // stepLabelRunes caps an element label inside a rendered step, so one absurd button label cannot stretch the line.
@@ -134,5 +134,5 @@ func renderActPlainLabel(s string) string {
 	if strings.HasPrefix(lower, ":1.") || strings.Contains(lower, "atspi") || strings.Contains(lower, "/org/") || strings.Contains(lower, "/accessible/") {
 		return ""
 	}
-	return oratext.Runes(s, stepLabelRunes)
+	return util.Runes(s, stepLabelRunes)
 }

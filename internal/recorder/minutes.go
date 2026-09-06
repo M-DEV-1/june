@@ -10,7 +10,7 @@ import (
 	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // minutesInstruction tells the model what to make of the transcript. The microphone side is [me]; the system-audio side is [call], a single pooled label covering every remote voice, and the model's job is to put names to it from the screen context and from what was said.
@@ -158,7 +158,7 @@ func (r *Recorder) desktopTimeline(ctx context.Context, since, until time.Time) 
 		if isMeetingWindow(e.App, e.Title) {
 			budget = meetingTextBudget
 		}
-		text = oratext.RunesEllipsis(oratext.OneLine(text), budget)
+		text = util.RunesEllipsis(util.OneLine(text), budget)
 
 		// Episodes come back from SQLite in UTC and the line above states the meeting's own clock in local time, so the row is converted here to keep both on the clock the user was watching.
 		fmt.Fprintf(&b, "  %s  %s — %s\n", e.CreatedAt.Local().Format("15:04"), e.App, e.Title)

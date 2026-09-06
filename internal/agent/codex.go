@@ -24,9 +24,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"ora/internal/config"
-	"ora/internal/fsx"
-	"ora/internal/netx"
+	"ora/internal/util"
 )
 
 // The direct Codex brain answers /ask with OpenAI models on the user's ChatGPT subscription by calling the Codex Responses backend with the tokens Codex CLI keeps in ~/.codex/auth.json, running Ora's own tools through the same gate and trace as the Gemini text path.
@@ -695,8 +693,8 @@ func (c *codexClient) round(ctx context.Context, instructions string, input []an
 	// Every response carries the account's allowance windows in its headers, the refusals included, so the picker's bars come from the calls Ora already makes rather than a call of their own.
 	recordUsage(ProviderCodex, codexRateLimits(resp.Header, time.Now()))
 	if resp.StatusCode/100 != 2 {
-		wait, _ := netx.ParseRetryAfter(resp.Header, time.Now())
-		return codexRound{}, codexHTTPError{Code: resp.StatusCode, Body: netx.BodySnippet(resp.Body), RetryAfter: wait}
+		wait, _ := util.ParseRetryAfter(resp.Header, time.Now())
+		return codexRound{}, codexHTTPError{Code: resp.StatusCode, Body: util.BodySnippet(resp.Body), RetryAfter: wait}
 	}
 	return parseCodexStream(resp.Body, onShape)
 }

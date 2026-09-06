@@ -3,7 +3,7 @@ package memory
 import (
 	"strings"
 
-	oratext "ora/internal/text"
+	"ora/internal/util"
 )
 
 // Domain partitions memory into work vs. personal; used by hybrid search's domain filter/boost (internal/db's HybridSearch).
@@ -46,8 +46,8 @@ func Classify(app, title string) Domain {
 		return DomainUnset
 	}
 
-	isWork := oratext.ContainsAny(combined, workApps...) || oratext.ContainsAny(app, workAppOnly...)
-	isPersonal := oratext.ContainsAny(combined, personalApps...)
+	isWork := util.ContainsAny(combined, workApps...) || util.ContainsAny(app, workAppOnly...)
+	isPersonal := util.ContainsAny(combined, personalApps...)
 
 	switch {
 	case isWork && isPersonal:

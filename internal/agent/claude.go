@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	oratext "ora/internal/text"
+	"ora/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -335,7 +335,7 @@ func runClaudeCLI(binary string) claudeRunner {
 
 // claudeHead is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line. Input: any string, including one that is not ASCII. Output: the flattened string, cut on a rune boundary with an ellipsis when it was longer than the cap.
 func claudeHead(s string) string {
-	return oratext.RunesEllipsis(oratext.OneLine(s), 300)
+	return util.RunesEllipsis(util.OneLine(s), 300)
 }
 
 // AskClaude answers a question through the Claude Code command line on the user's own subscription, running Ora's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "claude/<model>", or the trace so far and an error.
