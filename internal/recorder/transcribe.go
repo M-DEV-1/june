@@ -67,11 +67,11 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 		}
 	}
 	started := time.Now()
-	out, errOut, err := run(ctx, bin, args)
+	out, errOut, err := RunWhisper(ctx, bin, args)
 	// A primed run can lock onto a non-speech marker and print it for the whole file: on 2026-09-02 17:32 the call side came back as 308 lines of "[ Silence ]" and one invented sentence, while the same file unprimed gave 42 real lines. The prompt is only a spelling aid, so when the run is that loop it is redone without one.
 	if err == nil && prompt != "" && markerLooped(out) {
 		slog.Warn("whisper looped on a silence marker under the priming prompt, transcribing again without it", "file", filepath.Base(path))
-		out, errOut, err = run(ctx, bin, unprimed)
+		out, errOut, err = RunWhisper(ctx, bin, unprimed)
 	}
 	took := time.Since(started)
 	// audio and rate say how long the meeting itself runs and how many times faster than real time this machine transcribes it, so a run's log line is enough to predict how long N hours of meetings will take to catch up on.

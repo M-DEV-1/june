@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -547,5 +548,99 @@ func TestDictationStopWaitsForTheGPUWithoutSpendingItsClock(t *testing.T) {
 	tx.mu.Unlock()
 	if deadline.Before(released.Add(dictateTimeout - 100*time.Millisecond)) {
 		t.Errorf("decode deadline %v was set before the GPU was released at %v; the wait spent the decode's own budget", deadline, released)
+	}
+}
+
+// fakeDictateWhisper writes a stand-in for whisper-cli at $ORA_WHISPER_CPP and returns the path of the log each run appends to. The first run dies the way the real one died on 2026-09-06 — the Vulkan allocation failure on stderr and then SIGSEGV — and every run after it prints stdout and exits 0, unless alwaysFail is set, in which case every run dies. Each run logs whether the WAV it was handed is still on disk, so a file deleted between the attempts shows up.
+func fakeDictateWhisper(t *testing.T, stdout string, alwaysFail bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake-whisper")
+	log := filepath.Join(dir, "runs.log")
+	fail := "if [ ! -f " + dir + "/ran ]; then\n"
+	if alwaysFail {
+		fail = "if true; then\n"
+	}
+	body := "#!/bin/sh\n" +
+		"if [ -f \"$2\" ]; then echo \"wav-present $@\" >> " + log + "; else echo \"wav-gone $@\" >> " + log + "; fi\n" +
+		fail +
+		"  touch " + dir + "/ran\n" +
+		"  echo 'ggml_vulkan: Device memory allocation of size 462323712 failed.' >&2\n" +
+		"  echo 'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory' >&2\n" +
+		"  kill -SEGV $$\n" +
+		"fi\n" +
+		"cat <<'EOF'\n" + stdout + "\nEOF\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake whisper: %v", err)
+	}
+	t.Setenv("ORA_WHISPER_CPP", bin)
+	return log
+}
+
+// dictateRuns returns one line per run the fake whisper logged, in order.
+func dictateRuns(t *testing.T, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("read the fake whisper's run log: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+// A dictation whose GPU run dies for want of card memory is decoded again on the CPU, and what comes back to the window is the words rather than the error the first attempt hit. The audio is what the user said and cannot be recorded again, so it has to survive until both attempts are done.
+func TestDictationReportsTheWordsFromTheCPURetry(t *testing.T) {
+	log := fakeDictateWhisper(t, "shall we ship on friday", false)
+	mic := &fakeMic{chunks: [][]byte{pcm(1600), pcm(1600)}}
+	d, srv, _ := newDictationTest(t, mic, &fakeTranscriber{})
+	d.transcribe = whisperText
+
+	id := startDictation(t, srv)
+	resp := stopDictation(t, srv, id)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stop status = %d, want 200: the CPU retry transcribed the audio", resp.StatusCode)
+	}
+	var body struct{ Text string }
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode stop body: %v", err)
+	}
+	if body.Text != "shall we ship on friday" {
+		t.Fatalf("text = %q, want the words the CPU retry transcribed", body.Text)
+	}
+
+	runs := dictateRuns(t, log)
+	if len(runs) != 2 {
+		t.Fatalf("whisper ran %d times, want 2: the GPU run that died and the CPU retry\n%v", len(runs), runs)
+	}
+	for i, r := range runs {
+		if !strings.HasPrefix(r, "wav-present") {
+			t.Errorf("run %d found no audio to transcribe: %s", i, r)
+		}
+	}
+	if strings.Contains(runs[0], " -ng") {
+		t.Errorf("the first run was already on the CPU: %s", runs[0])
+	}
+	if !strings.Contains(runs[1], " -ng") {
+		t.Errorf("the retry did not turn the GPU off, so it fails for the same reason: %s", runs[1])
+	}
+}
+
+// When the CPU retry fails too there is nothing to report but the failure, and the user has to see it rather than an empty dictation.
+func TestWhisperTextReportsTheErrorWhenBothAttemptsFail(t *testing.T) {
+	log := fakeDictateWhisper(t, "", true)
+	wav := filepath.Join(t.TempDir(), "dictation.wav")
+	if err := writeWAV(wav, pcm(1600)); err != nil {
+		t.Fatalf("writeWAV: %v", err)
+	}
+
+	text, err := whisperText(context.Background(), wav, "")
+	if err == nil {
+		t.Fatalf("whisperText returned %q and no error, want the failure of both attempts", text)
+	}
+	if !strings.Contains(err.Error(), "ErrorOutOfDeviceMemory") {
+		t.Errorf("error = %v, want whisper's own account of why it failed", err)
+	}
+	if runs := dictateRuns(t, log); len(runs) != 2 {
+		t.Fatalf("whisper ran %d times, want 2: the GPU run and the CPU retry\n%v", len(runs), runs)
 	}
 }

@@ -592,3 +592,71 @@ func TestWhisperThreads_HonoursTheOverrideOnEitherPath(t *testing.T) {
 		t.Errorf("whisperThreads = %d on the CPU and %d on the GPU, want the configured 6 either way", cpu, gpu)
 	}
 }
+
+// fakeWhisperDyingOnTheGPUFirst writes a stand-in for whisper-cli that dies the way the real one died on 2026-09-06 — the Vulkan allocation failure on stderr and then SIGSEGV — on its first run, and transcribes normally on every run after that. Returns its path and the path of the log each run appends its arguments to.
+func fakeWhisperDyingOnTheGPUFirst(t *testing.T, stdout string) (bin, argLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin = filepath.Join(dir, "fake-whisper")
+	argLog = filepath.Join(dir, "args.log")
+	body := "#!/bin/sh\n" +
+		"echo \"$@\" >> " + argLog + "\n" +
+		"if [ ! -f " + dir + "/ran ]; then\n" +
+		"  touch " + dir + "/ran\n" +
+		"  echo 'ggml_vulkan: Device memory allocation of size 462323712 failed.' >&2\n" +
+		"  echo 'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory' >&2\n" +
+		"  kill -SEGV $$\n" +
+		"fi\n" +
+		"cat <<'EOF'\n" + stdout + "\nEOF\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake whisper: %v", err)
+	}
+	// whisperCPPArgs only adds the model flags when the model sits beside the binary, so the file has to be there for this to be the GPU path.
+	if err := os.WriteFile(filepath.Join(dir, whisperCPPModelName), []byte("not a model"), 0o644); err != nil {
+		t.Fatalf("write fake model: %v", err)
+	}
+	return bin, argLog
+}
+
+// The card is shared with the embedding server and a shadow model, so a decode can find no memory on it and die mid-run: on 2026-09-06 at 18:30 a dictation was lost to "ggml_vulkan: Device memory allocation of size 462323712 failed ... ErrorOutOfDeviceMemory" and a segmentation fault. The same audio decodes on the CPU, so the run is redone there instead of the words being thrown away.
+func TestTranscribeWAV_RetriesOnTheCPUWhenTheGPURunDies(t *testing.T) {
+	bin, argLog := fakeWhisperDyingOnTheGPUFirst(t, "[00:00:00.000 --> 00:00:01.000]   shall we ship on friday")
+
+	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0)
+	if err != nil {
+		t.Fatalf("transcribeWAV: %v", err)
+	}
+	if len(segs) != 1 || segs[0].Text != "shall we ship on friday" {
+		t.Fatalf("got %+v, want the segment the CPU retry transcribed", segs)
+	}
+	runs := runArgs(t, argLog)
+	if len(runs) != 2 {
+		t.Fatalf("whisper ran %d times, want 2: the GPU run that died and the CPU retry\n%v", len(runs), runs)
+	}
+	if strings.Contains(runs[0], "-ng") {
+		t.Errorf("the first run was already on the CPU: %s", runs[0])
+	}
+	if !strings.Contains(runs[1], "-ng") {
+		t.Errorf("the retry did not turn the GPU off, so it fails for the same reason: %s", runs[1])
+	}
+	if !strings.Contains(runs[1], "-m ") {
+		t.Errorf("the retry lost the model flags, so whisper has no model to load: %s", runs[1])
+	}
+}
+
+// A retry that fails too is still a failure the user has to be told about, rather than an empty transcript that reads as a meeting nobody spoke in.
+func TestTranscribeWAV_ReportsTheErrorWhenTheCPURetryFailsToo(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake-whisper")
+	body := "#!/bin/sh\necho 'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory' >&2\nexit 3\n"
+	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake whisper: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, whisperCPPModelName), []byte("not a model"), 0o644); err != nil {
+		t.Fatalf("write fake model: %v", err)
+	}
+
+	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "", 0); err == nil {
+		t.Fatal("transcribeWAV returned no error, want the failure of both attempts")
+	}
+}
