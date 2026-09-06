@@ -320,7 +320,7 @@ type jobMarkerStore interface {
 }
 
 // jobMarkerKind is the diary kind one background job's last run is recorded under. Input: the job's name as it appears in the log lines. Output: the kind, prefixed so nothing else in the diary collides with it.
-func jobMarkerKind(name string) string { return "job-last-run:" + name }
+func jobMarkerKind(name string) string { return db.JobMarkerKindPrefix + name }
 
 // lastJobRun reads when a background job last ran on this store. Input: ctx, the store, and the job's name. Output: the moment it last ran, or the zero time when it never has or the row could not be parsed.
 func lastJobRun(ctx context.Context, store jobMarkerStore, name string) (time.Time, error) {
@@ -815,7 +815,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		if !ipcServer.Subscribed(time.Minute) {
 			return false
 		}
-		ipcServer.Notice(ipc.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind, Action: n.Action, Until: n.Until})
+		// A notice that carries its own answers (the stale-task question) hands them to the window as buttons; the field-by-field copy keeps the two packages from importing each other.
+		buttons := make([]ipc.NoticeButton, len(n.Actions))
+		for i, a := range n.Actions {
+			buttons[i] = ipc.NoticeButton{Key: a.Key, Label: a.Label}
+		}
+		ipcServer.Notice(ipc.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind, Action: n.Action, Until: n.Until, Actions: buttons})
 		return true
 	})
 

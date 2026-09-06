@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -328,6 +329,50 @@ func (s *Scheduler) markDone(ctx context.Context, n Notice) error {
 	return nil
 }
 
+// answers is the in-process registry of notices waiting on an answer from the window's own card, keyed by noticeKey. A notice that asked a question of its own — the stale-item "Still open", so far — registers here before it goes out, and Act consults it before its own switch, which is what lets a card button whose key is none of the five a desktop notification offers reach the goroutine that asked. Guarded by answersMu, since the waiter is registered on the goroutine that raised the notice and the answer arrives on an HTTP handler's.
+var (
+	answersMu sync.Mutex
+	answers   = map[string]*answerWaiter{}
+)
+
+// answerWaiter is one notice waiting on its card. keys are the only action keys this notice will accept, so a key none of its buttons carried falls through to Act's own switch and is refused there exactly as it was before this registry existed. ch carries the accepted key to the waiting goroutine and is buffered, so delivering an answer never blocks the HTTP handler that brought it.
+type answerWaiter struct {
+	keys []string
+	ch   chan string
+}
+
+// awaitAnswer registers one notice as waiting on an answer from the window's card. Input: the notice's key (see noticeKey) and the action keys its buttons carry. Output: the channel the answer arrives on, and a func that unregisters the waiter, which the caller must always call so the map does not grow for the life of the daemon.
+func awaitAnswer(key string, keys []string) (<-chan string, func()) {
+	w := &answerWaiter{keys: keys, ch: make(chan string, 1)}
+	answersMu.Lock()
+	answers[key] = w
+	answersMu.Unlock()
+	return w.ch, func() {
+		answersMu.Lock()
+		if answers[key] == w {
+			delete(answers, key)
+		}
+		answersMu.Unlock()
+	}
+}
+
+// deliverAnswer hands one pressed card button to whoever is waiting on that notice. Input: the notice's key and the pressed button's key. Output: true when a waiter took it, and false when nothing is waiting under that key or the key is not one that notice offered, in which case the caller applies the button the usual way. A waiter that took an answer is unregistered here as well as by its own release func, so a second press on the same card is not taken a second time.
+func deliverAnswer(key, action string) bool {
+	answersMu.Lock()
+	w, ok := answers[key]
+	if ok && slices.Contains(w.keys, action) {
+		delete(answers, key)
+	} else {
+		ok = false
+	}
+	answersMu.Unlock()
+	if !ok {
+		return false
+	}
+	w.ch <- action
+	return true
+}
+
 // ErrBadNoticeAction is what Act returns for an action string that is none of the four buttons a notice offers.
 var ErrBadNoticeAction = errors.New("not a notice action")
 
@@ -338,6 +383,10 @@ var ErrTaskGone = errors.New("the task this notice named no longer exists")
 // Once the action is applied, this also closes the notice's own desktop banner, if any: without it, a done or snoozed task answered from the window would leave its notification sitting on screen asking the same question a second time. A D-Bus press closing its own already-closing banner a second time this way is harmless — Close is a no-op once the key is gone.
 func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action string) error {
 	n := Notice{Title: title, Body: body, Kind: kind, ID: id}
+	// A notice that asked a question of its own is answered by the goroutine waiting on it, whatever its button was called: that is what carries "dropped" and "low", neither of them one of the four this switch knows, back to the stale-item question. Nothing else changes — a key that notice never offered falls through to the switch and is refused there, and there is no banner to close, since a waiter is only registered when a window took the notice.
+	if deliverAnswer(noticeKey(n), action) {
+		return nil
+	}
 	var err error
 	switch action {
 	case actionDone:

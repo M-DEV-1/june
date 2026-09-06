@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +101,8 @@ type Scheduler struct {
 	openWindow func()
 	// taskDone closes one task through the daemon's own task-done path when "Done" is pressed on a task notice; unset, Done only records the dismissal. See SetTaskDone.
 	taskDone func(ctx context.Context, id string) error
+	// askWait is how long the stale-item question waits on the window's card before giving up on it. Set to notifyWait in New, which is the same hour the notify-send fallback is given, and shortened by tests.
+	askWait time.Duration
 	// dutyTimeout is how long one duty on a tick may take before its context is cancelled. Set from defaultDutyTimeout in New and shortened by tests.
 	dutyTimeout time.Duration
 	// retryAfter is the earliest moment a duty that failed may be attempted again, keyed by duty name, and retries counts its consecutive failures, which is what picks the backoff step. Both are read and written only on the tick goroutine, so neither needs a lock.
@@ -120,6 +123,7 @@ func New(store Store, b brain.Brain, notify func(title, body string), cfg config
 	return &Scheduler{
 		store: store, brain: b, notify: notify,
 		briefHour: briefHour, closeHour: closeHour, now: time.Now,
+		askWait:     notifyWait,
 		dutyTimeout: defaultDutyTimeout,
 		retryAfter:  map[string]time.Time{},
 		retries:     map[string]int{},
@@ -495,24 +499,50 @@ var askAnswers = []struct{ key, label, status, priority string }{
 	{"low", "Not urgent", "", memory.PriorityLow},
 }
 
-// askAbout puts one stale action item to the user as a notification they can answer with a click, and applies whatever they choose. Dismissing it changes nothing and the item is simply asked about again another morning. Runs in its own goroutine because the notification blocks until it is answered, which can be hours.
+// staleNoticeKind is the kind the stale-item question is raised under, on the window's card and in the answer registry alike. It is its own kind because its buttons are its own: a "task" notice offers Done and the three snoozes, this one offers Done, Not happening and Not urgent.
+const staleNoticeKind = "stale"
+
+// askAbout puts one stale action item to the user and applies whatever they answer. Dismissing it changes nothing and the item is simply asked about again another morning. Runs in its own goroutine because it blocks until the question is answered, which can be hours.
 //
-// This one stays with notify-send while the four telling moments moved to the window's own card: the answer is the whole point of it, and the card has no buttons to answer with.
+// With a window up the question is a notice of Ora's own carrying its three answers as buttons, and the answer comes back through POST /notices/stale/{note id}/action like every other card button; with no window it is the notify-send banner it has always been. It is deliberately not handed to say, whose fallback posts the five buttons every other notice carries, none of which can answer this question.
 //
 // ponytail: re-asks every morning until answered. If that grates, stamp the item with the day it was last asked about and leave a gap.
 func (s *Scheduler) askAbout(ctx context.Context, a memory.ActionItem) {
-	if s.ask == nil {
-		return
-	}
+	body := fmt.Sprintf("%s — %s\n\nOpen since %s. Any progress?", a.Owner, a.Text, a.Raised.Format(dayFormat))
+	n := Notice{Title: "Still open", Body: body, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: staleNoticeKind}
+	keys := make([]string, 0, len(askAnswers))
 	labels := make([]string, 0, len(askAnswers))
 	for _, ans := range askAnswers {
+		n.Actions = append(n.Actions, Action{Key: ans.key, Label: ans.label})
+		keys = append(keys, ans.key)
 		labels = append(labels, ans.key+"="+ans.label)
 	}
-	body := fmt.Sprintf("%s — %s\n\nOpen since %s. Any progress?", a.Owner, a.Text, a.Raised.Format(dayFormat))
-	chosen, err := s.ask("Still open", body, labels)
-	if err != nil {
-		slog.Debug("could not ask about a stale action item", "note_id", a.NoteID, "error", err)
-		return
+
+	// The waiter is registered before the notice goes out, so an answer pressed the instant the card is drawn still has somewhere to land, and released however this returns, so an unanswered question leaves nothing in the registry.
+	answered, release := awaitAnswer(noticeKey(n), keys)
+	defer release()
+
+	var chosen string
+	if sendNotice(n) {
+		timer := time.NewTimer(s.askWait)
+		defer timer.Stop()
+		select {
+		case chosen = <-answered:
+		case <-timer.C:
+			// Nobody answered the card. Nothing is applied, and the item comes round again on another morning.
+			return
+		}
+	} else {
+		release()
+		if s.ask == nil {
+			return
+		}
+		var err error
+		chosen, err = s.ask(n.Title, body, labels)
+		if err != nil {
+			slog.Debug("could not ask about a stale action item", "note_id", a.NoteID, "error", err)
+			return
+		}
 	}
 	for _, ans := range askAnswers {
 		if ans.key != chosen {
@@ -695,7 +725,7 @@ func notifyArgs(icon, title, body string) []string {
 	return append(args, title, body)
 }
 
-// Notice is one moment Ora has something to say about, drawn by the desktop window as its own card instead of being handed to GNOME. Title is the card's first line and Body the few lines under it. Place and ID say what a click on the card opens — Place names one of the app window's screens ("tasks", "days") and ID the row to select there, both empty when the moment points at nothing in particular. Kind names the moment: "brief", "close", "meeting", "task", "routine" or "note". Action and Until are empty on the notice itself and set only when the user has since dealt with it from its own notification: Action is "snoozed" or "done", and Until is the RFC 3339 moment a snoozed notice comes back, so the window can say "snoozed until 18:00" instead of drawing the card again.
+// Notice is one moment Ora has something to say about, drawn by the desktop window as its own card instead of being handed to GNOME. Title is the card's first line and Body the few lines under it. Place and ID say what a click on the card opens — Place names one of the app window's screens ("tasks", "days") and ID the row to select there, both empty when the moment points at nothing in particular. Kind names the moment: "brief", "close", "meeting", "task", "routine", "stale" or "note". Action and Until are empty on the notice itself and set only when the user has since dealt with it from its own notification: Action is "snoozed" or "done", and Until is the RFC 3339 moment a snoozed notice comes back, so the window can say "snoozed until 18:00" instead of drawing the card again.
 type Notice struct {
 	Title  string
 	Body   string
@@ -704,6 +734,8 @@ type Notice struct {
 	Kind   string
 	Action string
 	Until  string
+	// Actions is the notice's own buttons, empty for all but a notice that asked a question of its own — the stale-item "Still open", so far. The window draws exactly these in place of the buttons its kind implies, and POSTs the pressed one's Key back on /notices/{kind}/{id}/action, where Act hands it to the goroutine waiting on the answer (see awaitAnswer in notify.go).
+	Actions []Action
 }
 
 // noticeSend is the desktop window's notice channel, wired once at startup by cmd/daemon.go and read from whichever goroutine a notification happens to be on, which is what noticeMu guards. Nil means nothing has been wired and every notification goes to notify-send.
