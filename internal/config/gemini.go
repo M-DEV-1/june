@@ -17,6 +17,9 @@ const (
 	// TextFallbackModel answers an ask when TextModel returns 503 UNAVAILABLE.
 	TextFallbackModel = "gemini-3.6-flash"
 
+	// SubtaskModel answers the branch tool's background search. It is deliberately not TextModel: the free tier gives 3.5-flash 20 requests a day and the lite model several hundred, and a background search that spent the same budget as the answers themselves left nothing for the answers — on 2026-09-06 every branch call came back "You exceeded your current quota" (HTTP 429) while flash sat at its 20-call ceiling and lite had used 51 of its own allowance. A search that reads back memory is also a smaller job than the answer it feeds.
+	SubtaskModel = "gemini-3.5-flash-lite"
+
 	// TTSModel is the one-shot (non-live) TTS model used for /voice preview -- a single generateContent call, not a Live session, so previewing doesn't touch the active conversation.
 	// Returns 24kHz mono 16-bit PCM (https://ai.google.dev/gemini-api/docs/speech-generation), matching audio.Speaker's format exactly -- no resampling needed.
 	// gemini-3.1-flash-tts-preview supersedes 2.5 with more language coverage and audio tags for steering delivery, verified against ai.google.dev 2026-07-24.
