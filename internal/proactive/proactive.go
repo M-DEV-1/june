@@ -313,7 +313,14 @@ func sendNotice(n Notice) bool {
 	noticeMu.Lock()
 	send := noticeSend
 	noticeMu.Unlock()
-	return send != nil && send(n)
+	if send == nil {
+		return false
+	}
+	// The card draws exactly the buttons its notice names, so a notice that names none offers only Open. Done and the three snoozes belong to a task and to the stale-task question, both of which name their own; a routine's report, a meeting moment or a transcription has nothing to complete and nowhere to push to later, and the card that offered them those answered "Could not do that" on every press.
+	if len(n.Actions) == 0 {
+		n.Actions = openOnlyActions
+	}
+	return send(n)
 }
 
 // say delivers one of the scheduler's own moments to whichever single surface is there to show it: the desktop window's own card when a window is reading the event stream, and otherwise the desktop notification carrying the full set of buttons. Input: the notice. Output: nothing.
@@ -346,7 +353,8 @@ var openOnlyActions = []Action{{actionOpen, "Open in Ora"}}
 // The long form waits in the background for the button, up to an hour, so the caller never blocks on it.
 // The desktop window gets first refusal: it draws the same text as a card of Ora's own, which is not cut off after two lines and can be clicked through to what it is about, so the notifier (and notify-send) are only reached when no window is listening.
 func Notify(icon, title, body string) {
-	n := Notice{Title: title, Body: body, Kind: noticeKind(icon)}
+	// The notice carries its one button rather than leaving the window to guess: nothing posted this way has a task behind it, so Done and the snoozes would have nothing to act on.
+	n := Notice{Title: title, Body: body, Kind: noticeKind(icon), Actions: openOnlyActions}
 	if sendNotice(n) {
 		return
 	}

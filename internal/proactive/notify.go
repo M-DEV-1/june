@@ -510,7 +510,8 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 		}
 		held += len(whole) - len(group)
 		for _, a := range group {
-			out = append(out, Notice{Title: "New task from " + meeting, Body: a.Text, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: "task"})
+			// A task is the one notice that can be completed or pushed to later, so it names the full set of buttons; the window draws what the notice names rather than assuming every notice can answer them.
+			out = append(out, Notice{Title: "New task from " + meeting, Body: a.Text, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: "task", Actions: noticeActions})
 		}
 	}
 	if held > 0 && len(out) > 0 {

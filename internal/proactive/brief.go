@@ -113,7 +113,8 @@ func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string)
 	if err := s.store.SetDiaryEntry(ctx, day, "brief", brief); err != nil {
 		return err
 	}
-	s.say(Notice{Title: "Morning brief", Body: brief, Place: "tasks", Kind: "brief"})
+	// The brief names the full set: it is the scheduler's own moment, so Done clears it and a snooze re-fires it later. A notice that names none offers only Open (see sendNotice).
+	s.say(Notice{Title: "Morning brief", Body: brief, Place: "tasks", Kind: "brief", Actions: noticeActions})
 	// ask came from OpenActionItems, which already keeps only the user's own work ("Me" or an unnamed owner) — asking about the first one needs no further ownership check here.
 	// The question is answered long after this tick's duty deadline has passed, so the answer is applied on a context that outlives it.
 	if len(ask) > 0 {

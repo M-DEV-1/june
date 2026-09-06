@@ -589,7 +589,7 @@ func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 
 	s.tick(ctx)
 
-	want := Notice{Title: "Morning brief", Body: "Send the deck. Retrieval work is still half done.", Place: "tasks", Kind: "brief"}
+	want := Notice{Title: "Morning brief", Body: "Send the deck. Retrieval work is still half done.", Place: "tasks", Kind: "brief", Actions: noticeActions}
 	if len(sent) != 1 || !reflect.DeepEqual(sent[0], want) {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
@@ -642,7 +642,7 @@ func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
 
 	s.tick(ctx)
 
-	want := Notice{Title: "Day's written down", Body: "Today was about the diary seam.", Place: "days", ID: time.Now().Format(dayFormat), Kind: "close"}
+	want := Notice{Title: "Day's written down", Body: "Today was about the diary seam.", Place: "days", ID: time.Now().Format(dayFormat), Kind: "close", Actions: noticeActions}
 	if len(sent) != 1 || !reflect.DeepEqual(sent[0], want) {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
@@ -662,9 +662,10 @@ func TestNotify_PrefersTheWindow(t *testing.T) {
 	Notify("audio-input-microphone", "Before you join: standup", "Last time you owed the deck.")
 	Notify("x-office-calendar", "Recording saved", "Ora will transcribe it once you plug in.")
 
+	// The card is drawn from the notice's own actions, so a moment with no task behind it has to carry its one Open button rather than leave the window to guess: a "Transcribing meeting" card that offered Done and the snoozes answered "Could not do that" when one was pressed.
 	want := []Notice{
-		{Title: "Before you join: standup", Body: "Last time you owed the deck.", Kind: "meeting"},
-		{Title: "Recording saved", Body: "Ora will transcribe it once you plug in.", Kind: "day"},
+		{Title: "Before you join: standup", Body: "Last time you owed the deck.", Kind: "meeting", Actions: openOnlyActions},
+		{Title: "Recording saved", Body: "Ora will transcribe it once you plug in.", Kind: "day", Actions: openOnlyActions},
 	}
 	if len(sent) != len(want) {
 		t.Fatalf("notices = %+v, want %+v", sent, want)
