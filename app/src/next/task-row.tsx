@@ -1,4 +1,4 @@
-/** One task in the list: the tick, the title on one line, where it came from and when it was raised in a column of their own on the right, and the menu holding the other status changes.
+/** One task in the list: the tick, the title over as many lines as it needs, where it came from and when it was raised in a column of their own on the right, and the menu holding the other status changes. The title wraps rather than being cut off — a task read a day later has to say what it is, and a truncated one says nothing that its own hover tooltip has to finish.
  *
  * The row itself is a plain list item with no role of its own, and picking it is one button inside it. It was an option in a listbox once, which is wrong: an option may hold no interactive descendants, and every row holds two or three — the tick, the More menu, and on a noticed task the owner menu — so a screen reader in listbox mode could reach none of them and read all their labels as part of the row's own name instead.
  */
@@ -32,8 +32,8 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
 
   return (
     <li
-      className={`group flex items-center gap-2.5 rounded-sm px-2 transition-colors ${detail ? "h-11" : "h-8"} ${selected ? "bg-selected" : "hover:bg-hover"}`}
-      // The whole row picks the task, not only the title: the padding, the gaps and the column saying when it was raised are part of the target, and a row with no detail line is eight pixels tall without them. A click that landed on one of the row's own controls is that control's alone — the menus included, whose items are not buttons and reach here through the React tree however far the portal moved them in the document. The keyboard has the button below, which is the row's one tab stop, so this adds no second way in for anything but a pointer.
+      className={`group flex items-start gap-2.5 rounded-sm px-2 py-2 transition-colors ${selected ? "bg-selected" : "hover:bg-hover"}`}
+      // The whole row picks the task, not only the title: the padding, the gaps and the column saying when it was raised are part of the target. A click that landed on one of the row's own controls is that control's alone — the menus included, whose items are not buttons and reach here through the React tree however far the portal moved them in the document. The keyboard has the button below, which is the row's one tab stop, so this adds no second way in for anything but a pointer.
       onClick={(e) => {
         if (!(e.target as HTMLElement).closest('button,[role="menu"]')) dispatch(ui.taskOpened(task.id));
       }}
@@ -44,24 +44,24 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
         data-row-id={task.id}
         aria-current={selected ? "true" : undefined}
         onClick={() => dispatch(ui.taskOpened(task.id))}
-        className="min-w-0 flex-1 self-stretch rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="min-w-0 flex-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {/* Spans rather than divs: a button may only hold phrasing content, and some assistive technology flattens a block inside one oddly. */}
-        <span className={`block truncate text-ui ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`} title={task.title}>
+        <span className={`block text-ui break-words ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`}>
           {task.title}
         </span>
         {detail ? (
           <>
             {/* Two spans run together in the button's own name, which is read out as one sentence; a block would have separated them and an inline element does not. */}
             {" "}
-            <span className="block truncate text-meta text-muted-foreground" title={detail}>
+            <span className="block break-words text-meta text-muted-foreground">
               {detail}
             </span>
           </>
         ) : null}
       </button>
       {when ? (
-        <div className="hidden shrink-0 whitespace-nowrap text-right text-meta text-muted-foreground tabular-nums sm:block">{when}</div>
+        <div className="hidden shrink-0 whitespace-nowrap pt-0.5 text-right text-meta text-muted-foreground tabular-nums sm:block">{when}</div>
       ) : null}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -69,7 +69,7 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
             variant="ghost"
             size="icon-xs"
             aria-label={`More for ${task.title}`}
-            className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
+            className="shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
           >
             <MoreHorizontal />
           </Button>

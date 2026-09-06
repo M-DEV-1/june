@@ -1,12 +1,16 @@
-/** The Tasks screen: one wide list of everything owed, and under it a conversation about whichever task is picked. There is no list beside the sidebar — the sidebar is for chats — so the task the composer talks to is named in the header and chosen from the picker there. A task the user typed in can be ticked done and unticked open again; one Ora noticed in a meeting can also be dropped, which is the third state the store holds and the daemon takes on POST /tasks/{id}/done. */
+/** The Tasks screen: one wide list of everything owed, what the picked task came out of beside it, and its conversation under the list once there is one. There is no list beside the sidebar — the sidebar is for chats — so the task the composer talks to is named in the header and chosen from the picker there. A task the user typed in can be ticked done and unticked open again; one Ora noticed in a meeting can also be dropped, which is the third state the store holds and the daemon takes on POST /tasks/{id}/done.
+ *
+ * The list and the conversation only split the page once something has actually been said about a task. Before that the split was two thirds list and a third of empty white, which is a page that looks broken; the list takes the whole height instead and the composer sits at the foot of it, as it does on Chats.
+ */
 
 import { useRef } from "react";
 
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
-import { useAllTasksQuery, useBrainsQuery, useConversationQuery, useCreateConversationMutation } from "./api";
-import { shortWhen, taskContext, tasksShown } from "./format";
+import { useAllTasksQuery, useBrainsQuery, useConversationQuery, useCreateConversationMutation, useMeetingsQuery } from "./api";
+import { shortWhen, taskContext, taskMeeting, tasksShown } from "./format";
 import { Composer, Thread } from "./chats";
 import { HEAD, Nothing, PageHeader, Picker, Reading, Scroller, TAIL, BrainPicker, useFollowSelection, useWide } from "./parts";
+import { TaskAbout } from "./task-about";
 import { ui, useAppDispatch, useAppSelector } from "./store";
 import { NewTask } from "./task-new";
 import { TaskRow } from "./task-row";
@@ -21,9 +25,10 @@ export function TasksScreen() {
   const run = useAppSelector((s) => s.progress.run);
   const { data: tasks = [], isError } = useAllTasksQuery();
   const { data: brains = [] } = useBrainsQuery();
+  const { data: meetings = [] } = useMeetingsQuery();
   const [createConversation] = useCreateConversationMutation();
   const [wide, pane] = useWide();
-  const list = useRef<HTMLUListElement>(null);
+  const rows = useRef<HTMLUListElement>(null);
 
   const shown = tasksShown(tasks, query.tasks);
   // Mine is the default view; Theirs holds what a meeting raised for someone else or for nobody named, which is watched rather than assumed onto the user's own list. theirsTotal ignores the search box, since whether the section exists at all should not flicker with what is typed into it.
@@ -31,10 +36,11 @@ export function TasksScreen() {
   const theirs = shown.filter((t) => t.owner !== "me");
   const theirsTotal = tasks.filter((t) => t.owner !== "me").length;
   const selected = tasks.find((t) => t.id === taskId) ?? shown[0];
-  useFollowSelection(list, selected?.id);
+  useFollowSelection(rows, selected?.id);
   // A task the app opened owns its conversation; one Ora noticed has none until it is asked about, and the one opened for it then is remembered here for the rest of the session.
   const conversationId = selected ? selected.conversation_id || taskChats[selected.id] || undefined : undefined;
-  const { data: view } = useConversationQuery(conversationId ?? "", { skip: !conversationId });
+  // currentData rather than data: RTK Query keeps the previous argument's result in data while the new one is still in flight, which showed the task just left under the task just picked.
+  const { currentData: view } = useConversationQuery(conversationId ?? "", { skip: !conversationId });
   const now = new Date();
   const mine = run && conversationId && run.conversationId === conversationId ? run : undefined;
   const emptyLine = selected ? `Nothing said about “${selected.title}” yet.` : "Pick a task above to ask about it.";
@@ -59,9 +65,40 @@ export function TasksScreen() {
     group: t.source === "you" ? "You set" : "Ora noticed",
   }));
 
+  const meeting = taskMeeting(meetings, selected);
+  const about = <TaskAbout task={selected} meeting={meeting} now={now} inRail={wide} />;
+
+  const list = (
+    <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
+      <Reading wide={wide} rail={wide && selected ? about : undefined}>
+        <div className="flex flex-col gap-3">
+          <NewTask />
+          {tasks.length === 0 ? (
+            <Nothing up={!isError} empty="Nothing to do." />
+          ) : (
+            <>
+              {mineTasks.length === 0 ? (
+                <Nothing up={!isError} empty={query.tasks ? `Nothing matches “${query.tasks}”.` : "Nothing of yours open."} />
+              ) : (
+                <ul ref={rows} role="list" aria-label="Tasks" className="-mx-2 flex flex-col">
+                  {mineTasks.map((t) => (
+                    <TaskRow key={t.id} task={t} selected={t.id === selected?.id} now={now} />
+                  ))}
+                </ul>
+              )}
+              <TheirsSection tasks={theirs} total={theirsTotal} selectedId={selected?.id} now={now} />
+            </>
+          )}
+        </div>
+        {/* Below the rail's width the same blocks go under the list, where they are still the answer to "what was this task about?" rather than a second column. */}
+        {wide ? null : about}
+      </Reading>
+    </Scroller>
+  );
+
   return (
     <div ref={pane} data-pane className="flex h-full min-h-0 flex-col">
-      <PageHeader wide={wide}>
+      <PageHeader wide={wide} railed={Boolean(wide && selected)}>
         <h1 className="shrink-0 text-ui font-medium">Tasks</h1>
         <Picker
           list="tasks"
@@ -77,59 +114,37 @@ export function TasksScreen() {
         </div>
       </PageHeader>
 
-      <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
-        <ResizablePanel id="list" defaultSize="70" minSize="30">
-          <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
-            <Reading wide={wide}>
-              <div className="flex flex-col gap-3">
-                <NewTask />
-                {tasks.length === 0 ? (
-                  <Nothing up={!isError} empty="Nothing to do." />
-                ) : (
-                  <>
-                    {mineTasks.length === 0 ? (
-                      <Nothing up={!isError} empty={query.tasks ? `Nothing matches “${query.tasks}”.` : "Nothing of yours open."} />
-                    ) : (
-                      <ul ref={list} role="list" aria-label="Tasks" className="-mx-2 flex flex-col">
-                        {mineTasks.map((t) => (
-                          <TaskRow key={t.id} task={t} selected={t.id === selected?.id} now={now} />
-                        ))}
-                      </ul>
-                    )}
-                    <TheirsSection tasks={theirs} total={theirsTotal} selectedId={selected?.id} now={now} />
-                  </>
-                )}
-              </div>
-            </Reading>
-          </Scroller>
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel id="about" defaultSize="30" minSize="10" collapsible collapsedSize={0}>
-          {/* A task with nothing said about it yet gets no centred empty state down here — the composer alone, with the same sentence as its placeholder, is the whole panel. */}
-          <div className="flex h-full min-h-0 flex-col justify-end">
-            {hasTalked ? (
-              <Thread
-                view={view}
-                up={!isError}
-                wide={wide}
-                sources={false}
-                empty={emptyLine}
-                hint={selected ? "Ask below and Ora answers with this task as the subject." : undefined}
-                run={mine}
-              />
-            ) : null}
-            <Composer
-              conversationId={conversationId}
-              draftKey={selected?.id}
-              brain={view?.brain}
-              placeholder={hasTalked ? (selected ? "Say something about this task…" : "Pick a task first") : emptyLine}
-              context={taskContext(selected)}
-              start={selected ? startTaskChat : undefined}
+      {hasTalked ? (
+        <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
+          <ResizablePanel id="list" defaultSize="60" minSize="20">
+            {list}
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel id="about" defaultSize="40" minSize="15" collapsible collapsedSize={0}>
+            <Thread
+              view={view}
+              up={!isError}
               wide={wide}
+              sources={false}
+              empty={emptyLine}
+              hint={selected ? "Ask below and Ora answers with this task as the subject." : undefined}
+              run={mine}
             />
-          </div>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      ) : (
+        list
+      )}
+
+      <Composer
+        conversationId={conversationId}
+        draftKey={selected?.id}
+        brain={view?.brain}
+        placeholder={hasTalked ? (selected ? "Say something about this task…" : "Pick a task first") : emptyLine}
+        context={taskContext(selected)}
+        start={selected ? startTaskChat : undefined}
+        wide={wide}
+      />
     </div>
   );
 }
