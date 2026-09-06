@@ -4,7 +4,7 @@ import { configureStore, createAction, createListenerMiddleware, createSlice, is
 import { useDispatch, useSelector } from "react-redux";
 
 import { events, oraApi, type DaemonEvent, type Evidence, type Notice, type Spend } from "./api";
-import { jobStateWord, noticeActionMessage } from "./format";
+import { isJobLive, jobStateWord, noticeActionMessage } from "./format";
 
 /** The key a fresh, unsaved chat draft's composer text and job are kept under, before the first message has opened a real conversation and given it a real id. */
 export const DRAFT_CHAT = "__draft__";
@@ -228,6 +228,8 @@ export type Run = {
   answer: string;
   steps: Step[];
   evidence: Evidence[];
+  /** Whether the daemon has already said this question is over. Only ever set for a question whose "done" beat POST /ask's own reply, which is the one case the finish cannot be carried out where it arrives. */
+  finished?: boolean;
 };
 
 /** One step of a computer-use job's live list: the action it took (or is taking), the change it was written down to produce, and, once wait_for has checked it, whether that change came and why. Input on the wire is one "act" event per step (kind "step"), closed by the next one for it (kind "verified") — see the eventArrived reducer below. */
@@ -236,6 +238,8 @@ export type JobStepRow = {
   text: string;
   expect: string;
   outcome?: "pass" | "fail";
+  /** Whether the check already held before this step took it, which the daemon reports alongside a pass. A step like that proves nothing about what the step did, so the thread draws it as neither a pass nor a fail. */
+  heldBefore?: boolean;
   why?: string;
   startedAt: number;
   finishedAt?: number;
@@ -255,7 +259,7 @@ export type JobRun = {
 };
 
 /** The shape of an "act" event's JSON detail (see internal/actjob.Event on the Go side). kind is "started", "step", "verified", "question", "answered", "paused", "resumed" or "done". */
-type ActDetail = { kind: string; state: string; text: string; expect?: string; outcome?: string; spend?: Spend };
+type ActDetail = { kind: string; state: string; text: string; expect?: string; outcome?: string; held_before?: boolean; spend?: Spend };
 
 /** Decodes one "act" event's detail. Input: the detail text off the wire. Output: the parts, or every field empty when the text will not parse — which never happens against a daemon that sent it, but leaves nothing to throw on a malformed one. */
 function parseActDetail(detail: string | undefined): ActDetail {
@@ -291,9 +295,13 @@ const progressSlice = createSlice({
     askFailed(s) {
       s.run = undefined;
     },
-    /** Gives up the question in flight once its finished turn has been read back into the thread. Kept apart from the "done" event itself: the thread draws the question and the streamed answer out of the run alone, so clearing it on the event would blank the whole exchange until GET /conversations/{id} came back. */
-    runEnded(s) {
-      s.run = undefined;
+    /** Gives up the question in flight once its finished turn has been read back into the thread. Input: the askId of the question being ended, which must be the one still in flight — a second question sent while the first was finishing has replaced the run by the time the first's read comes back, and ending it there would take the new question and its streaming answer off the screen. Output: nothing. Kept apart from the "done" event itself: the thread draws the question and the streamed answer out of the run alone, so clearing it on the event would blank the whole exchange until GET /conversations/{id} came back. */
+    runEnded(s, a: PayloadAction<string | undefined>) {
+      if (s.run && a.payload === s.run.askId) s.run = undefined;
+    },
+    /** Records that the run's "done" or "error" arrived while the question was still tracked under the draft key, before POST /ask had said which conversation the daemon opened for it. Input: none. Output: nothing; the middleware below repeats the finish once askAccepted supplies that id, which is the first moment there is a conversation to read back. */
+    runFinished(s) {
+      if (s.run) s.run.finished = true;
     },
     /** Records that a "do:" goal has been sent, before the daemon has answered, so the thread shows the goal as its own turn straight away. */
     jobSent(s, a: PayloadAction<{ conversationId: string; goal: string }>) {
@@ -332,6 +340,8 @@ const progressSlice = createSlice({
             if (last && last.finishedAt === undefined) {
               last.finishedAt = Date.now();
               last.outcome = d.outcome === "pass" ? "pass" : "fail";
+              // A check that already held before the step took it comes back as a pass carrying this flag rather than as an outcome of its own, so nothing that reads the outcome has to learn a third word.
+              last.heldBefore = d.held_before === true;
               last.why = d.text;
             }
             break;
@@ -376,6 +386,12 @@ const progressSlice = createSlice({
       }
     },
   },
+  extraReducers: (build) => {
+    // A job started from a fresh draft is filed under the draft key and nothing else ever moves it, so the next New chat would open showing the last draft's finished job. The draft key is one slot the window reuses, unlike a conversation's own.
+    build.addCase(uiSlice.actions.chatDraftOpened, (s) => {
+      delete s.jobs[DRAFT_CHAT];
+    });
+  },
 });
 
 export const ui = uiSlice.actions;
@@ -397,6 +413,22 @@ function reactToNotice(n: Notice, api: { dispatch: AppDispatch }): void {
 }
 
 /** Opens the daemon's SSE stream the first time progress.streamOpened is dispatched and feeds every message into the progress slice. A second streamOpened is ignored, so the window never ends up with two streams answering the same ask. Input: the function that opens a stream, which the window leaves as the real one and a test replaces. Output: the middleware. */
+/** Ends the question in flight: reads the conversation it landed in back into the cache, then gives the run up. Input: anything that can dispatch and read the store. Output: nothing. The read is held and released rather than left dispatched: initiate() subscribes to that conversation's cache entry, and a subscription never let go of keeps the entry resident for the life of the window and has every later invalidation refetch it, so N conversations asked in meant N GETs on every finished ask. The conversation is not in the invalidation that follows for the same reason — it has just been read. A question asked from a fresh draft is still filed under the sentinel key here whenever its "done" beat POST /ask's reply: there is no conversation to read and nothing to give up, since the thread draws the whole exchange out of the run until the real conversation is open, so the finish is only recorded and repeated from askAccepted below. */
+async function finishRun(api: { dispatch: AppDispatch; getState: () => RootState }): Promise<void> {
+  const run = api.getState().progress.run;
+  if (!run || run.conversationId === DRAFT_CHAT) {
+    api.dispatch(progressSlice.actions.runFinished());
+    return;
+  }
+  const read = api.dispatch(oraApi.endpoints.conversation.initiate(run.conversationId, { forceRefetch: true }));
+  try {
+    await read;
+  } finally {
+    read.unsubscribe();
+  }
+  api.dispatch(progressSlice.actions.runEnded(run.askId));
+}
+
 export function streamMiddleware(open: typeof events = events) {
   const listener = createListenerMiddleware();
   let stop: (() => void) | undefined;
@@ -411,10 +443,9 @@ export function streamMiddleware(open: typeof events = events) {
           api.dispatch(progressSlice.actions.eventArrived(ev));
           if (ev.type !== "done" && ev.type !== "error") return;
           // A finished ask is what changes the conversation list, the turns inside it and what has been spent, so the cache is told to read them again rather than polling on a timer. The conversation the question landed in is read back first and the run given up only then: the thread draws the question and the streamed answer out of the run alone, so giving it up on the event itself blanks the exchange until the refetch lands.
-          const id = (api.getState() as RootState).progress.run?.conversationId;
-          if (id) await api.dispatch(oraApi.endpoints.conversation.initiate(id, { forceRefetch: true }));
-          api.dispatch(progressSlice.actions.runEnded());
-          api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Usage"]));
+          await finishRun(api as unknown as { dispatch: AppDispatch; getState: () => RootState });
+          // The list is named by its own id rather than by the bare type: the type alone matches every open conversation as well, including the one finishRun has just read, which would read it a second time for nothing.
+          api.dispatch(oraApi.util.invalidateTags([{ type: "Conversation", id: "LIST" }, "Task", "Usage"]));
         },
         () => {
           // The stream opening again is this window's one signal that the daemon it had lost is answering, so everything that failed while it was gone is read once more. Without it a window left open across a daemon restart keeps showing "Nothing is answering" until something happens to focus it.
@@ -433,14 +464,24 @@ export function streamMiddleware(open: typeof events = events) {
       if (ev.type === "notice" && ev.notice) reactToNotice(ev.notice, api);
     },
   });
+  // A question whose "done" arrived before POST /ask answered was left running, because there was no conversation to read it back from yet; this is the moment there is one.
+  startTyped({
+    actionCreator: progressSlice.actions.askAccepted,
+    effect: async (_action, api) => {
+      if (api.getState().progress.run?.finished) await finishRun(api);
+    },
+  });
   startTyped({
     matcher: isAnyOf(progressSlice.actions.jobSent, progressSlice.actions.jobAccepted, progressSlice.actions.eventArrived),
     effect: (_action, api) => {
       const jobs = Object.values(api.getState().progress.jobs);
       if (!jobs.length) return;
+      const before = api.getOriginalState().progress.jobs;
       api.dispatch(
         oraApi.util.updateQueryData("conversations", undefined, (draft) => {
           for (const job of jobs) {
+            // A job that has ended writes its last word once, on the event that ended it, and never again: what the row says after that is the daemon's, and rewriting it on every later event of every other chat put long-finished words back over whatever GET /conversations last said.
+            if (!isJobLive(job.state) && before[job.conversationId]?.state === job.state) continue;
             const row = draft.find((c) => c.id === job.conversationId);
             if (row) row.last = jobStateWord(job.state);
           }

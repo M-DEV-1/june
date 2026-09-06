@@ -25,16 +25,20 @@ function Elapsed({ startedAt, live }: { startedAt: number; live: boolean }) {
   return <span>{took(now - startedAt)}</span>;
 }
 
-/** One row of a job's live step list: a tick, a cross or a plain circle for a step still running, the action it took, the change it was written down to expect, and — once wait_for has checked it — why that check went the way it did. Input: the step. Output: the row. */
+/** One row of a job's live step list: a tick, a cross, a muted mark for a check that already held, or a plain circle for a step still running, the action it took, the change it was written down to expect, and — once wait_for has checked it — why that check went the way it did. Input: the step. Output: the row. */
 function JobStepView({ step }: { step: JobRun["steps"][number] }) {
-  const mark =
-    step.outcome === "pass" ? (
-      <Check className="mt-0.5 size-3.5 shrink-0 text-work" />
-    ) : step.outcome === "fail" ? (
-      <X className="mt-0.5 size-3.5 shrink-0 text-destructive" />
-    ) : (
-      <Circle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-    );
+  const mark = step.heldBefore ? (
+    // A check that was already true before the step took it says nothing about what the step did, so it is neither ticked nor crossed; the words are in the mark's own place rather than in an icon, since there is no shape that reads as "this proves nothing".
+    <span className="mt-0.5 shrink-0" title="The check already held before this step, so it says nothing about what the step did">
+      already held
+    </span>
+  ) : step.outcome === "pass" ? (
+    <Check className="mt-0.5 size-3.5 shrink-0 text-work" />
+  ) : step.outcome === "fail" ? (
+    <X className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+  ) : (
+    <Circle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+  );
   return (
     <li className="flex items-start gap-2 text-meta text-muted-foreground">
       {mark}

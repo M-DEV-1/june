@@ -18,8 +18,6 @@ export type Canned = {
   usage?: Usage;
   paused?: boolean;
   routines?: Routine[];
-  /** What a run started by POST /routines/{id}/run ends up recording as the routine's last answer; "NOTHING" is what a fresh fixture defaults to, same as a routine that has never had anything worth saying. The route itself answers 202 with the routine's id, as the daemon does — the answer reaches the window as a notice, never in that response. */
-  routineAnswer?: string;
   /** One entry per job id, the answer to GET /act/{id}. */
   jobs?: Record<string, ActJob>;
   /** A job already under way when the page opens, for ?mock=1 to show a running job without a click: the conversation it is shown beside, its goal, and the steps it has taken so far. Read by installMock alone — daemonFetch answers GET /act/{id} from `jobs` regardless of this, and a test that wants a live job in the store dispatches progress.jobSent/jobAccepted/eventArrived itself, the same way it does for a live ask. */
@@ -161,10 +159,8 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
       return { status: 204, body: null };
     }
     if (method === "POST" && routineRun) {
-      const id = decodeURIComponent(routineRun[1]);
-      const answer = canned.routineAnswer ?? "NOTHING";
-      routines = routines.map((r) => (r.id === id ? { ...r, last_run: new Date().toISOString(), last_answer: answer } : r));
-      return { status: 202, body: { id } };
+      // The daemon answers 202 the moment the run has started and knows neither when it will end nor what it will say; both come back minutes later as a "notice" event (see internal/ipc/routines.go), so nothing about the routine changes here.
+      return { status: 202, body: { id: decodeURIComponent(routineRun[1]) } };
     }
     // The rail line's own Done/1h/Evening/Tomorrow buttons; nothing here fires the "notice" event the real Act does, since a fixture that wants to show one arriving already dispatches progress.eventArrived directly (see store.test.ts).
     if (method === "POST" && noticeAction) return { status: 200, body: null };
