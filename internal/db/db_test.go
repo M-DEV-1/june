@@ -796,7 +796,7 @@ func TestStore_ReplaceSummariesWithDigest_ResumesADayWithAnExistingDigestAndLoos
 	}
 
 	// The next compaction pass finds these two through the same query OldSummaryGroups runs (still under a task), and calls ReplaceSummariesWithDigest again for the same day.
-	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{loose1, loose2}, "a fresh digest text that must be ignored"); err != nil {
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{loose1, loose2}, "a fresh digest text covering the whole day"); err != nil {
 		t.Fatalf("ReplaceSummariesWithDigest resuming a day with an existing digest: %v", err)
 	}
 
@@ -812,8 +812,8 @@ func TestStore_ReplaceSummariesWithDigest_ResumesADayWithAnExistingDigestAndLoos
 	if err := raw.QueryRowContext(ctx, `SELECT content FROM nodes WHERE id=?`, digestID).Scan(&digestContent); err != nil {
 		t.Fatalf("read digest content: %v", err)
 	}
-	if digestContent != "first digest text" {
-		t.Errorf("digest content = %q, want the original left untouched, not the freshly generated text", digestContent)
+	if digestContent != "a fresh digest text covering the whole day" {
+		t.Errorf("digest content = %q, want the text this pass generated — the reused digest is rewritten, not left frozen at what the first partial run said", digestContent)
 	}
 
 	var loose2Parent int64

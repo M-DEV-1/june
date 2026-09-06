@@ -27,14 +27,19 @@ func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64,
 	defer span.End()
 
 	if u.ID > 0 {
-		if _, err := s.db.ExecContext(ctx,
+		res, err := s.db.ExecContext(ctx,
 			`UPDATE threads SET state=?, last_seen_at=CURRENT_TIMESTAMP, times_seen=times_seen+1, salience=MIN(1.0, salience+0.05), status='active' WHERE id=?`,
-			u.State, u.ID); err != nil {
+			u.State, u.ID)
+		if err != nil {
 			span.RecordError(err)
 			return 0, fmt.Errorf("update thread: %w", err)
 		}
-		span.SetAttributes(attribute.Int64("db.thread_id", u.ID))
-		return u.ID, nil
+		// The id comes from the model, which can name a thread that never existed or one since deleted. Returning it anyway makes the caller link this flush's episodes and file its summary against nothing, so an id that matched no row falls through to the insert-by-subject path below.
+		if n, rerr := res.RowsAffected(); rerr == nil && n == 1 {
+			span.SetAttributes(attribute.Int64("db.thread_id", u.ID))
+			return u.ID, nil
+		}
+		slog.Warn("thread id from attribution matched no row, creating by subject instead", "thread_id", u.ID, "subject", u.Subject)
 	}
 
 	// new throughline: bias salience up slightly when the model flags it novel.

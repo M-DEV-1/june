@@ -22,6 +22,14 @@ type Store struct {
 	mu              sync.RWMutex
 	currentParentID int64 // bookmark for session
 	currentTaskID   int64 // bookmark for task
+	// currentTaskName is the content of the node currentTaskID points at, so LogSemanticNode can tell "the same thread as the last write" from "a different thread that happened to be written next". Without it SameTask files a summary under whichever task was touched last.
+	currentTaskName string
+	// userID is the root node every day node hangs off, kept so a day can be created after New has returned.
+	userID int64
+	// daySessions maps a local calendar day ("2006-01-02") to the session node under that day, so LogSemanticNode resolves the day per write instead of pinning the one the process started on. Guarded by mu.
+	daySessions map[string]int64
+	// clock is the source of "now" for day resolution, overridable by SetClock so a test can write across a midnight boundary. Nil means time.Now.
+	clock func() time.Time
 
 	// embedder/vectorIndex back HybridSearch's semantic half (see hybrid.go). Both nilable, wired via SetEmbedder/SetVectorIndex — a Store with neither set runs lexical-only.
 	embedder    embedder
@@ -114,12 +122,16 @@ func New(path string) (*Store, error) {
 
 	s.mu.Lock()
 	s.currentParentID = sessionID // bookmark
+	s.userID = userID
+	s.daySessions = map[string]int64{today: sessionID}
 
 	// rehydrate the latest task ID for continuity
 	var taskID int64
-	err = db.QueryRow("SELECT id FROM nodes WHERE parent_id = ? AND type = 'task' ORDER BY id DESC LIMIT 1", sessionID).Scan(&taskID)
+	var taskName string
+	err = db.QueryRow("SELECT id, content FROM nodes WHERE parent_id = ? AND type = 'task' ORDER BY id DESC LIMIT 1", sessionID).Scan(&taskID, &taskName)
 	if err == nil {
 		s.currentTaskID = taskID
+		s.currentTaskName = taskName
 	}
 	s.mu.Unlock()
 
@@ -139,6 +151,42 @@ func securePermissions(dir, dbPath string) {
 			slog.Warn("failed to restrict db file permissions", "path", p, "error", err)
 		}
 	}
+}
+
+// SetClock replaces the source of "now" used to decide which calendar day a summary is filed under. Input: a function returning the current time. Output: none. Only tests call this; production leaves it nil and gets time.Now.
+func (s *Store) SetClock(fn func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clock = fn
+}
+
+// now returns the current time from the installed clock, or time.Now when none is installed. Caller must hold s.mu (either mode).
+func (s *Store) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
+// sessionForDay returns the session node id for the calendar day containing at, creating that day node and its session the first time anything is written to the day. Input: ctx and the instant the write is filed under. Output: the session node's id, or an error from the node writes. Caller must hold s.mu for writing.
+func (s *Store) sessionForDay(ctx context.Context, at time.Time) (int64, error) {
+	day := DayStart(at).Format("2006-01-02")
+	if id, ok := s.daySessions[day]; ok {
+		return id, nil
+	}
+	dayID, err := s.ensureNode(ctx, s.userID, "day", day)
+	if err != nil {
+		return 0, fmt.Errorf("failed to ensure day: %w", err)
+	}
+	sessionID, err := s.ensureNode(ctx, dayID, "session", "Active Session")
+	if err != nil {
+		return 0, fmt.Errorf("failed to ensure session: %w", err)
+	}
+	if s.daySessions == nil {
+		s.daySessions = map[string]int64{}
+	}
+	s.daySessions[day] = sessionID
+	return sessionID, nil
 }
 
 func (s *Store) createSchema() error {
@@ -238,6 +286,18 @@ func (s *Store) createSchema() error {
 	WHEN OLD.type IN ('summary','digest')
 	BEGIN
 		DELETE FROM memory_fts WHERE source IN ('summary','digest') AND ref_id = OLD.id;
+	END;
+
+	-- A digest is rewritten in place when a day is compacted a second time (see ReplaceSummariesWithDigest), and without this the FTS row would still hold the first digest's words. Scoped to UPDATE OF content so the reparent update, which only touches parent_id, does not churn the index.
+	CREATE TRIGGER IF NOT EXISTS nodes_au_summary AFTER UPDATE OF content ON nodes
+	WHEN NEW.type IN ('summary','digest')
+	BEGIN
+		DELETE FROM memory_fts WHERE source IN ('summary','digest') AND ref_id = OLD.id;
+		INSERT INTO memory_fts(content, source, ref_id) VALUES (
+			CASE WHEN json_valid(NEW.content)
+				THEN IFNULL(NULLIF(json_extract(NEW.content, '$.summary'), ''), NEW.content)
+				ELSE NEW.content
+			END, NEW.type, NEW.id);
 	END;
 
 	CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes
