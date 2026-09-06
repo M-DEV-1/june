@@ -42,6 +42,37 @@ describe("ReplyMarkdown", () => {
     expect(w.__ran).toBeUndefined();
   });
 
+  it("writes none of react-markdown's own node prop onto the elements it renders", () => {
+    // react-markdown 10 hands every custom component the mdast node it came from; spreading that onto a DOM element leaves node="[object Object]" on it, which React 19 passes through without a word.
+    const { container } = render(<ReplyMarkdown text={"# a heading\n\nplain *word* in a paragraph\n\n- one item\n"} />);
+    expect(container.querySelector("[node]")).toBeNull();
+  });
+
+  it("shows a mailto: address as plain text, saying why, rather than as a click that does nothing", async () => {
+    mockDaemon();
+    const store = makeStore();
+    render(
+      <Provider store={store}>
+        <ReplyMarkdown text="[write to her](mailto:priya@example.com)" />
+      </Provider>,
+    );
+    // POST /open refuses any scheme but http and https (see internal/ipc/open.go), and this window never navigates itself, so there is nothing a click could do.
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText("write to her").getAttribute("title")).toContain("http");
+  });
+
+  it("never turns a javascript: href into a clickable link", async () => {
+    mockDaemon();
+    const store = makeStore();
+    render(
+      <Provider store={store}>
+        <ReplyMarkdown text="[click me](javascript:alert(1))" />
+      </Provider>,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText("click me")).toBeDefined();
+  });
+
   it("opens a link by posting to the daemon's /open route, never through window.open or window.location", async () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
     const originalHref = window.location.href;

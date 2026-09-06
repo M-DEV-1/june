@@ -13,19 +13,34 @@ function openLink(openUrl: ReturnType<typeof useOpenUrlMutation>[0], href: strin
   openUrl(href);
 }
 
-/** Every tag react-markdown may ask for, mapped onto the window's own type scale and surfaces rather than the browser's defaults — a heading tops out at `text-doc`, the same size a page's own section heading uses, because a reply is a paragraph in a thread and not a document of its own. */
+/** Whether a link is one the daemon will actually open. Input: the href, already through react-markdown's own urlTransform, which blanks every scheme but http, https, irc, mailto and xmpp. Output: true for http and https, which is all POST /open takes (see internal/ipc/open.go, which refuses the rest before running any command). */
+function opens(href: string | undefined): boolean {
+  return /^https?:\/\//i.test(href ?? "");
+}
+
+/** What a link the daemon would refuse is drawn as instead of a link, said in the title so the address is not simply dead under the pointer. */
+const NOT_OPENABLE = "Ora opens http and https links only, so this is shown as text.";
+
+/** Every tag react-markdown may ask for, mapped onto the window's own type scale and surfaces rather than the browser's defaults — a heading tops out at `text-doc`, the same size a page's own section heading uses, because a reply is a paragraph in a thread and not a document of its own. Each mapping drops `node`: react-markdown 10 hands every custom component the mdast node it was rendered from, and React 19 writes an unknown lowercase prop straight onto the element, which left node="[object Object]" on every paragraph, heading, cell and link in every reply. */
 const components: Components = {
-  h1: (p) => <h2 className="mt-6 mb-2 text-doc text-foreground" {...p} />,
-  h2: (p) => <h2 className="mt-6 mb-2 text-doc text-foreground" {...p} />,
-  h3: (p) => <h3 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
-  h4: (p) => <h4 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
-  h5: (p) => <h5 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
-  h6: (p) => <h6 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
-  p: (p) => <p className="whitespace-pre-wrap" {...p} />,
-  ul: (p) => <ul className="ml-5 list-disc [&>li]:mt-1" {...p} />,
-  ol: (p) => <ol className="ml-5 list-decimal [&>li]:mt-1" {...p} />,
-  a: ({ href, children, ...p }) => {
+  h1: ({ node: _n, ...p }) => <h2 className="mt-6 mb-2 text-doc text-foreground" {...p} />,
+  h2: ({ node: _n, ...p }) => <h2 className="mt-6 mb-2 text-doc text-foreground" {...p} />,
+  h3: ({ node: _n, ...p }) => <h3 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
+  h4: ({ node: _n, ...p }) => <h4 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
+  h5: ({ node: _n, ...p }) => <h5 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
+  h6: ({ node: _n, ...p }) => <h6 className="mt-4 mb-1 text-ui font-medium text-foreground" {...p} />,
+  p: ({ node: _n, ...p }) => <p className="whitespace-pre-wrap" {...p} />,
+  ul: ({ node: _n, ...p }) => <ul className="ml-5 list-disc [&>li]:mt-1" {...p} />,
+  ol: ({ node: _n, ...p }) => <ol className="ml-5 list-decimal [&>li]:mt-1" {...p} />,
+  a: ({ node: _n, href, children, ...p }) => {
     const [openUrl] = useOpenUrlMutation();
+    // A mailto:, a file: or a javascript: href react-markdown has already blanked is not something this window can do anything with — the daemon refuses it and the window never navigates itself — so it is drawn as the words it was, with the reason on the title, rather than as a click that silently does nothing.
+    if (!opens(href))
+      return (
+        <span className="underline decoration-dotted underline-offset-2" title={NOT_OPENABLE}>
+          {children}
+        </span>
+      );
     return (
       <a
         href={href}
@@ -40,8 +55,8 @@ const components: Components = {
       </a>
     );
   },
-  pre: (p) => <pre className="mt-2 overflow-x-auto rounded-md bg-sunken p-3 font-mono text-meta" {...p} />,
-  code: ({ className, children, ...p }) => {
+  pre: ({ node: _n, ...p }) => <pre className="mt-2 overflow-x-auto rounded-md bg-sunken p-3 font-mono text-meta" {...p} />,
+  code: ({ node: _n, className, children, ...p }) => {
     // A fenced block's own <code> sits inside the <pre> above and only needs the mono face; a bare `code` span is inline text and gets the subtle surface and padding the design calls "sunken". remark tags a fenced block's code with `language-xxx` only when the fence names one — a fence with no language (rare in practice, since every real reply names one) falls back to the inline styling nested inside the pre's own background, which is a harmless doubling rather than a wrong render. ponytail: className-sniffing, not full inline/block tracking — fine while every real fence in the daemon's replies names a language.
     const block = /language-/.test(className ?? "");
     return (
@@ -50,9 +65,9 @@ const components: Components = {
       </code>
     );
   },
-  table: (p) => <table className="my-2 border-collapse text-read" {...p} />,
-  th: (p) => <th className="border border-hairline px-2 py-1 text-left font-medium" {...p} />,
-  td: (p) => <td className="border border-hairline px-2 py-1" {...p} />,
+  table: ({ node: _n, ...p }) => <table className="my-2 border-collapse text-read" {...p} />,
+  th: ({ node: _n, ...p }) => <th className="border border-hairline px-2 py-1 text-left font-medium" {...p} />,
+  td: ({ node: _n, ...p }) => <td className="border border-hairline px-2 py-1" {...p} />,
 };
 
 /** Ora's reply, structured. Input: the text. Output: the rendered markdown. */
