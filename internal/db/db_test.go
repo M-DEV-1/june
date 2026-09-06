@@ -2520,3 +2520,82 @@ func TestCreateSchema_TallyCharColumnsMigrated(t *testing.T) {
 		t.Errorf("tally still lacks its character columns after open: %v", err)
 	}
 }
+
+// TestRetrieveRelevant_NoteExcerptSurvivesPastEpisodeCap checks the per-turn inject path gives a note the note budget rather than the 200-rune episode cap. Input: one note whose answer sits well past 200 runes. Output: the injected line still carries that answer.
+func TestRetrieveRelevant_NoteExcerptSurvivesPastEpisodeCap(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	body := "Attendees: Alex, Priya. " + strings.Repeat("the payments team walked through the checkout flow again. ", 8) + "DECISION: ship the kubernetes migration on Friday."
+	if _, err := store.LogNote(ctx, body, "meeting"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	lines, err := store.RetrieveRelevant(ctx, "kubernetes migration checkout", 4)
+	if err != nil {
+		t.Fatalf("RetrieveRelevant: %v", err)
+	}
+	if len(lines) == 0 {
+		t.Fatal("expected the note to be retrieved at all")
+	}
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "DECISION: ship the kubernetes migration on Friday.") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the note was cut to its heading — the inject path is still using the 200-rune episode cap: %+v", lines)
+	}
+}
+
+// TestRankedEpisodes_MultiWordFocusMatchesWordsApart checks that a multi-word recall subject is tokenised rather than quoted as one FTS5 phrase. Input: a focus whose words appear in an episode but not adjacent. Output: the episode is still a candidate.
+func TestRankedEpisodes_MultiWordFocusMatchesWordsApart(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if _, err := store.LogEpisode(ctx, "Firefox", "Riddler", "reviewing the Riddler puzzle generator and its scoring project notes"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
+	}
+
+	hits, err := store.RankedEpisodes(ctx, "Riddler project", 5)
+	if err != nil {
+		t.Fatalf("RankedEpisodes: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Error(`a two-word subject matched nothing: the focus is being quoted as one contiguous FTS5 phrase`)
+	}
+}
+
+// TestRelevantNotes_SurvivesCrossSourceLimit checks that the note filter runs in SQL before the row limit, not in Go after it. Input: more strongly-matching diary rows than the shared limit, plus one matching note. Output: the note is still returned.
+func TestRelevantNotes_SurvivesCrossSourceLimit(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	for i := 0; i < 12; i++ {
+		if err := store.SetDiaryEntry(ctx, fmt.Sprintf("2026-07-%02d", i+1), "day", "kubernetes migration payments"); err != nil {
+			t.Fatalf("SetDiaryEntry: %v", err)
+		}
+	}
+	if _, err := store.LogNote(ctx, "the user runs the kubernetes migration for the payments team on Fridays", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	notes, err := store.RelevantNotes(ctx, "kubernetes migration payments", 3)
+	if err != nil {
+		t.Fatalf("RelevantNotes: %v", err)
+	}
+	if len(notes) == 0 {
+		t.Error("the matching note was filtered out after a cross-source limit had already spent every row on diary hits")
+	}
+}
+
+// TestDeleteNote_MissingID_Errors checks that deleting an id naming nothing is reported as a failure. A nil error here made the revise tool answer "deleted" for an id the model invented, and fired the vector-index delete on it.
+func TestDeleteNote_MissingID_Errors(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if err := store.DeleteNote(ctx, 4242); err == nil {
+		t.Error("expected an error deleting a nonexistent note id, got nil")
+	}
+}

@@ -198,7 +198,7 @@ func buildFTSMatch(query string) string {
 // SearchMemory runs FTS5 over summaries + notes. Returns top 10 by rank.
 // Empty query -> empty result, no error.
 func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, error) {
-	return s.searchMemoryWindow(ctx, query, time.Time{}, time.Time{})
+	return s.searchMemoryWindow(ctx, query, "", time.Time{}, time.Time{}, 10)
 }
 
 // sqliteUTC renders t the way every timestamp column in this store is written (UTC "YYYY-MM-DD HH:MM:SS"), so bound parameters compare correctly against stored values.
@@ -214,8 +214,8 @@ const ftsRowTime = `(CASE source
 	ELSE (SELECT created_at FROM nodes WHERE id = ref_id)
 END)`
 
-// searchMemoryWindow is SearchMemory constrained to rows whose timestamp falls in [since, until]; a zero bound is open on that side. The window is part of the WHERE clause, before the LIMIT, so a sparse window still yields its rows instead of being crowded out by out-of-window rows that rank higher.
-func (s *Store) searchMemoryWindow(ctx context.Context, query string, since, until time.Time) ([]MemoryHit, error) {
+// searchMemoryWindow is SearchMemory constrained to rows whose timestamp falls in [since, until] and, when source is not "", to that one source; limit caps the rows returned. Both the window and the source are part of the WHERE clause, before the LIMIT, so a sparse window or a single-source caller still yields its rows instead of being crowded out by rows that rank higher — filtering after a cross-source LIMIT 10 returned nothing whenever ten other rows outranked the best note.
+func (s *Store) searchMemoryWindow(ctx context.Context, query, source string, since, until time.Time, limit int) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SearchMemory")
 	defer span.End()
@@ -230,6 +230,10 @@ func (s *Store) searchMemoryWindow(ctx context.Context, query string, since, unt
 
 	where := "memory_fts MATCH ?"
 	args := []any{safe}
+	if source != "" {
+		where += " AND source = ?"
+		args = append(args, source)
+	}
 	if !since.IsZero() {
 		where += " AND " + ftsRowTime + " >= ?"
 		args = append(args, sqliteUTC(since))
@@ -250,8 +254,8 @@ func (s *Store) searchMemoryWindow(ctx context.Context, query string, since, unt
 		FROM memory_fts
 		WHERE `+where+`
 		ORDER BY rank
-		LIMIT 10
-	`, args...)
+		LIMIT ?
+	`, append(args, limit)...)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("fts5 search: %w", err)
@@ -362,7 +366,8 @@ func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]
 	if focus == "" || limit <= 0 {
 		return nil, nil
 	}
-	safe := `"` + strings.ReplaceAll(focus, `"`, `""`) + `"`
+	// Tokenised and ORed like every other query in this file, not quoted as one contiguous phrase: a natural-language subject rarely appears verbatim in stored prose, so "Riddler project" found nothing while "Riddler" found the episode.
+	safe := buildFTSMatch(focus)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT episodes.id, episodes.screen_text, episodes.created_at, episodes.importance,
@@ -502,7 +507,8 @@ func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int
 	}
 	out := make([]string, 0, len(hits))
 	for _, h := range hits {
-		out = append(out, FormatHit(h, maxEpisodeExcerpt))
+		// Budget 0 means "let excerptBudget decide per source", the same call formatFocusHits and query_memory make. Passing maxEpisodeExcerpt here cut a note to 200 runes on the path that injects memory into every turn, which showed the model a heading where the answer was in the body.
+		out = append(out, FormatHit(h, 0))
 	}
 	return out, nil
 }

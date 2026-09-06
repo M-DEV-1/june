@@ -180,31 +180,39 @@ func (s *Store) RelevantNotes(ctx context.Context, focus string, limit int) ([]s
 	if focus == "" {
 		return nil, nil
 	}
-	hits, err := s.SearchMemory(ctx, focus)
+	rows := limit
+	if rows <= 0 {
+		rows = 10
+	}
+	hits, err := s.searchMemoryWindow(ctx, focus, "note", time.Time{}, time.Time{}, rows)
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	out := make([]string, 0, len(hits))
 	for _, h := range hits {
-		if h.Source != "note" {
-			continue
-		}
-		if limit > 0 && len(out) >= limit {
-			break
-		}
 		out = append(out, h.Content)
 	}
 	return out, nil
 }
 
-// DeleteNote removes a note by id. FTS5 mirror is dropped via trigger. Its vector (if any) is deleted async/best-effort — same non-blocking pattern as LogNote's embed goroutine — so a vector-index error never fails the SQL delete the model is waiting on.
+// DeleteNote removes a note by id, erroring when no such note exists. FTS5 mirror is dropped via trigger. Its vector (if any) is deleted async/best-effort — same non-blocking pattern as LogNote's embed goroutine — so a vector-index error never fails the SQL delete the model is waiting on.
 func (s *Store) DeleteNote(ctx context.Context, id int64) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.DeleteNote")
 	defer span.End()
 
-	_, err := s.db.ExecContext(ctx, `DELETE FROM notes WHERE id = ?`, id)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM notes WHERE id = ?`, id)
 	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+
+	// A no-op DELETE is not success, for the same reason UpdateNote guards its own: the model can hand us an id it invented, and reporting "deleted" tells the user their note is gone when it is not. Returning before the vector work below also stops the "note:<id>" Delete from evicting the vector of some other real note.
+	if n, rerr := res.RowsAffected(); rerr != nil {
+		span.RecordError(rerr)
+		return fmt.Errorf("delete note: %w", rerr)
+	} else if n == 0 {
+		err := fmt.Errorf("no note with id %d", id)
 		span.RecordError(err)
 		return err
 	}

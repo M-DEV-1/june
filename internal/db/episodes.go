@@ -399,16 +399,14 @@ func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([
 		return nil, nil
 	}
 
-	hits, err := s.SearchMemory(ctx, subject)
+	hits, err := s.searchMemoryWindow(ctx, subject, "thread", time.Time{}, time.Time{}, limit)
 	if err != nil {
 		return nil, err
 	}
 
 	var out []string
 	for _, h := range hits {
-		if h.Source == "thread" {
-			out = append(out, fmt.Sprintf("[thread#%d] %s", h.RefID, h.Content))
-		}
+		out = append(out, fmt.Sprintf("[thread#%d] %s", h.RefID, h.Content))
 	}
 
 	episodes, err := s.DiverseEpisodes(ctx, subject, limit)
