@@ -368,6 +368,27 @@ var AvailableVoices = []string{
 	"Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 }
 
+// voiceTraits is Google's own one-word description of how each prebuilt voice sounds, from https://ai.google.dev/gemini-api/docs/speech-generation#voices (checked 2026-09-07). The picker shows it beside the name because thirty star names say nothing about how any of them sounds.
+var voiceTraits = map[string]string{
+	"Zephyr": "Bright", "Puck": "Upbeat", "Charon": "Informative", "Kore": "Firm",
+	"Fenrir": "Excitable", "Leda": "Youthful", "Orus": "Firm", "Aoede": "Breezy",
+	"Callirrhoe": "Easy-going", "Autonoe": "Bright", "Enceladus": "Breathy", "Iapetus": "Clear",
+	"Umbriel": "Easy-going", "Algieba": "Smooth", "Despina": "Smooth", "Erinome": "Clear",
+	"Algenib": "Gravelly", "Rasalgethi": "Informative", "Laomedeia": "Upbeat", "Achernar": "Soft",
+	"Alnilam": "Firm", "Schedar": "Even", "Gacrux": "Mature", "Pulcherrima": "Forward",
+	"Achird": "Friendly", "Zubenelgenubi": "Casual", "Vindemiatrix": "Gentle", "Sadachbia": "Lively",
+	"Sadaltager": "Knowledgeable", "Sulafat": "Warm",
+}
+
+// VoiceTrait is how a voice sounds, in one word. Input: a voice name in any casing. Output: the trait, or "" for a name that is not one of AvailableVoices.
+func VoiceTrait(name string) string {
+	canonical, ok := NormalizeVoice(name)
+	if !ok {
+		return ""
+	}
+	return voiceTraits[canonical]
+}
+
 // NormalizeVoice case-insensitively matches name against AvailableVoices and returns the canonical spelling.
 // ok is false when name isn't a known voice.
 func NormalizeVoice(name string) (canonical string, ok bool) {

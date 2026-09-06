@@ -224,6 +224,9 @@ export type Usage = { today: UsageWindow; week: UsageWindow; days: UsageDay[]; r
 /** GET /status: whether the tracker is paused right now. POST /pause and POST /resume are what change it. */
 export type TrackerStatus = { paused: boolean };
 
+/** One of Gemini Live's thirty prebuilt voices, on GET or POST /voices. Mirrors ipc.VoiceView. trait is Google's own one-word description of how it sounds ("Bright", "Gravelly"), shown beside the name because thirty star names say nothing on their own about how any of them sounds. current marks the one a live session dials with next; exactly one row carries it. */
+export type Voice = { name: string; trait: string; current: boolean };
+
 /** One tool call's step inside a computer-use job. Mirrors actjob.Step; outcome is "pass", "fail", or "" before wait_for has checked it, and expect is the change the step was written down to produce. */
 export type ActStep = {
   n: number;
@@ -258,7 +261,7 @@ export type ActJob = {
 export const oraApi = createApi({
   reducerPath: "ora",
   baseQuery: baseQueryWithFreshToken,
-  tagTypes: ["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"],
+  tagTypes: ["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job", "Voice"],
   endpoints: (build) => ({
     /** The 50 most recently touched conversations, newest first. The list is tagged with an id of its own so it can be read again without every open conversation being read again with it: an invalidation naming the type alone still matches this, which is what every mutation below relies on. */
     conversations: build.query<ConversationSummary[], void>({
@@ -406,6 +409,22 @@ export const oraApi = createApi({
       transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
       invalidatesTags: ["Brain", "Settings"],
     }),
+    /** The whole voice roster: all thirty of Gemini Live's prebuilt voices, one carrying current true. */
+    voices: build.query<Voice[], void>({
+      query: () => "/voices",
+      transformResponse: (r: { voices: Voice[] }) => r.voices ?? [],
+      providesTags: [{ type: "Voice" as const, id: "LIST" }],
+    }),
+    /** Sets which voice Ora speaks in and persists it; the daemon answers the same list GET /voices would, with the new one marked current. A session already under way keeps the voice it dialled with, so this is heard on the next one, not this one. 400 for a name that is not one of the thirty. */
+    setVoice: build.mutation<Voice[], string>({
+      query: (name) => ({ url: "/voices", method: "POST", body: { name } }),
+      transformResponse: (r: { voices: Voice[] }) => r.voices ?? [],
+      invalidatesTags: [{ type: "Voice" as const, id: "LIST" }],
+    }),
+    /** Speaks one fixed line out of this machine's speaker in the named voice, without changing which voice is configured — hearing a voice first is the whole point, so nothing here is invalidated. Answers {played: name}. 400 for a name that is not one of the thirty, 500 when synthesis or playback failed, 503 when this daemon has no speaker to play through. */
+    previewVoice: build.mutation<{ played: string }, string>({
+      query: (name) => ({ url: "/voices/preview", method: "POST", body: { name } }),
+    }),
     /** What every provider has cost in tokens, which is the ledger at the foot of Settings. */
     usage: build.query<Usage, void>({
       query: () => "/usage",
@@ -489,6 +508,9 @@ export const {
   useSetClaudeUsageFromLoginMutation,
   useBrainsQuery,
   usePickBrainMutation,
+  useVoicesQuery,
+  useSetVoiceMutation,
+  usePreviewVoiceMutation,
   useUsageQuery,
   useTrackerQuery,
   useSetCaptureMutation,

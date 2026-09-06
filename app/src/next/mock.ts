@@ -1,7 +1,7 @@
 /** The fake daemon: one fetch function that answers every route api.ts calls, out of a plain object of canned answers. It is imported by the tests in this folder through testing.tsx, and by the ?mock=1 browser mode below, so a screen and its test and a screenshot all read the same fixtures. Nothing here imports vitest or React.
  */
 
-import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, Meeting, Notice, Routine, SettingsView, Task, Usage } from "./api";
+import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, Meeting, Notice, Routine, SettingsView, Task, Usage, Voice } from "./api";
 
 /** What the fake daemon holds. Anything left out answers as an empty list or an empty object, which is what a daemon with nothing recorded would say. */
 export type Canned = {
@@ -14,6 +14,7 @@ export type Canned = {
   pages?: Record<string, DayView>;
   meetings?: Meeting[];
   brains?: Brain[];
+  voices?: Voice[];
   settings?: Partial<SettingsView>;
   usage?: Usage;
   paused?: boolean;
@@ -142,6 +143,14 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     if (method === "GET" && path === "/meetings") return { status: 200, body: { meetings: canned.meetings ?? [] } };
     if (method === "GET" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
     if (method === "POST" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
+    if (method === "GET" && path === "/voices") return { status: 200, body: { voices: canned.voices ?? [] } };
+    // Picking a voice in the mock answers the roster with that one marked, so the section behaves the way it does against a real daemon rather than freezing on its first answer.
+    if (method === "POST" && path === "/voices") {
+      const picked = (body as { name?: string })?.name ?? "";
+      return { status: 200, body: { voices: (canned.voices ?? []).map((v) => ({ ...v, current: v.name === picked })) } };
+    }
+    // Nothing can be played in a browser, so the mock reports a machine with no speaker, which is a real answer the section already knows how to say.
+    if (method === "POST" && path === "/voices/preview") return { status: 503, body: {} };
     if (method === "GET" && path === "/settings") return { status: 200, body: { ...emptySettings, ...settingsState } };
     if (method === "POST" && path === "/settings") {
       settingsState = { ...settingsState, ...(body as Partial<SettingsView>) };
@@ -405,6 +414,13 @@ export const demo: Canned = {
     },
     { id: "2", text: "tell me if anything is on fire", schedule: "every 3 hours", enabled: true, last_run: ago(0, 6, 0), last_answer: "NOTHING" },
     { id: "3", text: "when Priya replies about the venue, tell me", schedule: "when Priya replies about the venue", enabled: true, last_run: "", last_answer: "" },
+  ],
+  voices: [
+    { name: "Iapetus", trait: "Clear", current: true },
+    { name: "Sulafat", trait: "Warm", current: false },
+    { name: "Algenib", trait: "Gravelly", current: false },
+    { name: "Puck", trait: "Upbeat", current: false },
+    { name: "Sadaltager", trait: "Knowledgeable", current: false },
   ],
   brains: [
     {
