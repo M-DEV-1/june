@@ -4,21 +4,19 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"ora/internal/config"
+	"ora/internal/obs"
+	"ora/internal/util"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
-	"ora/internal/config"
-	"ora/internal/obs"
-	"ora/internal/util"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 )
-
-
 
 // controlTokenPattern matches the artifacts the Live API occasionally leaves in OutputTranscription text instead of consuming them internally: a literal "<ctrlN>" marker (a real session logged "ora said" text of exactly "<ctrl46><ctrl46>"), or a run of the Unicode replacement character U+FFFD produced by the same kind of encoding slip.
 var controlTokenPattern = regexp.MustCompile(`<ctrl\d+>|\x{FFFD}+`)

@@ -37,7 +37,6 @@ func TestDataDir_ResolutionOrder(t *testing.T) {
 	})
 }
 
-
 // TestConfigPath_UnderDataDir verifies ConfigPath resolves inside DataDir rather than the old cwd-relative "ora-db".
 func TestConfigPath_UnderDataDir(t *testing.T) {
 	dir := t.TempDir()
@@ -48,7 +47,6 @@ func TestConfigPath_UnderDataDir(t *testing.T) {
 		t.Errorf("ConfigPath() = %q, want %q", got, want)
 	}
 }
-
 
 // TestEmbedConfigDefaults verifies a config file with no "embed" key at all (every install before the local embedder existed) still comes back with the local port and idle timeout filled in, so the daemon never spawns llama-server on port 0 or reaps it instantly.
 func TestEmbedConfigDefaults(t *testing.T) {

@@ -104,4 +104,3 @@ func GeminiDaily(state *QuotaState, model string, opts QuotaOptions, now time.Ti
 func GrokNote() string {
 	return "grok exposes no usage data: its CLI, config, logs, and session files carry no quota, usage, or rate-limit reading, and it has no command that reports one"
 }
-

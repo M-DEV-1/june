@@ -234,7 +234,8 @@ func lastSunday(base time.Time) time.Time {
 	for base.Weekday() != time.Sunday {
 		base = base.AddDate(0, 0, -1)
 	}
-	return base
+	// The hour is pinned to mid-morning so a test that advances its fake clock by minutes stays on the Sunday it started on; taking the wall clock's own hour made these tests fail when they ran late on a Sunday evening.
+	return time.Date(base.Year(), base.Month(), base.Day(), 9, 0, 0, 0, base.Location())
 }
 
 // TestScheduler_WeeklyStudy_FiresOnceOnSunday is the tracer bullet for the Sunday trigger: past the brief hour, on a Sunday, with fresh activity, one tick must call the wired weeklyStudy func exactly once and write the once-per-Sunday marker, and a second tick must not call it again.

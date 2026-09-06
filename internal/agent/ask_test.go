@@ -1043,4 +1043,3 @@ func TestShouldFallBack_OnlyOnUnavailable(t *testing.T) {
 		t.Errorf("TextFallbackModel = %q, want a model other than TextModel %q", config.TextFallbackModel, config.TextModel)
 	}
 }
-

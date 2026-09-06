@@ -415,4 +415,3 @@ func TestRun_StoresAFailedAskAsAnErrorTurn(t *testing.T) {
 		t.Errorf("events = %v, want status then error", types)
 	}
 }
-

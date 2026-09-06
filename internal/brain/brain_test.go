@@ -457,4 +457,3 @@ func TestOutermostJSON_IgnoresABracketInTheProse(t *testing.T) {
 		t.Errorf("got %q, want the object", got)
 	}
 }
-

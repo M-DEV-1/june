@@ -304,4 +304,3 @@ func TestNoticeAction_BadBody(t *testing.T) {
 		t.Error("Act was called for a body that never parsed")
 	}
 }
-
