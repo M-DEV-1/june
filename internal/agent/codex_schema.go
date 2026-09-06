@@ -33,6 +33,10 @@ func jsonSchema(s *genai.Schema) map[string]any {
 	if node["type"] == nil {
 		node["type"] = "object"
 	}
+	// A tool that takes no arguments still declares an empty properties map, the shape OpenAI documents for a parameterless function and the one this path sent before the schema walk was factored out.
+	if node["properties"] == nil {
+		node["properties"] = map[string]any{}
+	}
 	return node
 }
 
