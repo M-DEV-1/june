@@ -829,10 +829,16 @@ func TestCompactStage_CompleteWeekCollapses(t *testing.T) {
 	if got, _ := store.DiaryEntry(ctx, "2026-08-03", "week"); got != "A remembered week." {
 		t.Errorf("week entry = %q", got)
 	}
+	// The dailies are kept and reparented under the week rather than deleted, so they stay readable; DiaryEntriesThrough is what puts them out of the next night's reach.
 	for d := 0; d < 7; d++ {
-		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-03", -d), "day"); got != "" {
-			t.Errorf("constituent daily %d survived the compaction: %q", d, got)
+		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-03", -d), "day"); got == "" {
+			t.Errorf("constituent daily %d was destroyed by the compaction", d)
 		}
+	}
+	if left, err := store.DiaryEntriesThrough(ctx, "day", "2026-08-09"); err != nil {
+		t.Fatal(err)
+	} else if len(left) != 0 {
+		t.Errorf("a compacted week's dailies are still offered for compaction: %+v", left)
 	}
 	for d := 0; d < 6; d++ {
 		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-10", -d), "day"); got == "" {
@@ -883,9 +889,14 @@ func TestCompactStage_MonthTierCollapsesCompleteMonths(t *testing.T) {
 		t.Errorf("month entry = %q", got)
 	}
 	for _, m := range march {
-		if got, _ := store.DiaryEntry(ctx, m, "week"); got != "" {
-			t.Errorf("constituent week %s survived the compaction: %q", m, got)
+		if got, _ := store.DiaryEntry(ctx, m, "week"); got == "" {
+			t.Errorf("constituent week %s was destroyed by the compaction", m)
 		}
+	}
+	if left, err := store.DiaryEntriesThrough(ctx, "week", "2026-03-31"); err != nil {
+		t.Fatal(err)
+	} else if len(left) != 0 {
+		t.Errorf("a compacted month's weeks are still offered for compaction: %+v", left)
 	}
 	if got, _ := store.DiaryEntry(ctx, "2026-04-01", "month"); got != "" {
 		t.Error("an incomplete month was compacted")

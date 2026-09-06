@@ -127,14 +127,14 @@ func (s *Store) DiaryDays(ctx context.Context, from, to string) ([]DiaryDay, err
 	return out, nil
 }
 
-// DiaryEntriesThrough returns the diary rows of one kind whose day is at or before through (a local 'YYYY-MM-DD' string), oldest first. The compaction stage uses it to find the dailies and weeks old enough to collapse; the string comparison works because ISO dates order lexically.
+// DiaryEntriesThrough returns the diary rows of one kind whose day is at or before through (a local 'YYYY-MM-DD' string) and that have not already been rolled up, oldest first. The compaction stage uses it to find the dailies and weeks old enough to collapse; the string comparison works because ISO dates order lexically, and skipping a row with a parent is what stops an already-compacted week being compacted again.
 func (s *Store) DiaryEntriesThrough(ctx context.Context, kind, through string) ([]DiaryDay, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.DiaryEntriesThrough")
 	defer span.End()
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT day, content FROM diary WHERE kind = ? AND day <= ? ORDER BY day ASC`, kind, through)
+		`SELECT day, content FROM diary WHERE kind = ? AND day <= ? AND parent_id IS NULL ORDER BY day ASC`, kind, through)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("query diary entries through: %w", err)

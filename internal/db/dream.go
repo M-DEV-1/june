@@ -223,7 +223,7 @@ func (s *Store) CommitUnderstandingStage(ctx context.Context, night, understandi
 	})
 }
 
-// DiaryCompaction is one coarse diary entry replacing a run of finer ones: the (day, kind) to upsert with its content, and the finer-kind constituent days to delete in the same transaction.
+// DiaryCompaction is one coarse diary entry summarising a run of finer ones: the (day, kind) to upsert with its content, and the finer-kind constituent days to reparent under it in the same transaction.
 type DiaryCompaction struct {
 	Day             string
 	Kind            string
@@ -232,7 +232,8 @@ type DiaryCompaction struct {
 	ConstituentDays []string
 }
 
-// CommitCompactStage writes one tier of the night's diary compaction in a single transaction: every coarse entry upserted, its constituents deleted (the diary FTS triggers keep the mirror in sync), and — when done is set — the 'compact' token in stages_done. The runner calls this once per tier and sets done only on the last call, so the token lands exactly once; a night with nothing to compact is one call with no compactions that still commits the token.
+// CommitCompactStage writes one tier of the night's diary compaction in a single transaction: every coarse entry upserted, its constituents reparented under it, and — when done is set — the 'compact' token in stages_done. The runner calls this once per tier and sets done only on the last call, so the token lands exactly once; a night with nothing to compact is one call with no compactions that still commits the token.
+// The constituents are kept, not deleted. The coarse entry is a model rewrite of seven day pages and there is no other copy of what those days said, so this follows ReplaceSummariesWithDigest and ReplaceAllNotes in keeping the source of a compaction. DiaryEntriesThrough skips a reparented row, which is what stops the next night rolling the same week up again.
 func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []DiaryCompaction, done bool) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.CommitCompactStage")
@@ -243,10 +244,15 @@ func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []Di
 			if err := upsertDiary(ctx, tx, c.Day, c.Kind, c.Content); err != nil {
 				return err
 			}
+			var coarseID int64
+			if err := tx.QueryRowContext(ctx,
+				`SELECT id FROM diary WHERE day = ? AND kind = ?`, c.Day, c.Kind).Scan(&coarseID); err != nil {
+				return fmt.Errorf("read compacted diary parent: %w", err)
+			}
 			for _, day := range c.ConstituentDays {
 				if _, err := tx.ExecContext(ctx,
-					`DELETE FROM diary WHERE kind = ? AND day = ?`, c.ConstituentKind, day); err != nil {
-					return fmt.Errorf("delete compacted diary row: %w", err)
+					`UPDATE diary SET parent_id = ? WHERE kind = ? AND day = ?`, coarseID, c.ConstituentKind, day); err != nil {
+					return fmt.Errorf("reparent compacted diary row: %w", err)
 				}
 			}
 		}

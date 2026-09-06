@@ -356,13 +356,16 @@ func (s *Store) createSchema() error {
 	-- kind 'brief' records the morning brief delivered that day and doubles as its
 	-- once-per-day marker; kind 'dream' is a night's morning report. The dreaming
 	-- loop's compaction collapses old 'day' rows into 'week' (day = the Monday) and
-	-- old 'week' rows into 'month' (day = 'YYYY-MM-01'). Upserted by (day, kind) —
+	-- old 'week' rows into 'month' (day = 'YYYY-MM-01'); a collapsed row is kept and
+	-- gets parent_id set to the coarse row that now summarises it, the way
+	-- ReplaceSummariesWithDigest reparents summaries. Upserted by (day, kind) —
 	-- see SetDiaryEntry.
 	CREATE TABLE IF NOT EXISTS diary (
 		id INTEGER PRIMARY KEY,
 		day TEXT NOT NULL,
 		kind TEXT NOT NULL DEFAULT 'day',
 		content TEXT NOT NULL,
+		parent_id INTEGER,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(day, kind)
@@ -570,6 +573,10 @@ func (s *Store) createSchema() error {
 		if err := s.ensureColumn("act_runs", col.name, col.decl); err != nil {
 			return err
 		}
+	}
+	// diary gained parent_id on 2026-09-06, when compaction stopped deleting the day pages it rolls into a week and started reparenting them under it instead.
+	if err := s.ensureColumn("diary", "parent_id", "INTEGER"); err != nil {
+		return err
 	}
 	// notes gained owner_class on 2026-09-05 so the user can correct an action item's "me"/"them"/"unclear" reading by hand; empty for every note that is not an action item and for one nobody has corrected yet.
 	if err := s.ensureColumn("notes", "owner_class", "TEXT NOT NULL DEFAULT ''"); err != nil {
