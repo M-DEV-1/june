@@ -74,7 +74,6 @@ type RequestGate interface {
 	Allow(model string) error
 }
 
-
 type Storage interface {
 	LogSemanticNode(ctx context.Context, summary TaskSummary) error
 	LogNote(ctx context.Context, content, kind string) (int64, error)
@@ -347,4 +346,3 @@ func (c *Compiler) GetCurrentBuffer() []tracker.Activity {
 	copy(buf, c.buffer)
 	return buf
 }
-

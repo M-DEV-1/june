@@ -115,4 +115,3 @@ func TestMinMaxNormalize(t *testing.T) {
 		})
 	}
 }
-

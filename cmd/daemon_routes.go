@@ -238,16 +238,16 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *ipc.LiveConfig, opts brain.QuotaOptions) ipc.BrainLimits {
 	return func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
 		switch id {
-			case "gemini":
-				model, ok := brain.GeminiModelFor(cfg.Get().Brain)
-				if !ok {
-					model = config.TextModel
-				}
-				return brain.GeminiDaily(quota, model, opts, time.Now())
-			case "claude":
-				if cfg.ClaudeUsageEnabled() {
-					agent.RefreshClaudeUsage(ctx)
-				}
+		case "gemini":
+			model, ok := brain.GeminiModelFor(cfg.Get().Brain)
+			if !ok {
+				model = config.TextModel
+			}
+			return brain.GeminiDaily(quota, model, opts, time.Now())
+		case "claude":
+			if cfg.ClaudeUsageEnabled() {
+				agent.RefreshClaudeUsage(ctx)
+			}
 		}
 		return usage.Get(id)
 	}

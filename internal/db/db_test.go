@@ -29,7 +29,6 @@ func memStore(t *testing.T) *db.Store {
 	return store
 }
 
-
 // TestStore_LogNote_NormalizesCaseAndWhitespaceForDedup proves the fix for the "paraphrased restatement creates a duplicate row" problem: LogNote used to dedupe on an exact (content, kind) match only, so re-logging the same fact with different casing/whitespace created a second row instead of reconciling. Content is now normalized (trimmed, whitespace collapsed, lowercased) before the dedup check.
 func TestStore_LogNote_NormalizesCaseAndWhitespaceForDedup(t *testing.T) {
 	ctx := context.Background()
@@ -2570,4 +2569,3 @@ func TestDeleteNote_MissingID_Errors(t *testing.T) {
 		t.Error("expected an error deleting a nonexistent note id, got nil")
 	}
 }
-

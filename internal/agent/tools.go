@@ -33,7 +33,6 @@ func shellName() string {
 	return "sh"
 }
 
-
 // toolError renders a failed tool call as one plain sentence. Every failure path in executeTool goes through it, so a Go error string (a time-parse dump, a type name, a wrapped sqlite message) never reaches the model and, from there, never gets read out loud. The real error goes to the log instead.
 // Input: a plain-words sentence saying what went wrong and, where the model can fix it, what to try instead. Output: the tool result string, prefixed "error: " — which is what the model and resultSummary both read as "this call failed".
 func toolError(msg string) string {

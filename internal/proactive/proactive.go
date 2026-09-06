@@ -204,7 +204,6 @@ func (s *Scheduler) waitRoutines() {
 	s.running.Wait()
 }
 
-
 // notifyWait is how long a notify-send call that waits for a button is given before the child process is killed: past an hour nobody is coming to press it, and on a machine with no session bus every unanswered notice otherwise pinned a goroutine and a process until the daemon exited.
 const notifyWait = time.Hour
 
@@ -267,8 +266,6 @@ func (s *Scheduler) maybeWeeklyStudy(ctx context.Context) {
 	}
 	s.succeeded(weeklyStudyDuty)
 }
-
-
 
 // readAction is the notify-send action key for the button that opens a long body in full.
 const readAction = "read"

@@ -95,4 +95,3 @@ func NoticeAction(act NoticeActor) http.HandlerFunc {
 		}
 	}
 }
-
