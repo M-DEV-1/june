@@ -451,6 +451,77 @@ describe("a notice card carries its own buttons", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  // The daily stale-task question used to go to a GNOME banner with its own three buttons because the card only ever knew the Done/snooze set. A notice that names its answers now gets exactly those, on the card, in the order it named them.
+  it("renders a notice's own actions instead of the default set and posts the pressed key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({
+        kind: "notice",
+        notice: {
+          title: "Still open",
+          body: "Priya — send the invoice. Open since 28 Aug. Any progress?",
+          place: "tasks",
+          id: "42",
+          kind: "task",
+          actions: [
+            { key: "done", label: "Done" },
+            { key: "dropped", label: "Not happening" },
+            { key: "later", label: "Not urgent" },
+          ],
+        },
+        hoverOpen: true,
+      });
+      const buttons = [...document.querySelectorAll<HTMLButtonElement>("#n button.na")];
+      expect(buttons.map((b) => b.textContent)).toEqual(["Done", "Not happening", "Not urgent"]);
+      expect(buttons.map((b) => b.dataset.act)).toEqual(["done", "dropped", "later"]);
+      // Read on its own by a screen reader, "Not happening" says nothing about what is not happening, so each button names its notice.
+      expect(buttons[1]?.getAttribute("aria-label")).toBe("Not happening — Still open");
+
+      buttons[1]!.click();
+      const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/notices/task/42/action"));
+      expect(call).toBeDefined();
+      expect(JSON.parse(call![1].body)).toEqual({
+        title: "Still open",
+        body: "Priya — send the invoice. Open since 28 Aug. Any progress?",
+        action: "dropped",
+      });
+      // The card is kept up until the daemon's follow-up event, the same as every other answer.
+      expect(document.getElementById("n")?.hidden).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("leaves the buttons up and says so when the daemon refuses a custom action", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({
+        kind: "notice",
+        notice: {
+          title: "Still open",
+          body: "Any progress?",
+          place: "tasks",
+          id: "42",
+          kind: "task",
+          actions: [{ key: "later", label: "Not urgent" }],
+        },
+        hoverOpen: true,
+      });
+      document.querySelector<HTMLButtonElement>('#n button.na[data-act="later"]')!.click();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(document.querySelector("#n .nf")?.textContent).toBe("Couldn't do that");
+      expect(document.querySelectorAll("#n button.na").length).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // The live row's "working" state is the braille dot grid — Ora's one signature for "listening or working", the same grid live voice draws — rather than the words that used to sit there.

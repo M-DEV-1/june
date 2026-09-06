@@ -1,5 +1,5 @@
 /** Seed data for the window: the venue matter's script, the CI-red matter already answered, and the lease stub. Also owns the ?mock=1&voice=1 switch, which fakes a live-voice session (see startMockVoice) so the voice-mode surface can be exercised and screenshotted with no daemon and no microphone. */
-import type { Evidence, Matter, View } from "./state";
+import type { Evidence, Matter, Notice, View } from "./state";
 
 /** The one email both venue turns read from. Turn one leaves it collapsed; turn two is the same source, expanded. */
 const venueEvidence: Evidence = {
@@ -143,14 +143,28 @@ export function startMockVoice(params: URLSearchParams): () => void {
 const stopMockVoice = startMockVoice(new URLSearchParams(location.search));
 window.addEventListener("pagehide", stopMockVoice);
 
-/** Wires ?mock=1&notice=1 (a notice on its own, the card underneath hidden) and ?mock=1&notice=stack (a notice above an open card), so the notice card can be looked at and screenshotted with no daemon. Input: the page's query params. Output: nothing; one "notice" event goes into main.ts's real dispatch once it has loaded, for the same reason startMockVoice imports it dynamically. */
+/** The stale-task question the daemon asks once a day, the one notice that names its own three answers rather than taking the Done/snooze/Open set (see maybeStaleAsk in internal/proactive). */
+const askNotice: Notice = {
+  title: "Still open",
+  body: "Priya — send the invoice for the venue. Open since 28 Aug. Any progress?",
+  place: "tasks",
+  id: "42",
+  kind: "task",
+  actions: [
+    { key: "done", label: "Done" },
+    { key: "dropped", label: "Not happening" },
+    { key: "later", label: "Not urgent" },
+  ],
+};
+
+/** Wires ?mock=1&notice=1 (a notice on its own, the card underneath hidden), ?mock=1&notice=stack (a notice above an open card) and ?mock=1&notice=ask (the stale-task question with its own three answers), so the notice card can be looked at and screenshotted with no daemon. Input: the page's query params. Output: nothing; one "notice" event goes into main.ts's real dispatch once it has loaded, for the same reason startMockVoice imports it dynamically. */
 export function startMockNotice(params: URLSearchParams): void {
   const mode = params.get("notice");
-  if (!params.has("mock") || (mode !== "1" && mode !== "stack")) return;
+  if (!params.has("mock") || (mode !== "1" && mode !== "stack" && mode !== "ask")) return;
   void import("./main").then(({ dispatch }) => {
     dispatch({
       kind: "notice",
-      notice: { title: "New task from Daily AI Sprint Standup", body: "Continue the TCFD-style formatting research for the generated statements and bring a first draft on Monday.", place: "tasks", id: "42", kind: "task" },
+      notice: mode === "ask" ? askNotice : { title: "New task from Daily AI Sprint Standup", body: "Continue the TCFD-style formatting research for the generated statements and bring a first draft on Monday.", place: "tasks", id: "42", kind: "task" },
       hoverOpen: mode === "stack",
     });
   });

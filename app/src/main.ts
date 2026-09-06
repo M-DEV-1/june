@@ -30,6 +30,7 @@ import {
   type JobMeta,
   type Matter,
   type Notice,
+  type NoticeAction,
   type Theme,
   type ToolStep,
   type View,
@@ -250,9 +251,13 @@ async function loadFromDaemon(): Promise<void> {
   if (rows) dispatch({ kind: "mattersLoaded", rows });
 }
 
-/** Escapes text pulled into a template as plain text (questions, titles) so it can never be read as markup. */
+/** Escapes text pulled into a template as plain text (questions, titles) so it can never be read as markup. The double quote is escaped along with the three, so the same call is also safe inside a double-quoted attribute (a notice's aria-label carries its title); a browser renders &quot; in a text node as the quote itself, so escaping it costs the text-node callers nothing. */
 function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 /** Renders text that is allowed the two emphasis tags an answer or an evidence body may carry. Everything is escaped first and then only <b> and <mark> are put back, so nothing else in model output or in captured screen text can turn into markup. Input: the raw text. Output: HTML safe to assign. */
@@ -372,13 +377,22 @@ function renderNotice(v: View): void {
   noticeEl.innerHTML =
     actionLine !== undefined
       ? `<div class="nt">${esc(actionLine)}</div>`
-      : `<div class="nh">Ora</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml()}`;
+      : `<div class="nh">Ora</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml(n)}`;
 }
 
-/** The buttons every fresh notice carries, in the order the desktop banner offered them, so the card is dealt with where it appears. Input: none. Output: the row's HTML. */
-function noticeButtonsHtml(): string {
-  const acts: [string, string][] = [["done", "Done"], ["hour", "In an hour"], ["evening", "This evening"], ["tomorrow", "Tomorrow"], ["open", "Open"]];
-  return `<div class="nr">${acts.map(([act, label]) => `<button class="na" data-act="${act}" type="button">${label}</button>`).join("")}</div>`;
+/** The default answers, in the order the desktop banner offered them, for every notice that does not name its own. */
+const DEFAULT_NOTICE_ACTIONS: NoticeAction[] = [
+  { key: "done", label: "Done" },
+  { key: "hour", label: "In an hour" },
+  { key: "evening", label: "This evening" },
+  { key: "tomorrow", label: "Tomorrow" },
+  { key: "open", label: "Open" },
+];
+
+/** The buttons a fresh notice carries, so the card is dealt with where it appears. Input: the notice. Output: the row's HTML — the notice's own actions in the order it named them when it named any (the daily stale-task question does: Done / Not happening / Not urgent), the default Done/snooze/Open set otherwise. Each button also names its notice in an aria-label, because "Not happening" read on its own says nothing about what is not happening. */
+function noticeButtonsHtml(n: Notice): string {
+  const acts = n.actions?.length ? n.actions : DEFAULT_NOTICE_ACTIONS;
+  return `<div class="nr">${acts.map(({ key, label }) => `<button class="na" data-act="${esc(key)}" type="button" aria-label="${esc(`${label} — ${n.title}`)}">${esc(label)}</button>`).join("")}</div>`;
 }
 
 /** Sends one of the card's buttons to the daemon's notice route, the same one the desktop banner's buttons and the app window's rail line use. The card is still up while this runs (see the noticeAct case in state.ts), so a refusal has somewhere to be said: the daemon answers 500 when it could not write the snooze or the done (see internal/ipc/notices.go), and a press that goes nowhere must not look like it took. Input: the notice and the button pressed ("done", "hour", "evening" or "tomorrow"). Output: nothing; the daemon's own follow-up "notice" event is what replaces the card with its one-line confirmation when the press did take. */
