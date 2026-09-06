@@ -64,7 +64,9 @@ Reply with one JSON object and nothing else:
 
 When the goal is reached, reply {"done":true,"say":"..."} with one or two plain spoken sentences.
 When you cannot get further without knowing something only the user knows, reply {"ask":"..."} with one plain question.
-Never claim something worked because a tool returned; the check is what says it worked. Work in the window already in front unless the goal names another; when the goal names another app or window, switch_window {"app":"Brave"} brings it to the front first and observe_screen right after it. ` + "Never click anything that sends, pays, deletes or submits unless they have just said \"go\"."
+Never claim something worked because a tool returned; the check is what says it worked.
+Write a check that can only become true after the action: the title of the page you are opening, an item that will appear, the item you are removing being gone. A check that was already true before you acted proves nothing, is not counted as a step that checked out, and the job cannot end on one — so if you are staying in a window that is already called what your check names, check for something on the screen that is about to change instead.
+Work in the window already in front unless the goal names another; when the goal names another app or window, switch_window {"app":"Brave"} brings it to the front first and observe_screen right after it. ` + "Never click anything that sends, pays, deletes or submits unless they have just said \"go\"."
 
 // BuildPrompt renders one round's prompt. Input: the job as it stands. Output: the whole prompt, which stays about the same size whether the job is on its first step or its fortieth.
 func BuildPrompt(j Job) string {
@@ -93,7 +95,7 @@ func BuildPrompt(j Job) string {
 	}
 	if n := len(j.Steps); n > 0 {
 		last := j.Steps[n-1]
-		b.WriteString(fmt.Sprintf("\nThe last step was %s, expecting %s; it %s, and %s.", last.Tool, last.Expect.Describe(), outcomePhrase(last.Outcome), capRunes(last.Why, resultCap)))
+		b.WriteString(fmt.Sprintf("\nThe last step was %s, expecting %s; it %s, and %s.", last.Tool, last.Expect.Describe(), outcomePhrase(last), capRunes(last.Why, resultCap)))
 	}
 	if j.Next != "" {
 		b.WriteString("\nYou said the next thing to do was: " + j.Next)
@@ -117,19 +119,19 @@ func BuildPrompt(j Job) string {
 	return b.String()
 }
 
-// outcomePhrase is how a step's outcome reads in a sentence. Input: the outcome word a step carries. Output: "passed", "failed", or for a check that was already true before the action, a phrase saying so rather than one claiming the step worked.
-func outcomePhrase(outcome string) string {
-	if outcome == alreadyHeld {
+// outcomePhrase is how a step's outcome reads in a sentence. Input: the step. Output: "passed", "failed", or for a check that was already true before the action, a phrase saying so rather than one claiming the step worked.
+func outcomePhrase(s Step) string {
+	if s.Outcome == "pass" && s.HeldBefore {
 		return "checked out on something that was already true before it"
 	}
-	return outcome + "ed"
+	return s.Outcome + "ed"
 }
 
 // progressLine says how far the job has got, in the two numbers that matter: steps taken and steps that checked out.
 func progressLine(j Job) string {
 	verified := 0
 	for _, s := range j.Steps {
-		if s.Outcome == "pass" {
+		if checkedOut(s) {
 			verified++
 		}
 	}
@@ -149,7 +151,7 @@ func SummaryPrompt(j Job) string {
 	b.WriteString(j.Goal)
 	b.WriteString("\n\nSTEPS SO FAR\n")
 	for _, s := range lastN(j.Steps, keptSummarySteps) {
-		b.WriteString(fmt.Sprintf("- %s, expecting %s: %s (%s)\n", s.Tool, s.Expect.Describe(), s.Outcome, s.Why))
+		b.WriteString(fmt.Sprintf("- %s, expecting %s: %s (%s)\n", s.Tool, s.Expect.Describe(), outcomePhrase(s), s.Why))
 	}
 	if len(j.Observations) > 0 {
 		b.WriteString("\nTHE SCREEN NOW\n" + j.Observations[len(j.Observations)-1])
