@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,6 +21,8 @@ type UsageLimit = agent.UsageLimit
 type UsageSnapshot struct {
 	Limits []UsageLimit `json:"limits"`
 	At     time.Time    `json:"at"`
+	// Note is a sentence about the reading itself rather than the allowance — today only that a ceiling is a default rather than an observed one — which GET /brains carries into the row's limits_note. Empty for a reading that needs no caveat.
+	Note string `json:"note,omitempty"`
 }
 
 // UsageStore keeps the newest reading per provider in memory and writes it to brain_usage.json beside brain_quota.json, so a restart still has the last reading to draw until the next response refreshes it.
@@ -56,7 +59,7 @@ func (s *UsageStore) Record(provider string, limits []UsageLimit) {
 		slog.Warn("brain: could not encode the usage readings", "error", err)
 		return
 	}
-	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+	if err := writeFileAtomic(s.path, data); err != nil {
 		slog.Warn("brain: could not write the usage file", "path", s.path, "error", err)
 	}
 }
@@ -69,18 +72,24 @@ func (s *UsageStore) Get(provider string) (UsageSnapshot, bool) {
 	return snap, ok
 }
 
-// GeminiDaily is the Gemini brain's own allowance window, which no Gemini response reports: how much of a model's free-tier daily request ceiling today's calls have already taken, from the counter internal/brain/quota.go keeps. Input: that counter, the model name, the configured ceilings, and the clock to read today and the next midnight from. Output: a one-window snapshot, and false when opts sets no ceiling for the model, since there is then no number to measure against.
+// GeminiDaily is the Gemini brain's own allowance window, which no Gemini response reports: how much of a model's free-tier daily request ceiling today's calls have already taken, from the counter internal/brain/quota.go keeps. Input: that counter, the model name, the configured ceilings, and the clock to read today and the next midnight from. Output: a one-window snapshot, and false only for a name that is not a Gemini model at all, since there is then no number to measure against.
+// A Gemini model with no measured entry is drawn against QuotaOptions.DefaultQuotaLimit and the snapshot's Note says so, because a bar that quietly disappears reads as "no usage" rather than "nobody knows this model's ceiling".
 func GeminiDaily(state *QuotaState, model string, opts QuotaOptions, now time.Time) (UsageSnapshot, bool) {
-	limit, ok := opts[model]
-	if !ok || limit.Limit <= 0 {
+	limit, known := opts.For(model)
+	if limit.Limit <= 0 {
 		return UsageSnapshot{}, false
+	}
+	note := ""
+	if !known {
+		note = "nobody has measured " + model + "'s free-tier ceiling, so this bar is drawn against the default of " + strconv.Itoa(limit.Limit) + " requests a day"
 	}
 	state.mu.Lock()
 	used := state.load()[now.Format("2006-01-02")][model]
 	state.mu.Unlock()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, 1)
 	return UsageSnapshot{
-		At: now,
+		At:   now,
+		Note: note,
 		Limits: []UsageLimit{{
 			Window:       "daily",
 			UsedFraction: float64(used) / float64(limit.Limit),

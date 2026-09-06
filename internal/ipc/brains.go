@@ -95,7 +95,7 @@ func writeBrains(ctx context.Context, w http.ResponseWriter, cfg config.OraConfi
 	writeJSON(w, map[string]any{"brains": brainList(ctx, cfg, home, onPath, limitsFor)})
 }
 
-// providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every one of the five ids gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's still falls back to the Gemini API inside FromConfig because no CLI backend for it exists yet, but its own provider constant is what lands on disk, not gemini's. ok is false when id names none of the five brains Ora knows about, and the caller must leave the config untouched in that case.
+// providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every one of the five ids gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's has no backend at all, which is why brainList marks that row unavailable rather than letting a pick land on a provider that cannot answer. ok is false when id names none of the five brains Ora knows about, and the caller must leave the config untouched in that case.
 func providerForBrainID(id string) (provider string, ok bool) {
 	switch id {
 	case "claude":
@@ -122,7 +122,7 @@ func onPath(name string) bool {
 	return err == nil
 }
 
-// brainList builds the five rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them.
+// brainList builds the five rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them, with signed_in false on any brain internal/brain cannot actually answer with and limits_note saying why.
 func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(string) bool, limitsFor BrainLimits) []BrainView {
 	def := defaultBrainID(cfg.Brain.Provider)
 	claudeAccount := plainField(filepath.Join(home, ".claude", ".credentials.json"), "claudeAiOauth", "subscriptionType")
@@ -177,6 +177,13 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		list[i].Default = list[i].ID == def
 		list[i].Model = modelFor(list[i].ID, cfg, def)
 		list[i].Limits = []brain.UsageLimit{}
+		// A brain internal/brain has no code to answer with is never offered as pickable, whatever the machine says about it: internal/brain.FromConfig fails every call to it with ErrNoBackend, and before that it answered on the Gemini API instead, which spent the metered free tier the user picked another brain to avoid.
+		if provider, ok := providerForBrainID(list[i].ID); ok {
+			if note := brain.NoBackendNote(provider); note != "" {
+				list[i].SignedIn = false
+				list[i].LimitsNote = note
+			}
+		}
 		// The claude row's own usage bars come from an undocumented Anthropic endpoint (see internal/agent's RefreshClaudeUsage), which the user may turn off in Settings; when they have, no fetch runs and this says why rather than leaving the row looking like nothing has been read yet.
 		if list[i].ID == "claude" && !cfg.ClaudeUsageFromLoginEnabled() {
 			list[i].LimitsNote = "turned off in Settings"
@@ -184,9 +191,17 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		if limitsFor == nil {
 			continue
 		}
-		if snap, ok := limitsFor(ctx, list[i].ID); ok && len(snap.Limits) > 0 {
+		snap, ok := limitsFor(ctx, list[i].ID)
+		if !ok {
+			continue
+		}
+		if len(snap.Limits) > 0 {
 			list[i].Limits = snap.Limits
 			list[i].LimitsAt = rfc3339(snap.At)
+		}
+		// A caveat on the reading itself — today, that a Gemini model's ceiling is a default because nobody has measured that model — is what the row's note says, since it explains the bar the picker is already drawing.
+		if snap.Note != "" {
+			list[i].LimitsNote = snap.Note
 		}
 	}
 	return list

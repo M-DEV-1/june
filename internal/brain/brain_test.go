@@ -2,10 +2,14 @@ package brain
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"ora/internal/config"
@@ -45,6 +49,8 @@ func TestClaudeCLI(t *testing.T) {
 		timeout int
 		want    string
 		wantErr string
+		// wantNotErr is text the CLI printed that must never reach the returned error, because callers log these errors at warn and the prompt is a day of the user's screen text.
+		wantNotErr string
 	}{
 		{
 			name: "the result field is the answer",
@@ -52,9 +58,11 @@ func TestClaudeCLI(t *testing.T) {
 			want: "# Meeting minutes\nall good",
 		},
 		{
-			name:    "an is_error run fails with what the CLI said",
-			body:    `printf '%s' '{"is_error":true,"subtype":"error_during_execution","result":"Credit balance is too low"}'`,
-			wantErr: "Credit balance is too low",
+			// The error names the subtype only: res.Result is model output, and these errors are logged at warn by callers such as the evening close.
+			name:       "an is_error run fails with the subtype and not the CLI's own words",
+			body:       `printf '%s' '{"is_error":true,"subtype":"error_during_execution","result":"Credit balance is too low"}'`,
+			wantErr:    "error_during_execution",
+			wantNotErr: "Credit balance is too low",
 		},
 		{
 			name:    "an empty result is not an answer",
@@ -62,14 +70,17 @@ func TestClaudeCLI(t *testing.T) {
 			wantErr: "no text",
 		},
 		{
-			name:    "output that is not JSON fails loudly",
-			body:    `printf '%s' 'Invalid API key · Please run /login'`,
-			wantErr: "parse",
+			name:       "output that is not JSON fails loudly without quoting the output",
+			body:       `printf '%s' 'Invalid API key · Please run /login'`,
+			wantErr:    "parse",
+			wantNotErr: "Please run /login",
 		},
 		{
-			name:    "a non-zero exit carries the exit code and stderr",
-			body:    `echo "not logged in" >&2; exit 1`,
-			wantErr: "not logged in",
+			// The child's stderr can carry an account identifier or a login URL, so it is logged at debug rather than returned.
+			name:       "a non-zero exit carries the exit status and not the child's stderr",
+			body:       `echo "not logged in" >&2; exit 1`,
+			wantErr:    "exit status 1",
+			wantNotErr: "not logged in",
 		},
 		{
 			name:    "a run that outlives the timeout is killed",
@@ -94,6 +105,9 @@ func TestClaudeCLI(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				if tt.wantNotErr != "" && strings.Contains(err.Error(), tt.wantNotErr) {
+					t.Fatalf("error = %v, want it not to carry the CLI's own output %q", err, tt.wantNotErr)
 				}
 				return
 			}
@@ -170,14 +184,14 @@ func TestFromConfig(t *testing.T) {
 			want: "from claude",
 		},
 		{
-			name:    "codex with no asker falls back to the Gemini API",
+			name:    "codex with no asker is an error, not a quiet Gemini call",
 			cfg:     config.BrainConfig{Provider: config.BrainCodex},
-			wantErr: "GEMINI_API_KEY",
+			wantErr: "no backend",
 		},
 		{
-			name:    "ollama has no backend yet and falls back to the Gemini API",
+			name:    "ollama has no backend yet and says so",
 			cfg:     config.BrainConfig{Provider: config.BrainOllama},
-			wantErr: "GEMINI_API_KEY",
+			wantErr: "no backend",
 		},
 	}
 
@@ -316,5 +330,83 @@ func TestGeminiModel_DropsAnotherProvidersModelName(t *testing.T) {
 				t.Errorf("geminiModel(%+v) = %q, want %q", c.cfg, got, c.want)
 			}
 		})
+	}
+}
+
+// TestGeminiAPI_TimesOutOnAServerThatNeverAnswers checks that the configured timeout is a real deadline on the Gemini call and not a field only the CLI providers read. A server that accepts the connection and then never replies must fail the call within the configured seconds; before this the genai client had no timeout of its own and the daemon's root context never ends, so one dead connection blocked the proactive scheduler's single goroutine for the life of the process.
+// The stub is reached through GOOGLE_GEMINI_BASE_URL, which is the only seam the genai package offers for pointing a client somewhere else.
+func TestGeminiAPI_TimesOutOnAServerThatNeverAnswers(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer func() { close(release); srv.Close() }()
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", srv.URL)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := GeminiAPI("test-key", config.TextModel, 1)(context.Background(), "hi")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a server that never answers returned no error")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the call never came back, so the configured timeout is not reaching the Gemini call")
+	}
+}
+
+// TestFromConfig_PassesTheConfiguredModelToAgyAndGrok checks that a model pinned for the Antigravity or Grok CLI reaches the child process's argv. BrainConfig.Model is documented as per-provider and both CLIs take a model flag, but FromConfig used to drop it for these two.
+func TestFromConfig_PassesTheConfiguredModelToAgyAndGrok(t *testing.T) {
+	agyBin := fakeCLI(t, "agy", `printf '%s' '{"status":"SUCCESS","response":"ok"}'`)
+	if _, err := FromConfig(config.BrainConfig{Provider: config.BrainAgyCLI, Binary: agyBin, Model: "gemini-3-pro", TimeoutSeconds: 10}, "")(context.Background(), "hi"); err != nil {
+		t.Fatalf("agy: unexpected error: %v", err)
+	}
+	if args, _ := recorded(t, agyBin); !strings.Contains(args, "--model\ngemini-3-pro\n") {
+		t.Errorf("agy argv did not carry the configured model:\n%s", args)
+	}
+
+	grokBin := fakeCLI(t, "grok", `printf '%s' '{"text":"ok"}'`)
+	if _, err := FromConfig(config.BrainConfig{Provider: config.BrainGrokCLI, Binary: grokBin, Model: "grok-4", TimeoutSeconds: 10}, "")(context.Background(), "hi"); err != nil {
+		t.Fatalf("grok: unexpected error: %v", err)
+	}
+	if args, _ := recorded(t, grokBin); !strings.Contains(args, "-m\ngrok-4\n") {
+		t.Errorf("grok argv did not carry the configured model:\n%s", args)
+	}
+}
+
+// TestFromConfig_NoBackendIsAnErrorNotAQuietGeminiCall checks that a provider this package cannot answer for fails every call with ErrNoBackend instead of quietly answering on the Gemini API. The silent substitution spent the metered free tier the user picked another brain to avoid and sent the prompt — a day of screen text — to a provider they did not choose.
+func TestFromConfig_NoBackendIsAnErrorNotAQuietGeminiCall(t *testing.T) {
+	for _, cfg := range []config.BrainConfig{
+		{Provider: config.BrainOllama, Model: "llama3.1:8b"},
+		{Provider: config.BrainCodex, Model: "gpt-5.5"},
+	} {
+		// A real API key is given on purpose: the point is that the call fails even when the Gemini path would have worked.
+		_, err := FromConfig(cfg, "a-real-looking-key")(context.Background(), "hi")
+		if !errors.Is(err, ErrNoBackend) {
+			t.Errorf("FromConfig(%q) error = %v, want ErrNoBackend", cfg.Provider, err)
+		}
+	}
+}
+
+// TestNoBackendNote_NamesOllamaOnly checks the sentence GET /brains puts in the Ollama row's limits_note exists, and that a provider with a working backend gets none, so the picker never greys out a brain that can actually answer.
+func TestNoBackendNote_NamesOllamaOnly(t *testing.T) {
+	if NoBackendNote(config.BrainOllama) == "" {
+		t.Error("ollama has no note, so the picker cannot say why the row is unavailable")
+	}
+	for _, p := range []string{config.BrainClaudeCLI, config.BrainGrokCLI, config.BrainAgyCLI, config.BrainGeminiAPI, ""} {
+		if got := NoBackendNote(p); got != "" {
+			t.Errorf("NoBackendNote(%q) = %q, want empty: that provider has a backend", p, got)
+		}
+	}
+}
+
+// TestWithCodexFallback_HandsOverWhenThePrimaryHasNoBackend checks that a config naming a provider this package cannot build — codex with no asker, ollama — reaches the late-bound Codex hand-over rather than failing the duty outright. This is what keeps a machine configured for Codex answering its unattended duties once the daemon has published a real Codex brain.
+func TestWithCodexFallback_HandsOverWhenThePrimaryHasNoBackend(t *testing.T) {
+	primary := FromConfig(config.BrainConfig{Provider: config.BrainOllama}, "key")
+	fallback := func(context.Context, string) (string, error) { return "from codex", nil }
+	got, err := WithCodexFallback(primary, fallback)(context.Background(), "hi")
+	if err != nil || got != "from codex" {
+		t.Fatalf("got (%q, %v), want the fallback's answer", got, err)
 	}
 }

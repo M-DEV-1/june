@@ -343,3 +343,49 @@ func TestBrains_ConcurrentPostAndRead(t *testing.T) {
 		t.Errorf("model after the posts = %q, want opus", got)
 	}
 }
+
+// TestBrains_OllamaIsUnavailableWithTheReason checks the Ollama row is never offered as pickable, even with the binary installed and models listed, and says why. internal/brain has no Ollama backend, so picking it used to persist provider "ollama" and then answer every duty on the Gemini API instead — spending the metered free tier the user picked Ollama to avoid and sending the prompt to Google.
+// The window's picker disables a row with signed_in false and prints "Not signed in" in place of the bar (app/src/next/parts.tsx), so the note is what the settings page and a reader of the JSON get; the row stays in the list, and its name, note and models are untouched.
+func TestBrains_OllamaIsUnavailableWithTheReason(t *testing.T) {
+	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(name string) bool { return true }, nil)
+	byID := map[string]BrainView{}
+	for _, b := range list {
+		byID[b.ID] = b
+	}
+	if byID["ollama"].SignedIn {
+		t.Error("ollama reports signed in, but nothing in the daemon can answer with it")
+	}
+	if byID["ollama"].LimitsNote == "" {
+		t.Error("ollama limits_note is empty, want the sentence saying why the row cannot be picked")
+	}
+	if byID["ollama"].Name == "" || byID["ollama"].Note == "" {
+		t.Errorf("the ollama row lost a field: %+v", byID["ollama"])
+	}
+	// Every other brain still reads its own signal off the machine.
+	if !byID["grok"].SignedIn || !byID["gemini"].SignedIn {
+		t.Errorf("a brain with a working backend was marked unavailable: %+v", list)
+	}
+}
+
+// TestBrains_LimitsNoteCarriesTheSnapshotsOwnNote checks that a caveat on a reading — today, that a Gemini model's ceiling is a default because nobody has measured that model — reaches the row the picker draws, rather than being dropped between brain.GeminiDaily and the JSON.
+func TestBrains_LimitsNoteCarriesTheSnapshotsOwnNote(t *testing.T) {
+	limits := func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
+		if id != "gemini" {
+			return brain.UsageSnapshot{}, false
+		}
+		return brain.UsageSnapshot{
+			Limits: []brain.UsageLimit{{Window: "daily", UsedFraction: 0.1}},
+			At:     time.Now(),
+			Note:   "the ceiling is a default",
+		}, true
+	}
+	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return false }, limits)
+	for _, b := range list {
+		if b.ID != "gemini" {
+			continue
+		}
+		if b.LimitsNote != "the ceiling is a default" {
+			t.Errorf("gemini limits_note = %q, want the snapshot's own note", b.LimitsNote)
+		}
+	}
+}
