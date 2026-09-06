@@ -1266,6 +1266,10 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if errText != "" {
 			return errText
 		}
+		// The number came off a list that may be several rounds old, so the element behind it is checked to still be the one the list named, exactly as click and point_at do: a toolkit that has recycled the object path would otherwise have this scroll reported as a scroll to something it never touched.
+		if errText := a.stillThere(ctx, it); errText != "" {
+			return errText
+		}
 		if err := a.scrollTo(ctx, it.Ref); err != nil {
 			return toolError(fmt.Sprintf("could not scroll to [%d] %s %q: %v", it.N, it.Role, it.Label, err))
 		}
@@ -1281,8 +1285,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if strings.ContainsFunc(text, func(r rune) bool { return r < 0x20 }) {
 			return toolError("type_text will not type control characters; use press_key for Enter, Tab or Backspace, or the enter argument to press Enter after the text")
 		}
-		// There is no accessibility read for which field actually has keyboard focus, so the field the last successful click acted on stands in for it — "click the field first" is the documented way to reach type_text anyway. Before any click, this is the zero act.Item, which matches neither check below.
+		// The field the last successful click acted on stands in for the one the keyboard is in — "click the field first" is the documented way to reach type_text anyway — and the accessibility focused state is then read on that same field, so a dialog that opened over it or an application that moved the focus itself is refused rather than checked against a control the text will not reach. Before any click, this is the zero act.Item, which matches neither check below.
 		focused, known := a.focus(ctx)
+		known = known && a.focusHeld(ctx, focused)
 		window := a.currentWindow(ctx)
 		if !known && !blindConsent(questionFrom(ctx)) && !goAllowed(ctx) {
 			return "Stopped before typing: I could not identify the field the text would go into, since the last click was at a point on the screen or a key has moved the focus since. Click the field by its number from observe_screen, or say \"yes, go ahead\" and I will type where the focus is."
@@ -1312,8 +1317,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return toolError("press_key needs keys, like \"Enter\" or \"Ctrl+L\"")
 		}
 		if pressesFocused(keys) {
-			// Enter and Space press whatever has keyboard focus, which is a click by another name, so they go through the same stop line the click tool does — against the field or button the last click focused, since that is this session's only reading of where the keyboard is pointing.
+			// Enter, Space and the Send chords press whatever has keyboard focus, which is a click by another name, so they go through the same stop line the click tool does — against the field or button the last click focused, confirmed by the accessibility focused state on that same element.
 			focused, known := a.focus(ctx)
+			known = known && a.focusHeld(ctx, focused)
 			window := a.currentWindow(ctx)
 			if !known && !blindConsent(questionFrom(ctx)) && !goAllowed(ctx) {
 				return fmt.Sprintf("Stopped before pressing %s: I could not identify what has keyboard focus, since the last click was at a point on the screen or a key has moved the focus since. Click the control by its number from observe_screen, or say %q and I will press it.", keys, "yes, go ahead")
@@ -2150,6 +2156,16 @@ func (a *Agent) focus(ctx context.Context) (act.Item, bool) {
 	return s.clicked, !s.focusUnknown
 }
 
+// focusHeld reports whether the control the last click focused still has the keyboard, read from the accessibility focused state. Input: the call's context and the remembered item. Output: true when nothing has been wired to read focus (the remembered click is then all there is) or when the read says the element is focused; false when the item carries no reference, when the read says it is not focused, or when the read fails — a dialog that opened over the field, or an application that moved the focus itself, has to refuse the typing rather than send it somewhere nothing checked.
+func (a *Agent) focusHeld(ctx context.Context, it act.Item) bool {
+	// Nothing has been clicked yet: there is no field to read the state on, and the zero item this stands for matches no stop-line check either, so this is the same "typing where the focus is" it has always been.
+	if a.focused == nil || it.Ref == "" {
+		return true
+	}
+	held, err := a.focused(ctx, it.Ref)
+	return err == nil && held
+}
+
 // rememberClick records the item a numbered click just acted on as the control the keyboard is now pointing at. Input: the call's context and the clicked item. Output: none.
 func (a *Agent) rememberClick(ctx context.Context, it act.Item) {
 	s := a.askState(ctx)
@@ -2288,11 +2304,15 @@ func (a *Agent) inputDevice(ctx context.Context) (InputDevice, string) {
 	return dev, ""
 }
 
-// pressesFocused reports whether a key press acts on the control that has keyboard focus rather than moving around or editing text. Input: the key or chord press_key was given. Output: true for a bare Enter, Return or Space, which press what is focused and so go through the click's stop line; false for everything else, including a chord, since Ctrl+Enter is a different key to the application under it.
+// pressesFocused reports whether a key press acts on the control that has keyboard focus rather than moving around or editing text. Input: the key or chord press_key was given. Output: true for Enter or Return with any modifiers or none, and for a bare Space, all of which press what is focused and so go through the click's stop line; false for everything else.
+// Enter carrying a modifier counts because Ctrl+Enter is Send in Slack, Teams and Gmail, which are the applications this engine is most likely to be driving; a chord this is wrong about costs a consent question, and one it misses sends a message nothing checked.
 func pressesFocused(keys string) bool {
-	switch strings.ToLower(strings.TrimSpace(keys)) {
-	case "enter", "return", "space":
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(keys)), "+")
+	switch strings.TrimSpace(parts[len(parts)-1]) {
+	case "enter", "return":
 		return true
+	case "space":
+		return len(parts) == 1
 	}
 	return false
 }

@@ -1705,6 +1705,8 @@ func drawingAgent(t *testing.T) (a *Agent, drawn *[]string) {
 	}
 	// A drawing that names an element checks the number still points at it and reads where it is now, so these two seams stand in for the accessibility bus; a test that wants an element to have moved replaces them through drawingScreen.
 	a.verify = func(ctx context.Context, ref, role, label string, x, y, w, h int) error { return nil }
+	// The stop line on type_text and a focused key press reads whether the field the last click acted on still holds the keyboard, which is the accessibility bus again; here it always does, and a test about a focus that moved replaces this.
+	a.focused = func(context.Context, string) (bool, error) { return true, nil }
 	a.extents = func(ctx context.Context, ref string) (int, int, int, int, error) {
 		if ref == "r-1" {
 			return 10, 20, 80, 30, nil
@@ -3091,5 +3093,98 @@ func TestExecuteTool_WaitFor_RefusesAnUnknownKind(t *testing.T) {
 		if !strings.Contains(got, kind) {
 			t.Errorf("the refusal %q does not name %s", got, kind)
 		}
+	}
+}
+
+// The field the last click acted on stands in for the keyboard, and a dialog or the application itself can move the focus off it without a click of ours. The accessibility focused state says whether it still holds the keyboard, and when it does not the typing is refused instead of being checked against a control the text will not reach.
+func TestExecuteTool_TypeText_RefusesWhenTheClickedFieldNoLongerHasFocus(t *testing.T) {
+	a, in := typingAgent(t)
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.rememberClick(ctx, act.Item{N: 1, Role: "entry", Label: "To", Ref: "r-1"})
+	a.focused = func(context.Context, string) (bool, error) { return false, nil }
+
+	got := a.executeTool(ctx, "type_text", map[string]any{"text": "hello"})
+
+	if len(in.calls) != 0 {
+		t.Errorf("keyboard = %v, want nothing typed", in.calls)
+	}
+	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "could not identify") {
+		t.Errorf("result = %q, want a stop saying the field could not be identified", got)
+	}
+}
+
+// The same read the other way round: the clicked field still holds the keyboard, so the text goes in as before.
+func TestExecuteTool_TypeText_TypesWhenTheClickedFieldStillHasFocus(t *testing.T) {
+	a, in := typingAgent(t)
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.rememberClick(ctx, act.Item{N: 1, Role: "entry", Label: "To", Ref: "r-1"})
+	var asked []string
+	a.focused = func(_ context.Context, ref string) (bool, error) { asked = append(asked, ref); return true, nil }
+
+	got := a.executeTool(ctx, "type_text", map[string]any{"text": "hello"})
+
+	if len(in.calls) != 1 || in.calls[0] != "type hello" {
+		t.Errorf("keyboard = %v, want the text typed", in.calls)
+	}
+	if !slices.Equal(asked, []string{"r-1"}) {
+		t.Errorf("the focus read was asked about %v, want the clicked field's own reference", asked)
+	}
+	if strings.HasPrefix(got, "Stopped before ") {
+		t.Errorf("result = %q, want the typing to go through", got)
+	}
+}
+
+// A focused Enter goes through the click's stop line, and so must the chords that press the focused control in the applications this engine drives: Ctrl+Enter is Send in Slack, Teams and Gmail.
+func TestExecuteTool_PressKey_StopsBeforeSendChordsOnASendButton(t *testing.T) {
+	for _, keys := range []string{"Ctrl+Enter", "Ctrl+Return", "Shift+Enter", "Super+Enter"} {
+		a, in := typingAgent(t)
+		a.executeTool(context.Background(), "observe_screen", map[string]any{})
+		a.rememberClick(context.Background(), act.Item{N: 2, Role: "push button", Label: "Send", Ref: "r-2"})
+
+		got := a.executeTool(context.Background(), "press_key", map[string]any{"keys": keys})
+
+		if len(in.calls) != 0 {
+			t.Errorf("%s: keyboard = %v, want nothing pressed", keys, in.calls)
+		}
+		if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "yes, send it") {
+			t.Errorf("%s: result = %q, want a stop naming what to say to unlock it", keys, got)
+		}
+	}
+}
+
+// A chord that does not press the focused control is not put through the stop line: Ctrl+L is the address bar, not the button under the keyboard.
+func TestPressesFocused_LeavesOtherChordsAlone(t *testing.T) {
+	for _, keys := range []string{"Ctrl+L", "Tab", "Escape", "Ctrl+Space", "Alt+F4"} {
+		if pressesFocused(keys) {
+			t.Errorf("pressesFocused(%q) = true, want false", keys)
+		}
+	}
+	for _, keys := range []string{"Enter", "return", " Space ", "ctrl+enter", "Cmd+Return"} {
+		if !pressesFocused(keys) {
+			t.Errorf("pressesFocused(%q) = false, want true", keys)
+		}
+	}
+}
+
+// scroll_to resolves a number off a list that may be several rounds old, so it runs the same staleness check click and point_at do rather than scrolling to whatever the toolkit has since put behind that object path and reporting it as the element the list named.
+func TestExecuteTool_ScrollTo_RefusesAStaleElement(t *testing.T) {
+	a, _ := observingAgent(t)
+	var scrolled []string
+	a.scrollTo = func(_ context.Context, ref string) error { scrolled = append(scrolled, ref); return nil }
+	a.verify = func(context.Context, string, string, string, int, int, int, int) error {
+		return errors.New(`it is now a link "Settings"`)
+	}
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+
+	got := a.executeTool(ctx, "scroll_to", map[string]any{"n": 1.0})
+
+	if len(scrolled) != 0 {
+		t.Errorf("scrolled to %v, want nothing scrolled to a stale element", scrolled)
+	}
+	if !strings.HasPrefix(got, "error") || !strings.Contains(got, "not what observe_screen listed") {
+		t.Errorf("result = %q, want the staleness refusal", got)
 	}
 }
