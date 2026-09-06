@@ -63,6 +63,18 @@ describe("the list", () => {
     expect(within(row).queryByRole("checkbox")).toBeNull();
   });
 
+  it("opens the task from anywhere on the row that is not one of its controls", async () => {
+    const { store } = renderApp({ tasks }, { place: "tasks" });
+    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
+    // The row's own padding, the gaps and the column saying when it was raised are all part of the target: a row with no detail line is eight pixels tall, and only its title being clickable loses a third of its width.
+    await userEvent.click(list().getAllByRole("listitem")[1]);
+    await waitFor(() => expect(store.getState().ui.taskId).toBe("12"));
+
+    // A click on a control is that control's, and nothing else's.
+    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Book the flight done" }));
+    expect(store.getState().ui.taskId).toBe("12");
+  });
+
   it("marks the picked row with aria-current rather than aria-selected, since the list is no longer a listbox", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });

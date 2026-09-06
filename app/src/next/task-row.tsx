@@ -31,7 +31,13 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
   };
 
   return (
-    <li className={`group flex items-center gap-2.5 rounded-sm px-2 transition-colors ${detail ? "h-11" : "h-8"} ${selected ? "bg-selected" : "hover:bg-hover"}`}>
+    <li
+      className={`group flex items-center gap-2.5 rounded-sm px-2 transition-colors ${detail ? "h-11" : "h-8"} ${selected ? "bg-selected" : "hover:bg-hover"}`}
+      // The whole row picks the task, not only the title: the padding, the gaps and the column saying when it was raised are part of the target, and a row with no detail line is eight pixels tall without them. A click that landed on one of the row's own controls is that control's alone — the menus included, whose items are not buttons and reach here through the React tree however far the portal moved them in the document. The keyboard has the button below, which is the row's one tab stop, so this adds no second way in for anything but a pointer.
+      onClick={(e) => {
+        if (!(e.target as HTMLElement).closest('button,[role="menu"]')) dispatch(ui.taskOpened(task.id));
+      }}
+    >
       <TaskTick task={task} />
       <button
         type="button"
@@ -40,13 +46,18 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
         onClick={() => dispatch(ui.taskOpened(task.id))}
         className="min-w-0 flex-1 self-stretch rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <div className={`truncate text-ui ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`} title={task.title}>
+        {/* Spans rather than divs: a button may only hold phrasing content, and some assistive technology flattens a block inside one oddly. */}
+        <span className={`block truncate text-ui ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`} title={task.title}>
           {task.title}
-        </div>
+        </span>
         {detail ? (
-          <div className="truncate text-meta text-muted-foreground" title={detail}>
-            {detail}
-          </div>
+          <>
+            {/* Two spans run together in the button's own name, which is read out as one sentence; a block would have separated them and an inline element does not. */}
+            {" "}
+            <span className="block truncate text-meta text-muted-foreground" title={detail}>
+              {detail}
+            </span>
+          </>
         ) : null}
       </button>
       {when ? (
@@ -59,12 +70,11 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
             size="icon-xs"
             aria-label={`More for ${task.title}`}
             className="text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
-            onClick={(e) => e.stopPropagation()}
           >
             <MoreHorizontal />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+        <DropdownMenuContent align="end">
           {task.done ? (
             <DropdownMenuItem onClick={() => void set("open")}>
               <RotateCcw /> Reopen

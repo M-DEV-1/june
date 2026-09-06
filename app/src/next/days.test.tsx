@@ -3,11 +3,31 @@
 /** Tests for the Days screen: one day's page at a time, chosen from the header picker, with no list beside the sidebar — and the work it raised, which reads and ticks off the same rows GET /tasks does. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { DaySummary, DayView, Task } from "./api";
-import { openPicker, renderApp } from "./testing";
+import { openPicker, renderApp, type Call } from "./testing";
+
+/** Holds GET /days/2026-09-04 open. setTaskStatus patches the tasks and allTasks caches on its way out, but the Days page reads its ticks off day.tasks, which changes only when the day is read again: holding that read is what makes the gap between the daemon answering a status change and the day reporting it wide enough to look at. Input: none. Output: the function that lets the held read through. */
+function holdTheDay(): () => void {
+  const daemon = globalThis.fetch;
+  let release = () => {};
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(typeof input === "object" && "url" in input ? input.url : String(input)).pathname;
+    if (path !== "/days/2026-09-04") return daemon(input, init);
+    return held.then(() => daemon(input, init));
+  });
+  return release;
+}
+
+/** What was sent to the daemon for task 11, in the order it went. Input: every call the window made. Output: one body per status change. */
+function sent(calls: Call[]): unknown[] {
+  return calls.filter((c) => c.path === "/tasks/11/done").map((c) => c.body);
+}
 
 afterEach(() => {
   cleanup();
@@ -114,17 +134,7 @@ describe("ticking a raised task", () => {
   it("holds the circle filled from the click until the day itself agrees, rather than emptying it while the day is being read again", async () => {
     const { calls } = renderApp({ days, tasks, pages: { "2026-09-04": page } }, { place: "days" });
     await screen.findByText("Raised that day");
-    // setTaskStatus patches the tasks and allTasks caches on its way out, but the Days page reads its ticks off day.tasks, which changes only when GET /days/{date} is read again. Holding that read open here is what makes the gap between the daemon answering the status change and the day reporting it wide enough to look at.
-    const daemon = globalThis.fetch;
-    let release = () => {};
-    const held = new Promise<void>((r) => {
-      release = r;
-    });
-    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = new URL(typeof input === "object" && "url" in input ? input.url : String(input)).pathname;
-      if (path !== "/days/2026-09-04") return daemon(input, init);
-      return held.then(() => daemon(input, init));
-    });
+    const release = holdTheDay();
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
     await waitFor(() => expect(calls.find((c) => c.path === "/tasks/11/done")?.body).toEqual({ status: "done" }));
@@ -134,5 +144,39 @@ describe("ticking a raised task", () => {
 
     release();
     expect(await screen.findByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+  });
+
+  it("takes a click after the change has gone out as a fresh tick rather than swallowing it", async () => {
+    const { calls } = renderApp({ days, tasks, pages: { "2026-09-04": page } }, { place: "days" });
+    await screen.findByText("Raised that day");
+    holdTheDay();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
+    await waitFor(() => expect(sent(calls)).toHaveLength(1));
+    // The day has still not caught up, so the circle is showing a change that has already gone out: clicking it again asks for the opposite, rather than undoing something that was never sent.
+    await userEvent.click(screen.getByRole("checkbox", { name: "Reopen Send the TCFD file" }));
+    await waitFor(() => expect(sent(calls)).toEqual([{ status: "done" }, { status: "open" }]));
+    expect(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" })).toBeDefined();
+  });
+
+  it("gives the circle up after a while when the day never comes round to agreeing", async () => {
+    const { calls } = renderApp({ days, tasks, pages: { "2026-09-04": page } }, { place: "days" });
+    await screen.findByText("Raised that day");
+    // Held and never released: a day that reports its tasks from somewhere the status change did not reach would otherwise leave the circle showing a thing the row never comes to say.
+    holdTheDay();
+    vi.useFakeTimers();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(sent(calls)).toHaveLength(1);
+    expect(screen.getByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" })).toBeDefined();
+    vi.useRealTimers();
   });
 });
