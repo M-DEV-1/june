@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // richnessWordCap is the word count at which screen_text richness saturates to 1.0 in computeImportance — beyond this point more words don't add signal.
@@ -49,6 +50,28 @@ func (s *Store) computeImportance(ctx context.Context, app, title, screenText st
 	return 0.5*richness + 0.5*revisitation, nil
 }
 
+// fallbackMaxWords is the word cap on the raw-capture fallback in WriteEpisode. It is memory.Normalize's own signalMaxWords, repeated here because that constant is not exported: the fallback stores a capture the normalizer emptied, and it must not be free to store more than a capture the normalizer kept.
+const fallbackMaxWords = 120
+
+// cleanFallback prepares a raw capture for storage when memory.Normalize found no content in it. Input: the raw screen text of one capture. Output: the same text with object-replacement and control characters removed, whitespace collapsed to single spaces, and at most fallbackMaxWords words kept.
+// The chrome filter is not applied here: dropping every chrome line is what emptied the normalized content in the first place, so re-running it would leave nothing at all.
+func cleanFallback(raw string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '￼' || r == '�' {
+			return -1
+		}
+		if unicode.IsControl(r) && !unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, raw)
+	words := strings.Fields(cleaned)
+	if len(words) > fallbackMaxWords {
+		words = words[:fallbackMaxWords]
+	}
+	return strings.Join(words, " ")
+}
+
 // EpisodeWrite is one capture to persist. LogEpisode fills only App/Title/ScreenText; the daemon uses WriteEpisode when vision produced activity, visible chunks, or a JPEG.
 type EpisodeWrite struct {
 	App, Title, ScreenText string
@@ -71,18 +94,18 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 	defer span.End()
 
 	obs := memory.Normalize(w.App, w.Title, w.ScreenText)
-	// Prefer normalized content; if normalize emptied a non-empty raw capture of only chrome, fall back to raw so we never store an empty row as if it were a real observation. The fallback passes through StripObjectChars so a titleless capture of pure U+FFFC placeholders cannot smuggle uncleaned text into storage.
+	// Prefer normalized content; if normalize emptied a non-empty raw capture of only chrome, fall back to raw so we never store an empty row as if it were a real observation.
 	content := obs.Content
 	if content == "" {
-		content = memory.StripObjectChars(w.ScreenText)
+		content = cleanFallback(w.ScreenText)
 	}
 	if structured := memory.ComposeMoment(w.UserActivity, w.VisibleText, ""); structured != "" {
 		content = structured
 	}
 
+	// The title stays off the span: a window title is often the subject line of a mail or the name of a document, and traces are kept in a less guarded place than the store.
 	span.SetAttributes(
 		attribute.String("db.app", obs.Context.App),
-		attribute.String("db.window_title", obs.Context.Title),
 		attribute.String("db.signal_kind", string(obs.Context.SignalKind)),
 	)
 
@@ -513,12 +536,13 @@ func (s *Store) AgeEpisodeImages(ctx context.Context, keepFor time.Duration) (in
 	if keepFor <= 0 {
 		return 0, nil
 	}
-	secs := int64(keepFor.Seconds())
+	// One cutoff computed here and bound to both statements, rather than datetime('now') evaluated twice: a row that crossed the boundary between the two would otherwise have its image_path cleared without its JPEG being deleted, leaving the file on disk with nothing left pointing at it.
+	cutoff := sqliteUTC(time.Now().Add(-keepFor))
 	idRows, err := s.db.QueryContext(ctx,
 		`SELECT id FROM episodes
-		 WHERE created_at < datetime('now', '-' || ? || ' seconds')
+		 WHERE created_at < ?
 		   AND image_path != ''`,
-		secs)
+		cutoff)
 	if err != nil {
 		span.RecordError(err)
 		return 0, fmt.Errorf("age episode images: select: %w", err)
@@ -542,15 +566,12 @@ func (s *Store) AgeEpisodeImages(ctx context.Context, keepFor time.Duration) (in
 		return 0, nil
 	}
 
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
+	// The UPDATE repeats the SELECT's own WHERE clause rather than naming each id: one bound parameter per aged row runs into SQLITE_MAX_VARIABLE_NUMBER (32766 by default) on a store that missed several aging runs, and after that no image is ever aged again. The ids are still needed, but only to delete the files.
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE episodes SET image_path = '' WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
-		args...)
+		`UPDATE episodes SET image_path = ''
+		 WHERE created_at < ?
+		   AND image_path != ''`,
+		cutoff)
 	if err != nil {
 		span.RecordError(err)
 		return 0, fmt.Errorf("age episode images: update: %w", err)
