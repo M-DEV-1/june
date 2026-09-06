@@ -105,6 +105,11 @@ type vectorIndex interface {
 	IDs() []string
 }
 
+// batchVectorIndex is optionally implemented by vector backends that support bulk additions (such as *vector.ChromemIndex) to avoid per-document disk persistence overhead during reconciliation.
+type batchVectorIndex interface {
+	AddBatch(ctx context.Context, ids []string, contents []string, embeddings [][]float32, metadatas []map[string]string) error
+}
+
 // Result mirrors internal/vector.Result — duplicated here rather than imported, same reason as embedder/vectorIndex above: internal/db must not gain an import-time dependency on internal/vector.
 type Result struct {
 	ID         string
