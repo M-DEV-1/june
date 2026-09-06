@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"ora/internal/act"
@@ -56,334 +54,6 @@ const maxDeriveStateNotes = 10
 
 // maxDeriveStateEpisodes bounds how many tracked episodes the change gate reads to build its app-and-window-title signature. Two hundred: this store logged at most 60 episodes in its busiest hour on 2026-09-04, so it covers well over the ten-minute window the gate compares across, and the signature is a set so reading extra rows only costs the query.
 const maxDeriveStateEpisodes = 200
-
-// codexFallbackBrain holds the hand-over brain the unattended jobs use when Gemini answers 429 or 503. It is published once the daemon has built the ask agent, which happens after those jobs are wired, so it is read through an atomic rather than captured directly.
-var codexFallbackBrain atomic.Pointer[brain.Brain]
-
-// publishCodexFallback makes b the brain every unattended job hands over to on a quota or overload failure. Input: the Codex-backed brain; called once during startup.
-func publishCodexFallback(b brain.Brain) {
-	codexFallbackBrain.Store(&b)
-}
-
-// backgroundFallbackBrain returns the hand-over brain the unattended jobs should use, resolved at call time. Output: a Brain that answers through Codex once one has been published, and fails with a clear message before that.
-func backgroundFallbackBrain() brain.Brain {
-	return func(ctx context.Context, prompt string) (string, error) {
-		b := codexFallbackBrain.Load()
-		if b == nil {
-			return "", fmt.Errorf("codex fallback is not wired yet")
-		}
-		return (*b)(ctx, prompt)
-	}
-}
-
-// geminiRequestGate adapts brain.WithDailyQuota's Brain-shaped daily quota check into the Allow(model string) error shape memory.GeminiSummarizer's request gate expects, so its direct genai calls are metered against the same shared daily count as every Brain-wrapped call site above. The wrapped primary is a no-op: WithDailyQuota calls it only once its own quota check has already passed, so by the time it runs the count has already advanced and there is nothing left to do.
-type geminiRequestGate struct {
-	state *brain.QuotaState
-	opts  brain.QuotaOptions
-	// forAsks marks the interactive band, which may spend the share the quota keeps back from the nightly jobs.
-	forAsks bool
-}
-
-// Allow reports whether a request against model may proceed in this gate's band: background like every unattended job, or interactive when forAsks is set.
-func (g *geminiRequestGate) Allow(model string) error {
-	noop := func(context.Context, string) (string, error) { return "", nil }
-	_, err := brain.WithDailyQuota(g.state, model, g.forAsks, g.opts, noop)(context.Background(), "")
-	return err
-}
-
-// reconcileEmbedCap bounds how many backfill embeds one ReconcileVectors sweep performs, to protect API quota on a large dirty store — the sweep runs again on the next trigger (startup / note consolidation) and picks up where it left off.
-const reconcileEmbedCap = 200
-
-// localReconcileEmbedCap is the same bound when the embedder is the local llama-server rather than a metered API. The cap exists to protect a quota; with a free embedder there is no quota to protect, and a small cap only means a backlog that never drains. Chunking made that backlog real — a store of 4,866 captures needs about 8,800 passage vectors, so at 200 a sweep it would take dozens of restarts to catch up.
-const localReconcileEmbedCap = 5000
-
-// reconcileCap picks the sweep's budget from whether embedding costs money.
-func reconcileCap(embedsFree bool) int {
-	if embedsFree {
-		return localReconcileEmbedCap
-	}
-	return reconcileEmbedCap
-}
-
-// embedderAdapter adapts an embed.Embedder's Embed (which takes embed.TaskType) to the plain-string task param db.Store.SetEmbedder expects.
-// internal/db can't import internal/embed, so the adapter lives here instead.
-type embedderAdapter struct {
-	inner embed.Embedder
-}
-
-func (e *embedderAdapter) Embed(ctx context.Context, task string, text string) ([]float32, error) {
-	return e.inner.Embed(ctx, embed.TaskType(task), text)
-}
-
-// vectorIndexAdapter adapts *vector.ChromemIndex to db.Store.SetVectorIndex, translating vector.Result into db.Result field by field.
-type vectorIndexAdapter struct {
-	inner *vector.ChromemIndex
-}
-
-func (v *vectorIndexAdapter) Add(ctx context.Context, id, content string, embedding []float32, metadata map[string]string) error {
-	return v.inner.Add(ctx, id, content, embedding, metadata)
-}
-
-func (v *vectorIndexAdapter) Search(ctx context.Context, queryEmbedding []float32, n int, where map[string]string) ([]db.Result, error) {
-	results, err := v.inner.Search(ctx, queryEmbedding, n, where)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]db.Result, len(results))
-	for i, r := range results {
-		out[i] = db.Result{
-			ID:         r.ID,
-			Content:    r.Content,
-			Metadata:   r.Metadata,
-			Similarity: r.Similarity,
-		}
-	}
-	return out, nil
-}
-
-func (v *vectorIndexAdapter) Delete(ctx context.Context, id string) error {
-	return v.inner.Delete(ctx, id)
-}
-
-func (v *vectorIndexAdapter) IDs() []string { return v.inner.IDs() }
-
-// brainProviderName names a configured brain for the tally counters (see internal/tally.Wrap): the config's own provider constant when it's one of the recognised providers, "gemini" for the default/empty/explicit-Gemini-API case. Codex and Ollama belong here as much as the CLIs do — left out, a machine configured for either filed every counter it kept under gemini.
-func brainProviderName(cfg config.BrainConfig) string {
-	switch cfg.Provider {
-	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI, config.BrainCodex, config.BrainOllama:
-		return cfg.Provider
-	default:
-		return "gemini"
-	}
-}
-
-// drainEpisodes writes every activity the tracker publishes to the store and hands the same activity to the compiler, until events is closed. Input: the daemon's root context (its cancellation is dropped here), the tracker's channel, the store's episode writer, and the compiler's Ingest or nil when no compiler was built. Output: none — a failed write is logged and the next activity is still read.
-// The cancellation is dropped because SIGTERM cancels the root context before stop() runs: every activity still in the channel, and every write already in flight, would otherwise fail with context canceled and the last minutes of a session would be lost. The context's values (the trace span) are kept.
-func drainEpisodes(ctx context.Context, events <-chan tracker.Activity, write func(context.Context, db.EpisodeWrite) (int64, error), ingest func(context.Context, tracker.Activity)) {
-	ctx = context.WithoutCancel(ctx)
-	// The ingest runs on its own goroutine because it makes the attribution model call inline, with no deadline: run here, one stalled call stopped the drain, filled the tracker's event channel and ended all capture until a restart. One worker rather than one goroutine per activity keeps the buffer in the order the screens happened; an activity that finds the queue full is dropped from the summariser's buffer with a log line, having already been written to the store above.
-	var pending chan tracker.Activity
-	if ingest != nil {
-		pending = make(chan tracker.Activity, ingestQueueDepth)
-		defer close(pending)
-		go func() {
-			for ev := range pending {
-				ingest(ctx, ev)
-			}
-		}()
-	}
-	for ev := range events {
-		if _, err := write(ctx, db.EpisodeWrite{
-			App: ev.App, Title: ev.Title, ScreenText: ev.ScreenText,
-			UserActivity: ev.UserActivity, VisibleText: ev.VisibleText, ImageJPEG: ev.ImageJPEG,
-			ExtraJPEG: ev.ExtraJPEG,
-		}); err != nil {
-			slog.Error("log episode failed", "error", err)
-		}
-		if pending != nil {
-			select {
-			case pending <- ev:
-			default:
-				slog.Warn("the activity compiler is behind, so this screen is not in the summary buffer", "app", ev.App)
-			}
-		}
-	}
-}
-
-// ingestQueueDepth is how many activities may wait for the compiler before the drain starts dropping them. At the tracker's sampling rate this is roughly ten minutes of screens, which is longer than any attribution call that is going to come back at all.
-const ingestQueueDepth = 256
-
-// weeklyStudyMaterial finds what the Sunday distillation pass reads. Input: the data directory. Output: the replay transcripts and the dream traces, either of which may be empty. Replays are looked for in two places because the working directory is not the repo on every install: ora-restart pins it there, but the login autostart entry pins it to the binary's own directory and a packaged install has no evals/ at all, so <data>/replays is where a packaged install keeps them.
-func weeklyStudyMaterial(dataDir string) (replays, traces []string) {
-	repoReplays, _ := filepath.Glob("evals/replays/*.md")
-	installedReplays, _ := filepath.Glob(filepath.Join(dataDir, "replays", "*.md"))
-	traces, _ = filepath.Glob(filepath.Join(dataDir, "dreams", "*.jsonl"))
-	return append(repoReplays, installedReplays...), traces
-}
-
-// jobFirstRunDelay is how long after startup a background job makes its first run, before its own interval takes over. Two minutes so the first run is not on the startup path, competing with the tracker and the embedding server for the machine.
-const jobFirstRunDelay = 2 * time.Minute
-
-// shutdownFlushBound is how long the shutdown waits for the compiler's last flush, and the deadline that flush's own context carries. Forty-five seconds because the flush makes an attribution model call and its writes: at the old ten the bound won on a normal call, and ForceFlush had already emptied the buffer, so that stretch of the session was lost.
-const shutdownFlushBound = 45 * time.Second
-
-// dreamArtifactRetention is how long a night's trace and its replay artifact are kept under <data>/dreams. Ninety days: the Sunday study reads the newest of them each week, and a night older than a quarter has already been distilled into lessons.md.
-const dreamArtifactRetention = 90 * 24 * time.Hour
-
-// ageDreamArtifacts removes the night traces and replay artifacts under <data>/dreams that were last written longer ago than keepFor. Input: the data directory and the retention. Output: how many files were removed, and the first error a removal returned.
-// Only the two names the dream writes are matched, so anything else a person has put in that directory is left alone.
-func ageDreamArtifacts(dataDir string, keepFor time.Duration) (int, error) {
-	dir := filepath.Join(dataDir, "dreams")
-	traces, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	replays, _ := filepath.Glob(filepath.Join(dir, "*-replay.md"))
-	cutoff := time.Now().Add(-keepFor)
-	removed := 0
-	for _, path := range append(traces, replays...) {
-		info, err := os.Stat(path)
-		if err != nil || info.ModTime().After(cutoff) {
-			continue
-		}
-		if err := os.Remove(path); err != nil {
-			return removed, err
-		}
-		removed++
-	}
-	return removed, nil
-}
-
-// every runs fn shortly after start and then on a ticker every interval until ctx is done — the ticker/select/ctx.Done skeleton every one of the daemon's background jobs otherwise repeated by hand. Each job's own logging/error-handling stays inside its fn closure; name is only for the stop-log line below.
-func every(ctx context.Context, interval time.Duration, name string, fn func()) {
-	everyAfter(ctx, jobFirstRunDelay, interval, name, fn)
-}
-
-// everyAfter is every with the first run's delay passed in, so a test does not wait out jobFirstRunDelay. Input: ctx, how long to wait before the first run, the interval between runs after that, the job's name for the stop-log line, and the job. Output: none — it returns when ctx is done.
-// The first run exists because a job's interval is often longer than the machine's uptime: the image ageing runs every 24 h and the episodic compaction every 12 h, so on a machine restarted through the day neither ever fired and frames/ grew without bound.
-func everyAfter(ctx context.Context, delay, interval time.Duration, name string, fn func()) {
-	first := time.NewTimer(delay)
-	defer first.Stop()
-	select {
-	case <-first.C:
-		fn()
-	case <-ctx.Done():
-		slog.Debug("background job stopped", "job", name)
-		return
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-t.C:
-			fn()
-		case <-ctx.Done():
-			slog.Debug("background job stopped", "job", name)
-			return
-		}
-	}
-}
-
-// lateRaiser is the window raiser as the agent and the shutdown see it from the moment startup wires them, before the session-bus dial behind it has finished — or on a wedged bus, before it ever does. Every method answers "no window" until a Raiser is published, which is the same answer an uninstalled shell extension gives, so switch_window falls back to the keyboard exactly as it does on a machine that has none.
-// It exists because the dial is bounded and its goroutine can outlive the bound: assigning the raiser from that goroutine wrote the agent's own field and the shutdown's variable while the ipc server was already answering asks on other goroutines. Publishing through an atomic and handing out this one stable value instead means nothing is written after startup but the pointer.
-type lateRaiser struct {
-	raiser atomic.Pointer[window.Raiser]
-}
-
-// publish makes r the raiser every later call goes to. Input: the dialled raiser. Output: none.
-func (l *lateRaiser) publish(r *window.Raiser) { l.raiser.Store(r) }
-
-// close releases the session-bus connection if one was ever dialled. Output: whatever Close returned, or nil when there is nothing to close.
-func (l *lateRaiser) close() error {
-	if r := l.raiser.Load(); r != nil {
-		return r.Close()
-	}
-	return nil
-}
-
-func (l *lateRaiser) Available(ctx context.Context) (bool, error) {
-	if r := l.raiser.Load(); r != nil {
-		return r.Available(ctx)
-	}
-	return false, nil
-}
-
-func (l *lateRaiser) List(ctx context.Context) ([]window.Window, error) {
-	if r := l.raiser.Load(); r != nil {
-		return r.List(ctx)
-	}
-	return nil, nil
-}
-
-func (l *lateRaiser) ByPid(ctx context.Context, pid uint32) (bool, error) {
-	if r := l.raiser.Load(); r != nil {
-		return r.ByPid(ctx, pid)
-	}
-	return false, nil
-}
-
-func (l *lateRaiser) ByTitle(ctx context.Context, substring string) (bool, error) {
-	if r := l.raiser.Load(); r != nil {
-		return r.ByTitle(ctx, substring)
-	}
-	return false, nil
-}
-
-func (l *lateRaiser) ByWmClass(ctx context.Context, wmClass string) (bool, error) {
-	if r := l.raiser.Load(); r != nil {
-		return r.ByWmClass(ctx, wmClass)
-	}
-	return false, nil
-}
-
-// jobMarkerStore is the slice of the store the metered background jobs use to remember when they last ran. The diary table is where it goes because that is where every other once-per-period marker in the daemon already lives (see proactive.maybeWeeklyStudy); the row has no day, like the understanding doc, since a job's schedule is not a calendar day's.
-type jobMarkerStore interface {
-	DiaryEntry(ctx context.Context, day, kind string) (string, error)
-	SetDiaryEntry(ctx context.Context, day, kind, content string) error
-}
-
-// jobMarkerKind is the diary kind one background job's last run is recorded under. Input: the job's name as it appears in the log lines. Output: the kind, prefixed so nothing else in the diary collides with it.
-func jobMarkerKind(name string) string { return db.JobMarkerKindPrefix + name }
-
-// lastJobRun reads when a background job last ran on this store. Input: ctx, the store, and the job's name. Output: the moment it last ran, or the zero time when it never has or the row could not be parsed.
-func lastJobRun(ctx context.Context, store jobMarkerStore, name string) (time.Time, error) {
-	raw, err := store.DiaryEntry(ctx, "", jobMarkerKind(name))
-	if err != nil || raw == "" {
-		return time.Time{}, err
-	}
-	at, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	return at, nil
-}
-
-// firstRunDelay says how long a metered background job waits before its first run of this process. Input: when it last ran (zero when it never has), its interval, the shortest the first run may be away (jobFirstRunDelay in production), and now. Output: the later of that floor and the time left of the interval, so a restart resumes the schedule instead of starting it again.
-func firstRunDelay(lastRun time.Time, interval, floor time.Duration, now time.Time) time.Duration {
-	if lastRun.IsZero() {
-		return floor
-	}
-	if left := lastRun.Add(interval).Sub(now); left > floor {
-		return left
-	}
-	return floor
-}
-
-// everyMetered is every for a job that spends a model call on every run: same interval, but its last run is remembered in the store, so a restart does not buy another call two minutes in. Input: ctx, the store the marker row lives in, the interval, the job's name, and the job. Output: none — it returns when ctx is done.
-// The plain first run exists because a 12 h or 24 h interval never fires on a machine restarted through the day, and that reasoning holds for the jobs that only read and write the store. For the ones that call the model it inverted the cost: on a day of ora-restart cycles the daemon paid for a flush attribution, a note consolidation and a compaction digest on every start.
-func everyMetered(ctx context.Context, store jobMarkerStore, interval time.Duration, name string, fn func()) {
-	everyMeteredAfter(ctx, store, jobFirstRunDelay, interval, name, fn)
-}
-
-// everyMeteredAfter is everyMetered with the first run's floor passed in, so a test does not wait out jobFirstRunDelay. Input: ctx, the store, the shortest the first run may be away, the interval, the job's name, and the job.
-func everyMeteredAfter(ctx context.Context, store jobMarkerStore, floor, interval time.Duration, name string, fn func()) {
-	delay := floor
-	last, err := lastJobRun(ctx, store, name)
-	if err != nil {
-		slog.Warn("could not read a background job's last run, treating it as never run", "job", name, "error", err)
-	} else {
-		delay = firstRunDelay(last, interval, floor, time.Now())
-	}
-	everyAfter(ctx, delay, interval, name, func() {
-		fn()
-		if err := store.SetDiaryEntry(ctx, "", jobMarkerKind(name), time.Now().Format(time.RFC3339)); err != nil {
-			slog.Warn("could not record a background job's last run", "job", name, "error", err)
-		}
-	})
-}
-
-// within runs one step and comes back at the bound whether or not the step finished, so a step that hangs delays the caller by that bound and no more. Input: the step's name for the log line, how long it may take, and the step itself. Output: none — a step still running when its bound passes is left behind and logged. At shutdown that is the right trade, since the process is about to exit and the alternative is a daemon that never releases its port; at startup it is the right trade because the port is already bound and nothing is accepting on it yet.
-func within(name string, bound time.Duration, step func()) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		step()
-	}()
-	t := time.NewTimer(bound)
-	defer t.Stop()
-	select {
-	case <-done:
-	case <-t.C:
-		slog.Warn("a bounded step did not finish in time and was left behind", "step", name, "bound", bound)
-	}
-}
 
 func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) error {
 	slog.Info("Starting Ora Daemon...")
@@ -571,7 +241,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		})
 
 		// consolidate the notes table every 6 h: merge near-duplicates and drop transient task detail that leaked in as "facts."
-		noteCompactor := memory.NewNoteCompactor(summarizer, store)
+		noteCompactor := db.NewNoteCompactor(summarizer, store)
 		// Metered: Compact calls the model whenever there are at least twenty fact notes, which on a real store is always, so every restart bought one call and a full ReconcileVectors sweep behind it.
 		go everyMetered(ctx, store, 6*time.Hour, "note-consolidation", func() {
 			if err := noteCompactor.Compact(ctx); err != nil {
@@ -662,7 +332,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
 	// These duties are unattended, so they run on the background model like every other one: config.TextModel's free tier allows 20 requests a day against DefaultBackgroundModel's 500, and dreaming alone ticks every five minutes all night. No Job* name exists for the proactive duties yet, and BackgroundModel degrades a name it does not know to DefaultBackgroundModel, which is the model wanted here — naming it "proactive" means a later entry in background_models pins it without another change here.
 	// The hand-over is what makes a Codex- or Ollama-configured machine keep working now that FromConfig fails those with ErrNoBackend instead of quietly answering on Gemini; it is the same hand-over the meeting minutes and the dream brain already get.
-	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.WithCodexFallback(brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, "proactive"), apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store)
+	// meteredJobBrain builds the brain object every unattended job on this daemon shares: cfg's provider, on the background model config.BackgroundBrainConfig picks for job, metered against the shared Gemini quota, with a Codex hand-over for a config FromConfig cannot answer on directly. Input: the job's own brain config and its background-model job name. Output: the wrapped, quota-tallied brain.
+	meteredJobBrain := func(cfg config.BrainConfig, job string) brain.Brain {
+		return tally.Wrap(brainProviderName(cfg), brain.WithCodexFallback(brain.Metered(config.BackgroundBrainConfig(cfg, job), apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store)
+	}
+	mainBrain := meteredJobBrain(appConfig.Brain, "proactive")
 	// Meeting minutes previously built their own unmetered brain per meeting; pinning to the meeting-minutes job's own model (as defaultBrain did unmetered) and metering it against the same shared quota means an unattended write-up spends the day's allowance in the same place it always spent it, just counted now.
 	meetingRecorder.SetBrain(tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobMeetingMinutes), apiKey, geminiQuota, false, geminiQuotaOpts), store))
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
@@ -720,7 +394,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
 	dreamBriefHour, _ := appConfig.Proactive.Hours()
 	// The dream brain gets the dream job's own background model and the same Codex hand-over the configured-dream-brain branch below gets, since a night of stages left on config.TextModel spends the next day's 20 requests before the morning brief runs.
-	dreamer := dream.New(store, tally.Wrap(brainProviderName(appConfig.Brain), brain.WithCodexFallback(brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobDream), apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store), dream.Probes{
+	dreamer := dream.New(store, meteredJobBrain(appConfig.Brain, config.JobDream), dream.Probes{
 		OnAC:              recorder.OnACPower,
 		SessionLocked:     tracker.SessionLocked,
 		RecorderQuiescent: meetingRecorder.Quiescent,
@@ -733,8 +407,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// A dream brain of its own (grok, agy) frees the night from the Claude window curfew, since it spends none of the user's Claude usage.
 	if p := appConfig.Dream.Brain.Provider; p != "" {
 		// On the Gemini API the night runs on the model config.BackgroundModel names for the dream job, and a quota or overload failure hands the stage to Codex.
-		dreamBrainConfig := config.BackgroundBrainConfig(appConfig.Dream.Brain, config.JobDream)
-		dreamer.SetBrain(tally.Wrap(brainProviderName(appConfig.Dream.Brain), brain.WithCodexFallback(brain.Metered(dreamBrainConfig, apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store))
+		dreamer.SetBrain(meteredJobBrain(appConfig.Dream.Brain, config.JobDream))
 		dreamer.CurfewExempt = p != config.BrainClaudeCLI
 	}
 	// Nightly dual-run: a local Gemma shadows the primary dream brain on the same prompts, replies logged for comparison, never acted on. The daemon owns the llama-server child for exactly one night's run — started before the stages, stopped after. The binary is the same llama-server the embedder already runs (appConfig.Embed.LlamaServer); a config with a dream model_path but no embed.llama_server falls back to PATH.
@@ -890,185 +563,27 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// local http for IPC between the tui and daemon
 	mux := http.NewServeMux()
 
-	// heartbeat — deliberately unauthenticated: root.go's pre-spawn liveness probe polls this before it can assume the token file even exists yet, and the build identity it returns reveals nothing sensitive.
-	mux.HandleFunc("/ping", pingHandler)
-
-	// data sharing endpoint, get latest tracking data
-	mux.HandleFunc("/buffer", auth(func(w http.ResponseWriter, r *http.Request) {
-		if compiler == nil {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		buf := compiler.GetCurrentBuffer()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(buf)
-	}))
-
-	// The tray asks the window it started to open or to show its hover; the instruction travels on the event stream the window already reads.
-	mux.HandleFunc("/window", auth(ipcServer.Window))
-
-	// pause/resume tracking
-	mux.HandleFunc("/pause", auth(func(w http.ResponseWriter, r *http.Request) {
-		daemon.Pause()
-		slog.Info("tracking paused via IPC")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("paused"))
-	}))
-
-	mux.HandleFunc("/resume", auth(func(w http.ResponseWriter, r *http.Request) {
-		daemon.Resume()
-		slog.Info("tracking resumed via IPC")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("resumed"))
-	}))
-
-	mux.HandleFunc("/status", auth(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		paused := daemon.IsPaused()
-		json.NewEncoder(w).Encode(map[string]bool{"paused": paused})
-	}))
-
-	// /vector/* let the client process reach the daemon's vector index over IPC instead of opening chromem itself — two processes opening the same chromem dir risks torn reads/corruption (see vecIndex's own doc comment above). All three return 503 with no body if the daemon has no vector index wired (no API key, or init failed) — the client's httpVectorIndex adapter treats any non-200 as an error, which HybridSearch already degrades gracefully from (see internal/db/hybrid.go's resilience handling).
-	mux.HandleFunc("/vector/search", auth(func(w http.ResponseWriter, r *http.Request) {
-		if vecIndex == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			Embedding []float32         `json:"embedding"`
-			N         int               `json:"n"`
-			Where     map[string]string `json:"where"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		results, err := vecIndex.Search(r.Context(), req.Embedding, req.N, req.Where)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"results": results})
-	}))
-
-	mux.HandleFunc("/vector/add", auth(func(w http.ResponseWriter, r *http.Request) {
-		if vecIndex == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			ID        string            `json:"id"`
-			Content   string            `json:"content"`
-			Embedding []float32         `json:"embedding"`
-			Metadata  map[string]string `json:"metadata"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		if err := vecIndex.Add(r.Context(), req.ID, req.Content, req.Embedding, req.Metadata); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	mux.HandleFunc("/vector/delete", auth(func(w http.ResponseWriter, r *http.Request) {
-		if vecIndex == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			ID string `json:"id"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		if err := vecIndex.Delete(r.Context(), req.ID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	// /embed lets the client reach the daemon's embedding engine instead of running one of its own. Only the daemon may own the llama-server child (one process, one port), so this is the client's only route to a local vector. 503 with no body when the daemon is on the Gemini path or has no embedder at all, which the client's httpEmbedder reports as an error and HybridSearch degrades from.
-	mux.HandleFunc("/embed", auth(func(w http.ResponseWriter, r *http.Request) {
-		if embedEngine == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			Task string `json:"task"`
-			Text string `json:"text"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		vec, err := embedEngine.Embed(r.Context(), embed.TaskType(req.Task), req.Text)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
-	}))
-
-	// /ask and /events let the desktop window pose a question about what's on screen and stream the answer as it comes together — see internal/ipc for the route bodies.
-	mux.HandleFunc("/ask", auth(ipcServer.Ask))
-	mux.HandleFunc("/events", auth(ipcServer.Events))
-
-	// A reply's link posts here instead of the webview's own window.open, which WebKitGTK does not reliably hand off to the system browser; the daemon opens it the same way the open_url tool does. See internal/ipc/open.go.
-	mux.HandleFunc("POST /open", auth(ipc.Open(ipc.OpenCommand)))
-
-	// A long computer-use goal: POST /act starts one and returns its id, GET /act/{id} is its whole record, and the four control routes stop it, hold it, carry it on and answer the one question a stuck job asks. Progress rides the same /events stream as an ask, tagged type "act" with the job's id.
-	mux.HandleFunc("POST /act", auth(actJobs.Start))
-	mux.HandleFunc("GET /act/{id}", auth(actJobs.Get))
-	mux.HandleFunc("POST /act/{id}/stop", auth(actJobs.Stop))
-	mux.HandleFunc("POST /act/{id}/pause", auth(actJobs.Pause))
-	mux.HandleFunc("POST /act/{id}/resume", auth(actJobs.Resume))
-	mux.HandleFunc("POST /act/{id}/answer", auth(actJobs.Answer))
-
-	// Hold-to-talk dictation: /dictate/start opens the microphone, /dictate/stop transcribes what was said with the same local whisper.cpp build the meeting recorder uses and hands the text back for the window to put in its input. Route bodies are in internal/ipc/dictate.go.
-	dictation := ipc.NewDictation(ipcServer)
-	mux.HandleFunc("/dictate/start", auth(dictation.Start))
-	mux.HandleFunc("/dictate/stop", auth(dictation.Stop))
-
-	// The window's read-only screens: what is on screen now, what is outstanding, what happened today, the meetings, a memory search and the people. Route bodies are in internal/ipc/reads.go.
-	mux.HandleFunc("/context", auth(ipcServer.Context))
-	mux.HandleFunc("/matters", auth(ipcServer.Matters))
-	mux.HandleFunc("/today", auth(ipcServer.Today))
-	mux.HandleFunc("/meetings", auth(ipcServer.Meetings))
-	mux.HandleFunc("/meetings/live", auth(ipc.MeetingLive(meetingRecorder)))
-	mux.HandleFunc("/memory/search", auth(ipcServer.MemorySearch))
-	mux.HandleFunc("/people", auth(ipcServer.People))
-
-	// The window's voice: the daemon runs the same Gemini Live loop the terminal client does, and what the session hears, says and calls rides the /events stream above. Route bodies are in internal/ipc/voice.go.
-	voiceSession := ipc.NewVoice(ipcServer, store, apiKey)
-	mux.HandleFunc("/voice/start", auth(voiceSession.Start))
-	mux.HandleFunc("/voice/stop", auth(voiceSession.Stop))
-	mux.HandleFunc("/voice/status", auth(voiceSession.Status))
-
-	// The window's own record: the conversations it keeps and the turns inside them, the one list of work (action items plus the tasks the user typed in), the day pages, and which brains this machine is signed in to. Route bodies are in internal/ipc/conversations.go, tasks.go, days.go and brains.go.
-	mux.HandleFunc("/conversations", auth(ipcServer.Conversations))
-	mux.HandleFunc("/conversations/{id}", auth(ipcServer.Conversation)) // GET reads it, DELETE removes it
-	mux.HandleFunc("/conversations/{id}/title", auth(ipcServer.ConversationTitle))
-	mux.HandleFunc("/tasks", auth(ipcServer.Tasks))
-	mux.HandleFunc("/tasks/{id}/done", auth(ipcServer.TaskDone))
-	mux.HandleFunc("/tasks/{id}", auth(ipcServer.TaskOwner)) // PATCH corrects whose task it is, by hand
-	// The window's own Done/1h/Evening/Tomorrow buttons on a live notice's rail line, answered through the same Act the desktop notification's own buttons call.
-	mux.HandleFunc("POST /notices/{kind}/{id}/action", auth(ipc.NoticeAction(scheduler.Act)))
-
-	mux.HandleFunc("/days", auth(ipcServer.Days))
-	mux.HandleFunc("/days/{date}", auth(ipcServer.Day))
-	mux.HandleFunc("/routines", auth(ipcServer.Routines))
-	mux.HandleFunc("/routines/{id}", auth(ipcServer.RoutineDelete))
-	mux.HandleFunc("/routines/{id}/run", auth(ipcServer.RoutineRun))
 	// One accessor over the config the request goroutines share, so POST /settings writing ClaudeUsageFromLogin and the /brains and /usage handlers reading it are not touching the same struct from several goroutines at once.
 	liveConfig := ipc.NewLiveConfig(&appConfig, config.SaveConfig)
 	brainLimits := brainLimitsFrom(brainUsage, geminiQuota, liveConfig, geminiQuotaOpts)
-	mux.HandleFunc("/brains", auth(ipc.Brains(liveConfig, brainLimits)))
-	mux.HandleFunc("/overlay", auth(ipcServer.Overlay))
-	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), liveConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
-	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, brainLimits)))
+
+	registerDaemonRoutes(mux, routeDependencies{
+		auth:            auth,
+		compiler:        compiler,
+		daemon:          daemon,
+		vecIndex:        vecIndex,
+		embedEngine:     embedEngine,
+		ipcServer:       ipcServer,
+		actJobs:         actJobs,
+		store:           store,
+		apiKey:          apiKey,
+		meetingRecorder: meetingRecorder,
+		scheduler:       scheduler,
+		liveConfig:      liveConfig,
+		brainLimits:     brainLimits,
+		appConfig:       appConfig,
+		startTime:       startTime,
+	})
 
 	server := &http.Server{
 		Handler: mux,
@@ -1134,23 +649,4 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	return stop, daemon, nil
-}
-
-// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the config accessor (for the Gemini model those requests are metered under, and for whether the Claude read is turned on, both read under its lock since POST /settings writes that flag from another request goroutine) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker (skipped entirely when config.OraConfig.ClaudeUsageFromLogin is off), Codex's whatever its last response's headers said, and nothing at all for Grok and Ollama, which expose no allowance to read.
-func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *ipc.LiveConfig, opts brain.QuotaOptions) ipc.BrainLimits {
-	return func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
-		switch id {
-		case "gemini":
-			model, ok := brain.GeminiModelFor(cfg.Get().Brain)
-			if !ok {
-				model = config.TextModel
-			}
-			return brain.GeminiDaily(quota, model, opts, time.Now())
-		case "claude":
-			if cfg.ClaudeUsageEnabled() {
-				agent.RefreshClaudeUsage(ctx)
-			}
-		}
-		return usage.Get(id)
-	}
 }

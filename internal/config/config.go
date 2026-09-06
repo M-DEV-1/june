@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"ora/internal/util"
 )
 
 type OraConfig struct {
@@ -377,12 +379,6 @@ func NormalizeVoice(name string) (canonical string, ok bool) {
 	return "", false
 }
 
-// IsValidVoice reports whether name (case-insensitive) is one of AvailableVoices.
-func IsValidVoice(name string) bool {
-	_, ok := NormalizeVoice(name)
-	return ok
-}
-
 // DefaultDwellTime is how long a window must hold focus before the tracker records it, in milliseconds. Used both as the built-in default and as the fallback for a config file that carries an explicit zero.
 // It is a plain int rather than a time.Duration because that is what the number on disk means: as a Duration, 15000 reads as 15 microseconds, and the value was only ever right because the one call site multiplied by time.Millisecond a second time.
 const DefaultDwellTime = 15000
@@ -433,83 +429,7 @@ func DataDir() string {
 	}
 
 	target := filepath.Join(dir, "ora")
-	migrateLegacyDataDir(target)
 	return target
-}
-
-// migrateLegacyDataDir moves the contents of the legacy cwd-relative "ora-db" directory (if one exists) into target, a one-time upgrade step.
-// The decision is keyed on whether target already holds a database, NOT on whether the target directory exists: InitTelemetry creates that directory for the log file and SaveConfig creates it for the config, so on a real upgrade it usually exists before anything looks for a legacy directory. Keying on existence would skip the move and strand every existing memory in the old location while ORA quietly started a fresh empty database.
-// A no-op once target has a database (already migrated, or a fresh install that wrote there directly) or when there's no legacy database to move.
-func migrateLegacyDataDir(target string) {
-	if _, err := os.Stat(filepath.Join(target, "db")); err == nil {
-		return
-	}
-	const legacy = "ora-db"
-	info, err := os.Stat(legacy)
-	if err != nil || !info.IsDir() {
-		return
-	}
-	if _, err := os.Stat(filepath.Join(legacy, "db")); err != nil {
-		return
-	}
-
-	if err := os.MkdirAll(target, 0700); err != nil {
-		slog.Error("failed to create data directory for legacy migration", "target", target, "error", err)
-		return
-	}
-	// Entries are moved one at a time rather than renaming the directory itself, because target may already exist and hold files (a log, a config) that must survive. Anything already present in target wins — it is newer than the legacy copy by definition.
-	entries, err := os.ReadDir(legacy)
-	if err != nil {
-		slog.Error("failed to read legacy ora-db directory", "from", legacy, "error", err)
-		return
-	}
-	moved := 0
-	for _, e := range entries {
-		from := filepath.Join(legacy, e.Name())
-		to := filepath.Join(target, e.Name())
-		if _, err := os.Stat(to); err == nil {
-			continue
-		}
-		if err := os.Rename(from, to); err != nil {
-			// os.Rename fails across filesystems — fall back to a recursive copy, leaving the original in place for that entry.
-			if copyErr := copyDir(from, to); copyErr != nil {
-				slog.Error("failed to migrate legacy entry", "from", from, "to", to, "error", copyErr)
-				continue
-			}
-			os.RemoveAll(from)
-		}
-		moved++
-	}
-	if moved == 0 {
-		return
-	}
-	// Only remove the legacy directory once it is empty, so a partial migration never destroys anything that did not make it across.
-	if rest, err := os.ReadDir(legacy); err == nil && len(rest) == 0 {
-		os.Remove(legacy)
-	}
-	slog.Info("migrated legacy ora-db directory to new data directory", "from", legacy, "to", target, "entries", moved)
-}
-
-// copyDir recursively copies every file and directory under src into dst. Used only as migrateLegacyDataDir's cross-filesystem fallback when os.Rename can't do the move in place.
-func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0755)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, 0600)
-	})
 }
 
 // ConfigPath is the on-disk location of the persisted app config.
@@ -556,7 +476,7 @@ func LoadConfig() OraConfig {
 	}
 
 	// configs written before /voice existed (or with a bad value) fall back to default
-	if cfg.Voice == "" || !IsValidVoice(cfg.Voice) {
+	if _, ok := NormalizeVoice(cfg.Voice); cfg.Voice == "" || !ok {
 		cfg.Voice = DefaultVoice
 	}
 
@@ -588,12 +508,8 @@ func SaveConfig(cfg OraConfig) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	if err := os.WriteFile(ConfigPath(), data, 0600); err != nil {
+	if err := util.WriteFileAtomic(ConfigPath(), data, 0600); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
-	}
-	// Writing an existing file does not change its mode, so a config left 0644 by an older build stays that way until this tightens it.
-	if err := os.Chmod(ConfigPath(), 0600); err != nil {
-		return fmt.Errorf("failed to secure config: %w", err)
 	}
 	return nil
 }
