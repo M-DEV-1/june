@@ -36,6 +36,10 @@ func (e *jobExec) ExecuteAskTool(ctx context.Context, name string, args map[stri
 	case "observe_screen":
 		return "Brave · Netflix\n[1] push button \"Play\" (10,10)"
 	case "wait_for":
+		// The step loop takes each check once before it acts, with a one-poll timeout, to see whether the check already held. Here it never did, so the reading taken after the action is the one that counts and every scripted step verifies as it did before.
+		if ms, ok := args["timeout_ms"].(float64); ok && ms <= 1 {
+			return act.WaitFailPrefix + `0s: the title is "Netflix"`
+		}
 		return act.WaitPassPrefix + `the title is "S16 E8"`
 	}
 	return "did " + name

@@ -133,10 +133,12 @@ type Step struct {
 	Args   map[string]any `json:"args"`
 	Expect act.Check      `json:"expect"`
 	Result string         `json:"result"`
-	// Outcome is "pass" or "fail", from the wait_for check alone.
+	// Outcome is "pass", "fail" or alreadyHeld, from the wait_for check alone.
 	Outcome string `json:"outcome"`
 	// Why is what the check found, in plain words, whichever way it went.
 	Why string `json:"why"`
+	// HeldBefore is what the same check said when it was taken once before the action ran. True means the screen already satisfied it, so the reading taken afterwards says nothing about what the action did.
+	HeldBefore bool `json:"held_before,omitempty"`
 }
 
 // Job is the whole checkpoint: everything a fresh Runner needs to carry on where the last one stopped. It is stored as JSON in the act_runs row's job_json column and is the only place the full trail lives — the prompt sent each round carries a small part of it (see BuildPrompt).
@@ -637,6 +639,15 @@ const storedResultCap = 300
 // waitTimeoutMS is how long wait_for polls for the expected change before calling it a failure, in milliseconds — the tool's own default, passed explicitly so a job's verification time is on record rather than implied.
 const waitTimeoutMS = 5000
 
+// preCheckTimeoutMS is how long the pre-reading of a step's check polls: one look and no waiting, since it is asking what the screen showed before the action rather than waiting for anything to change.
+const preCheckTimeoutMS = 1
+
+// alreadyHeld is the outcome of a step whose check was already satisfied before the action ran. It is not a pass: the model may not end a job on it, and it is not counted as a step that checked out.
+const alreadyHeld = "already held"
+
+// alreadyHeldNote is appended to what the check found, so the round after it reads the verdict as saying nothing about the action rather than as proof it worked.
+const alreadyHeldNote = " — but this already held before the action, so it says nothing about what the action did"
+
 // summaryEvery is how many rounds pass between rewrites of the progress summary. Five, because a summary rewritten every round costs a round's worth of tokens for nothing, and one rewritten every twenty is describing a screen the job has long left.
 const summaryEvery = 5
 
@@ -713,6 +724,7 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 
 		if d.Done {
 			// The goal is only reached once something checked that it was: a model may end a job on the step it just watched come true, never on its own say-so before anything has been verified.
+			// A step whose check already held before its action is not something that checked out, so it cannot carry a done either.
 			if n := len(job.Steps); n == 0 || job.Steps[n-1].Outcome != "pass" {
 				l.set(func(j *Job) {
 					j.Results = pushCapped(j.Results, "you said the goal was reached, but nothing has checked out yet; take the action that would make it true and let the check confirm it before you set done", keptResults, resultCap)
@@ -750,6 +762,12 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		l.set(func(j *Job) { j.State = Stepping })
 		r.emit(Event{Job: job.ID, Kind: "step", State: Stepping, Step: step.N, Text: describeAction(d), Expect: storedExpect.Describe()})
 
+		// The check is taken once before the action, so a verdict that was true either way cannot be counted as proof: a title_contains "Netflix" written after a click passes on a window that was already called that, and item_absent passes on an item that was never there. One poll, no waiting.
+		step.HeldBefore = r.checkHolds(ctx, d.Expect)
+		if r.ended(ctx, l) {
+			return
+		}
+
 		result := r.exec.ExecuteAskTool(ctx, d.Tool, d.Args)
 		step.Result = capRunes(result, resultCap)
 		step.Why = "the action ran, and the check had not answered yet"
@@ -776,11 +794,14 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			return
 		}
 
-		verdict := r.exec.ExecuteAskTool(ctx, "wait_for", map[string]any{"kind": d.Expect.Kind, "value": d.Expect.Value, "timeout_ms": waitTimeoutMS})
+		verdict := r.exec.ExecuteAskTool(ctx, "wait_for", map[string]any{"kind": d.Expect.Kind, "value": d.Expect.Value, "timeout_ms": float64(waitTimeoutMS)})
 		if r.ended(ctx, l) {
 			return
 		}
 		step.Outcome, step.Why = readVerdict(verdict)
+		if step.Outcome == "pass" && step.HeldBefore {
+			step.Outcome, step.Why = alreadyHeld, step.Why+alreadyHeldNote
+		}
 
 		job = l.set(func(j *Job) {
 			j.Steps[len(j.Steps)-1] = step
@@ -920,6 +941,15 @@ func summarise(j Job, why string) string {
 func stuckQuestion(j Job) string {
 	last := j.Steps[len(j.Steps)-1]
 	return fmt.Sprintf("I tried %d times to make it so that %s, and each time %s. What should I do instead?", stuckAfter, last.Expect.Describe(), last.Why)
+}
+
+// checkHolds reads a step's check once, before the action runs, through the same wait_for the verification uses. Input: the job's context and the change the model wrote down. Output: true when the screen already satisfies it, false when it does not or the step named no check at all.
+func (r *Runner) checkHolds(ctx context.Context, expect act.Check) bool {
+	if expect.Value == "" {
+		return false
+	}
+	outcome, _ := readVerdict(r.exec.ExecuteAskTool(ctx, "wait_for", map[string]any{"kind": expect.Kind, "value": expect.Value, "timeout_ms": float64(preCheckTimeoutMS)}))
+	return outcome == "pass"
 }
 
 // readVerdict turns wait_for's own answer into a step's outcome. Input: the tool result. Output: "pass" or "fail", and what the check found in plain words.

@@ -30,10 +30,24 @@ type fakeExec struct {
 	blockTool string
 	// result, when set, is what every tool but observe_screen and wait_for answers with.
 	result string
+	// heldBefore is what the pre-reading of a step's check answers: the step loop takes its check once before the action, with a one-poll timeout, and true here says the check was already true before anything happened.
+	heldBefore bool
+	// preChecks records the "value" of each of those pre-readings, kept apart from calls and waitValues so the tool sequence a test asserts on is still the actions and their checks.
+	preChecks []string
 }
 
 func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[string]any) string {
 	f.mu.Lock()
+	if name == "wait_for" && preCheckArgs(args) {
+		value, _ := args["value"].(string)
+		f.preChecks = append(f.preChecks, value)
+		held := f.heldBefore
+		f.mu.Unlock()
+		if held {
+			return act.WaitPassPrefix + "the title is \"S16 E8\""
+		}
+		return act.WaitFailPrefix + "0s: the title is \"Netflix\""
+	}
 	f.calls = append(f.calls, name)
 	if name == "wait_for" {
 		value, _ := args["value"].(string)
@@ -81,6 +95,19 @@ func (f *fakeExec) ExecuteAskTool(ctx context.Context, name string, args map[str
 		return result
 	}
 	return "did " + name
+}
+
+// preCheckArgs reports whether a wait_for call is the step loop's pre-reading rather than its verification, which is the one-poll timeout it is made with.
+func preCheckArgs(args map[string]any) bool {
+	ms, ok := args["timeout_ms"].(float64)
+	return ok && ms <= float64(preCheckTimeoutMS)
+}
+
+// preChecksSeen returns the value of each pre-reading the step loop took, in order.
+func (f *fakeExec) preChecksSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.preChecks...)
 }
 
 func (f *fakeExec) names() []string {
@@ -1387,5 +1414,58 @@ func TestRunner_TheWallBudgetStillEndsAJobAfterItHasWaited(t *testing.T) {
 	job := waitState(t, r, id, Failed, Done, Stopped)
 	if job.State != Failed || !strings.Contains(job.Err, "wall-clock") {
 		t.Fatalf("state = %q (%s), want it failed on the wall-clock budget once it went back to work", job.State, job.Err)
+	}
+}
+
+// A check that was already true before the action says nothing about what the action did: a title_contains "Netflix" written after a click passes on a window that was already called that. The step loop takes the check once before it acts, records that pre-reading on the step, and when the verdict did not flip the step is recorded as having already held rather than as a pass — so the model is told, and done cannot ride on it.
+func TestRunner_ACheckThatAlreadyHeldIsNotAPass(t *testing.T) {
+	exec := &fakeExec{heldBefore: true}
+	r, _, events := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("It is playing S16 E8."), stepReply("click", "S16 E8")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Stuck, Done, Failed)
+
+	if job.State == Done {
+		t.Fatalf("state = done, want the job refused to end on a step whose check already held")
+	}
+	if len(job.Steps) == 0 {
+		t.Fatal("no steps recorded")
+	}
+	first := job.Steps[0]
+	if !first.HeldBefore {
+		t.Errorf("step = %+v, want the pre-reading recorded on it", first)
+	}
+	if first.Outcome != alreadyHeld {
+		t.Errorf("outcome = %q, want %q", first.Outcome, alreadyHeld)
+	}
+	if !strings.Contains(first.Why, "already held before the action") {
+		t.Errorf("why = %q, want it to say the check already held before the action", first.Why)
+	}
+	if got := exec.preChecksSeen(); len(got) == 0 || got[0] != "S16 E8" {
+		t.Errorf("pre-readings = %v, want the step's own check taken before the action", got)
+	}
+	for _, ev := range events() {
+		if ev.Kind == "verified" && ev.Outcome == "pass" {
+			t.Errorf("event = %+v, want no step reported as a pass", ev)
+		}
+	}
+}
+
+// The pre-reading is only taken to be compared against: a check that was false before the action and true after it is the ordinary pass, and nothing about it changes.
+func TestRunner_ACheckThatFlippedIsStillAPass(t *testing.T) {
+	exec := &fakeExec{}
+	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("It is playing S16 E8.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Done, Failed, Stuck)
+	if job.State != Done {
+		t.Fatalf("state = %q (%s), want done", job.State, job.Err)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].Outcome != "pass" || job.Steps[0].HeldBefore {
+		t.Errorf("steps = %+v, want one plain pass whose check did not already hold", job.Steps)
 	}
 }
