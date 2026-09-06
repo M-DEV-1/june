@@ -72,6 +72,9 @@ type toolTestBrain struct {
 	actionStatus   string
 	actionPriority string
 	actionErr      error
+	// actionText captures SetActionText's arg; isAction says whether the id the test uses names an action item at all — false, the zero value, makes SetActionText report db.ErrNotActionItem the way the store does for a plain note, so revise falls back to UpdateNote.
+	actionText string
+	isAction   bool
 	// updatedThreadID/updatedThreadState capture UpdateThreadState's args for the revise tool's thread tests; updateThreadErr forces it to fail.
 	updatedThreadID    int64
 	updatedThreadState string
@@ -128,6 +131,16 @@ func (b *toolTestBrain) LogNote(ctx context.Context, content, kind string) (int6
 	return 1, nil
 }
 func (b *toolTestBrain) GetNotes(ctx context.Context) ([]db.Note, error) { return b.notes, nil }
+func (b *toolTestBrain) NotesOfKindSince(ctx context.Context, kind string, since time.Time) ([]db.Note, error) {
+	var out []db.Note
+	for i := len(b.notes) - 1; i >= 0; i-- {
+		n := b.notes[i]
+		if n.Kind == kind && (since.IsZero() || !n.CreatedAt.Before(since)) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
 func (b *toolTestBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
 	if b.personalErr != nil {
 		return nil, b.personalErr
@@ -170,6 +183,14 @@ func (b *toolTestBrain) OpenActionItems(ctx context.Context) ([]memory.ActionIte
 
 func (b *toolTestBrain) SetActionStatus(ctx context.Context, id int64, status string) error {
 	b.actionID, b.actionStatus = id, status
+	return b.actionErr
+}
+
+func (b *toolTestBrain) SetActionText(ctx context.Context, id int64, text string) error {
+	if !b.isAction {
+		return fmt.Errorf("no action item with id %d: %w", id, db.ErrNotActionItem)
+	}
+	b.actionID, b.actionText = id, text
 	return b.actionErr
 }
 
@@ -772,6 +793,30 @@ func TestExecuteTool_Revise_Note(t *testing.T) {
 		}
 		if result != "deleted" {
 			t.Errorf(`result = %q, want "deleted"`, result)
+		}
+	})
+	// An id the model invented names nothing, and the store says so: the model must be told the note was never there, not that its removal succeeded, or the user hears "deleted" about a note that is still on file.
+	t.Run("remove an id that names nothing", func(t *testing.T) {
+		brain := &toolTestBrain{deleteNoteErr: fmt.Errorf("no note with id 4242")}
+		a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+		result := a.executeTool(context.Background(), "revise", map[string]any{"ref": "note#4242", "remove": true})
+		if !strings.HasPrefix(result, "error") || !strings.Contains(result, "nothing was there") {
+			t.Errorf("result = %q, want an error saying nothing was there", result)
+		}
+	})
+	// An action item's content is a rendered "[state/priority] Owner — work (Meeting, date)" line, so correcting its work text goes through SetActionText, which re-renders it. Overwriting the whole line through UpdateNote would strip the prefix, ParseAction would stop reading the row, and the task would vanish from the brief and the Tasks screen.
+	t.Run("content on an action item", func(t *testing.T) {
+		brain := &toolTestBrain{isAction: true}
+		a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
+		result := a.executeTool(context.Background(), "revise", map[string]any{"ref": "note#7", "content": "deploy the checkout-flow PR"})
+		if brain.actionID != 7 || brain.actionText != "deploy the checkout-flow PR" {
+			t.Errorf("expected SetActionText(7, ...), got id=%d text=%q", brain.actionID, brain.actionText)
+		}
+		if brain.updatedNoteID != 0 {
+			t.Errorf("the rendered action line was overwritten through UpdateNote(%d, %q)", brain.updatedNoteID, brain.updatedNoteContent)
+		}
+		if result != "updated" {
+			t.Errorf(`result = %q, want "updated"`, result)
 		}
 	})
 }
@@ -2870,5 +2915,30 @@ func TestNewScreenScope_GivesOneCallerItsOwnNumberedList(t *testing.T) {
 	}
 	if got := a.lastScreen(jobB); got.app != "" {
 		t.Errorf("a second scope's last screen = %+v, want the zero value", got)
+	}
+}
+
+// query_memory kind=meeting reads only the meeting notes, newest first, and stops at maxMeetingNotesListed with a count of the rest, instead of paging the whole notes table into one answer.
+func TestListMeetingNotes_NewestFirstAndCapped(t *testing.T) {
+	b := &toolTestBrain{}
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < maxMeetingNotesListed+3; i++ {
+		b.notes = append(b.notes, db.Note{ID: int64(i + 1), Kind: "meeting", Content: fmt.Sprintf("# Standup %d", i+1), CreatedAt: base.Add(time.Duration(i) * time.Hour)})
+	}
+	b.notes = append(b.notes, db.Note{ID: 999, Kind: "fact", Content: "not a meeting", CreatedAt: base})
+	a := NewAgent(nil, nil, b, nil, "")
+	got := a.listMeetingNotes(context.Background(), time.Time{}, time.Time{})
+	if strings.Contains(got, "not a meeting") {
+		t.Errorf("a non-meeting note was listed: %s", got)
+	}
+	if !strings.HasPrefix(got, fmt.Sprintf("[note#%d]", maxMeetingNotesListed+3)) {
+		t.Errorf("first line = %q, want the newest meeting first", strings.SplitN(got, "\n", 2)[0])
+	}
+	if !strings.Contains(got, "and 3 more") {
+		t.Errorf("result does not count the meetings left out: %s", got)
+	}
+	// One line per meeting plus the closing count line; the note formatter repeats the reference inside each line, so lines are counted rather than references.
+	if n := len(strings.Split(got, "\n")); n != maxMeetingNotesListed+1 {
+		t.Errorf("listed %d lines, want the cap of %d plus the count line", n, maxMeetingNotesListed)
 	}
 }
