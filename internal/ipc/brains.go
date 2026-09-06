@@ -140,14 +140,18 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 	if has("ollama") {
 		ollamaModels = ollamaList()
 	}
+	agyList := []string{}
+	if has("agy") {
+		agyList = agyModels()
+	}
 
 	list := []BrainView{
 		{
 			ID:       "antigravity",
 			Name:     "Antigravity",
 			SignedIn: has("agy"),
-			Models:   []string{},
-			Note:     "Antigravity runs Gemini under the Google plan the user already pays for, so a duty answered here costs nothing against the metered API key. Its command line exposes no model choice, so there is nothing to pick.",
+			Models:   agyList,
+			Note:     "Antigravity runs models under the Google plan the user already pays for, so a duty answered here costs nothing against the metered API key. The list is whatever `agy models` reports, which on this plan is more than Gemini — Claude and GPT-OSS are in it too.",
 		},
 		{
 			ID:       "gemini",
@@ -289,6 +293,30 @@ func plainField(path, object, field string) string {
 	return value
 }
 
+// agyModels asks the Antigravity command line which models the user's plan can call. Output: the model ids in the order it lists them, or an empty list when the command fails or reports none.
+// The output is two columns, the id and a human label — "gemini-3.8-flash-high     Gemini 3.8 Flash (High)" — with no header row, so every non-blank line's first field is an id. The roster is read live rather than hardcoded because it is the user's own plan that decides what is in it, and it grows.
+func agyModels() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), ollamaListTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "agy", "models").Output()
+	if err != nil {
+		return []string{}
+	}
+	return firstFields(string(out), false)
+}
+
+// firstFields reads one id per line off a command's table output. Input: the output, and whether its first line is a header to skip. Output: the first whitespace-separated field of every other non-blank line.
+func firstFields(out string, header bool) []string {
+	ids := []string{}
+	for i, line := range strings.Split(out, "\n") {
+		if (header && i == 0) || strings.TrimSpace(line) == "" {
+			continue
+		}
+		ids = append(ids, strings.Fields(line)[0])
+	}
+	return ids
+}
+
 // ollamaList asks the local Ollama for its installed models. Output: the model names in the order it lists them, or an empty list when the command fails or reports none.
 func ollamaList() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), ollamaListTimeout)
@@ -297,13 +325,6 @@ func ollamaList() []string {
 	if err != nil {
 		return []string{}
 	}
-	models := []string{}
-	for i, line := range strings.Split(string(out), "\n") {
-		// The first line is the header row ("NAME  ID  SIZE  MODIFIED"); every later line starts with the model's name.
-		if i == 0 || strings.TrimSpace(line) == "" {
-			continue
-		}
-		models = append(models, strings.Fields(line)[0])
-	}
-	return models
+	// The first line is the header row ("NAME  ID  SIZE  MODIFIED"); every later line starts with the model's name.
+	return firstFields(string(out), true)
 }

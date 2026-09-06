@@ -411,3 +411,23 @@ func TestBrainsPostRefusesABrainWithNoBackend(t *testing.T) {
 		t.Errorf("the refused pick wrote a config file")
 	}
 }
+
+// `agy models` prints two columns and no header, so every non-blank line's first field is a model id. `ollama list` prints a header first. One parser reads both, and getting the header wrong would either drop a real model or offer "NAME" as one.
+func TestFirstFields_ReadsBothTableShapes(t *testing.T) {
+	agy := "gemini-3.8-flash-high     Gemini 3.8 Flash (High)\nclaude-sonnet-4-6         Claude Sonnet 4.6 (Thinking)\ngpt-oss-120b-medium       GPT-OSS 120B (Medium)\n"
+	got := firstFields(agy, false)
+	want := []string{"gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-oss-120b-medium"}
+	if len(got) != len(want) {
+		t.Fatalf("agy models = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("agy model %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	ollama := "NAME              ID    SIZE\nembeddinggemma    abc   600 MB\n"
+	if got := firstFields(ollama, true); len(got) != 1 || got[0] != "embeddinggemma" {
+		t.Errorf("ollama list = %v, want just the one model with the header skipped", got)
+	}
+}
