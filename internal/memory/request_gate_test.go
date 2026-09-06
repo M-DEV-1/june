@@ -224,7 +224,7 @@ func TestGeminiSummarizer_Digest_GateRefusesWithoutCallingBackend(t *testing.T) 
 	gateErr := errors.New("daily quota reached")
 	summarizer.SetRequestGate(&fakeGate{err: gateErr})
 
-	digest, err := summarizer.Digest(context.Background(), []string{"fixed the build", "wrote the notes"})
+	digest, err := summarizer.Digest(context.Background(), "", []string{"fixed the build", "wrote the notes"})
 	if !errors.Is(err, gateErr) {
 		t.Fatalf("Digest error = %v, want it to wrap the gate's refusal", err)
 	}
