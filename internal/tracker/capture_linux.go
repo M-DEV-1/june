@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	oratext "ora/internal/text"
+
 	"github.com/godbus/dbus/v5"
 )
 
@@ -373,7 +375,7 @@ func (w *focusWatcher) consume(sigs chan *dbus.Signal, describe func(aref) (app,
 }
 
 // current returns the application name and title of the window that last took focus. The title is read live because a window keeps its identity while its title changes — a browser switching tabs sends no activation — and ok is false when no window holds focus or the remembered one has gone, which drops it from the state.
-// The remembered window can also be alive but no longer the active one: its own activation never arrived, which happens when the window that actually took focus belongs to another session's systemd scope, or was announced by its mutter-x11-frames client rather than by the app. So the remembered window's STATE_ACTIVE bit is checked here too, and when it is unset the desktop is scanned for whichever window really is active (see activeOrFallback and scanForActive); the state is updated to that window so the next call does not re-scan.
+// The remembered window can also be alive but no longer the one in front: its successor's activation never arrived, which happens when the window that actually took focus belongs to another session's systemd scope, or was announced by its mutter-x11-frames client rather than by the app. So the remembered window's STATE_ACTIVE and STATE_FOCUSED bits are both read here, and the desktop is scanned for whichever window really holds the keyboard whenever it is not carrying both (see activeOrFallback and scanForActive); the state is updated to that window so the next call does not re-scan.
 func (w *focusWatcher) current(ctx context.Context) (app, title string, ok bool) {
 	ref, app, ok := w.state.get()
 	if !ok {
@@ -384,7 +386,8 @@ func (w *focusWatcher) current(ctx context.Context) (app, title string, ok bool)
 		w.state.clear(ref)
 		return "", "", false
 	}
-	newRef, app, title, ok := activeOrFallback(ref, app, title, hasState(ctx, w.conn, ref, stateActive), func() (aref, string, string, bool) {
+	active, focused := activeAndFocused(ctx, w.conn, ref)
+	newRef, app, title, ok := activeOrFallback(ref, app, title, active, focused, func() (activeWindow, bool) {
 		return scanForActive(ctx, w.conn)
 	})
 	if !ok {
@@ -396,14 +399,34 @@ func (w *focusWatcher) current(ctx context.Context) (app, title string, ok bool)
 	return app, title, true
 }
 
-// activeOrFallback decides what current() reports once it already knows the remembered window's live title. Input: the remembered window's ref, app and title, whether it still carries STATE_ACTIVE, and a scan for whichever window is active when it does not. Output: the window to report and true, or false when neither the remembered window nor any other is active. Kept apart from current() so the decision can be tested without a live accessibility bus.
-func activeOrFallback(ref aref, app, title string, active bool, scan func() (aref, string, string, bool)) (aref, string, string, bool) {
-	if active {
+// activeWindow is one window a desktop scan found: its accessible ref, its application's name, its own title, and whether it claims the keyboard focus as well as being active.
+type activeWindow struct {
+	ref     aref
+	app     string
+	title   string
+	focused bool
+}
+
+// activeOrFallback decides what current() reports once it already knows the remembered window's live title. Input: the remembered window's ref, app and title, whether it still carries STATE_ACTIVE and STATE_FOCUSED, and a scan of the desktop for whichever window is active. Output: the window to report and true, or false when neither the remembered window nor any other is active. Kept apart from current() so the decision can be tested without a live accessibility bus.
+// STATE_ACTIVE on its own is not proof of focus, which is the whole reason focusState exists: probed on 2026-09-04, the Chrome window hosting the Teams PWA kept the bit set after losing focus while a second window carried it too. Trusting it here reopened that hole from the other side — a window that took focus without announcing it (another session's systemd scope, or a client announced only through mutter-x11-frames) left Chrome reported as the focused window indefinitely, and the meeting's conversation was walked and stored as screen text for as long as the user worked elsewhere. So STATE_FOCUSED is read as a second opinion, and the desktop is scanned whenever it is missing.
+func activeOrFallback(ref aref, app, title string, active, focused bool, scan func() (activeWindow, bool)) (aref, string, string, bool) {
+	// The remembered window holding both bits is the ordinary case, and it costs no scan.
+	if active && focused {
 		return ref, app, title, true
 	}
-	// Ora's own window holding focus is the one case the remembered window exists to hide, so a scan that finds only it reports no focus rather than Ora.
-	if newRef, newApp, newTitle, found := scan(); found && !IsOraWindow(newApp, newTitle) {
-		return newRef, newApp, newTitle, true
+	found, ok := scan()
+	switch {
+	case !ok:
+	// Ora's own window holding focus is the one case the remembered window exists to hide, so a scan that finds it changes nothing.
+	case IsOraWindow(found.app, found.title):
+	case found.ref == ref:
+		return ref, app, title, true
+	// A window that claims the keyboard beats a remembered window that has only kept STATE_ACTIVE. When nothing claims the keyboard, another merely-active window is no better evidence than the remembered one, so it only wins if the remembered window has lost its own active bit as well.
+	case found.focused || !active:
+		return found.ref, found.app, found.title, true
+	}
+	if active {
+		return ref, app, title, true
 	}
 	return aref{}, "", "", false
 }
@@ -501,12 +524,10 @@ func atspiExtract(ctx context.Context) (string, error) {
 	return trimText(strings.Join(parts, "\n")), nil
 }
 
-// trimText strips surrounding whitespace from captured text and caps it at maxTextLen bytes.
+// trimText strips surrounding whitespace from captured text and caps it at maxTextLen runes. Input: the text a walk produced. Output: the trimmed, capped text.
+// The cap is in runes rather than bytes because a byte cut lands inside a rune on any screen that is not pure ASCII, and the invalid UTF-8 that produced went into episodes.screen_text and its FTS5 index.
 func trimText(s string) string {
-	if len(s) > maxTextLen {
-		s = s[:maxTextLen]
-	}
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(oratext.Runes(s, maxTextLen))
 }
 
 // extractMeetingWindow finds a call in progress anywhere on the desktop and reads it, whether or not it has focus, returning its app, its window title and its text. ok is false when no meeting window is open.
@@ -556,12 +577,7 @@ func scanForMeetingWindow(ctx context.Context) meetingRead {
 			if !IsMeetingWindow(appName, winName) {
 				continue
 			}
-			tree := walkWindow(ctx, conn, win)
-			t := strings.TrimSpace(documentText(tree))
-			if len(t) > maxTextLen {
-				t = t[:maxTextLen]
-			}
-			return meetingRead{app: appName, title: winName, text: t, ok: true}
+			return meetingRead{app: appName, title: winName, text: trimText(documentText(walkWindow(ctx, conn, win))), ok: true}
 		}
 	}
 	return meetingRead{}
@@ -595,19 +611,22 @@ func scanActiveWindow(ctx context.Context) (string, string) {
 	}
 	defer conn.Close()
 
-	_, app, title, ok := scanForActive(ctx, conn)
+	found, ok := scanForActive(ctx, conn)
 	if !ok {
 		return "", ""
 	}
-	return app, title
+	return found.app, found.title
 }
 
-// scanForActive walks every application's top-level windows on the accessibility bus — the same walk observeDesktop uses to list them — and returns the one carrying STATE_ACTIVE. Input: a context bounding the bus calls and a live connection. Output: that window's ref, its application's name and its own title, with ok false when nothing on the bus is active right now.
-func scanForActive(ctx context.Context, conn *dbus.Conn) (ref aref, app, title string, ok bool) {
+// scanForActive walks every application's top-level windows on the accessibility bus — the same walk observeDesktop uses to list them — and returns the one that holds the focus. Input: a context bounding the bus calls and a live connection. Output: that window, with ok false when nothing on the bus is active right now.
+// A window carrying STATE_FOCUSED as well as STATE_ACTIVE wins outright and ends the walk, because more than one window can be left carrying STATE_ACTIVE and only one holds the keyboard. When no window claims the keyboard, the first active one is returned, marked as not focused so the caller knows how weak the answer is.
+func scanForActive(ctx context.Context, conn *dbus.Conn) (activeWindow, bool) {
 	apps, err := getChildren(ctx, conn, registryRoot)
 	if err != nil {
-		return aref{}, "", "", false
+		return activeWindow{}, false
 	}
+	var firstActive activeWindow
+	var foundAny bool
 	for _, a := range apps {
 		if ctx.Err() != nil {
 			break
@@ -620,13 +639,20 @@ func scanForActive(ctx context.Context, conn *dbus.Conn) (ref aref, app, title s
 			if ctx.Err() != nil {
 				break
 			}
-			if !hasState(ctx, conn, win, stateActive) {
+			active, focused := activeAndFocused(ctx, conn, win)
+			if !active {
 				continue
 			}
-			return win, getName(ctx, conn, a), getName(ctx, conn, win), true
+			w := activeWindow{ref: win, app: getName(ctx, conn, a), title: getName(ctx, conn, win), focused: focused}
+			if focused {
+				return w, true
+			}
+			if !foundAny {
+				firstActive, foundAny = w, true
+			}
 		}
 	}
-	return aref{}, "", "", false
+	return firstActive, foundAny
 }
 
 // getName reads the org.a11y.atspi.Accessible "Name" property of an accessible, returning "" when it cannot be read.
@@ -647,22 +673,40 @@ func readName(ctx context.Context, conn *dbus.Conn, ref aref) (string, error) {
 	return strings.TrimSpace(s), nil
 }
 
-// stateActive is the AtspiStateType bit index for STATE_ACTIVE (focused top-level window).
+// stateActive is the AtspiStateType bit index for STATE_ACTIVE, which a top-level window keeps while the window manager treats it as the active one.
 const stateActive uint = 1
 
-// hasState checks whether the accessible has a given AtspiStateType bit set.
-// State bits are packed into two uint32 words: bit n lives at word[n/32], bit (n%32).
-func hasState(ctx context.Context, conn *dbus.Conn, ref aref, bit uint) bool {
+// stateFocused is the AtspiStateType bit index for STATE_FOCUSED, which says the object holds the keyboard focus right now. Only one window on the desktop should carry it, which is what makes it worth reading next to STATE_ACTIVE — that bit is left set on windows that have lost the focus.
+const stateFocused uint = 12
+
+// readStates reads an accessible's packed state words. Input: a context bounding the call, a live connection and the accessible. Output: the two uint32 words, or nil when the accessible cannot be read.
+func readStates(ctx context.Context, conn *dbus.Conn, ref aref) []uint32 {
 	obj := conn.Object(ref.Name, ref.Path)
 	var states []uint32
 	if err := obj.CallWithContext(ctx, "org.a11y.atspi.Accessible.GetState", 0).Store(&states); err != nil {
-		return false
+		return nil
 	}
+	return states
+}
+
+// stateSet reports whether a state bit is set in packed state words. Input: the words and the AtspiStateType bit index. Output: whether the bit is set; state bits are packed into two uint32 words, so bit n lives at word[n/32], bit (n%32).
+func stateSet(states []uint32, bit uint) bool {
 	word := bit / 32
 	if int(word) >= len(states) {
 		return false
 	}
 	return states[word]&(1<<(bit%32)) != 0
+}
+
+// hasState checks whether the accessible has a given AtspiStateType bit set.
+func hasState(ctx context.Context, conn *dbus.Conn, ref aref, bit uint) bool {
+	return stateSet(readStates(ctx, conn, ref), bit)
+}
+
+// activeAndFocused reads one window's STATE_ACTIVE and STATE_FOCUSED bits together. Input: a context bounding the call, a live connection and the window. Output: the two bits, both false when the window cannot be read. Reading them from one GetState keeps the second opinion free: it is the same bus call the active check already made.
+func activeAndFocused(ctx context.Context, conn *dbus.Conn, ref aref) (active, focused bool) {
+	states := readStates(ctx, conn, ref)
+	return stateSet(states, stateActive), stateSet(states, stateFocused)
 }
 
 // getChildren calls GetChildren on an accessible and returns the child refs.
