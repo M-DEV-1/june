@@ -15,7 +15,8 @@ export function DaysScreen() {
 
   const listed = daysShown(activeDays(days), query.days);
   const chosen = date ?? (days.find((d) => d.has_page) ?? days[0])?.date;
-  const { data: page } = useDayQuery(chosen ?? "", { skip: !chosen });
+  // currentData rather than data: RTK Query keeps the previous arg's result in data while the new day's own fetch is in flight, which would show the day just left under the date just picked.
+  const { currentData: page } = useDayQuery(chosen ?? "", { skip: !chosen });
 
   // Each row carries what the day holds: the counts the daemon reported, and for a day the nightly loop has not written yet, that it has no page.
   const options = groupDays(listed).flatMap((g) => g.items.map((d) => ({ id: d.date, label: dayShort(d.date), hint: dayCounts(d) || (d.has_page ? "" : "no page yet"), group: g.label })));
