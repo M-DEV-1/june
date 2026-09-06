@@ -161,6 +161,17 @@ func brainProviderName(cfg config.BrainConfig) string {
 // The cancellation is dropped because SIGTERM cancels the root context before stop() runs: every activity still in the channel, and every write already in flight, would otherwise fail with context canceled and the last minutes of a session would be lost. The context's values (the trace span) are kept.
 func drainEpisodes(ctx context.Context, events <-chan tracker.Activity, write func(context.Context, db.EpisodeWrite) (int64, error), ingest func(context.Context, tracker.Activity)) {
 	ctx = context.WithoutCancel(ctx)
+	// The ingest runs on its own goroutine because it makes the attribution model call inline, with no deadline: run here, one stalled call stopped the drain, filled the tracker's event channel and ended all capture until a restart. One worker rather than one goroutine per activity keeps the buffer in the order the screens happened; an activity that finds the queue full is dropped from the summariser's buffer with a log line, having already been written to the store above.
+	var pending chan tracker.Activity
+	if ingest != nil {
+		pending = make(chan tracker.Activity, ingestQueueDepth)
+		defer close(pending)
+		go func() {
+			for ev := range pending {
+				ingest(ctx, ev)
+			}
+		}()
+	}
 	for ev := range events {
 		if _, err := write(ctx, db.EpisodeWrite{
 			App: ev.App, Title: ev.Title, ScreenText: ev.ScreenText,
@@ -169,11 +180,18 @@ func drainEpisodes(ctx context.Context, events <-chan tracker.Activity, write fu
 		}); err != nil {
 			slog.Error("log episode failed", "error", err)
 		}
-		if ingest != nil {
-			ingest(ctx, ev)
+		if pending != nil {
+			select {
+			case pending <- ev:
+			default:
+				slog.Warn("the activity compiler is behind, so this screen is not in the summary buffer", "app", ev.App)
+			}
 		}
 	}
 }
+
+// ingestQueueDepth is how many activities may wait for the compiler before the drain starts dropping them. At the tracker's sampling rate this is roughly ten minutes of screens, which is longer than any attribution call that is going to come back at all.
+const ingestQueueDepth = 256
 
 // weeklyStudyMaterial finds what the Sunday distillation pass reads. Input: the data directory. Output: the replay transcripts and the dream traces, either of which may be empty. Replays are looked for in two places because the working directory is not the repo on every install: ora-restart pins it there, but the login autostart entry pins it to the binary's own directory and a packaged install has no evals/ at all, so <data>/replays is where a packaged install keeps them.
 func weeklyStudyMaterial(dataDir string) (replays, traces []string) {
@@ -183,8 +201,53 @@ func weeklyStudyMaterial(dataDir string) (replays, traces []string) {
 	return append(repoReplays, installedReplays...), traces
 }
 
-// every runs fn on a ticker every interval until ctx is done — the ticker/select/ctx.Done skeleton every one of the daemon's background jobs otherwise repeated by hand. Each job's own logging/error-handling stays inside its fn closure; name is only for the stop-log line below.
+// jobFirstRunDelay is how long after startup a background job makes its first run, before its own interval takes over. Two minutes so the first run is not on the startup path, competing with the tracker and the embedding server for the machine.
+const jobFirstRunDelay = 2 * time.Minute
+
+// shutdownFlushBound is how long the shutdown waits for the compiler's last flush, and the deadline that flush's own context carries. Forty-five seconds because the flush makes an attribution model call and its writes: at the old ten the bound won on a normal call, and ForceFlush had already emptied the buffer, so that stretch of the session was lost.
+const shutdownFlushBound = 45 * time.Second
+
+// dreamArtifactRetention is how long a night's trace and its replay artifact are kept under <data>/dreams. Ninety days: the Sunday study reads the newest of them each week, and a night older than a quarter has already been distilled into lessons.md.
+const dreamArtifactRetention = 90 * 24 * time.Hour
+
+// ageDreamArtifacts removes the night traces and replay artifacts under <data>/dreams that were last written longer ago than keepFor. Input: the data directory and the retention. Output: how many files were removed, and the first error a removal returned.
+// Only the two names the dream writes are matched, so anything else a person has put in that directory is left alone.
+func ageDreamArtifacts(dataDir string, keepFor time.Duration) (int, error) {
+	dir := filepath.Join(dataDir, "dreams")
+	traces, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	replays, _ := filepath.Glob(filepath.Join(dir, "*-replay.md"))
+	cutoff := time.Now().Add(-keepFor)
+	removed := 0
+	for _, path := range append(traces, replays...) {
+		info, err := os.Stat(path)
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// every runs fn shortly after start and then on a ticker every interval until ctx is done — the ticker/select/ctx.Done skeleton every one of the daemon's background jobs otherwise repeated by hand. Each job's own logging/error-handling stays inside its fn closure; name is only for the stop-log line below.
 func every(ctx context.Context, interval time.Duration, name string, fn func()) {
+	everyAfter(ctx, jobFirstRunDelay, interval, name, fn)
+}
+
+// everyAfter is every with the first run's delay passed in, so a test does not wait out jobFirstRunDelay. Input: ctx, how long to wait before the first run, the interval between runs after that, the job's name for the stop-log line, and the job. Output: none — it returns when ctx is done.
+// The first run exists because a job's interval is often longer than the machine's uptime: the image ageing runs every 24 h and the episodic compaction every 12 h, so on a machine restarted through the day neither ever fired and frames/ grew without bound.
+func everyAfter(ctx context.Context, delay, interval time.Duration, name string, fn func()) {
+	first := time.NewTimer(delay)
+	defer first.Stop()
+	select {
+	case <-first.C:
+		fn()
+	case <-ctx.Done():
+		slog.Debug("background job stopped", "job", name)
+		return
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -424,14 +487,23 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			if since.IsZero() {
 				since = now.Add(-memory.StateInterval)
 			}
-			episodes, _ := store.EpisodesInWindow(ctx, since, now, maxDeriveStateEpisodes)
+			// Both gate reads are checked rather than ignored: a failing read used to yield an empty signature and a zero count, which match the cached values, so the gate said no and the working state went stale with nothing logged.
+			episodes, err := store.EpisodesInWindow(ctx, since, now, maxDeriveStateEpisodes)
+			if err != nil {
+				slog.Error("working-state derive skipped: could not read the recent episodes", "error", err)
+				return
+			}
 			windows := make([]string, 0, len(episodes))
 			for _, e := range episodes {
 				windows = append(windows, e.App+"|"+e.Title)
 			}
 			signature := memory.EpisodeSignature(windows)
 			// A running total rather than a count since the last derive, so the gate can measure how many arrived between one derive and the next.
-			summaryCount, _ := store.CountSummariesSince(ctx, time.Time{})
+			summaryCount, err := store.CountSummariesSince(ctx, time.Time{})
+			if err != nil {
+				slog.Error("working-state derive skipped: could not count the summaries", "error", err)
+				return
+			}
 			if !gate.ShouldDerive(now, signature, summaryCount) {
 				return
 			}
@@ -565,6 +637,13 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			slog.Error("episode image aging failed", "error", err)
 		} else {
 			slog.Info("episode image aging complete", "dropped_jpegs", dropped)
+		}
+		// The night's traces and replay artifacts are aged on the same tick: nothing else pruned them, and the Sunday study globs the whole directory every week.
+		removed, err := ageDreamArtifacts(config.DataDir(), dreamArtifactRetention)
+		if err != nil {
+			slog.Error("dream artifact aging failed", "error", err)
+		} else {
+			slog.Info("dream artifact aging complete", "removed_files", removed)
 		}
 	})
 
@@ -894,10 +973,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			}
 		})
 		// The compiler's activity buffer is written out next, before the store it writes into is closed. It is otherwise flushed only on the hourly tick, so a logout or an ora-restart lost up to an hour of activity — the same loss the recorder above was given a shutdown step for on 2026-09-01.
-		// The context is Background, not the root one: SIGTERM has already cancelled the root context by the time stop() runs, and a flush started with it would fail on its first query. Ten seconds is a summarizer call plus its writes.
-		within("flushing the activity buffer", 10*time.Second, func() {
+		// The context is not the root one: SIGTERM has already cancelled the root context by the time stop() runs, and a flush started with it would fail on its first query. It carries the same deadline as the bound, so a flush that runs out of time stops at its next call rather than being left behind writing into a store this function is about to close.
+		within("flushing the activity buffer", shutdownFlushBound, func() {
 			if compiler != nil {
-				compiler.ForceFlush(context.Background())
+				flushCtx, cancelFlush := context.WithTimeout(context.Background(), shutdownFlushBound)
+				defer cancelFlush()
+				compiler.ForceFlush(flushCtx)
 			}
 		})
 		// The event streams are ended first: Shutdown waits for open handlers but never cancels their requests, so a daemon with the window connected would otherwise hold its port for the whole timeout and the next daemon could not bind.
