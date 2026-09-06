@@ -491,16 +491,11 @@ describe("flightFrames", () => {
     expect(flightFrames(flight)).toHaveLength(Math.round(flight.ms / 16) + 5);
   });
 
-  it("starts at the point it left and comes to rest upright on the target", () => {
+  it("starts at the point it left, upright so no frame asks the pointer to jump from one angle to another, and comes to rest upright on the target", () => {
     const frames = flightFrames(flightFor({ x: 100, y: 500 }, { x: 900, y: 500 }), 8);
     expect(frames[0].transform).toBe("translate(100px, 500px) rotate(0deg) scale(1)");
     expect(frames[12].transform).toBe("translate(900px, 500px) rotate(0deg) scale(1)");
     expect(frames[12].offset).toBe(1);
-  });
-
-  it("leaves upright, so no frame asks the pointer to jump from one angle to another", () => {
-    const frames = flightFrames(flightFor({ x: 100, y: 500 }, { x: 900, y: 500 }), 8);
-    expect(part(frames[0], "rotate")).toBe(0);
   });
 
   it("swells a little at the top of the arc, and only a little, because the ink is what the eye is meant to follow", () => {

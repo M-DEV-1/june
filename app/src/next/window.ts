@@ -1,7 +1,7 @@
 /** The window's own size and position, remembered between runs. Tauri's window-state plugin lives on the Rust side and this window has none, so the geometry is read off the window with the JS API, kept in the same localStorage both windows already use for the theme, and put back the next time the page loads. Nothing here runs outside Tauri: every call is behind a try, and in a plain browser tab reading fails and the module does nothing. */
 
 /** The key the geometry is kept under, alongside "ora-theme" and "ora-hover-position". */
-export const GEOMETRY_KEY = "ora-window-geometry";
+const GEOMETRY_KEY = "ora-window-geometry";
 
 /** Where the window was and how big, in physical pixels on the whole desktop. */
 export type Geometry = { x: number; y: number; width: number; height: number };
@@ -28,7 +28,7 @@ export function parseGeometry(raw: string | null): Geometry | undefined {
 }
 
 /** Reads the geometry this machine last stored. Input: none. Output: it, or undefined when nothing valid is stored or storage is blocked. */
-export function storedGeometry(): Geometry | undefined {
+function storedGeometry(): Geometry | undefined {
   try {
     return parseGeometry(localStorage.getItem(GEOMETRY_KEY));
   } catch {
@@ -37,7 +37,7 @@ export function storedGeometry(): Geometry | undefined {
 }
 
 /** Writes a geometry down. Input: it. Output: nothing; blocked storage is ignored, because the window is already where it is and the only cost is forgetting. */
-export function storeGeometry(g: Geometry): void {
+function storeGeometry(g: Geometry): void {
   try {
     localStorage.setItem(GEOMETRY_KEY, JSON.stringify(g));
   } catch {

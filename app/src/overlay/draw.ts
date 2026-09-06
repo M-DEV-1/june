@@ -3,6 +3,8 @@
  * The daemon sends rectangles in global desktop pixels — the same pixels the screenshot the model looked at is made of. The overlay window covers the whole desk, so a rectangle becomes a position inside that window by subtracting the window's own top-left corner and dividing by the window's scale factor, which is how many physical pixels one CSS pixel is worth.
  */
 
+import { clamp } from "../shared/clamp";
+
 /** One rectangle from an overlay event, in global desktop pixels. A ring's label may ride on the rect itself instead of on the event. */
 export type OverlayRect = { x: number; y: number; w: number; h: number; label?: string };
 
@@ -342,11 +344,6 @@ export function nextCursor(shaftEnd: number, cursor: number, budget: number, gap
 /** Cuts a number to one decimal place, which is finer than a screen pixel and keeps a path string short. */
 function r1(v: number): number {
   return Math.round(v * 10) / 10;
-}
-
-/** Holds a value between two bounds. Input: the value, the low bound and the high bound. Output: the value moved inside them, and the low bound when the two bounds have crossed, which is what a label wider than its own monitor looks like. */
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
 }
 
 /** Roughly how wide a label's callout is drawn, in CSS pixels. Input: the text. Output: its width at 13px with the padding the stylesheet gives it, guessed at 7.2 pixels a character because measuring text needs a DOM and this file has none. Only the clamping at the screen edge uses it, so being a few pixels out just moves a label a few pixels. */

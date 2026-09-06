@@ -1,4 +1,5 @@
 import { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
+import { clamp as clampRaw } from "./shared/clamp";
 
 /**
  * The subset of a Tauri window's API this module touches, factored out so the show/hide,
@@ -32,7 +33,7 @@ export const DEFAULT_HOVER_POSITION: HoverPosition = "bottom";
 export const HOVER_POSITION_KEY = "ora-hover-position";
 
 /** Which edge of the screen the desktop's dock sits on. */
-export type DockEdge = "bottom" | "left" | "right" | "top";
+type DockEdge = "bottom" | "left" | "right" | "top";
 
 /** Where the dock is and how much room to leave for it. `clearance` is in logical pixels and is the dock's own thickness when the dock does not reserve screen space (an auto-hiding dock), or 0 when it does reserve space, because then the monitor's work area already excludes it. */
 export interface Dock {
@@ -80,10 +81,9 @@ export function edgeInset(areaHeight: number, scale: number): number {
   return Math.max(Math.round(24 * scale), Math.round(areaHeight / 12));
 }
 
-/** Clamps a value into a range, and returns the low end when the range is inverted, which happens when the window is larger than the space it has to fit in. Input: the value and the inclusive bounds. Output: the clamped, rounded value. */
+/** Clamps a value into a range and rounds it to a physical pixel, returning the low end when the range is inverted, which happens when the window is larger than the space it has to fit in. Input: the value and the inclusive bounds. Output: the clamped, rounded value. */
 function clamp(value: number, low: number, high: number): number {
-  if (high < low) return Math.round(low);
-  return Math.round(Math.min(Math.max(value, low), high));
+  return clampRaw(value, low, high, true);
 }
 
 /** Takes the dock's own strip off the work area. A dock that reserves screen space is already cut out of the work area and reports 0 clearance, so this changes nothing for it; an auto-hiding dock reserves nothing, so its thickness is subtracted here and the hover stays clear of the strip the dock slides into. Input: the work area and the dock, with clearance in physical pixels. Output: the rectangle the window may occupy. */
