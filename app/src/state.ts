@@ -1,8 +1,12 @@
 /** Pure state model for the window. No DOM here — main.ts renders View, this file only computes it. */
 
 import { truncateAtWord } from "./shared/errorline";
+import { noticeActionSuffix } from "./shared/notice";
+import { THEME_KEY, themeChoice, type Theme } from "./shared/theme";
 import type { DaemonEvent, Notice as WireNotice } from "./daemon";
 import { renderLevelEvent, type LevelDetail } from "./waveform";
+
+export { THEME_KEY, themeChoice, type Theme };
 
 export type Evidence = { title: string; meta: string; body?: string };
 
@@ -155,17 +159,9 @@ export const NOTICE_MS = 6000;
 
 /** The one-line text a notice whose action is set shows instead of its usual title and body: "Snoozed until 18:00" for one snoozed from its own desktop notification's buttons, "Snoozed until tomorrow 09:00" once the snooze crosses midnight, or "Done" for one dismissed outright. Input: the notice, and the current moment, used only to tell whether until falls on today. Output: the line, or undefined for a notice with no action, which draws exactly as it always has (see renderNotice in main.ts). */
 export function noticeActionLine(n: Notice, now: Date): string | undefined {
-  if (n.action === "done") return "Done";
-  if (n.action !== "snoozed" || !n.until) return undefined;
-  const until = new Date(n.until);
-  if (isNaN(until.getTime())) return "Snoozed";
-  const hhmm = until.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const sameDay = until.toDateString() === now.toDateString();
-  return `Snoozed until ${sameDay ? hhmm : `tomorrow ${hhmm}`}`;
+  return noticeActionSuffix(n, now, (d) =>
+    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }),
+  );
 }
 
 /** close hides the hover. openNotice opens the main app window at the screen and row the clicked notice named, which are empty when it named none and the window should just open. ask sends the question that has just gone on the card to the daemon, in the conversation named, or in a new one the daemon opens when none is named. */
@@ -194,17 +190,6 @@ export function askConversation(v: View, now: number): string | undefined {
   return now - v.conversationAt <= CONVERSATION_MS
     ? v.conversationId
     : undefined;
-}
-
-/** The three values the theme setting can hold. "system" is not a colour: it means the desktop decides, which main.ts resolves by asking the Rust system_theme command. */
-export type Theme = "light" | "dark" | "system";
-
-/** The localStorage key the theme choice is kept under. Both windows are served from one origin, so the app window's Settings screen writes it and the hover reads it, the same way the hover position is shared (see HOVER_POSITION_KEY in winplace.ts). */
-export const THEME_KEY = "ora-theme";
-
-/** Reads a stored theme choice. Input: the text stored under THEME_KEY, or null when nothing is stored. Output: "light" or "dark" when that is what was stored, and "system" for everything else, including nothing at all. */
-export function themeChoice(stored: string | null | undefined): Theme {
-  return stored === "light" || stored === "dark" ? stored : "system";
 }
 
 /** What a storage event means for the theme. Input: the event's key and new value; a key of null is the whole store being cleared. Output: the choice to apply now, or undefined when the event was about some other key and the theme has not changed. */

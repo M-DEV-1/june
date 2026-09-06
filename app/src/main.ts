@@ -5,6 +5,7 @@ import {
   getCurrentWindow,
 } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
+import { systemTheme } from "./shared/theme";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import {
@@ -1284,16 +1285,9 @@ function applyThemeChoice(choice: Theme): void {
     document.documentElement.dataset.theme = choice;
     return;
   }
-  const stamp = (t: string) => {
+  void systemTheme().then((t) => {
     if (ask === themeAsk) document.documentElement.dataset.theme = t;
-  };
-  void invoke<string>("system_theme")
-    .then(stamp)
-    .catch(() =>
-      stamp(
-        matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
-      ),
-    );
+  });
 }
 
 // Theme choice: the dev switch wins, then the setting the app window's Settings screen stored, and nothing stored leaves it to the desktop.

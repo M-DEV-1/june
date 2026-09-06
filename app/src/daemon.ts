@@ -1,21 +1,11 @@
 /** HTTP/SSE client for the local daemon at http://127.0.0.1:6942. No DOM or state here, just I/O. */
 
+import { TOKEN_HEADER, devToken } from "./shared/token";
+
+export { TOKEN_HEADER, devToken };
+
 /** Where the daemon listens. Only setPort moves it, which is how a test or a throwaway build can point the client somewhere else without stopping the user's real daemon. */
 let base = "http://127.0.0.1:6942";
-/** The header every daemon request carries its token in; the one copy the hover's modules share. */
-export const TOKEN_HEADER = "X-Ora-Token";
-
-/** The port the Vite dev server runs on, which is the only origin devToken will hand a token to. */
-const DEV_PORT = "1420";
-
-/** The IPC token a page may take from its own URL, which only the Vite dev server's origin may do. Input: the page's port and query string. Output: the value of ?token=, or undefined on any other origin or when there is none. A packaged app is served from tauri://localhost with no port, so this is never a way into the real window; the daemon already allows CORS for the dev origin, so a browser tab opened with the token can read live data while the window is being worked on. */
-export function devToken(loc: {
-  port: string;
-  search: string;
-}): string | undefined {
-  if (loc.port !== DEV_PORT) return undefined;
-  return new URLSearchParams(loc.search).get("token") ?? undefined;
-}
 
 /** Points every call in this module at a different port on 127.0.0.1. Input: the port as digits. Output: nothing; a non-numeric value is ignored so a stray query string cannot redirect the client. */
 export function setPort(port: string): void {
