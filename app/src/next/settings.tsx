@@ -1,9 +1,10 @@
 /** The Settings screen: how the window looks, where the hover opens, the hotkey that opens it, what the daemon is allowed to watch, which brain answers and on which model, what the daemon is running on this machine, and the token ledger. Every value is read off GET /settings, GET /brains, GET /status and GET /usage, and every control writes through the route that owns the setting, except the theme and the hover position, which the window and the hover share through localStorage rather than through the daemon (see HOVER_POSITION_KEY in src/winplace.ts). The page is a stack of grouped cards, the way a desktop settings pane is built, rather than a run of rows under grey capitals. */
 
-import { Fragment, useEffect, useRef, useState } from "react";
-import { Loader2, Play, RotateCcw } from "lucide-react";
+import { Fragment, useState } from "react";
+import { Check, ChevronDown, Loader2, Play, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { HOVER_POSITION_KEY, storedHoverPosition, type HoverPosition } from "../winplace";
@@ -142,13 +143,15 @@ function errorStatus(e: unknown): number | undefined {
   return typeof status === "number" ? status : undefined;
 }
 
-/** One row of the voice roster: its name and the one-word trait that says how it actually sounds, the current voice marked, and a play button that speaks a line in that voice without picking it. Input: the voice. Output: the row. Each row runs its own previewVoice mutation, so one row showing "playing" and disabled never touches any other row's button. */
-function VoiceRow({ voice }: { voice: Voice }) {
+/** The voice picker: a single select showing the current voice and the trait that says how it sounds, with every one of Gemini Live's thirty prebuilt voices behind it the same way, and a play button beside it that previews whichever voice is currently picked. Input: none — it reads GET /voices itself. Output: the section. */
+function VoiceSection() {
   const dispatch = useAppDispatch();
+  const { data: voices = [] } = useVoicesQuery();
   const [setVoice] = useSetVoiceMutation();
   const [previewVoice, { isLoading: playing }] = usePreviewVoiceMutation();
+  const current = voices.find((v) => v.current);
 
-  const pick = async () => {
+  const pick = async (voice: Voice) => {
     try {
       await setVoice(voice.name).unwrap();
     } catch {
@@ -157,40 +160,13 @@ function VoiceRow({ voice }: { voice: Voice }) {
   };
 
   const preview = async () => {
+    if (!current) return;
     try {
-      await previewVoice(voice.name).unwrap();
+      await previewVoice(current.name).unwrap();
     } catch (e) {
       dispatch(ui.noticed(errorStatus(e) === 503 ? "This machine has no speaker to play it through" : "Could not play that voice"));
     }
   };
-
-  return (
-    <div className="flex items-center gap-2 px-3.5 py-2.5">
-      <button type="button" onClick={() => void pick()} className="flex min-w-0 flex-1 items-baseline gap-2 rounded-xs text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <span className="text-ui">
-          {voice.name} — {voice.trait}
-        </span>
-        {voice.current ? <span className="text-meta text-muted-foreground">Current</span> : null}
-      </button>
-      <Button variant="ghost" size="icon-sm" aria-label={`Play ${voice.name}`} disabled={playing} onClick={() => void preview()}>
-        {playing ? <Loader2 className="animate-spin" /> : <Play />}
-      </Button>
-    </div>
-  );
-}
-
-/** The voice picker: every one of Gemini Live's thirty prebuilt voices with the trait that says how it sounds, the current one marked and scrolled into view on open, and a play button on each row to hear it before picking it. Input: none — it reads GET /voices itself. Output: the section, in its own bounded scroll area so thirty rows do not push the rest of Settings off the page. */
-function VoiceSection() {
-  const { data: voices = [] } = useVoicesQuery();
-  const listRef = useRef<HTMLDivElement>(null);
-  const opened = useRef(false);
-
-  // Scrolls the current voice into view the first time the roster arrives, so the list opens on it rather than at the top of thirty names in no order a person chose.
-  useEffect(() => {
-    if (opened.current || voices.length === 0) return;
-    opened.current = true;
-    listRef.current?.querySelector('[data-current="true"]')?.scrollIntoView({ block: "nearest" });
-  }, [voices]);
 
   return (
     <section className="mt-10">
@@ -200,13 +176,32 @@ function VoiceSection() {
         {voices.length === 0 ? (
           <p className="px-3.5 py-3 text-ui text-muted-foreground">No voices reported.</p>
         ) : (
-          <div ref={listRef} className="max-h-80 divide-y overflow-y-auto">
-            {voices.map((v) => (
-              <div key={v.name} data-current={v.current}>
-                <VoiceRow voice={v} />
-              </div>
-            ))}
-          </div>
+          <Row label="Voice">
+            <div className="flex items-center gap-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="sm" aria-label="Voice" className="gap-1 px-1.5 font-normal text-muted-foreground hover:text-foreground">
+                    <span className="text-foreground">{current ? `${current.name} — ${current.trait}` : "not set"}</span>
+                    <ChevronDown className="opacity-60" />
+                  </Button>
+                </DropdownMenuTrigger>
+                {/* Thirty voices is more than a menu can show at once, so it is bounded and scrolls inside itself rather than covering the page. Each row is one line — a wrapped name reads as two entries — and the one in use carries a tick in a gutter every row reserves, so nothing shifts sideways as the selection moves. */}
+                <DropdownMenuContent align="end" className="max-h-72 w-56 overflow-y-auto">
+                  {voices.map((v) => (
+                    <DropdownMenuItem key={v.name} onClick={() => void pick(v)} className="gap-2 whitespace-nowrap">
+                      <Check className={`size-3.5 shrink-0 ${v.current ? "" : "invisible"}`} />
+                      <span className={v.current ? "font-medium text-foreground" : undefined}>
+                        {v.name} — {v.trait}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button variant="ghost" size="icon-sm" aria-label={current ? `Play ${current.name}` : "Play"} disabled={playing || !current} onClick={() => void preview()}>
+                {playing ? <Loader2 className="animate-spin" /> : <Play />}
+              </Button>
+            </div>
+          </Row>
         )}
       </Group>
     </section>
