@@ -24,3 +24,6 @@ func Extents(ctx context.Context, ref string) (x, y, w, h int, err error) {
 
 // ScrollTo is Linux-only; elsewhere it reports that the screen cannot be acted on.
 func ScrollTo(ctx context.Context, ref string) error { return errActUnsupported }
+
+// Focused is Linux-only; elsewhere it reports that the screen cannot be read.
+func Focused(ctx context.Context, ref string) (bool, error) { return false, errActUnsupported }

@@ -6,7 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"ora/internal/act"
 
@@ -14,6 +18,9 @@ import (
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xproto"
 )
+
+// actTimeout bounds one entry point that acts on or measures an element. An application that has stopped answering the accessibility bus is exactly the state a model clicks into, and the caller's context comes from a whole ask or a whole job, so without a bound of its own one wedged toolkit holds that ask up for as long as it lasts. It is the same few seconds Observe gives a whole window walk.
+const actTimeout = 4 * time.Second
 
 // refString packs an accessible's bus name and object path into the one string act.Node carries. Input: the ref. Output: "name|path".
 func refString(ref aref) string { return ref.Name + "|" + string(ref.Path) }
@@ -61,6 +68,8 @@ func actionConn() (*dbus.Conn, error) {
 
 // DoAction fires a node's primary accessibility action, which is what a click does without moving the pointer. Input: a context and the node's Ref from act.Node. Output: the name of the action fired, or an error when the ref is malformed, the node has gone, has no actions, or the toolkit reports the action failed.
 func DoAction(ctx context.Context, ref string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	defer cancel()
 	r, err := parseARef(ref)
 	if err != nil {
 		return "", err
@@ -114,6 +123,8 @@ const coordScreen uint32 = 0
 // Extents reads where an element is on the screen right now, so a ring is drawn around the element rather than around the rectangle it occupied when observe_screen made its list. Input: a context and the node's Ref from act.Node. Output: the rectangle in real screen pixels, or an error when the ref is malformed, the accessibility bus is unreachable, or the element no longer answers.
 // The bus is asked for screen coordinates and does not always answer with them, so the answer is corrected before it is handed back: see screenShift.
 func Extents(ctx context.Context, ref string) (x, y, w, h int, err error) {
+	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	defer cancel()
 	r, err := parseARef(ref)
 	if err != nil {
 		return 0, 0, 0, 0, err
@@ -168,7 +179,7 @@ func windowOf(ctx context.Context, conn *dbus.Conn, ref aref) (rect, bool) {
 // screenShift is how far a rectangle this node's window reports has to move to land where that window really is on the screen. Input: a context, the bus connection and the node's ref. Output: how much to add to x and to y, and 0,0 whenever nothing here can say.
 // Coordinate type 0 does mean screen coordinates: measured on this desk on 2026-09-05, Ora's own GTK window answered 0,32 1920x1048 for it and a Brave popup answered 1551,110, both of which are where those windows really were. But a client that cannot know where its own window sits — which is every native Wayland client, Chromium and GTK included — answers with window coordinates instead, and Brave's maximized frame came back as 0,0 1920x1048 when the work area starts at y=32. Every rectangle read out of that window was then 32 pixels too high, so a ring drawn from one landed a top bar's height above the thing it was naming.
 func screenShift(ctx context.Context, conn *dbus.Conn, ref aref) (dx, dy int) {
-	work, screen, ok := desktopBounds()
+	d, ok := deskNow()
 	if !ok {
 		return 0, 0
 	}
@@ -176,12 +187,58 @@ func screenShift(ctx context.Context, conn *dbus.Conn, ref aref) (dx, dy int) {
 	if !ok {
 		return 0, 0
 	}
-	return windowShift(frame, work, screen, monitorRects())
+	return windowShift(frame, d)
 }
 
-// monitorRects reads the monitors making up the desktop, in the same screen pixels desktopBounds reports. Input: none; it asks RandR through screenLayout. Output: one rectangle per monitor, or nil when X or RandR is unreachable.
-func monitorRects() []rect {
-	mons, _ := screenLayout()
+// desk is the desktop the windows are laid out on: the work area, the whole canvas, the monitors making it up, and where the pointer is (-1,-1 when X could not say), all in the same screen pixels a whole-screen screenshot is in.
+type desk struct {
+	work, screen rect
+	mons         []rect
+	pointer      image.Point
+}
+
+// readDesk reads the desktop from X, one connection for _NET_WORKAREA and one for RandR. Output: the desktop, and false when X is unreachable or publishes no work area. It is a variable so a test can count how often the real read happens.
+var readDesk = func() (desk, bool) {
+	work, screen, ok := desktopBounds()
+	if !ok {
+		return desk{}, false
+	}
+	mons, pointer := screenLayout()
+	return desk{work: work, screen: screen, mons: monitorRects(mons), pointer: pointer}, true
+}
+
+// deskTTL is how long one read of the desktop stands before it is taken again. Monitors are plugged in and panels resized in seconds; a show_marks call reads the rectangle of up to forty elements inside a few hundred milliseconds, and each of those reads used to open two X connections of its own.
+const deskTTL = 2 * time.Second
+
+// deskCache holds the last desktop read and when it was taken, so the reads one tool call makes share one answer.
+var deskCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	desk desk
+	ok   bool
+}
+
+// deskNow hands back the desktop, reading it from X at most once every deskTTL. Output: the desktop and true, or false when the last read failed — a failed read is cached too, so a machine with no X is not asked forty times a call.
+func deskNow() (desk, bool) {
+	deskCache.mu.Lock()
+	defer deskCache.mu.Unlock()
+	if !deskCache.at.IsZero() && time.Since(deskCache.at) < deskTTL {
+		return deskCache.desk, deskCache.ok
+	}
+	deskCache.desk, deskCache.ok = readDesk()
+	deskCache.at = time.Now()
+	return deskCache.desk, deskCache.ok
+}
+
+// forgetDesk drops the cached desktop so the next deskNow reads X again. It exists for the tests, which need a known starting point and must not leave one behind.
+func forgetDesk() {
+	deskCache.mu.Lock()
+	defer deskCache.mu.Unlock()
+	deskCache.at = time.Time{}
+}
+
+// monitorRects converts the monitor rectangles screenLayout reports into the rectangle type this file works in. Input: the monitors as image rectangles. Output: one rect per monitor, empty when the list is empty.
+func monitorRects(mons []image.Rectangle) []rect {
 	out := make([]rect, 0, len(mons))
 	for _, m := range mons {
 		out = append(out, rect{X: m.Min.X, Y: m.Min.Y, W: m.Dx(), H: m.Dy()})
@@ -189,10 +246,11 @@ func monitorRects() []rect {
 	return out
 }
 
-// windowShift works out how far one window's rectangles are from the truth. Input: the window's rectangle as the bus reported it, the desktop's work area, the whole screen, and the monitors it is made of (nil when RandR cannot be read), all in pixels. Output: how much to add to x and to y.
+// windowShift works out how far one window's rectangles are from the truth. Input: the window's rectangle as the bus reported it, and the desktop it is on. Output: how much to add to x and to y.
 // A window the size of the whole screen, or of one whole monitor, is full screen and is where it says it is. A window as tall as the work area and as wide as either the work area or some monitor is maximized, and a maximized window's top-left corner is the work area's top-left corner on the monitor it sits on, so the gap between the two is the whole error. A window of any other size is one this cannot place from its size alone, and is left alone rather than moved by a guess.
-// Each monitor's own work area is not readable here — _NET_WORKAREA is one desktop-wide rectangle covering every monitor — so the maximized test is the tolerant one: the height must match that single work area's height whichever monitor the window is on, and the width has only to match one monitor. The monitor is taken to be the one the reported top-left corner falls in, which for a native Wayland client answering 0,0 is the monitor at the desktop origin; that is right for the top bar's height, which is the error being corrected, and cannot tell a window maximized on a second monitor apart from one maximized on the first.
-func windowShift(frame, work, screen rect, mons []rect) (dx, dy int) {
+// Each monitor's own work area is not readable here — _NET_WORKAREA is one desktop-wide rectangle covering every monitor — so the maximized test is the tolerant one: the height must match that single work area's height whichever monitor the window is on, and the width has only to match one monitor. Which monitor the window sits on is windowMonitor's question.
+func windowShift(frame rect, d desk) (dx, dy int) {
+	work, screen, mons := d.work, d.screen, d.mons
 	if frame.W <= 0 || frame.H <= 0 || work.W <= 0 || work.H <= 0 {
 		return 0, 0
 	}
@@ -208,11 +266,29 @@ func windowShift(frame, work, screen rect, mons []rect) (dx, dy int) {
 		return 0, 0
 	}
 	x, y := work.X, work.Y
-	if m, ok := monitorAt(frame.X, frame.Y, mons); ok {
+	if m, ok := windowMonitor(frame, mons, d.pointer); ok {
 		x, y = m.X+work.X, m.Y+work.Y
 	}
 	return x - frame.X, y - frame.Y
 }
+
+// windowMonitor picks the monitor a window is on. Input: the window's rectangle as the bus reported it, the monitors, and the pointer's position (-1,-1 when X could not say). Output: that monitor and true, or false when nothing here can place the window.
+// The reported corner answers it whenever the window can say where it is. A native Wayland client cannot: it answers 0,0, which on a desk with more than one monitor names the monitor at the desktop origin whatever monitor the window is really on — a maximized Brave on the right-hand monitor got no x shift and every rectangle in its listing named a point one monitor's width to the left of the element it was for. The pointer is then the second opinion, and it is the same stand-in screenLayout already uses to say which monitor a stored frame came from.
+// ponytail: the pointer is wrong when the user's hand is on one monitor and the keyboard focus on another. The extension's window list would settle it, but it reports no geometry today; add x, y to its List reply if this ever misplaces a ring.
+func windowMonitor(frame rect, mons []rect, pointer image.Point) (rect, bool) {
+	if frame.X == 0 && frame.Y == 0 && len(mons) > 1 {
+		if m, ok := monitorAt(pointer.X, pointer.Y, mons); ok {
+			return m, true
+		}
+		unplacedWindow.Do(func() {
+			slog.Debug("a window reported its corner as 0,0 on a desk with more than one monitor and the pointer could not be read, so its rectangles stay on the monitor at the desktop origin", "monitors", len(mons))
+		})
+	}
+	return monitorAt(frame.X, frame.Y, mons)
+}
+
+// unplacedWindow keeps the note about a window no source could place to one line in the log, since it would otherwise be written once per element read.
+var unplacedWindow sync.Once
 
 // maximizedWidth reports whether a window that wide is as wide as something it could be maximized across. Input: the window's width, the desktop work area and the monitors. Output: true when it matches the work area (a one-monitor desk, or a window maximized across the lot) or any one monitor.
 func maximizedWidth(w int, work rect, mons []rect) bool {
@@ -272,6 +348,8 @@ const movedBy = 8
 
 // Verify checks that a node still is what observe_screen described, since a toolkit can hand a recycled object path to a different element after a page re-renders, and since a page that scrolls under the list leaves every number pointing at the right element in the wrong place. Input: a context, the node's Ref, the role and label the list showed, and the rectangle it showed. Output: nil when the role, the label and the rectangle all still match (the label check is skipped when the list showed none and when the role is a content role, whose label is the node's own contents, the rectangle check when the list showed no size), or an error naming what changed or that the node has gone.
 func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error {
+	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	defer cancel()
 	r, err := parseARef(ref)
 	if err != nil {
 		return err
@@ -328,11 +406,28 @@ func moved(now, was rect) bool {
 // away reports whether two pixel counts differ by more than movedBy.
 func away(a, b int) bool { return a-b > movedBy || b-a > movedBy }
 
+// Focused reports whether an element holds the keyboard focus right now, so a caller about to type can check that the box it is typing into is the box its guards were applied to: a click that opened a dialog, or an application that moved the focus itself, leaves the remembered element no longer the one the keys reach. Input: a context and the node's Ref from act.Node. Output: true when STATE_FOCUSED is set on that element, or an error when the ref is malformed or the accessibility bus is unreachable; an element that no longer answers reads as not focused, which is the safe direction for a caller that refuses to type without it.
+func Focused(ctx context.Context, ref string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	defer cancel()
+	r, err := parseARef(ref)
+	if err != nil {
+		return false, err
+	}
+	conn, err := actionConn()
+	if err != nil {
+		return false, err
+	}
+	return hasState(ctx, conn, r, stateFocused), nil
+}
+
 // scrollAnywhere is ATSPI_SCROLL_ANYWHERE: bring the node into view wherever is cheapest.
 const scrollAnywhere uint32 = 6
 
 // ScrollTo scrolls a node into view. Input: a context and the node's Ref. Output: an error when the ref is malformed, the node has gone, or the toolkit could not scroll.
 func ScrollTo(ctx context.Context, ref string) error {
+	ctx, cancel := context.WithTimeout(ctx, actTimeout)
+	defer cancel()
 	r, err := parseARef(ref)
 	if err != nil {
 		return err

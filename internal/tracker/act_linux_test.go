@@ -4,6 +4,7 @@ package tracker
 
 import (
 	"context"
+	"image"
 	"testing"
 )
 
@@ -99,32 +100,97 @@ func TestWindowShift(t *testing.T) {
 	wideScreen := rect{X: 0, Y: 0, W: 3840, H: 1080}
 	wideWork := rect{X: 0, Y: 32, W: 3840, H: 1048}
 	two := []rect{{X: 0, Y: 0, W: 1920, H: 1080}, {X: 1920, Y: 0, W: 1920, H: 1080}}
+	// The pointer is only consulted for a frame reporting 0,0 on a desk with more than one monitor; nowhere is where X answers when it cannot be read.
+	nowhere := image.Pt(-1, -1)
+	onFirst := image.Pt(400, 500)
 	cases := []struct {
 		name           string
 		frame          rect
-		work, screen   rect
-		mons           []rect
+		d              desk
 		wantDX, wantDY int
 	}{
-		{name: "a maximized window the toolkit places at the origin", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, work: work, screen: screen, mons: one, wantDY: 32},
-		{name: "a maximized window the toolkit already places correctly", frame: rect{X: 0, Y: 32, W: 1920, H: 1048}, work: work, screen: screen, mons: one},
-		{name: "a full screen window covers the panel and is where it says", frame: rect{X: 0, Y: 0, W: 1920, H: 1080}, work: work, screen: screen, mons: one},
-		{name: "a floating window cannot be placed and is left alone", frame: rect{X: 0, Y: 0, W: 800, H: 600}, work: work, screen: screen, mons: one},
-		{name: "a desk with no panel needs no shift", frame: rect{X: 0, Y: 0, W: 1920, H: 1080}, work: screen, screen: screen, mons: one},
-		{name: "nothing is read and nothing is shifted", frame: rect{}, work: rect{}, screen: rect{}},
-		{name: "a panel down the left edge shifts x", frame: rect{X: 0, Y: 0, W: 1856, H: 1080}, work: rect{X: 64, Y: 0, W: 1856, H: 1080}, screen: screen, mons: one, wantDX: 64},
-		{name: "no monitor list, so only the desktop-wide work area can be matched", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, work: work, screen: screen, wantDY: 32},
+		{name: "a maximized window the toolkit places at the origin", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, d: desk{work: work, screen: screen, mons: one, pointer: nowhere}, wantDY: 32},
+		{name: "a maximized window the toolkit already places correctly", frame: rect{X: 0, Y: 32, W: 1920, H: 1048}, d: desk{work: work, screen: screen, mons: one, pointer: nowhere}},
+		{name: "a full screen window covers the panel and is where it says", frame: rect{X: 0, Y: 0, W: 1920, H: 1080}, d: desk{work: work, screen: screen, mons: one, pointer: nowhere}},
+		{name: "a floating window cannot be placed and is left alone", frame: rect{X: 0, Y: 0, W: 800, H: 600}, d: desk{work: work, screen: screen, mons: one, pointer: nowhere}},
+		{name: "a desk with no panel needs no shift", frame: rect{X: 0, Y: 0, W: 1920, H: 1080}, d: desk{work: screen, screen: screen, mons: one, pointer: nowhere}},
+		{name: "nothing is read and nothing is shifted", frame: rect{}, d: desk{pointer: nowhere}},
+		{name: "a panel down the left edge shifts x", frame: rect{X: 0, Y: 0, W: 1856, H: 1080}, d: desk{work: rect{X: 64, Y: 0, W: 1856, H: 1080}, screen: screen, mons: one, pointer: nowhere}, wantDX: 64},
+		{name: "no monitor list, so only the desktop-wide work area can be matched", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, d: desk{work: work, screen: screen, pointer: nowhere}, wantDY: 32},
 		// A window maximized on either monitor of a two-monitor desk is 1920x1048: as wide as one monitor, as tall as the work area, and matching neither the desktop-wide work area nor the whole canvas.
-		{name: "maximized on a second monitor, reporting window coordinates", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, work: wideWork, screen: wideScreen, mons: two, wantDY: 32},
-		{name: "maximized on a second monitor, reporting where it really is", frame: rect{X: 1920, Y: 32, W: 1920, H: 1048}, work: wideWork, screen: wideScreen, mons: two},
-		{name: "maximized on the first monitor of two", frame: rect{X: 0, Y: 32, W: 1920, H: 1048}, work: wideWork, screen: wideScreen, mons: two},
-		{name: "full screen on one monitor of two is where it says", frame: rect{X: 1920, Y: 0, W: 1920, H: 1080}, work: wideWork, screen: wideScreen, mons: two},
-		{name: "a floating window on a two-monitor desk is left alone", frame: rect{X: 2200, Y: 300, W: 800, H: 600}, work: wideWork, screen: wideScreen, mons: two},
+		{name: "maximized on a second monitor, reporting window coordinates", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, d: desk{work: wideWork, screen: wideScreen, mons: two, pointer: image.Pt(2500, 500)}, wantDX: 1920, wantDY: 32},
+		{name: "maximized on the first monitor of two, reporting window coordinates", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, d: desk{work: wideWork, screen: wideScreen, mons: two, pointer: onFirst}, wantDY: 32},
+		{name: "maximized on a second monitor, reporting where it really is", frame: rect{X: 1920, Y: 32, W: 1920, H: 1048}, d: desk{work: wideWork, screen: wideScreen, mons: two, pointer: nowhere}},
+		{name: "maximized on the first monitor of two", frame: rect{X: 0, Y: 32, W: 1920, H: 1048}, d: desk{work: wideWork, screen: wideScreen, mons: two, pointer: nowhere}},
+		{name: "full screen on one monitor of two is where it says", frame: rect{X: 1920, Y: 0, W: 1920, H: 1080}, d: desk{work: wideWork, screen: wideScreen, mons: two, pointer: nowhere}},
+		{name: "a floating window on a two-monitor desk is left alone", frame: rect{X: 2200, Y: 300, W: 800, H: 600}, d: desk{work: wideWork, screen: wideScreen, mons: two, pointer: nowhere}},
 	}
 	for _, c := range cases {
-		dx, dy := windowShift(c.frame, c.work, c.screen, c.mons)
+		dx, dy := windowShift(c.frame, c.d)
 		if dx != c.wantDX || dy != c.wantDY {
-			t.Errorf("%s: windowShift(%+v, %+v, %+v, %v) = %d,%d; want %d,%d", c.name, c.frame, c.work, c.screen, c.mons, dx, dy, c.wantDX, c.wantDY)
+			t.Errorf("%s: windowShift(%+v, %+v) = %d,%d; want %d,%d", c.name, c.frame, c.d, dx, dy, c.wantDX, c.wantDY)
 		}
+	}
+}
+
+// A native Wayland client answers 0,0 when asked where its own window is, so on a desk with more than one monitor the corner it reports names the monitor at the desktop origin whatever monitor the window is really on: a maximized Brave on the right-hand monitor got dx=0 and every rectangle in its listing named a point 1920 pixels to the left of the element it was for. The pointer is the second opinion, and it is the same stand-in screenLayout already uses to pick the monitor a stored frame came from.
+func TestWindowMonitor(t *testing.T) {
+	first := rect{X: 0, Y: 0, W: 1920, H: 1080}
+	second := rect{X: 1920, Y: 0, W: 1920, H: 1080}
+	two := []rect{first, second}
+	cases := []struct {
+		name    string
+		frame   rect
+		mons    []rect
+		pointer image.Point
+		want    rect
+		wantOK  bool
+	}{
+		{name: "a window that says where it is", frame: rect{X: 1920, Y: 32, W: 1920, H: 1048}, mons: two, pointer: image.Pt(400, 500), want: second, wantOK: true},
+		{name: "a window that cannot say, with the pointer on the second monitor", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, mons: two, pointer: image.Pt(2500, 500), want: second, wantOK: true},
+		{name: "a window that cannot say, with the pointer on the first monitor", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, mons: two, pointer: image.Pt(400, 500), want: first, wantOK: true},
+		{name: "a window that cannot say, and no pointer either", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, mons: two, pointer: image.Pt(-1, -1), want: first, wantOK: true},
+		// One monitor: the corner cannot name the wrong screen, so the pointer is never asked and a pointer on another desk cannot move anything.
+		{name: "one monitor is the only answer there is", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, mons: []rect{first}, pointer: image.Pt(2500, 500), want: first, wantOK: true},
+		{name: "no monitor list at all", frame: rect{X: 0, Y: 0, W: 1920, H: 1048}, pointer: image.Pt(400, 500)},
+		{name: "a window off every monitor", frame: rect{X: 9000, Y: 9000, W: 800, H: 600}, mons: two, pointer: image.Pt(-1, -1)},
+	}
+	for _, c := range cases {
+		got, ok := windowMonitor(c.frame, c.mons, c.pointer)
+		if ok != c.wantOK || (ok && got != c.want) {
+			t.Errorf("%s: windowMonitor(%+v, %v, %v) = %+v, %v; want %+v, %v", c.name, c.frame, c.mons, c.pointer, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+// show_marks reads the rectangle of up to forty items in one call, and each of those reads went through screenShift, which opened one X connection for _NET_WORKAREA and another for RandR every time: eighty connections for one call, all of them asking a layout that changes when a monitor is plugged in and not otherwise. deskNow reads it once and hands the same answer back for deskTTL.
+func TestDeskNow_ReadsTheDesktopOncePerCall(t *testing.T) {
+	reads := 0
+	restore := readDesk
+	readDesk = func() (desk, bool) {
+		reads++
+		return desk{work: rect{W: 1920, H: 1048}, screen: rect{W: 1920, H: 1080}, pointer: image.Pt(-1, -1)}, true
+	}
+	t.Cleanup(func() { readDesk = restore; forgetDesk() })
+	forgetDesk()
+	for i := 0; i < 40; i++ {
+		if _, ok := deskNow(); !ok {
+			t.Fatalf("read %d came back with nothing", i)
+		}
+	}
+	if reads != 1 {
+		t.Errorf("forty rectangle reads asked X %d times, want 1", reads)
+	}
+	// The cache has to expire, or a monitor plugged in mid-session would never be noticed.
+	forgetDesk()
+	if _, ok := deskNow(); !ok || reads != 2 {
+		t.Errorf("after the cache expired X was asked %d times, want 2", reads)
+	}
+}
+
+// A ref that never came from a node list cannot be read at all, and Focused has to say so rather than answer false, which the caller would read as "some other element has the keyboard" and refuse a legitimate typing.
+func TestFocused_RefusesAMalformedRef(t *testing.T) {
+	if _, err := Focused(context.Background(), "nonsense"); err == nil {
+		t.Error("Focused must refuse a ref with no bus name and object path in it")
 	}
 }
