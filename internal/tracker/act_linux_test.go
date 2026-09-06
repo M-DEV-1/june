@@ -68,6 +68,11 @@ func TestVerifyAgainst(t *testing.T) {
 		{name: "the entry below the one that was listed", nowRole: "entry", now: rect{X: 10, Y: 250, W: 300, H: 30}, role: "entry", was: was, wantErr: true},
 		// The list can show a node with no size only if it never had one; nothing then to compare against, so the rectangle is not part of the answer.
 		{name: "nothing remembered to compare", nowRole: "entry", now: was, role: "entry", was: rect{}},
+		// For a content role the label is the node's own contents, not a name somebody chose for it, so it changes whenever the user types — and typing into a box is the ordinary thing to do between listing it and clicking it. The role and the rectangle still say it is the same box. Comparing the contents refused those clicks and sent the model to look at the screen again.
+		{name: "the user typed a character into the listed entry", nowRole: "entry", nowLabel: "hello!", now: was, role: "entry", label: "hello", was: was},
+		{name: "the paragraph that was listed was edited", nowRole: "text", nowLabel: "Dear Bob,", now: was, role: "text", label: "Dear Bo", was: was},
+		// A control's label is a name, so a changed one still means a different element.
+		{name: "another label on a button", nowRole: "push button", nowLabel: "Delete", now: was, role: "push button", label: "Send", was: was, wantErr: true},
 	}
 	for _, c := range cases {
 		err := verifyAgainst(c.nowRole, c.nowLabel, c.now, c.role, c.label, c.was)
