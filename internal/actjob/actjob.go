@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -198,14 +196,14 @@ type Executor interface {
 	ExecuteAskTool(ctx context.Context, name string, args map[string]any) string
 }
 
-// ScreenScope is the half of the Executor seam a job needs to have a screen of its own: an executor that keeps per-caller screen state — the numbered list observe_screen produced, the picture look took, what the last click focused — hands this job a context carrying its own, so a click by number cannot land in another job's window and the pictures a job takes count against its own allowance. An executor that does not implement it (a scripted one in a test) runs on whatever state it already has. Input: the job's context. Output: a context to make every tool call of that job with.
+// ScreenScope creates a fresh screen-tool namespace so concurrent jobs do not stomp on each other's numbered lists or focus state. Optional: when the executor implements it, NewScreenScope is called once per job run.
 type ScreenScope interface {
 	NewScreenScope(ctx context.Context) context.Context
 }
 
-// PreChecker is the half of the Executor seam a job uses for the reading it takes before it acts: one walk of the screen matched against the step's check, with no polling and no second opinion about which window is in front. An executor that does not implement it leaves every pre-reading unanswered, which reads as "the check did not already hold" and puts the step back where it was before this reading existed. Input: the job's context and the change the model wrote down. Output: true when the screen already satisfies it.
+// PreChecker tests whether an expected change already holds on the screen before the action runs, off a single reading. Optional: when missing, HeldBefore stays false.
 type PreChecker interface {
-	CheckHolds(ctx context.Context, check act.Check) bool
+	CheckHolds(ctx context.Context, expect act.Check) bool
 }
 
 // Store is what a job needs from the database: write its checkpoint after every step, read one back to resume it, and say what the highest job id already on disk is so a restarted daemon carries on numbering from there.
@@ -227,27 +225,6 @@ type Runner struct {
 	nextID atomic.Uint64
 	mu     sync.Mutex
 	live   map[string]*live
-}
-
-// live is one job actually running: its state under a lock, the context and cancel that stop it, and the two channels the user's answers and resumes arrive on.
-type live struct {
-	mu      sync.Mutex
-	job     Job
-	ctx     context.Context
-	cancel  context.CancelFunc
-	answers chan string
-	resumes chan struct{}
-	paused  atomic.Bool
-	stopped atomic.Bool
-
-	// started is when this run of the job began and baseMS is what earlier runs of it had already spent, so the wall budget is one budget across a restart rather than a fresh one each time.
-	started time.Time
-	baseMS  int64
-	// waitedMS is how long this run has already spent waiting on the user, and waitingSince is when the wait it is in now began, zero when it is not waiting. Neither counts against the wall budget: a job holding still for a person is not a job running away with the screen.
-	waitedMS     atomic.Int64
-	waitingSince atomic.Int64
-	// working is how endWait tells the wall-clock guard that the job has gone back to work, so the guard can sleep through a wait instead of polling a frozen clock. It holds one token, and a token left over from a wait the guard never saw costs one extra wakeup and nothing else.
-	working chan struct{}
 }
 
 // New builds the runner. Input: the store checkpoints go to, the executor tools run through, the models by brain name, the name of the daemon's configured brain (used by a job that names none), and the sink progress events go to, which may be nil. Output: the runner.
@@ -494,154 +471,6 @@ func (r *Runner) find(id string) *live {
 	return r.live[id]
 }
 
-// snapshot copies the job out from under its lock, deeply enough to be encoded or marshalled while the loop goes on working (see cloned). Input: none. Output: the copy.
-func (l *live) snapshot() Job {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return cloned(l.job)
-}
-
-// set edits the job under its lock and returns the edited copy, deep enough to hand out (see cloned).
-func (l *live) set(edit func(*Job)) Job {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	edit(&l.job)
-	return cloned(l.job)
-}
-
-// cloned copies the two fields of a job that go on being written after a copy of it has been handed out: the per-model spend map, which every round writes an entry into, and the steps slice, whose last element is rewritten when its check comes back. A shallow copy shares both, so a GET that encodes one while the loop writes the other is a concurrent map read and write — which is not a panic but a fatal error that takes the daemon down. The other slices are only ever replaced wholesale or appended to, so the header alone is enough for them. Input: the job under the lock. Output: the copy.
-func cloned(j Job) Job {
-	j.Steps = slices.Clone(j.Steps)
-	j.Spend.ByModel = maps.Clone(j.Spend.ByModel)
-	return j
-}
-
-// row renders a job as the database row that holds it. Input: the job. Output: the row, or an error when the checkpoint will not marshal — which the caller must not paper over, because writing an empty object in its place would replace the job's whole history with nothing.
-func row(job Job) (db.ActJobRow, error) {
-	job.Observations, job.Steps = digestedObservations(job.Observations), storedSteps(job.Steps)
-	blob, err := json.Marshal(job)
-	if err != nil {
-		return db.ActJobRow{}, fmt.Errorf("act job %s: its checkpoint will not marshal: %w", job.ID, err)
-	}
-	return db.ActJobRow{ID: job.ID, Goal: job.Goal, Brain: job.Brain, State: string(job.State), Answer: job.Say, Error: job.Err, DurationMS: job.ElapsedMS, Checkpoint: blob}, nil
-}
-
-// digestedObservations is what a screen reading is kept as on disk: its first line, which names the app and the window, and how many items were listed under it. The listing itself is the live text of somebody's window — the messages on screen, the half-typed reply in the compose box — and the checkpoint is a lasting record, so the body stays in memory where the prompt reads it and never reaches the row. Input: the readings the job is holding. Output: one line each.
-func digestedObservations(obs []string) []string {
-	if len(obs) == 0 {
-		return nil
-	}
-	out := make([]string, len(obs))
-	for i, o := range obs {
-		lines := strings.Split(o, "\n")
-		items := 0
-		for _, line := range lines[1:] {
-			if strings.HasPrefix(line, "[") {
-				items++
-			}
-		}
-		out[i] = fmt.Sprintf("%s (%d items listed)", lines[0], items)
-	}
-	return out
-}
-
-// storedSteps is what the steps are kept as on disk: the same steps with each result cut to storedResultCap runes. The fuller copy stays in memory for the prompt. Input: the job's steps. Output: a copy of them, since the originals are the loop's own and must not be edited under it.
-func storedSteps(steps []Step) []Step {
-	out := slices.Clone(steps)
-	for i := range out {
-		out[i].Result = capRunes(out[i].Result, storedResultCap)
-	}
-	return out
-}
-
-// stopLineRefusal is what every stop-line refusal begins with (see agent's stopBeforeClick and the type_text and press_key stop lines): the action did not happen and the user has to say go before it can.
-const stopLineRefusal = "Stopped before "
-
-// save writes the job's checkpoint, with the wall time it has spent brought up to date first, so a daemon that crashes mid-job resumes on what is left of the budget rather than on a fresh one. A failed write is logged, never returned: losing the ability to resume must not stop the job that is working.
-func (r *Runner) save(l *live, job Job) {
-	job.ElapsedMS = l.elapsed()
-	l.set(func(j *Job) { j.ElapsedMS = job.ElapsedMS })
-	stored, err := row(job)
-	if err != nil {
-		slog.Error("act job: could not checkpoint", "job", job.ID, "error", err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), saveTimeout)
-	defer cancel()
-	if err := r.store.SaveActJob(ctx, stored); err != nil {
-		slog.Error("act job: could not checkpoint", "job", job.ID, "error", err)
-	}
-}
-
-// elapsed is the wall time this job has spent working, over every run of it, with the stretches it spent waiting on the user taken out. Input: none. Output: the milliseconds, which is what the checkpoint carries as ElapsedMS.
-func (l *live) elapsed() int64 {
-	spent := time.Since(l.started) - time.Duration(l.waitedMS.Load())*time.Millisecond
-	if since := l.waitingSince.Load(); since != 0 {
-		spent -= time.Since(time.Unix(0, since))
-	}
-	return l.baseMS + spent.Milliseconds()
-}
-
-// beginWait marks the job as waiting on the user from now, and endWait folds the stretch it just waited into the time that does not count against the wall budget. endWait may be called twice; the second call does nothing.
-func (l *live) beginWait() { l.waitingSince.Store(time.Now().UnixNano()) }
-
-func (l *live) endWait() {
-	if since := l.waitingSince.Swap(0); since != 0 {
-		l.waitedMS.Add(time.Since(time.Unix(0, since)).Milliseconds())
-	}
-	select {
-	case l.working <- struct{}{}:
-	default:
-	}
-}
-
-// wallGuard ends a job once the time it has spent actually working reaches its wall budget. It does that instead of a deadline on the job's own context because the time a job spends stuck on a question or held paused is the user's, not the job's, and a job must not be timed out for how long someone took to answer it. Input: the live job and the whole wall budget, what earlier runs of the job spent included. Output: none; it returns when the job's context is done.
-func wallGuard(l *live, wall time.Duration) {
-	t := time.NewTicker(wallTick)
-	defer t.Stop()
-	for {
-		if l.waitingSince.Load() != 0 {
-			// The job is waiting on the user, so elapsed() is frozen and no amount of ticking can bring it nearer the budget: sleep until the wait ends or the job does, rather than waking ten times a second for as long as the question goes unanswered.
-			select {
-			case <-l.ctx.Done():
-				return
-			case <-l.working:
-			}
-			continue
-		}
-		if time.Duration(l.elapsed())*time.Millisecond >= wall {
-			l.cancel()
-			return
-		}
-		select {
-		case <-l.ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
-}
-
-// wallTick is how often the wall-clock guard looks at how long a job has been working: fine enough grain against a five-minute budget, and one wakeup every tenth of a second while a job runs.
-const wallTick = 100 * time.Millisecond
-
-// saveTimeout bounds one checkpoint write so a wedged store cannot hold a job's own goroutine.
-const saveTimeout = 10 * time.Second
-
-// storedResultCap is how much of a tool result the checkpoint keeps, in runes: the same 300 the ordinary act runs keep theirs at (see db/act_runs.go). The prompt still sees the fuller resultCap copy the job holds in memory; what goes on disk is only what a later reader needs to see what happened.
-const storedResultCap = 300
-
-// waitTimeoutMS is how long wait_for polls for the expected change before calling it a failure, in milliseconds — the tool's own default, passed explicitly so a job's verification time is on record rather than implied.
-const waitTimeoutMS = 5000
-
-// alreadyHeldNote is appended to what the check found, so the round after it reads the verdict as saying nothing about the action rather than as proof it worked.
-const alreadyHeldNote = " — but this already held before the action, so it says nothing about what the action did"
-
-// summaryEvery is how many rounds pass between rewrites of the progress summary. Five, because a summary rewritten every round costs a round's worth of tokens for nothing, and one rewritten every twenty is describing a screen the job has long left.
-const summaryEvery = 5
-
-// stuckAfter is how many failed verifications on the same step turn into a question for the user.
-const stuckAfter = 3
-
 // loop is the job: observe, decide one action with the change it should produce, act, check, record — until the goal is reached, the budget is spent, or the user is asked something.
 func (r *Runner) loop(ctx context.Context, l *live) {
 	defer l.cancel()
@@ -873,21 +702,6 @@ func (r *Runner) askUser(ctx context.Context, l *live, question string) bool {
 	}
 }
 
-// waitWhilePaused holds the loop while the job is paused. Output: true when it may carry on, false when the job was stopped or its time ran out while paused.
-func (l *live) waitWhilePaused(ctx context.Context) bool {
-	for l.paused.Load() {
-		l.beginWait()
-		select {
-		case <-l.resumes:
-			l.endWait()
-		case <-ctx.Done():
-			l.endWait()
-			return false
-		}
-	}
-	return ctx.Err() == nil
-}
-
 // end puts a job into its final state, writes the last checkpoint and says so. Input: the live job, the end state, the error text ("" when none) and the closing words. Output: none.
 // The final checkpoint is written before the end state is published, so that a caller who sees the job as ended — the hover, a GET, a test — always finds the same thing on disk. Only the loop's own goroutine writes the job, so reading it out, editing the copy and putting it back is safe. A question the job was still waiting on is kept rather than wiped, so a job whose time ran out while it waited can still be seen to have been waiting, and on what.
 func (r *Runner) end(l *live, state State, errText, say string) {
@@ -898,141 +712,4 @@ func (r *Runner) end(l *live, state State, errText, say string) {
 	l.set(func(j *Job) { *j = job })
 	spend := job.Spend
 	r.emit(Event{Job: job.ID, Kind: "done", State: state, Step: len(job.Steps), Text: say, Spend: &spend})
-}
-
-// overBudget reports whether a job has spent what it was given, and which budget it was. Input: the job. Output: true and the plain reason, or false and "".
-func overBudget(j Job) (bool, string) {
-	if len(j.Steps) >= j.Budget.Steps {
-		return true, fmt.Sprintf("the step budget of %d is spent", j.Budget.Steps)
-	}
-	if j.Spend.Input >= j.Budget.InputTokens {
-		return true, fmt.Sprintf("the input-token budget of %d is spent (%d used)", j.Budget.InputTokens, j.Spend.Input)
-	}
-	return false, ""
-}
-
-// summarise is what a job says when it ends without reaching the goal: how far it got, what it last did, and what it was about to do — never a claim that the goal was met. Input: the job and the plain reason it stopped. Output: the sentence.
-func summarise(j Job, why string) string {
-	verified := 0
-	for _, s := range j.Steps {
-		if checkedOut(s) {
-			verified++
-		}
-	}
-	out := fmt.Sprintf("I stopped short of %q: %s. I took %d steps, %d of which checked out.", j.Goal, why, len(j.Steps), verified)
-	if n := len(j.Steps); n > 0 {
-		out += fmt.Sprintf(" The last thing I did was %s, and %s.", j.Steps[n-1].Tool, j.Steps[n-1].Why)
-	}
-	if j.Next != "" {
-		out += " Next would have been: " + j.Next + "."
-	}
-	return out
-}
-
-// stuckQuestion is the one plain question a job asks when three checks in a row on the same step have failed. Input: the job. Output: the question, in the model's own words for what it was trying when it has them.
-func stuckQuestion(j Job) string {
-	last := j.Steps[len(j.Steps)-1]
-	return fmt.Sprintf("I tried %d times to make it so that %s, and each time %s. What should I do instead?", stuckAfter, last.Expect.Describe(), last.Why)
-}
-
-// checkedOut reports whether a step is one that actually showed the goal moving: a check that passed and was not already true before the action. It is what the done guard, the progress line and the closing sentence all count, so a job cannot end on, or claim progress from, a check that told it nothing.
-func checkedOut(s Step) bool { return s.Outcome == "pass" && !s.HeldBefore }
-
-// checkHolds reads a step's check once, before the action runs, off a single reading of the screen. Input: the job's context and the change the model wrote down. Output: true when the screen already satisfies it, false when it does not, when the step named no check at all, or when this executor cannot take the reading.
-// It does not go through wait_for: that tool polls for up to five seconds and, on a list check that matches, walks the window a second time to see whether another window came to the front. Neither is worth anything here — nothing has acted yet, so there is nothing to wait for and nothing for the front window to have changed under — and both were paid on every step of every job.
-func (r *Runner) checkHolds(ctx context.Context, expect act.Check) bool {
-	pre, ok := r.exec.(PreChecker)
-	if !ok || expect.Value == "" {
-		return false
-	}
-	return pre.CheckHolds(ctx, expect)
-}
-
-// readVerdict turns wait_for's own answer into a step's outcome. Input: the tool result. Output: "pass" or "fail", and what the check found in plain words.
-func readVerdict(result string) (string, string) {
-	if rest, ok := strings.CutPrefix(result, act.WaitPassPrefix); ok {
-		return "pass", rest
-	}
-	if rest, ok := strings.CutPrefix(result, act.WaitFailPrefix); ok {
-		return "fail", rest
-	}
-	return "fail", strings.TrimSpace(result)
-}
-
-// redactedExpect is what a step's Expect is stored and described as, in place of what the model actually wrote down, wherever it could otherwise repeat text StorableArgs already dropped from the same step's own arguments. A type_text step redacts its Value regardless of what kind of check it names, since the box just typed into is exactly what a check right after it is about. A field_holds check redacts its Value regardless of which tool the step named, since it can only be asking about a field something was just typed into. Kind is left alone either way, so the stored and emitted check still says what kind of thing was being verified. Input: the step's tool name and the expected change the model wrote down for it. Output: the expect to store and to describe; the live wait_for check must keep using the real one this came from.
-func redactedExpect(tool string, e act.Check) act.Check {
-	// A step with no check named has nothing to hide, and stamping the marker on it would record a check that never existed.
-	if e.Value == "" {
-		return e
-	}
-	if tool == "type_text" || e.Kind == act.FieldHolds {
-		e.Value = db.RedactedValue
-	}
-	return e
-}
-
-// describeAction renders one decision as the line a hover shows while the step runs. The fallback for a decision that wrote no words for itself is the tool and its arguments, redacted as the checkpoint redacts them, so what the user dictated into type_text never goes out on the event stream either.
-func describeAction(d decision) string {
-	if d.Next != "" {
-		return d.Next
-	}
-	if len(d.Args) == 0 {
-		return d.Tool
-	}
-	args, err := json.Marshal(db.StorableArgs(d.Tool, d.Args))
-	if err != nil {
-		return d.Tool
-	}
-	return d.Tool + " " + string(args)
-}
-
-// rewriteSummary asks the cheap brain to restate where the job has got to in at most two sentences, so the trail never has to be re-sent. A failure leaves the old summary standing: a job must not end because its own note-taking failed.
-func (r *Runner) rewriteSummary(ctx context.Context, l *live) {
-	job := l.snapshot()
-	name := job.SummaryBrain
-	if name == "" {
-		name = job.Brain
-	}
-	model, ok := r.models[name]
-	if !ok {
-		return
-	}
-	text, usage, err := model(ctx, SummaryPrompt(job))
-	if err != nil {
-		slog.Warn("act job: could not rewrite the progress summary", "job", job.ID, "error", err)
-		return
-	}
-	l.set(func(j *Job) {
-		j.Summary = capRunes(strings.TrimSpace(text), summaryCap)
-		j.Spend.add(usage, name)
-	})
-}
-
-// decision is what the model is asked to reply with each round: at most one action, the change it should produce, or an end.
-type decision struct {
-	Plan   string         `json:"plan"`
-	Next   string         `json:"next"`
-	Tool   string         `json:"tool"`
-	Args   map[string]any `json:"args"`
-	Expect act.Check      `json:"expect"`
-	Done   bool           `json:"done"`
-	Say    string         `json:"say"`
-	Ask    string         `json:"ask"`
-}
-
-// parseDecision reads one round's reply. Input: whatever the model wrote, which in practice is bare JSON, JSON in a fenced block, or JSON with a sentence around it. Output: the decision, or an error when there is no JSON object in it at all or it says nothing to do.
-func parseDecision(reply string) (decision, error) {
-	open := strings.Index(reply, "{")
-	shut := strings.LastIndex(reply, "}")
-	if open < 0 || shut <= open {
-		return decision{}, fmt.Errorf("no JSON object in the reply")
-	}
-	var d decision
-	if err := json.Unmarshal([]byte(reply[open:shut+1]), &d); err != nil {
-		return decision{}, fmt.Errorf("the JSON would not read: %w", err)
-	}
-	if !d.Done && d.Tool == "" && strings.TrimSpace(d.Ask) == "" {
-		return decision{}, fmt.Errorf("the reply named no tool, asked nothing and did not say it was done")
-	}
-	return d, nil
 }
