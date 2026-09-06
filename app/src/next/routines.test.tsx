@@ -75,19 +75,20 @@ describe("adding one", () => {
 });
 
 describe("running one now", () => {
-  it("asks the daemon and shows what it said", async () => {
+  // The daemon answers 202 as soon as the run has started and delivers the answer as a notice, so the button says the run is under way rather than waiting minutes for the reply.
+  it("asks the daemon and says the run is under way", async () => {
     const { calls } = renderApp({ routines, routineAnswer: "Ship the report — it's due today." }, { place: "routines" });
     await screen.findByText("tell me the one thing I must do today");
     await userEvent.click(screen.getByRole("button", { name: /Run "tell me the one thing I must do today" now/ }));
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/routines/1/run")).toBe(true));
-    expect(await screen.findByText("Ship the report — it's due today.")).toBeDefined();
+    expect(await screen.findByText("Running…")).toBeDefined();
   });
 
-  it("says nothing was worth saying for a NOTHING answer", async () => {
-    renderApp({ routines, routineAnswer: "NOTHING" }, { place: "routines" });
+  it("says so when the run could not be started", async () => {
+    renderApp({ routines, fails: ["POST /routines/1/run"] }, { place: "routines" });
     await screen.findByText("tell me the one thing I must do today");
     await userEvent.click(screen.getByRole("button", { name: /Run "tell me the one thing I must do today" now/ }));
-    expect(await screen.findByText("Nothing worth saying right now")).toBeDefined();
+    expect(await screen.findByText("Could not run that routine")).toBeDefined();
   });
 });
 

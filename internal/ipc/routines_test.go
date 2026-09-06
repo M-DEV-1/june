@@ -76,7 +76,26 @@ func TestCreateRoutineRequiresTextAndSchedule(t *testing.T) {
 	}
 }
 
-// TestRoutineRunAsksRecordsAndNotifies checks the run-now route puts the instruction plus the answer-shape suffix to the asker, records the answer as the routine's last run, and posts a notice carrying it under place "routine".
+// waitForRoutineAnswer polls the routine until its last run holds want, which is how a caller sees the result of a run started in the background. Input: the store, the routine's id and the answer expected. Output: none; the test fails if it has not been recorded within two seconds.
+func waitForRoutineAnswer(t *testing.T, store *db.Store, id int64, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r, err := store.RoutineByID(t.Context(), id)
+		if err == nil && !r.LastRun.IsZero() {
+			if r.LastAnswer != want {
+				t.Fatalf("LastAnswer = %q, want %q", r.LastAnswer, want)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the run to be recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestRoutineRunAsksRecordsAndNotifies checks the run-now route answers 202 with the routine's id straight away, then puts the instruction plus the answer-shape suffix to the asker in the background, records the answer as the routine's last run, and delivers it through the same say path a scheduled run uses — under place "routine" with the routine's id.
 func TestRoutineRunAsksRecordsAndNotifies(t *testing.T) {
 	store := newReadStore(t)
 	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
@@ -84,24 +103,60 @@ func TestRoutineRunAsksRecordsAndNotifies(t *testing.T) {
 		t.Fatalf("AddRoutine: %v", err)
 	}
 	asker := &fakeAsker{trace: agent.TurnTrace{Answer: "Ship the report — it's due today."}}
-	_, srv := newRoutinesServer(t, asker, store)
+	s, srv := newRoutinesServer(t, asker, store)
+	said := make(chan Notice, 1)
+	s.SetSay(func(n Notice) { said <- n })
 
 	var reply map[string]string
 	idStr := strconv.FormatInt(id, 10)
-	if code := postJSON(t, srv, "/routines/"+idStr+"/run", `{}`, &reply); code != http.StatusOK {
-		t.Fatalf("POST /routines/%s/run status = %d, want 200", idStr, code)
+	if code := postJSON(t, srv, "/routines/"+idStr+"/run", `{}`, &reply); code != http.StatusAccepted {
+		t.Fatalf("POST /routines/%s/run status = %d, want 202", idStr, code)
 	}
-	if reply["answer"] != "Ship the report — it's due today." {
-		t.Errorf("answer = %q", reply["answer"])
+	if reply["id"] != idStr {
+		t.Errorf("reply = %+v, want the routine's id", reply)
+	}
+	if _, ok := reply["answer"]; ok {
+		t.Errorf("reply = %+v, want no answer — the run has not finished yet", reply)
 	}
 
-	r, err := store.RoutineByID(t.Context(), id)
-	if err != nil || r.LastAnswer != "Ship the report — it's due today." || r.LastRun.IsZero() {
-		t.Errorf("routine after run = %+v, %v", r, err)
+	waitForRoutineAnswer(t, store, id, "Ship the report — it's due today.")
+
+	select {
+	case n := <-said:
+		if n.Body != "Ship the report — it's due today." || n.Place != "routine" || n.ID != idStr || n.Kind != "routine" {
+			t.Errorf("notice = %+v, want the answer under place routine with the routine's id", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer never reached the say path")
 	}
 }
 
-// TestRoutineRunSendsNoNoticeForNothing checks that an exact "NOTHING" answer is still recorded as the run but reported back so the caller can tell nothing was said.
+// TestRoutineRunAnswersBeforeTheAskFinishes checks the run-now route no longer holds the request open for the length of the ask: the window's Run button must come back at once and let the notice carry the result, rather than spinning for up to the five-minute ask timeout.
+func TestRoutineRunAnswersBeforeTheAskFinishes(t *testing.T) {
+	store := newReadStore(t)
+	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
+	if err != nil {
+		t.Fatalf("AddRoutine: %v", err)
+	}
+	unblock := make(chan struct{})
+	asker := &ctxCapturingAsker{unblock: unblock, trace: agent.TurnTrace{Answer: "took a while"}}
+	_, srv := newRoutinesServer(t, asker, store)
+	t.Cleanup(func() { close(unblock) })
+
+	idStr := strconv.FormatInt(id, 10)
+	done := make(chan int, 1)
+	go func() { done <- postJSON(t, srv, "/routines/"+idStr+"/run", `{}`, nil) }()
+	select {
+	case code := <-done:
+		if code != http.StatusAccepted {
+			t.Errorf("POST /routines/%s/run = %d, want 202", idStr, code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("POST /routines/{id}/run blocked on the ask instead of answering 202")
+	}
+}
+
+// TestRoutineRunSendsNoNoticeForNothing checks that an exact "NOTHING" answer is still recorded as the run but says nothing to the user.
 func TestRoutineRunSendsNoNoticeForNothing(t *testing.T) {
 	store := newReadStore(t)
 	id, err := store.AddRoutine(t.Context(), "tell me if anything is on fire", "every 1 hour")
@@ -109,19 +164,19 @@ func TestRoutineRunSendsNoNoticeForNothing(t *testing.T) {
 		t.Fatalf("AddRoutine: %v", err)
 	}
 	asker := &fakeAsker{trace: agent.TurnTrace{Answer: "NOTHING"}}
-	_, srv := newRoutinesServer(t, asker, store)
+	s, srv := newRoutinesServer(t, asker, store)
+	said := make(chan Notice, 1)
+	s.SetSay(func(n Notice) { said <- n })
 
-	var reply map[string]string
 	idStr := strconv.FormatInt(id, 10)
-	if code := postJSON(t, srv, "/routines/"+idStr+"/run", `{}`, &reply); code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", code)
+	if code := postJSON(t, srv, "/routines/"+idStr+"/run", `{}`, nil); code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", code)
 	}
-	if reply["answer"] != "NOTHING" {
-		t.Errorf("answer = %q, want NOTHING", reply["answer"])
-	}
-	r, err := store.RoutineByID(t.Context(), id)
-	if err != nil || r.LastAnswer != "NOTHING" || r.LastRun.IsZero() {
-		t.Errorf("routine after a NOTHING run = %+v, %v, want the run still recorded", r, err)
+	waitForRoutineAnswer(t, store, id, "NOTHING")
+	select {
+	case n := <-said:
+		t.Errorf("a NOTHING run said %+v, want nothing said", n)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

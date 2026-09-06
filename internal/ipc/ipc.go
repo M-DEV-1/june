@@ -233,6 +233,8 @@ type Server struct {
 	nextID  atomic.Uint64
 	// askMu guards asking.
 	askMu sync.Mutex
+	// say delivers a notice the way the scheduler's own moments go out: the window's card when a window is reading the event stream, and the desktop notification when none is. Nil until the daemon wires it (see SetSay), which is why sayNotice falls back to the plain broadcast.
+	say func(Notice)
 	// asking holds the id of every ask running right now. The daemon wires one shared agent's point_at and show_marks to Ring and Marks (see cmd/daemon.go), and that agent's drawing callbacks say nothing about which question is being answered, so this is what DrawingAsk reads to stamp a drawing with the ask that caused it.
 	asking map[string]struct{}
 }
@@ -240,6 +242,18 @@ type Server struct {
 // New builds a Server for every route this package serves. Input: the asker that answers /ask, the store the read routes query, screen, which returns the tracker's live activity buffer (the same one /buffer serves) and may be nil when no tracker is wired, and focused, which reads the window in focus at the moment it is called (rather than the last sampled one), takes the request's context so a caller that has given up stops waiting on it, and may also be nil. Output: the server; register its methods on a mux (see cmd/daemon.go for the route names). /context tries focused first, falls back to screen, then to the newest stored episode.
 func New(asker Asker, store *db.Store, screen func() []tracker.Activity, focused func(context.Context) (tracker.Activity, bool)) *Server {
 	return &Server{asker: asker, store: store, screen: screen, focused: focused, hub: newHub(), brains: map[string]Asker{}, asking: map[string]struct{}{}}
+}
+
+// SetSay wires the one surface a notice this package raises should go to. Input: a function that delivers one notice, which the daemon fills in with the scheduler's own say (see proactive.Scheduler.Say) so a moment falls back to a desktop notification when no window is listening. Output: none. Left unset, sayNotice broadcasts on the event stream and a notice raised while no window is there is simply lost.
+func (s *Server) SetSay(say func(Notice)) { s.say = say }
+
+// sayNotice delivers one notice through whatever SetSay wired, or straight onto the event stream when nothing was wired. Input: the notice. Output: none.
+func (s *Server) sayNotice(n Notice) {
+	if s.say != nil {
+		s.say(n)
+		return
+	}
+	s.Notice(n)
 }
 
 // AddBrain registers an asker a POST /ask can pick by naming it in "brain". Input: the brain id the window uses (see brains.go) and the asker.

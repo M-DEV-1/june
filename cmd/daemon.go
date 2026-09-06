@@ -596,6 +596,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		return true
 	})
 
+	// A routine the user runs from the window's own Run button answers 202 and delivers its result as a notice, the same way the scheduler's tick on that routine does — through the scheduler's own say, so it falls back to a desktop notification when no window is listening.
+	ipcServer.SetSay(func(n ipc.Notice) {
+		scheduler.Say(proactive.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind, Action: n.Action, Until: n.Until})
+	})
+
 	// point_at rings through the same overlay path POST /overlay uses, so the extension has one thing to listen to. One agent answers every ask, so the ring itself says nothing about which question drew it; the server names the ask running at that moment (see ipc.Server.DrawingAsk) and the overlay event goes out under that id, so a client watching /events can tie the ring to the question.
 	askAgent.Point = func(x, y, w, h int, label string) {
 		ipcServer.Ring(ipcServer.DrawingAsk(), x, y, w, h, label)

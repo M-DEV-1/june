@@ -18,7 +18,7 @@ export type Canned = {
   usage?: Usage;
   paused?: boolean;
   routines?: Routine[];
-  /** What POST /routines/{id}/run answers with; "NOTHING" is what a fresh fixture defaults to, same as a routine that has never had anything worth saying. */
+  /** What a run started by POST /routines/{id}/run ends up recording as the routine's last answer; "NOTHING" is what a fresh fixture defaults to, same as a routine that has never had anything worth saying. The route itself answers 202 with the routine's id, as the daemon does — the answer reaches the window as a notice, never in that response. */
   routineAnswer?: string;
   /** One entry per job id, the answer to GET /act/{id}. */
   jobs?: Record<string, ActJob>;
@@ -164,7 +164,7 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
       const id = decodeURIComponent(routineRun[1]);
       const answer = canned.routineAnswer ?? "NOTHING";
       routines = routines.map((r) => (r.id === id ? { ...r, last_run: new Date().toISOString(), last_answer: answer } : r));
-      return { status: 200, body: { answer } };
+      return { status: 202, body: { id } };
     }
     // The rail line's own Done/1h/Evening/Tomorrow buttons; nothing here fires the "notice" event the real Act does, since a fixture that wants to show one arriving already dispatches progress.eventArrived directly (see store.test.ts).
     if (method === "POST" && noticeAction) return { status: 200, body: null };

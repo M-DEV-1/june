@@ -4,6 +4,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -106,7 +107,7 @@ func (s *Server) RoutineDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// RoutineRun handles POST /routines/{id}/run: asks the routine's own instruction right now, through the same Asker /ask uses, records the answer as the routine's last run, and — unless the model answered exactly "NOTHING" — posts a notice the same way a scheduled run would. Answers 200 with the answer either way, so the window can show what happened without waiting on the notice. An id that matches nothing is 404. A routine already running — this same route hit twice, or the scheduler's own tick landing on it first — answers 409 rather than asking and recording a second result. The ask runs on its own askTimeout-bounded context rather than the request's: closing the window that made this call must not silently cut off a minutes-long ask, the same reasoning as /ask's own run().
+// RoutineRun handles POST /routines/{id}/run: it asks the routine's own instruction right now, through the same Asker /ask uses, records the answer as the routine's last run, and — unless the model answered exactly "NOTHING" — delivers it the same way a scheduled run would (see SetSay), so it falls back to a desktop notification when no window is listening. Answers 202 with {"id"} as soon as the run has started, because the ask can take minutes and the window's Run button must not spin for all of them; the result reaches the window as a notice, not as this response. An id that matches nothing is 404. A routine already running — this same route hit twice, or the scheduler's own tick landing on it first — answers 409 rather than asking and recording a second result. The ask runs on its own askTimeout-bounded context rather than the request's: closing the window that made this call must not silently cut off a minutes-long ask, the same reasoning as /ask's own run().
 func (s *Server) RoutineRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -122,26 +123,36 @@ func (s *Server) RoutineRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	// Claimed before the response is written, so a second click still gets its 409 rather than starting a second ask against the same routine.
 	if !s.store.TryStart(id) {
 		http.Error(w, "routine is already running", http.StatusConflict)
 		return
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"id": strconv.FormatInt(id, 10)})
+
+	go s.runRoutine(id, routine.Text)
+}
+
+// runRoutine asks one routine's instruction and files what it said, on its own goroutine and its own askTimeout-bounded context. Input: the routine's row id and its instruction. Output: none — the answer is recorded as the routine's last run and, unless it was exactly "NOTHING", delivered as a notice. A failure is logged rather than returned: the caller has already been answered, and the in-flight claim is released either way.
+func (s *Server) runRoutine(id int64, text string) {
 	defer s.store.Finish(id)
 
 	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
 	defer cancel()
-	trace, err := s.asker.AskText(ctx, routine.Text+db.RoutineSuffix)
+	trace, err := s.asker.AskText(ctx, text+db.RoutineSuffix)
 	if err != nil {
-		fail(w, err, http.StatusInternalServerError)
+		slog.Error("routine: the run-now ask failed", "id", id, "error", err)
 		return
 	}
 	answer := strings.TrimSpace(trace.Answer)
 	if err := s.store.SetRoutineRun(ctx, id, time.Now(), answer); err != nil {
-		fail(w, err, http.StatusInternalServerError)
+		slog.Error("routine: could not record the run", "id", id, "error", err)
 		return
 	}
 	if answer != db.RoutineNothing {
-		s.Notice(Notice{Title: "Routine", Body: answer, Place: "routine", ID: strconv.FormatInt(id, 10), Kind: "routine"})
+		s.sayNotice(Notice{Title: "Routine", Body: answer, Place: "routine", ID: strconv.FormatInt(id, 10), Kind: "routine"})
 	}
-	writeJSON(w, map[string]string{"answer": answer})
 }

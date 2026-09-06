@@ -445,8 +445,8 @@ export const oraApi = createApi({
       query: (id) => ({ url: `/routines/${encodeURIComponent(id)}`, method: "DELETE" }),
       invalidatesTags: ["Routine"],
     }),
-    /** Runs a routine right now instead of waiting for its schedule, and answers with what it said — "NOTHING" when it had nothing worth saying, which is also why no notice went out for this run. */
-    runRoutine: build.mutation<{ answer: string }, string>({
+    /** Starts a routine right now instead of waiting for its schedule. The daemon answers 202 with the routine's id as soon as the run is under way and the ask itself can take minutes, so the answer is not in this response: it arrives as a notice, exactly as it does when the routine fires on its own schedule. */
+    runRoutine: build.mutation<{ id: string }, string>({
       query: (id) => ({ url: `/routines/${encodeURIComponent(id)}/run`, method: "POST" }),
       invalidatesTags: ["Routine"],
     }),
