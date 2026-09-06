@@ -45,6 +45,8 @@ const (
 	maxDepth   = 40
 	maxNodes   = 4000
 	maxTextLen = 100000
+	// dbusProbeTimeout bounds the one-shot D-Bus probes that are not part of a capture: the lock check on every tick, the input-idle read the dreaming loop makes, and the accessibility switch daemon startup flips. godbus's plain Call has no reply timeout at all, so each of these could hold its caller for good on a peer that accepted the message and stopped answering.
+	dbusProbeTimeout = time.Second
 )
 
 // enableATSPI makes GTK3/Qt/VTE apps build and expose their accessibility trees, by setting org.a11y.Status.IsEnabled only.
@@ -55,8 +57,11 @@ func enableATSPI() {
 	if err != nil {
 		return
 	}
+	// Bounded because this runs on tracker.New(), on the daemon's startup path: an org.a11y.Bus that accepted the message and never replied held a plain Call for good, and the daemon would never finish starting.
+	ctx, cancel := context.WithTimeout(context.Background(), dbusProbeTimeout)
+	defer cancel()
 	obj := sess.Object("org.a11y.Bus", "/org/a11y/bus")
-	obj.Call("org.freedesktop.DBus.Properties.Set", 0,
+	obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Set", 0, //nolint:errcheck — best-effort switch, failures are expected on a desktop without accessibility
 		"org.a11y.Status", "IsEnabled", dbus.MakeVariant(true))
 }
 
