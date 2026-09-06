@@ -186,7 +186,7 @@ export function shapesFor(spec: OverlaySpec, layout: Layout): Shape[] {
   spec.rects.slice(0, MARK_CAP).forEach((rect, i) => {
     const monitor = monitorFor(rect, layout.monitors);
     if (!monitor) return;
-    const placed = placeRect(rect, monitor, layout);
+    const placed = placeRect(rect, layout);
     if (spec.kind === "ring" || spec.kind === "box" || spec.kind === "circle") {
       const x = placed.x;
       const y = placed.y;
@@ -219,17 +219,16 @@ export function shapesFor(spec: OverlaySpec, layout: Layout): Shape[] {
   return shapes;
 }
 
-/** Turns one rect in global desktop pixels into the overlay page's CSS pixels. Input: the rect, the monitor its centre falls on, and the window's layout. Output: the rect's left, top, width and height in this page's CSS pixels.
- * The monitor's own corner is placed with the window's scale, because the page has one uniform pixel grid across the whole desk. Everything inside that monitor — how far along the rect sits and how big it is — is divided by that monitor's scale instead, so a target on a doubled screen next to a plain one is not drawn at twice its offset and twice its size. On a desk where every screen has the same scale the two are the same number and this is exactly what it always was.
+/** Turns one rect in global desktop pixels into the overlay page's CSS pixels. Input: the rect and the window's layout. Output: the rect's left, top, width and height in this page's CSS pixels.
+ * One mapping, the window's own scale, for every kind of ink: the monitor rects the layout carries are physical desktop pixels (monitor_rects and union_bounds in lib.rs), the overlay window is sized to the physical union of them, and the daemon's rects are in those same physical pixels, so one divide takes all of them into this page's grid. labelAt and the arrow, line and path branch map their points the same way, which is what keeps a ring, its label and an arrow pointing at the same element in the same place.
  */
-function placeRect(rect: OverlayRect, monitor: Monitor, layout: Layout): { x: number; y: number; w: number; h: number } {
-  const windowScale = layout.scale > 0 ? layout.scale : 1;
-  const own = monitor.scale > 0 ? monitor.scale : windowScale;
+function placeRect(rect: OverlayRect, layout: Layout): { x: number; y: number; w: number; h: number } {
+  const scale = layout.scale > 0 ? layout.scale : 1;
   return {
-    x: (monitor.x - layout.origin_x) / windowScale + (rect.x - monitor.x) / own,
-    y: (monitor.y - layout.origin_y) / windowScale + (rect.y - monitor.y) / own,
-    w: rect.w / own,
-    h: rect.h / own,
+    x: (rect.x - layout.origin_x) / scale,
+    y: (rect.y - layout.origin_y) / scale,
+    w: rect.w / scale,
+    h: rect.h / scale,
   };
 }
 

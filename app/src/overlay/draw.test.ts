@@ -272,8 +272,8 @@ describe("shapesFor", () => {
     ]);
   });
 
-  it("places a rect by the scale of the monitor it sits on, not by the overlay window's own", () => {
-    // The window's own scale places the monitor's corner, because the page's pixel grid is uniform; the rect's offset inside that monitor and its size are the monitor's own business, so a target on a doubled screen beside a plain one is not drawn at twice its true offset.
+  it("maps every rect on a mixed-scale desk with the window's own scale, the same as the label and the strokes", () => {
+    // Rects, labels and strokes all share one mapping, and it is the overlay window's own scale. The monitor rects the layout carries are physical pixels (monitor_rects and union_bounds in lib.rs), the window is sized to the physical union of them (arm_overlay), and the daemon gives its rects in the same physical desktop pixels — so one divide by the window's scale takes all of them into this page's CSS pixels. Dividing a rect by the scale of the monitor it happens to sit on instead put the ink somewhere the label clamp and the arrows could not follow.
     const mixed: Layout = {
       origin_x: 0,
       origin_y: 0,
@@ -283,8 +283,11 @@ describe("shapesFor", () => {
         { x: 1920, y: 0, w: 1920, h: 1080, scale: 2 },
       ],
     };
-    const spec = { kind: "ring", rects: [{ x: 2000, y: 100, w: 200, h: 100 }] };
-    expect(shapesFor(spec, mixed)).toEqual([{ kind: "stroke", d: ringPath(1960, 50, 100, 50), width: 3 }]);
+    const spec = { kind: "ring", label: "Send", rects: [{ x: 2000, y: 100, w: 200, h: 100 }] };
+    expect(shapesFor(spec, mixed)).toEqual([
+      { kind: "stroke", d: ringPath(2000, 100, 200, 100), width: 3 },
+      { kind: "label", x: 1997, y: 63, text: "Send", tail: "down" },
+    ]);
   });
 
   it("draws nothing at all when the monitor list is empty, rather than drawing in the wrong place", () => {
