@@ -72,15 +72,15 @@ One bullet per person per commitment: who said they would do what, and by when i
 What was actually settled, and who settled it. Omit this section entirely if nothing was decided.
 
 ## Action items
-Every piece of owed work from this meeting in one list, the user's own included, so nothing agreed to is only recorded inside a paragraph. Repeat here what the sections above already said rather than leaving it out. Omit this section entirely if nothing was clearly owed.
-An item belongs here only when the transcript shows work was clearly owed — someone agreed to do something, or was directly asked for something and did not decline. A topic that was merely discussed, a possibility floated, or a "we should sit down and decide" is not owed work; leave it out rather than turning the discussion into a task.
+Every piece of owed work from this meeting in one list, the user's own included, so nothing agreed to is only recorded inside a paragraph. Repeat here what the sections above already said rather than leaving it out. Omit this section entirely if nothing was owed.
+Two things belong here and nothing else: work the [me] speaker owes, and work a named person said out loud they would do. A topic that was discussed, a problem somebody described, a possibility floated, a "we should sit down and decide", or a state of play such as "left mid-check on the CHART-7 branch" is not owed work and gets no bullet. If nobody took the work on, there is no item at all: leave it out rather than recording it with the owner unknown.
 Write each one on its own bullet in exactly this shape, with an em dash between the owner and the work:
 - **Owner Name** — what they agreed to do, and by when if a date was said.
-The owner is one of exactly three things, and nothing else — no role, no parenthetical, no "(recording)":
+The owner is one of exactly two things, and nothing else — no role, no parenthetical, no "(recording)", and never "Owner unclear":
   - "Me", for anything the [me] speaker owes. Write it exactly, never their own name — for example "- **Me** — send the deck by Friday". "About the person recording" above names them; that name in the transcript is this person, so "<their name> will send the deck", "you'll send the deck" and "I'll send the deck" are all "Me".
-  - One other person's name, for anything somebody else owes. Everyone but the [me] speaker keeps their own name.
-  - "Owner unclear", and only when work was clearly owed but the transcript never names who owes it — never for an item you are unsure even counts as owed work; when it is that unclear, drop the item instead.
-The user's list is built from the "Me" items alone, so an item filed under the wrong one of the three either buries his own work or puts somebody else's on his plate.
+  - One other person's name, for anything somebody else promised to do. Everyone but the [me] speaker keeps their own name.
+Write the work so somebody who was not in the call can read it a week later: name the thing, the person or the file it is about, and what is being done to it. "Send Priya the TCFD emissions file before the Q3 review" is an item; "send the file" is not.
+The user's list is built from the "Me" items alone, so an item filed under the wrong owner either buries his own work or puts somebody else's on his plate.
 
 ## Attendees
 Two lists, and every name goes in exactly one of them.

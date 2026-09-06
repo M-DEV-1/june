@@ -31,9 +31,9 @@ func TestDefaultBrain_UsesInstalledBrain(t *testing.T) {
 	}
 }
 
-// The minutes are the only place an action item's owner is ever decided, and the tasks page is built from the "Me" items alone, so the prompt has to name all three owners it will accept.
-func TestMinutesInstruction_NamesTheThreeOwners(t *testing.T) {
-	for _, want := range []string{`"Me", for anything the [me] speaker owes`, `One other person's name`, `"Owner unclear"`, `"I'll send the deck" are all "Me"`} {
+// The minutes are the only place an action item's owner is ever decided, and the tasks page is built from the "Me" items alone, so the prompt has to name both owners it will accept — and only those two, since work nobody took on is not an item at all.
+func TestMinutesInstruction_NamesTheTwoOwners(t *testing.T) {
+	for _, want := range []string{`"Me", for anything the [me] speaker owes`, `One other person's name`, `never "Owner unclear"`, `"I'll send the deck" are all "Me"`} {
 		if !strings.Contains(minutesInstruction, want) {
 			t.Errorf("the minutes prompt no longer says %q", want)
 		}
