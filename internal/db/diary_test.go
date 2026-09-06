@@ -201,3 +201,54 @@ func TestNew_ClearsAWatermarkAlreadyInTheIndex(t *testing.T) {
 		t.Errorf("%d watermark rows are still mirrored into memory_fts after reopening, want 0", got)
 	}
 }
+
+// TestSetDiaryEntry_JobMarkerIsNeverSearchable pins that a background job's last-run marker stays out of the search index. Like the task-notice watermark it is a diary row only because the diary is where the daemon keeps a keyed marker, and its content is a bare RFC 3339 timestamp the metered job rewrites every time it runs; mirrored into memory_fts it is a searchable "memory" saying nothing but a date.
+func TestSetDiaryEntry_JobMarkerIsNeverSearchable(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if err := store.SetDiaryEntry(ctx, "2026-09-06", "day", "A day of moving the store around."); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDiaryEntry(ctx, "", db.JobMarkerKindPrefix+"compact", "2026-09-06T04:00:00+05:30"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDiaryEntry(ctx, "", db.JobMarkerKindPrefix+"compact", "2026-09-06T05:00:00+05:30"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := diaryFTSCount(t, store); got != 1 {
+		t.Errorf("%d diary rows are mirrored into memory_fts, want 1 — the day page alone", got)
+	}
+}
+
+// TestNew_ClearsAJobMarkerAlreadyInTheIndex pins the migration for a store written before the job markers were kept out of the index: their timestamps are still mirrored, and opening the store again drops them.
+func TestNew_ClearsAJobMarkerAlreadyInTheIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ora.db")
+	store, err := db.New(path)
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	kind := db.JobMarkerKindPrefix + "compact"
+	if err := store.SetDiaryEntry(context.Background(), "", kind, "2026-09-06T04:00:00+05:30"); err != nil {
+		t.Fatal(err)
+	}
+	// What the old triggers left behind: the marker's timestamp mirrored under its own row id.
+	var id int64
+	if err := store.DB().QueryRow(`SELECT id FROM diary WHERE kind = ?`, kind).Scan(&id); err != nil {
+		t.Fatalf("read the marker row: %v", err)
+	}
+	if _, err := store.DB().Exec(`INSERT INTO memory_fts(content, source, ref_id) VALUES ('2026-09-06T04:00:00+05:30', 'diary', ?)`, id); err != nil {
+		t.Fatalf("mirror the marker the way the old triggers did: %v", err)
+	}
+	store.Close()
+
+	reopened, err := db.New(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	if got := diaryFTSCount(t, reopened); got != 0 {
+		t.Errorf("%d diary rows are still mirrored after reopening, want 0", got)
+	}
+}

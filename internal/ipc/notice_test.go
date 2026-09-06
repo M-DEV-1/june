@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -23,7 +24,7 @@ func TestNotice_BroadcastsToEveryWindow(t *testing.T) {
 			if ev.Type != "notice" || ev.ID != noticeEventID {
 				t.Errorf("client %d: event = %+v", i, ev)
 			}
-			if ev.Notice == nil || *ev.Notice != n {
+			if ev.Notice == nil || !reflect.DeepEqual(*ev.Notice, n) {
 				t.Errorf("client %d: notice = %+v, want %+v", i, ev.Notice, n)
 			}
 		case <-time.After(time.Second):
@@ -120,5 +121,57 @@ func TestNotice_SnoozedJSONShape(t *testing.T) {
 	}
 	if got.Notice["action"] != "snoozed" || got.Notice["until"] != "2026-09-05T18:00:00+05:30" {
 		t.Errorf("notice = %+v, want action snoozed and the moment it comes back", got.Notice)
+	}
+}
+
+// A notice that asks its own question carries its own buttons, and the window draws them straight off these names. The stale-item question is the first one: "Done", "Not happening", "Not urgent" are none of the five a desktop notification offers, so the card has to be told what to draw.
+func TestNotice_ActionsJSONShape(t *testing.T) {
+	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+
+	s.Notice(Notice{Title: "Still open", Body: "Me \u2014 settle the payment.", Place: "tasks", ID: "42", Kind: "stale", Actions: []NoticeButton{{Key: "done", Label: "Done"}, {Key: "dropped", Label: "Not happening"}}})
+	ev := <-ch
+
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		Notice struct {
+			Kind    string              `json:"kind"`
+			Actions []map[string]string `json:"actions"`
+		} `json:"notice"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := []map[string]string{{"key": "done", "label": "Done"}, {"key": "dropped", "label": "Not happening"}}
+	if got.Notice.Kind != "stale" || !reflect.DeepEqual(got.Notice.Actions, want) {
+		t.Errorf("notice.actions = %+v, want %+v", got.Notice.Actions, want)
+	}
+}
+
+// A notice with no buttons of its own must not grow an actions field: every other card reads its buttons from its kind, and an empty list would have the window draw a rail with nothing on it.
+func TestNotice_NoActionsFieldWhenThereAreNone(t *testing.T) {
+	s := New(&fakeAsker{}, newReadStore(t), nil, nil)
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+
+	s.Notice(Notice{Title: "Morning brief", Body: "Two things are still open.", Kind: "brief"})
+	ev := <-ch
+
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		Notice map[string]json.RawMessage `json:"notice"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := got.Notice["actions"]; ok {
+		t.Errorf("a notice with no buttons of its own carries an actions field: %s", data)
 	}
 }

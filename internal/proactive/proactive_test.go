@@ -2,7 +2,10 @@ package proactive
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -596,7 +599,7 @@ func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 	s.tick(ctx)
 
 	want := Notice{Title: "Morning brief", Body: "Send the deck. Retrieval work is still half done.", Place: "tasks", Kind: "brief"}
-	if len(sent) != 1 || sent[0] != want {
+	if len(sent) != 1 || !reflect.DeepEqual(sent[0], want) {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
 	if len(notes) != 0 {
@@ -649,7 +652,7 @@ func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
 	s.tick(ctx)
 
 	want := Notice{Title: "Day's written down", Body: "Today was about the diary seam.", Place: "days", ID: time.Now().Format(dayFormat), Kind: "close"}
-	if len(sent) != 1 || sent[0] != want {
+	if len(sent) != 1 || !reflect.DeepEqual(sent[0], want) {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
 	if len(notes) != 0 {
@@ -676,7 +679,7 @@ func TestNotify_PrefersTheWindow(t *testing.T) {
 		t.Fatalf("notices = %+v, want %+v", sent, want)
 	}
 	for i := range want {
-		if sent[i] != want[i] {
+		if !reflect.DeepEqual(sent[i], want[i]) {
 			t.Errorf("notice %d = %+v, want %+v", i, sent[i], want[i])
 		}
 	}
@@ -922,5 +925,160 @@ func TestSetBrainTimeout_WidensTheDutyDeadline(t *testing.T) {
 	s.SetBrainTimeout(20 * time.Minute)
 	if got := s.dutyTimeout; got != dutyTimeoutFor(20*time.Minute) {
 		t.Errorf("dutyTimeout = %v after SetBrainTimeout(20m), want %v", got, dutyTimeoutFor(20*time.Minute))
+	}
+}
+
+// staleItem stores one stale action item and hands it back as the scheduler's own duty would read it, so a test can put the question straight to askAbout. Input: the test and the store. Output: the item, note id and all.
+func staleItem(t *testing.T, store *db.Store) memory.ActionItem {
+	t.Helper()
+	openItem(t, store, "Me", "improve capture resolution in the screen-frame tool.", memory.PriorityLow, 12)
+	items, err := store.OpenActionItems(context.Background())
+	if err != nil {
+		t.Fatalf("OpenActionItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("%d open items, want the one just stored", len(items))
+	}
+	return items[0]
+}
+
+// openCount is how many action items are still open on the store.
+func openCount(t *testing.T, store *db.Store) int {
+	t.Helper()
+	open, err := store.OpenActionItems(context.Background())
+	if err != nil {
+		t.Fatalf("OpenActionItems: %v", err)
+	}
+	return len(open)
+}
+
+// The daily "Still open" question used to go straight to notify-send, which is why it kept appearing as a GNOME banner while every other moment had moved to Ora's own card. With a window up it is now a notice carrying its own three answers, and the answer comes back through the same POST /notices/{kind}/{id}/action route the card's other buttons use.
+func TestAskAbout_WindowUp_AsksOnTheCardAndAppliesTheAnswer(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	item := staleItem(t, store)
+
+	sent := make(chan Notice, 4)
+	SetNoticeSender(func(n Notice) bool { sent <- n; return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s := New(store, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	var banners int32
+	s.SetAsk(func(string, string, []string) (string, error) {
+		atomic.AddInt32(&banners, 1)
+		return "", nil
+	})
+
+	done := make(chan struct{})
+	go func() { defer close(done); s.askAbout(ctx, item) }()
+
+	var n Notice
+	select {
+	case n = <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stale-item question never reached the window")
+	}
+	if atomic.LoadInt32(&banners) != 0 {
+		t.Error("the question went to notify-send as well as to the window's card")
+	}
+	if n.Kind != staleNoticeKind || n.ID != strconv.FormatInt(item.NoteID, 10) {
+		t.Errorf("notice kind/id = %q/%q, want %q/%d", n.Kind, n.ID, staleNoticeKind, item.NoteID)
+	}
+	want := []Action{{"done", "Done"}, {"dropped", "Not happening"}, {"low", "Not urgent"}}
+	if !reflect.DeepEqual(n.Actions, want) {
+		t.Errorf("notice actions = %+v, want %+v", n.Actions, want)
+	}
+
+	if err := s.Act(ctx, n.Kind, n.ID, n.Title, n.Body, "dropped"); err != nil {
+		t.Fatalf("Act with the card's own answer: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer never reached the goroutine waiting on the question")
+	}
+	if got := openCount(t, store); got != 0 {
+		t.Errorf("%d items still open, want the answered one dropped", got)
+	}
+}
+
+// With no window listening the question stays exactly where it was: a notify-send banner carrying the same three buttons, answered the same way.
+func TestAskAbout_NoWindow_KeepsTheNotifySendBanner(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	item := staleItem(t, store)
+
+	SetNoticeSender(func(Notice) bool { return false })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s := New(store, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	var gotTitle, gotBody string
+	var gotActions []string
+	s.SetAsk(func(title, body string, actions []string) (string, error) {
+		gotTitle, gotBody, gotActions = title, body, actions
+		return "done", nil
+	})
+
+	s.askAbout(ctx, item)
+
+	if gotTitle != "Still open" || !strings.Contains(gotBody, item.Text) {
+		t.Errorf("banner asked %q / %q, want the stale item named under \"Still open\"", gotTitle, gotBody)
+	}
+	wantActions := []string{"done=Done", "dropped=Not happening", "low=Not urgent"}
+	if !reflect.DeepEqual(gotActions, wantActions) {
+		t.Errorf("banner actions = %v, want %v", gotActions, wantActions)
+	}
+	if got := openCount(t, store); got != 0 {
+		t.Errorf("%d items still open, want the answered one done", got)
+	}
+}
+
+// A card nobody ever answers changes nothing and does not leave a waiter behind: the item is asked about again another morning, and a later press with one of its own keys is a plain unknown action again.
+func TestAskAbout_WindowUp_UnansweredChangesNothing(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	item := staleItem(t, store)
+
+	SetNoticeSender(func(Notice) bool { return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s := New(store, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.askWait = 20 * time.Millisecond
+	s.SetAsk(func(string, string, []string) (string, error) {
+		t.Error("an unanswered card fell back to the notify-send banner")
+		return "", nil
+	})
+
+	s.askAbout(ctx, item)
+
+	if got := openCount(t, store); got != 1 {
+		t.Errorf("%d items open, want the unanswered one left alone", got)
+	}
+	err := s.Act(ctx, staleNoticeKind, strconv.FormatInt(item.NoteID, 10), "Still open", "", "dropped")
+	if !errors.Is(err, ErrBadNoticeAction) {
+		t.Errorf("Act after the question timed out = %v, want ErrBadNoticeAction — the waiter was not pruned", err)
+	}
+}
+
+// A key none of a notice's own buttons carries is still refused, so the route answers 400 for it exactly as it did before the registry existed.
+func TestAct_UnknownKeyOnAWaitingNotice(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	item := staleItem(t, store)
+
+	SetNoticeSender(func(Notice) bool { return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s := New(store, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.askWait = 2 * time.Second
+	go s.askAbout(ctx, item)
+	time.Sleep(50 * time.Millisecond)
+
+	id := strconv.FormatInt(item.NoteID, 10)
+	if err := s.Act(ctx, staleNoticeKind, id, "Still open", "", "banana"); !errors.Is(err, ErrBadNoticeAction) {
+		t.Errorf("Act with a key the card never offered = %v, want ErrBadNoticeAction", err)
+	}
+	if err := s.Act(ctx, "task", id, "Still open", "", "dropped"); !errors.Is(err, ErrBadNoticeAction) {
+		t.Errorf("Act on another notice's kind = %v, want ErrBadNoticeAction — the registry is keyed by kind and id", err)
 	}
 }

@@ -189,6 +189,9 @@ func (s *Store) sessionForDay(ctx context.Context, at time.Time) (int64, error) 
 	return sessionID, nil
 }
 
+// JobMarkerKindPrefix is what every diary kind recording a metered background job's last run starts with, the whole kind being this plus the job's name (cmd/daemon.go's jobMarkerKind is the only writer). It lives here because the diary FTS triggers below name it: the content of such a row is a bare RFC 3339 timestamp rewritten every time that job runs, so like the task-notice watermark it is deliberately never mirrored into memory_fts and never comes back from a search as if it were something Ora wrote.
+const JobMarkerKindPrefix = "job-last-run:"
+
 func (s *Store) createSchema() error {
 	query := `
 	CREATE TABLE IF NOT EXISTS nodes (
@@ -432,14 +435,14 @@ func (s *Store) createSchema() error {
 	);
 
 	-- Mirrored into memory_fts exactly like threads, so diary entries surface through the existing query_memory path with no agent changes.
-	-- Every kind is mirrored but TaskNoticeWatermarkKind, which is a bare note id the proactive loop rewrites on most ticks rather than anything Ora wrote (see diary.go).
-	-- The insert is written as INSERT ... SELECT ... WHERE rather than a trigger-level WHEN so the update trigger's DELETE still runs for every kind, which is what clears a watermark row an older database had already mirrored.
+	-- Two sorts of kind are left out, both bare markers rewritten on a schedule rather than anything Ora wrote: TaskNoticeWatermarkKind, whose content is a note id the proactive loop rewrites on most ticks (see diary.go), and every JobMarkerKindPrefix kind, whose content is the RFC 3339 moment one metered background job last ran (see cmd/daemon.go).
+	-- The insert is written as INSERT ... SELECT ... WHERE rather than a trigger-level WHEN so the update trigger's DELETE still runs for every kind, which is what clears a marker row an older database had already mirrored.
 	-- Dropped first so a database created before the watermark was excluded picks up the new bodies.
 	DROP TRIGGER IF EXISTS diary_ai;
 	DROP TRIGGER IF EXISTS diary_au;
 	CREATE TRIGGER IF NOT EXISTS diary_ai AFTER INSERT ON diary BEGIN
 		INSERT INTO memory_fts(content, source, ref_id)
-			SELECT NEW.content, 'diary', NEW.id WHERE NEW.kind <> '` + TaskNoticeWatermarkKind + `';
+			SELECT NEW.content, 'diary', NEW.id WHERE NEW.kind <> '` + TaskNoticeWatermarkKind + `' AND NEW.kind NOT LIKE '` + JobMarkerKindPrefix + `%';
 	END;
 	CREATE TRIGGER IF NOT EXISTS diary_ad AFTER DELETE ON diary BEGIN
 		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
@@ -447,7 +450,7 @@ func (s *Store) createSchema() error {
 	CREATE TRIGGER IF NOT EXISTS diary_au AFTER UPDATE ON diary BEGIN
 		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
 		INSERT INTO memory_fts(content, source, ref_id)
-			SELECT NEW.content, 'diary', NEW.id WHERE NEW.kind <> '` + TaskNoticeWatermarkKind + `';
+			SELECT NEW.content, 'diary', NEW.id WHERE NEW.kind <> '` + TaskNoticeWatermarkKind + `' AND NEW.kind NOT LIKE '` + JobMarkerKindPrefix + `%';
 	END;
 
 	-- dream_runs: one row per night of the overnight dreaming loop, keyed by the
@@ -658,12 +661,12 @@ func (s *Store) createSchema() error {
 		return fmt.Errorf("rebuild summary fts content: %w", err)
 	}
 
-	// Migration for DBs written while the diary triggers still mirrored every kind: the task-notice watermark's bare note id is sitting in the search index as if it were a memory. Idempotent — there is nothing left to delete on every later run.
+	// Migration for DBs written while the diary triggers still mirrored every kind: the task-notice watermark's bare note id and each background job's bare last-run timestamp are sitting in the search index as if they were memories. Idempotent — there is nothing left to delete on every later run.
 	if _, err := s.db.Exec(`
 		DELETE FROM memory_fts
 		WHERE source = 'diary'
-		  AND ref_id IN (SELECT id FROM diary WHERE kind = ?)`, TaskNoticeWatermarkKind); err != nil {
-		return fmt.Errorf("clear the task notice watermark from the search index: %w", err)
+		  AND ref_id IN (SELECT id FROM diary WHERE kind = ? OR kind LIKE ?)`, TaskNoticeWatermarkKind, JobMarkerKindPrefix+"%"); err != nil {
+		return fmt.Errorf("clear the diary's bare markers from the search index: %w", err)
 	}
 
 	return nil
