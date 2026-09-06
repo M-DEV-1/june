@@ -276,3 +276,32 @@ func TestActRoutes_RefusesAGoallessOrUnknownBrainJob(t *testing.T) {
 		t.Errorf("a body that will not decode = %d, want 400", got.Code)
 	}
 }
+
+// TestActStart_BadRequestOnlyForValidationErrors checks POST /act separates what the caller got wrong from what the daemon could not do: a blank goal and a brain this daemon does not have are 400, while a store that cannot take the job is 500 — reporting a wedged store as "you sent a bad goal" sends the user looking in the wrong place.
+func TestActStart_BadRequestOnlyForValidationErrors(t *testing.T) {
+	j, _, _ := jobServer(t, &jobExec{}, stepJSON)
+
+	if w := post(t, j, "POST", "/act", `{"goal":"   "}`); w.Code != http.StatusBadRequest {
+		t.Errorf("POST /act with a blank goal = %d (%s), want 400", w.Code, w.Body.String())
+	}
+	if w := post(t, j, "POST", "/act", `{"goal":"play S16 E8","brain":"nosuchbrain"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("POST /act with an unknown brain = %d (%s), want 400", w.Code, w.Body.String())
+	}
+	if w := post(t, j, "POST", "/act", `{"goal":"play S16 E8","summary_brain":"nosuchbrain"}`); w.Code != http.StatusBadRequest {
+		t.Errorf("POST /act with an unknown summary brain = %d (%s), want 400", w.Code, w.Body.String())
+	}
+
+	// A store that has already been closed stands in for one that cannot take the write: everything the caller sent is fine, so this is the daemon's failure to report.
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	store.Close()
+	model := func(ctx context.Context, prompt string) (string, actjob.Usage, error) {
+		return stepJSON, actjob.Usage{}, nil
+	}
+	broken := NewActJobs(actjob.New(store, &jobExec{}, map[string]actjob.Model{"fake": model}, "fake", nil))
+	if w := post(t, broken, "POST", "/act", `{"goal":"play S16 E8"}`); w.Code != http.StatusInternalServerError {
+		t.Errorf("POST /act against a closed store = %d (%s), want 500", w.Code, w.Body.String())
+	}
+}

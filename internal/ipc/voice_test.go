@@ -783,3 +783,22 @@ func TestVoiceLevels_StopsWhenSessionEnds(t *testing.T) {
 		}
 	}
 }
+
+// TestVoiceStartAndStopRefuseAGet checks both mutating voice routes guard their method the way every other mutating route in this package does: a GET /voice/start would otherwise open the user's microphone and start a live session, which is the sort of thing a stray prefetch from the window's own origin does.
+func TestVoiceStartAndStopRefuseAGet(t *testing.T) {
+	srv, _, mic, _, _ := newVoiceServer(t)
+
+	for _, path := range []string{"/voice/start", "/voice/stop"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s = %d, want 405", path, resp.StatusCode)
+		}
+	}
+	if mic.captured.Load() {
+		t.Errorf("a GET opened the microphone")
+	}
+}

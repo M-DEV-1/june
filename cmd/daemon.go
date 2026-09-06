@@ -840,6 +840,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	server := &http.Server{
 		Handler: mux,
+		// A header-read bound, and only that: WriteTimeout stays zero because /events holds its response open for as long as a window is listening. Ten seconds is long enough for any local caller to finish a request line and short enough that a process opening connections and never finishing one does not hold them.
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
