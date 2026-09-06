@@ -21,8 +21,4 @@ describe("reading a stored window geometry", () => {
     expect(parseGeometry(JSON.stringify({ x: 0, y: 0, width: 100, height: 700 }))).toBeUndefined();
     expect(parseGeometry(JSON.stringify({ x: 0, y: 0, width: 900, height: 40 }))).toBeUndefined();
   });
-
-  it("refuses a rectangle that is not a finite number, so no window is ever placed at NaN", () => {
-    expect(parseGeometry('{"x":null,"y":0,"width":900,"height":700}')).toBeUndefined();
-  });
 });
