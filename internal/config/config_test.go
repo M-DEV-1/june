@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // DataDir resolves in a fixed order: the ORA_DATA_DIR override verbatim (what the tests and any scripted/portable install use), then $XDG_DATA_HOME/ora, then ~/.local/share/ora.
@@ -440,5 +441,23 @@ func TestLoadConfig_ZeroTrackerFieldsFallBackToTheDefaults(t *testing.T) {
 	}
 	if len(cfg.Tracker.Blocklist) != len(DefaultBlocklist) {
 		t.Errorf("blocklist has %d entries, want the default %d", len(cfg.Tracker.Blocklist), len(DefaultBlocklist))
+	}
+}
+
+// TestTrackerDwellTime_IsMilliseconds pins the unit the dwell time is stored in, because the field was typed time.Duration while holding 15000 milliseconds — as a Duration that number reads as 15 microseconds, and it was only ever right because the one call site multiplied by time.Millisecond a second time. A plain int cannot be handed to a Duration parameter by mistake.
+func TestTrackerDwellTime_IsMilliseconds(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ORA_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "ora-config.json"), []byte(`{"tracker":{"dwell_time_ms":2500}}`), 0600); err != nil {
+		t.Fatalf("write the config: %v", err)
+	}
+
+	// The assignment to a plain int is the assertion about the type: a time.Duration would not compile here, and that is what made 15000 read as 15 microseconds everywhere but the one call site.
+	var ms int = LoadConfig().Tracker.DwellTime
+	if got := ms; got != 2500 {
+		t.Errorf("dwell time = %d, want 2500 milliseconds read straight off the file", got)
+	}
+	if got := time.Duration(DefaultDwellTime) * time.Millisecond; got != 15*time.Second {
+		t.Errorf("the default dwell time is %v once the call site converts it, want 15s", got)
 	}
 }

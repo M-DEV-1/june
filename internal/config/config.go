@@ -176,8 +176,16 @@ type BrainConfig struct {
 	Model string `json:"model"`
 	// Binary is the path to the claude CLI to run. Empty means look "claude" up on PATH.
 	Binary string `json:"binary"`
-	// TimeoutSeconds is the hard limit on a single CLI run, after which the child is killed and the call fails. Defaults to DefaultBrainTimeoutSeconds. The Gemini provider ignores it and is bounded by the caller's context.
+	// TimeoutSeconds is the hard limit on a single call, after which the CLI child is killed or the HTTP request is dropped, and the call fails. Defaults to DefaultBrainTimeoutSeconds. The Gemini provider passes it to the SDK's own HTTPOptions.Timeout, so every provider is bounded by it.
 	TimeoutSeconds int `json:"timeout_seconds"`
+}
+
+// Timeout returns the hard limit on one brain call, defaulting to DefaultBrainTimeoutSeconds. internal/brain applies the same default when it builds the backend; this is for callers that need to size their own deadline around a call.
+func (b BrainConfig) Timeout() time.Duration {
+	if b.TimeoutSeconds <= 0 {
+		return DefaultBrainTimeoutSeconds * time.Second
+	}
+	return time.Duration(b.TimeoutSeconds) * time.Second
 }
 
 // The provider names accepted in BrainConfig.Provider.
@@ -376,11 +384,13 @@ func IsValidVoice(name string) bool {
 }
 
 // DefaultDwellTime is how long a window must hold focus before the tracker records it, in milliseconds. Used both as the built-in default and as the fallback for a config file that carries an explicit zero.
-const DefaultDwellTime time.Duration = 15000
+// It is a plain int rather than a time.Duration because that is what the number on disk means: as a Duration, 15000 reads as 15 microseconds, and the value was only ever right because the one call site multiplied by time.Millisecond a second time.
+const DefaultDwellTime = 15000
 
 type TrackerConfig struct {
-	Blocklist []string      `json:"blocklist"`
-	DwellTime time.Duration `json:"dwell_time_ms"`
+	Blocklist []string `json:"blocklist"`
+	// DwellTime is milliseconds, as the JSON tag says. cmd/daemon.go converts it once, where it is handed to the tracker.
+	DwellTime int `json:"dwell_time_ms"`
 }
 
 // DefaultBlocklist is matched via tracker.MatchesBlocklist, a case-insensitive, ".exe"-stripped substring match, so one entry covers both platforms.
