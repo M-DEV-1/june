@@ -22,17 +22,33 @@ var (
 	tp *sdktrace.TracerProvider
 )
 
+// maxLogBytes is how large ora.log may grow before the next start rolls it aside. The log is written at Debug and carries the first 160 characters of every tool result, so on a busy day it grows fast; nothing else in the tree ever truncated it.
+const maxLogBytes = 50 << 20
+
+// rotateLog renames path to path+".1" when the file has grown past maxLogBytes, so the next open starts a fresh log and at most two are ever kept. Input: the log's path. Output: none — a missing file, a failed stat or a failed rename all leave things as they are, since a log that cannot be rotated is no reason to refuse to start.
+func rotateLog(path string) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= maxLogBytes {
+		return
+	}
+	if err := os.Rename(path, path+".1"); err != nil {
+		fmt.Fprintf(os.Stderr, "ora: could not rotate %s: %v\n", path, err)
+	}
+}
+
 // global slog logger, otel traceprovider init
 // returns shutdown, must defer in main.go
 func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) error, error) {
 	// The log goes in config.DataDir(), not a working-directory-relative "ora-db" — the daemon (launched by the autostart entry, cwd = the binary's directory) and a terminal-launched client would otherwise write to two different log files.
 	logDir := config.DataDir()
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	// 0700: the same directory holds the store, the IPC token and this log, and InitTelemetry is usually the first thing to create it.
+	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	// The log is 0600, readable only by the user who runs Ora. Every tool call writes the first 160 characters of its result here, and for observe_screen that is the title and the contents of whatever window was in front — a password manager, an inbox — so nobody else with an account on the machine may read it.
 	logPath := filepath.Join(logDir, "ora.log")
+	rotateLog(logPath)
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)

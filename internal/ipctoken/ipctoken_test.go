@@ -90,3 +90,19 @@ func TestRead_MissingFile_ReturnsError(t *testing.T) {
 		t.Error("expected an error reading a token file that doesn't exist")
 	}
 }
+
+// The token file is 0600, but the directory it sits in was created 0755 here, so whoever created the data directory first decided whether anyone else on the machine could list it. It is the user's own directory and is created as such.
+func TestGenerate_CreatesTheTokenDirectoryPrivateToTheUser(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ora")
+	if _, err := ipctoken.Generate(filepath.Join(dir, "ipc-token")); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat the token directory: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0700 {
+		t.Errorf("expected the token directory to be 0700, got %o", got)
+	}
+}
