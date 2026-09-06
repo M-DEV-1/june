@@ -203,6 +203,7 @@ func screenLayout() ([]image.Rectangle, image.Point) {
 // grabScreen returns a PNG of the current screen for the vision tier.
 // Prefers gnome-shell's direct API because it captures silently and invisibly; falls back to the portal on other compositors, which flashes on GNOME but at least works everywhere.
 func grabScreen(ctx context.Context) ([]byte, error) {
+	defer standAside()()
 	png, err := screenshotShell(ctx)
 	if err == nil {
 		return png, nil

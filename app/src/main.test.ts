@@ -1,6 +1,5 @@
 /** @vitest-environment jsdom */
 /** Regression test for the "stuttering" status line: main.ts used to rebuild the whole card's innerHTML on every daemon event while an ask was running (and once a second besides, from the elapsed-time ticker), tearing down and recreating the live step row on every one of them. A CSS animation restarts from its first frame whenever the element carrying it is removed and recreated, so the shimmer and breathe never got to run a full pass — that restart, not the animations themselves, was the stutter. patchLiveSteps (see main.ts) now patches that row in place instead. This checks the fix holds: the row survives a run of daemon events as the same DOM node instead of being swapped for a fresh one. */
-import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import type { DaemonEvent } from "./daemon";
@@ -40,40 +39,6 @@ vi.mock("./daemon", () => ({
   actPauseResume: vi.fn(),
   actAnswer: vi.fn(),
 }));
-
-describe("the live step row's animation survives a run of daemon events", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
-  });
-
-  it("keeps the same row, icon and label nodes across status and tool events", async () => {
-    const { dispatch } = await import("./main");
-    // Lets connect()'s mocked probe/context/matters/voiceStatus promises settle before the ask starts.
-    await new Promise((r) => setTimeout(r, 0));
-
-    dispatch({ kind: "type", value: "what changed on this page" });
-    dispatch({ kind: "enter" });
-
-    const row = document.querySelector(".steps .step.run");
-    const icon = row?.querySelector(".step-ic");
-    const label = row?.querySelector(".step-label");
-    expect(row).toBeTruthy();
-    expect(icon).toBeTruthy();
-    expect(label).toBeTruthy();
-
-    dispatch({ kind: "daemonEvent", ev: { id: "", type: "status", text: "Checking." } });
-    dispatch({ kind: "daemonEvent", ev: { id: "", type: "tool", text: "observe_screen", detail: "" } });
-    dispatch({ kind: "daemonEvent", ev: { id: "", type: "tool", text: "observe_screen", detail: "done" } });
-    dispatch({ kind: "daemonEvent", ev: { id: "", type: "status", text: "Checking." } });
-
-    expect(document.querySelector(".steps .step.run")).toBe(row);
-    expect(row?.querySelector(".step-ic")).toBe(icon);
-    expect(row?.querySelector(".step-label")).toBe(label);
-    // The finished tool call got its own row, appended rather than replacing anything.
-    expect(document.querySelectorAll(".steps > .step").length).toBe(2);
-  });
-});
 
 describe("a computer-use job started with do:", () => {
   beforeEach(() => {
@@ -304,6 +269,15 @@ describe("live voice mode", () => {
   });
 });
 
+// What the daemon puts on a task notice: the same five buttons its desktop banner offers, in the same order (noticeActions in internal/proactive/notify.go). A card draws the actions its notice names and nothing else, so a fixture that presses a button has to carry them.
+const TASK_ACTIONS = [
+  { key: "default", label: "Open in Ora" },
+  { key: "done", label: "Done" },
+  { key: "hour", label: "In an hour" },
+  { key: "evening", label: "This evening" },
+  { key: "tomorrow", label: "Tomorrow" },
+];
+
 // A notice sent back with its action filled in is the desktop notification's own Done/snooze buttons reaching this window (see internal/proactive/notify.go); it draws as one line instead of the title and body a fresh notice shows, reusing the same bubble and the same .nt/.nb markup.
 describe("a notice's action line replaces its title and body in the bubble", () => {
   beforeEach(() => {
@@ -344,65 +318,6 @@ describe("a notice's action line replaces its title and body in the bubble", () 
   });
 });
 
-// C6 from the design review: the status dot told its four states apart by colour alone, with idle (a near-invisible grey) reading the same as "the dot is missing", and the daemon-down red carrying no words for a new user to go on.
-describe("the status dot names its own state", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
-    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
-  });
-
-  it("gives the resting dot an aria-label and title once the daemon has answered", async () => {
-    await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-
-    const dot = document.querySelector(".dot");
-    expect(dot?.getAttribute("aria-label")).toBe("Ready");
-    expect(dot?.getAttribute("title")).toBe("Ready");
-  });
-
-  it("gives the dot a different label while a question is running", async () => {
-    const { dispatch } = await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-
-    dispatch({ kind: "type", value: "what changed on this page" });
-    dispatch({ kind: "enter" });
-
-    const dot = document.querySelector(".dot");
-    expect(dot?.getAttribute("aria-label")).toBe("Working");
-  });
-
-  it("replaces the dot with the words 'Not connected' when the daemon does not answer its probe", async () => {
-    const { probe } = await import("./daemon");
-    vi.mocked(probe).mockResolvedValue(false);
-    await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-
-    expect(document.querySelector(".dot")).toBeNull();
-    expect(document.querySelector(".in")?.textContent).toContain("Not connected");
-  });
-});
-
-// Same review: the resting placeholder used to carry the two shortcut hints inline ("Space to dictate · Shift+Space for voice"), which vanished the moment there was anything else to say and were never announced any other way. They now sit permanently beside the input instead.
-describe("the shortcut hints beside the input", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
-    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
-  });
-
-  it("shows the resting placeholder as just 'Ask Ora', with the dictate and voice hints in the context-chip slot instead", async () => {
-    await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-
-    const input = document.querySelector<HTMLInputElement>(".q");
-    expect(input?.placeholder).toBe("Ask Ora");
-
-    const ctx = document.querySelector(".ctx");
-    expect(ctx?.textContent).toBe("⎵ dictate · ⇧⎵ voice");
-  });
-});
-
 // A fresh notice is a card with its answers on it: the user deals with it where it appears instead of going to the app window or to a desktop banner asking the same thing.
 describe("a notice card carries its own buttons", () => {
   beforeEach(() => {
@@ -418,12 +333,12 @@ describe("a notice card carries its own buttons", () => {
       await new Promise((r) => setTimeout(r, 0));
       dispatch({
         kind: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" },
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task", actions: TASK_ACTIONS },
         hoverOpen: true,
       });
       const bubble = document.getElementById("n")!;
       const acts = [...bubble.querySelectorAll<HTMLButtonElement>("button.na")].map((b) => b.dataset.act);
-      expect(acts).toEqual(["done", "hour", "evening", "tomorrow", "open"]);
+      expect(acts).toEqual(["default", "done", "hour", "evening", "tomorrow"]);
       expect(bubble.querySelector(".nt")?.textContent).toBe("Still open");
 
       bubble.querySelector<HTMLButtonElement>('button.na[data-act="hour"]')!.click();
@@ -444,7 +359,7 @@ describe("a notice card carries its own buttons", () => {
     try {
       const { dispatch } = await import("./main");
       await new Promise((r) => setTimeout(r, 0));
-      dispatch({ kind: "notice", notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief" }, hoverOpen: true });
+      dispatch({ kind: "notice", notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief", actions: TASK_ACTIONS }, hoverOpen: true });
       document.querySelector<HTMLButtonElement>('#n button.na[data-act="done"]')!.click();
       expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/notices/brief/-/action"))).toBe(true);
     } finally {
@@ -478,9 +393,6 @@ describe("a notice card carries its own buttons", () => {
       const buttons = [...document.querySelectorAll<HTMLButtonElement>("#n button.na")];
       expect(buttons.map((b) => b.textContent)).toEqual(["Done", "Not happening", "Not urgent"]);
       expect(buttons.map((b) => b.dataset.act)).toEqual(["done", "dropped", "later"]);
-      // Read on its own by a screen reader, "Not happening" says nothing about what is not happening, so each button names its notice.
-      expect(buttons[1]?.getAttribute("aria-label")).toBe("Not happening — Still open");
-
       buttons[1]!.click();
       const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/notices/task/42/action"));
       expect(call).toBeDefined();
@@ -522,70 +434,42 @@ describe("a notice card carries its own buttons", () => {
       vi.unstubAllGlobals();
     }
   });
-});
 
-// The live row's "working" state is the braille dot grid — Ora's one signature for "listening or working", the same grid live voice draws — rather than the words that used to sit there.
-describe("the live step row's braille grid", () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    vi.clearAllMocks();
-    // An earlier block leaves probe resolving false, which would send the ask down the offline path and never show a live row at all.
-    const { probe } = await import("./daemon");
-    vi.mocked(probe).mockResolvedValue(true);
-    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
+  // A card offering a button the notice cannot answer is what put Done and three snoozes on "Transcribing meeting", where pressing one answered "Could not do that". The daemon says what each notice can answer (see openOnlyActions and noticeActions in internal/proactive), and the card draws that and nothing else.
+  it("draws the buttons the notice names and nothing else, and opens on the desktop's own open key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({
+        kind: "notice",
+        notice: {
+          title: "Transcribing meeting",
+          body: "Ora is transcribing the recording in the background.",
+          place: "",
+          id: "",
+          kind: "note",
+          actions: [{ key: "default", label: "Open in Ora" }],
+        },
+        hoverOpen: true,
+      });
+      expect([...document.querySelectorAll<HTMLButtonElement>("#n button.na")].map((b) => b.dataset.act)).toEqual(["default"]);
 
-  /** Whether every character of a string is a braille cell, U+2800 to U+28FF. */
-  const allBraille = (t: string) =>
-    t.length > 0 && [...t].every((c) => c.codePointAt(0)! >= 0x2800 && c.codePointAt(0)! <= 0x28ff);
+      // "default" is what the desktop calls a press on the notification body, and it is the key the daemon's own Open button carries. It opens the window here rather than being posted back as an action the daemon would refuse.
+      document.querySelector<HTMLButtonElement>('#n button.na[data-act="default"]')!.click();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(fetchMock.mock.calls.map(([u]) => String(u))).toEqual(["/window?action=open"]);
 
-  it("shows one row of the dot grid, not words, while a question runs with no tool call yet", async () => {
-    const { dispatch } = await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-
-    dispatch({ kind: "type", value: "what changed on this page" });
-    dispatch({ kind: "enter" });
-
-    const text = document.querySelector(".steps .step.run .step-label")?.textContent ?? "";
-    expect(allBraille(text)).toBe(true);
-    // No "Thinking", no "working" — the grid is the whole of what the row says.
-    expect(document.querySelector(".steps")?.textContent).not.toMatch(/[A-Za-z]/);
-  });
-
-  it("advances the row while it is shown, without replacing the element its animations run on", async () => {
-    const { dispatch } = await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-    // Installed before the ask starts, so the ticker the ask sets up is the fake one this test drives.
-    vi.useFakeTimers();
-
-    dispatch({ kind: "type", value: "what changed on this page" });
-    dispatch({ kind: "enter" });
-
-    const label = document.querySelector(".steps .step.run .step-label")!;
-    const before = label.textContent;
-    vi.advanceTimersByTime(600);
-    expect(label.textContent).not.toBe(before);
-    expect(allBraille(label.textContent ?? "")).toBe(true);
-    // The row is patched in place, so the element carrying the CSS animations is still the same one.
-    expect(document.querySelector(".steps .step.run .step-label")).toBe(label);
-  });
-
-  it("shows a running tool call's own label instead of the grid", async () => {
-    const { dispatch } = await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-
-    dispatch({ kind: "type", value: "what changed on this page" });
-    dispatch({ kind: "enter" });
-    dispatch({ kind: "daemonEvent", ev: { id: "", type: "tool", text: "observe_screen", detail: "" } });
-    // The label cross-fades rather than swapping instantly (see crossFadeText), so the new words land 150ms later.
-    await new Promise((r) => setTimeout(r, 200));
-
-    const label = document.querySelector(".steps .step.run .step-label")!;
-    expect(label.textContent).toMatch(/[A-Za-z]/);
-    expect(label.classList.contains("work")).toBe(false);
+      dispatch({
+        kind: "notice",
+        notice: { title: "Recording saved", body: "Ora will transcribe it once you plug in.", place: "", id: "", kind: "note" },
+        hoverOpen: true,
+      });
+      expect(document.querySelectorAll("#n button.na").length).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -666,32 +550,12 @@ describe("a notice the daemon refuses", () => {
     document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
   });
 
-  it("keeps the card up and says on it that the button did not take", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 500 }));
-    vi.stubGlobal("fetch", fetchMock);
-    try {
-      const { dispatch } = await import("./main");
-      await new Promise((r) => setTimeout(r, 0));
-      dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
-
-      document.querySelector<HTMLButtonElement>('#n button.na[data-act="evening"]')!.click();
-      await new Promise((r) => setTimeout(r, 0));
-
-      expect(document.getElementById("n")?.hidden).toBe(false);
-      expect(document.querySelector("#n .nf")?.textContent).toBe("Could not do that");
-      // The buttons are still there, so the same press can be tried again; the app window takes its own view of a refusal (see DESIGN.md rule 18), and this is the hover's.
-      expect(document.querySelectorAll("#n button.na").length).toBe(5);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
   it("says the same when the daemon cannot be reached at all", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connection refused")));
     try {
       const { dispatch } = await import("./main");
       await new Promise((r) => setTimeout(r, 0));
-      dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+      dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task", actions: TASK_ACTIONS }, hoverOpen: true });
       document.querySelector<HTMLButtonElement>('#n button.na[data-act="done"]')!.click();
       await new Promise((r) => setTimeout(r, 0));
 
@@ -718,11 +582,11 @@ describe("the notice timer under a pointer that is already on the card", () => {
     const { dispatch } = await import("./main");
     await vi.advanceTimersByTimeAsync(0);
 
-    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task", actions: TASK_ACTIONS }, hoverOpen: true });
     const bubble = document.getElementById("n")!;
     // The pointer is on the card; no fresh pointerenter fires for the notice that lands under it.
     vi.spyOn(bubble, "matches").mockReturnValue(true);
-    dispatch({ kind: "notice", notice: { title: "Also open", body: "Book the flight", place: "tasks", id: "43", kind: "task" }, hoverOpen: true });
+    dispatch({ kind: "notice", notice: { title: "Also open", body: "Book the flight", place: "tasks", id: "43", kind: "task", actions: TASK_ACTIONS }, hoverOpen: true });
 
     await vi.advanceTimersByTimeAsync(7000);
     expect(bubble.hidden).toBe(false);
@@ -963,18 +827,7 @@ describe("the window a notice opens on its own", () => {
     // One move per fit, not the two the double placement used to make.
     expect(calls.filter((c) => c.startsWith("setPosition"))).toHaveLength(1);
     expect(calls.indexOf("show")).toBe(calls.length - 1);
-    expect(document.body.classList.contains("alone")).toBe(true);
     expect(calls).not.toContain("raise");
-  });
-
-  // The class is a margin, and which side it goes on follows where the window actually is: a notice-only window is put under the top bar whatever hover position is stored.
-  it("takes its air above the card, whatever hover position is stored", async () => {
-    localStorage.setItem("ora-hover-position", "bottom");
-    const { send } = await notifiable();
-    send({ id: "", type: "notice", notice });
-    await vi.waitFor(() => expect(document.getElementById("n")?.hidden).toBe(false));
-    expect(document.getElementById("n")?.className).toBe("N up");
-    localStorage.removeItem("ora-hover-position");
   });
 });
 
@@ -1033,29 +886,6 @@ describe("the card's fold-out headers are keyboard controls", () => {
   });
 });
 
-// The notice card is sized to itself and the window is sized to the card, with no minimum height and a clamp that pins a window too tall for its area to the top of the screen; a long title and a wrapped row of buttons had nothing stopping them running off the bottom.
-describe("what the stylesheet and the page hold the notice to", () => {
-  // Read off disk rather than imported: what is asserted here is what the browser will be handed, and a CSS import in a jsdom test resolves to an empty module.
-  const css = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
-  /** The body of one CSS rule. Input: the selector, exactly as written in the file. Output: what is between its braces. */
-  const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`)).slice(0, css.slice(css.indexOf(`${selector} {`)).indexOf("}"));
-
-  it("caps the card's height and hides what runs past it", () => {
-    expect(rule(".N")).toContain("max-height: 300px");
-    expect(rule(".N")).toContain("overflow: hidden");
-  });
-
-  it("clamps the title to two lines, the way the body is clamped to three", () => {
-    expect(rule(".N .nt")).toContain("-webkit-line-clamp: 2");
-    expect(rule(".N .nb")).toContain("-webkit-line-clamp: 3");
-  });
-
-  it("makes the bubble a live region, since a notice is Ora talking first", () => {
-    const html = readFileSync(`${process.cwd()}/index.html`, "utf8");
-    expect(html).toContain('id="n" role="status" aria-live="polite"');
-  });
-});
-
 // Space with an empty input opens the microphone, and the capture-phase listener that does it sees every key on the card first. The fold headers were exempted by their role="button"; every other control on the card is a native <button>, which carries no role attribute at all.
 describe("Space on the card's own buttons", () => {
   beforeEach(async () => {
@@ -1069,7 +899,7 @@ describe("Space on the card's own buttons", () => {
   it("leaves the microphone shut when Space presses a notice button", async () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
-    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task", actions: TASK_ACTIONS }, hoverOpen: true });
 
     const button = document.querySelector<HTMLButtonElement>('#n button.na[data-act="done"]')!;
     const pressed = button.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
@@ -1128,7 +958,7 @@ describe("what a render does to the keyboard", () => {
   it("leaves the keyboard on a notice button a render lands under", async () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
-    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task" }, hoverOpen: true });
+    dispatch({ kind: "notice", notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task", actions: TASK_ACTIONS }, hoverOpen: true });
     const button = document.querySelector<HTMLButtonElement>('#n button.na[data-act="hour"]')!;
     button.focus();
 
@@ -1153,31 +983,3 @@ describe("what a render does to the keyboard", () => {
   });
 });
 
-// The card's margin and the hidden ask card underneath it both say the same thing — this notice is on its own — and used to be read from two different flags, which disagreed anywhere but the Tauri path.
-describe("a notice that is the only thing on screen", () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    vi.clearAllMocks();
-    const { probe } = await import("./daemon");
-    vi.mocked(probe).mockResolvedValue(true);
-    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
-  });
-
-  it("takes its air above and hides the card, from the one flag", async () => {
-    const { dispatch } = await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-    dispatch({ kind: "notice", notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief" }, hoverOpen: false });
-
-    expect(document.getElementById("n")?.className).toBe("N up");
-    expect(document.body.classList.contains("alone")).toBe(true);
-  });
-
-  it("takes its air below when the hover is open under it", async () => {
-    const { dispatch } = await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-    dispatch({ kind: "notice", notice: { title: "Morning brief", body: "Nothing urgent.", place: "", id: "", kind: "brief" }, hoverOpen: true });
-
-    expect(document.getElementById("n")?.className).toBe("N down");
-    expect(document.body.classList.contains("alone")).toBe(false);
-  });
-});

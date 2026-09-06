@@ -49,10 +49,10 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .W .in .ctx { font: 400 13px/1.45 var(--body); color: var(--mute); white-space: nowrap; max-width: 38%; overflow: hidden; text-overflow: ellipsis; flex: none; }
 
 /* The voice-mode surface (see main.ts's voiceSurfaceHtml): replaces the input and the thread entirely for the whole length of a live voice session, the way Gemini Live and ChatGPT's own voice mode take over the screen instead of sharing it with the composer. */
-.W .voicebox { display: grid; justify-items: center; gap: 16px; padding: 32px 24px 20px; }
-.W .vs-state { font: 600 11px/1.3 var(--body); letter-spacing: .08em; text-transform: uppercase; color: var(--mute); }
+.W .voicebox { display: grid; justify-items: center; gap: 13px; padding: 22px 24px 16px; }
+.W .vs-state { font: 600 10px/1.2 var(--body); letter-spacing: .08em; text-transform: uppercase; color: var(--mute); }
 /* Ora's own four braille rows (see waveform.ts), the surface's centrepiece rather than a sliver beside the input: 16px monospace at line-height 1, in the accent purple (about 40 columns × 4 rows). */
-.W .vwave { font-family: var(--mono); font-size: 16px; line-height: 1; }
+.W .vwave { font-family: var(--mono); font-size: 15px; line-height: 1; }
 .W .vw-spk { display: flex; flex-direction: column; color: var(--accent); }
 .W .vw-row { white-space: pre; }
 /* The last thing the user said and the last thing Ora said, one line each, clipped rather than wrapped — a live session's transcript is a glance, not something to read in full here. */
@@ -97,6 +97,7 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 /* The live step list, shown in place of the answer while an ask is still running (see main.ts's stepsHtml) — one row per tool call, in the order they ran. Every row plays a brief slide-and-fade entrance on mount (step-in), once: main.ts patches a running turn's list in place (see patchLiveSteps) rather than rebuilding it on every event, so a finished row is appended exactly once and never touched again, and this only plays for the row it is actually new for. */
 .W .steps { display: grid; gap: 8px; }
 /* DESIGN.md's text-read, the same size and rhythm every step row in the main window's own document view reads at. */
+.W .step-more { font-size: 13px; color: var(--mute); opacity: .8; }
 .W .step { display: flex; align-items: center; gap: 10px; font-size: 15px; line-height: 1.62; letter-spacing: -.003em; color: var(--fg); animation: step-in 180ms ease-out; }
 .W .step.ok, .W .step.err { color: var(--mute); }
 @keyframes step-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }

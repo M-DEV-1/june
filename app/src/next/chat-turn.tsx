@@ -207,9 +207,13 @@ export function Thread({
 
             {run ? (
               <>
-                <div className="max-w-[85%] self-end rounded-xl bg-secondary px-3.5 py-2.5 whitespace-pre-wrap">
-                  {run.question}
-                </div>
+                {/* The daemon writes the question into the conversation as soon as the ask starts, so anything that reads the conversation again while the answer is still streaming brings that question back as a turn — and the thread then drew it twice, once as a stored turn and once as the run's own bubble. The run's bubble is the one that gives way. */}
+                {turns[turns.length - 1]?.text.trim() === run.question.trim() &&
+                turns[turns.length - 1]?.role === "you" ? null : (
+                  <div className="max-w-[85%] self-end rounded-xl bg-secondary px-3.5 py-2.5 whitespace-pre-wrap">
+                    {run.question}
+                  </div>
+                )}
                 <Working run={run} />
               </>
             ) : null}

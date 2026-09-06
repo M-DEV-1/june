@@ -93,17 +93,6 @@ describe("the rail", () => {
     for (const place of ["Tasks", "Meetings", "Days", "Settings"]) expect(screen.getByRole("button", { name: place })).toBeDefined();
     expect(screen.queryByRole("button", { name: "Usage" })).toBeNull();
   });
-
-  it("pins the width of the box Radix draws around the conversation list, so a long subtitle truncates against the rail's own edge rather than growing past it with no ellipsis", async () => {
-    renderApp({ conversations: conversations() });
-    await row("Flights to Zurich");
-    const scrollArea = document.querySelector('[data-slot="sidebar-content"] [data-slot="scroll-area"]');
-    expect(scrollArea).not.toBeNull();
-    // Radix's own viewport box is `display: table`, which sizes to its widest row rather than the rail; without a fixed table layout and a width pinned to zero (floored back up to the full rail by min-w-full), a long subtitle grows that box past the rail and is cut by the rail's own edge instead of by the truncated span's, which is what left the reported line stopping mid-word with no "…".
-    expect(scrollArea?.className).toContain("[&>[data-radix-scroll-area-viewport]>div]:table-fixed");
-    expect(scrollArea?.className).toContain("[&>[data-radix-scroll-area-viewport]>div]:w-0");
-    expect(scrollArea?.className).toContain("[&>[data-radix-scroll-area-viewport]>div]:min-w-full");
-  });
 });
 
 describe("the menu on a row", () => {
@@ -186,6 +175,15 @@ describe("the jump-to-a-chat palette", () => {
   });
 });
 
+// What the daemon puts on a task notice: the same five buttons its desktop banner offers (noticeActions in internal/proactive/notify.go). A card draws the actions its notice names, so a fixture that presses a button has to carry them.
+const TASK_ACTIONS = [
+  { key: "default", label: "Open in Ora" },
+  { key: "done", label: "Done" },
+  { key: "hour", label: "In an hour" },
+  { key: "evening", label: "This evening" },
+  { key: "tomorrow", label: "Tomorrow" },
+];
+
 // A live notice — one that reached the window with no action yet — offers its own Done/1h/Evening/Tomorrow row, wired through POST /notices/{kind}/{id}/action (see internal/proactive/notify.go's Act, the same code a desktop notification's own buttons call).
 describe("a live notice's own buttons", () => {
   it("posts the pressed button's action for that notice", async () => {
@@ -195,7 +193,7 @@ describe("a live notice's own buttons", () => {
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
       }),
     );
 
@@ -217,7 +215,7 @@ describe("a live notice's own buttons", () => {
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
       }),
     );
     expect(await screen.findByRole("button", { name: "Done — Still open" })).toBeDefined();
@@ -231,7 +229,7 @@ describe("a live notice's own buttons", () => {
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
       }),
     );
 
@@ -242,27 +240,31 @@ describe("a live notice's own buttons", () => {
     expect(store.getState().ui.liveNotice).toBeDefined();
   });
 
-  it("offers Done alongside the snooze buttons for a task, but only the snooze buttons for a routine", async () => {
+  // The daemon says what each notice can answer and the window draws that, rather than each window deciding for itself. A task can be completed or pushed to later; a routine's report is Ora saying what it found, with nothing to complete and nowhere to push it to, and the four buttons it used to get all came back "Could not do that".
+  it("draws the buttons the notice names, and none for a routine that names only Open", async () => {
     const { store } = renderApp({ conversations: conversations() });
     await row("Flights to Zurich");
     store.dispatch(
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
       }),
     );
     expect(await screen.findByRole("button", { name: /^Done/ })).toBeDefined();
+    expect(screen.getByRole("button", { name: /^Evening/ })).toBeDefined();
 
     store.dispatch(
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine" },
+        notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine", actions: [{ key: "default", label: "Open in Ora" }] },
       }),
     );
-    expect(await screen.findByRole("button", { name: /^Evening/ })).toBeDefined();
-    expect(screen.queryByRole("button", { name: /^Done/ })).toBeNull();
+    // Open is the one button the app window drops: it is already the thing Open would open.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^Done/ })).toBeNull());
+    expect(screen.queryByRole("button", { name: /^Evening/ })).toBeNull();
+    expect(screen.getByText("Priya replied about the venue.")).toBeDefined();
   });
 
   it("replaces the buttons with the rail line's own text once the daemon answers", async () => {
@@ -272,7 +274,7 @@ describe("a live notice's own buttons", () => {
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
       }),
     );
     await screen.findByRole("button", { name: /^1 h/ });

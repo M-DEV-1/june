@@ -667,7 +667,8 @@ describe("mattersLoaded", () => {
     expect(effect?.kind).toBe("ask");
   });
 
-  it("drops back to empty when the reloaded matter has no turns to show", () => {
+  // The list is read again every time the hover is shown. It used to keep only questions still waiting for an answer, so asking something, switching to another window to check on it and coming back threw the answer away.
+  it("keeps an answered exchange through a reload", () => {
     const v = view({
       matters: [matter({ id: "a", turns: [{ q: "q", a: "an answer" }] })],
       state: "answered",
@@ -676,8 +677,8 @@ describe("mattersLoaded", () => {
       kind: "mattersLoaded",
       rows: [row({ id: "a" })],
     });
-    expect(next.matters[0].turns).toEqual([]);
-    expect(next.state).toBe("empty");
+    expect(next.matters[0].turns).toEqual([{ q: "q", a: "an answer" }]);
+    expect(next.state).toBe("answered");
   });
 
   it("stays in the asking state when the matter it kept is still mid-question", () => {
