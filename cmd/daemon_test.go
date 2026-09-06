@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"ora/internal/config"
 	"ora/internal/db"
@@ -114,5 +116,93 @@ func TestBrainProviderName_NamesCodexAndOllama(t *testing.T) {
 	}
 	if got := brainProviderName(config.BrainConfig{}); got != "gemini" {
 		t.Errorf("an unset provider is the Gemini API path, got %q", got)
+	}
+}
+
+// A job whose interval is longer than the machine's uptime never fired: every waited for the first tick, so the 24 h image ageing and the 12 h compaction never ran on a machine restarted through the day. The first run now happens shortly after start.
+func TestEveryAfter_RunsOnceBeforeTheFirstTick(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ran := make(chan struct{}, 4)
+	go everyAfter(ctx, time.Millisecond, 24*time.Hour, "test-job", func() { ran <- struct{}{} })
+
+	select {
+	case <-ran:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a job with a 24 h interval never ran at start")
+	}
+}
+
+// The compiler's Ingest runs the attribution model call inline, so a hung call used to stop the drain, fill the tracker's event channel and end all capture. The ingest now runs off the drain and is dropped when it falls behind.
+func TestDrainEpisodes_KeepsWritingWhileAnIngestIsStuck(t *testing.T) {
+	const activities = ingestQueueDepth + 10
+	events := make(chan tracker.Activity, activities)
+	for i := 0; i < activities; i++ {
+		events <- tracker.Activity{App: "brave", Title: "a page"}
+	}
+	close(events)
+
+	stuck := make(chan struct{})
+	defer close(stuck)
+	var writes atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		drainEpisodes(context.Background(), events, func(context.Context, db.EpisodeWrite) (int64, error) {
+			writes.Add(1)
+			return 1, nil
+		}, func(context.Context, tracker.Activity) { <-stuck })
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain stopped because one ingest never returned")
+	}
+	if got := writes.Load(); got != activities {
+		t.Fatalf("wrote %d episodes, want all %d", got, activities)
+	}
+}
+
+// The night traces and replay artifacts under <data>/dreams were never pruned, so the Sunday study re-read a growing directory forever.
+func TestAgeDreamArtifacts_RemovesOldTracesAndReplays(t *testing.T) {
+	dir := t.TempDir()
+	dreams := filepath.Join(dir, "dreams")
+	if err := os.MkdirAll(dreams, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-dreamArtifactRetention - time.Hour)
+	write := func(name string, modTime time.Time) string {
+		p := filepath.Join(dreams, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	oldTrace := write("2026-01-01.jsonl", old)
+	oldReplay := write("2026-01-01-replay.md", old)
+	freshTrace := write("2026-09-05.jsonl", time.Now())
+	notOurs := write("lessons.md", old)
+
+	removed, err := ageDreamArtifacts(dir, dreamArtifactRetention)
+	if err != nil {
+		t.Fatalf("ageDreamArtifacts: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed %d files, want 2", removed)
+	}
+	for _, p := range []string{oldTrace, oldReplay} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s outlived the retention", filepath.Base(p))
+		}
+	}
+	for _, p := range []string{freshTrace, notOurs} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed but should have been kept", filepath.Base(p))
+		}
 	}
 }
