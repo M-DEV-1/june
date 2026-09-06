@@ -193,60 +193,7 @@ func (s *Store) sessionForDay(ctx context.Context, at time.Time) (int64, error) 
 const JobMarkerKindPrefix = "job-last-run:"
 
 func (s *Store) createSchema() error {
-	if err := s.runMigrations(context.Background()); err != nil {
-		return err
-	}
-	return s.cleanLegacyFTS()
-}
-
-func (s *Store) cleanLegacyFTS() error {
-	if _, err := s.db.Exec(`
-		UPDATE memory_fts
-		SET content = json_extract(content, '$.summary')
-		WHERE source = 'summary'
-		  AND json_valid(content)
-		  AND json_extract(content, '$.summary') IS NOT NULL`); err != nil {
-		return fmt.Errorf("rebuild summary fts content: %w", err)
-	}
-
-	if _, err := s.db.Exec(`
-		DELETE FROM memory_fts
-		WHERE source = 'diary'
-		  AND ref_id IN (SELECT id FROM diary WHERE kind = ? OR kind LIKE ?)`, TaskNoticeWatermarkKind, JobMarkerKindPrefix+"%"); err != nil {
-		return fmt.Errorf("clear the diary's bare markers from the search index: %w", err)
-	}
-
-	return nil
-}
-
-// ensureColumn adds column to table (with the given SQL type/constraint) if it doesn't already exist, checked via PRAGMA table_info since modernc.org/sqlite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS.
-func (s *Store) ensureColumn(table, column, coldef string) error {
-	rows, err := s.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
-	if err != nil {
-		return fmt.Errorf("ensure column %s.%s: pragma table_info: %w", table, column, err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
-			return fmt.Errorf("ensure column %s.%s: scan pragma row: %w", table, column, err)
-		}
-		if name == column {
-			return nil // already present
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("ensure column %s.%s: iterate pragma rows: %w", table, column, err)
-	}
-
-	if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, coldef)); err != nil {
-		return fmt.Errorf("ensure column %s.%s: alter table: %w", table, column, err)
-	}
-	return nil
+	return s.runMigrations(context.Background())
 }
 
 func (s *Store) Close() error {

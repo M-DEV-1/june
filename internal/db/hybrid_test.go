@@ -107,9 +107,30 @@ type fakeHybridVectorIndex struct {
 	addedIDs      chan string
 	deletedCalled chan string
 
+	// batchErr, when set, makes every AddBatch call fail; batchSizes records the size of each AddBatch call. The fake implements batchVectorIndex so reconcile tests take the same branch production does with a real *vector.ChromemIndex.
+	batchErr error
+
 	mu         sync.Mutex
 	liveIDs    map[string]bool
 	addRecords []addRecord
+	batchSizes []int
+}
+
+// AddBatch records the batch size and then adds each document through Add, so everything Add records (liveIDs, addRecords, addedIDs) stays true of the batch path too. Input: parallel slices of ids, contents, embeddings and metadata. Output: batchErr if the test set one, and nothing is added in that case.
+func (f *fakeHybridVectorIndex) AddBatch(ctx context.Context, ids []string, contents []string, embeddings [][]float32, metadatas []map[string]string) error {
+	f.mu.Lock()
+	f.batchSizes = append(f.batchSizes, len(ids))
+	err := f.batchErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for i, id := range ids {
+		if err := f.Add(ctx, id, contents[i], embeddings[i], metadatas[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addRecord is one recorded Add call's full arguments — addCalls/addedIDs only ever tracked the id; metadata-parity tests (W1) need the content and metadata too.
@@ -1875,5 +1896,60 @@ func TestHybridSearch_DomainFilter_KeepsUntaggedNote(t *testing.T) {
 	}
 	if !found {
 		t.Errorf(`domainFilter="work" dropped the note, which carries no domain at all: %+v`, hits)
+	}
+}
+
+// A sweep against an index that takes batches sends its backfill in one AddBatch rather than one Add per document, and every document still lands in the index and is counted.
+func TestReconcileVectors_BackfillsInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	for _, content := range []string{"the user likes tea", "the user likes coffee", "the user likes cocoa"} {
+		if _, err := store.LogNote(ctx, content, "fact"); err != nil {
+			t.Fatalf("LogNote(%q): %v", content, err)
+		}
+	}
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{}
+	store.SetVectorIndex(vidx)
+
+	report, err := store.ReconcileVectors(ctx, 200)
+	if err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if report.Backfilled != 3 {
+		t.Errorf("Backfilled = %d, want 3", report.Backfilled)
+	}
+	if len(vidx.batchSizes) != 1 || vidx.batchSizes[0] != 3 {
+		t.Errorf("batch sizes = %v, want one batch of 3", vidx.batchSizes)
+	}
+	if len(vidx.IDs()) != 3 {
+		t.Errorf("index holds %v, want all three notes", vidx.IDs())
+	}
+}
+
+// A failed batch must not throw away the embeddings it was already charged for: the sweep re-adds each document on its own and counts the ones that land, so the next sweep does not have to pay for them again.
+func TestReconcileVectors_FailedBatchAddsEachDocumentOnItsOwn(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	for _, content := range []string{"the user likes tea", "the user likes coffee"} {
+		if _, err := store.LogNote(ctx, content, "fact"); err != nil {
+			t.Fatalf("LogNote(%q): %v", content, err)
+		}
+	}
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{batchErr: fmt.Errorf("chromem add batch: disk full")}
+	store.SetVectorIndex(vidx)
+
+	report, err := store.ReconcileVectors(ctx, 200)
+	if err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if report.Backfilled != 2 {
+		t.Errorf("Backfilled = %d, want 2 — the retried documents count", report.Backfilled)
+	}
+	if len(vidx.IDs()) != 2 {
+		t.Errorf("index holds %v, want both notes added one at a time after the batch failed", vidx.IDs())
 	}
 }

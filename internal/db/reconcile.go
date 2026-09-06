@@ -81,7 +81,15 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 			return
 		}
 		if err := batchAdder.AddBatch(ctx, batchIDs, batchContents, batchEmbeddings, batchMetadatas); err != nil {
-			slog.Error("reconcile: backfill batch add failed", "count", len(batchIDs), "error", err)
+			// The embeddings in a failed batch have already been paid for, so each document is offered again on its own rather than dropped. This also closes the hole a half-applied batch leaves in a *vector.ChromemIndex, where a document the batch added but never stamped with a createdAt is invisible to eviction: the single Add stamps it.
+			slog.Error("reconcile: backfill batch add failed, retrying one at a time", "count", len(batchIDs), "error", err)
+			for i, id := range batchIDs {
+				if err := vidx.Add(ctx, id, batchContents[i], batchEmbeddings[i], batchMetadatas[i]); err != nil {
+					slog.Error("reconcile: backfill add after a failed batch failed", "id", id, "error", err)
+					continue
+				}
+				report.Backfilled++
+			}
 		} else {
 			report.Backfilled += len(batchIDs)
 		}

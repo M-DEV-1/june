@@ -348,3 +348,43 @@ func TestChromemIndex_Add_RejectsWrongWidth(t *testing.T) {
 		t.Fatalf("a correct-width vector must be accepted: %v", err)
 	}
 }
+
+// A batch add must land every document in the collection, with each one searchable and counted against maxDocs, and must reject the whole batch when any vector is the wrong width.
+func TestChromemIndex_AddBatch_AddsEveryDocumentAndRejectsWrongWidth(t *testing.T) {
+	ctx := context.Background()
+	idx, err := NewChromemIndex(t.TempDir(), 3, 100)
+	if err != nil {
+		t.Fatalf("NewChromemIndex: %v", err)
+	}
+
+	ids := []string{"note:1", "note:2", "note:3"}
+	contents := []string{"tea", "coffee", "cocoa"}
+	embeddings := [][]float32{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}
+	metadatas := []map[string]string{{"source": "note"}, {"source": "note"}, {"source": "note"}}
+	if err := idx.AddBatch(ctx, ids, contents, embeddings, metadatas); err != nil {
+		t.Fatalf("AddBatch: %v", err)
+	}
+	if got := idx.Count(); got != 3 {
+		t.Errorf("Count() = %d, want 3", got)
+	}
+	got := map[string]bool{}
+	for _, id := range idx.IDs() {
+		got[id] = true
+	}
+	for _, id := range ids {
+		if !got[id] {
+			t.Errorf("%q missing from the index after AddBatch, have %v", id, idx.IDs())
+		}
+	}
+	results, err := idx.Search(ctx, []float32{0, 1, 0}, 1, nil)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "note:2" || results[0].Content != "coffee" {
+		t.Errorf("nearest to the second vector = %+v, want note:2 / coffee", results)
+	}
+
+	if err := idx.AddBatch(ctx, []string{"note:4"}, []string{"milk"}, [][]float32{{1, 1}}, []map[string]string{nil}); err == nil {
+		t.Fatal("a 2-wide vector must be rejected by a 3-wide index")
+	}
+}

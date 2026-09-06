@@ -190,6 +190,7 @@ func TestNew_ClearsAWatermarkAlreadyInTheIndex(t *testing.T) {
 	if _, err := store.DB().Exec(`INSERT INTO memory_fts(content, source, ref_id) VALUES ('42', 'diary', ?)`, id); err != nil {
 		t.Fatalf("mirror the watermark the way the old triggers did: %v", err)
 	}
+	unapplyFTSCleanup(t, store)
 	store.Close()
 
 	reopened, err := db.New(path)
@@ -241,6 +242,7 @@ func TestNew_ClearsAJobMarkerAlreadyInTheIndex(t *testing.T) {
 	if _, err := store.DB().Exec(`INSERT INTO memory_fts(content, source, ref_id) VALUES ('2026-09-06T04:00:00+05:30', 'diary', ?)`, id); err != nil {
 		t.Fatalf("mirror the marker the way the old triggers did: %v", err)
 	}
+	unapplyFTSCleanup(t, store)
 	store.Close()
 
 	reopened, err := db.New(path)
