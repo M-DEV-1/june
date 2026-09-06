@@ -443,7 +443,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
-	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(appConfig.Brain, apiKey, geminiQuota, false, geminiQuotaOpts), store)
+	// These duties are unattended, so they run on the background model like every other one: config.TextModel's free tier allows 20 requests a day against DefaultBackgroundModel's 500, and dreaming alone ticks every five minutes all night. No Job* name exists for the proactive duties yet, and BackgroundModel degrades a name it does not know to DefaultBackgroundModel, which is the model wanted here — naming it "proactive" means a later entry in background_models pins it without another change here.
+	// The hand-over is what makes a Codex- or Ollama-configured machine keep working now that FromConfig fails those with ErrNoBackend instead of quietly answering on Gemini; it is the same hand-over the meeting minutes and the dream brain already get.
+	mainBrain := tally.Wrap(brainProviderName(appConfig.Brain), brain.WithCodexFallback(brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, "proactive"), apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store)
 	// Meeting minutes previously built their own unmetered brain per meeting; pinning to the meeting-minutes job's own model (as defaultBrain did unmetered) and metering it against the same shared quota means an unattended write-up spends the day's allowance in the same place it always spent it, just counted now.
 	meetingRecorder.SetBrain(tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobMeetingMinutes), apiKey, geminiQuota, false, geminiQuotaOpts), store))
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
@@ -495,7 +497,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
 	dreamBriefHour, _ := appConfig.Proactive.Hours()
-	dreamer := dream.New(store, tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(appConfig.Brain, apiKey, geminiQuota, false, geminiQuotaOpts), store), dream.Probes{
+	// The dream brain gets the dream job's own background model and the same Codex hand-over the configured-dream-brain branch below gets, since a night of stages left on config.TextModel spends the next day's 20 requests before the morning brief runs.
+	dreamer := dream.New(store, tally.Wrap(brainProviderName(appConfig.Brain), brain.WithCodexFallback(brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobDream), apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store), dream.Probes{
 		OnAC:              recorder.OnACPower,
 		SessionLocked:     tracker.SessionLocked,
 		RecorderQuiescent: meetingRecorder.Quiescent,

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	oratext "ora/internal/text"
 	"os"
 	"os/exec"
@@ -35,10 +36,12 @@ func ClaudeCLI(binary, model string, timeoutSeconds int) Brain {
 			Subtype string `json:"subtype"`
 		}
 		if err := json.Unmarshal(out, &res); err != nil {
-			return "", fmt.Errorf("could not parse the output of claude -p: %w (%s)", err, head(string(out)))
+			slog.Debug("claude -p printed something that is not JSON", "output", head(string(out)))
+			return "", fmt.Errorf("could not parse the output of claude -p: %w", err)
 		}
 		if res.IsError {
-			return "", fmt.Errorf("claude -p failed (%s): %s", res.Subtype, head(res.Result))
+			slog.Debug("claude -p reported a failure", "subtype", res.Subtype, "result", head(res.Result))
+			return "", fmt.Errorf("claude -p failed (%s)", res.Subtype)
 		}
 		text := strings.TrimSpace(res.Result)
 		if text == "" {
@@ -63,10 +66,12 @@ func AgyCLI(binary string, timeoutSeconds int, model ...string) Brain {
 			Response string `json:"response"`
 		}
 		if err := json.Unmarshal(out, &res); err != nil {
-			return "", fmt.Errorf("could not parse the output of agy --print: %w (%s)", err, head(string(out)))
+			slog.Debug("agy --print printed something that is not JSON", "output", head(string(out)))
+			return "", fmt.Errorf("could not parse the output of agy --print: %w", err)
 		}
 		if res.Status != "SUCCESS" {
-			return "", fmt.Errorf("agy --print failed with status %s: %s", res.Status, head(res.Response))
+			slog.Debug("agy --print reported a failure", "status", res.Status, "response", head(res.Response))
+			return "", fmt.Errorf("agy --print failed with status %s", res.Status)
 		}
 		text := strings.TrimSpace(res.Response)
 		if text == "" {
@@ -90,7 +95,8 @@ func GrokCLI(binary string, timeoutSeconds int, model ...string) Brain {
 			StopReason string `json:"stopReason"`
 		}
 		if err := json.Unmarshal(out, &res); err != nil {
-			return "", fmt.Errorf("could not parse the output of grok -p: %w (%s)", err, head(string(out)))
+			slog.Debug("grok -p printed something that is not JSON", "output", head(string(out)))
+			return "", fmt.Errorf("could not parse the output of grok -p: %w", err)
 		}
 		text := strings.TrimSpace(res.Text)
 		if text == "" {
@@ -149,10 +155,13 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%s timed out after %s", name, timeout)
 		}
-		return nil, fmt.Errorf("%s: %w: %s", name, err, head(stderr.String()))
+		slog.Debug("a brain CLI exited with an error", "binary", name, "stderr", head(stderr.String()))
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	return out.Bytes(), nil
 }
+
+// The CLIs' own output is logged at debug rather than returned in the error, because these errors are logged at warn by callers such as the evening close (slog.Warn("evening close failed", "error", err)) and the output can carry part of the prompt — a day of the user's screen text — or a login error naming their account.
 
 // head is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line. Cutting on runes rather than bytes keeps the log line valid UTF-8 whatever the CLI printed.
 func head(s string) string {

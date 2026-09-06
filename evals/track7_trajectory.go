@@ -692,7 +692,7 @@ func runTrack7(ctx context.Context, j *judge, apiKey, dataDir, model string, tur
 		{Name: "gemini", Step: geminiArm(client, model, decls, pace)},
 		{Name: "claude", Step: claudeArm(teacherBrain(), decls)},
 	}
-	roleplay := pacedBrain(brain.GeminiAPI(apiKey, config.TextModel), pace)
+	roleplay := pacedBrain(brain.GeminiAPI(apiKey, config.TextModel, config.DefaultBrainTimeoutSeconds), pace)
 
 	now := time.Now()
 	sys := trajSystemPrompt(ctx, store, now)

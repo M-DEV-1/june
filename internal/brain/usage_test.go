@@ -105,10 +105,44 @@ func TestGeminiDaily_CountsTodayAgainstTheModelsCeiling(t *testing.T) {
 	}
 }
 
-// TestGeminiDaily_SaysNothingForAModelWithNoCeiling checks a model DefaultQuotaOptions does not meter draws no bar, since there is no number to draw one against.
-func TestGeminiDaily_SaysNothingForAModelWithNoCeiling(t *testing.T) {
-	if _, ok := GeminiDaily(NewQuotaState(t.TempDir()), "gemini-9-imaginary", DefaultQuotaOptions(), time.Now()); ok {
-		t.Fatalf("an unmetered model reported a daily window")
+// TestGeminiDaily_DrawsAnUnlistedGeminiModelAgainstTheDefaultCeiling checks that a Gemini model nobody has measured still draws a bar, against DefaultQuotaLimit, and carries a note saying the ceiling is a guess — rather than the bar silently disappearing, which is what config.TextFallbackModel and any pinned background model used to do.
+func TestGeminiDaily_DrawsAnUnlistedGeminiModelAgainstTheDefaultCeiling(t *testing.T) {
+	snap, ok := GeminiDaily(NewQuotaState(t.TempDir()), "gemini-9-imaginary", DefaultQuotaOptions(), time.Now())
+	if !ok || len(snap.Limits) != 1 {
+		t.Fatalf("an unlisted gemini model drew no window: ok=%v limits=%+v", ok, snap.Limits)
+	}
+	if snap.Note == "" {
+		t.Errorf("the window carries no note, so the picker cannot say the ceiling is a default")
+	}
+}
+
+// TestGeminiDaily_SaysNothingForAModelFromAnotherNamespace checks a name that is not a Gemini model at all draws no bar, since there is no free-tier ceiling it could be measured against.
+func TestGeminiDaily_SaysNothingForAModelFromAnotherNamespace(t *testing.T) {
+	if _, ok := GeminiDaily(NewQuotaState(t.TempDir()), "sonnet", DefaultQuotaOptions(), time.Now()); ok {
+		t.Fatalf("a non-Gemini model name reported a daily window")
+	}
+}
+
+// TestGeminiDaily_NoNoteForAMeasuredModel checks a model with its own measured ceiling carries no note, so an ordinary row does not tell the user the number is a guess.
+func TestGeminiDaily_NoNoteForAMeasuredModel(t *testing.T) {
+	snap, ok := GeminiDaily(NewQuotaState(t.TempDir()), "gemini-3.5-flash", DefaultQuotaOptions(), time.Now())
+	if !ok {
+		t.Fatal("a measured model drew no window")
+	}
+	if snap.Note != "" {
+		t.Errorf("note = %q, want empty for a model whose ceiling was actually observed", snap.Note)
+	}
+}
+
+// TestUsageStore_ATornWriteDoesNotLoseTheReadings checks the usage file is replaced by a rename rather than truncated in place, so a crash mid-write leaves the last good readings on disk instead of blanking every bar.
+func TestUsageStore_ATornWriteDoesNotLoseTheReadings(t *testing.T) {
+	dir := t.TempDir()
+	NewUsageStore(dir).Record("codex", []UsageLimit{{Window: "5h", UsedFraction: 0.4}})
+	if err := os.WriteFile(filepath.Join(dir, "brain_usage.json.tmp"), []byte(`{"cod`), 0o600); err != nil {
+		t.Fatalf("write the torn file: %v", err)
+	}
+	if _, ok := NewUsageStore(dir).Get("codex"); !ok {
+		t.Fatal("the codex reading was lost to a torn write")
 	}
 }
 
