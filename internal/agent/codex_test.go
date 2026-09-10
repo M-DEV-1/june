@@ -297,7 +297,7 @@ func TestParseCodexStream(t *testing.T) {
 func TestAskCodex_StreamedDrawFailureDoesNotDoubleDrawTheNextShape(t *testing.T) {
 	a, drawn := drawingAgent(t)
 	calls := 0
-	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error {
+	a.Draw = func(_, shape string, points [][2]int, x, y, w, h int, label string) error {
 		calls++
 		*drawn = append(*drawn, fmt.Sprintf("%d,%d,%d,%d", x, y, w, h))
 		if calls == 1 {
@@ -311,7 +311,7 @@ func TestAskCodex_StreamedDrawFailureDoesNotDoubleDrawTheNextShape(t *testing.T)
 	early := map[string][]streamDrawn{}
 	// Mirrors the onShape closure askCodex builds around one round (codex.go), fixed per finding 1: a shape that fails to draw is recorded as an error entry rather than dropped.
 	onShape := func(itemID string, shape map[string]any) {
-		phrase, target, errText := a.drawOne(ctx, shape)
+		phrase, target, errText := a.drawOne(ctx, "g", shape)
 		if errText != "" {
 			early[itemID] = append(early[itemID], streamDrawn{Err: errText})
 			return
@@ -341,7 +341,7 @@ func TestAskCodex_StreamedDrawFailureDoesNotDoubleDrawTheNextShape(t *testing.T)
 	call := round.Calls[0]
 	var callArgs map[string]any
 	json.Unmarshal([]byte(call.Arguments), &callArgs)
-	a.executeTool(withStreamDrawn(ctx, early[call.ID]), call.Name, callArgs)
+	a.executeTool(withStreamDrawn(ctx, "g", early[call.ID]), call.Name, callArgs)
 
 	if calls != 2 {
 		t.Fatalf("a.Draw called %d times, want exactly 2 (no double draw)", calls)
@@ -580,33 +580,6 @@ func TestCodexBrain_ForwardsToTheAgent(t *testing.T) {
 	} = CodexBrain{Agent: NewAgent(nil, nil, &toolTestBrain{}, nil, "")}
 	if asker.(CodexBrain).Agent == nil {
 		t.Fatal("agent not kept")
-	}
-}
-
-// The Gemini text path hands over to Codex when no Gemini model can answer, no tool has run yet, and the user is logged in to Codex; a click must never be repeated on another model. A 429 counts as well as a 503: the free tier's day runs out, and on 2026-09-04 the user watched a quota error land in the window while a working Codex login sat unused.
-func TestCodexFallbackWanted(t *testing.T) {
-	unavailable := genai.APIError{Code: 503}
-	spent := genai.APIError{Code: 429, Status: "RESOURCE_EXHAUSTED"}
-	cases := map[string]struct {
-		err      error
-		hops     int
-		loggedIn bool
-		want     bool
-	}{
-		"503, no hops, logged in": {unavailable, 0, true, true},
-		"429 quota spent":         {spent, 0, true, true},
-		"429 wrapped":             {fmt.Errorf("ask text: generate (iteration 0): %w", spent), 0, true, true},
-		"429 pointer":             {&genai.APIError{Code: 429}, 0, true, true},
-		"429 after a tool ran":    {spent, 1, true, false},
-		"503 after a tool ran":    {unavailable, 1, true, false},
-		"503, not logged in":      {unavailable, 0, false, false},
-		"other error":             {genai.APIError{Code: 400}, 0, true, false},
-		"nil":                     {nil, 0, true, false},
-	}
-	for name, c := range cases {
-		if got := codexFallbackWanted(c.err, c.hops, c.loggedIn); got != c.want {
-			t.Errorf("%s: %v, want %v", name, got, c.want)
-		}
 	}
 }
 
@@ -875,7 +848,7 @@ func TestAskCodex_TrimsTheInstructionOnceItIsAScreenTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := bodies[0]["instructions"].(string)
-	if !strings.Contains(first, "Talk like a sharp friend") {
+	if !strings.Contains(first, "composed, dry-witted aide") {
 		t.Fatalf("the first round must still carry the whole handshake, got %d bytes", len(first))
 	}
 	if got := len(bodies[0]["tools"].([]any)); got != len(a.askToolDeclarations()) {
@@ -883,7 +856,7 @@ func TestAskCodex_TrimsTheInstructionOnceItIsAScreenTask(t *testing.T) {
 	}
 
 	second := bodies[1]["instructions"].(string)
-	if strings.Contains(second, "Talk like a sharp friend") {
+	if strings.Contains(second, "composed, dry-witted aide") {
 		t.Errorf("a screen round still carried the conversational handshake, %d bytes", len(second))
 	}
 	if !strings.Contains(second, "one task to see through") {

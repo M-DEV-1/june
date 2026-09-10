@@ -144,3 +144,85 @@ func TestVoicePreview_SaysWhenThereIsNoPreviewer(t *testing.T) {
 		t.Errorf("preview with no previewer = %d, want 503", rec.Code)
 	}
 }
+
+// GET /voices carries the two Live models beside the voices, because the picker draws both and one read has to answer both.
+func TestVoices_ListsTheLiveModelsAndMarksTheCurrentOne(t *testing.T) {
+	live, cfg := savedConfig(t)
+	cfg.LiveModel = config.Live25Model
+
+	rec := httptest.NewRecorder()
+	Voices(live, nil)(rec, httptest.NewRequest(http.MethodGet, "/voices", nil))
+	var out struct{ Models []LiveModelView }
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Models) != len(config.LiveVoiceModels) {
+		t.Fatalf("models = %d, want the %d Ora can dial", len(out.Models), len(config.LiveVoiceModels))
+	}
+	var current int
+	for _, m := range out.Models {
+		if m.Label == "" || m.Trait == "" {
+			t.Errorf("model %q has no label or trait", m.Name)
+		}
+		if m.Current {
+			current++
+			if m.Name != config.Live25Model {
+				t.Errorf("current model = %q, want the configured 2.5", m.Name)
+			}
+		}
+	}
+	if current != 1 {
+		t.Errorf("%d models marked current, want exactly one", current)
+	}
+}
+
+// With no model ever chosen the list still marks one, since a session with an empty config dials config.DefaultVoiceModel.
+func TestVoices_MarksTheDefaultModelWhenNothingIsChosen(t *testing.T) {
+	live, _ := savedConfig(t)
+	rec := httptest.NewRecorder()
+	Voices(live, nil)(rec, httptest.NewRequest(http.MethodGet, "/voices", nil))
+	var out struct{ Models []LiveModelView }
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	for _, m := range out.Models {
+		if m.Current && m.Name != config.DefaultVoiceModel {
+			t.Errorf("current model = %q, want the default %q", m.Name, config.DefaultVoiceModel)
+		}
+	}
+}
+
+// POST {"model": ...} persists the choice and takes effect in the same process, so the next session dials it without a restart.
+func TestVoices_PostSwitchesTheLiveModel(t *testing.T) {
+	t.Cleanup(func() { config.SetVoiceModel(config.DefaultVoiceModel) })
+	live, cfg := savedConfig(t)
+	cfg.Voice = "Sulafat"
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"model":"` + config.Live25Model + `"}`)
+	Voices(live, nil)(rec, httptest.NewRequest(http.MethodPost, "/voices", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /voices = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if cfg.LiveModel != config.Live25Model {
+		t.Errorf("stored model = %q, want 2.5", cfg.LiveModel)
+	}
+	if config.VoiceModel() != config.Live25Model {
+		t.Errorf("the running daemon still dials %q", config.VoiceModel())
+	}
+	if cfg.Voice != "Sulafat" {
+		t.Errorf("switching the model changed the voice to %q", cfg.Voice)
+	}
+}
+
+// A model Ora cannot dial is refused and changes nothing: stored, every later session would fail at connect rather than this request failing here.
+func TestVoices_PostRefusesAnUnknownModel(t *testing.T) {
+	live, cfg := savedConfig(t)
+	cfg.LiveModel = config.Live25Model
+	rec := httptest.NewRecorder()
+	Voices(live, nil)(rec, httptest.NewRequest(http.MethodPost, "/voices", strings.NewReader(`{"model":"gemini-9-ultra"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("POST /voices with an unknown model = %d, want 400", rec.Code)
+	}
+	if cfg.LiveModel != config.Live25Model {
+		t.Errorf("the refused model changed the config to %q", cfg.LiveModel)
+	}
+}

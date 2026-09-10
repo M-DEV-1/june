@@ -81,20 +81,6 @@ func EpisodeSignature(windows []string) string {
 // TextBackend answers one prompt in one call. It is the same shape as internal/brain.Brain, repeated here rather than imported because internal/brain imports internal/agent, which imports this package.
 type TextBackend func(ctx context.Context, prompt string) (string, error)
 
-// SetStateBackend points DeriveState at backend — the daemon's local llama-server — instead of the metered Gemini API. A nil backend restores the Gemini path. This is what keeps an unattended five-minute job off the user's free-tier daily request allowance entirely.
-func (g *GeminiSummarizer) SetStateBackend(backend TextBackend) {
-	g.backendMu.Lock()
-	defer g.backendMu.Unlock()
-	g.stateBackend = backend
-}
-
-// stateBackendFn reads the installed local backend under the lock, so a background goroutine never races the daemon installing one.
-func (g *GeminiSummarizer) stateBackendFn() TextBackend {
-	g.backendMu.RLock()
-	defer g.backendMu.RUnlock()
-	return g.stateBackend
-}
-
 // QuotaOrOverload reports whether err is a Gemini failure no Gemini model can fix — 429 because the day's free-tier request allowance is spent, or 503 because every model is overloaded — and so is worth handing to another provider. Input: the error from a call, possibly wrapped. Output: true only for those two, since any other failure would fail the same way anywhere.
 // It repeats the rule internal/agent applies to the user's own asks rather than importing it, because internal/agent imports this package.
 func QuotaOrOverload(err error) bool {
@@ -179,39 +165,16 @@ func (g *GeminiSummarizer) DeriveState(ctx context.Context, recentSummaries []st
 	// Every pending summary goes into this one prompt, so a batch of new material costs one call rather than one call each.
 	prompt := fmt.Sprintf("%s\n\n%s", stateInstruction, strings.Join(parts, "\n\n"))
 
-	// The local backend, when the daemon has one, answers here and the metered API is never reached.
-	if local := g.stateBackendFn(); local != nil {
-		_, localSpan := tracer.Start(ctx, "Local.Generate.DeriveState")
-		text, err := local(ctx, prompt)
-		if err != nil {
-			localSpan.RecordError(err)
-			localSpan.End()
-			return "", fmt.Errorf("derive state local call: %w", err)
-		}
-		localSpan.End()
-		return strings.TrimSpace(text), nil
-	}
-
-	model := config.BackgroundModel(config.JobWorkingState)
-	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent.DeriveState")
-	var resp *genai.GenerateContentResponse
-	err := g.allow(model)
-	if err == nil {
-		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), nil)
-	}
+	_, genSpan := tracer.Start(ctx, "Generate.DeriveState")
+	text, err := g.text(ctx, config.JobWorkingState, prompt, false)
 	if err != nil {
 		genSpan.RecordError(err)
 		genSpan.End()
-		if text, ok := g.fallbackText(ctx, err, prompt); ok {
-			return text, nil
+		if fallback, ok := g.fallbackText(ctx, err, prompt); ok {
+			return fallback, nil
 		}
-		return "", fmt.Errorf("derive state llm call: %w", err)
+		return "", fmt.Errorf("derive state: %w", err)
 	}
 	genSpan.End()
-
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("derive state: empty response from model")
-	}
-
-	return strings.TrimSpace(resp.Candidates[0].Content.Parts[0].Text), nil
+	return strings.TrimSpace(text), nil
 }

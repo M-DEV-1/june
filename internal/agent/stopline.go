@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 	"strings"
 
@@ -71,9 +70,9 @@ func matchedVerb(item act.Item, window string) string {
 func consentPrompt(verb string) string {
 	switch verb {
 	case "sign out", "unsubscribe", "confirm order", "place order", "checkout":
-		return fmt.Sprintf("Say %q and I will.", "yes, "+verb)
+		return consentMark + verb + "\" and I will."
 	default:
-		return fmt.Sprintf("Say %q and I will.", "yes, "+verb+" it")
+		return consentMark + verb + " it\" and I will."
 	}
 }
 

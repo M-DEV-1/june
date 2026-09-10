@@ -4,8 +4,10 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"maps"
 	"net/http"
+	"ora/internal/agent"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,9 @@ import (
 
 // ollamaListTimeout bounds the `ollama list` call this route makes, so a wedged local server cannot hang the window's settings screen.
 const ollamaListTimeout = 3 * time.Second
+
+// agyModelsTimeout is how long `agy models` is given. It is not the three seconds a local Ollama gets, because agy fetches its roster over the network: measured 6.5 seconds on 2026-09-07, so a three-second deadline killed every call and the Antigravity row published an empty model list for as long as it existed. The read runs in the background off a ten-minute cache, so a generous deadline costs a request nothing.
+const agyModelsTimeout = 30 * time.Second
 
 // BrainView is one backend on GET or POST /brains. SignedIn says whether this machine can actually call it; Account is what the login file plainly says about the account (a plan name, a mode), never a token; Models are the models the user may pick, empty for a CLI that exposes no choice; Model is the one currently chosen for this brain, "" when none has ever been picked; Note is one sentence about why this brain is here; Default marks the one the daemon is configured to use.
 type BrainView struct {
@@ -72,6 +77,8 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 				http.Error(w, "cannot pick "+req.Brain+": "+note, http.StatusBadRequest)
 				return
 			}
+			// The router answers a question with the picked brain first from this moment, not from the next daemon start.
+			agent.SetPreferredProvider(provider)
 			err := cfg.Update(func(c *config.OraConfig) {
 				c.Brain.Provider = provider
 				c.Brain.Model = req.Model
@@ -297,12 +304,14 @@ func plainField(path, object, field string) string {
 // agyModels asks the Antigravity command line which models the user's plan can call. Output: the model ids in the order it lists them, or an empty list when the command fails or reports none.
 // The output is two columns, the id and a human label — "gemini-3.8-flash-high     Gemini 3.8 Flash (High)" — with no header row, so every non-blank line's first field is an id. The roster is read live rather than hardcoded because it is the user's own plan that decides what is in it, and it grows.
 func agyModels() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), ollamaListTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), agyModelsTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "agy", "models").Output()
 	if err != nil {
+		slog.Warn("could not read the Antigravity model roster", "error", err)
 		return []string{}
 	}
+	// Every line is "id\tLabel"; the ids carry the effort agy will run at, as a -high, -medium or -low suffix, so picking a model here is also picking the effort.
 	return firstFields(string(out), false)
 }
 

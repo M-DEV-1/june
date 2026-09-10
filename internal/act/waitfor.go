@@ -16,6 +16,8 @@ const (
 	ItemAbsent = "item_absent"
 	// FieldHolds passes when the text of the field with keyboard focus contains the value.
 	FieldHolds = "field_holds"
+	// ScreenChanged passes when a picture of the screen differs from the one taken before the action. It is for what no list can show: a shell overlay, a top-bar indicator, a video starting. Value is what the change is expected to be, in words, kept for the record; the match is on the pixels alone.
+	ScreenChanged = "screen_changed"
 )
 
 // How the wait_for tool opens its answer, either way. These are matched, not just printed: a job's step loop reads the prefix to record its step as a pass or a fail (see internal/actjob), so the two live here, in the pure package both sides already import, rather than as a string one side spells out and the other guesses at.
@@ -46,6 +48,8 @@ func (c Check) Describe() string {
 		return fmt.Sprintf("no item labelled %q is showing", c.Value)
 	case FieldHolds:
 		return fmt.Sprintf("the focused field holds %q", c.Value)
+	case ScreenChanged:
+		return fmt.Sprintf("the screen looks different (%s)", c.Value)
 	}
 	return "nothing in particular"
 }

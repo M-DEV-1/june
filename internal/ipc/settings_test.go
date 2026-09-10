@@ -77,7 +77,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 			paused:          false,
 			want: SettingsView{
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
-				VoiceModel: config.VoiceModel, Brain: config.TextModel, EmbedModel: config.LocalEmbedModel,
+				VoiceModel: config.VoiceModel(), Brain: config.TextModel, EmbedModel: config.LocalEmbedModel,
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
 				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
 			},
@@ -89,7 +89,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 			paused:          true,
 			want: SettingsView{
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
-				VoiceModel: config.VoiceModel, Brain: "claude-cli sonnet", EmbedModel: "none",
+				VoiceModel: config.VoiceModel(), Brain: "claude-cli sonnet", EmbedModel: "none",
 				MeetingsEnabled: false, CaptureEnabled: false, KeepAudioDays: -1,
 				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
 			},
@@ -101,7 +101,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 			paused:          false,
 			want: SettingsView{
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
-				VoiceModel: config.VoiceModel, Brain: config.BrainClaudeCLI, EmbedModel: "none",
+				VoiceModel: config.VoiceModel(), Brain: config.BrainClaudeCLI, EmbedModel: "none",
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
 				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
 			},

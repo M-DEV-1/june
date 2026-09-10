@@ -70,6 +70,8 @@ type Session struct {
 	stream uint32 // ScreenCast PipeWire node id backing absolute pointer motion; 0 if none was granted
 	// rect is where the granted monitor sits on the desktop and how big it is, from the stream's "position" and "size" properties; all zero when the compositor reported neither. Pointer coordinates arrive in whole-desktop space and are mapped into this rectangle's own space before they are sent (see toStream).
 	rect streamRect
+	// dataDir holds the saved restore token; blank in tests that never touch the disk.
+	dataDir string
 
 	// send routes one RemoteDesktop method call; nil means the live D-Bus connection. Tests set it to record the event stream without a bus. It takes the call's own context so the timeout call puts on every event is the one the test sees.
 	send func(ctx context.Context, method string, args ...interface{}) error
@@ -88,10 +90,17 @@ var portalCallTimeout = 2 * time.Second
 func (s *Session) call(method string, args ...interface{}) error {
 	ctx, cancel := context.WithTimeout(context.Background(), portalCallTimeout)
 	defer cancel()
+	var err error
 	if s.send != nil {
-		return s.send(ctx, method, args...)
+		err = s.send(ctx, method, args...)
+	} else {
+		err = s.conn.Object(portalDest, portalPath).CallWithContext(ctx, remoteDesktopIface+"."+method, 0, args...).Err
 	}
-	return s.conn.Object(portalDest, portalPath).CallWithContext(ctx, remoteDesktopIface+"."+method, 0, args...).Err
+	// "not allowed to call Notify..." is a session granted without the keyboard or the pointer, and the saved token is what restores that empty grant, so it goes; the next open then shows the consent dialog again (2026-09-08).
+	if err != nil && strings.Contains(err.Error(), "not allowed to call Notify") {
+		forgetToken(s.dataDir)
+	}
+	return err
 }
 
 // currentHandle returns the live session handle, or errClosed once Close has run.
@@ -130,7 +139,7 @@ func Open(ctx context.Context, dataDir string) (*Session, error) {
 	if err := saveToken(dataDir, newToken); err != nil {
 		return nil, fmt.Errorf("save token: %w", err)
 	}
-	return &Session{conn: conn, handle: handle, stream: stream, rect: withStreamScale(rect)}, nil
+	return &Session{conn: conn, handle: handle, stream: stream, rect: withStreamScale(rect), dataDir: dataDir}, nil
 }
 
 // portalOps is the set of fallible RemoteDesktop/ScreenCast steps openSequence drives. Splitting it out from Session lets the failure-cleanup logic in openSequence be tested against a fake, without a live D-Bus session.
@@ -331,7 +340,12 @@ func (s *Session) notifyButton(handle string, button int32, state uint32) error 
 }
 
 func (s *Session) notifyMotion(handle string, x, y float64) error {
-	return s.call("NotifyPointerMotionAbsolute", dbus.ObjectPath(handle), map[string]dbus.Variant{}, s.stream, x, y)
+	err := s.call("NotifyPointerMotionAbsolute", dbus.ObjectPath(handle), map[string]dbus.Variant{}, s.stream, x, y)
+	// Mutter answers "Invalid position" for a point outside the one monitor's stream this session was granted, which is what a click aimed at a second monitor gets; said as what it is, so the model aims at the monitor it can reach instead of retrying the same point. Measured on this desk on 2026-09-08 with clicks at x=3750 on a two-monitor desk.
+	if err != nil && strings.Contains(err.Error(), "Invalid position") {
+		return fmt.Errorf("the point is outside the monitor this pointer session reaches (the session covers one monitor; a point on another cannot be clicked from here): %w", err)
+	}
+	return err
 }
 
 // realPortal implements portalOps against a live session bus connection.
@@ -339,9 +353,16 @@ type realPortal struct {
 	conn *dbus.Conn
 }
 
+// createSessionOptions builds CreateSession's options. The portal refuses the call with "Missing token" unless session_handle_token names the session object it should create; handle_token for the request itself is added by portalRequest.
+func createSessionOptions() map[string]dbus.Variant {
+	return map[string]dbus.Variant{
+		"session_handle_token": dbus.MakeVariant(fmt.Sprintf("ora_session_%d", reqSeq.Add(1))),
+	}
+}
+
 // createSession opens a new RemoteDesktop session and returns its session_handle.
 func (p *realPortal) createSession(ctx context.Context) (string, error) {
-	results, err := portalRequest(ctx, p.conn, remoteDesktopIface+".CreateSession", nil, map[string]dbus.Variant{})
+	results, err := portalRequest(ctx, p.conn, remoteDesktopIface+".CreateSession", nil, createSessionOptions())
 	if err != nil {
 		return "", err
 	}

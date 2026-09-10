@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -84,7 +87,7 @@ func observeResult(app, title string, lines []string, previous screenSnapshot) s
 	}
 	switch {
 	case len(changed) == 0:
-		return fmt.Sprintf("%s\n%s — the same %d items, and their numbers still stand)", window, unchangedScreenMarker, len(lines))
+		return fmt.Sprintf("%s\n%s the same %d items, and their numbers still stand)", window, unchangedScreenMarker, len(lines))
 	case len(changed) <= maxChangedLines:
 		return fmt.Sprintf("%s\n(the same %d items as the last look, with these changed:)\n%s", window, len(lines), strings.Join(changed, "\n"))
 	}
@@ -115,6 +118,8 @@ type askLookState struct {
 	// clicked is the item the last numbered click acted on, standing in for "the control that now has keyboard focus" — there is no accessibility read for actual focus, and click it first is the documented way to reach type_text anyway. focusUnknown says that stand-in cannot be trusted: a click at a bare coordinate or a key that moves focus has left this session unable to name what the keyboard is pointing at.
 	clicked      act.Item
 	focusUnknown bool
+	// beforeShot is the picture a screen_changed check keeps before the action, for wait_for to compare against (see CheckHolds and waitFor).
+	beforeShot tracker.Capture
 }
 
 // streamDrawn is one shape that was resolved while the model was still writing the call it belongs to, whether it drew or not. The Codex stream hands over each shape the moment its object closes, so the ink starts before the round has finished rather than after it (see parseCodexStream); the phrase and the target are what the draw tool would have produced had it drawn the shape itself. Err carries the tool error when the shape failed instead — a shape refused during the stream still has to occupy its place in this slice, or the shapes it precedes in the finished call would be shifted onto the wrong entries.
@@ -124,21 +129,35 @@ type streamDrawn struct {
 	Err    string
 }
 
-// streamDrawnKey is the unexported context key withStreamDrawn stores one call's already-drawn shapes under.
+// streamDrawnKey is the unexported context key withStreamDrawn stores one call's already-drawn shapes, and the group they were drawn under, at.
 type streamDrawnKey struct{}
 
-// withStreamDrawn carries the shapes a draw call already drew off the stream into that call's own execution, so the tool draws only what is left rather than drawing everything a second time. Input: the ask's context and the shapes already drawn, in the order the call listed them. Output: a context for that one tool call.
-func withStreamDrawn(ctx context.Context, drawn []streamDrawn) context.Context {
+// streamDrawnState is what a draw call inherits from the stream that drew part of it: the shapes already on screen, and the group name they went out under, which the rest of the call has to reuse or the overlay treats the two halves as separate drawings.
+type streamDrawnState struct {
+	group string
+	drawn []streamDrawn
+}
+
+// withStreamDrawn carries the shapes a draw call already drew off the stream into that call's own execution, so the tool draws only what is left rather than drawing everything a second time. Input: the ask's context, the group those shapes were drawn under, and the shapes themselves in the order the call listed them. Output: a context for that one tool call.
+func withStreamDrawn(ctx context.Context, group string, drawn []streamDrawn) context.Context {
 	if len(drawn) == 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, streamDrawnKey{}, drawn)
+	return context.WithValue(ctx, streamDrawnKey{}, streamDrawnState{group: group, drawn: drawn})
 }
 
 // streamDrawnFrom returns the leading shapes of this draw call that the stream already drew. Output: those shapes in call order, or nil when the call drew nothing early — which is every provider but Codex, and every Codex round whose backend sent no argument deltas.
 func streamDrawnFrom(ctx context.Context) []streamDrawn {
-	drawn, _ := ctx.Value(streamDrawnKey{}).([]streamDrawn)
-	return drawn
+	st, _ := ctx.Value(streamDrawnKey{}).(streamDrawnState)
+	return st.drawn
+}
+
+// drawGroupFor names the draw call now running, so every shape of it lands on the overlay as one drawing. Output: the group the stream already drew this call's leading shapes under, or a fresh name when nothing was drawn early.
+func drawGroupFor(ctx context.Context) string {
+	if st, ok := ctx.Value(streamDrawnKey{}).(streamDrawnState); ok && st.group != "" {
+		return st.group
+	}
+	return nextDrawGroup()
 }
 
 // askLookStateKey is the unexported context key withAskLookState stores the per-ask look state under.
@@ -243,6 +262,14 @@ func recordLook(ctx context.Context, c tracker.Capture) {
 	s.lookTokens += lookTokenCost(c.W, c.H)
 }
 
+// markLookDelivered records that the model has been shown the newest picture, for a channel that had to push it out of band rather than return it with the tool result (see deliverPicture). Input: the ask's context. Output: none.
+func markLookDelivered(ctx context.Context) {
+	s := lookStateFrom(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lookUndelivered = false
+}
+
 // looksLeft reports whether this ask may take another picture.
 func looksLeft(ctx context.Context) bool {
 	s := lookStateFrom(ctx)
@@ -286,7 +313,7 @@ func lookTokensSpent(ctx context.Context) int {
 }
 
 // needLookFirst is what draw says when it is given coordinates with no picture behind them. It names the tool to call, because the refusal is only useful if the model's next move is the look it should have made.
-const needLookFirst = "I need to look at the screen first — call look, then give me points in that picture's own coordinates"
+const needLookFirst = "I need to look at the screen first, call look, then give me points in that picture's own coordinates"
 
 // cannotSeePictures is what draw says when the picture was taken but this session had no way to show it. A Live voice session takes tool results as text, so every look it makes is undelivered and no further look will change that: telling it to look again sends it round the same loop until it gives up and reports that its screen tools are broken, which is what happened on 2026-09-07 against an Electron window. The refusal therefore names the path that does work — the numbered list — and says plainly that this one never will.
 const cannotSeePictures = "I took the picture but this session cannot show it to me, so I have no coordinates to work from and looking again will not help. Use observe_screen and act on an item by its number instead; if observe_screen lists nothing, this window does not expose its contents and I should say so rather than keep trying."
@@ -301,10 +328,36 @@ func (a *Agent) toScreen(ctx context.Context, x, y int) (int, int, string) {
 		return 0, 0, toolError(needLookFirst)
 	}
 	if !c.Holds(x, y) {
-		return 0, 0, toolError(fmt.Sprintf("%d,%d is not inside the picture the last look took, which is %d wide and %d high — give me a point in it", x, y, c.W, c.H))
+		return 0, 0, toolError(fmt.Sprintf("%d,%d is not inside the picture the last look took, which is %d wide and %d high, give me a point in it", x, y, c.W, c.H))
 	}
 	sx, sy := c.ToScreen(x, y)
 	return sx, sy, ""
+}
+
+// toScreenForDraw turns a point the model worked out from the last look into the point on the screen it names, for drawing only. Input: the call's context and the point in the picture's own pixels. Output: the screen point, or a tool error when no look has been taken or the point is outside the picture.
+// It differs from toScreen in one way: it maps the point even when the picture was never delivered to the model. A live voice session takes tool results as text, so it never sees the image — but it is told the frame in words ("here is the picture, 1280 wide and 698 high … one of its pixels is 1.50 screen pixels"), which is everything needed to place a shape. The rule toScreen enforces, that a point read off a picture nobody saw is a guess, is right for clicking and wrong for drawing: a guessed click presses the wrong control, where a guessed line lands in the wrong place and nothing happens. Refusing both is why a session asked to draw an octopus on 2026-09-07 sent a nine-point path, was refused, and told the user it could not draw at all.
+func (a *Agent) toScreenForDraw(ctx context.Context, x, y int) (int, int, string) {
+	c, ok := lookFrame(ctx)
+	if !ok {
+		return 0, 0, toolError(needLookFirst)
+	}
+	if !c.Holds(x, y) {
+		return 0, 0, toolError(fmt.Sprintf("%d,%d is not inside the picture the last look took, which is %d wide and %d high, give me a point in it", x, y, c.W, c.H))
+	}
+	sx, sy := c.ToScreen(x, y)
+	return sx, sy, ""
+}
+
+// lookFrame returns the newest picture this session took, whether or not the model was ever shown it. Output: the capture and true when a look has been taken, the zero value and false when none has.
+// Only the frame is used — the size, the origin and the scale — so a session that cannot be shown images can still place a shape by the description it was given in words.
+func lookFrame(ctx context.Context) (tracker.Capture, bool) {
+	s := lookStateFrom(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.look == nil {
+		return tracker.Capture{}, false
+	}
+	return *s.look, true
 }
 
 // InputDevice is the keyboard and pointer press_key, click_at and scroll_at drive, and the one type_text falls back to when a field will not take text through the accessibility path: an *input.Session in production (see UsePortalInput), a fake in tests, which is the whole reason it is an interface — a test must record what was sent rather than press keys on the user's own screen.
@@ -315,23 +368,88 @@ type InputDevice interface {
 	ScrollAt(x, y float64, dy int32) error
 }
 
-// onceInput wraps an opener so the session behind it is opened at most once, on the first tool call that actually needs it. The portal puts a dialog on the user's screen asking them to allow remote control the first time a session opens, so opening at daemon start would ask someone who has not requested anything, and opening per call would ask again. Only a session that actually opened is remembered: the open blocks on that dialog, so an ask that gave up waiting for it must not cost this session its keyboard until the daemon restarts, and the next call asks again. Input: the opener. Output: an opener that hands back the one open session, retrying the open after every failure.
+// onceInput wraps an opener so the session behind it is opened at most once, on the first tool call that actually needs it. The portal puts a dialog on the user's screen asking them to allow remote control the first time a session opens, so opening at daemon start would ask someone who has not requested anything, and opening per call would ask again. Only a session that actually opened is remembered: the open blocks on that dialog, so an ask that gave up waiting for it must not cost this session its keyboard until the daemon restarts, and the next call asks again. The device handed back also reopens once, without a dialog thanks to the saved restore token, when the portal says the session it holds is gone (see sessionGone), and replays the action on the new one. Input: the opener. Output: an opener that hands back the one open session, retrying the open after every failure.
 func onceInput(open func(context.Context) (InputDevice, error)) func(context.Context) (InputDevice, error) {
-	var mu sync.Mutex
-	var dev InputDevice
+	r := &reopeningInput{open: open}
 	return func(ctx context.Context) (InputDevice, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if dev != nil {
-			return dev, nil
+		if _, err := r.device(ctx); err != nil {
+			return nil, err
 		}
-		opened, err := open(ctx)
+		return &boundInput{r: r, ctx: ctx}, nil
+	}
+}
+
+// sessionGone reports whether the portal answered with its stale-handle error. Mutter closes a RemoteDesktop session when the screencast stream behind it ends (a monitor unplugged or reconfigured, the screen locked, the machine asleep), and every call on the old handle fails this way until a new session is opened.
+func sessionGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	// "not allowed to call Notify..." is a session the portal opened without the keyboard or the pointer in it, which is what a consent dialog answered with nothing granted leaves behind (2026-09-08, after the saved token was lost); it never becomes useful, so it is dropped and the next press opens a new one, and the dialog, again.
+	return strings.Contains(err.Error(), "Invalid session") || strings.Contains(err.Error(), "not allowed to call Notify")
+}
+
+// reopeningInput is the one cached session and the opener that made it. do runs one action on it and, when the portal says that session is gone, opens a new one and runs the action again.
+type reopeningInput struct {
+	open func(context.Context) (InputDevice, error)
+	mu   sync.Mutex
+	dev  InputDevice
+}
+
+// device hands back the cached session, opening one if there is none. Input: the context bounding the open. Output: the session, or the open's error, in which case nothing is cached and the next call opens again.
+func (r *reopeningInput) device(ctx context.Context) (InputDevice, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dev == nil {
+		opened, err := r.open(ctx)
 		if err != nil {
 			return nil, err
 		}
-		dev = opened
-		return dev, nil
+		r.dev = opened
 	}
+	return r.dev, nil
+}
+
+// do runs act on the cached session. If the portal answers that the session is gone, the cached one is forgotten, a new one opened under ctx, and act run once more on it; any other error comes back as is.
+func (r *reopeningInput) do(ctx context.Context, act func(InputDevice) error) error {
+	dev, err := r.device(ctx)
+	if err != nil {
+		return err
+	}
+	if err = act(dev); !sessionGone(err) {
+		return err
+	}
+	slog.Info("the portal input session is gone, opening a new one")
+	r.mu.Lock()
+	if r.dev == dev {
+		r.dev = nil
+	}
+	r.mu.Unlock()
+	if dev, err = r.device(ctx); err != nil {
+		return err
+	}
+	return act(dev)
+}
+
+// boundInput is the InputDevice a tool call drives: the shared reopening session, bound to that call's context so a reopen is bounded the same way the first open was.
+type boundInput struct {
+	r   *reopeningInput
+	ctx context.Context
+}
+
+func (b *boundInput) PressKey(name string) error {
+	return b.r.do(b.ctx, func(d InputDevice) error { return d.PressKey(name) })
+}
+
+func (b *boundInput) TypeText(text string) error {
+	return b.r.do(b.ctx, func(d InputDevice) error { return d.TypeText(text) })
+}
+
+func (b *boundInput) ClickAt(x, y float64) error {
+	return b.r.do(b.ctx, func(d InputDevice) error { return d.ClickAt(x, y) })
+}
+
+func (b *boundInput) ScrollAt(x, y float64, dy int32) error {
+	return b.r.do(b.ctx, func(d InputDevice) error { return d.ScrollAt(x, y, dy) })
 }
 
 // WindowRaiser brings an already-running window of another application to the front, which switch_window tries before it falls back to driving the shell's own search from the keyboard: a *window.Raiser in production, talking to the bundled GNOME Shell extension over D-Bus (see internal/window), a fake in tests. Available says whether that extension is loaded and enabled in the running shell right now; List reports every open window with its pid, WM_CLASS, title and focus state; ByPid, ByTitle and ByWmClass each activate a window by one key and report whether they found and raised one.
@@ -349,6 +467,20 @@ func (a *Agent) UseWindowRaiser(r WindowRaiser) { a.raiser = r }
 // UsePortalInput gives this agent a keyboard and pointer through the desktop portal, opened on the first tool call that needs one. Input: the directory the portal's restore token is kept in, so the user is asked to allow remote control once rather than on every restart.
 func (a *Agent) UsePortalInput(dataDir string) {
 	a.input = onceInput(func(ctx context.Context) (InputDevice, error) { return openPortalInput(ctx, dataDir) })
+}
+
+// tapLead is how long the real press waits after the overlay's tap is sent, so the pointer on screen is seen arriving before the click lands rather than after it. The overlay's flight is bounded to a few hundred milliseconds whatever the distance; a variable so tests cost no wall time.
+var tapLead = 350 * time.Millisecond
+
+// tapAt shows the press that is about to happen at a screen point, when this session can draw, and gives the overlay time to fly there. Input: the point in screen pixels and the label of what is there, "" when unknown. Output: none; a tap that reached no window is not an error, the press still goes ahead unseen.
+func (a *Agent) tapAt(x, y int, label string) {
+	if a.Tap == nil {
+		return
+	}
+	if err := a.Tap(x, y, label); err != nil {
+		return
+	}
+	time.Sleep(tapLead)
 }
 
 // inputDevice hands back this session's keyboard and pointer, opening it if this is the first call that needs it. Output: the device, or a tool error naming why there is none — nothing wired one up, or the portal refused, which is what a declined consent dialog looks like from here.
@@ -444,8 +576,20 @@ func itemByNumber(items []act.Item, n int) (act.Item, string) {
 	return items[n-1], ""
 }
 
-// maxDrawShapes bounds one draw call. The list comes from the model and every entry is resolved against the screen and broadcast to the overlay on its own, so it is worth a ceiling; thirty-two is far above any real diagram.
-const maxDrawShapes = 32
+// drawGroupSeq numbers draw calls so every shape of one drawing carries the same name. A counter rather than a clock: two calls in the same millisecond must not share a name, or the second drawing joins the first instead of replacing it.
+var drawGroupSeq atomic.Uint64
+
+// nextDrawGroup names one draw call. Output: a name no other call on this daemon will use.
+func nextDrawGroup() string {
+	return "d" + strconv.FormatUint(drawGroupSeq.Add(1), 10)
+}
+
+// MaxDrawShapes bounds one draw call. The list comes from the model and every entry is resolved against the screen and broadcast to the overlay on its own, so it is worth a ceiling; thirty-two is far above any real diagram.
+// It is exported because it is also the size of the largest burst one action can put on the event stream, which is what a client's buffer has to be able to hold — see clientBufferSize in internal/ipc.
+const MaxDrawShapes = 32
+
+// maxDrawShapes is the unexported spelling the rest of this package already uses.
+const maxDrawShapes = MaxDrawShapes
 
 // drawShapeList returns the shapes one draw call is asking for. Input: the tool's arguments. Output: the entries of "shapes" when it holds at least one, otherwise the arguments themselves as a single shape, or a tool error when shapes holds more than maxDrawShapes or an entry that is not an object. A call carrying both forms is read as the batch, because refusing it would cost a round to say something the batch already answers.
 func drawShapeList(args map[string]any) ([]map[string]any, string) {
@@ -474,7 +618,7 @@ func drawShapeList(args map[string]any) ([]map[string]any, string) {
 }
 
 // drawOne draws one shape and says what it drew. Input: the ask's context and one shape's arguments — shape, then from/to, points, on or rect as that shape needs, and an optional label. Output: the phrase naming what was drawn, for the caller to put after "drew "; the target to remember when the shape was drawn around a numbered element, nil for every other form since there is nothing to resolve a later "it" against; and a tool error when the shape cannot be drawn, in which case nothing was drawn.
-func (a *Agent) drawOne(ctx context.Context, args map[string]any) (string, *ScreenTarget, string) {
+func (a *Agent) drawOne(ctx context.Context, group string, args map[string]any) (string, *ScreenTarget, string) {
 	shape, _ := args["shape"].(string)
 	label, _ := args["label"].(string)
 	switch shape {
@@ -483,7 +627,7 @@ func (a *Agent) drawOne(ctx context.Context, args map[string]any) (string, *Scre
 		if errText != "" {
 			return "", nil, errText
 		}
-		if err := a.Draw(shape, points, 0, 0, 0, 0, label); err != nil {
+		if err := a.Draw(group, shape, points, 0, 0, 0, 0, label); err != nil {
 			return "", nil, toolError(err.Error())
 		}
 		return shape + fmt.Sprintf(" through %d point(s)", len(points)) + labelNote(label), nil, ""
@@ -492,7 +636,7 @@ func (a *Agent) drawOne(ctx context.Context, args map[string]any) (string, *Scre
 		if errText != "" {
 			return "", nil, errText
 		}
-		if err := a.Draw(shape, points, 0, 0, 0, 0, label); err != nil {
+		if err := a.Draw(group, shape, points, 0, 0, 0, 0, label); err != nil {
 			return "", nil, toolError(err.Error())
 		}
 		return fmt.Sprintf("a path through %d point(s)", len(points)) + labelNote(label), nil, ""
@@ -501,7 +645,7 @@ func (a *Agent) drawOne(ctx context.Context, args map[string]any) (string, *Scre
 		if errText != "" {
 			return "", nil, errText
 		}
-		if err := a.Draw(shape, nil, x, y, w, h, label); err != nil {
+		if err := a.Draw(group, shape, nil, x, y, w, h, label); err != nil {
 			return "", nil, toolError(err.Error())
 		}
 		// it is nil for the "rect" form (a point read off a picture, naming no observe_screen item), so there is nothing to remember or check a mismatch against — only the "on" form draws around a numbered item.
@@ -535,7 +679,7 @@ func (a *Agent) drawPoints(ctx context.Context, args map[string]any, allowFromTo
 			if !xOK || !yOK {
 				return nil, toolError("each point must be [x, y]")
 			}
-			sx, sy, errText := a.toScreen(ctx, int(x), int(y))
+			sx, sy, errText := a.toScreenForDraw(ctx, int(x), int(y))
 			if errText != "" {
 				return nil, errText
 			}
@@ -609,12 +753,12 @@ func (a *Agent) drawRect(ctx context.Context, args map[string]any) (x, y, w, h i
 	if !xOK || !yOK || !wOK || !hOK {
 		return 0, 0, 0, 0, nil, toolError("rect needs x, y, w and h")
 	}
-	farX, farY, errText := a.toScreen(ctx, int(rx)+int(rw), int(ry)+int(rh))
+	farX, farY, errText := a.toScreenForDraw(ctx, int(rx)+int(rw), int(ry)+int(rh))
 	if errText != "" {
 		return 0, 0, 0, 0, nil, errText
 	}
 	// Both corners are mapped, so a rectangle that starts inside the picture and runs off its edge is refused rather than drawn half over something the model never saw.
-	x, y, errText = a.toScreen(ctx, int(rx), int(ry))
+	x, y, errText = a.toScreenForDraw(ctx, int(rx), int(ry))
 	if errText != "" {
 		return 0, 0, 0, 0, nil, errText
 	}
@@ -776,17 +920,18 @@ func (a *Agent) waitForOverview(ctx context.Context) bool {
 }
 
 // switchWindow brings another application's window to the front. It has two ways in and tries them in that order: the bundled GNOME Shell extension, which raises a window the way the shell itself does and puts nothing on the user's screen (see internal/window), and failing that the shell's own search driven through the portal keyboard — Super, the application's name, Enter — which is all an unprivileged daemon has on a GNOME Wayland session without that extension. Either way it then reads what actually came forward, since the search matches an installed application name rather than a window title and its top result can be something else entirely. Input: a context carrying the ask's own question (see WithQuestion) and the application to bring forward. Output: what happened, in the words the model reads back: the window it switched to, the window that is still in front, the window that came forward instead, or a tool error.
-// It refuses unless the question itself names that application: a task carries the window it started in, and leaving that window is the user's decision, not the model's. Nothing but the given name is ever typed, and nothing is pressed or raised at all when the window asked for is already in front.
+// It refuses when the request is about the window in front and not this application: a task that names the window it started in stays there, and leaving it is the user's decision, not the model's. A request that names no window at all leaves the choice of application to the model, since "play it" or "close the tab" can only be done somewhere. Nothing but the given name is ever typed, and nothing is pressed or raised at all when the window asked for is already in front.
 func (a *Agent) switchWindow(ctx context.Context, app string) string {
 	if app == "" {
 		return toolError("switch_window needs the app to bring to the front")
 	}
-	if !namesApp(questionFrom(ctx), app) {
-		return toolError(fmt.Sprintf("I won't switch to %q: nothing in what was asked names it, and this task stays in the window it started in", app))
-	}
 	before := a.frontWindowNow(ctx)
 	if namesApp(before, app) {
 		return fmt.Sprintf("%q is already the window in front; nothing was pressed", before)
+	}
+	question := questionFrom(ctx)
+	if frontApp, _, _ := strings.Cut(before, windowSep); frontApp != "" && !namesApp(question, app) && namesApp(question, frontApp) {
+		return toolError(fmt.Sprintf("I won't switch to %q: what was asked is about %q, and this task stays in the window it started in", app, frontApp))
 	}
 	if ok, how := a.raiseWindow(ctx, app); ok {
 		return a.switchOutcome(ctx, app, before, how, nil)
@@ -844,6 +989,46 @@ func (a *Agent) raiseWindow(ctx context.Context, app string) (bool, string) {
 	return false, ""
 }
 
+// defaultBrowserID is the desktop id of the browser the desktop opens links with, as xdg-settings reports it ("brave_brave.desktop", "firefox.desktop", "org.mozilla.firefox.desktop"), or "" when it cannot say. A variable so a test can name one without the desktop.
+var defaultBrowserID = func() string {
+	out, err := exec.Command("xdg-settings", "get", "default-web-browser").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// raiseBrowser brings the default browser's window to the front through the shell extension, after open_url has put a page in it: xdg-open hands the browser no activation token, so the shell keeps the new tab behind whatever was in front, and observe_screen then reads the old window and the model opens the page again. The browser's window is the one whose class shares a word with the browser's desktop id, which is how brave_brave.desktop finds wm_class brave-browser and org.mozilla.firefox.desktop finds firefox without a table of browsers. Input: a context bounding the D-Bus calls. Output: how it was raised ("pid 1234"), or "" when there is no extension, no known browser, no window of it open yet, or the raise did not land.
+func (a *Agent) raiseBrowser(ctx context.Context) string {
+	if a.raiser == nil {
+		return ""
+	}
+	id := strings.TrimSuffix(defaultBrowserID(), ".desktop")
+	idWords := appWords(id)
+	if len(idWords) == 0 {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, raiserTimeout)
+	defer cancel()
+	if ok, err := a.raiser.Available(ctx); err != nil || !ok {
+		return ""
+	}
+	windows, err := a.raiser.List(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, w := range windows {
+		classWords := appWords(w.WmClass)
+		if !slices.ContainsFunc(classWords, func(word string) bool { return len(word) > 2 && slices.Contains(idWords, word) }) {
+			continue
+		}
+		if ok, err := a.raiser.ByPid(ctx, w.Pid); err == nil && ok {
+			return fmt.Sprintf("pid %d", w.Pid)
+		}
+	}
+	return ""
+}
+
 // switchOutcome reads which window is in front after a switch was attempted and says what happened in the words the model reads back. Input: a context, the application asked for, the window that was in front before, the key that raised it ("pid 1234" and so on, from raiseWindow) or "" when the keyboard did the switching, and the keyboard the search was typed on — nil when the extension did the raising and no search was ever opened. Output: the switch's result line, or a tool error when the front window cannot be read at all.
 // A switch that did not land can leave the shell's search sitting over everything, so it is closed again with one Escape — but only when a live read says it is still up, since the same key sent at the user's own window discards whatever was in it. Whether that press lands changes nothing about the report, which is about the switch.
 func (a *Agent) switchOutcome(ctx context.Context, app, before, how string, dev InputDevice) string {
@@ -886,7 +1071,7 @@ func (a *Agent) frontWindowAfterSwitch(ctx context.Context, app string) string {
 	}
 }
 
-// frontWindowChanged refuses a click that would land in whatever grabbed focus since observe_screen built the list a number is being resolved against — a popup, a desktop overview, another application — unless the question that started this turn actually named where it should act (see WithQuestion, mentionsWindow). Input: a context carrying the ask's own question. Output: "" when nothing has been observed yet (seenItem already refuses that case), the front window still matches the one the list came from, or the question names the window now in front; otherwise the tool error to hand back, naming both windows.
+// frontWindowChanged refuses a click that would land in whatever grabbed focus since observe_screen built the list a number is being resolved against — a popup, a desktop overview, another application — unless the question that started this turn actually named where it should act (see WithQuestion, mentionsWindow). A title change alone in the same application does not count: measured 2026-09-09 03:19, a YouTube tab's title grew "- Audio playing" the moment Play was pressed, and the same click was refused though the same page and button were still there; that case is left for stillThere to verify by role, label and rectangle. Input: a context carrying the ask's own question. Output: "" when nothing has been observed yet (seenItem already refuses that case), the same application is still in front, or the question names the window now in front; otherwise the tool error to hand back, naming both windows.
 func (a *Agent) frontWindowChanged(ctx context.Context) string {
 	last := a.lastScreen(ctx)
 	if last.app == "" && last.title == "" {
@@ -897,7 +1082,7 @@ func (a *Agent) frontWindowChanged(ctx context.Context) string {
 		// The real error, if there is one, surfaces from stillThere or the click itself right after this.
 		return ""
 	}
-	if app == last.app && title == last.title {
+	if app == last.app {
 		return ""
 	}
 	if mentionsWindow(questionFrom(ctx), app, title) {
@@ -910,5 +1095,23 @@ func (a *Agent) frontWindowChanged(ctx context.Context) string {
 	if last.title != "" {
 		from = last.app + " · " + last.title
 	}
-	return toolError(fmt.Sprintf("the window in front is now %q, not %q where observe_screen listed this element — call observe_screen again, or say which window to use", front, from))
+	return toolError(fmt.Sprintf("the window in front is now %q, not %q where observe_screen listed this element, call observe_screen again, or say which window to use", front, from))
 }
+
+// liveScreenScope gives one live voice session its own screen state, the way withAskLookState gives one to every typed ask. Input: the session's context. Output: a context carrying that state, to be used for every tool call the session makes.
+// Without it lookStateFrom hands each tool call a throwaway, so look records its picture into something discarded the moment it returns and the draw that follows cannot tell a look ever happened: it answers needLookFirst, the model looks again, and the two go round forever. One state per session instead of one per turn because the session, not the turn, is what the model treats as continuous — a picture taken while answering one question is drawn on while answering the next.
+func liveScreenScope(ctx context.Context) context.Context {
+	return withAskLookState(ctx)
+}
+
+// endLiveTurn gives the session's look allowance back at a model turn boundary. Input: the session's context. Output: none.
+// The allowance is maxLooksPerAsk, which is two, and it is meant to bound one question rather than a conversation: without this a session that looked twice in its first minute could never look again however long it ran. What the looks left behind — the newest picture and the numbered list observe_screen produced — is deliberately kept, because the model lists the screen, replies, and is then asked to draw around item 3.
+func endLiveTurn(ctx context.Context) {
+	s := lookStateFrom(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.looks = 0
+}
+
+// EndScreenRound gives the look allowance back at a round boundary of a long job, the way endLiveTurn does at a model turn of a live session, and keeps the picture the last look took. Input: the job's screen scope context. Output: none.
+func (a *Agent) EndScreenRound(ctx context.Context) { endLiveTurn(ctx) }

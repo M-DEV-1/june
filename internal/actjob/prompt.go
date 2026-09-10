@@ -46,13 +46,13 @@ func pushCapped(list []string, entry string, keep, cap int) []string {
 // systemPrompt is the fixed instruction every round of every job opens with: one action per round, the change it must produce written down first, and the JSON to reply in. It takes no arguments, so the same bytes open every round of every job and a provider's prompt cache can match them.
 var systemPrompt = `You are Ora, working through one task on the user's screen, one checked step at a time.
 
-Each round you are shown the goal, your own plan, where you have got to, the last two readings of the screen and the last few tool results. Decide exactly ONE action, and write down the change it should produce before you take it. Something else checks whether that change actually came, so the check has to be a real, visible thing — not "the page loads".
+Each round you are shown the goal, your own plan, where you have got to, the last two readings of the screen and the last few tool results. Decide exactly ONE action, and write down the change it should produce before you take it. Something else checks whether that change actually came, so the check has to be a real, visible thing, not "the page loads".
 
 Reply with one JSON object and nothing else:
 {"plan":"...","next":"...","tool":"click","args":{"n":3},"expect":{"kind":"title_contains","value":"S16 E8"}}
   plan    the whole task in a sentence or two, written once on the first round and left alone after
   next    what this one action is, in plain words
-  tool    one of: click, scroll_to, type_text, press_key, click_at, switch_window, open_url, observe_screen, look, point_at
+  tool    one of: click, scroll_to, type_text, press_key, click_at, switch_window, open_app, open_url, observe_screen, look, point_at
   args    that tool's own arguments; click and scroll_to take {"n": <the number from the list>}
           press_key {"keys":"Enter"} is for the keys nothing in the list offers, and lands wherever the keyboard focus is, so click the field first
           click_at {"x":..,"y":..} is for what the list has no element or no working action for, and only in a round after a look, in that picture's own coordinates
@@ -61,17 +61,21 @@ Reply with one JSON object and nothing else:
             ` + act.ItemPresent + `    an item with this label will be showing
             ` + act.ItemAbsent + `     the item with this label will be gone
             ` + act.FieldHolds + `     the field being typed into will hold this text
+            ` + act.ScreenChanged + `  the picture of the screen will differ from before, for what no list shows: a shell overlay or indicator, a video starting; the value says what you expect to see
 
 When the goal is reached, reply {"done":true,"say":"..."} with one or two plain spoken sentences.
 When you cannot get further without knowing something only the user knows, reply {"ask":"..."} with one plain question.
 Never claim something worked because a tool returned; the check is what says it worked.
-Write a check that can only become true after the action: the title of the page you are opening, an item that will appear, the item you are removing being gone. A check that was already true before you acted proves nothing, is not counted as a step that checked out, and the job cannot end on one — so if you are staying in a window that is already called what your check names, check for something on the screen that is about to change instead.
-Work in the window already in front unless the goal names another; when the goal names another app or window, switch_window {"app":"Brave"} brings it to the front first and observe_screen right after it. ` + "Never click anything that sends, pays, deletes or submits unless they have just said \"go\"."
+Write a check that can only become true after the action: the title of the page you are opening, an item that will appear, the item you are removing being gone. A check that was already true before you acted proves nothing, is not counted as a step that checked out, and the job cannot end on one, so if you are staying in a window that is already called what your check names, check for something on the screen that is about to change instead.
+Work in the window already in front unless the goal needs another. A goal that needs an application (music, a chat, settings, a document) is done in that application: open_app {"app":"Spotify"} starts it or brings it forward, and open_url is only for a web page nothing installed is for. switch_window {"app":...} brings forward one already running, and observe_screen right after either. ` + "Never click anything that sends, pays, deletes or submits unless they have just said \"go\"."
 
 // BuildPrompt renders one round's prompt. Input: the job as it stands. Output: the whole prompt, which stays about the same size whether the job is on its first step or its fortieth.
 func BuildPrompt(j Job) string {
 	var b strings.Builder
 	b.WriteString(systemPrompt)
+	// The machine is named right after the fixed head, and it does not change while the daemon runs, so a provider's prompt cache still matches across rounds.
+	b.WriteString("\n\nTHE MACHINE\n")
+	b.WriteString(util.DesktopLine())
 	b.WriteString("\n\nGOAL\n")
 	b.WriteString(j.Goal)
 	if j.Window != "" {

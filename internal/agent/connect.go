@@ -2,14 +2,17 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"ora/internal/config"
 	"ora/internal/obs"
+	"ora/internal/tracker"
 	"ora/internal/util"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -51,7 +54,7 @@ const thinkingBudgetTokens = 256
 
 // thinkingConfig builds the Live API's thinking-behavior config for the configured voice model. Extracted from Connect() so it's testable without dialing a real websocket, same pattern as realtimeInputConfig.
 func thinkingConfig() *genai.ThinkingConfig {
-	return thinkingConfigFor(config.VoiceModel)
+	return thinkingConfigFor(config.VoiceModel())
 }
 
 // thinkingConfigFor builds the thinking config the given Live model accepts. The Gemini 3 Live models take a thinking level and reject a token budget; the 2.5 model is the reverse. Low is the level that keeps first-word latency close to the 256-token budget the 2.5 model ran with, which on 2026-08-28 measured under two seconds for a lookup-and-answer turn.
@@ -82,7 +85,7 @@ func compressionConfig() *genai.ContextWindowCompressionConfig {
 }
 
 // proactivityConfig builds the Live API's proactive-audio config, or nil when the feature is switched off in ora-config.json (see config.ProactiveAudioEnabled). Extracted from Connect() so it's testable without dialing a real websocket, same pattern as realtimeInputConfig/thinkingConfig/compressionConfig.
-// Proactive audio lets the model decline to answer audio that wasn't aimed at it — a conversation in the room, a video playing, the user talking to someone else. Ora's mic is always open, so without it every stray sentence in earshot is a prompt. Only supported on the 2.5 native-audio models, which is what config.VoiceModel is.
+// Proactive audio lets the model decline to answer audio that wasn't aimed at it — a conversation in the room, a video playing, the user talking to someone else. Ora's mic is always open, so without it every stray sentence in earshot is a prompt. Only supported on the 2.5 native-audio models, which is what config.VoiceModel() is.
 // Returning nil rather than a config with ProactiveAudio=false leaves the field off the wire entirely, so the API keeps its own default instead of Ora pinning it.
 // affectiveDialogFor enables the 2.5 model's affective dialog, which matches the reply's tone to how the user sounds. Input: the Live model name. Output: true for the 2.5 native-audio model, nil for the gemini-3 live models, which reject the field.
 func affectiveDialogFor(model string) *bool {
@@ -116,10 +119,10 @@ func inputTranscriptionConfig() *genai.AudioTranscriptionConfig {
 }
 
 func proactivityConfig(enabled bool) *genai.ProactivityConfig {
-	return proactivityConfigFor(config.VoiceModel, enabled)
+	return proactivityConfigFor(config.VoiceModel(), enabled)
 }
 
-// proactivityConfigFor is proactivityConfig for a named Live model. The Gemini 3 Live models do not support proactive audio as of 2026-09-02, so for them the field stays off the wire whatever the config file says — which also means the mic hears the room and the model answers it; see the trial note on config.VoiceModel.
+// proactivityConfigFor is proactivityConfig for a named Live model. The Gemini 3 Live models do not support proactive audio as of 2026-09-02, so for them the field stays off the wire whatever the config file says — which also means the mic hears the room and the model answers it; see the trial note on config.VoiceModel().
 func proactivityConfigFor(model string, enabled bool) *genai.ProactivityConfig {
 	// The field is only accepted under API version v1alpha, which the live client sets; a probe on 2026-09-03 without it got `Unknown name "proactivity" at 'setup'`, so a client change here must keep v1alpha.
 	if !enabled || strings.HasPrefix(model, "gemini-3") {
@@ -216,8 +219,8 @@ func matchesRecentOraSpeech(recent []oraUtterance, candidate string, arrived tim
 }
 
 func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
-	// branchCalls is scoped to one live session — reset at the top of every Connect() (fresh or reconnect) so a prior session hitting maxBranchesPerSession doesn't leave branch() dead for the rest of the process.
-	a.branchCalls.Store(0)
+	// Every tool call this session makes shares one screen state, the way every tool call of a typed ask shares the ask's. Without it each call got a throwaway: look recorded its picture into something discarded the moment it returned, and the draw that followed answered "I need to look at the screen first", so the model looked again and the two went round forever (a real session did exactly that on 2026-09-07).
+	ctx = a.voiceScreenScope(ctx)
 
 	tracer := obs.GetTracer(ctx, "ora.agent")
 	handshakeCtx, span := tracer.Start(ctx, "Agent.ConnectHandshake")
@@ -237,7 +240,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 
 	// drumrolllllll
 	// connectttt to livee apiii
-	span.SetAttributes(attribute.String("agent.model", config.VoiceModel))
+	span.SetAttributes(attribute.String("agent.model", config.VoiceModel()))
 
 	_, ctxSpan := tracer.Start(handshakeCtx, "Agent.GetImplicitContext")
 	resp, err := a.brain.GetImplicitContext(handshakeCtx)
@@ -304,7 +307,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		Tools:                    tools,
 		ContextWindowCompression: compressionConfig(),
 		Proactivity:              proactivityConfig(config.LoadConfig().ProactiveAudioEnabled()),
-		EnableAffectiveDialog:    affectiveDialogFor(config.VoiceModel),
+		EnableAffectiveDialog:    affectiveDialogFor(config.VoiceModel()),
 		SystemInstruction: &genai.Content{
 			Role: "system",
 			Parts: []*genai.Part{
@@ -316,13 +319,13 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	slog.Debug("connecting to live API")
 
 	// A live session is one request against the day's allowance, asked for before the dial so a spent quota is reported without opening a socket.
-	if err := a.allowGemini(config.VoiceModel); err != nil {
+	if err := a.allowGemini(config.VoiceModel()); err != nil {
 		span.RecordError(err)
 		span.End()
 		return fmt.Errorf("live session refused: %w", err)
 	}
 	_, wsSpan := tracer.Start(handshakeCtx, "Agent.LiveConnectWebSocket")
-	session, err := client.Live.Connect(handshakeCtx, config.VoiceModel, cfg)
+	session, err := client.Live.Connect(handshakeCtx, config.VoiceModel(), cfg)
 	if err != nil {
 		wsSpan.RecordError(err)
 		wsSpan.End()
@@ -362,6 +365,8 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		}
 	} else {
 		slog.Info("resuming live session, skipping opening greeting", "resumption_handle_present", true)
+		// Anything a branch answered in the dead session's last seconds is not in the resumed context, so the model is told again rather than left saying the search is still running.
+		a.redeliverBranchNotes(session)
 	}
 
 	// handshake complete, end span
@@ -385,6 +390,101 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	}
 }
 
+// voiceScreenScope gives every tool call of the voice conversation the same screen state for as long as the agent lives, across reconnects. Input: the connection's context. Output: a context carrying the agent's own screen state.
+// It used to be liveScreenScope, one fresh state per Connect. Measured 2026-09-09: the server hung up mid conversation, Connect redialled and resumed the same conversation from the model's point of view, and the model's next click on item 25 answered "call observe_screen first" about a list it had just been given. The model treats a resumed session as one conversation, so the numbered list, the picture and the focused control have to survive the redial. The look allowance still comes back at every model turn (see endLiveTurn).
+func (a *Agent) voiceScreenScope(ctx context.Context) context.Context {
+	return context.WithValue(ctx, askLookStateKey{}, &a.askScreen)
+}
+
+// ErrGoAway is what receiveLoop returns when it gave the session up because the server said it was about to hang up. The caller's reconnect loop redials on any error; this one says the drop was planned, not a failure.
+var ErrGoAway = errors.New("live session ended on server GoAway")
+
+// goAwayDrainLimit bounds how long a GoAway waits for Ora to finish the sentence she is speaking before the session is closed. The server gives its own deadline in GoAway.TimeLeft, which measured around ten seconds on 2026-09-09, so this stays well inside it.
+const goAwayDrainLimit = 5 * time.Second
+
+// goAwayDrainPoll is how often the speaker is asked whether it has gone quiet during that wait.
+const goAwayDrainPoll = 100 * time.Millisecond
+
+// waitForSpeakerQuiet blocks until the speaker is no longer audibly playing, or until limit runs out. Input: how long to wait at most. Output: none. A session with no speaker wired up (tests, text only) returns at once.
+func (a *Agent) waitForSpeakerQuiet(limit time.Duration) {
+	if a.speaker == nil {
+		return
+	}
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if a.speaker.CurrentAmplitude() <= bargeInEchoAmplitude {
+			return
+		}
+		time.Sleep(goAwayDrainPoll)
+	}
+}
+
+// branchNote is one branch result the model may never have seen: the task it was given, what came back, and when it was ready.
+type branchNote struct {
+	task   string
+	result string
+	at     time.Time
+}
+
+// branchNoteWindow is how long a branch result stays worth telling the model after a reconnect. Measured 2026-09-09: a branch result was sent at 03:43:41 and the server killed the socket at 03:43:50, nine seconds later, and the resumed session had no trace of it, so Ora kept saying the search was still running. Ninety seconds covers that gap and the redial after it.
+const branchNoteWindow = 90 * time.Second
+
+// pendingBranchNotes holds the recent branch results of each live agent, so a resumed session can be told the news the dead one carried. Notes past branchNoteWindow are dropped on every read and write, and an agent left with none is removed from the map, so nothing is held past the conversation it belongs to.
+var pendingBranchNotes = struct {
+	mu    sync.Mutex
+	notes map[*Agent][]branchNote
+}{notes: map[*Agent][]branchNote{}}
+
+// rememberBranchResult keeps one branch result, so a reconnect within branchNoteWindow can hand it to the resumed session. Input: the task, the result string exactly as the tool produced it (an "error..." string is a failure), and the time it was ready. Output: none.
+func (a *Agent) rememberBranchResult(task, result string, at time.Time) {
+	pendingBranchNotes.mu.Lock()
+	defer pendingBranchNotes.mu.Unlock()
+	kept := freshBranchNotes(pendingBranchNotes.notes[a], at)
+	pendingBranchNotes.notes[a] = append(kept, branchNote{task: task, result: result, at: at})
+}
+
+// takeBranchNotes returns this agent's branch results from the last branchNoteWindow and forgets them, so a second reconnect does not tell the model the same news twice. Input: now. Output: the notes, oldest first, or none.
+func (a *Agent) takeBranchNotes(now time.Time) []branchNote {
+	pendingBranchNotes.mu.Lock()
+	defer pendingBranchNotes.mu.Unlock()
+	notes := freshBranchNotes(pendingBranchNotes.notes[a], now)
+	delete(pendingBranchNotes.notes, a)
+	return notes
+}
+
+// freshBranchNotes drops the notes older than branchNoteWindow. Input: the notes and now. Output: the ones still worth delivering.
+func freshBranchNotes(notes []branchNote, now time.Time) []branchNote {
+	var kept []branchNote
+	for _, n := range notes {
+		if now.Sub(n.at) <= branchNoteWindow {
+			kept = append(kept, n)
+		}
+	}
+	return kept
+}
+
+// branchNoteText is what the model is told about one background search that finished while the socket was down. Input: the note. Output: one sentence, saying the result or the failure.
+func branchNoteText(n branchNote) string {
+	if strings.HasPrefix(n.result, "error") {
+		return fmt.Sprintf("The background search for %s failed: %s", n.task, n.result)
+	}
+	return fmt.Sprintf("The background search for %s came back: %s", n.task, n.result)
+}
+
+// redeliverBranchNotes tells a resumed session about the branch results the previous connection was carrying when it died. Input: the new session. Output: none. Sent as client content text because a function response belongs to a call this new session never made.
+func (a *Agent) redeliverBranchNotes(session liveSession) {
+	for _, n := range a.takeBranchNotes(time.Now()) {
+		a.writeMu.Lock()
+		err := session.SendClientContent(genai.LiveSendClientContentParameters{
+			Turns: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: branchNoteText(n)}}}},
+		})
+		a.writeMu.Unlock()
+		if err != nil {
+			slog.Error("failed to re-deliver a branch result to the resumed session", "task", n.task, "error", err)
+		}
+	}
+}
+
 // liveSession is the subset of *genai.Session's behavior receiveLoop depends on.
 // Extracting it as an interface lets tests exercise receiveLoop's concurrency behavior (notably: a slow tool call must not block the receive path) against a fake session instead of a live websocket.
 // *genai.Session satisfies this structurally already — no wrapping needed at call sites.
@@ -392,6 +492,19 @@ type liveSession interface {
 	Receive() (*genai.LiveServerMessage, error)
 	SendToolResponse(genai.LiveSendToolResponseParameters) error
 	SendClientContent(genai.LiveSendClientContentParameters) error
+	// SendRealtimeInput is the road the microphone already uses every frame, and the only one that can carry a picture: a tool result on this session is text, so a screenshot returned as one is never seen. The look tool pushes its capture down here instead (see sessionPictureSender), which is what lets the voice session read the screen at all.
+	SendRealtimeInput(genai.LiveRealtimeInput) error
+	// Close hangs up the websocket. receiveLoop calls it when the server sends a GoAway, so the client closes first rather than being force-closed with "close 1008 client failed to close the connection after receiving a GoAway" (measured three times in 25 minutes on 2026-09-09).
+	Close() error
+}
+
+// sessionPictureSender is the road a look's picture takes on a live session. Input: the session. Output: a PictureSender that ships the capture as one realtime video frame.
+// It goes in the Video field, the way the microphone's audio goes in Audio. The Media field serialises to media_chunks, which the API deprecated: measured 2026-09-09 at 03:58:40 and 04:04:33, a picture sent that way closed the socket with "close 1007 realtime_input.media_chunks is deprecated. Use audio, video, or text instead" and took the branch subtask running under it down with the session.
+// It is realtime input rather than a tool result because the Live API takes a function response as text: the picture has to arrive on the same channel as the microphone's audio, and the tool result then only describes the frame it was taken in.
+func sessionPictureSender(session liveSession) PictureSender {
+	return func(_ context.Context, c tracker.Capture) error {
+		return session.SendRealtimeInput(genai.LiveRealtimeInput{Video: &genai.Blob{Data: c.Data, MIMEType: c.Mime}})
+	}
 }
 
 // VoiceUsage returns the Live API token usage of this session's most recently completed voice turn. Call it right after observing ResponseChunk{TurnBoundary: true} on TextResponseChan, and before the next turn completes — receiveLoop snapshots the running total on the agent and resets it for the next turn at the same TurnComplete/GenerationComplete point that flushes the turn's transcript buffers (see flushTurnUsage in receiveLoop). Output: that turn's usage, or the zero value TokenUsage{Provider: ProviderGemini} before any voice turn has completed on this session.
@@ -494,10 +607,16 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		// The Live API reports usage on the server message that finishes a response rather than on a response object, so a turn that runs tools reports usage once per round and they add up here the same way askVoice's eval loop totals TurnTrace.Usage (see TokenUsage.addLive in ask.go). Most messages of a turn carry no UsageMetadata at all, and addLive is then a no-op.
 		turnUsage.addLive(msg.UsageMetadata)
 
-		// GoAway: the server is about to hang up (session expiry or rate limits) — otherwise receiveLoop just silently hits a raw close. Just make it observable; the caller's reconnect loop already redials, and can now resume via SessionResumption instead of cold-starting.
+		// GoAway: the server is about to hang up (session expiry or rate limits). Logging it and carrying on is what produced "close 1008 client failed to close the connection after receiving a GoAway" three times in 25 minutes on 2026-09-09, each force-close losing whatever a tool delivered in its last seconds. So the session is given up here instead: wait out the sentence Ora is in the middle of, hang up, and let the caller's reconnect loop redial and resume from the stored handle.
 		if msg.GoAway != nil {
-			slog.Warn("live session GoAway received, server will disconnect soon",
+			slog.Warn("live session GoAway received, closing the session so the reconnect happens on our terms",
 				"time_left", msg.GoAway.TimeLeft)
+			a.waitForSpeakerQuiet(goAwayDrainLimit)
+			if err := session.Close(); err != nil {
+				slog.Warn("closing the live session after a GoAway failed", "error", err)
+			}
+			errChan <- ErrGoAway
+			return
 		}
 
 		// SessionResumptionUpdate: capture the handle so the next Connect() can resume instead of cold-starting. Only stored when the server marks the state actually resumable with a non-empty handle — an unresumable point (e.g. mid function-call) sends an empty one, which would otherwise make the next reconnect skip the greeting while still cold-starting.
@@ -622,6 +741,8 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 
 		// TurnComplete/GenerationComplete mark the end of one model turn — the boundary the UI needs so it stops merging this turn's ora chunks into whatever arrives for the NEXT turn (see streamLine's TurnBoundary handling). The SDK can signal either depending on realtime-playback timing, so both are checked; Interrupted (handled above) already breaks the merge chain on its own since it emits a system-sender chunk.
 		if msg.ServerContent != nil && (msg.ServerContent.TurnComplete || msg.ServerContent.GenerationComplete) {
+			// The look allowance bounds one question, not a whole conversation, so it comes back here. What the looks left behind is kept: the model lists the screen, replies, and is then asked to draw around item 3.
+			endLiveTurn(recvCtx)
 			clock.turnDone()
 			flushInputTranscript()
 			flushOraSpeech()
@@ -637,12 +758,18 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		// tool calling - check if model wants to use a tool.
 		//
 		// Dispatched to its own goroutine per call: executeTool can block for an arbitrary time (HITL shell_exec waits on TUI approval), and running it inline here used to stall session.Receive() for the duration, backing up the receive buffer and dropping mic frames in audioSendLoop downstream. Now Receive() keeps getting called immediately; the tool's result is sent back later, matched by fc.ID/fc.Name.
+		// One goroutine per MESSAGE, not per call: the calls of one model turn are steps of one plan and run in the order the model gave them. Measured 2026-09-09: click(tab) and press_key Ctrl+W arrived together, the key landed after 62 ms and the click after 666 ms, so the wrong tab closed; click(search box) and type_text arrived together three times and the typing finished before the click landed, so the box stayed empty. Receive() is still never blocked, which is what the goroutine is for.
 		if msg.ToolCall != nil {
 			flushInputTranscript()
-			for _, fc := range msg.ToolCall.FunctionCalls {
+			calls := msg.ToolCall.FunctionCalls
+			for _, fc := range calls {
 				slog.Info("tool call received", "tool", fc.Name, "args", fc.Args)
-				go a.runToolCall(recvCtx, otelTracer, session, fc)
 			}
+			go func() {
+				for _, fc := range calls {
+					a.runToolCall(recvCtx, otelTracer, session, fc)
+				}
+			}()
 		}
 	}
 }
@@ -651,6 +778,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 // Saving, correcting or forgetting a note, and opening a URL, all produce their real effect outside the conversation — the user sees the browser open, or simply trusts that the note was saved — so their result is scheduled WHEN_IDLE and slots into the next natural gap instead of cutting off whatever Ora is saying.
 var quietTools = map[string]bool{
 	"save_note": true,
+	"add_task":  true,
 	"revise":    true,
 	"open_url":  true,
 }
@@ -714,6 +842,12 @@ func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session li
 		slog.Warn("tool result truncated", "tool", fc.Name, "length", len(result))
 	}
 
+	// Kept for a short while so a reconnect can tell the resumed session what came back, whether or not this send reaches the model: the socket can die between the send and the server folding the result in, and on 2026-09-09 one did, nine seconds after a branch answered. See branchNoteWindow.
+	if fc.Name == "branch" {
+		task, _ := fc.Args["task"].(string)
+		a.rememberBranchResult(task, result, time.Now())
+	}
+
 	slog.Info("tool result", "tool", fc.Name, "took_ms", time.Since(toolStart).Milliseconds(), "result", result)
 
 	// Emitted before the ctx.Err() check below on purpose: ToolActivityChan is Agent-scoped (survives reconnects, like TextResponseChan), so the UI's transcript stays accurate even after the session that spawned this call is gone.
@@ -767,6 +901,8 @@ func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session li
 // Only INTERRUPT-scheduled tools get a nudge: a WHEN_IDLE result (saving a note, opening a URL) is not something the user is waiting through silence for.
 // Input: the tool call and the scheduling its result will carry. Output: the tool's result string, exactly as executeTool returned it.
 func (a *Agent) runToolWithNudge(ctx context.Context, session liveSession, fc *genai.FunctionCall, scheduling genai.FunctionResponseScheduling) string {
+	// The tool gets a road for a picture here, where the session is in hand: look pushes its capture down it rather than trying to return it, which a function response cannot carry.
+	ctx = WithPictureSender(ctx, sessionPictureSender(session))
 	if scheduling != genai.FunctionResponseSchedulingInterrupt {
 		return a.executeTool(ctx, fc.Name, fc.Args)
 	}

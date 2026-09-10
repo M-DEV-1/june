@@ -1059,6 +1059,13 @@ type scopedExec struct {
 	smu    sync.Mutex
 	scopes int
 	seen   []int
+	rounds int
+}
+
+func (s *scopedExec) EndScreenRound(ctx context.Context) {
+	s.smu.Lock()
+	s.rounds++
+	s.smu.Unlock()
 }
 
 func (s *scopedExec) NewScreenScope(ctx context.Context) context.Context {
@@ -1402,3 +1409,76 @@ func TestRunner_ACheckThatAlreadyHeldIsNotCountedAsAFailure(t *testing.T) {
 	}
 }
 
+// A look or an observe_screen changes nothing on the screen, so a check written for it can only fail, and on 2026-09-09 a job spent the first of its three tries on a look that came back fine. A read carries no check, calls no wait_for, and does not move the stuck counter either way.
+func TestRunner_AReadIsNotCheckedAndDoesNotCountTowardStuck(t *testing.T) {
+	exec := &fakeExec{verdicts: []bool{false, false, true}}
+	r, _, _ := newRunner(t, exec, script(
+		stepReply("look", "Spotify"),
+		stepReply("click", "S16 E8"),
+		stepReply("observe_screen", "Spotify"),
+		stepReply("click", "S16 E8"),
+		stepReply("click", "S16 E8"),
+		doneReply("Playing now."),
+	))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Stuck, Done, Failed)
+	if job.State != Done {
+		t.Fatalf("state = %q (%s), want done: two failed clicks with reads between them are not three failures in a row", job.State, job.Err)
+	}
+	waits := 0
+	for _, c := range exec.calls {
+		if c == "wait_for" {
+			waits++
+		}
+	}
+	if waits != 3 {
+		t.Errorf("wait_for ran %d times, want 3: once per click and never for a read", waits)
+	}
+	if job.Steps[0].Outcome != "read" || job.Steps[0].Expect.Kind != "" {
+		t.Errorf("the look step = %+v, want outcome read and no check", job.Steps[0])
+	}
+}
+
+// The stuck question used to be stitched from the check's description and the verifier's reason: "I tried 3 times to make it so that the title contains Screenshot, and each time 5s: the title is Claude". It is written for a person, and carries what the last tool answered, which is what the person needs to help.
+func TestStuckQuestion_IsPlainAndCarriesTheLastResult(t *testing.T) {
+	j := Job{Next: "open a screen recorder", Steps: []Step{{Tool: "open_app", Result: `error: no installed application is named "OBS Studio"`, Expect: act.Check{Kind: act.TitleContains, Value: "OBS"}, Why: "5s: the title is \"Claude\""}}}
+	q := stuckQuestion(j)
+	for _, want := range []string{"open a screen recorder", "open_app", "OBS Studio", "What should I do"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("question %q lacks %q", q, want)
+		}
+	}
+	if strings.Contains(q, "make it so that") {
+		t.Errorf("question %q still reads like the old stitched sentence", q)
+	}
+}
+
+// The model is told what machine it is on: on 2026-09-09 it hunted for a recording application because nothing said GNOME on Wayland, where recording is a built-in shortcut. The line is read from the session, not written in.
+func TestBuildPrompt_NamesTheDesktop(t *testing.T) {
+	t.Setenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
+	t.Setenv("XDG_SESSION_TYPE", "wayland")
+	p := BuildPrompt(Job{Goal: "record the screen"})
+	if !strings.Contains(p, "ubuntu:GNOME") || !strings.Contains(p, "wayland") {
+		t.Errorf("prompt does not name the desktop: %q", p[:min(len(p), 200)])
+	}
+}
+
+// A job shares one screen scope across all its rounds, and the look allowance on that scope is meant for one question, so on 2026-09-09 a job went blind at its third look and pressed keys it could not see the effect of. The runner hands the allowance back at the start of every round; the picture the last look took stays, since click_at aims by it in the round after.
+func TestRunner_GivesTheLookAllowanceBackEveryRound(t *testing.T) {
+	exec := &scopedExec{}
+	r, _, _ := newRunner(t, exec, script(stepReply("look", ""), stepReply("click", "S16 E8"), doneReply("done")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Done, Failed)
+	exec.smu.Lock()
+	rounds := exec.rounds
+	exec.smu.Unlock()
+	if rounds < 3 {
+		t.Errorf("EndScreenRound ran %d times, want once per round (three rounds: look, click, done)", rounds)
+	}
+}

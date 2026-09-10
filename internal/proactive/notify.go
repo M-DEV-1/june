@@ -387,6 +387,12 @@ func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action strin
 	if deliverAnswer(noticeKey(n), action) {
 		return nil
 	}
+	// Nobody was waiting, which happens whenever the question's goroutine has already given up, the daemon has restarted since the card was drawn, or the card was drawn on a second surface. The button still has to work, so the notice's own registered action runs instead.
+	if do := noticeActionFor(kind, id, action); do != nil {
+		slog.Info("notice: no goroutine was waiting, doing what the button asks for directly", "kind", kind, "action", action)
+		return do()
+	}
+	slog.Debug("notice: no goroutine is waiting on this press and nothing is registered for it", "key", noticeKey(n), "action", action, "waiting", waitingKeys())
 	var err error
 	switch action {
 	case actionDone:
@@ -439,7 +445,8 @@ func (s *Scheduler) maybeSnoozes(ctx context.Context) {
 			slog.Warn("snoozes: could not stamp one as fired, skipping it", "id", sn.ID, "error", err)
 			continue
 		}
-		s.say(Notice{Title: sn.Title, Body: sn.Body, Place: noticePlaces[sn.Kind], ID: sn.NoticeID, Kind: sn.Kind})
+		// The buttons are named rather than left empty: a notice that names none is filled in as Open alone (see sendNotice), so a snoozed task came back with no way to finish it or push it back again.
+		s.say(Notice{Title: sn.Title, Body: sn.Body, Place: noticePlaces[sn.Kind], ID: sn.NoticeID, Kind: sn.Kind, Actions: noticeActions})
 	}
 }
 
@@ -527,4 +534,52 @@ func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
 			slog.Warn("task notices: writing the watermark failed", "error", err)
 		}
 	}
+}
+
+// waitingKeys lists the notices with a goroutine waiting on an answer right now, for the log line above. Output: their keys, in no particular order.
+func waitingKeys() []string {
+	answersMu.Lock()
+	defer answersMu.Unlock()
+	keys := make([]string, 0, len(answers))
+	for k := range answers {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// noticeDoers holds what each notice kind's own buttons do, keyed by kind and action ("meeting"+"record"). It exists because a notice's button must work when it is pressed, not only while some goroutine is still parked waiting for the answer: a press that arrives after that goroutine gave up, after a daemon restart, or on a card drawn on a second surface used to fall through to the four-action switch, which knows only done and the three snoozes, and the card said "Could not do that" while nothing was attempted.
+var (
+	noticeDoersMu sync.Mutex
+	noticeDoers   map[string]func() error
+)
+
+// SetNoticeAction registers what one notice kind's own button does when pressed, whichever notice of that kind it was drawn on. Input: the notice kind, the action key its button sends, and what to do — nil to remove it. Output: none.
+// The registration lives as long as whatever owns the work: the meeting watcher registers "record" while it is running and takes it away when it stops, so a press only ever starts a recording something is still there to stop again.
+func SetNoticeAction(kind, action string, do func() error) {
+	setNoticeActionFor(kind, "", action, do)
+}
+
+// setNoticeActionFor registers what one button does, against one notice or against every notice of a kind. Input: the notice kind, the notice's id — empty to answer for the whole kind — the action key, and what to do, nil to remove it. Output: none.
+// The id is part of the key because a question's answer belongs to the thing it asked about: the stale-item question names a different note every morning, and a press on a card left over from yesterday must not mark today's item dropped. A kind whose button means the same thing whatever it was drawn on (the meeting watcher's "record") registers under the empty id and answers for all of them.
+func setNoticeActionFor(kind, id, action string, do func() error) {
+	noticeDoersMu.Lock()
+	defer noticeDoersMu.Unlock()
+	if do == nil {
+		delete(noticeDoers, kind+"|"+id+"|"+action)
+		return
+	}
+	if noticeDoers == nil {
+		noticeDoers = make(map[string]func() error, 1)
+	}
+	noticeDoers[kind+"|"+id+"|"+action] = do
+}
+
+// noticeActionFor returns what a button does, or nil when nothing has registered it. The notice's own registration wins over the kind's, so a question that registered an answer for the item it asked about is the one that runs.
+func noticeActionFor(kind, id, action string) func() error {
+	noticeDoersMu.Lock()
+	defer noticeDoersMu.Unlock()
+	if do := noticeDoers[kind+"|"+id+"|"+action]; do != nil {
+		return do
+	}
+	return noticeDoers[kind+"||"+action]
 }

@@ -104,6 +104,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	// Every unattended job reads its model through config.BackgroundModel, so the choice lives in the config file rather than in each call site. Without this they all run on DefaultBackgroundModel.
 	config.SetBackgroundModels(appConfig.BackgroundModels)
+	// The Live model the voice session dials is a choice rather than a constant: 3.1 answers in about two seconds with one tone, 2.5 takes five to eight and carries affective dialog and proactive audio. A name the config gets wrong falls back to the default rather than dialling a model that does not exist.
+	if appConfig.LiveModel != "" && !config.SetVoiceModel(appConfig.LiveModel) {
+		slog.Warn("unknown live voice model in config, using the default", "model", appConfig.LiveModel, "using", config.VoiceModel())
+	}
 
 	// The config file is the switch for start-on-login: make the on-disk login entry agree with it on every daemon start, so a config edited by hand (or an entry left behind by an older build) is corrected here rather than drifting.
 	reconcileAutostart(appConfig.Autostart)
@@ -169,8 +173,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	if textEngine == nil {
 		slog.Warn("no local text model configured (local_text.model_path / dream.model_path), the working-state derive stays on the metered API")
 	} else if summarizer != nil {
-		// This is what takes the five-minute working-state job off the user's free-tier daily request allowance entirely.
-		summarizer.SetStateBackend(textEngine.Generate)
+		// This is what takes the five-minute working-state job off the user's free-tier daily request allowance entirely. A background_brains entry for the same job overrides it below, because naming a provider in the config is the more deliberate act.
+		summarizer.SetJobBackend(config.JobWorkingState, textEngine.Generate)
 	}
 
 	if embedEngine != nil {
@@ -340,6 +344,22 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		return tally.Wrap(brainProviderName(cfg), brain.WithCodexFallback(brain.Metered(config.BackgroundBrainConfig(cfg, job), apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store)
 	}
 	mainBrain := meteredJobBrain(appConfig.Brain, "proactive")
+	// Every memory duty the config names a provider for is pointed at it here; a duty named nowhere stays on the Gemini API. StripFence is applied because three of these duties parse the answer as JSON and a CLI login wraps JSON in a markdown fence where the SDK could simply be told to answer in JSON, and this is the one place that knows a CLI is involved.
+	// JobScreenSight is not offered: it sends a screenshot rather than a prompt, and a text seam cannot carry an image.
+	if summarizer != nil {
+		for job, cfg := range appConfig.BackgroundBrains {
+			if job == config.JobScreenSight {
+				slog.Warn("background_brains names screen_sight, which sends an image and cannot run on a text brain; leaving it on Gemini")
+				continue
+			}
+			jobBrain := meteredJobBrain(cfg, job)
+			summarizer.SetJobBackend(job, func(ctx context.Context, prompt string) (string, error) {
+				text, err := jobBrain(ctx, prompt)
+				return brain.StripFence(text), err
+			})
+			slog.Info("background duty routed to its own brain", "job", job, "provider", brainProviderName(cfg))
+		}
+	}
 	// Meeting minutes previously built their own unmetered brain per meeting; pinning to the meeting-minutes job's own model (as defaultBrain did unmetered) and metering it against the same shared quota means an unattended write-up spends the day's allowance in the same place it always spent it, just counted now.
 	meetingRecorder.SetBrain(tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobMeetingMinutes), apiKey, geminiQuota, false, geminiQuotaOpts), store))
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
@@ -473,6 +493,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// The window's asks and the live voice session spend the interactive share of the same daily Gemini count the nightly jobs are held to, so the reserve is real.
 	askAgent.SetRequestGate(&geminiRequestGate{state: geminiQuota, opts: geminiQuotaOpts, forAsks: true})
 	// The window's read routes draw on the same store the daemon writes, on the compiler's live activity buffer — the one /buffer already serves — for what is on screen this second, and on the tracker's own active-window read for what has focus right now: the buffer only updates on the tracker's sampling interval, so a hotkey pressed between samples would otherwise name a window the user has already left.
+	// The brain picked in Settings answers first; the router otherwise ranks by cost and left the pick last.
+	agent.SetPreferredProvider(appConfig.Brain.Provider)
 	ipcServer := ipc.New(askAgent, store, func() []tracker.Activity {
 		if compiler == nil {
 			return nil
@@ -501,6 +523,11 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		time.Sleep(concealSettle)
 		return func() { ipcServer.Tell("reveal") }
 	})
+	// The faces both windows show for what the daemon is doing on its own: a meeting being captured, and the nightly run.
+	meetingRecorder.SetOnStateChange(func() {
+		ipcServer.Announce("recording", onOff(meetingRecorder.Active()))
+	})
+	dreamer.OnNight = func(running bool) { ipcServer.Announce("dreaming", onOff(running)) }
 
 	// A proactive moment goes to Ora's own card in the hover window when a window is there to show it, and falls back to the desktop's notifications only when none has been listening for a minute. Returning false is what makes that fallback happen, so a window that has just gone away does not swallow the notice.
 	proactive.SetNoticeSender(func(n proactive.Notice) bool {
@@ -512,7 +539,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		for i, a := range n.Actions {
 			buttons[i] = ipc.NoticeButton{Key: a.Key, Label: a.Label}
 		}
-		ipcServer.Notice(ipc.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind, Action: n.Action, Until: n.Until, Actions: buttons})
+		ipcServer.Notice(ipc.Notice{Title: n.Title, Body: n.Body, Place: n.Place, ID: n.ID, Kind: n.Kind, Action: n.Action, Until: n.Until, Actions: buttons, Expires: n.Expires})
 		return true
 	})
 
@@ -526,6 +553,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		return ipcServer.Ring(ipcServer.DrawingAsk(), x, y, w, h, label)
 	}
 	askAgent.Draw = ipcServer.Draw
+	// A press through the real pointer is shown first as the overlay's pointer flying to the same point, under the same ask id as a ring would be.
+	askAgent.Tap = func(x, y int, label string) error {
+		return ipcServer.Tap(ipcServer.DrawingAsk(), x, y, label)
+	}
 	// show_marks marks through the same overlay path, one rect per observed item, labelled with the item's own number so the marks line up with what observe_screen just listed.
 	askAgent.Marks = func(items []act.Item) error {
 		rects := make([]ipc.OverlayRect, len(items))
@@ -540,6 +571,32 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// dbus.ConnectSessionBus has no timeout of its own and this runs while the IPC port is bound but nothing is accepting on it yet, so a wedged session bus used to hang startup past the client's ten-second readiness poll and print "daemon spawn failed: timed out" for a daemon that was merely stuck here. The dial is off the startup path entirely now, and lateRaiser is what the agent and the shutdown hold in the meantime, so nothing waits on it and nothing is assigned behind their backs when it finishes.
 	windowRaiser := &lateRaiser{}
 	askAgent.UseWindowRaiser(windowRaiser)
+	// The same extension is the only thing on a Wayland desk that knows where a window is, so the tracker's listings are placed from its frame rectangles; until it answers, or on a desk without it, the tracker falls back to guessing from window size.
+	// The same list says which window the compositor has in front, which is the window observe_screen reads: the accessibility bus's own idea of focus drifts between two windows of one application.
+	tracker.UseFocusReader(func(ctx context.Context) (pid uint32, title string, ok bool) {
+		windows, err := windowRaiser.List(ctx)
+		if err != nil {
+			return 0, "", false
+		}
+		for _, win := range windows {
+			if win.Focused {
+				return win.Pid, win.Title, true
+			}
+		}
+		return 0, "", false
+	})
+	tracker.UseWindowPlacer(func(ctx context.Context, title string) (x, y, w, h int, ok bool) {
+		windows, err := windowRaiser.List(ctx)
+		if err != nil {
+			return 0, 0, 0, 0, false
+		}
+		for _, win := range windows {
+			if win.Title == title && win.W > 0 && win.H > 0 {
+				return win.X, win.Y, win.W, win.H, true
+			}
+		}
+		return 0, 0, 0, 0, false
+	})
 	go func() {
 		raiser, err := window.New()
 		if err != nil {
@@ -552,12 +609,16 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	ipcServer.AddBrain("codex", agent.CodexBrain{Agent: askAgent})
 	// Claude answers through the Claude Code command line on the user's own subscription, with Ora's tools offered to it over MCP, so working on the screen does not depend on Codex's smaller monthly allowance.
 	ipcServer.AddBrain("claude", agent.ClaudeBrain{Agent: askAgent})
+	// Antigravity answers through the agy command line on the user's own Google plan, with Ora's tools offered to it over MCP the same way Claude gets them. The brain id is "antigravity" because that is the id GET /brains publishes and the window's picker posts back; the CLI it runs is called agy.
+	ipcServer.AddBrain("antigravity", agent.AgyBrain{Agent: askAgent})
 	// Gemini is the default asker's own first choice, so naming it routes through that same path; without this line GET /brains offers Gemini while POST /ask refuses the name with a 400, which is what the window's picker hit on 2026-09-05.
 	ipcServer.AddBrain("gemini", askAgent)
 
 	// A long computer-use goal runs as a job in the daemon rather than inside one HTTP request (see internal/actjob): it plans, takes one checked step at a time, and can be stopped, paused, answered and resumed. Its rounds go to a plain prompt-in, text-out brain, never through an ask — an ask would run a second tool loop inside the job's own — and its steps go through the ask's own gated tool path, so the tool gate and the stop line have one copy.
 	// The default is the daemon's own configured brain, metered and tallied like every other call it makes; the CLI logins are offered by name so the same goal can be run on each and the cost compared. No API-key path is ever picked by default.
-	actModels := map[string]actjob.Model{"default": actjob.FromPromptFunc(brainProviderName(appConfig.Brain), mainBrain)}
+	// The default job brain is the configured chain with the Claude CLI behind it, so a spent Codex allowance moves a job to Claude the way an ask already moves.
+	claudeJobBrain := brain.FromConfig(config.BrainConfig{Provider: config.BrainClaudeCLI}, apiKey)
+	actModels := map[string]actjob.Model{"default": actjob.FromPromptFunc(brainProviderName(appConfig.Brain), fallThrough(mainBrain, claudeJobBrain))}
 	for _, provider := range []string{config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI} {
 		actModels[provider] = actjob.FromPromptFunc(provider, brain.FromConfig(config.BrainConfig{Provider: provider}, apiKey))
 	}
@@ -605,7 +666,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	})
 
 	server := &http.Server{
-		Handler: mux,
+		// Every CORS preflight is answered in front of the routes; see withPreflight for why it cannot be a route of its own.
+		Handler: withPreflight(mux, auth),
 		// A header-read bound, and only that: WriteTimeout stays zero because /events holds its response open for as long as a window is listening. Ten seconds is long enough for any local caller to finish a request line and short enough that a process opening connections and never finishing one does not hold them.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -668,4 +730,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	return stop, daemon, nil
+}
+
+// onOff is "on" for true and "off" for false, the two words an announce event carries.
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }

@@ -91,16 +91,17 @@ func frontWindowRect(ctx context.Context) (image.Rectangle, bool) {
 		return image.Rectangle{}, false
 	}
 	ref, _, ok := w.state.get()
+	// The compositor's focused window wins here for the same reason it does in Observe: a look must be of the window the user sees in front, and the bus's own idea of focus drifts between two windows of one application.
+	if fref, _, found := compositorFront(ctx, w.conn); found {
+		ref, ok = fref, true
+	}
 	if !ok {
 		return image.Rectangle{}, false
 	}
-	frame, ok := windowOf(ctx, w.conn, ref)
+	frame, _, ok := windowOf(ctx, w.conn, ref)
 	if !ok || frame.W <= 0 || frame.H <= 0 {
 		return image.Rectangle{}, false
 	}
-	dx, dy := 0, 0
-	if d, ok := deskNow(); ok {
-		dx, dy = windowShift(frame, d)
-	}
+	dx, dy, _ := shiftOf(ctx, w.conn, ref)
 	return image.Rect(frame.X+dx, frame.Y+dy, frame.X+frame.W+dx, frame.Y+frame.H+dy), true
 }

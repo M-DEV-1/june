@@ -139,7 +139,8 @@ func (s *Server) recordTokenUse(trace agent.TurnTrace, question, channel string)
 }
 
 // clientBufferSize bounds how many unread events a single /events client may queue before it is dropped, so one stalled listener never backs up the others.
-const clientBufferSize = 8
+// It is sized from the largest burst one action can produce rather than picked: a single draw call broadcasts up to agent.MaxDrawShapes shapes, each as its own event, inside the same millisecond. At eight, a nine-shape octopus overflowed the overlay window's buffer and the hub dropped and closed it mid-drawing, so the drawing landed half-finished and the window lost every later event until it reconnected ("dropping a client that is not keeping up, buffered: 8", twice, 2026-09-07 06:08:48.7524). Doubled so a drawing arriving while an ask is already streaming still fits.
+const clientBufferSize = 2 * agent.MaxDrawShapes
 
 // levelEventType is the type of the voice waveform's amplitude event, which a live session broadcasts every 50ms for as long as it runs (see levels in voice.go). It is the one event stream that keeps arriving whether or not anything on screen has changed, so broadcast treats it differently from everything else.
 const levelEventType = "level"
@@ -246,6 +247,11 @@ func New(asker Asker, store *db.Store, screen func() []tracker.Activity, focused
 
 // SetSay wires the one surface a notice this package raises should go to. Input: a function that delivers one notice, which the daemon fills in with the scheduler's own say (see proactive.Scheduler.Say) so a moment falls back to a desktop notification when no window is listening. Output: none. Left unset, sayNotice broadcasts on the event stream and a notice raised while no window is there is simply lost.
 func (s *Server) SetSay(say func(Notice)) { s.say = say }
+
+// Announce tells every window one thing about what the daemon is doing that belongs to no ask: a meeting recording starting or stopping ("recording", "on" or "off"), or the nightly dream run beginning or ending ("dreaming", "on" or "off"). Input: the event type and its text. Output: none; the windows read it as a face to show.
+func (s *Server) Announce(typ, text string) {
+	s.hub.broadcast(Event{Type: typ, Text: text, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
+}
 
 // sayNotice delivers one notice through whatever SetSay wired, or straight onto the event stream when nothing was wired. Input: the notice. Output: none.
 func (s *Server) sayNotice(n Notice) {
@@ -432,6 +438,8 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 	ctx = agent.WithToolObserver(ctx, func(name, summary string) {
 		s.hub.broadcast(Event{ID: id, Type: "tool", Text: name, Detail: summary, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 	})
+	// Every tool this question runs is filed under the conversation it belongs to, so a later pass can read what the model reached for and what it was offered — which is the only record of it, since the activity feed is thrown away and act runs only ever covered the screen tools.
+	ctx = agent.WithToolRecorder(ctx, toolRecorder(s.store, "ask", convID))
 	if allowGo {
 		ctx = agent.WithGo(ctx)
 	}

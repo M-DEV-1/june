@@ -88,6 +88,13 @@ func TestClaudeCLI(t *testing.T) {
 			timeout: 1,
 			wantErr: "timed out",
 		},
+		{
+			// On 2026-09-08 a meeting's minutes were lost to "claude timed out after 5m0s" with the answer already printed: the CLI had written its result and not exited. The answer is complete once stdout holds one whole JSON value, and that is when the runner returns.
+			name:    "a run that prints its result and then lingers is not waited for",
+			body:    `printf '%s' '{"is_error":false,"subtype":"success","result":"done"}'; sleep 5`,
+			timeout: 2,
+			want:    "done",
+		},
 	}
 
 	for _, tt := range tests {

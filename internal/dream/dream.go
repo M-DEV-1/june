@@ -113,9 +113,11 @@ type Store interface {
 
 // Runner owns one machine's dreaming. Construct with New; the daemon calls Tick on a ticker and everything else is private.
 type Runner struct {
-	store  Store
-	brain  brain.Brain
-	probes Probes
+	// OnNight, when set, is told when a night's run begins (true) and when it ends however it ends (false), so a window can show that Ora is dreaming.
+	OnNight func(running bool)
+	store   Store
+	brain   brain.Brain
+	probes  Probes
 	// dreamHour opens the window (negative disables dreaming); briefHour closes it. Both local hours.
 	dreamHour int
 	briefHour int
@@ -273,6 +275,10 @@ func (r *Runner) consumeForceMarker() bool {
 
 // dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error — a cancelled context included — just returns; nothing partial was committed and the next wake resumes from stages_done.
 func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback, forced bool) {
+	if r.OnNight != nil {
+		r.OnNight(true)
+		defer r.OnNight(false)
+	}
 	if !exists {
 		if err := r.store.StartDreamRun(ctx, night); err != nil {
 			slog.Warn("dreaming: starting the run failed", "night", night, "error", err)

@@ -75,7 +75,7 @@ func TestScreenTarget_SurvivesObserveScreenAndCarriesToTheNextAsk(t *testing.T) 
 // draw's "on" form must name the item it drew around, the way point_at and click already do, so a later ask has something to remember and so the model can tell from the tool's own result whether it drew around the right thing.
 func TestDraw_OnItemNamesTheItemInItsResult(t *testing.T) {
 	a, _ := observingAgent(t)
-	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
+	a.Draw = func(_, shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
 	a.executeTool(t.Context(), "observe_screen", map[string]any{})
 	got := a.executeTool(t.Context(), "draw", map[string]any{"shape": "circle", "on": float64(1)})
 	if !strings.Contains(got, "Merge") {
@@ -103,7 +103,7 @@ func TestDraw_MismatchNote(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			a, _ := observingAgent(t)
-			a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
+			a.Draw = func(_, shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
 			a.executeTool(t.Context(), "observe_screen", map[string]any{})
 			a.executeTool(t.Context(), "point_at", map[string]any{"n": float64(1)}) // rings [1] Merge
 
@@ -149,7 +149,7 @@ func TestAskText_BareFollowUpCarriesTheLastTargetHint(t *testing.T) {
 	geminiBaseURL = backend.URL
 	t.Cleanup(func() { geminiBaseURL = "" })
 	a, _ := observingAgent(t)
-	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
+	a.Draw = func(_, shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
 
 	tr1, err := a.askText(t.Context(), "gemini-test", nil, "ring the merge button")
 	if err != nil {

@@ -263,3 +263,13 @@ func TestFindFocused_StopsOnItsBudget(t *testing.T) {
 		t.Errorf("the walk read %d elements, want at most the 5 it was given", reads)
 	}
 }
+
+// A GTK4 client answers a request for screen coordinates with 0,0 for every widget, and only its window coordinates say where the widget is: measured on this desk on 2026-09-08, gnome-control-center's "Search" button was 0,0 34x34 for type 0 and 125,11 34x34 for type 1, so every Bluetooth row was listed at the same point and the pointer click for the JBL earbuds landed on the header instead. The window answer stands in whenever the screen answer places a widget at the origin.
+func TestPlaceOf_UsesTheWindowAnswerWhenTheScreenAnswerIsTheOrigin(t *testing.T) {
+	if got := placeOf(rect{0, 0, 34, 34}, func() rect { return rect{125, 11, 34, 34} }); got != (rect{125, 11, 34, 34}) {
+		t.Errorf("placeOf at the origin = %+v, want the window coordinates", got)
+	}
+	if got := placeOf(rect{40, 60, 34, 34}, func() rect { t.Fatal("must not read the window answer for a placed widget"); return rect{} }); got != (rect{40, 60, 34, 34}) {
+		t.Errorf("placeOf placed = %+v, want the screen answer kept", got)
+	}
+}

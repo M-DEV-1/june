@@ -28,8 +28,12 @@ import (
 
 // toolTestBrain is a minimal ContextReader mock used to exercise executeTool's query_memory case. It lives in an internal (package agent, not agent_test) test file because executeTool is unexported.
 type toolTestBrain struct {
-	notes           []db.Note
-	threadEpisodes  []db.Episode
+	notes          []db.Note
+	threadEpisodes []db.Episode
+	// addedTasks records what add_task wrote, and addTaskErr makes the write fail, so the tool's own reporting can be asserted without a real store.
+	addedTasks      []string
+	addTaskErr      error
+	convTitles      []string
 	openActions     []memory.ActionItem
 	openActionsErr  error
 	windowEpisodes  []db.Episode
@@ -179,6 +183,19 @@ func (b *toolTestBrain) UpdateNote(ctx context.Context, id int64, content string
 }
 func (b *toolTestBrain) EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error) {
 	return b.threadEpisodes, nil
+}
+
+func (b *toolTestBrain) CreateConversation(ctx context.Context, title, brain string) (int64, error) {
+	b.convTitles = append(b.convTitles, title)
+	return int64(len(b.convTitles)), nil
+}
+
+func (b *toolTestBrain) AddUserTask(ctx context.Context, title string, conversationID int64) (int64, error) {
+	if b.addTaskErr != nil {
+		return 0, b.addTaskErr
+	}
+	b.addedTasks = append(b.addedTasks, title)
+	return int64(len(b.addedTasks)), nil
 }
 
 func (b *toolTestBrain) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {
@@ -1592,7 +1609,7 @@ func drawingAgent(t *testing.T) (a *Agent, drawn *[]string) {
 		}, nil
 	}
 	drawn = &[]string{}
-	a.Draw = func(shape string, points [][2]int, x, y, w, h int, label string) error {
+	a.Draw = func(_, shape string, points [][2]int, x, y, w, h int, label string) error {
 		*drawn = append(*drawn, fmt.Sprintf("%s %v %d,%d,%d,%d %q", shape, points, x, y, w, h, label))
 		return nil
 	}
@@ -2161,6 +2178,23 @@ func TestExecuteTool_ClickAt_MapsThePictureCoordinatesOntoTheScreen(t *testing.T
 	}
 }
 
+// The real pointer is invisible while it works, so the overlay's own pointer flies to the point and taps there before the press lands: what the user sees is where the click is going, in the order it happens.
+func TestExecuteTool_ClickAt_ShowsTheTapBeforeThePress(t *testing.T) {
+	a, in := typingAgent(t)
+	var order []string
+	a.Tap = func(x, y int, label string) error {
+		order = append(order, fmt.Sprintf("tap %d,%d", x, y))
+		return nil
+	}
+	tapLead = 0
+	ctx := lookedAt(t, a)
+	a.executeTool(ctx, "click_at", map[string]any{"x": 10.0, "y": 20.0})
+	order = append(order, in.calls...)
+	if len(order) != 2 || order[0] != "tap 20,72" || order[1] != "click 20,72" {
+		t.Errorf("sequence = %v, want the tap shown at the point, then the click there", order)
+	}
+}
+
 // A coordinate with no picture behind it is a guess, and a guessed click lands on whatever happens to be there.
 func TestExecuteTool_ClickAt_RefusesWithoutALook(t *testing.T) {
 	a, in := typingAgent(t)
@@ -2236,56 +2270,28 @@ func TestExecuteTool_TypeText_ReportsAKeyboardThatRefused(t *testing.T) {
 	}
 }
 
-// A click at a point leaves this session unable to say what the keyboard is pointing at: the point carries no element, so the field the text would go into cannot be named and the text is refused rather than typed blind. A fresh observe_screen puts the model back to naming elements, and the typing goes through again.
-func TestExecuteTool_TypeText_RefusesWhileTheFocusIsUnknownAfterAClickAt(t *testing.T) {
+// Enter presses whatever has focus, and after a click at a point the tree says what that is: an entry is pressed, a Send button is stopped by name, and a window with nothing readable is pressed on the click alone. Tab moves the keyboard the same way and gets the same read.
+func TestExecuteTool_PressKey_EnterAfterAPointClickIsCheckedAgainstWhatHoldsTheKeyboard(t *testing.T) {
 	a, in := typingAgent(t)
 	ctx := lookedAt(t, a)
 	a.executeTool(ctx, "observe_screen", map[string]any{})
 	a.executeTool(ctx, "click_at", map[string]any{"x": 400.0, "y": 400.0})
-	got := a.executeTool(ctx, "type_text", map[string]any{"text": "hello"})
-	if len(in.calls) != 1 {
-		t.Errorf("keyboard = %v, want only the click and nothing typed", in.calls)
-	}
-	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "could not identify") {
-		t.Errorf("result = %q, want a stop saying the field could not be identified", got)
-	}
-	if got := a.executeTool(WithGo(ctx), "type_text", map[string]any{"text": "hello"}); strings.HasPrefix(got, "Stopped before ") {
-		t.Errorf("result = %q, want the user's own go-ahead to unlock the typing", got)
-	}
-	a.executeTool(ctx, "observe_screen", map[string]any{})
-	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "hello"}); strings.HasPrefix(got, "Stopped before ") {
-		t.Errorf("result = %q, want a fresh observe_screen to restore a known focus", got)
-	}
-}
 
-// Enter presses whatever has focus, so it is refused for the same reason as the typing while this session cannot say what that is.
-func TestExecuteTool_PressKey_RefusesEnterWhileTheFocusIsUnknown(t *testing.T) {
-	a, in := typingAgent(t)
-	ctx := lookedAt(t, a)
-	a.executeTool(ctx, "observe_screen", map[string]any{})
-	a.executeTool(ctx, "click_at", map[string]any{"x": 400.0, "y": 400.0})
+	holdsKeyboard(t, act.Node{Role: "push button", Label: "Send", Ref: "r-send"}, true)
 	got := a.executeTool(ctx, "press_key", map[string]any{"keys": "Enter"})
-	if len(in.calls) != 1 {
-		t.Errorf("keyboard = %v, want only the click and no key pressed", in.calls)
+	if len(in.calls) != 1 || !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "Send") {
+		t.Errorf("keyboard = %v, result %q; want the Enter stopped by the button's name", in.calls, got)
 	}
-	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "could not identify") {
-		t.Errorf("result = %q, want a stop saying the focused control could not be identified", got)
-	}
-}
 
-// Tab moves the keyboard off whatever the last click focused, so the Enter after it is checked against nothing this session can vouch for and is refused rather than pressed on a control it cannot name.
-func TestExecuteTool_PressKey_TabLeavesTheFocusUnknownForTheNextEnter(t *testing.T) {
-	a, in := typingAgent(t)
-	ctx := context.Background()
-	a.executeTool(ctx, "observe_screen", map[string]any{})
-	a.rememberClick(ctx, act.Item{N: 1, Role: "push button", Label: "Compose", Ref: "r-1"})
+	holdsKeyboard(t, act.Node{Role: "entry", Label: "Search", Ref: "r-search"}, true)
+	if got := a.executeTool(ctx, "press_key", map[string]any{"keys": "Enter"}); len(in.calls) != 2 {
+		t.Errorf("keyboard = %v, result %q; want the Enter pressed on the entry", in.calls, got)
+	}
+
+	holdsKeyboard(t, act.Node{}, false)
 	a.executeTool(ctx, "press_key", map[string]any{"keys": "Tab"})
-	got := a.executeTool(ctx, "press_key", map[string]any{"keys": "Enter"})
-	if len(in.calls) != 1 || in.calls[0] != "press Tab" {
-		t.Errorf("keyboard = %v, want the Tab pressed and the Enter refused", in.calls)
-	}
-	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "could not identify") {
-		t.Errorf("result = %q, want a stop saying the focused control could not be identified", got)
+	if got := a.executeTool(ctx, "press_key", map[string]any{"keys": "Enter"}); len(in.calls) != 4 {
+		t.Errorf("keyboard = %v, result %q; want the Enter pressed on the click alone when nothing readable holds the keyboard", in.calls, got)
 	}
 }
 
@@ -2366,6 +2372,40 @@ func TestOnceInput_RetriesAfterAFailedOpen(t *testing.T) {
 	}
 }
 
+// Mutter closes a RemoteDesktop session when the screencast stream behind it ends (a monitor change, the screen locking, sleep), and every call on the old handle then fails with "Invalid session" until the daemon restarts. That is what killed the JBL Bluetooth click on 2026-09-08: the pointer must open a fresh session and land the action, and an unrelated error must not be retried.
+func TestOnceInput_ReopensWhenThePortalSaysTheSessionIsGone(t *testing.T) {
+	dead := &fakeInput{err: errors.New("Invalid session")}
+	live := &fakeInput{}
+	opens := 0
+	open := onceInput(func(ctx context.Context) (InputDevice, error) {
+		opens++
+		if opens == 1 {
+			return dead, nil
+		}
+		return live, nil
+	})
+	dev, err := open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dev.ClickAt(10, 20); err != nil {
+		t.Fatalf("click = %v, want it landed on a fresh session", err)
+	}
+	if opens != 2 || len(live.calls) != 1 || live.calls[0] != "click 10,20" {
+		t.Errorf("opens = %d, live calls = %v, want one reopen and the click replayed on it", opens, live.calls)
+	}
+	live.err = errors.New("Invalid position")
+	if err := dev.ScrollAt(1, 2, 3); err == nil || opens != 2 {
+		t.Errorf("scroll err = %v, opens = %d, want the other error reported without a reopen", err, opens)
+	}
+	// A session granted without the devices in it answers every press this way and never recovers; it is dropped like a dead one.
+	live.err = errors.New("Session is not allowed to call NotifyPointer methods")
+	dev.ClickAt(1, 2)
+	if opens != 3 {
+		t.Errorf("opens = %d, want a device-less session dropped and reopened", opens)
+	}
+}
+
 // Every new tool has to be offered to a screen round, allowed through the ask gate, and kept out of the log file, or it is declared and unusable.
 func TestScreenToolLists_CarryTheKeyboardAndPointerTools(t *testing.T) {
 	for _, name := range []string{"press_key", "click_at", "scroll_at"} {
@@ -2414,16 +2454,40 @@ func switchingAgent(t *testing.T, front func() (string, string)) (*Agent, *fakeI
 	return a, in
 }
 
-// A job stays in the window it started in: leaving it needs the user's own request to name the other application, so a model that decides on its own to go somewhere else is refused before a key is pressed.
-func TestExecuteTool_SwitchWindow_RefusesWhenTheRequestDoesNotNameTheApp(t *testing.T) {
+// A job stays in the window it started in when the request itself is about that window: a request that names the front window and not the other application is refused before a key is pressed.
+func TestExecuteTool_SwitchWindow_RefusesWhenTheRequestIsAboutTheFrontWindow(t *testing.T) {
 	a, in := switchingAgent(t, func() (string, string) { return "mail", "Inbox" })
-	ctx := WithQuestion(context.Background(), "read me the top line")
+	ctx := WithQuestion(context.Background(), "read me the top line in mail")
 	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
 	if len(in.calls) != 0 {
 		t.Errorf("keyboard = %v, want nothing pressed", in.calls)
 	}
 	if !strings.HasPrefix(got, "error") || !strings.Contains(got, "Brave") {
 		t.Errorf("result = %q, want a refusal naming the app the request never asked for", got)
+	}
+}
+
+// A request that names no window at all — "now, play it" — leaves the choice of application to the model, so the switch goes ahead. On 2026-09-07 every such request was refused and the model fell back to opening search pages it could not see.
+func TestExecuteTool_SwitchWindow_AllowsWhenTheRequestNamesNoWindow(t *testing.T) {
+	raiser := &fakeRaiser{
+		available: true,
+		windows:   []window.Window{{Pid: 42, WmClass: "spotify", Title: "Spotify"}},
+		raises:    map[string]bool{"pid 42": true},
+	}
+	a, in := switchingAgent(t, func() (string, string) {
+		if len(raiser.calls) > 0 {
+			return "Spotify", "Back in Black"
+		}
+		return "claude-desktop", "Claude"
+	})
+	a.UseWindowRaiser(raiser)
+	ctx := WithQuestion(context.Background(), "now, play it")
+	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Spotify"})
+	if len(in.calls) != 0 {
+		t.Errorf("keyboard = %v, want nothing pressed when the extension raised the window", in.calls)
+	}
+	if strings.HasPrefix(got, "error") || !strings.Contains(got, "Spotify · Back in Black") {
+		t.Errorf("result = %q, want the switch to go ahead and say what came forward", got)
 	}
 }
 
@@ -2766,7 +2830,8 @@ func TestScreenRoundDeclarations_StayShort(t *testing.T) {
 		byName[tool.Name] = strings.ToLower(tool.Description)
 	}
 	// 6,450 bytes leaves the measured round at 2,989 tokens: the rest of a round (instruction, thread, the newest screen listing) is about 5,450 bytes, and 3,000 tokens is 12,000 bytes at four bytes a token. It was 6,400 until draw started taking a list of shapes instead of one, which is about 25 more tokens on every screen round; the turn that marked up a diagram on 2026-09-05 spent ten rounds and 38,335 input tokens drawing ten shapes one per round, and now spends one. That leaves the last round 11 tokens under the 3,000 bound — the next word added to any screen-round declaration fails TestAskCodex_ScreenRoundsStayUnderThreeThousandTokens.
-	const screenRoundDeclarationBudget = 6450
+	// Raised to 6,850 on 2026-09-08 for open_app, the sixteenth: an installed application opened as itself instead of through open_url and a browser tab, which is what the Spotify ask that day failed on. About 100 tokens a round.
+	const screenRoundDeclarationBudget = 6900
 	if total > screenRoundDeclarationBudget {
 		t.Errorf("the screen-round declarations are %d bytes, want at most %d", total, screenRoundDeclarationBudget)
 	}
@@ -2858,6 +2923,35 @@ func TestExecuteTool_OpenURL_RefusesNonHTTPSchemes(t *testing.T) {
 	}
 	if len(opened) != 1 || opened[0] != "https://example.com/page" {
 		t.Fatalf("expected the https link handed to the opener once, got %v", opened)
+	}
+}
+
+// xdg-open puts the page in a tab the shell keeps behind whatever is in front, so once the extension is there the browser is raised through it: the window whose class shares a word with the default browser's desktop id (brave_brave.desktop against wm_class brave-browser) is raised by pid, and the result says so. Four opens on 2026-09-07 landed behind the Claude window and the model, seeing nothing, opened the same page again.
+func TestExecuteTool_OpenURL_RaisesTheBrowserThroughTheExtension(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	original, originalBrowser := openURLCommand, defaultBrowserID
+	openURLCommand = func(raw string) *exec.Cmd { return exec.Command("true") }
+	defaultBrowserID = func() string { return "brave_brave.desktop" }
+	t.Cleanup(func() { openURLCommand, defaultBrowserID = original, originalBrowser })
+	raiser := &fakeRaiser{
+		available: true,
+		windows:   []window.Window{{Pid: 5, WmClass: "spotify", Title: "Spotify"}, {Pid: 7, WmClass: "brave-browser", Title: "Inbox"}},
+		raises:    map[string]bool{"pid 7": true},
+	}
+	a.UseWindowRaiser(raiser)
+	got := a.executeTool(context.Background(), "open_url", map[string]any{"url": "https://example.com/page"})
+	if !slices.Equal(raiser.calls, []string{"list", "pid 7"}) {
+		t.Errorf("raiser = %v, want the list read and the browser raised by pid", raiser.calls)
+	}
+	if !strings.Contains(got, "to the front (pid 7)") {
+		t.Errorf("result = %q, want it to say the browser was brought to the front", got)
+	}
+
+	// No extension, or no browser window yet: the page still opens, and the result says the window was not raised so the model does not read "opened" as "showing".
+	a.UseWindowRaiser(&fakeRaiser{available: false})
+	got = a.executeTool(context.Background(), "open_url", map[string]any{"url": "https://example.com/page"})
+	if !strings.Contains(got, "not brought to the front") {
+		t.Errorf("result without the extension = %q, want it to say the window was not brought forward", got)
 	}
 }
 
@@ -2989,8 +3083,8 @@ func TestExecuteTool_TypeText_RefusesWhenTheClickedFieldNoLongerHasFocus(t *test
 	if len(in.calls) != 0 {
 		t.Errorf("keyboard = %v, want nothing typed", in.calls)
 	}
-	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "could not identify") {
-		t.Errorf("result = %q, want a stop saying the field could not be identified", got)
+	if !strings.HasPrefix(got, "Stopped before ") || !strings.Contains(got, "no place to type") {
+		t.Errorf("result = %q, want a stop naming the control that holds the keyboard", got)
 	}
 }
 
@@ -3165,4 +3259,285 @@ func TestEvalExecute_AllowsUnapprovedWriteTools(t *testing.T) {
 			t.Errorf("%s must stay behind the gate, got %q", tool, got)
 		}
 	}
+}
+
+// "Put that on my list" writes a task, not a note. There was no tool that made one, so the model's only move was save_note — which files a fact nothing shows in Tasks, and then it said it had put the thing on the list.
+func TestAddTask_WritesATaskAndSaysSo(t *testing.T) {
+	b := &toolTestBrain{}
+	a := NewAgent(nil, nil, b, nil, "")
+
+	out := a.executeTool(t.Context(), "add_task", map[string]any{"title": "  add source pdfs to the excel files  "})
+
+	if len(b.addedTasks) != 1 || b.addedTasks[0] != "add source pdfs to the excel files" {
+		t.Fatalf("tasks written = %v, want the one title, trimmed", b.addedTasks)
+	}
+	if !strings.Contains(out, "add source pdfs to the excel files") {
+		t.Errorf("tool said %q, want it to name the task it wrote", out)
+	}
+	if len(b.notes) != 0 {
+		t.Errorf("it also wrote %d notes; a task is not a note", len(b.notes))
+	}
+}
+
+// A title with nothing in it is refused rather than filed as a blank row the user then finds in Tasks.
+func TestAddTask_RefusesABlankTitle(t *testing.T) {
+	b := &toolTestBrain{}
+	a := NewAgent(nil, nil, b, nil, "")
+
+	out := a.executeTool(t.Context(), "add_task", map[string]any{"title": "   "})
+
+	if !strings.HasPrefix(out, "error") {
+		t.Errorf("tool said %q, want an error", out)
+	}
+	if len(b.addedTasks) != 0 {
+		t.Errorf("wrote %v, want nothing", b.addedTasks)
+	}
+}
+
+// A failed write is reported as failed. Saying "added" over a write that did not happen is the whole complaint.
+func TestAddTask_SaysWhenTheWriteFailed(t *testing.T) {
+	b := &toolTestBrain{addTaskErr: errors.New("disk full")}
+	a := NewAgent(nil, nil, b, nil, "")
+
+	out := a.executeTool(t.Context(), "add_task", map[string]any{"title": "send the invoice"})
+
+	if !strings.HasPrefix(out, "error") {
+		t.Errorf("tool said %q, want an error the model cannot read as success", out)
+	}
+}
+
+// An element with no accessibility action to fire, like a dock button, is clicked with the real pointer at the centre of its rectangle instead of failing.
+func TestExecuteTool_Click_FallsBackToThePointerWhenThereIsNoAction(t *testing.T) {
+	a, _ := ringingAgent(t, act.Node{Role: "push button", Label: "Brave", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-brave"})
+	// No camera: a pointer press is judged against the pixels around it when one is wired, and this test is about the fallback, not the judgement.
+	a.capture = nil
+	in := &fakeInput{}
+	a.input = onceInput(func(ctx context.Context) (InputDevice, error) { return in, nil })
+	a.doAction = func(ctx context.Context, ref string) (string, error) {
+		return "", errors.New("the element offers no action to fire")
+	}
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+	got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
+	if len(in.calls) != 1 || in.calls[0] != "click 50,35" {
+		t.Errorf("pointer = %v, want one click at the centre of the button", in.calls)
+	}
+	if !strings.Contains(got, "via pointer") {
+		t.Errorf("result = %q, want it to say the pointer did it", got)
+	}
+}
+
+// "open spotify, and play back in black" on 2026-09-08 went to open_url and the web player, and then failed on the browser's tab titles. An installed application is opened as itself: its desktop entry is launched, its window waited for, and that window brought to the front.
+func TestExecuteTool_OpenApp_LaunchesTheDesktopEntryAndRaisesItsWindow(t *testing.T) {
+	raiser := &fakeRaiser{available: true, raises: map[string]bool{"pid 42": true}}
+	a, in := switchingAgent(t, func() (string, string) {
+		if len(raiser.calls) > 0 {
+			return "Spotify", "Spotify Premium"
+		}
+		return "claude-desktop", "Claude"
+	})
+	a.UseWindowRaiser(raiser)
+	a.desktopEntries = func() map[string]string {
+		return map[string]string{"/apps/spotify_spotify.desktop": "Spotify", "/apps/brave_brave.desktop": "Brave"}
+	}
+	var launched []string
+	a.launchApp = func(path string) error {
+		launched = append(launched, path)
+		raiser.windows = []window.Window{{Pid: 42, WmClass: "spotify", Title: "Spotify Premium"}}
+		return nil
+	}
+	launchPoll = 0
+	got := a.executeTool(WithQuestion(context.Background(), "open spotify"), "open_app", map[string]any{"app": "spotify"})
+	if len(launched) != 1 || launched[0] != "/apps/spotify_spotify.desktop" {
+		t.Errorf("launched = %v, want Spotify's own desktop entry", launched)
+	}
+	if len(in.calls) != 0 || strings.HasPrefix(got, "error") || !strings.Contains(got, "Spotify · Spotify Premium") {
+		t.Errorf("result = %q, keyboard = %v, want the window raised and named, nothing typed", got, in.calls)
+	}
+	if got := a.executeTool(context.Background(), "open_app", map[string]any{"app": "Figma"}); !strings.Contains(got, "no installed application") {
+		t.Errorf("unknown app = %q, want it said plainly", got)
+	}
+}
+
+// The name the user says is rarely the entry's exact name: the whole name wins over a part of one, and the part matches case-blind.
+func TestPickDesktopEntry(t *testing.T) {
+	entries := map[string]string{"/a/spotify_spotify.desktop": "Spotify", "/a/spotify-tray.desktop": "Spotify Tray Helper", "/a/brave.desktop": "Brave Web Browser"}
+	if got := pickDesktopEntry(entries, "spotify"); got != "/a/spotify_spotify.desktop" {
+		t.Errorf("spotify = %q, want the exact name over the helper", got)
+	}
+	if got := pickDesktopEntry(entries, "brave"); got != "/a/brave.desktop" {
+		t.Errorf("brave = %q, want the entry whose name contains it", got)
+	}
+	if got := pickDesktopEntry(entries, "figma"); got != "" {
+		t.Errorf("figma = %q, want nothing", got)
+	}
+}
+
+// Spotify, opened plain on 2026-09-08, showed observe_screen nothing: a Chromium-based application builds no accessibility tree on this desk unless it is started with the flag. One is known by the pak file beside its binary and is run from its own Exec line with the flag added; anything else goes through gio launch untouched.
+func TestLaunchEntry_AddsTheAccessibilityFlagToAChromiumApp(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "player")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, chromiumMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(dir, "player.desktop")
+	if err := os.WriteFile(entry, []byte("[Desktop Entry]\nName=Player\nExec="+bin+" --quiet %U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := launchEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+	var argv []byte
+	for i := 0; i < 50 && len(argv) == 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+		argv, _ = os.ReadFile(filepath.Join(dir, "argv"))
+	}
+	if got := strings.TrimSpace(string(argv)); got != "--quiet\n"+accessibilityFlag {
+		t.Errorf("argv = %q, want the entry's own arguments, the placeholder dropped, and the flag added", got)
+	}
+	if isChromium("/bin/sh") {
+		t.Error("a binary with no pak file beside it must not count as Chromium")
+	}
+}
+
+// Spotify was already running, started plain, when open_app raised it on 2026-09-08, and the model was handed an empty listing with no reason. The reason and the two ways on are said with the raise.
+func TestExecuteTool_OpenApp_SaysWhenARunningChromiumAppHasNoTree(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "player")
+	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
+	os.WriteFile(filepath.Join(dir, chromiumMarker), nil, 0o644)
+	entry := filepath.Join(dir, "player.desktop")
+	os.WriteFile(entry, []byte("[Desktop Entry]\nName=Player\nExec="+bin+" %U\n"), 0o644)
+	raiser := &fakeRaiser{available: true, windows: []window.Window{{Pid: 42, WmClass: "player", Title: "Player"}}, raises: map[string]bool{"pid 42": true}}
+	a, _ := switchingAgent(t, func() (string, string) { return "Player", "Player" })
+	a.UseWindowRaiser(raiser)
+	a.desktopEntries = func() map[string]string { return map[string]string{entry: "Player"} }
+	processArgs = func(pid uint32) string { return bin }
+	got := a.executeTool(context.Background(), "open_app", map[string]any{"app": "Player"})
+	if !strings.Contains(got, "without accessibility support") {
+		t.Errorf("result = %q, want the empty listing explained", got)
+	}
+	processArgs = func(pid uint32) string { return bin + " " + accessibilityFlag }
+	if got := a.executeTool(context.Background(), "open_app", map[string]any{"app": "Player"}); strings.Contains(got, "without accessibility") {
+		t.Errorf("result = %q, want no note for an app started with the flag", got)
+	}
+}
+
+// A snap's "current" is a symlink to its revision, and a directory walk does not step through a symlink at its root, so the marker under it was never seen and the Spotify snap was launched without its accessibility flag on 2026-09-08.
+func TestIsChromium_StepsThroughASymlinkedRoot(t *testing.T) {
+	dir := t.TempDir()
+	rev := filepath.Join(dir, "99", "usr", "share", "player")
+	if err := os.MkdirAll(rev, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(rev, chromiumMarker), nil, 0o644)
+	if err := os.Symlink(filepath.Join(dir, "99"), filepath.Join(dir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if !isChromiumUnder(filepath.Join(dir, "current")) {
+		t.Error("the marker under the symlinked root should be found")
+	}
+}
+
+// A miss on open_app names the installed applications that share a word with what was asked, so the model can pick one or see that nothing of that kind is installed; "no installed application is named" alone sent it guessing names on 2026-09-09.
+func TestExecuteTool_OpenApp_AMissNamesTheNearestInstalledApps(t *testing.T) {
+	a, _ := switchingAgent(t, func() (string, string) { return "Claude", "Claude" })
+	a.desktopEntries = func() map[string]string {
+		return map[string]string{"/apps/shot.desktop": "Take a Screenshot", "/apps/spotify.desktop": "Spotify", "/apps/obs.desktop": "OBS Studio"}
+	}
+	got := a.executeTool(context.Background(), "open_app", map[string]any{"app": "screenshot tool"})
+	if !strings.HasPrefix(got, "error") || !strings.Contains(got, "Take a Screenshot") || strings.Contains(got, "Spotify") {
+		t.Errorf("result = %q, want the miss to name the one installed app that shares a word and no other", got)
+	}
+	got = a.executeTool(context.Background(), "open_app", map[string]any{"app": "Figma"})
+	if !strings.Contains(got, "3 installed") {
+		t.Errorf("result = %q, want a miss with no near name to say how many applications are installed", got)
+	}
+}
+
+// The allowance handed back at a round boundary leaves the picture in place: click_at in the next round aims by the picture the last look took.
+func TestEndScreenRound_GivesLooksBackAndKeepsThePicture(t *testing.T) {
+	a, _ := typingAgent(t)
+	ctx := lookedAt(t, a)
+	a.executeTool(ctx, "look", map[string]any{})
+	if got := a.executeTool(ctx, "look", map[string]any{}); !strings.HasPrefix(got, "error") {
+		t.Fatalf("third look = %q, want the allowance spent", got)
+	}
+	a.EndScreenRound(ctx)
+	if got := a.executeTool(ctx, "look", map[string]any{}); strings.HasPrefix(got, "error") {
+		t.Errorf("look after the round ended = %q, want it allowed again", got)
+	}
+	if got := a.executeTool(ctx, "click_at", map[string]any{"x": 100.0, "y": 100.0}); strings.Contains(got, "look at the screen first") {
+		t.Errorf("click_at after the round ended = %q, want the picture kept", got)
+	}
+}
+
+// A launched application's window is found by what appeared, not by the word the user used: "Files" is org.gnome.Nautilus with a window called "Home", and on 2026-09-09 open_app waited 30 seconds beside that open window and said none showed.
+func TestExecuteTool_OpenApp_FindsTheLaunchedWindowByWhatAppeared(t *testing.T) {
+	raiser := &fakeRaiser{available: true, raises: map[string]bool{"pid 77": true}, windows: []window.Window{{Pid: 1, WmClass: "claude-desktop", Title: "Claude"}}}
+	a, _ := switchingAgent(t, func() (string, string) {
+		if len(raiser.calls) > 0 {
+			return "org.gnome.Nautilus", "Home"
+		}
+		return "claude-desktop", "Claude"
+	})
+	a.UseWindowRaiser(raiser)
+	a.desktopEntries = func() map[string]string { return map[string]string{"/apps/org.gnome.Nautilus.desktop": "Files"} }
+	a.launchApp = func(string) error {
+		raiser.windows = append(raiser.windows, window.Window{Pid: 77, WmClass: "org.gnome.Nautilus", Title: "Home"})
+		return nil
+	}
+	launchPoll = 0
+	got := a.executeTool(context.Background(), "open_app", map[string]any{"app": "Files"})
+	if strings.HasPrefix(got, "error") || !strings.Contains(got, "pid 77") {
+		t.Errorf("result = %q, want the new window raised by its pid", got)
+	}
+}
+
+// Measured 2026-09-09 03:19: a click on YouTube's Play button was refused because the title had grown
+// "- Audio playing" since observe_screen listed it, though the same page and button were still there.
+// The same application in front with only the title changed must fall through to the element check
+// (stillThere) instead of being refused on the title alone; a different application must still refuse.
+func TestExecuteTool_Click_SameAppTitleChange(t *testing.T) {
+	t.Run("same app, changed title: falls through to the element check and clicks", func(t *testing.T) {
+		a, f := ringingAgent(t, act.Node{Role: "push button", Label: "Play (k)", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-play"})
+		calls := 0
+		a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
+			calls++
+			if calls == 1 {
+				return "brave", "YouTube", []act.Node{f.at}, nil
+			}
+			return "brave", "YouTube - Audio playing", []act.Node{f.at}, nil
+		}
+		a.executeTool(context.Background(), "observe_screen", map[string]any{})
+		got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
+		if len(f.clicked) != 1 || f.clicked[0] != "r-play" {
+			t.Errorf("clicked = %v, want the click to go through once the element itself still verifies; result=%q", f.clicked, got)
+		}
+		if !strings.Contains(got, "Play") {
+			t.Errorf("result = %q, want the clicked item named", got)
+		}
+	})
+
+	t.Run("different app: still refused", func(t *testing.T) {
+		a, f := ringingAgent(t, act.Node{Role: "push button", Label: "Play (k)", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-play"})
+		calls := 0
+		a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
+			calls++
+			if calls == 1 {
+				return "brave", "YouTube", []act.Node{f.at}, nil
+			}
+			return "gnome-shell", "Activities", nil, nil
+		}
+		a.executeTool(context.Background(), "observe_screen", map[string]any{})
+		got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
+		if len(f.clicked) != 0 {
+			t.Errorf("clicked = %v, want no click once a different application came to front", f.clicked)
+		}
+		if !strings.Contains(got, "gnome-shell") || !strings.Contains(got, "YouTube") {
+			t.Errorf("result = %q, want it to name both the window now in front and the one the list came from", got)
+		}
+	})
 }

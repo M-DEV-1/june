@@ -18,7 +18,7 @@ const stopLineRefusal = "Stopped before "
 const waitTimeoutMS = 5000
 
 // alreadyHeldNote is appended to what the check found, so the round after it reads the verdict as saying nothing about the action rather than as proof it worked.
-const alreadyHeldNote = " — but this already held before the action, so it says nothing about what the action did"
+const alreadyHeldNote = ", but this already held before the action, so it says nothing about what the action did"
 
 // summaryEvery is how many rounds pass between rewrites of the progress summary. Five, because a summary rewritten every round costs a round's worth of tokens for nothing, and one rewritten every twenty is describing a screen the job has long left.
 const summaryEvery = 5
@@ -102,7 +102,15 @@ func summarise(j Job, why string) string {
 // stuckQuestion is the one plain question a job asks when three checks in a row on the same step have failed. Input: the job. Output: the question, in the model's own words for what it was trying when it has them.
 func stuckQuestion(j Job) string {
 	last := j.Steps[len(j.Steps)-1]
-	return fmt.Sprintf("I tried %d times to make it so that %s, and each time %s. What should I do instead?", stuckAfter, last.Expect.Describe(), last.Why)
+	q := fmt.Sprintf("I am stuck after %d tries.", stuckAfter)
+	if j.Next != "" {
+		q += " I was trying to " + strings.TrimSuffix(j.Next, ".") + "."
+	}
+	q += fmt.Sprintf(" The last thing I did was %s, expecting %s; %s.", last.Tool, last.Expect.Describe(), last.Why)
+	if last.Result != "" {
+		q += " It answered: " + capRunes(last.Result, 300) + "."
+	}
+	return q + " What should I do instead?"
 }
 
 // checkedOut reports whether a step is one that actually showed the goal moving: a check that passed and was not already true before the action. It is what the done guard, the progress line and the closing sentence all count, so a job cannot end on, or claim progress from, a check that told it nothing.

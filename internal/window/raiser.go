@@ -51,6 +51,11 @@ type Window struct {
 	WmClass string `json:"wm_class"`
 	Title   string `json:"title"`
 	Focused bool   `json:"focused"`
+	// X, Y, W and H are the window's frame in logical screen pixels, as the shell reports it; all zero from an extension older than the one that reports them.
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"width"`
+	H int `json:"height"`
 }
 
 // List asks the extension for every open window. Input: a context bounding the D-Bus round trip. Output: one Window per open window the extension reported, or an error if the D-Bus call itself failed or its JSON could not be parsed.

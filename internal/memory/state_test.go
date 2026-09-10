@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"ora/internal/config"
 	"ora/internal/memory"
 	"strings"
 	"testing"
@@ -19,7 +20,7 @@ func TestGeminiSummarizer_DeriveState_EmptyInputsShortCircuit(t *testing.T) {
 		t.Fatalf("NewGeminiSummarizer: %v", err)
 	}
 	called := false
-	summarizer.SetStateBackend(func(ctx context.Context, prompt string) (string, error) {
+	summarizer.SetJobBackend(config.JobWorkingState, func(ctx context.Context, prompt string) (string, error) {
 		called = true
 		return "x", nil
 	})
@@ -127,7 +128,7 @@ func TestDeriveState_LocalBackendReplacesTheAPI(t *testing.T) {
 
 	calls := 0
 	var seen string
-	summarizer.SetStateBackend(func(ctx context.Context, prompt string) (string, error) {
+	summarizer.SetJobBackend(config.JobWorkingState, func(ctx context.Context, prompt string) (string, error) {
 		calls++
 		seen = prompt
 		return "  you are still on the quota work  ", nil

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -274,5 +275,14 @@ func TestEveryMeteredAfter_RecordsEachRun(t *testing.T) {
 			t.Fatal("the job ran but recorded no last-run marker, so a restart would run it again two minutes in")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A job whose brain fails for any reason answers from the fallback, since the user is watching it die otherwise.
+func TestFallThrough_AnswersFromTheFallbackOnAnyError(t *testing.T) {
+	primary := func(context.Context, string) (string, error) { return "", errors.New("codex: HTTP 429") }
+	fallback := func(context.Context, string) (string, error) { return "plan", nil }
+	if got, err := fallThrough(primary, fallback)(context.Background(), "go"); err != nil || got != "plan" {
+		t.Errorf("got %q, %v; want the fallback's answer", got, err)
 	}
 }

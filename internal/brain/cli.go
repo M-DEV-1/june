@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"ora/internal/util"
@@ -12,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -132,33 +132,79 @@ func first(ss []string) string {
 	return ""
 }
 
-// runCLI runs one child process to completion under a hard timeout and returns its stdout.
-// Input: the binary, the timeout in seconds, the arguments, and what to feed the child on stdin. Output: stdout, or an error naming the timeout, the exit status or the stderr the child died with.
+// runCLI runs one child process under a hard timeout and returns its stdout. It returns as soon as stdout holds one complete JSON value, which is the whole answer for every CLI here, and does not wait for the child to exit: on 2026-09-08 a meeting's minutes were lost to "claude timed out after 5m0s" when the CLI had printed its result and then sat there. The child and everything it spawned are killed once the answer is in hand or the timeout passes.
+// Input: the binary, the timeout in seconds, the arguments, and what to feed the child on stdin. Output: stdout, or an error naming the timeout (with the head of the child's stderr, since a run that says nothing else is otherwise untraceable), the exit status, or the stderr the child died with.
 func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []string, stdin string) ([]byte, error) {
 	timeout := time.Duration(timeoutSeconds) * time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd := exec.Command(binary, args...)
 	cmd.Stdin = strings.NewReader(stdin)
-	// Both CLIs read project files, per-directory settings and instruction files out of their working directory, and the daemon's working directory is wherever the user happened to launch it from. An empty temporary directory makes one run look like every other run.
+	// Both CLIs read project files, per-directory settings and instruction files out of their working directory, and the daemon's working directory is wherever the user happened to launch it from. An empty temporary directory makes one run look like every other.
 	cmd.Dir = os.TempDir()
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
+	// Its own process group, so the kill below reaches the children a CLI spawns as well as the CLI, and none of them can hold stdout open after the CLI itself is gone.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	// Killing the child does not kill its own children, and stdout stays open as long as any of them holds it, so without this a hung run would still block here for as long as its grandchildren live. WaitDelay stops the waiting a couple of seconds after the kill instead.
-	// ponytail: the timeout stops ORA waiting, it does not guarantee the process tree is gone; kill the whole process group if a hung CLI is ever seen to linger.
-	cmd.WaitDelay = 2 * time.Second
-
-	name := filepath.Base(binary)
-	if err := cmd.Run(); err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("%s timed out after %s", name, timeout)
-		}
-		slog.Debug("a brain CLI exited with an error", "binary", name, "stderr", head(stderr.String()))
-		return nil, fmt.Errorf("%s: %w", name, err)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
 	}
-	return out.Bytes(), nil
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	name := filepath.Base(binary)
+	kill := func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+
+	// stdout is read on its own goroutine, which hands back the bytes as soon as they form a complete JSON value or the pipe closes, so the wait below can be cut short by either the answer or the clock.
+	type read struct {
+		out []byte
+		err error
+	}
+	done := make(chan read, 1)
+	go func() {
+		var out bytes.Buffer
+		buf := make([]byte, 32<<10)
+		for {
+			n, err := stdout.Read(buf)
+			out.Write(buf[:n])
+			if completeJSON(out.Bytes()) {
+				done <- read{out: out.Bytes()}
+				return
+			}
+			if err != nil {
+				done <- read{out: out.Bytes(), err: err}
+				return
+			}
+		}
+	}()
+
+	select {
+	case r := <-done:
+		if completeJSON(r.out) {
+			kill()
+			cmd.Wait()
+			return r.out, nil
+		}
+		// The pipe closed without a whole answer: the child is done (or dying), and its exit status says how.
+		kill()
+		if err := cmd.Wait(); err != nil {
+			slog.Debug("a brain CLI exited with an error", "binary", name, "stderr", head(stderr.String()))
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		return r.out, nil
+	case <-ctx.Done():
+		kill()
+		cmd.Wait()
+		return nil, fmt.Errorf("%s timed out after %s (stderr: %s)", name, timeout, head(stderr.String()))
+	}
+}
+
+// completeJSON reports whether b, ignoring surrounding whitespace, is one whole JSON value: the moment a CLI's stdout reads this way its answer is in hand. Output: false for empty or partial output.
+func completeJSON(b []byte) bool {
+	b = bytes.TrimSpace(b)
+	return len(b) > 0 && json.Valid(b)
 }
 
 // The CLIs' own output is logged at debug rather than returned in the error, because these errors are logged at warn by callers such as the evening close (slog.Warn("evening close failed", "error", err)) and the output can carry part of the prompt — a day of the user's screen text — or a login error naming their account.

@@ -40,7 +40,7 @@ func toolError(msg string) string {
 }
 
 // storeUnavailable is what every failed memory read says. The model can only ever do one thing about it, so naming the store's own error would add nothing it can act on.
-const storeUnavailable = "I couldn't reach your memory just now — try that again in a moment"
+const storeUnavailable = "I couldn't reach your memory just now, try that again in a moment"
 
 // hasArg reports whether name was supplied with a value that isn't an empty string. A non-string value counts as supplied — the model meant something by it, and treating it as absent is how a filter gets dropped without anyone noticing.
 func hasArg(args map[string]any, name string) bool {
@@ -78,7 +78,7 @@ func checkArgs(args map[string]any, valid ...string) string {
 		return ""
 	}
 	slices.Sort(unknown)
-	return fmt.Sprintf("I don't take %s here — what I do take is %s",
+	return fmt.Sprintf("I don't take %s here, what I do take is %s",
 		strings.Join(unknown, ", "), strings.Join(valid, ", "))
 }
 
@@ -233,7 +233,7 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 	case a.ToolApprovalChan <- req:
 	default:
 		// TUI approval queue full — another tool is pending. Reject to unblock.
-		return toolError("I'm already waiting on another approval — ask again in a moment")
+		return toolError("I'm already waiting on another approval, ask again in a moment")
 	}
 
 	select {
@@ -248,7 +248,7 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 // refuseApproval is what a tool returns instead of asking for an approval nobody is listening for. Input: what the tool wanted to do, for the log. Output: one refusal sentence for the model.
 func refuseApproval(what string) string {
 	slog.Warn("refusing a tool that needs approval: nothing in this session can ask for one", "what", what)
-	return toolError("that needs your say-so and there's no way to ask for it here — do it yourself, or tell me exactly what to do instead")
+	return toolError("that needs your say-so and " + refuseApprovalMark + ", do it yourself, or tell me exactly what to do instead")
 }
 
 // ExecuteTool is just executeTool but exported, so eval tests outside this package can call the real tool (query_memory, recall, etc) the same way the model does.
@@ -259,12 +259,31 @@ func (a *Agent) ExecuteTool(ctx context.Context, name string, args map[string]an
 // brainRequiredTools are the tool names whose handler reads or writes through a.brain, the memory store. Widening the set of tools the ask gate can reach (askAllowedTools) opened a path where an agent built without a brain — a nil ContextReader, the shape both a not-yet-connected daemon and a test can produce — hit a.brain.SomeMethod(...) and panicked on the nil interface's own method dispatch. Checked once, up front, so every one of them fails the same way every other executeTool error path already does: a plain "error: ..." string, never a panic.
 var brainRequiredTools = map[string]bool{
 	"query_memory": true, "query_store": true, "recall": true,
-	"save_note": true, "personal_context": true, "revise": true, "action_items": true,
+	"save_note": true, "add_task": true, "personal_context": true, "revise": true, "action_items": true,
 }
 
 // executeTool runs a tool and returns the result as a string
 // maybe this can be seperated into /agent/tools altogether later and be compiled with OS specific code?
+// executeTool runs one tool and files what it did. Input: the tool's name and arguments. Output: the tool's result string, exactly as runTool produced it.
+// Every path that runs a tool comes through here — the ask loop, the sub-task loop, the computer-use job and the live voice session — which is why the record is written at this one point rather than at each of them. Before this the live session recorded nothing at all, so the tools it used most were invisible to anything reading the store.
 func (a *Agent) executeTool(ctx context.Context, name string, args map[string]any) string {
+	start := time.Now()
+	result := a.runTool(ctx, name, args)
+	if rec := recorderFrom(ctx); rec != nil {
+		rec(ToolRecord{
+			Name:     name,
+			Args:     toolActivitySummary(name, args),
+			Outcome:  toolOutcome(result),
+			Result:   resultSummary(name, result),
+			Duration: time.Since(start),
+			Offered:  offeredFrom(ctx),
+		})
+	}
+	return result
+}
+
+// runTool is the tool switch itself: what each tool name does, with no recording or timing around it.
+func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) string {
 	if a.brain == nil && brainRequiredTools[name] {
 		return toolError(storeUnavailable)
 	}
@@ -307,7 +326,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			data, err := os.ReadFile(path)
 			if err != nil {
 				slog.Warn("read_file failed", "path", path, "error", err)
-				return toolError("I couldn't read that file — check the path")
+				return toolError("I couldn't read that file, check the path")
 			}
 			return capRunes(string(data), 4000, "... (truncated, file too large)")
 		}
@@ -332,7 +351,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			slog.Warn("list_files failed", "path", path, "error", err)
-			return toolError("I couldn't list that folder — check the path")
+			return toolError("I couldn't list that folder, check the path")
 		}
 		var lines []string
 		for _, e := range entries {
@@ -378,6 +397,8 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return toolError("could not take a picture of the screen: " + err.Error())
 		}
 		recordLook(ctx, shot)
+		// A channel that cannot be handed a picture with the tool result is given a road of its own here: the Live voice session takes its tool results as text, so without this it took a picture it was never shown and every coordinate it named afterwards was refused. Nothing changes for a text ask, which has no sender and collects the picture through takeLook instead.
+		deliverPicture(ctx, shot)
 		return fmt.Sprintf("here is the picture, %d wide and %d high. Its top-left corner is %d,%d on the screen and one of its pixels is %.2f screen pixels, so point at things in it with its own coordinates and draw will put them back on the screen for you.", shot.W, shot.H, shot.X, shot.Y, shot.Scale)
 
 	case "point_at":
@@ -454,7 +475,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if early := streamDrawnFrom(ctx); len(early) > 0 {
 			for _, d := range early {
 				if d.Err != "" {
-					refused = append(refused, fmt.Sprintf("shape %d — %s", len(drawn)+len(refused)+1, strings.TrimPrefix(d.Err, "error: ")))
+					refused = append(refused, fmt.Sprintf("shape %d: %s", len(drawn)+len(refused)+1, strings.TrimPrefix(d.Err, "error: ")))
 					continue
 				}
 				drawn = append(drawn, d.Phrase)
@@ -472,11 +493,13 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if errText != "" {
 			refused = append(refused, strings.TrimPrefix(errText, "error: "))
 		}
+		// One name for the whole call, so the overlay keeps its shapes on screen together; when the stream already inked the leading ones it is their name, so the two halves of the call stay one drawing.
+		group := drawGroupFor(ctx)
 		for _, shape := range shapes {
-			phrase, target, errText := a.drawOne(ctx, shape)
+			phrase, target, errText := a.drawOne(ctx, group, shape)
 			if errText != "" {
 				// One bad shape does not lose the rest of the drawing: the others are drawn and the model is told which entry failed, so it can send that one again rather than the whole diagram.
-				refused = append(refused, fmt.Sprintf("shape %d — %s", len(drawn)+len(refused)+1, strings.TrimPrefix(errText, "error: ")))
+				refused = append(refused, fmt.Sprintf("shape %d: %s", len(drawn)+len(refused)+1, strings.TrimPrefix(errText, "error: ")))
 				continue
 			}
 			drawn = append(drawn, phrase)
@@ -500,7 +523,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		default:
 			result := fmt.Sprintf("drew %d shapes: %s", len(drawn), strings.Join(drawn, "; ")) + note
 			if len(refused) > 0 {
-				result += "\nnot drawn — " + strings.Join(refused, "; ")
+				result += "\nnot drawn: " + strings.Join(refused, "; ")
 			}
 			return result
 		}
@@ -522,7 +545,24 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		action, err := a.doAction(ctx, it.Ref)
 		if err != nil {
-			return toolError(fmt.Sprintf("could not click [%d] %s %q: %v", it.N, it.Role, it.Label, err))
+			// An element with no accessibility action to fire is clicked where it sits instead: the real pointer moves to the centre of its rectangle, which is in the same picture pixels click_at uses.
+			if it.W <= 0 || it.H <= 0 {
+				return toolError(fmt.Sprintf("could not click [%d] %s %q: %v", it.N, it.Role, it.Label, err))
+			}
+			dev, errText := a.inputDevice(ctx)
+			if errText != "" {
+				return toolError(fmt.Sprintf("could not click [%d] %s %q: %v; %s", it.N, it.Role, it.Label, err, errText))
+			}
+			px, py := it.X+it.W/2, it.Y+it.H/2
+			before := a.beforePress(ctx)
+			a.tapAt(px, py, it.Label)
+			if perr := dev.ClickAt(float64(px), float64(py)); perr != nil {
+				return toolError(fmt.Sprintf("could not click [%d] %s %q: %v; pointer: %v", it.N, it.Role, it.Label, err, perr))
+			}
+			if missed := a.pressCheck(ctx, before, px, py); missed != "" {
+				return missed
+			}
+			action = "pointer"
 		}
 		a.rememberClick(ctx, it)
 		a.rememberTarget(ScreenTarget{Label: it.Label, Role: it.Role, Window: window})
@@ -566,15 +606,23 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		// The field the last successful click acted on stands in for the one the keyboard is in — "click the field first" is the documented way to reach type_text anyway — and keyboardField then reads who really holds the keys, so the checks below are put against the field the text will actually reach. Before any click, this is the zero act.Item, which matches neither check below.
 		focused, known := a.focus(ctx)
 		landed := ""
+		window := a.currentWindow(ctx)
 		if known {
 			focused, known, landed = a.keyboardField(ctx, focused)
+		} else {
+			// A click at a point, or a focus-moving key, left the click itself saying nothing about the field, so the tree is asked who holds the keyboard now. A readable place to type is the field; a readable control that is no place to type is refused by name below; nothing readable at all (a window without a tree) types on the click alone, and the press check and the next look are what verify it, which is the same unknown keyboardField goes ahead on.
+			if holder, ok := keyboardHolder(ctx); ok {
+				focused, known = act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}, typingPlaces[holder.Role]
+			} else {
+				slog.Warn("nothing readable holds the keyboard after a point click, so typing goes ahead where the focus is")
+				known = true
+			}
 		}
-		window := a.currentWindow(ctx)
 		if !known && !blindConsent(questionFrom(ctx)) && !goAllowed(ctx) {
-			return "Stopped before typing: I could not identify the field the text would go into, since the last click was at a point on the screen or a key has moved the focus since. Click the field by its number from observe_screen, or say \"yes, go ahead\" and I will type where the focus is."
+			return fmt.Sprintf("Stopped before typing: the keyboard is held by %s %q in %q, which is no place to type. Click the field first, or say \"yes, go ahead\" and I will type where the focus is.", focused.Role, focused.Label, window)
 		}
 		if secretField(focused, window) {
-			return fmt.Sprintf("Stopped before typing into %s %q in %q — I never type passwords, card numbers or other secrets, so say it yourself once the field is focused.", focused.Role, focused.Label, window)
+			return fmt.Sprintf("Stopped before typing into %s %q in %q, I never type passwords, card numbers or other secrets, so say it yourself once the field is focused.", focused.Role, focused.Label, window)
 		}
 		if irreversible(focused, window, true) && !consented(questionFrom(ctx), matchedVerb(focused, window)) && !goAllowed(ctx) {
 			return fmt.Sprintf("Stopped before typing into %s %q in %q. %s", focused.Role, focused.Label, window, consentPrompt(matchedVerb(focused, window)))
@@ -602,10 +650,14 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			focused, known := a.focus(ctx)
 			if known {
 				focused, known, _ = a.keyboardField(ctx, focused)
+			} else if holder, ok := keyboardHolder(ctx); ok {
+				// After a point click the tree says who holds the keyboard, and the stop line below is put against that control, whatever it is.
+				focused, known = act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}, true
 			}
 			window := a.currentWindow(ctx)
-			if !known && !blindConsent(questionFrom(ctx)) && !goAllowed(ctx) {
-				return fmt.Sprintf("Stopped before pressing %s: I could not identify what has keyboard focus, since the last click was at a point on the screen or a key has moved the focus since. Click the control by its number from observe_screen, or say %q and I will press it.", keys, "yes, go ahead")
+			if !known {
+				// Nothing readable holds the keyboard and the last click was at a point: the window publishes no tree, so the press goes ahead on the click, checked against the window's own title below.
+				slog.Warn("nothing readable holds the keyboard after a point click, so the key press goes ahead where the focus is", "keys", keys)
 			}
 			if irreversible(focused, window, false) && !consented(questionFrom(ctx), matchedVerb(focused, window)) && !goAllowed(ctx) {
 				return fmt.Sprintf("Stopped before pressing %s on %s %q in %q. %s", keys, focused.Role, focused.Label, window, consentPrompt(matchedVerb(focused, window)))
@@ -635,10 +687,10 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if it, ok := itemAt(a.seen(ctx), x, y); ok {
 			lands = fmt.Sprintf("; the point lands on [%d] %s %q", it.N, it.Role, it.Label)
 			if secretField(it, window) {
-				return fmt.Sprintf("Stopped before clicking %d,%d — the point lands on %s %q in %q, which holds a password or another secret. Click it yourself if you want it focused.", x, y, it.Role, it.Label, window)
+				return fmt.Sprintf("Stopped before clicking %d,%d, the point lands on %s %q in %q, which holds a password or another secret. Click it yourself if you want it focused.", x, y, it.Role, it.Label, window)
 			}
 			if irreversible(it, window, false) && !consented(questionFrom(ctx), matchedVerb(it, window)) && !goAllowed(ctx) {
-				return fmt.Sprintf("Stopped before clicking %d,%d — the point lands on [%d] %s %q in %q. %s", x, y, it.N, it.Role, it.Label, window, consentPrompt(matchedVerb(it, window)))
+				return fmt.Sprintf("Stopped before clicking %d,%d, the point lands on [%d] %s %q in %q. %s", x, y, it.N, it.Role, it.Label, window, consentPrompt(matchedVerb(it, window)))
 			}
 		} else if verb := matchedVerb(act.Item{}, window); verb != "" && !consented(questionFrom(ctx), verb) && !goAllowed(ctx) {
 			return fmt.Sprintf("Stopped before clicking %d,%d in %q. A point on the screen carries no label, so the window's own title is all I have to go on, and it names a %s. %s", x, y, window, verb, consentPrompt(verb))
@@ -647,8 +699,13 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if errText != "" {
 			return errText
 		}
+		before := a.beforePress(ctx)
+		a.tapAt(x, y, strings.TrimPrefix(lands, "; the point lands on "))
 		if err := dev.ClickAt(float64(x), float64(y)); err != nil {
 			return toolError(fmt.Sprintf("could not click %d,%d: %v", x, y, err))
+		}
+		if missed := a.pressCheck(ctx, before, x, y); missed != "" {
+			return missed
 		}
 		// The pointer has moved the keyboard somewhere this session cannot name, whatever was under the point, so type_text and a focused key press refuse until a fresh observe_screen or a numbered click says where the keyboard is again.
 		a.focusLost(ctx)
@@ -667,14 +724,23 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if errText != "" {
 			return errText
 		}
+		before := a.beforePress(ctx)
+		a.tapAt(x, y, "")
 		if err := dev.ScrollAt(float64(x), float64(y), int32(dy)); err != nil {
 			return toolError(fmt.Sprintf("could not scroll at %d,%d: %v", x, y, err))
+		}
+		if missed := a.pressCheck(ctx, before, x, y); missed != "" {
+			return missed
 		}
 		return fmt.Sprintf("scrolled %d steps at %d,%d; look or call observe_screen to see the page now", int(dy), x, y)
 
 	case "switch_window":
 		app, _ := args["app"].(string)
 		return a.switchWindow(ctx, strings.TrimSpace(app))
+
+	case "open_app":
+		app, _ := args["app"].(string)
+		return a.openApp(ctx, strings.TrimSpace(app))
 
 	case "open_url":
 		raw, ok := args["url"].(string)
@@ -693,7 +759,11 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		// Reaped in the background: the opener exits in milliseconds, and an unwaited child stays a zombie in the daemon's process table for the life of the daemon.
 		go func() { _ = cmd.Wait() }()
-		return fmt.Sprintf("opened %s in browser", raw)
+		// Opened is not showing: the shell keeps the new tab behind the window in front unless the browser is raised from inside the shell, so the result says which of the two happened rather than leaving the model to read "opened" as "in front".
+		if how := a.raiseBrowser(ctx); how != "" {
+			return fmt.Sprintf("opened %s in browser and brought the browser to the front (%s)", raw, how)
+		}
+		return fmt.Sprintf("opened %s in browser; the browser window was not brought to the front, so it may be behind the window that was in front, switch_window to it before reading the page", raw)
 
 	case "query_memory":
 		if msg := checkArgs(args, "query", "domain", "app", "since", "until", "kind"); msg != "" {
@@ -714,7 +784,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		domain, _ := args["domain"].(string)
 		since, until, timed, err := optionalWindow(args, time.Now())
 		if errors.Is(err, errSinceAfterUntil) {
-			return toolError("that range runs backwards — the start has to come before the end")
+			return toolError("that range runs backwards, the start has to come before the end")
 		}
 		if err != nil {
 			slog.Warn("query_memory: unreadable date", "error", err)
@@ -825,7 +895,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		since, until, err := recallBounds(sinceStr, untilStr, time.Now())
 		if errors.Is(err, errSinceAfterUntil) {
-			return toolError("that range runs backwards — the start has to come before the end")
+			return toolError("that range runs backwards, the start has to come before the end")
 		}
 		if err != nil {
 			slog.Warn("recall: unreadable date", "error", err)
@@ -861,20 +931,34 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		if !ok || strings.TrimSpace(task) == "" {
 			return toolError("branch needs the question to work on")
 		}
-		if !a.tryReserveBranchSlot() {
-			return toolError("I've already run all the background searches I get this session — use query_memory or recall instead")
-		}
-		model, err := a.subtaskModelFactory()
+		// webSearch calls a real search engine directly (Exa, falling back to Tavily) — the cheapest and fastest path. When neither is configured or both fail, the task goes to whichever brain the router says has a web search of its own, the same way a typed ask does, instead of telling the model the web is out of reach.
+		result, err := a.webSearch(ctx, task)
 		if err != nil {
-			slog.Error("branch: could not start", "error", err)
-			return toolError("that background search couldn't start — use query_memory or recall instead")
+			slog.Warn("branch: web search failed, handing the task to a brain with its own web search", "error", err)
+			result, err = a.webAsk(ctx, task)
 		}
-		result, err := a.runSubtask(ctx, model, task)
 		if err != nil {
 			slog.Error("branch: failed", "error", err)
-			return toolError("that background search didn't come back — use query_memory or recall instead")
+			return toolError("that background search didn't come back, use query_memory or recall instead")
 		}
 		return result
+
+	case "add_task":
+		title, _ := args["title"].(string)
+		title = strings.TrimSpace(title)
+		if title == "" {
+			return toolError("add_task needs the task's title")
+		}
+		// A conversation per task, as POST /tasks does it, so the row on the Tasks screen opens somewhere to work on it. A conversation that cannot be opened is not fatal: the task itself is what the user asked for, and it is filed against no conversation rather than not at all.
+		convID, err := a.brain.CreateConversation(ctx, title, "")
+		if err != nil {
+			slog.Warn("add_task: could not open a conversation for the task, filing it without one", "error", err)
+		}
+		if _, err := a.brain.AddUserTask(ctx, title, convID); err != nil {
+			slog.Error("add_task: write failed", "error", err)
+			return toolError("that task didn't save, tell the user it is not on their list")
+		}
+		return "added to the task list: " + title
 
 	case "save_note":
 		content, ok := args["content"].(string)
@@ -883,7 +967,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		if _, err := a.brain.LogNote(ctx, content, "fact"); err != nil {
 			slog.Error("save_note: write failed", "error", err)
-			return toolError("that didn't save — try saying it again")
+			return toolError("that didn't save, try saying it again")
 		}
 		return "saved"
 
@@ -915,16 +999,16 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			}
 			if err := a.brain.SetPersonalContext(ctx, subject, content); err != nil {
 				slog.Error("personal_context: write failed", "subject", subject, "error", err)
-				return toolError("that didn't save — try saying it again")
+				return toolError("that didn't save, try saying it again")
 			}
 			return "saved"
 		case "delete":
 			if strings.TrimSpace(subject) == "" {
-				return toolError("personal_context needs the subject to remove — view it first to see which ones there are")
+				return toolError("personal_context needs the subject to remove, view it first to see which ones there are")
 			}
 			if err := a.brain.DeletePersonalContext(ctx, subject); err != nil {
 				slog.Error("personal_context: delete failed", "subject", subject, "error", err)
-				return toolError("nothing was removed — view it first to see which subjects there are")
+				return toolError("nothing was removed, view it first to see which subjects there are")
 			}
 			return "deleted"
 		default:
@@ -937,7 +1021,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		ref, ok := args["ref"].(string)
 		if !ok || strings.TrimSpace(ref) == "" {
-			return toolError("revise needs a ref — the \"note#N\" or \"thread#N\" a result showed you")
+			return toolError("revise needs a ref, the \"note#N\" or \"thread#N\" a result showed you")
 		}
 		kind, id, err := parseRef(ref)
 		if err != nil {
@@ -951,10 +1035,10 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		hasPriority = hasPriority && strings.TrimSpace(priority) != ""
 		remove, _ := args["remove"].(bool)
 		if remove && (hasContent || hasState || hasPriority) {
-			return toolError("revise can't remove and change something in the same call — pick one")
+			return toolError("revise can't remove and change something in the same call, pick one")
 		}
 		if !remove && !hasContent && !hasState && !hasPriority {
-			return toolError("revise needs content, a state, a priority, or remove — say what changed")
+			return toolError("revise needs content, a state, a priority, or remove, say what changed")
 		}
 
 		switch kind {
@@ -962,7 +1046,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			if remove {
 				if err := a.brain.DeleteNote(ctx, id); err != nil {
 					slog.Error("revise: delete failed", "id", id, "error", err)
-					return toolError("nothing was there to delete — look it up again with query_memory and use the id it shows")
+					return toolError("nothing was there to delete, look it up again with query_memory and use the id it shows")
 				}
 				return "deleted"
 			}
@@ -975,7 +1059,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 				}
 				if err := a.brain.SetActionPriority(ctx, id, p); err != nil {
 					slog.Error("revise: priority write failed", "id", id, "error", err)
-					return toolError("that priority didn't stick — look the item up again and use the id it shows")
+					return toolError("that priority didn't stick, look the item up again and use the id it shows")
 				}
 				if !hasState && !hasContent {
 					return "updated"
@@ -988,31 +1072,31 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 				}
 				if err := a.brain.SetActionStatus(ctx, id, s); err != nil {
 					slog.Error("revise: status write failed", "id", id, "error", err)
-					return toolError("nothing was updated — look it up again with query_memory and use the id it shows")
+					return toolError("nothing was updated, look it up again with query_memory and use the id it shows")
 				}
 			}
 			if hasContent {
-				// An action item's content is a rendered "[state/priority] Owner — work (Meeting, date)" line, so its text is corrected through SetActionText, which re-renders the line: writing the model's prose straight over it would strip the prefix and drop the item out of every read that goes through ParseAction. An id that names an ordinary note is not an action item, and that one is written whole.
+				// An action item's content is a rendered "[state/priority] Owner: work (Meeting, date)" line, so its text is corrected through SetActionText, which re-renders the line: writing the model's prose straight over it would strip the prefix and drop the item out of every read that goes through ParseAction. An id that names an ordinary note is not an action item, and that one is written whole.
 				err := a.brain.SetActionText(ctx, id, content)
 				if errors.Is(err, db.ErrNotActionItem) {
 					err = a.brain.UpdateNote(ctx, id, content)
 				}
 				if err != nil {
 					slog.Error("revise: content write failed", "id", id, "error", err)
-					return toolError("nothing was updated — look it up again with query_memory and use the id it shows")
+					return toolError("nothing was updated, look it up again with query_memory and use the id it shows")
 				}
 			}
 			return "updated"
 		case "thread":
 			if remove {
-				return toolError("a thread can't be removed — correct it with content instead")
+				return toolError("a thread can't be removed, correct it with content instead")
 			}
 			if hasState || hasPriority {
-				return toolError("a thread has no state or priority — those only apply to an action item")
+				return toolError("a thread has no state or priority, those only apply to an action item")
 			}
 			if err := a.brain.UpdateThreadState(ctx, id, content); err != nil {
 				slog.Error("revise: thread write failed", "id", id, "error", err)
-				return toolError("nothing was fixed — look the thread up again with query_memory and use the id it shows")
+				return toolError("nothing was fixed, look the thread up again with query_memory and use the id it shows")
 			}
 			return "fixed"
 		default:
@@ -1026,7 +1110,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return toolError("could not read the action items")
 		}
 		if len(items) == 0 {
-			return "nothing outstanding — no open action items"
+			return "nothing outstanding, no open action items"
 		}
 		var b strings.Builder
 		// Open items never expire by design — "an owed task does not stop being owed" — so the list only grows, and it is prompt text like any other tool result.
@@ -1120,6 +1204,10 @@ func toolActivitySummary(name string, args map[string]any) string {
 	case "click", "scroll_to", "point_at":
 		if n, ok := args["n"].(float64); ok {
 			return fmt.Sprintf("element %d", int(n))
+		}
+	case "switch_window", "open_app":
+		if app, ok := args["app"].(string); ok {
+			return quoteArg(app)
 		}
 	case "type_text":
 		if text, ok := args["text"].(string); ok {
@@ -1218,7 +1306,7 @@ func filterHitsByApp(hits []db.MemoryHit, app string) []db.MemoryHit {
 	return out
 }
 
-// listMeetingNotes renders every meeting-minutes note whose creation time falls in [since, until] (a zero bound is open), newest first, each as "[note#ID] date — excerpt". It reads the notes table directly rather than ranking, because minutes are the answer to "what was the meeting about" and no query word reliably ranks them above the screens of the user reading them.
+// listMeetingNotes renders every meeting-minutes note whose creation time falls in [since, until] (a zero bound is open), newest first, each as "[note#ID] date: excerpt". It reads the notes table directly rather than ranking, because minutes are the answer to "what was the meeting about" and no query word reliably ranks them above the screens of the user reading them.
 // maxMeetingNotesListed caps how many meetings query_memory kind=meeting lists in one answer; the rest are counted, and a narrower window or a real query reaches them.
 const maxMeetingNotesListed = 30
 
@@ -1238,7 +1326,7 @@ func (a *Agent) listMeetingNotes(ctx context.Context, since, until time.Time) st
 			left++
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("[note#%d] %s — %s", n.ID, n.CreatedAt.Format("Mon Jan 2 15:04"), db.FormatNoteHitWithSource(db.MemoryHit{Source: "note", RefID: n.ID, Content: n.Content, CreatedAt: n.CreatedAt}, 0)))
+		lines = append(lines, fmt.Sprintf("[note#%d] %s: %s", n.ID, n.CreatedAt.Format("Mon Jan 2 15:04"), db.FormatNoteHitWithSource(db.MemoryHit{Source: "note", RefID: n.ID, Content: n.Content, CreatedAt: n.CreatedAt}, 0)))
 	}
 	if len(lines) == 0 {
 		if desc := filterDescription("", since, until); desc != "" {

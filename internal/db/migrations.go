@@ -543,6 +543,37 @@ var migrations = []Migration{
 			return nil
 		},
 	},
+	{
+		Version: 8,
+		Name:    "0008_add_tool_calls",
+		Up: func(ctx context.Context, tx *sql.Tx) error {
+			// One row per tool call, written by every path that runs one. Until this existed the harness had three partial records — act_runs only kept a run that touched the screen, conversation_turns only kept chat asks, and the live session kept nothing at all — so a tool's absence from the record could mean it was never offered, offered and not chosen, or refused, and the three were the same byte.
+			// offered is what makes the absence readable: the names the model could have called on that round, so "not chosen" can be told apart from "never shown".
+			if _, err := tx.ExecContext(ctx, `
+				CREATE TABLE IF NOT EXISTS tool_calls (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+					path TEXT NOT NULL DEFAULT '',
+					conversation_id INTEGER NOT NULL DEFAULT 0,
+					name TEXT NOT NULL DEFAULT '',
+					args TEXT NOT NULL DEFAULT '',
+					outcome TEXT NOT NULL DEFAULT '',
+					result TEXT NOT NULL DEFAULT '',
+					duration_ms INTEGER NOT NULL DEFAULT 0,
+					offered TEXT NOT NULL DEFAULT ''
+				)`); err != nil {
+				return fmt.Errorf("create tool_calls: %w", err)
+			}
+			// The nightly report reads by day and joins by conversation, so those are the two it is indexed on.
+			if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tool_calls_created ON tool_calls(created_at)`); err != nil {
+				return fmt.Errorf("index tool_calls by time: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tool_calls_conv ON tool_calls(conversation_id)`); err != nil {
+				return fmt.Errorf("index tool_calls by conversation: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // runMigrations applies all pending schema migrations sequentially in transactions.

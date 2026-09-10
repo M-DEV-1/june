@@ -86,6 +86,14 @@ func TestOverlay_KindFieldMapping(t *testing.T) {
 			},
 		},
 		{
+			"tap broadcasts its one point", `{"kind":"tap","label":"Send","points":[[40,50]]}`,
+			func(t *testing.T, got OverlayRequest) {
+				if got.Kind != "tap" || len(got.Points) != 1 || got.Points[0] != [2]int{40, 50} {
+					t.Fatalf("tap payload = %+v, want kind tap at one point", got)
+				}
+			},
+		},
+		{
 			"box broadcasts its rect", `{"kind":"box","label":"drop here","rects":[{"x":1,"y":2,"w":3,"h":4}]}`,
 			func(t *testing.T, got OverlayRequest) {
 				if got.Kind != "box" || len(got.Rects) != 1 {
@@ -173,35 +181,29 @@ func TestOverlayMethods_BroadcastFieldMapping(t *testing.T) {
 				t.Errorf("ttl = %d, want the default %d", got.TTLMs, defaultOverlayTTLMs)
 			}
 		}},
-		{"Arrow", func(s *Server) error { return s.Arrow("ask-7", [][2]int{{1, 2}, {3, 4}}, "here") }, func(t *testing.T, ev Event, got OverlayRequest) {
-			if ev.ID != "ask-7" {
-				t.Errorf("event id = %q, want ask-7, the ask whose draw drew it", ev.ID)
-			}
+		{"Arrow", func(s *Server) error { return s.Draw("", "arrow", [][2]int{{1, 2}, {3, 4}}, 0, 0, 0, 0, "here") }, func(t *testing.T, ev Event, got OverlayRequest) {
 			points := [][2]int{{1, 2}, {3, 4}}
 			if got.Kind != "arrow" || got.Label != "here" || len(got.Points) != 2 || got.Points[0] != points[0] || got.Points[1] != points[1] {
 				t.Errorf("overlay = %+v, want an arrow labelled here through %v", got, points)
 			}
 		}},
-		{"Line", func(s *Server) error { return s.Line("ask-7", [][2]int{{1, 2}, {3, 4}}, "here") }, func(t *testing.T, ev Event, got OverlayRequest) {
-			if ev.ID != "ask-7" {
-				t.Errorf("event id = %q, want ask-7, the ask whose draw drew it", ev.ID)
-			}
+		{"Line", func(s *Server) error { return s.Draw("", "line", [][2]int{{1, 2}, {3, 4}}, 0, 0, 0, 0, "here") }, func(t *testing.T, ev Event, got OverlayRequest) {
 			points := [][2]int{{1, 2}, {3, 4}}
 			if got.Kind != "line" || got.Label != "here" || len(got.Points) != 2 || got.Points[0] != points[0] || got.Points[1] != points[1] {
 				t.Errorf("overlay = %+v, want a line labelled here through %v", got, points)
 			}
 		}},
-		{"Path", func(s *Server) error { return s.Path("ask-7", [][2]int{{1, 2}, {3, 4}, {5, 6}}, "route") }, func(t *testing.T, ev Event, got OverlayRequest) {
+		{"Path", func(s *Server) error { return s.Draw("", "path", [][2]int{{1, 2}, {3, 4}, {5, 6}}, 0, 0, 0, 0, "route") }, func(t *testing.T, ev Event, got OverlayRequest) {
 			if got.Kind != "path" || len(got.Points) != 3 {
 				t.Errorf("path overlay = %+v, want kind path through 3 points", got)
 			}
 		}},
-		{"Box", func(s *Server) error { return s.Box("ask-7", 10, 20, 30, 40, "drop here") }, func(t *testing.T, ev Event, got OverlayRequest) {
+		{"Box", func(s *Server) error { return s.Draw("", "box", nil, 10, 20, 30, 40, "drop here") }, func(t *testing.T, ev Event, got OverlayRequest) {
 			if got.Kind != "box" || len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
 				t.Errorf("box overlay = %+v, want kind box around 10,20 30x40", got)
 			}
 		}},
-		{"Circle", func(s *Server) error { return s.Circle("ask-7", 10, 20, 30, 40, "click here") }, func(t *testing.T, ev Event, got OverlayRequest) {
+		{"Circle", func(s *Server) error { return s.Draw("", "circle", nil, 10, 20, 30, 40, "click here") }, func(t *testing.T, ev Event, got OverlayRequest) {
 			if got.Kind != "circle" || len(got.Rects) != 1 || got.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
 				t.Errorf("circle overlay = %+v, want kind circle inscribed in 10,20 30x40", got)
 			}
@@ -242,7 +244,7 @@ func TestDraw_DispatchesByShapeAndRejectsUnknownOnes(t *testing.T) {
 		{"circle", "circle"},
 	}
 	for _, tc := range cases {
-		if err := s.Draw(tc.shape, [][2]int{{1, 1}, {2, 2}, {3, 3}}, 10, 20, 30, 40, "go"); err != nil {
+		if err := s.Draw("", tc.shape, [][2]int{{1, 1}, {2, 2}, {3, 3}}, 10, 20, 30, 40, "go"); err != nil {
 			t.Fatalf("Draw(%s) error: %v", tc.shape, err)
 		}
 		if _, got := waitOverlay(t, ch); got.Kind != tc.want {
@@ -250,7 +252,7 @@ func TestDraw_DispatchesByShapeAndRejectsUnknownOnes(t *testing.T) {
 		}
 	}
 
-	if err := s.Draw("sparkle", [][2]int{{1, 1}, {2, 2}}, 0, 0, 0, 0, "go"); err == nil {
+	if err := s.Draw("", "sparkle", [][2]int{{1, 1}, {2, 2}}, 0, 0, 0, 0, "go"); err == nil {
 		t.Fatal("Draw(sparkle) error = nil, want a complaint about the shape")
 	}
 	select {
@@ -357,12 +359,7 @@ func TestDraw_SaysWhenTheDrawingReachedNoWindow(t *testing.T) {
 	calls := map[string]func() error{
 		"Ring":   func() error { return s.Ring("", 1, 2, 3, 4, "here") },
 		"Marks":  func() error { return s.Marks("", []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}}) },
-		"Arrow":  func() error { return s.Arrow("", [][2]int{{1, 1}, {2, 2}}, "go") },
-		"Line":   func() error { return s.Line("", [][2]int{{1, 1}, {2, 2}}, "go") },
-		"Path":   func() error { return s.Path("", [][2]int{{1, 1}, {2, 2}, {3, 3}}, "go") },
-		"Box":    func() error { return s.Box("", 1, 2, 3, 4, "go") },
-		"Circle": func() error { return s.Circle("", 1, 2, 3, 4, "go") },
-		"Draw":   func() error { return s.Draw("box", nil, 1, 2, 3, 4, "go") },
+		"Draw":   func() error { return s.Draw("", "box", nil, 1, 2, 3, 4, "go") },
 	}
 	for name, call := range calls {
 		if err := call(); !errors.Is(err, ErrNoOverlayWindow) {
@@ -379,6 +376,26 @@ func TestDraw_SaysWhenTheDrawingReachedNoWindow(t *testing.T) {
 	for name, call := range calls {
 		if err := call(); err != nil {
 			t.Errorf("%s with a client on the hub = %v, want nil", name, err)
+		}
+	}
+}
+
+// A drawing is several shapes broadcast one at a time, and the overlay keeps them together only when they name the same draw call. Every shape of one call therefore has to carry that name out on the wire; without it a twenty-shape formula drawn by a voice session showed up as one stroke, each shape wiping the last (2026-09-07).
+func TestDraw_EveryShapeOfOneCallCarriesItsGroup(t *testing.T) {
+	s := New(&fakeAsker{}, nil, nil, nil)
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+
+	go func() {
+		_ = s.Draw("d4", "box", nil, 1, 2, 3, 4, "one")
+		_ = s.Draw("d4", "arrow", [][2]int{{1, 1}, {2, 2}}, 0, 0, 0, 0, "two")
+		_ = s.Draw("d5", "circle", nil, 5, 6, 7, 8, "next drawing")
+	}()
+
+	for _, want := range []struct{ kind, group string }{{"box", "d4"}, {"arrow", "d4"}, {"circle", "d5"}} {
+		_, got := waitOverlay(t, ch)
+		if got.Kind != want.kind || got.Group != want.group {
+			t.Errorf("overlay = kind %q group %q, want kind %q group %q", got.Kind, got.Group, want.kind, want.group)
 		}
 	}
 }

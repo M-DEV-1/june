@@ -45,3 +45,12 @@ func TestChordUnknownKey(t *testing.T) {
 		t.Fatal("expected error for unknown key")
 	}
 }
+
+// The table used to hold letters, arrows and a handful of names, so Print, the function keys, digits and punctuation were "unknown key": on 2026-09-09 a job could not press Print to open GNOME's screenshot overlay. Every key on a laptop keyboard resolves.
+func TestChordCoversTheWholeKeyboard(t *testing.T) {
+	for _, name := range []string{"Print", "F5", "F12", "1", "0", "Home", "End", "PageUp", "PageDown", "Insert", "-", "=", "[", "]", ";", "'", "`", "\\", ",", ".", "/", "ctrl+alt+shift+r", "Super+Print"} {
+		if _, err := chord(name); err != nil {
+			t.Errorf("chord(%q): %v", name, err)
+		}
+	}
+}

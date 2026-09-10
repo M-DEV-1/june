@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"ora/internal/tracker"
 	"strings"
 	"time"
 
@@ -54,6 +55,11 @@ func (a *Agent) CheckHolds(ctx context.Context, check act.Check) bool {
 	if check.Value == "" {
 		return false
 	}
+	// A screen_changed check can never already hold; what the pre-check does is keep the picture the change is judged against.
+	if check.Kind == act.ScreenChanged {
+		a.keepBeforeShot(ctx)
+		return false
+	}
 	_, title, nodes, err := a.observe(ctx)
 	if err != nil {
 		return false
@@ -71,8 +77,10 @@ func (a *Agent) waitFor(ctx context.Context, check act.Check, timeout time.Durat
 	}
 	switch check.Kind {
 	case act.TitleContains, act.ItemPresent, act.ItemAbsent, act.FieldHolds:
+	case act.ScreenChanged:
+		return a.waitForScreenChange(ctx, timeout)
 	default:
-		return toolError(fmt.Sprintf("wait_for has no check called %q; it has %s, %s, %s and %s", check.Kind, act.TitleContains, act.ItemPresent, act.ItemAbsent, act.FieldHolds))
+		return toolError(fmt.Sprintf("wait_for has no check called %q; it has %s, %s, %s, %s and %s", check.Kind, act.TitleContains, act.ItemPresent, act.ItemAbsent, act.FieldHolds, act.ScreenChanged))
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -85,7 +93,7 @@ func (a *Agent) waitFor(ctx context.Context, check act.Check, timeout time.Durat
 			ok, why = act.Match(check, title, items, a.focusedText(ctx, items))
 			// A list check is only about the window the step acted in. Another window that took focus since carries its own items, and it satisfies item_present by coincidence and item_absent by never having held the thing at all, so while the front window is not the one the list came from neither may pass. A title check is about whatever is in front by definition and is left alone.
 			if ok && listCheck(check.Kind) {
-				if changed := a.frontWindowChanged(ctx); changed != "" {
+				if changed := a.frontAppChanged(ctx); changed != "" {
 					ok, why = false, strings.TrimPrefix(changed, "error: ")
 				}
 			}
@@ -102,4 +110,65 @@ func (a *Agent) waitFor(ctx context.Context, check act.Check, timeout time.Durat
 			return fmt.Sprintf("%s%s: %s", act.WaitFailPrefix, time.Since(deadline.Add(-timeout)).Round(time.Millisecond), why)
 		}
 	}
+}
+
+// keepBeforeShot takes a picture of the screen and keeps it on the ask for the next screen_changed wait. Input: the call's context. Output: none; a camera that is not wired or fails leaves nothing kept.
+func (a *Agent) keepBeforeShot(ctx context.Context) {
+	if a.capture == nil {
+		return
+	}
+	c, err := a.capture(ctx)
+	if err != nil {
+		return
+	}
+	s := a.askState(ctx)
+	s.mu.Lock()
+	s.beforeShot = c
+	s.mu.Unlock()
+}
+
+// waitForScreenChange polls pictures of the screen until one differs from the picture kept before the action, or the timeout runs out. A wait with no kept picture takes one now, so the check then says whether the screen goes on changing. Input: the call's context and how long to wait. Output: the same pass and fail lines the list checks give.
+func (a *Agent) waitForScreenChange(ctx context.Context, timeout time.Duration) string {
+	if a.capture == nil {
+		return toolError("wait_for screen_changed needs the camera, and none is wired")
+	}
+	s := a.askState(ctx)
+	s.mu.Lock()
+	before := s.beforeShot
+	s.mu.Unlock()
+	if len(before.Data) == 0 {
+		a.keepBeforeShot(ctx)
+		s.mu.Lock()
+		before = s.beforeShot
+		s.mu.Unlock()
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		after, err := a.capture(ctx)
+		if err == nil {
+			if changed, known := screenChanged(before, after); known && changed {
+				s.mu.Lock()
+				s.beforeShot = tracker.Capture{}
+				s.mu.Unlock()
+				return act.WaitPassPrefix + "the screen looks different from before the action"
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Sprintf("%s%s: the screen looks the same as before the action", act.WaitFailPrefix, timeout.Round(time.Millisecond))
+		}
+		select {
+		case <-time.After(pressPoll):
+		case <-ctx.Done():
+			return fmt.Sprintf("%s%s: the screen looks the same as before the action", act.WaitFailPrefix, timeout.Round(time.Millisecond))
+		}
+	}
+}
+
+// frontAppChanged is frontWindowChanged for a list check: only a different application in front counts, since the same application renaming its window (Spotify's title becomes the song the moment Play is pressed) is often the very change a check waits for. Input: the call's context. Output: "" when the same application is in front, else frontWindowChanged's own line.
+func (a *Agent) frontAppChanged(ctx context.Context) string {
+	last := a.lastScreen(ctx)
+	if app, _, _, err := a.observe(ctx); err == nil && app == last.app {
+		return ""
+	}
+	return a.frontWindowChanged(ctx)
 }

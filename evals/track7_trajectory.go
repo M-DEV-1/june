@@ -51,10 +51,11 @@ type trajTurn struct {
 // armStep is the only place the two arms differ. Given the system prompt and the conversation so far (whose last turn is the one in progress, with the tool calls already run on it), it returns either the next tool call or the spoken reply. Both arms are stateless and rebuild everything from the turns each time, so neither carries hidden state the other lacks.
 type armStep func(ctx context.Context, sys string, turns []trajTurn) (*trajCall, string, error)
 
-// trajStubs are the tools track 7 records but never runs. Three reasons a tool is here: it writes to the store (save_note, revise, personal_context), it changes the machine or reaches the network (shell_exec, open_url, read_file, list_files, read_clipboard, and the screen tools observe_screen through type_text, which drive the real desktop through the accessibility layer), or it would need a live session to work at all (branch spawns a sub-agent against the Live API). shell_exec and a sensitive read_file also block on human approval through a channel nothing is draining in the eval, so stubbing them is what keeps the loop from hanging.
+// trajStubs are the tools track 7 records but never runs. Three reasons a tool is here: it writes to the store (save_note, add_task, revise, personal_context), it changes the machine or reaches the network (shell_exec, open_url, read_file, list_files, read_clipboard, and the screen tools observe_screen through type_text, which drive the real desktop through the accessibility layer), or it would need a live session to work at all (branch spawns a sub-agent against the Live API). shell_exec and a sensitive read_file also block on human approval through a channel nothing is draining in the eval, so stubbing them is what keeps the loop from hanging.
 // Every declaration agent.ToolDeclarations hands the two arms has to be either a read tool below or a key here. A declared tool that is neither comes back as "there is no tool called X", which is the harness calling the model wrong about a tool the harness itself offered, and the arm that reached for it loses the round to a bug rather than to the other arm.
 var trajStubs = map[string]string{
 	"save_note":        "saved",
+	"add_task":         "added to the task list",
 	"revise":           "updated",
 	"personal_context": "personal context updated",
 	"shell_exec":       "error: no shell in this eval — answer without running anything",

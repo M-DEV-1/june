@@ -100,7 +100,7 @@ func TestSystemInstruction_PersonalContextBlock(t *testing.T) {
 	})
 	got := systemInstructionText(time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC), "linux", "amd64", "sh", block, "some context", 5)
 
-	if !strings.Contains(got, "Personal context — things known for certain about the user and their world:") {
+	if !strings.Contains(got, "Personal context, things known for certain about the user and their world:") {
 		t.Error("the personal context block is missing its heading")
 	}
 	if !strings.Contains(got, "The user is Alex Rivera.") || !strings.Contains(got, "The user wants short answers.") {

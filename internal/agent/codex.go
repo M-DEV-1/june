@@ -102,11 +102,6 @@ func actionHops(hops []ToolHop) int {
 	return n
 }
 
-// codexFallbackWanted says whether the Gemini text path should hand a question to Codex: only when Gemini cannot answer at all, only when no tool has run yet so an action is never repeated, and only when the user is logged in to Codex.
-func codexFallbackWanted(err error, hops int, loggedIn bool) bool {
-	return geminiCannotAnswer(err) && hops == 0 && loggedIn
-}
-
 // GeminiCannotAnswer reports whether err is a failure no Gemini model can fix — 503 because every model is overloaded, or 429 because the day's free-tier request allowance is spent — and so is worth handing to a different provider. Input: the error from a Gemini call, possibly wrapped. Output: true only for those two.
 // It is the exported form of geminiCannotAnswer, for the background jobs in internal/brain that need the same rule the asks already use.
 func GeminiCannotAnswer(err error) bool {
@@ -336,6 +331,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	spent, screen := 0, ""
 	for i := 0; i < maxAskRounds && spent < maxAskIterations; i++ {
 		prompt, thread, offered := instruction, historyItems, tools
+		offeredNames := declNames(decls)
 		if screenAsk || screenTaskStarted(tr.ToolHops) {
 			if screenPrompt == "" {
 				screenPrompt = screenTaskInstruction()
@@ -345,7 +341,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 			}
 			prompt, thread = screenPrompt, screenThread
 			if screenRoundToolsSuffice(tr.ToolHops) {
-				offered = screenTools
+				offered, offeredNames = screenTools, declNames(trimToDeclarations(decls, screenRoundTools))
 			}
 		}
 		input := make([]any, 0, len(thread)+1+len(trail))
@@ -362,7 +358,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 			if len(early[itemID]) >= maxDrawShapes {
 				return
 			}
-			phrase, target, errText := a.drawOne(ctx, shape)
+			phrase, target, errText := a.drawOne(ctx, itemID, shape)
 			if errText != "" {
 				// Recorded rather than dropped: a shape refused during the stream still has to hold its place in early, or the shapes after it in the finished call shift onto the wrong entries (see streamDrawn.Err).
 				early[itemID] = append(early[itemID], streamDrawn{Err: errText})
@@ -421,7 +417,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 				}
 			}
 			ObserveTool(ctx, call.Name, toolActivitySummary(call.Name, args))
-			result := a.evalExecute(withStreamDrawn(ctx, early[call.ID]), call.Name, args)
+			result := a.evalExecute(WithOffered(withStreamDrawn(ctx, call.ID, early[call.ID]), offeredNames), call.Name, args)
 			ObserveTool(ctx, call.Name, resultSummary(call.Name, result))
 			slog.Info("ask: tool", "tool", call.Name, "args", toolActivitySummary(call.Name, args), "result", resultSummary(call.Name, result), "detail", toolLogDetail(call.Name, result))
 			tr.ToolHops = append(tr.ToolHops, ToolHop{Name: call.Name, Args: args, Result: result})

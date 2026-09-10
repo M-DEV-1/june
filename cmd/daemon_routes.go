@@ -40,6 +40,22 @@ type routeDependencies struct {
 	startTime       time.Time
 }
 
+// withPreflight answers every CORS preflight in front of the mux, and hands everything else straight to it. Input: the routes and the same auth wrapper they are registered with, which is what writes the CORS headers and answers an OPTIONS 204 without asking for a token. Output: the handler the daemon serves.
+//
+// It exists because a route whose pattern names a method — "POST /notices/{kind}/{id}/action" — is routed to that method alone, so the OPTIONS a browser sends first never reaches the handler and the mux answers it 405 with no CORS headers of its own. The browser then blocks the real request, the window's fetch rejects, and the card says "Could not do that" while the daemon logs nothing at all, because the POST was never sent. Every notice button was dead this way, and so was every /act and /open route.
+//
+// In front of the mux rather than as a route of its own: Go's mux refuses an "OPTIONS /" pattern as ambiguous against every plain pattern like "/ask", which matches all methods on a narrower path. Being in front also means a route added later cannot reintroduce this by forgetting anything.
+func withPreflight(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerFunc) http.Handler {
+	preflight := auth(func(w http.ResponseWriter, r *http.Request) {})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			preflight(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
 // registerDaemonRoutes wires up the HTTP routes on mux for IPC communication.
 func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	auth := d.auth
@@ -205,6 +221,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/matters", auth(ipcServer.Matters))
 	mux.HandleFunc("/today", auth(ipcServer.Today))
 	mux.HandleFunc("/meetings", auth(ipcServer.Meetings))
+	mux.HandleFunc("/meetings/{id}", auth(ipcServer.Meeting)) // DELETE removes a meeting whose write-up is not worth keeping
 	mux.HandleFunc("/meetings/live", auth(ipc.MeetingLive(meetingRecorder)))
 	mux.HandleFunc("/memory/search", auth(ipcServer.MemorySearch))
 	mux.HandleFunc("/people", auth(ipcServer.People))

@@ -20,14 +20,17 @@ func loadToken(dataDir string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// saveToken writes the restore_token returned by the portal so the next Open can skip the consent dialog. A blank token removes the stored file instead of writing an empty one, since the portal returns "" when persistence was not granted.
+// saveToken writes the restore_token returned by the portal so the next Open can skip the consent dialog. A blank token leaves the stored file alone: the portal answers Start with no restore_token on a session it restored from the saved one (measured on this desk on 2026-09-08, when four clicks through a restored session were followed by the file being gone and the next open would have asked for consent again), and the saved token is still the one that restores the grant.
 func saveToken(dataDir, token string) error {
-	path := filepath.Join(dataDir, tokenFile)
 	if token == "" {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
 		return nil
 	}
-	return os.WriteFile(path, []byte(token), 0600)
+	return os.WriteFile(filepath.Join(dataDir, tokenFile), []byte(token), 0600)
+}
+
+// forgetToken removes the saved restore_token so the next Open asks for consent again. A blank dataDir, or no file, is nothing to do.
+func forgetToken(dataDir string) {
+	if dataDir != "" {
+		os.Remove(filepath.Join(dataDir, tokenFile))
+	}
 }

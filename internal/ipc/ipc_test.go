@@ -45,6 +45,7 @@ func newTestServer(t *testing.T, asker Asker, store *db.Store, screen func() []t
 	mux.HandleFunc("/matters", s.Matters)
 	mux.HandleFunc("/today", s.Today)
 	mux.HandleFunc("/meetings", s.Meetings)
+	mux.HandleFunc("/meetings/{id}", s.Meeting)
 	mux.HandleFunc("/memory/search", s.MemorySearch)
 	mux.HandleFunc("/people", s.People)
 	srv := httptest.NewServer(mux)

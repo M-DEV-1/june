@@ -362,3 +362,44 @@ func TestRequireIPCToken_CapsTheBody(t *testing.T) {
 		}
 	}
 }
+
+// Every route answers a CORS preflight, including the ones registered with a method in their pattern. Go's mux routes a pattern written "POST /x" to POST alone, so an OPTIONS preflight never reaches the handler requireIPCToken wraps and is answered 405 with no CORS headers — at which point the browser blocks the real request, the window's fetch rejects, and the card says "Could not do that" while the daemon logs nothing, because the POST was never sent. Every notice button was dead this way; the CORS test above missed it because it calls requireIPCToken directly rather than through a mux.
+func TestWithPreflight_AnswersAMethodPrefixedRoute(t *testing.T) {
+	auth := func(h http.HandlerFunc) http.HandlerFunc { return requireIPCToken("tok", h) }
+	mux := http.NewServeMux()
+	// The notice button's own registration, copied from registerDaemonRoutes, plus a plain route that always worked.
+	mux.HandleFunc("POST /notices/{kind}/{id}/action", auth(func(w http.ResponseWriter, r *http.Request) {}))
+	mux.HandleFunc("/ask", auth(func(w http.ResponseWriter, r *http.Request) {}))
+	h := withPreflight(mux, auth)
+
+	for _, path := range []string{"/notices/task/42/action", "/ask"} {
+		req := httptest.NewRequest(http.MethodOptions, path, nil)
+		req.Header.Set("Origin", "tauri://localhost")
+		req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Errorf("OPTIONS %s = %d, want 204 — the browser blocks the real request without it", path, rec.Code)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "tauri://localhost" {
+			t.Errorf("OPTIONS %s named the origin back as %q, want the window's own origin", path, got)
+		}
+	}
+}
+
+// The catch-all answers preflights only. A real request to a path no route claims still gets the mux's own 404, rather than a silent 204 that would make a typo in the window look like a request that worked.
+func TestWithPreflight_LeavesRealRequestsToTheirOwnRoutes(t *testing.T) {
+	auth := func(h http.HandlerFunc) http.HandlerFunc { return requireIPCToken("tok", h) }
+	mux := http.NewServeMux()
+	h := withPreflight(mux, auth)
+
+	req := httptest.NewRequest(http.MethodPost, "/no/such/route", nil)
+	req.Header.Set("Origin", "tauri://localhost")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("POST to a path no route claims = %d, want 404", rec.Code)
+	}
+}

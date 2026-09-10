@@ -25,6 +25,8 @@ type Notice struct {
 	Action  string         `json:"action"`
 	Until   string         `json:"until"`
 	Actions []NoticeButton `json:"actions,omitempty"`
+	// Expires is the RFC 3339 moment the notice's own buttons stop working, empty on a notice that asked no question. The window counts down to it and removes the card at zero.
+	Expires string `json:"expires,omitempty"`
 }
 
 // NoticeButton is one button a notice carries. Key is what the window POSTs back as the action, and Label is what the user reads on the button. Named for the button rather than the action because NoticeAction is already the route handler above.

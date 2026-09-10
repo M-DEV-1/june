@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -676,5 +677,62 @@ func TestPeople_BoundsTheMeetingNoteRead(t *testing.T) {
 	getJSON(t, srv, "/people", &got)
 	if len(got.People) != 0 {
 		t.Errorf("people = %+v, want none — the only meeting is older than the window", got.People)
+	}
+}
+
+// A meeting whose write-up is not worth keeping is deleted from the list it appears in, and the note behind it goes with it.
+func TestMeeting_DeleteRemovesTheWriteUp(t *testing.T) {
+	store := dbtest.Open(t)
+	ctx := context.Background()
+	id, err := store.LogNote(ctx, sampleMinutes, "meeting")
+	if err != nil {
+		t.Fatalf("seed meeting: %v", err)
+	}
+	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
+
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/meetings/"+strconv.FormatInt(id, 10), nil)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE answered %d, want 204", resp.StatusCode)
+	}
+
+	var got struct {
+		Meetings []Meeting `json:"meetings"`
+	}
+	getJSON(t, srv, "/meetings", &got)
+	if len(got.Meetings) != 0 {
+		t.Errorf("%d meetings left, want the deleted one gone", len(got.Meetings))
+	}
+}
+
+// Only a meeting can be deleted through this route. Notes share one id space, so an id that names a diary entry or a memory note must not be removed by a request the meetings screen made.
+func TestMeeting_DeleteRefusesANoteThatIsNotAMeeting(t *testing.T) {
+	store := dbtest.Open(t)
+	ctx := context.Background()
+	id, err := store.LogNote(ctx, "Rohan's daughter is called Meera.", "memory")
+	if err != nil {
+		t.Fatalf("seed note: %v", err)
+	}
+	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
+
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/meetings/"+strconv.FormatInt(id, 10), nil)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("DELETE of a note that is not a meeting answered %d, want 404", resp.StatusCode)
+	}
+	notes, err := store.GetNotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 {
+		t.Errorf("%d notes left, want the note that is not a meeting untouched", len(notes))
 	}
 }

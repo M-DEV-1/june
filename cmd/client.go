@@ -76,7 +76,7 @@ func runClient(ctx context.Context, shutdownObs func(context.Context) error, dae
 	orchestrator := agent.NewAgent(mic, speaker, store, nil, apiKey)
 	// The client process has no in-process compiler (that only exists in the daemon), so the handshake's "[working]" current-activity context was always dead here — wire it over the daemon's /buffer IPC instead (F2).
 	orchestrator.SetBufferProvider(newBufferProvider().Get)
-	orchestrator.SetModel(config.VoiceModel)
+	orchestrator.SetModel(config.VoiceModel())
 
 	orchestrator.SetVoice(appConfig.Voice)
 	// The TUI reads ToolApprovalChan and answers it (internal/ui), so this process may run the approval-gated tools; the daemon never sets this and refuses them instead.

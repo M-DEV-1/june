@@ -7,8 +7,6 @@ import (
 	"ora/internal/config"
 	"strings"
 	"time"
-
-	"google.golang.org/genai"
 )
 
 // NodeRef is a lightweight handle to a node row (id + content).
@@ -140,23 +138,13 @@ Do not invent facts. Plain text only — no JSON, no bullet points.
 Summaries:
 %s`, priorBlock, strings.Join(numbered, "\n"))
 
-	// The daily request gate is asked before the call so a spent Gemini allowance refuses here and falls through to the fallback text path like a real 429 would.
-	model := config.BackgroundModel(config.JobEpisodicCompaction)
-	var resp *genai.GenerateContentResponse
-	err := g.allow(model)
-	if err == nil {
-		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), nil)
-	}
+	// The daily request gate is asked inside text before the call, so a spent Gemini allowance refuses there and falls through to the fallback text path like a real 429 would.
+	text, err := g.text(ctx, config.JobEpisodicCompaction, prompt, false)
 	if err != nil {
-		if text, ok := g.fallbackText(ctx, err, prompt); ok {
-			return text, nil
+		if fallback, ok := g.fallbackText(ctx, err, prompt); ok {
+			return fallback, nil
 		}
-		return "", fmt.Errorf("digest llm call: %w", err)
+		return "", fmt.Errorf("digest: %w", err)
 	}
-
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("digest: empty response from model")
-	}
-
-	return strings.TrimSpace(resp.Candidates[0].Content.Parts[0].Text), nil
+	return strings.TrimSpace(text), nil
 }

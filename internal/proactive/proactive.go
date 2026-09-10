@@ -293,6 +293,8 @@ type Notice struct {
 	Until  string
 	// Actions is the notice's own buttons, empty for all but a notice that asked a question of its own — the stale-item "Still open", so far. The window draws exactly these in place of the buttons its kind implies, and POSTs the pressed one's Key back on /notices/{kind}/{id}/action, where Act hands it to the goroutine waiting on the answer (see awaitAnswer in notify.go).
 	Actions []Action
+	// Expires is the RFC 3339 moment a question stops being answerable, set by Ask and empty on every notice that asked nothing. Past it the goroutine waiting on the answer has gone, so the button would 400; the window counts down to it and takes the card off screen rather than leaving a button on screen that no longer does anything.
+	Expires string
 }
 
 // noticeSend is the desktop window's notice channel, wired once at startup by cmd/daemon.go and read from whichever goroutine a notification happens to be on, which is what noticeMu guards. Nil means nothing has been wired and every notification goes to notify-send.
@@ -353,8 +355,13 @@ var openOnlyActions = []Action{{actionOpen, "Open in Ora"}}
 // The long form waits in the background for the button, up to an hour, so the caller never blocks on it.
 // The desktop window gets first refusal: it draws the same text as a card of Ora's own, which is not cut off after two lines and can be clicked through to what it is about, so the notifier (and notify-send) are only reached when no window is listening.
 func Notify(icon, title, body string) {
+	NotifyAt(icon, title, body, "", "")
+}
+
+// NotifyAt is Notify for a notice whose card opens somewhere in the window. Input: as Notify, plus the place ("chats", "tasks", "days", "meetings", "routines") and the row id the card's Open goes to, both "" to open the window and nothing in particular.
+func NotifyAt(icon, title, body, place, id string) {
 	// The notice carries its one button rather than leaving the window to guess: nothing posted this way has a task behind it, so Done and the snoozes would have nothing to act on.
-	n := Notice{Title: title, Body: body, Kind: noticeKind(icon), Actions: openOnlyActions}
+	n := Notice{Title: title, Body: body, Place: place, ID: id, Kind: noticeKind(icon), Actions: openOnlyActions}
 	if sendNotice(n) {
 		return
 	}
