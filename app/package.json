@@ -24,7 +24,6 @@
     "react-dom": "^19.2.8",
     "react-markdown": "10.1.0",
     "react-redux": "^9.3.0",
-    "react-resizable-panels": "^4.12.3",
     "rehype-katex": "7.0.1",
     "remark-gfm": "4.0.1",
     "remark-math": "6.0.0",

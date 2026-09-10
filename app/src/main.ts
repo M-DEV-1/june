@@ -9,7 +9,7 @@ import { systemTheme } from "./shared/theme";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import {
-  dotClass,
+  faceState,
   dotLabel,
   voiceStateWord,
   conversationSeparator,
@@ -38,6 +38,7 @@ import {
 } from "./state";
 // The key a clicked notice's target is left under is defined beside the code in the app window that reads it, so there is one spelling of it rather than two.
 import { OPEN_AT_KEY } from "./app/state";
+import { FACE_TICK_MS, face } from "./shared/faces";
 import { initialView, venueScript } from "./mock";
 import {
   actAnswer,
@@ -375,11 +376,34 @@ function renderNotice(v: View): void {
   }
   // A notice whose action is set is the desktop notification's own follow-up, not a fresh card: it shows what happened, one line, instead of the title and body drawn the first time.
   const actionLine = noticeActionLine(n, new Date());
+  // The cross is on every card, the follow-up line included: a card the user has read should go when they say so, and without it the only ways off screen are answering it, opening the whole app window, or waiting.
   noticeEl.innerHTML =
-    actionLine !== undefined
+    closeHtml(n) +
+    (actionLine !== undefined
       ? `<div class="nt">${esc(actionLine)}</div>`
-      : `<div class="nh">Ora</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml(n)}`;
+      : `<div class="nh">Ora</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml(n)}${countdownHtml(n)}`);
 }
+
+/** The card's own close cross. Input: the notice, named in the label because a cross read on its own says nothing about what it closes. Output: the button's HTML. */
+function closeHtml(n: Notice): string {
+  return `<button class="nx" data-close="1" type="button" aria-label="${esc(`Close — ${n.title}`)}">&times;</button>`;
+}
+
+/** The bar under a question's buttons that empties as its answer window runs out. Input: the notice. Output: the bar's HTML, or "" for a notice that asked nothing and so has no window to run out.
+ * A bar rather than a number: the card is glanced at, not read, and "14 seconds left" asks the user to do arithmetic about a thing that is about to vanish anyway. The emptying is a CSS animation timed from the moment the daemon stamped, so nothing here ticks — the browser does it, and the bar stays exact even while the page is busy. */
+function countdownHtml(n: Notice): string {
+  const left = msLeft(n, Date.now());
+  if (left === undefined) return "";
+  return `<div class="np"><i style="animation-duration:${left}ms"></i></div>`;
+}
+
+/** How long a question has left, in milliseconds. Input: the notice and the current moment. Output: the milliseconds remaining, or undefined for a notice with no answer window at all. Never negative — a bar given a negative duration never animates and would sit there full. */
+function msLeft(n: Notice, now: number): number | undefined {
+  const at = Date.parse(n.expires ?? "");
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, at - now);
+}
+
 
 /** The buttons a fresh notice carries, so the card is dealt with where it appears. Input: the notice. Output: the row's HTML — exactly the actions the notice named, in that order, and an empty row when it named none. Each button also names its notice in an aria-label, because "Not happening" read on its own says nothing about what is not happening.
  * The daemon decides which buttons a notice can answer: a task carries the full Done/snooze/Open set, the stale-task question carries its own three, and a moment with nothing to complete carries only Open (see openOnlyActions and noticeActions in internal/proactive). The card used to fall back to the full set for any notice that named none, which is how "Transcribing meeting" came to offer Done and three snoozes and answer "Could not do that" when one was pressed. */
@@ -415,7 +439,14 @@ let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 function armNotice(v: View): void {
   clearTimeout(noticeTimer);
   noticeTimer = undefined;
-  if (!v.notice || v.noticeHeld || noticeEl.matches(":hover")) return;
+  if (!v.notice) return;
+  // A question's card lives exactly as long as its answer window, and the pointer does not pause it: the daemon's goroutine gives up on its own clock whatever the pointer is doing, and a card held open past that is a button that answers "Could not do that". The bar under it empties over the same span, so nothing here has to tick.
+  const left = msLeft(v.notice, Date.now());
+  if (left !== undefined) {
+    noticeTimer = setTimeout(() => dispatch({ kind: "noticeGone" }), left);
+    return;
+  }
+  if (v.noticeHeld || noticeEl.matches(":hover")) return;
   noticeTimer = setTimeout(() => dispatch({ kind: "noticeGone" }), NOTICE_MS);
 }
 
@@ -427,8 +458,13 @@ noticeEl.addEventListener("pointerleave", () =>
   dispatch({ kind: "noticeRelease" }),
 );
 noticeEl.addEventListener("click", (e) => {
-  // A press on one of the card's own buttons is that button; a press anywhere else on the card is still the click that opens the app window.
-  const act = (e.target as HTMLElement).closest<HTMLElement>("button.na")?.dataset.act;
+  // Three presses, in this order: the cross takes the card off screen and does nothing else, one of the card's own buttons is that button, and a press anywhere else is still the click that opens the app window. The cross is read first because it sits inside the card the click would otherwise open.
+  const el = e.target as HTMLElement;
+  if (el.closest("button.nx")) {
+    dispatch({ kind: "noticeGone" });
+    return;
+  }
+  const act = el.closest<HTMLElement>("button.na")?.dataset.act;
   dispatch(act ? { kind: "noticeAct", act } : { kind: "noticeClick" });
 });
 
@@ -511,13 +547,12 @@ function displayPlaceholder(v: View): string {
   return p === RESTING_PLACEHOLDER ? "Ask Ora" : p;
 }
 
-/** The whole card: the input line, the thread of what has been asked so far, and the footer — or, for the whole length of a live voice session, the voice-mode surface instead (see voiceSurfaceHtml). The input carries a fixed aria-label rather than leaning on its placeholder for a name: the placeholder is also this window's status line ("Listening…", "Live voice on"), so it changes under a user who is part way through typing, and a control whose name moves has no name. Input: the view and the matter the turns belong to. Output: the card's HTML. */
+/** The whole card: the input line, the thread of what has been asked so far — or, for the whole length of a live voice session, the voice-mode surface instead (see voiceSurfaceHtml). The input carries a fixed aria-label rather than leaning on its placeholder for a name: the placeholder is also this window's status line ("Listening…", "Live voice on"), so it changes under a user who is part way through typing, and a control whose name moves has no name. Input: the view and the matter the turns belong to. Output: the card's HTML. */
 function cardHtml(v: View, m: Matter): string {
   if (v.voice) return voiceSurfaceHtml(v, m);
-  const tag = daemonUp ? "daemon" : mockMode ? "mock" : "daemon offline";
-  // A 9px dot telling "not connected" apart from "idle" by colour alone is invisible to begin with, so the first thing a user sees when the daemon is down is not a red dot but these two words, in the same place the dot sat and in the "something wrong" colour rather than a shape nobody can name.
+  // Ora's face sits where a status dot used to: the same states, told apart by a face rather than by a colour nobody can name. When the daemon is down the words "Not connected" take its place in the "something wrong" colour, since a sleeping face alone would read as idle. A state with several faces alternates on re-render, which the level and state events drive often enough while anything is happening.
   const status = daemonUp
-    ? `<span class="dot ${dotClass(v, daemonUp)}" role="img" title="${esc(dotLabel(v, daemonUp))}" aria-label="${esc(dotLabel(v, daemonUp))}"></span>`
+    ? `<span class="face" role="img" title="${esc(dotLabel(v, daemonUp))}" aria-label="${esc(dotLabel(v, daemonUp))}">${esc(face(faceState(v, daemonUp), Math.floor(Date.now() / FACE_TICK_MS)))}</span>`
     : `<span role="status" style="flex:none;color:var(--bad);font:400 12px/1.4 var(--body);">${esc(dotLabel(v, daemonUp))}</span>`;
   // Permanent, not just while resting: the chip shows the window's own context once the daemon reports one, and the shortcut hints otherwise — never both, since there is only room for one aside next to the input.
   const ctx = v.contextChip
@@ -532,7 +567,6 @@ function cardHtml(v: View, m: Matter): string {
       ${ctx}
     </div>
     ${threadHtml(v, m)}
-    <div class="foot"><span>↵ ask</span><span>ctrl↵ new thread</span><span>esc close</span><span class="tag">${tag}</span></div>
   `;
 }
 

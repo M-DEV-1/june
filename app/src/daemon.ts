@@ -100,12 +100,14 @@ export type Notice = {
   kind: string;
   action?: string;
   until?: string;
+  /** The RFC 3339 moment this notice's buttons stop working, set only on a notice that asked a question. The daemon's goroutine waiting on the answer gives up then, so the card counts down to it and takes itself off screen rather than leaving a button that answers "Could not do that". */
+  expires?: string;
 };
 
 /** The shape of every event on the daemon's SSE stream, whichever client reads it. The one place this is declared: a client-side copy that drifts from this adds a field the compiler cannot check against what the wire actually sends. */
 export type DaemonEvent = {
   id: string;
-  /** The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, and "act" carries one line of a computer-use job's progress, its parts as JSON in detail (see internal/ipc/actjob.go). */
+  /** The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way, and "act" carries one line of a computer-use job's progress, its parts as JSON in detail (see internal/ipc/actjob.go). */
   type:
     | "status"
     | "tool"
@@ -118,7 +120,9 @@ export type DaemonEvent = {
     | "state"
     | "level"
     | "notice"
-    | "act";
+    | "act"
+    | "recording"
+    | "dreaming";
   text?: string;
   /** Carried on a "tool" event (a short summary of what that call is doing or found), on an "act" event (the job progress, as JSON text — see internal/ipc/actjob.go's ActEmitter) and on a "level" event (the session's mic/speaker amplitude as JSON text, {"mic":0-1,"speaker":0-1} — see internal/ipc/voice.go's levels and waveform.ts's renderLevelEvent). */
   detail?: string;

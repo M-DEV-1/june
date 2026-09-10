@@ -8,13 +8,15 @@ import { clamp } from "../shared/clamp";
 /** One rectangle from an overlay event, in global desktop pixels. A ring's label may ride on the rect itself instead of on the event. */
 export type OverlayRect = { x: number; y: number; w: number; h: number; label?: string };
 
-/** The body of a POST /overlay, as it arrives in the text of an "overlay" event. Kind is "ring", "marks", "arrow", "line" or "clear". A ring and marks carry rects; an arrow and a line carry a run of points in the same global desktop pixels. */
+/** The body of a POST /overlay, as it arrives in the text of an "overlay" event. Kind is "ring", "marks", "arrow", "line", "tap" or "clear". A ring and marks carry rects; an arrow and a line carry a run of points in the same global desktop pixels; a tap carries the one point the pointer flies to and presses. */
 export type OverlaySpec = {
   kind: string;
   label?: string;
   rects?: OverlayRect[];
   points?: [number, number][];
   ttl_ms?: number;
+  /** The one draw call every shape of this drawing came from. Shapes sharing it belong on screen together; empty when the drawing came from somewhere with no call to name, such as POST /overlay. */
+  group?: string;
 };
 
 /** One monitor, in global desktop pixels, as the Rust side reports it. */
@@ -141,11 +143,17 @@ export function ttlFor(spec: OverlaySpec): number {
 /** The id an overlay event carries when no question drew it: a POST /overlay from another program, or a voice session's own ring. The daemon mints ask ids of the shape "ask-N", so this can never collide with one. */
 export const NO_ASK = "overlay";
 
-/** Whether this drawing joins what is already on the layer instead of replacing it. Input: the id of the ask that drew it (NO_ASK when no ask did), the id of the ask whose drawing is on the layer now (null when the layer is empty), and the spec about to be drawn. Output: true to add these shapes to the ones already up, false to wipe the layer first.
- * One answer often needs several shapes — "draw a box round each of them" is two draw calls — and those belong on screen together, so a drawing joins one already up when the same ask made both. Everything else replaces: a new ask is answering a new question and its predecessor's ink is stale, an empty layer has nothing to join, marks number their rects from 1 so a second set would put two number ones on the screen at once, and NO_ASK is shared by every caller that is not an ask, so joining on it would pile one program's drawing onto another's. */
-export function keepsPrevious(askID: string, previous: string | null, spec: OverlaySpec): boolean {
-  if (previous === null || spec.kind === "marks" || askID === NO_ASK) return false;
-  return askID === previous;
+/** What is on the overlay layer now: the ask that drew it and the draw call it came from, either of which may be empty. */
+export type Drawn = { ask: string; group: string };
+
+/** Whether this drawing joins what is already on the layer instead of replacing it. Input: the id of the ask that drew it (NO_ASK when no ask did), what is on the layer now (null when it is empty), and the spec about to be drawn. Output: true to add these shapes to the ones already up, false to wipe the layer first.
+ * Two things join. A drawing joins one already up when the same ask made both, because one answer often needs several shapes — "draw a box round each of them" is two draw calls — and those belong on screen together. And shapes join when they name the same draw call, whoever drew them: one call is one drawing, and a twenty-shape formula spoken to a voice session carries no ask at all, so without this every shape of it wiped the one before and the user saw a single stroke (2026-09-07).
+ * Everything else replaces: a new ask is answering a new question and its predecessor's ink is stale, an empty layer has nothing to join, marks number their rects from 1 so a second set would put two number ones on the screen at once, and NO_ASK is shared by every caller that is not an ask, so joining on it alone would pile one program's drawing onto another's. */
+export function keepsPrevious(askID: string, previous: Drawn | null, spec: OverlaySpec): boolean {
+  if (previous === null || spec.kind === "marks") return false;
+  if (spec.group && spec.group === previous.group) return true;
+  if (askID === NO_ASK) return false;
+  return askID === previous.ask;
 }
 
 /** Finds the monitor a rectangle belongs to by its centre point. Input: a rect in global desktop pixels and the monitors. Output: that monitor, or null when the centre falls on no monitor, which is what a stale rect from a screen layout that has since changed looks like. */
@@ -296,6 +304,7 @@ export function startOf(d: string): Point | null {
 /** What colour a drawing is in. Input: the event's kind and whether this one is a tap. Output: the mood; anything that points at something is a point, a tap about to happen is an act, an erase is a thing done, and numbering the screen is neutral. */
 export function moodFor(kind: string, tap: boolean): Mood {
   if (kind === "clear") return "done";
+  if (kind === "tap") return "act";
   if (kind === "marks") return "neutral";
   return tap ? "act" : "point";
 }

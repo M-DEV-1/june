@@ -3,7 +3,21 @@
  * In a pane wide enough for it (parts.tsx's WIDE), who was there, when it ran, what it left the user to do and an outline of the minutes move into a rail beside the document, and the document itself goes up one step to 72 characters at 16px. Below that width the page is exactly what it was: one column with the same blocks stacked inside it.
  */
 
-import { useMeetingsQuery, useTasksQuery } from "./api";
+import { useState } from "react";
+import { Trash2 } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./alert-dialog";
+import { useDeleteMeetingMutation, useMeetingsQuery, useTasksQuery } from "./api";
 import { dayHeading, groupMeetings, hhmm, meetingLength, meetingTasks, meetingWho, meetingsShown, minutesLines } from "./format";
 import { Blank, HEAD, Outline, PageHeader, Picker, Rail, RailBlock, Reading, Scroller, TAIL, useReading, useWide } from "./parts";
 import { ui, useAppDispatch, useAppSelector } from "./store";
@@ -16,6 +30,8 @@ export function MeetingsScreen() {
   const { meetingId, query } = useAppSelector((s) => s.ui);
   const { data: meetings = [], isError } = useMeetingsQuery();
   const { data: tasks = [] } = useTasksQuery();
+  const [removeMeeting] = useDeleteMeetingMutation();
+  const [asking, setAsking] = useState(false);
   const [wide, pane] = useWide();
 
   const now = new Date();
@@ -74,6 +90,12 @@ export function MeetingsScreen() {
           empty={meetings.length ? `Nothing matches “${query.meetings}”.` : "No meetings recorded yet."}
           onPick={(id) => dispatch(ui.meetingOpened(id))}
         />
+        {/* Only offered while a recording is open, because it is that recording it deletes. Named for the meeting so it is not a bare bin icon beside a picker holding thirty of them. */}
+        {selected ? (
+          <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground hover:text-destructive" aria-label={`Delete ${selected.title}`} onClick={() => setAsking(true)}>
+            <Trash2 />
+          </Button>
+        ) : null}
       </PageHeader>
       <Scroller bodyClassName={selected ? `${HEAD} ${TAIL}` : "flex"}>
         {selected ? (
@@ -92,6 +114,32 @@ export function MeetingsScreen() {
           <Blank up={!isError} empty="No meetings recorded yet." hint="Ora writes minutes for a call once it has recorded one. Turn recording on in the config file and the next call lands here." />
         )}
       </Scroller>
+
+      {/* The question is asked before anything is removed, the same as deleting a chat: minutes are written once from audio that may since have been cleared, and there is no undo. */}
+      <AlertDialog open={asking} onOpenChange={setAsking}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{selected?.title}”?</AlertDialogTitle>
+            <AlertDialogDescription>This removes the write-up. The recording itself stays on disk, so the minutes can be written again from it.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep it</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!selected) return;
+                // The next recording in the list is opened by hand: the one showing has just gone, and leaving the screen pointed at it would show a blank document until the list came back.
+                const next = meetings.find((m) => m.id !== selected.id)?.id ?? "";
+                void removeMeeting(selected.id)
+                  .unwrap()
+                  .then(() => dispatch(ui.meetingOpened(next)))
+                  .catch(() => dispatch(ui.noticed("Could not delete")));
+              }}
+            >
+              Delete it
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

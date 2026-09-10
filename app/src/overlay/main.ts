@@ -21,6 +21,7 @@ import {
   startOf,
   ttlFor,
   keepsPrevious,
+  type Drawn,
   nextCursor,
   NO_ASK,
   POINTER_HEADING,
@@ -61,6 +62,9 @@ const INK_EASING = "cubic-bezier(0.33, 0, 0.2, 1)";
 /** How long the pointer stays on screen after the ink is finished, in milliseconds. The ink outlives it, because the ink is what the user is being shown and the pointer is only what drew it. */
 const POINTER_IDLE_MS = 1500;
 
+/** The height a tap's ripple is sized from, in desktop pixels, since a bare point has no rectangle of its own: about the height of a button, so the ripple reads as a press on a control rather than a dot or a splash. */
+const TAP_RIPPLE_H = 36;
+
 /** How long apart the two circles of a tap ripple start, in milliseconds. The circle itself runs for 380, so the whole tap is over 500 milliseconds after the pointer lands. */
 const RIPPLE_GAP_MS = 120;
 
@@ -92,7 +96,7 @@ let pointerTimer: number | undefined;
 let traceTimers: number[] = [];
 
 /** The id of the ask whose drawing is on the layer now, or null when the layer is empty. Every overlay event carries the id of the ask that drew it, or "overlay" when no ask did, which is how a drawing that belongs with the one already up is told from one that replaces it. */
-let drawingAsk: string | null = null;
+let drawnNow: Drawn | null = null;
 
 /** One event as the daemon's /events stream sends it. Only "overlay" matters here; every other type belongs to the hover window. */
 type DaemonEvent = { id: string; type: string; text?: string };
@@ -286,7 +290,7 @@ function ripple(at: Point, size: number, delay: number): void {
 /** Takes the whole drawing off the screen, gently. Input: none. Output: nothing. */
 function fadeOut(): void {
   // The layer is on its way out, so nothing may join what is on it: an event from the same ask arriving inside the fade replaces it rather than being appended to ink that is about to be deleted.
-  drawingAsk = null;
+  drawnNow = null;
   // A stroke trace queued by draw() may still be waiting on its timer; left armed, it would fire mid-fade and re-animate the pointer this fade just set to opacity 0.
   traceTimers.forEach((t) => clearTimeout(t));
   traceTimers = [];
@@ -313,9 +317,20 @@ async function draw(text: string, askID: string): Promise<void> {
     return;
   }
 
-  const keep = keepsPrevious(askID, drawingAsk, spec);
-  drawingAsk = askID;
+  const keep = keepsPrevious(askID, drawnNow, spec);
+  drawnNow = { ask: askID, group: spec.group || "" };
 
+  // A tap is the pointer alone: it flies to the point, presses there, and leaves whatever ink is on the layer as it was, since a press during a drawing must not wipe the drawing.
+  if (spec.kind === "tap" && spec.points?.[0]) {
+    const [px, py] = spec.points[0];
+    const at = pointFor({ x: px, y: py, w: 0, h: 0 }, layout);
+    setMood("act");
+    const arrival = flyTo(at);
+    ripple(at, rippleSize({ x: px, y: py, w: 0, h: TAP_RIPPLE_H }, layout), arrival);
+    if (pointerTimer !== undefined) clearTimeout(pointerTimer);
+    pointerTimer = window.setTimeout(() => (pointer.style.opacity = "0"), arrival + POINTER_IDLE_MS);
+    return;
+  }
   let shapes = shapesFor(spec, layout);
   if (shapes.length === 0) {
     // Every shape was filtered out, which for a drawing that is not a clear means the layout this page is holding does not match the desk the rectangles came from — the commonest cause being a layout read before the window was mapped, when no monitor could be enumerated. So it is read again and the shapes are placed a second time.

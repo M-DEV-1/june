@@ -523,3 +523,12 @@ export function cachedInput(
   }
   return { cached, input, has };
 }
+
+/** Splits a model id into the model and the effort it will run at. Antigravity has no effort flag of its own: it publishes one id per effort, suffixed -high, -medium or -low, so picking an id is picking an effort and the two read better apart. Input: a model id. Output: the id without the suffix and the effort word, or the id whole and an empty effort when it carries none. */
+export function modelEffort(id: string): { model: string; effort: string } {
+  const at = id.lastIndexOf("-");
+  const tail = at < 0 ? "" : id.slice(at + 1);
+  if (tail === "high" || tail === "medium" || tail === "low")
+    return { model: id.slice(0, at), effort: tail };
+  return { model: id, effort: "" };
+}

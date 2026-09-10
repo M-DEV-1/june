@@ -1,7 +1,7 @@
 /** The fake daemon: one fetch function that answers every route api.ts calls, out of a plain object of canned answers. It is imported by the tests in this folder through testing.tsx, and by the ?mock=1 browser mode below, so a screen and its test and a screenshot all read the same fixtures. Nothing here imports vitest or React.
  */
 
-import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, Meeting, Notice, Routine, SettingsView, Task, Usage, Voice } from "./api";
+import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, LiveModel, Meeting, Notice, Routine, SettingsView, Task, Usage, Voice } from "./api";
 
 /** What the fake daemon holds. Anything left out answers as an empty list or an empty object, which is what a daemon with nothing recorded would say. */
 export type Canned = {
@@ -15,6 +15,8 @@ export type Canned = {
   meetings?: Meeting[];
   brains?: Brain[];
   voices?: Voice[];
+  /** The two Live models GET /voices reports beside the voice roster, one carrying current true. */
+  models?: LiveModel[];
   settings?: Partial<SettingsView>;
   usage?: Usage;
   paused?: boolean;
@@ -143,11 +145,12 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     if (method === "GET" && path === "/meetings") return { status: 200, body: { meetings: canned.meetings ?? [] } };
     if (method === "GET" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
     if (method === "POST" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
-    if (method === "GET" && path === "/voices") return { status: 200, body: { voices: canned.voices ?? [] } };
-    // Picking a voice in the mock answers the roster with that one marked, so the section behaves the way it does against a real daemon rather than freezing on its first answer.
+    if (method === "GET" && path === "/voices") return { status: 200, body: { voices: canned.voices ?? [], models: canned.models ?? [] } };
+    // Picking a voice or a Live model in the mock answers the roster with that one marked, so the section behaves the way it does against a real daemon rather than freezing on its first answer. A body names one or the other, never both, same as the real route.
     if (method === "POST" && path === "/voices") {
-      const picked = (body as { name?: string })?.name ?? "";
-      return { status: 200, body: { voices: (canned.voices ?? []).map((v) => ({ ...v, current: v.name === picked })) } };
+      const { name, model } = body as { name?: string; model?: string };
+      if (model) return { status: 200, body: { voices: canned.voices ?? [], models: (canned.models ?? []).map((m) => ({ ...m, current: m.name === model })) } };
+      return { status: 200, body: { voices: (canned.voices ?? []).map((v) => ({ ...v, current: v.name === (name ?? "") })), models: canned.models ?? [] } };
     }
     // Nothing can be played in a browser, so the mock reports a machine with no speaker, which is a real answer the section already knows how to say.
     if (method === "POST" && path === "/voices/preview") return { status: 503, body: {} };
@@ -421,6 +424,10 @@ export const demo: Canned = {
     { name: "Algenib", trait: "Gravelly", current: false },
     { name: "Puck", trait: "Upbeat", current: false },
     { name: "Sadaltager", trait: "Knowledgeable", current: false },
+  ],
+  models: [
+    { name: "gemini-3.1-flash-live-preview", label: "Gemini 3.1 Flash Live", trait: "Fast — about two seconds to first word, one tone, hears everything", current: true },
+    { name: "gemini-2.5-flash-native-audio-preview-12-2025", label: "Gemini 2.5 Native Audio", trait: "Warm — five to eight seconds, but it has moods and can ignore the room", current: false },
   ],
   brains: [
     {

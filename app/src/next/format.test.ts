@@ -23,6 +23,7 @@ import {
   dayRailed,
   daysShown,
   errorLine,
+  modelEffort,
   groupConversations,
   groupDays,
   groupLabel,
@@ -693,5 +694,17 @@ describe("taskDetail on a task the user typed", () => {
         owner: "me",
       } as never),
     ).toBe("");
+  });
+});
+
+describe("modelEffort", () => {
+  it("splits the effort Antigravity encodes in the model id off the model itself", () => {
+    expect(modelEffort("gemini-3.8-flash-high")).toEqual({ model: "gemini-3.8-flash", effort: "high" });
+    expect(modelEffort("gpt-oss-120b-medium")).toEqual({ model: "gpt-oss-120b", effort: "medium" });
+  });
+
+  it("leaves a model that carries no effort suffix whole", () => {
+    expect(modelEffort("claude-opus-4-6-thinking")).toEqual({ model: "claude-opus-4-6-thinking", effort: "" });
+    expect(modelEffort("sonnet")).toEqual({ model: "sonnet", effort: "" });
   });
 });

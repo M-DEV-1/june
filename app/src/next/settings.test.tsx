@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import type { Brain, SettingsView, Usage } from "./api";
+import type { Brain, LiveModel, SettingsView, Usage, Voice } from "./api";
 import { renderApp } from "./testing";
 
 afterEach(() => {
@@ -139,6 +139,37 @@ describe("Settings", () => {
     expect(screen.getByText("as long as you leave it there")).toBeDefined();
   });
 
+});
+
+const voices: Voice[] = [
+  { name: "Iapetus", trait: "Clear", current: true },
+  { name: "Puck", trait: "Upbeat", current: false },
+];
+
+const models: LiveModel[] = [
+  { name: "gemini-3.1-flash-live-preview", label: "Gemini 3.1 Flash Live", trait: "Fast — about two seconds to first word, one tone, hears everything", current: true },
+  { name: "gemini-2.5-flash-native-audio-preview-12-2025", label: "Gemini 2.5 Native Audio", trait: "Warm — five to eight seconds, but it has moods and can ignore the room", current: false },
+];
+
+describe("the voice model picker", () => {
+  it("shows both Live models with the current one marked, and posts the other one's name when picked", async () => {
+    const { calls } = renderApp({ settings, voices, models }, { place: "settings" });
+    const trigger = await screen.findByRole("button", { name: "Model" });
+    expect(within(trigger).getByText("Gemini 3.1 Flash Live")).toBeDefined();
+    await userEvent.click(trigger);
+    const menu = within(await screen.findByRole("menu"));
+    expect(menu.getByText("Gemini 3.1 Flash Live")).toBeDefined();
+    expect(menu.getByText("Gemini 2.5 Native Audio")).toBeDefined();
+    await userEvent.click(menu.getByRole("menuitem", { name: /Gemini 2.5 Native Audio/ }));
+    await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/voices")?.body).toEqual({ model: "gemini-2.5-flash-native-audio-preview-12-2025" }));
+  });
+
+  it("says it could not change the voice model when the daemon refuses", async () => {
+    renderApp({ settings, voices, models, fails: ["POST /voices"] }, { place: "settings" });
+    await userEvent.click(await screen.findByRole("button", { name: "Model" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: /Gemini 2.5 Native Audio/ }));
+    expect(await screen.findByText("Could not change the voice model")).toBeDefined();
+  });
 });
 
 describe("the token ledger", () => {

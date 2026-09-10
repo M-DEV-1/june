@@ -271,7 +271,20 @@ function parseActDetail(detail: string | undefined): ActDetail {
 }
 
 /** What the daemon is doing right now: the one question in flight, the computer-use jobs in flight keyed by the conversation each was started from, the transcript of a dictation the daemon closed by itself, and whether the event stream is open. Jobs are keyed rather than held one at a time because a job runs for minutes and the user goes on to another chat while it does; a single slot would lose the first job the moment a second was started and fold the first's events into the second. */
-type ProgressState = { run?: Run; jobs: Record<string, JobRun>; dictation?: { id: string; text: string }; streaming: boolean };
+/** What a live voice session is doing, off the daemon's "state" events; unset when no session runs. */
+type VoiceState = "listening" | "thinking" | "speaking";
+type ProgressState = {
+  run?: Run;
+  jobs: Record<string, JobRun>;
+  dictation?: { id: string; text: string };
+  streaming: boolean;
+  voice?: VoiceState;
+  /** Whether a meeting is being captured, and whether the nightly dream run is under way, off the daemon's "recording" and "dreaming" events. */
+  recording?: boolean;
+  dreaming?: boolean;
+  /** How the last question ended and when, so the face can say done or refused for a moment after. */
+  ended?: { ok: boolean; at: number };
+};
 
 const progressSlice = createSlice({
   name: "progress",
@@ -324,6 +337,16 @@ const progressSlice = createSlice({
         s.dictation = { id: ev.id, text: ev.text ?? "" };
         return;
       }
+      // The three things the face is told about that belong to no question: a voice session's own state, a meeting being captured, the nightly run.
+      if (ev.type === "state") {
+        s.voice = ev.text === "listening" || ev.text === "thinking" || ev.text === "speaking" ? ev.text : undefined;
+        return;
+      }
+      if (ev.type === "recording" || ev.type === "dreaming") {
+        s[ev.type] = ev.text === "on";
+        return;
+      }
+      if ((ev.type === "done" || ev.type === "error") && s.run) s.ended = { ok: ev.type === "done", at: Date.now() };
       if (ev.type === "act") {
         // The job this belongs to is the one whose id matches; a job whose POST /act has not answered yet has no id to match, and takes what arrives, the same tolerance an ask's own id race gets.
         const jobs = Object.values(s.jobs);

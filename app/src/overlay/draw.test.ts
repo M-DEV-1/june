@@ -379,6 +379,9 @@ describe("the ink's own shapes", () => {
 });
 
 describe("moodFor", () => {
+  it("colours a tap as a press about to happen", () => {
+    expect(moodFor("tap", false)).toBe("act");
+  });
   it("is Ora's own colour while it is only numbering the screen", () => {
     expect(moodFor("marks", false)).toBe("neutral");
   });
@@ -597,13 +600,14 @@ describe("nextCursor", () => {
 
 describe("keepsPrevious", () => {
   const box = { kind: "box", rects: [{ x: 0, y: 0, w: 10, h: 10 }] };
+  const drawn = (ask: string, group = ""): { ask: string; group: string } => ({ ask, group });
 
   it("joins a drawing from the same ask, which is the two-boxes-in-one-answer case", () => {
-    expect(keepsPrevious("ask-7", "ask-7", box)).toBe(true);
+    expect(keepsPrevious("ask-7", drawn("ask-7"), box)).toBe(true);
   });
 
   it("replaces when a different ask draws, because the old answer's ink is stale", () => {
-    expect(keepsPrevious("ask-8", "ask-7", box)).toBe(false);
+    expect(keepsPrevious("ask-8", drawn("ask-7"), box)).toBe(false);
   });
 
   it("replaces when the layer is empty", () => {
@@ -612,10 +616,19 @@ describe("keepsPrevious", () => {
 
   it("replaces for marks, so one screen never carries two number ones", () => {
     const marks = { kind: "marks", rects: [{ x: 0, y: 0, w: 10, h: 10 }] };
-    expect(keepsPrevious("ask-7", "ask-7", marks)).toBe(false);
+    expect(keepsPrevious("ask-7", drawn("ask-7"), marks)).toBe(false);
   });
 
   it("replaces for a drawing no ask made, so one program's ink never piles onto another's", () => {
-    expect(keepsPrevious(NO_ASK, NO_ASK, box)).toBe(false);
+    expect(keepsPrevious(NO_ASK, drawn(NO_ASK), box)).toBe(false);
+  });
+
+  // A spoken "draw this formula" is one draw call of twenty shapes, and every one of them arrives under NO_ASK because no /ask asked. Each therefore wiped the one before it and the user saw a single stroke where a formula should have been (2026-09-07). The shapes of one call now name that call, and a name they share is enough to join on.
+  it("joins shapes of one draw call even when no ask drew them", () => {
+    expect(keepsPrevious(NO_ASK, drawn(NO_ASK, "d4"), { ...box, group: "d4" })).toBe(true);
+  });
+
+  it("replaces when the next draw call comes, so one drawing does not pile onto the last", () => {
+    expect(keepsPrevious(NO_ASK, drawn(NO_ASK, "d4"), { ...box, group: "d5" })).toBe(false);
   });
 });
