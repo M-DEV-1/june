@@ -199,6 +199,8 @@ type Executor interface {
 // ScreenScope creates a fresh screen-tool namespace so concurrent jobs do not stomp on each other's numbered lists or focus state. Optional: when the executor implements it, NewScreenScope is called once per job run.
 type ScreenScope interface {
 	NewScreenScope(ctx context.Context) context.Context
+	// EndScreenRound gives the round's look allowance back, keeping the picture; the runner calls it at the start of every round.
+	EndScreenRound(ctx context.Context)
 }
 
 // PreChecker tests whether an expected change already holds on the screen before the action runs, off a single reading. Optional: when missing, HeldBefore stays false.
@@ -493,6 +495,10 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			r.endedWaiting(ctx, l)
 			return
 		}
+		// Each round may look afresh: the allowance is sized for one question, and a forty-step job is forty questions.
+		if scoped, ok := r.exec.(ScreenScope); ok {
+			scoped.EndScreenRound(ctx)
+		}
 		if over, why := overBudget(l.snapshot()); over {
 			job := l.snapshot()
 			r.end(l, Failed, why, summarise(job, why))
@@ -566,6 +572,11 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		}
 
 		// The arguments are kept as the act runs keep them (see db.StorableArgs): what the user dictated into type_text is dropped here, before the step is ever written to disk or described on the event stream. Expect gets the same treatment (see redactedExpect): a field_holds check right after a type_text step would otherwise repeat the typed text StorableArgs just dropped, this time under Expect.Value rather than under an argument. The tool itself is still called with what the model actually said, and the live wait_for check below still verifies against the real, unredacted Expect.
+		// A read (look, observe_screen, point_at) changes nothing on the screen, so a check written for it could only fail; it carries none, is not checked, and does not move the stuck counter.
+		read := isRead(d.Tool)
+		if read {
+			d.Expect = act.Check{}
+		}
 		storedExpect := redactedExpect(d.Tool, d.Expect)
 		step := Step{N: len(job.Steps) + 1, Tool: d.Tool, Args: db.StorableArgs(d.Tool, d.Args), Expect: storedExpect}
 
@@ -580,7 +591,9 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		r.emit(Event{Job: job.ID, Kind: "step", State: Stepping, Step: step.N, Text: describeAction(d), Expect: storedExpect.Describe()})
 
 		// The check is taken once before the action, so a verdict that was true either way cannot be counted as proof: a title_contains "Netflix" written after a click passes on a window that was already called that, and item_absent passes on an item that was never there. One poll, no waiting.
-		step.HeldBefore = r.checkHolds(ctx, d.Expect)
+		if !read {
+			step.HeldBefore = r.checkHolds(ctx, d.Expect)
+		}
 		if r.ended(ctx, l) {
 			return
 		}
@@ -611,13 +624,17 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			return
 		}
 
-		verdict := r.exec.ExecuteAskTool(ctx, "wait_for", map[string]any{"kind": d.Expect.Kind, "value": d.Expect.Value, "timeout_ms": float64(waitTimeoutMS)})
-		if r.ended(ctx, l) {
-			return
+		if read {
+			step.Outcome, step.Why = "read", "a read, nothing to check"
+		} else {
+			verdict := r.exec.ExecuteAskTool(ctx, "wait_for", map[string]any{"kind": d.Expect.Kind, "value": d.Expect.Value, "timeout_ms": float64(waitTimeoutMS)})
+			if r.ended(ctx, l) {
+				return
+			}
+			step.Outcome, step.Why = readVerdict(verdict)
 		}
-		step.Outcome, step.Why = readVerdict(verdict)
-		toldNothing := step.Outcome == "pass" && step.HeldBefore
-		if toldNothing {
+		toldNothing := (step.Outcome == "pass" && step.HeldBefore) || read
+		if toldNothing && !read {
 			step.Why += alreadyHeldNote
 		}
 
@@ -712,4 +729,9 @@ func (r *Runner) end(l *live, state State, errText, say string) {
 	l.set(func(j *Job) { *j = job })
 	spend := job.Spend
 	r.emit(Event{Job: job.ID, Kind: "done", State: state, Step: len(job.Steps), Text: say, Spend: &spend})
+}
+
+// isRead reports whether a tool only reads the screen. Input: the tool's name. Output: true for look, observe_screen and point_at.
+func isRead(tool string) bool {
+	return tool == "look" || tool == "observe_screen" || tool == "point_at"
 }

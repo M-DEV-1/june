@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -400,6 +401,37 @@ func (s *Server) Meetings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, map[string]any{"meetings": meetings})
+}
+
+// Meeting handles DELETE /meetings/{id}: it removes one meeting's write-up, for a call whose minutes are not worth keeping. Output: 204 with nothing, 404 for an id that names no meeting, 405 for any other method.
+//
+// The note's kind is checked before it is deleted, because meetings are notes and notes share one id space: without the check, an id typed or invented against this route would remove a diary entry or something the user told Ora to remember, and the meetings screen would have no way of knowing it had.
+//
+// The recording itself is left on disk. Deleting the write-up says the minutes were bad, not that the call never happened, and the audio is what a second attempt at them would have to read.
+func (s *Server) Meeting(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "no such meeting", http.StatusNotFound)
+		return
+	}
+	notes, err := s.store.NotesOfKindSince(r.Context(), meetingNoteKind, time.Time{})
+	if err != nil {
+		fail(w, err, http.StatusInternalServerError)
+		return
+	}
+	if !slices.ContainsFunc(notes, func(n db.Note) bool { return n.ID == id }) {
+		http.Error(w, "no such meeting", http.StatusNotFound)
+		return
+	}
+	if err := s.store.DeleteNote(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // MemorySearch handles GET /memory/search?q=: 20 hybrid-search hits over notes, summaries, episodes and threads, filled up to that same total with archived notes whose text contains the query. A blank q is 400 — an empty search would otherwise read as "everything Ora knows".

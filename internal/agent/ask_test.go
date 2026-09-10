@@ -439,6 +439,10 @@ func TestToolLogDetail(t *testing.T) {
 	if got := toolLogDetail("query_memory", "three notes about the venue"); got != "three notes about the venue" {
 		t.Errorf("query_memory detail = %q, want the result kept", got)
 	}
+	// A screen tool's failure carries no screen text, only why it failed, and that is the one thing a log of "failed" cannot say. Six switch_window failures on 2026-09-07 were unexplainable for want of this.
+	if got := toolLogDetail("switch_window", "error: the desktop search never opened after Super, so nothing was typed and nothing moved"); !strings.Contains(got, "never opened after Super") {
+		t.Errorf("switch_window failure detail = %q, want the reason kept", got)
+	}
 }
 
 // TestEvalExecute_RefusalNamesTheAskNotAnEval pins the wording of the gate's refusal. It used to read "disabled in evals (read-only memory eval)", which describes a situation a user typing /ask is not in: the model read it, the user read it in the trace, and neither was running an eval. The refusal has to say the plain true thing — the tool is not available in an ask.
@@ -738,10 +742,10 @@ func TestAskText_TrimsThePromptAndTheThreadOnAScreenTask(t *testing.T) {
 	if len(bodies) != 2 {
 		t.Fatalf("%d rounds, want 2", len(bodies))
 	}
-	if !strings.Contains(bodies[0], "Talk like a sharp friend") {
+	if !strings.Contains(bodies[0], "composed, dry-witted aide") {
 		t.Fatal("the first round must still carry the whole handshake")
 	}
-	if strings.Contains(bodies[1], "Talk like a sharp friend") {
+	if strings.Contains(bodies[1], "composed, dry-witted aide") {
 		t.Error("a screen round still carried the conversational handshake")
 	}
 	if !strings.Contains(bodies[1], "one task to see through") || !strings.Contains(bodies[1], "just said") {
@@ -962,7 +966,7 @@ func TestAskTextWith_HandsOnAfterAReadOnlyToolButNotAfterAnAction(t *testing.T) 
 	t.Cleanup(func() { geminiBaseURL = "" })
 
 	a, _ := observingAgent(t)
-	// askText is the call AskTextWith makes; the two hand-over decisions below are the expressions it evaluates on what came back, checked here rather than by letting the test run the Codex backend or the Claude command line for real.
+	// askText is the call AskTextWith makes for the Gemini provider; what the router then decides on what came back is checked here rather than by letting the test run the Codex backend or the Claude command line for real.
 	tr, err := a.askText(t.Context(), "gemini-test", nil, "what is on my screen")
 	if err == nil {
 		t.Fatal("the ask must fail once the model answers 429")
@@ -970,16 +974,15 @@ func TestAskTextWith_HandsOnAfterAReadOnlyToolButNotAfterAnAction(t *testing.T) 
 	if len(tr.ToolHops) != 1 || tr.ToolHops[0].Name != "observe_screen" {
 		t.Fatalf("tool hops = %+v, want the one read-only look the model made", tr.ToolHops)
 	}
-	if !codexFallbackWanted(err, actionHops(tr.ToolHops), true) {
-		t.Error("a turn that only looked at the screen must still be handed to Codex")
+	if !providerSpent(err) {
+		t.Error("a 429 must count as a spent allowance, so the question is handed on")
 	}
-	// The Claude check runs on what Codex answered, so its own spent-allowance error stands in for that step; the hops it counts are the same ones.
-	if !claudeFallbackWanted(codexHTTPError{Code: http.StatusTooManyRequests}, actionHops(tr.ToolHops), true) {
-		t.Error("a turn that only looked at the screen must still be handed to Claude")
+	if actionHops(tr.ToolHops) != 0 {
+		t.Error("a turn that only looked at the screen has taken no action, so it may still be handed on")
 	}
 	acted := append(tr.ToolHops, ToolHop{Name: "click", Result: "clicked [1] push button \"Merge\""})
-	if codexFallbackWanted(err, actionHops(acted), true) {
-		t.Error("a turn that clicked something must not be replayed on another provider")
+	if actionHops(acted) == 0 {
+		t.Error("a turn that clicked something must count as having acted, so it is never replayed on another provider")
 	}
 }
 
@@ -1025,5 +1028,26 @@ func TestShouldFallBack_OnlyOnUnavailable(t *testing.T) {
 	}
 	if config.TextFallbackModel == "" || config.TextFallbackModel == config.TextModel {
 		t.Errorf("TextFallbackModel = %q, want a model other than TextModel %q", config.TextFallbackModel, config.TextModel)
+	}
+}
+
+// A note hit is several lines with its source tag on the last one, since meeting minutes keep their line breaks up to the 4,000 rune budget. Reading only the tagged line showed each note's last line in the evidence fold, "- Several other unnamed voic" and a lone "-" on 2026-09-08, so the excerpt takes every line since the previous hit's tag.
+func TestEvidenceFromToolHops_KeepsEveryLineOfAMultiLineHit(t *testing.T) {
+	hops := []ToolHop{{Name: "query_memory", Result: strings.Join([]string{
+		`[note#7] Standup 2026-09-07`,
+		`- **Me**: research on hazard-specific climate vulnerability`,
+		`- Several other unnamed voices {"source":{"kind":"note","id":7,"title":"","when":"2026-09-07T12:00:00Z"}}`,
+		`[episode] reviewing the PR {"source":{"kind":"episode","id":42,"title":"main.go","when":"2026-09-01T10:30:00Z"}}`,
+	}, "\n")}}
+	got := evidenceFromToolHops(hops)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(got), got)
+	}
+	want := "[note#7] Standup 2026-09-07\n- **Me**: research on hazard-specific climate vulnerability\n- Several other unnamed voices"
+	if got[0].Excerpt != want {
+		t.Errorf("note excerpt = %q, want the whole hit %q", got[0].Excerpt, want)
+	}
+	if got[1].Excerpt != "[episode] reviewing the PR" {
+		t.Errorf("episode excerpt = %q, want only its own line", got[1].Excerpt)
 	}
 }

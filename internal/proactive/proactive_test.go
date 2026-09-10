@@ -589,7 +589,7 @@ func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 
 	s.tick(ctx)
 
-	want := Notice{Title: "Morning brief", Body: "Send the deck. Retrieval work is still half done.", Place: "tasks", Kind: "brief", Actions: noticeActions}
+	want := Notice{Title: "Morning brief", Body: "Send the deck. Retrieval work is still half done.", Place: "days", ID: s.now().Format("2006-01-02"), Kind: "brief", Actions: noticeActions}
 	if len(sent) != 1 || !reflect.DeepEqual(sent[0], want) {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
@@ -1025,8 +1025,8 @@ func TestAskAbout_NoWindow_KeepsTheNotifySendBanner(t *testing.T) {
 	}
 }
 
-// A card nobody ever answers changes nothing and does not leave a waiter behind: the item is asked about again another morning, and a later press with one of its own keys is a plain unknown action again.
-func TestAskAbout_WindowUp_UnansweredChangesNothing(t *testing.T) {
+// A card nobody answers in time changes nothing yet, and its buttons go on working: the question's goroutine has gone, so the press runs through what Ask registered against that notice instead, and the item it asked about is the one that changes. Pressing it used to be refused as an unknown action, and the card said "Could not do that".
+func TestAskAbout_WindowUp_UnansweredKeepsItsButtonsWorking(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
 	item := staleItem(t, store)
@@ -1046,9 +1046,11 @@ func TestAskAbout_WindowUp_UnansweredChangesNothing(t *testing.T) {
 	if got := openCount(t, store); got != 1 {
 		t.Errorf("%d items open, want the unanswered one left alone", got)
 	}
-	err := s.Act(ctx, staleNoticeKind, strconv.FormatInt(item.NoteID, 10), "Still open", "", "dropped")
-	if !errors.Is(err, ErrBadNoticeAction) {
-		t.Errorf("Act after the question timed out = %v, want ErrBadNoticeAction — the waiter was not pruned", err)
+	if err := s.Act(ctx, staleNoticeKind, strconv.FormatInt(item.NoteID, 10), "Still open", "", "dropped"); err != nil {
+		t.Fatalf("pressing the card's own button after the question timed out: %v", err)
+	}
+	if got := openCount(t, store); got != 0 {
+		t.Errorf("%d items still open, want the one the late press dropped", got)
 	}
 }
 

@@ -132,3 +132,17 @@ func TestContainsAny(t *testing.T) {
 		t.Error("ContainsAny with no substrings given should never match")
 	}
 }
+
+func TestDesktopLine(t *testing.T) {
+	t.Setenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
+	t.Setenv("XDG_SESSION_TYPE", "wayland")
+	got := DesktopLine()
+	if !strings.Contains(got, "ubuntu:GNOME") || !strings.Contains(got, "wayland") {
+		t.Errorf("DesktopLine() = %q, want the desktop and the session type", got)
+	}
+	t.Setenv("XDG_CURRENT_DESKTOP", "")
+	t.Setenv("XDG_SESSION_TYPE", "")
+	if got := DesktopLine(); strings.Contains(got, "desktop") && !strings.Contains(got, "Linux") {
+		t.Errorf("DesktopLine() with nothing set = %q", got)
+	}
+}

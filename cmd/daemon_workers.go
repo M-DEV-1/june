@@ -345,3 +345,15 @@ func within(name string, bound time.Duration, step func()) {
 		slog.Warn("a bounded step did not finish in time and was left behind", "step", name, "bound", bound)
 	}
 }
+
+// fallThrough answers from primary, and from fallback when primary fails for any reason. It is for a job the user started and is watching: unlike the unattended duties, which hand over only on a spent allowance, a job that cannot get a plan out of its brain is a job that has visibly died, and on 2026-09-08 three died in a row because the Codex chain was spent while Claude sat idle. Input: the two brains. Output: one brain.
+func fallThrough(primary, fallback brain.Brain) brain.Brain {
+	return func(ctx context.Context, prompt string) (string, error) {
+		out, err := primary(ctx, prompt)
+		if err == nil {
+			return out, nil
+		}
+		slog.Warn("job: the default brain failed, asking the fallback", "error", err)
+		return fallback(ctx, prompt)
+	}
+}

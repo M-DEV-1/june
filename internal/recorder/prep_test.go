@@ -78,7 +78,7 @@ func TestPrepMeeting_Silent(t *testing.T) {
 				return "", nil
 			}
 			var got notifications
-			r.notify = got.add
+			r.notifyAt = got.addAt
 
 			r.prepMeeting()
 
@@ -149,7 +149,7 @@ func TestPrepMeeting_Matches(t *testing.T) {
 				}
 			}
 			var got notifications
-			r.notify = got.add
+			r.notifyAt = got.addAt
 			var gotPrompt string
 			r.minutes = func(ctx context.Context, prompt string) (string, error) {
 				gotPrompt = prompt
@@ -181,7 +181,7 @@ func TestPrepMeeting_DropsSilentlyWhenTheBrainIsTooSlow(t *testing.T) {
 		return "too late to matter", nil
 	}
 	var got notifications
-	r.notify = got.add
+	r.notifyAt = got.addAt
 
 	r.prepMeeting()
 
@@ -198,7 +198,7 @@ func TestStart_FiresMeetingPrepAsynchronously(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got notifications
-	r.notify = got.add
+	r.notifyAt = got.addAt
 	r.minutes = func(ctx context.Context, prompt string) (string, error) { return "Priya still owes the deck.", nil }
 
 	if err := r.Start(); err != nil {
@@ -418,5 +418,35 @@ func TestLooksLikeName_ScriptsWithoutCaseAreNotShouting(t *testing.T) {
 		if got := looksLikeName(c.name); got != c.want {
 			t.Errorf("looksLikeName(%q) = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// On 2026-09-08 the prep for a Teams standup reached the window as a card titled "Before you join: Calendar | Daily Ai Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB", with the brief cut off at three lines and an Open button that opened nothing, because the notice named no place. The name is the one section of the title that is not furniture, the brief is filed as a conversation of Ora's own so it can be read in full, and the card opens that conversation.
+func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
+	title := "Calendar | Daily Ai Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB"
+	if got := meetingName(title); got != "Daily Ai Sprint Standup" {
+		t.Fatalf("meetingName = %q, want the meeting's own name", got)
+	}
+	store := &fakeStore{episodes: []db.Episode{{Title: title, ScreenText: "Manish Kumar: joining now"}}}
+	r, _, _ := newTestRecorder(t, store)
+	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nManish Kumar agreed to drop the Bill Eval Studio UI.", noteKind); err != nil {
+		t.Fatal(err)
+	}
+	var got notifications
+	r.notifyAt = got.addAt
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		return "Manish agreed to drop the Bill Eval Studio UI last time.", nil
+	}
+
+	r.prepMeeting()
+
+	if len(store.conversations) != 1 || store.conversations[0] != "Before you join: Daily Ai Sprint Standup" {
+		t.Fatalf("conversations = %v, want one named for the meeting", store.conversations)
+	}
+	if len(store.turns) != 1 || !strings.Contains(store.turns[0], "Bill Eval Studio") {
+		t.Errorf("turns = %v, want the brief filed as Ora's turn", store.turns)
+	}
+	if len(got.sent) != 1 || !strings.HasPrefix(got.sent[0], "Before you join: Daily Ai Sprint Standup: ") || !strings.HasSuffix(got.sent[0], " @chats/1") {
+		t.Errorf("notice = %v, want it to open the conversation in chats", got.sent)
 	}
 }

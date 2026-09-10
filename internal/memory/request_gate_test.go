@@ -3,6 +3,7 @@ package memory_test
 import (
 	"context"
 	"errors"
+	"ora/internal/config"
 	"ora/internal/memory"
 	"testing"
 )
@@ -150,7 +151,7 @@ func TestGeminiSummarizer_DeriveState_LocalBackendBypassesTheRequestGate(t *test
 	}
 	summarizer.SetRequestGate(&fakeGate{err: errors.New("daily quota reached")})
 	calls := 0
-	summarizer.SetStateBackend(func(ctx context.Context, prompt string) (string, error) {
+	summarizer.SetJobBackend(config.JobWorkingState, func(ctx context.Context, prompt string) (string, error) {
 		calls++
 		return "local answer", nil
 	})

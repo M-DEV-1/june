@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -19,10 +20,10 @@ type GeminiSummarizer struct {
 	client *genai.Client
 	// identity, when set, returns who the user is (the personal-context "identity" entry) so the attribution prompt can say it. Without it the model reads a calendar entry naming the user and writes them up as somebody they met.
 	identity func(context.Context) string
-	// backendMu guards stateBackend, backgroundFallback and gate, which the daemon installs after the background goroutines that read them have already started.
+	// backendMu guards jobBackends, backgroundFallback and gate, which the daemon installs after the background goroutines that read them have already started.
 	backendMu sync.RWMutex
-	// stateBackend, when set, answers DeriveState's prompt instead of the Gemini API, so the unattended working-state job can run on the local llama-server and spend no metered quota. See SetStateBackend.
-	stateBackend TextBackend
+	// jobBackends holds the backend answering each background duty, keyed by config.Job* name. A duty with no entry calls the Gemini API directly, which is what every duty did before this map existed. See SetJobBackend.
+	jobBackends map[string]TextBackend
 	// backgroundFallback, when set, answers a background prompt whose Gemini call came back 429 or 503. See SetBackgroundFallback.
 	backgroundFallback TextBackend
 	// gate, when set, is checked before every direct Gemini request this summarizer makes. See SetRequestGate.
@@ -54,6 +55,56 @@ func (g *GeminiSummarizer) allow(model string) error {
 		return gate.Allow(model)
 	}
 	return nil
+}
+
+// errNoModelText is what text returns when the model answered with no text at all. Callers wrap it with their own duty name, so the message a caller produces is unchanged from when each of them checked the candidate list itself.
+var errNoModelText = errors.New("empty response from model")
+
+// SetJobBackend points one background duty at backend instead of the Gemini API. Input: one of the config.Job* names and the backend to answer it, or nil to put that duty back on the Gemini path. Output: none.
+// This is the one seam every background duty shares: the daemon decides per duty which provider answers it — the local llama-server, a CLI login, or Gemini — and nothing in this package knows or cares which it got.
+func (g *GeminiSummarizer) SetJobBackend(job string, backend TextBackend) {
+	g.backendMu.Lock()
+	defer g.backendMu.Unlock()
+	if backend == nil {
+		delete(g.jobBackends, job)
+		return
+	}
+	if g.jobBackends == nil {
+		g.jobBackends = make(map[string]TextBackend, 1)
+	}
+	g.jobBackends[job] = backend
+}
+
+// jobBackend reads the backend installed for a duty under the lock, because a background goroutine must never race the daemon installing one.
+func (g *GeminiSummarizer) jobBackend(job string) TextBackend {
+	g.backendMu.RLock()
+	defer g.backendMu.RUnlock()
+	return g.jobBackends[job]
+}
+
+// text answers one background duty's prompt. Input: the config.Job* name the duty runs as, the prompt, and whether the answer must be JSON. Output: the model's text, or an error — errNoModelText when the model answered with nothing, the provider's own error otherwise.
+// A duty with a backend installed goes to it and the metered request gate is never consulted, because a backend is by definition not the metered API and reserving a slot for it would spend the allowance the move was meant to protect. A duty with no backend takes the same direct Gemini call every duty took before this existed.
+// A backend cannot be told to answer in JSON the way the SDK can with ResponseMIMEType, so a JSON duty routed to one gets whatever that provider wraps its JSON in; the daemon strips a markdown fence when it installs the backend, which is where the knowledge of that lives.
+func (g *GeminiSummarizer) text(ctx context.Context, job, prompt string, wantJSON bool) (string, error) {
+	if backend := g.jobBackend(job); backend != nil {
+		return backend(ctx, prompt)
+	}
+	model := config.BackgroundModel(job)
+	if err := g.allow(model); err != nil {
+		return "", err
+	}
+	var cfg *genai.GenerateContentConfig
+	if wantJSON {
+		cfg = &genai.GenerateContentConfig{ResponseMIMEType: "application/json"}
+	}
+	resp, err := g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), cfg)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		return "", errNoModelText
+	}
+	return resp.Candidates[0].Content.Parts[0].Text, nil
 }
 
 func NewGeminiSummarizer(apiKey string) (*GeminiSummarizer, error) {
@@ -109,28 +160,17 @@ Be deterministic. Do not invent facts. Merge wording when updating.`,
 		strings.Join(existingLines, "\n"),
 		strings.Join(candidates, "\n"))
 
-	model := config.BackgroundModel(config.JobPersonalContext)
-	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent.ReconcileNotes")
-	var resp *genai.GenerateContentResponse
-	err := g.allow(model)
-	if err == nil {
-		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), &genai.GenerateContentConfig{
-			ResponseMIMEType: "application/json",
-		})
-	}
+	_, genSpan := tracer.Start(ctx, "Generate.ReconcileNotes")
+	text, err := g.text(ctx, config.JobPersonalContext, prompt, true)
 	if err != nil {
 		genSpan.RecordError(err)
 		genSpan.End()
-		return nil, fmt.Errorf("reconcile notes llm call: %w", err)
+		return nil, fmt.Errorf("reconcile notes: %w", err)
 	}
 	genSpan.End()
 
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("empty reconcile response from model")
-	}
-
 	var ops []NoteOp
-	if err := json.Unmarshal([]byte(resp.Candidates[0].Content.Parts[0].Text), &ops); err != nil {
+	if err := json.Unmarshal([]byte(text), &ops); err != nil {
 		return nil, fmt.Errorf("parse reconcile ops: %w", err)
 	}
 	return ops, nil
@@ -161,28 +201,17 @@ func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tr
 	}
 	prompt := AttributePrompt(activities, existing, identity)
 
-	model := config.BackgroundModel(config.JobEpisodeSummary)
-	_, genSpan := tracer.Start(ctx, "Gemini.GenerateContent.AttributeThreads")
-	var resp *genai.GenerateContentResponse
-	err := g.allow(model)
-	if err == nil {
-		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), &genai.GenerateContentConfig{
-			ResponseMIMEType: "application/json",
-		})
-	}
+	_, genSpan := tracer.Start(ctx, "Generate.AttributeThreads")
+	text, err := g.text(ctx, config.JobEpisodeSummary, prompt, true)
 	if err != nil {
 		genSpan.RecordError(err)
 		genSpan.End()
-		return nil, fmt.Errorf("attribute threads llm call: %w", err)
+		return nil, fmt.Errorf("attribute threads: %w", err)
 	}
 	genSpan.End()
 
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("empty attribution response from model")
-	}
-
 	var attr ThreadAttribution
-	if err := json.Unmarshal([]byte(resp.Candidates[0].Content.Parts[0].Text), &attr); err != nil {
+	if err := json.Unmarshal([]byte(text), &attr); err != nil {
 		return nil, fmt.Errorf("parse thread attribution: %w", err)
 	}
 	return &attr, nil

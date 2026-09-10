@@ -413,30 +413,6 @@ func TestAskClaude_ReportsAFailedRun(t *testing.T) {
 	}
 }
 
-// Claude is the last resort after Codex: only when Codex refused because the allowance is spent, only before a tool has run so no action is taken twice, and only when the machine has a Claude login.
-func TestClaudeFallbackWanted(t *testing.T) {
-	spent := codexHTTPError{Code: http.StatusTooManyRequests}
-	other := codexHTTPError{Code: http.StatusBadGateway}
-	cases := []struct {
-		name     string
-		err      error
-		hops     int
-		loggedIn bool
-		want     bool
-	}{
-		{"a spent allowance before any tool ran", spent, 0, true, true},
-		{"a spent allowance after a tool ran", spent, 1, true, false},
-		{"a spent allowance with no claude login", spent, 0, false, false},
-		{"any other failure", other, 0, true, false},
-		{"no failure at all", nil, 0, true, false},
-	}
-	for _, c := range cases {
-		if got := claudeFallbackWanted(c.err, c.hops, c.loggedIn); got != c.want {
-			t.Errorf("%s: got %v", c.name, got)
-		}
-	}
-}
-
 // The brain wrapper the daemon registers forwards to the agent, with and without a thread.
 func TestClaudeBrain_ForwardsToTheAgent(t *testing.T) {
 	var b any = ClaudeBrain{}

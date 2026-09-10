@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -85,12 +86,32 @@ func (r *Recorder) prepMeeting() {
 	}
 
 	head := "Before you join"
-	if title != "" {
-		head = "Before you join: " + title
+	if name := meetingName(title); name != "" {
+		head = "Before you join: " + name
 	}
 	// Logged in full so a prep that turns out to be about the wrong meeting can be traced to the minutes it was written from.
 	slog.Info("meeting prep", "title", title, "from_note", note.ID, "text", text)
-	r.notify(head, text)
+	// The brief is filed as a conversation of Ora's own, so the card's Open lands on the whole text and the user can ask about it; a card shows three lines, and a prep is longer than that.
+	place, id := "", ""
+	if convID, err := r.store.CreateConversation(ctx, head, ""); err != nil {
+		slog.Warn("meeting prep: could not open a conversation for it, the card will open nothing", "error", err)
+	} else if _, err := r.store.AddTurn(ctx, convID, "ora", text, "ask", nil, nil); err != nil {
+		slog.Warn("meeting prep: could not file the brief in its conversation", "error", err)
+	} else {
+		place, id = "chats", strconv.FormatInt(convID, 10)
+	}
+	r.notifyAt(head, text, place, id)
+}
+
+// meetingName is the part of a meeting window's title that names the meeting. Input: the title, such as "Calendar | Daily Ai Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB". Output: the first section that is neither app furniture nor the meeting app's own name, "Daily Ai Sprint Standup" there, or "" when every section is furniture.
+func meetingName(title string) string {
+	for _, s := range titleSections(title) {
+		if hasChromeWord(s) || tracker.IsMeetingWindow("", s) || strings.EqualFold(s, "calendar") {
+			continue
+		}
+		return s
+	}
+	return ""
 }
 
 // meetingTitle returns the most recent window title belonging to a call, which is what actually says which meeting this is. Input: the episodes captured over the last few minutes. Output: the newest title that is a meeting window, and "" when none of them is.

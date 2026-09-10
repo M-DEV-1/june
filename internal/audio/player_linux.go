@@ -32,12 +32,16 @@ func NewSpeaker() (Speaker, error) {
 		chunks: make(chan []byte, 10000),
 	}
 
-	stream, err := c.NewPlayback(
-		pulse.Int16Reader(s.readFn),
+	opts := []pulse.PlaybackOption{
 		pulse.PlaybackSampleRate(24000),
 		pulse.PlaybackChannels(proto.ChannelMap{proto.ChannelMono}),
 		pulse.PlaybackLatency(0.05),
-	)
+	}
+	// Played through the echo-cancel sink when there is one, so the canceller on EchoCancelSource knows what Ora said and can take it back out of the mic (see capture_linux.go).
+	if sink, err := c.SinkByID(EchoCancelSink); err == nil {
+		opts = append(opts, pulse.PlaybackSink(sink))
+	}
+	stream, err := c.NewPlayback(pulse.Int16Reader(s.readFn), opts...)
 	if err != nil {
 		c.Close()
 		return nil, err

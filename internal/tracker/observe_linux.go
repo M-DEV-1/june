@@ -30,6 +30,10 @@ func Observe(ctx context.Context) (app, title string, nodes []act.Node, err erro
 	ctx, cancel := context.WithTimeout(ctx, observeTimeout)
 	defer cancel()
 	ref, app, ok := w.state.get()
+	// The compositor's own answer wins when it is there: on 2026-09-08 two Brave windows on two monitors had the accessibility bus announcing one while the shell had the other in front, so every click was refused for a window change that never happened. The extension reports the focused window's pid and title, and that names one accessible window exactly.
+	if fref, fapp, found := compositorFront(ctx, w.conn); found {
+		ref, app, ok = fref, fapp, true
+	}
 	if !ok || IsOraWindow(app, getName(ctx, w.conn, ref)) {
 		// The watcher only learns focus from activation events after the daemon starts, so a fresh daemon, or one that has only seen Ora's own hover come and go, has nothing to walk. Fall back to the desktop tree and take the window with the most actionable nodes.
 		return observeDesktop(ctx, w.conn)
@@ -54,20 +58,15 @@ func correctListing(ctx context.Context, conn *dbus.Conn, ref aref, nodes []act.
 	if len(nodes) == 0 {
 		return
 	}
-	d, ok := deskNow()
+	dx, dy, ok := shiftOf(ctx, conn, ref)
 	if !ok {
 		return
 	}
-	frame, ok := windowOf(ctx, conn, ref)
-	if !ok {
-		return
-	}
-	toScreen(nodes, frame, d)
+	toScreen(nodes, dx, dy)
 }
 
-// toScreen moves every node of one window's listing by however far that window's rectangles are from the truth. Input: the nodes as the walk read them, the rectangle the window reported for itself, and the desktop it is on. Output: none; the nodes are moved in place, by the shift windowShift works out, and a node with no rectangle is left at zero because there is nothing there to move.
-func toScreen(nodes []act.Node, frame rect, d desk) {
-	dx, dy := windowShift(frame, d)
+// toScreen moves every node of one window's listing by however far that window's rectangles are from the truth. Input: the nodes as the walk read them, and the shift shiftOf worked out for their window. Output: none; the nodes are moved in place, and a node with no rectangle is left at zero because there is nothing there to move.
+func toScreen(nodes []act.Node, dx, dy int) {
 	if dx == 0 && dy == 0 {
 		return
 	}
@@ -93,7 +92,7 @@ func observeWalk(ctx context.Context, conn *dbus.Conn, ref aref, depth int, visi
 		if n.Label == "" {
 			n.Label = strings.TrimSpace(getText(ctx, conn, ref))
 		}
-		if r, err := readExtents(ctx, conn, ref, coordScreen); err == nil {
+		if r, err := readPlace(ctx, conn, ref); err == nil {
 			n.X, n.Y, n.W, n.H = r.X, r.Y, r.W, r.H
 		}
 		n.Showing = hasState(ctx, conn, ref, stateShowing)
@@ -115,7 +114,7 @@ func observeWalk(ctx context.Context, conn *dbus.Conn, ref aref, depth int, visi
 // getExtents reads one node's rectangle in real screen pixels, through org.a11y.atspi.Component and then screenShift, which corrects a window that answers a request for screen coordinates with its own window coordinates. Output: x, y, width, height in pixels, all zero when the node has no Component interface, the call fails, or the node is not on the screen.
 // This is the single-node path, the one Verify uses, and it pays a walk up to the window and a read of the desktop's work area on top of the node's own read. It has to correct, not skip: Verify compares what it reads here against the rectangle the listing showed, and the listing is in screen pixels, so an uncorrected read would differ by the height of the top bar and Verify would refuse every click on a maximized window as having moved. An observe pass uses correctListing instead, which is the same correction worked out once for a whole listing.
 func getExtents(ctx context.Context, conn *dbus.Conn, ref aref) (x, y, w, h int) {
-	got, err := readExtents(ctx, conn, ref, coordScreen)
+	got, err := readPlace(ctx, conn, ref)
 	if err != nil || got.W <= 0 || got.H <= 0 {
 		return 0, 0, 0, 0
 	}
@@ -208,4 +207,58 @@ func keptCount(nodes []act.Node) int {
 		n++
 	}
 	return n
+}
+
+// focusReader answers which window the compositor has in front, as its process id and title, and false when nothing can say. nil until UseFocusReader wires one in; the daemon wires the shell extension's window list.
+var focusReader func(ctx context.Context) (pid uint32, title string, ok bool)
+
+// UseFocusReader wires in the reader of the compositor's focused window. Input: a function answering that window's pid and title, false when there is none or nothing can say. Output: none.
+func UseFocusReader(f func(ctx context.Context) (pid uint32, title string, ok bool)) { focusReader = f }
+
+// compositorFront finds, on the accessibility bus, the window the compositor says is in front. Input: a context and the bus connection. Output: that window's ref and its application's name, and true; false when no reader is wired, it has no answer, or no accessible window belongs to that process with that title. The process is matched through the bus's own record of which connection belongs to which pid, and the window by title among that process's windows, exact first and then by containment, since Chromium titles its window after the active tab and the shell reports the same string.
+func compositorFront(ctx context.Context, conn *dbus.Conn) (aref, string, bool) {
+	if focusReader == nil {
+		return aref{}, "", false
+	}
+	pid, title, ok := focusReader(ctx)
+	if !ok || title == "" {
+		return aref{}, "", false
+	}
+	apps, err := getChildren(ctx, conn, registryRoot)
+	if err != nil {
+		return aref{}, "", false
+	}
+	for _, app := range apps {
+		var appPid uint32
+		if err := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetConnectionUnixProcessID", 0, app.Name).Store(&appPid); err != nil || appPid != pid {
+			continue
+		}
+		windows, err := getChildren(ctx, conn, app)
+		if err != nil {
+			continue
+		}
+		names := make([]string, len(windows))
+		for i, win := range windows {
+			names[i] = getName(ctx, conn, win)
+		}
+		if i := pickByTitle(names, title); i >= 0 {
+			return windows[i], getName(ctx, conn, app), true
+		}
+	}
+	return aref{}, "", false
+}
+
+// pickByTitle chooses the window whose name is the compositor's title. Input: the names of one application's windows and the title. Output: the index of the exact match, else of the first name containing the title or contained by it, else -1.
+func pickByTitle(names []string, title string) int {
+	for i, n := range names {
+		if n == title {
+			return i
+		}
+	}
+	for i, n := range names {
+		if n != "" && (strings.Contains(n, title) || strings.Contains(title, n)) {
+			return i
+		}
+	}
+	return -1
 }

@@ -117,8 +117,34 @@ func actionNames(ctx context.Context, obj dbus.BusObject) ([]string, error) {
 // rect is an element's rectangle in screen pixels, as org.a11y.atspi.Component reports it.
 type rect struct{ X, Y, W, H int }
 
-// coordScreen is ATSPI_COORD_TYPE_SCREEN, the coordinate type that asks org.a11y.atspi.Component for a rectangle on the screen rather than inside its own window (which is type 1, ATSPI_COORD_TYPE_WINDOW).
-const coordScreen uint32 = 0
+// coordScreen is ATSPI_COORD_TYPE_SCREEN, the coordinate type that asks org.a11y.atspi.Component for a rectangle on the screen rather than inside its own window, which is coordWindow (ATSPI_COORD_TYPE_WINDOW).
+const (
+	coordScreen uint32 = 0
+	coordWindow uint32 = 1
+)
+
+// readPlace reads one node's rectangle the way readExtents does, but in the coordinates the listing and the click both use: the screen answer, or the window answer when the screen answer put the node at the origin. A GTK4 client answers coordScreen with 0,0 for every widget (measured on this desk on 2026-09-08: gnome-control-center's "Search" button was 0,0 34x34 for the screen type and 125,11 34x34 for the window type), so without this every row of a list sat at one point and a click aimed at it landed on the window's header. A client that cannot place its widgets on the screen cannot place its window either and reports the frame at 0,0 too, so the window answer is in the same space windowShift already corrects. Input: a context, the bus connection and the node's ref. Output: the rectangle, or an error when the node no longer answers.
+func readPlace(ctx context.Context, conn *dbus.Conn, ref aref) (rect, error) {
+	got, err := readExtents(ctx, conn, ref, coordScreen)
+	if err != nil {
+		return rect{}, err
+	}
+	return placeOf(got, func() rect {
+		w, err := readExtents(ctx, conn, ref, coordWindow)
+		if err != nil {
+			return got
+		}
+		return w
+	}), nil
+}
+
+// placeOf picks between the screen answer and the window answer for one node. Input: the screen rectangle, and a function reading the window rectangle, called only when needed. Output: the window rectangle when the screen one sits at 0,0 with a real size, the screen one otherwise.
+func placeOf(screen rect, window func() rect) rect {
+	if screen.X == 0 && screen.Y == 0 && screen.W > 0 && screen.H > 0 {
+		return window()
+	}
+	return screen
+}
 
 // Extents reads where an element is on the screen right now, so a ring is drawn around the element rather than around the rectangle it occupied when observe_screen made its list. Input: a context and the node's Ref from act.Node. Output: the rectangle in real screen pixels, or an error when the ref is malformed, the accessibility bus is unreachable, or the element no longer answers.
 // The bus is asked for screen coordinates and does not always answer with them, so the answer is corrected before it is handed back: see screenShift.
@@ -133,7 +159,7 @@ func Extents(ctx context.Context, ref string) (x, y, w, h int, err error) {
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
-	got, err := readExtents(ctx, conn, r, coordScreen)
+	got, err := readPlace(ctx, conn, r)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
@@ -156,38 +182,57 @@ var windowRoles = map[string]bool{"frame": true, "window": true, "dialog": true,
 // maxParentHops bounds the walk from a node up to its window, so a tree that answers with a cycle cannot spin here for ever. Measured on this desk on 2026-09-05, Brave's address bar sits seven levels under its frame, so this is several times what a real page needs.
 const maxParentHops = 40
 
-// windowOf walks up from a node to the top-level window it is drawn in. Input: a context, the bus connection and the node's ref. Output: that window's rectangle as the bus reports it in screen coordinates, and true; false when the chain breaks or runs past maxParentHops before a window is reached.
-func windowOf(ctx context.Context, conn *dbus.Conn, ref aref) (rect, bool) {
+// windowPlacer answers where a window titled title really is on the screen, in logical pixels, and false when it cannot say. nil until UseWindowPlacer wires one in; the daemon wires the bundled shell extension's window list, which is the only thing on a Wayland desk that knows.
+var windowPlacer func(ctx context.Context, title string) (x, y, w, h int, ok bool)
+
+// UseWindowPlacer wires in the reader of real window positions. Input: a function answering the frame of the window with that exact title, and false when there is none or nothing can say. Output: none. Call it before the first observe; a placer is asked on every correction and may answer false until the shell extension is reachable.
+func UseWindowPlacer(f func(ctx context.Context, title string) (x, y, w, h int, ok bool)) {
+	windowPlacer = f
+}
+
+// shiftOf is how far a node's window has to move to be where it really is on the screen. Input: a context, the bus connection and the node's ref. Output: the shift to add to x and to y, and false when the node's window cannot be found. The placer's answer wins when it has one for the window's title, since it is a measurement; the size-based guess in windowShift is the fallback for a desk with no extension.
+func shiftOf(ctx context.Context, conn *dbus.Conn, ref aref) (dx, dy int, ok bool) {
+	frame, win, ok := windowOf(ctx, conn, ref)
+	if !ok {
+		return 0, 0, false
+	}
+	if windowPlacer != nil {
+		if x, y, _, _, ok := windowPlacer(ctx, getName(ctx, conn, win)); ok {
+			return x - frame.X, y - frame.Y, true
+		}
+	}
+	d, ok := deskNow()
+	if !ok {
+		return 0, 0, false
+	}
+	dx, dy = windowShift(frame, d)
+	return dx, dy, true
+}
+
+// windowOf walks up from a node to the top-level window it is drawn in. Input: a context, the bus connection and the node's ref. Output: that window's rectangle as the bus reports it in screen coordinates, the window's ref, and true; false when the chain breaks or runs past maxParentHops before a window is reached.
+func windowOf(ctx context.Context, conn *dbus.Conn, ref aref) (rect, aref, bool) {
 	at := ref
 	for hop := 0; hop < maxParentHops; hop++ {
 		if windowRoles[getRoleName(ctx, conn, at)] {
 			r, err := readExtents(ctx, conn, at, coordScreen)
 			if err != nil {
-				return rect{}, false
+				return rect{}, aref{}, false
 			}
-			return r, true
+			return r, at, true
 		}
 		parent := getParent(ctx, conn, at)
 		if parent.Name == "" || parent.Path == "" || parent.Path == "/org/a11y/atspi/null" {
-			return rect{}, false
+			return rect{}, aref{}, false
 		}
 		at = parent
 	}
-	return rect{}, false
+	return rect{}, aref{}, false
 }
 
-// screenShift is how far a rectangle this node's window reports has to move to land where that window really is on the screen. Input: a context, the bus connection and the node's ref. Output: how much to add to x and to y, and 0,0 whenever nothing here can say.
-// Coordinate type 0 does mean screen coordinates: measured on this desk on 2026-09-05, Ora's own GTK window answered 0,32 1920x1048 for it and a Brave popup answered 1551,110, both of which are where those windows really were. But a client that cannot know where its own window sits — which is every native Wayland client, Chromium and GTK included — answers with window coordinates instead, and Brave's maximized frame came back as 0,0 1920x1048 when the work area starts at y=32. Every rectangle read out of that window was then 32 pixels too high, so a ring drawn from one landed a top bar's height above the thing it was naming.
+// screenShift is how far a rectangle this node's window reports has to move to land where that window really is on the screen. Input: a context, the bus connection and the node's ref. Output: how much to add to x and to y, and 0,0 whenever nothing here can say. See shiftOf for where the answer comes from.
 func screenShift(ctx context.Context, conn *dbus.Conn, ref aref) (dx, dy int) {
-	d, ok := deskNow()
-	if !ok {
-		return 0, 0
-	}
-	frame, ok := windowOf(ctx, conn, ref)
-	if !ok {
-		return 0, 0
-	}
-	return windowShift(frame, d)
+	dx, dy, _ = shiftOf(ctx, conn, ref)
+	return dx, dy
 }
 
 // desk is the desktop the windows are laid out on: the work area, the whole canvas, the monitors making it up, and where the pointer is (-1,-1 when X could not say), all in the same screen pixels a whole-screen screenshot is in.

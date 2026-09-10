@@ -82,7 +82,7 @@ func (m *model) renderInput() string {
 		var modeHint string
 		switch m.mode {
 		case ModeVoice:
-			modeHint = m.styles.KbdLabel.Render("voice: " + config.VoiceModel)
+			modeHint = m.styles.KbdLabel.Render("voice: " + config.VoiceModel())
 		case ModeText:
 			modeHint = m.styles.KbdLabel.Render("text: " + config.TextModel)
 		default:

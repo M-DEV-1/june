@@ -17,6 +17,8 @@ type OraConfig struct {
 	// Voice is the Gemini Live prebuilt voice name used for the assistant's spoken output (see AvailableVoices).
 	// Defaults to DefaultVoice when unset.
 	Voice string `json:"voice"`
+	// LiveModel is the bidirectional Live API model the voice session dials, one of config.LiveVoiceModels. Empty, or a name Ora does not know, runs on DefaultVoiceModel. It is a choice rather than a constant because the two models trade tone against latency and neither answer is right for everyone: see LiveVoiceModels in gemini.go for the measured numbers.
+	LiveModel string `json:"live_model,omitempty"`
 	// Autostart is whether the daemon should be launched when the user logs in. Defaults to false — an upgrading user must opt in to a screen-recording daemon starting at login, not get one installed silently — and the daemon reconciles the on-disk autostart entry to match this field on every startup.
 	Autostart bool `json:"autostart"`
 	// Window is whether the daemon also runs the desktop window, so the login entry starts one thing and gets both. Defaults to true; set it to false in ora-config.json to run the daemon headless, and see cmd/window.go for where the window binary is looked for.
@@ -40,6 +42,8 @@ type OraConfig struct {
 	BrainModels map[string]string `json:"brain_models,omitempty"`
 	// BackgroundModels pins a Gemini model per unattended job, keyed by the Job* names in gemini.go ("working_state", "meeting_minutes", ...). A job with no entry runs on DefaultBackgroundModel. It exists so the model each background duty spends the free tier's per-day request allowance on is named in the config rather than buried in code; the daemon installs it with SetBackgroundModels at startup.
 	BackgroundModels map[string]string `json:"background_models,omitempty"`
+	// BackgroundBrains names which provider answers each unattended job, keyed by the same Job* names as BackgroundModels. A job with no entry stays on the Gemini API, which is what every job did before this existed, so a config file written without this block behaves exactly as it did. It is what lets the memory duties run on a CLI login — the user's own Antigravity or Claude plan — and spend no metered request at all.
+	BackgroundBrains map[string]BrainConfig `json:"background_brains,omitempty"`
 	// LocalText points the working-state derive at a local llama-server instead of the metered API. Zero value means there is no local text model and the job stays on Gemini.
 	LocalText LocalTextConfig `json:"local_text"`
 	// ActRunKeep caps how many ordinary act runs the store keeps — the screen-tool traces behind db.PruneActRuns, which grow without bound otherwise. Zero means DefaultActRunKeep; a negative number keeps every run. Runs the nightly notes were written from, and recent failures, are kept whatever this says. Read it through ActRunsKept rather than directly.

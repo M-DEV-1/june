@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -117,7 +118,7 @@ func NewVoice(s *Server, store *db.Store, apiKey string) *VoiceSession {
 // newVoiceAgent builds the live agent one voice session drives. Input: the server the session broadcasts on, the session's microphone and speaker, the store the agent uses as its memory, and the Gemini API key. Output: the agent, configured with the live model and the user's chosen voice and wired to the screen. Extracted from NewVoice so the wiring is testable without opening the user's real microphone.
 func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store *db.Store, apiKey string) *agent.Agent {
 	a := agent.NewAgent(mic, speaker, store, nil, apiKey)
-	a.SetModel(config.VoiceModel)
+	a.SetModel(config.VoiceModel())
 	a.SetVoice(config.LoadConfig().Voice)
 	// The handshake's "[working]" context comes from the same live activity buffer the window's read routes draw on, which the daemon already wired into the server.
 	if s.screen != nil {
@@ -125,6 +126,10 @@ func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store
 	}
 	// point_at rings through the same overlay path POST /overlay uses, so the extension has one thing to listen to whether the ring came from a typed ask or from speech. A spoken ring belongs to no /ask, so it is stamped with the non-ask id rather than with an id that names a question the user never typed.
 	a.Point = func(x, y, w, h int, label string) error { return s.Ring(overlayNoAsk, x, y, w, h, label) }
+	// draw goes through the same overlay path as point_at and show_marks. Server.Draw stamps it with whichever ask is running, which for a spoken session is none, so it lands under the same non-ask id the other two use.
+	a.Draw = s.Draw
+	// A keyboard and a pointer, through the same desktop portal the typed ask has always had. Without one press_key, click_at and scroll_at refused every call with "this session cannot reach the keyboard or the pointer", so a spoken request to scroll down a page ended with Ora asking the user to scroll it themselves — which is what happened on 2026-09-07 against a blog the user asked it to read. The portal asks for consent once and remembers it, so this does not put a dialog in front of the user on every session.
+	a.UsePortalInput(config.DataDir())
 	// show_marks marks through the same overlay path, one rect per observed item, labelled with the item's own number so the marks line up with what observe_screen just listed.
 	a.Marks = func(items []act.Item) error {
 		rects := make([]OverlayRect, len(items))
@@ -180,6 +185,8 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	// A spoken session belongs to no conversation, so its calls are filed under conversation 0 — until now it recorded nothing at all, which is why a voice turn that used look and draw looked, from the store, like a turn that used no tools.
+	ctx = agent.WithToolRecorder(ctx, toolRecorder(v.store, "voice", 0))
 	// Capture starts once and outlives every reconnect below, the same way the terminal client does it.
 	micChan, err := mic.StartCapture(ctx)
 	if err != nil {
@@ -246,6 +253,11 @@ func (v *VoiceSession) dial(ctx context.Context, id string, run voiceRunner, mic
 		}
 		if err == nil {
 			return
+		}
+		// A run that ended on the server's GoAway closed itself so it could be resumed before the server's deadline: it is redialed at once and counts for nothing, since a conversation that has merely lasted long is not failing.
+		if errors.Is(err, agent.ErrGoAway) {
+			slog.Info("live session ended on GoAway, resuming", "id", id)
+			continue
 		}
 		failures++
 		if failures >= voiceMaxConsecutiveFailures {
@@ -340,7 +352,7 @@ func (v *VoiceSession) recordTurnUsage(usage agent.TokenUsage) {
 	defer storeCancel()
 	if _, err := v.store.AddTokenUse(storeCtx, db.TokenUse{
 		Provider:     provider,
-		Model:        config.VoiceModel,
+		Model:        config.VoiceModel(),
 		Channel:      "voice",
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,

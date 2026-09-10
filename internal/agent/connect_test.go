@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"ora/internal/act"
 	"ora/internal/db"
 	"ora/internal/tracker"
 	"runtime"
@@ -587,6 +588,26 @@ type fakeLiveSession struct {
 
 	// sentContent, if non-nil, receives every SendClientContent call's params — buffered by the test as needed. nil is a valid zero value: SendClientContent becomes a no-op recorder that just returns nil, for tests that don't care about it.
 	sentContent chan genai.LiveSendClientContentParameters
+
+	// sentRealtime, if non-nil, receives every realtime input sent — the channel the look tool's picture goes down.
+	sentRealtime chan genai.LiveRealtimeInput
+
+	// closes counts Close calls, which is how a test sees the loop give the session up on GoAway.
+	closes atomic.Int32
+}
+
+// Close records that the session was given up. The real session's Close hangs up the websocket.
+func (f *fakeLiveSession) Close() error {
+	f.closes.Add(1)
+	return nil
+}
+
+// sentRealtime, if non-nil, receives every SendRealtimeInput call — which is how a test sees the picture the look tool pushed.
+func (f *fakeLiveSession) SendRealtimeInput(p genai.LiveRealtimeInput) error {
+	if f.sentRealtime != nil {
+		f.sentRealtime <- p
+	}
+	return nil
 }
 
 func (f *fakeLiveSession) SendClientContent(p genai.LiveSendClientContentParameters) error {
@@ -1707,5 +1728,165 @@ func TestSystemInstruction_TellsTheModelItsToolListIsTheTruth(t *testing.T) {
 	// The rule against browsing is about answering questions, not about opening things the user asked for.
 	if strings.Contains(prompt, "never open a browser instead") {
 		t.Error("the live prompt still forbids opening a browser outright, which is what stopped it opening one when asked")
+	}
+}
+
+// Asked on 2026-09-07 to read a blog, find the part that mattered and mark it up, the live session stopped to ask permission before every step and then asked again after each answer — scrolling, looking and drawing all cost nothing and undo themselves, so there was nothing to ask about. The prompt has to say which actions are free and that a request made of several steps is carried through rather than checked off one at a time.
+func TestSystemInstruction_DoesNotAskPermissionForWhatCostsNothing(t *testing.T) {
+	prompt := SystemInstruction(time.Date(2026, 9, 7, 3, 0, 0, 0, time.UTC), "", "some context")
+	for _, want := range []string{
+		"observe_screen, look, scroll_to and draw change nothing",
+		"carry it through",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the live prompt no longer says %q", want)
+		}
+	}
+}
+
+// TestReceiveLoop_ToolCallsOfOneMessageRunInOrder covers the calls of a single ToolCall message racing each other. Measured 2026-09-09: the model sent click(tab) with press_key Ctrl+W and the key landed 62 ms in while the click landed at 666 ms, so the wrong tab closed; click(search box) with type_text went the same way three times and the box stayed empty. The calls of one message must now run one after another in the order the model gave them.
+// The first call here is a shell_exec awaiting HITL approval, so it genuinely blocks; the second is a fast list_files. Under the old goroutine-per-call code the fast one answered first.
+func TestReceiveLoop_ToolCallsOfOneMessageRunInOrder(t *testing.T) {
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
+	a := NewAgent(nil, nil, nil, nil, "")
+
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 4),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-first", Name: "shell_exec", Args: map[string]any{"command": "echo never-approved"}},
+			{ID: "call-second", Name: "list_files", Args: map[string]any{"path": "."}},
+		},
+	}}
+
+	var req ToolRequest
+	select {
+	case req = <-a.ToolApprovalChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the first call's HITL approval request")
+	}
+	select {
+	case resp := <-fs.responses:
+		t.Fatalf("the second call answered while the first was still running: %q", resp.FunctionResponses[0].ID)
+	case <-time.After(200 * time.Millisecond):
+	}
+	req.ResultChan <- "ok: approved and ran"
+
+	var order []string
+	for range 2 {
+		select {
+		case resp := <-fs.responses:
+			order = append(order, resp.FunctionResponses[0].ID)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for the tool responses, got %v so far", order)
+		}
+	}
+	if order[0] != "call-first" || order[1] != "call-second" {
+		t.Fatalf("expected the calls answered in the order given, got %v", order)
+	}
+}
+
+// TestSessionPictureSender_UsesVideoNotDeprecatedMediaChunks covers the field a look's picture goes out in. Measured 2026-09-09 at 03:58:40 and 04:04:33: the server closed the socket with "close 1007 realtime_input.media_chunks is deprecated. Use audio, video, or text instead", which killed the session and the branch subtask running under it.
+func TestSessionPictureSender_UsesVideoNotDeprecatedMediaChunks(t *testing.T) {
+	fs := &fakeLiveSession{sentRealtime: make(chan genai.LiveRealtimeInput, 1)}
+
+	if err := sessionPictureSender(fs)(context.Background(), tracker.Capture{Data: []byte("png"), Mime: "image/png"}); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	in := <-fs.sentRealtime
+	if in.Media != nil {
+		t.Fatal("Media maps to the deprecated mediaChunks field, which closes the socket; must be nil")
+	}
+	if in.Video == nil || string(in.Video.Data) != "png" || in.Video.MIMEType != "image/png" {
+		t.Fatalf("expected the picture in the Video field, got %+v", in)
+	}
+}
+
+// TestReceiveLoop_GoAway_ClosesSessionAndReturns covers the server warning it is about to hang up. Measured 2026-09-09, three times in 25 minutes: the loop only logged the GoAway, and the server then force-closed with "close 1008 client failed to close the connection after receiving a GoAway". Closing it ourselves lets the caller redial before that deadline.
+func TestReceiveLoop_GoAway_ClosesSessionAndReturns(t *testing.T) {
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 1),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	errChan := make(chan error, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go a.receiveLoop(ctx, fs, "test-model", errChan)
+	fs.msgCh <- &genai.LiveServerMessage{GoAway: &genai.LiveServerGoAway{TimeLeft: time.Second}}
+
+	select {
+	case err := <-errChan:
+		if !errors.Is(err, ErrGoAway) {
+			t.Fatalf("expected the GoAway error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the loop to give up the session on GoAway")
+	}
+	if fs.closes.Load() == 0 {
+		t.Fatal("expected the session to be closed on GoAway")
+	}
+}
+
+// TestRedeliverBranchNotes_ResumedSessionGetsTheResult covers a branch result the model never saw. Measured 2026-09-09: a branch result was sent at 03:43:41 and the socket died at 03:43:50, and the resumed session had no trace of it, so Ora kept saying the search was still running.
+func TestRedeliverBranchNotes_ResumedSessionGetsTheResult(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	a.rememberBranchResult("the price of tea", "about 400 rupees a kilo", time.Now())
+	fs := &fakeLiveSession{sentContent: make(chan genai.LiveSendClientContentParameters, 2)}
+
+	a.redeliverBranchNotes(fs)
+
+	select {
+	case sent := <-fs.sentContent:
+		text := sent.Turns[0].Parts[0].Text
+		if !strings.Contains(text, "the price of tea") || !strings.Contains(text, "400 rupees") {
+			t.Fatalf("expected the branch task and result in the re-delivered turn, got %q", text)
+		}
+	default:
+		t.Fatal("expected the pending branch result to be re-delivered to the resumed session")
+	}
+
+	// Delivered once: a second reconnect must not tell the model the same news again.
+	a.redeliverBranchNotes(fs)
+	select {
+	case sent := <-fs.sentContent:
+		t.Fatalf("expected nothing left to re-deliver, got %+v", sent.Turns)
+	default:
+	}
+}
+
+// TestBranchNotes_StaleResultIsNotRedelivered covers the age limit on the ring: news older than branchNoteWindow is not worth telling.
+func TestBranchNotes_StaleResultIsNotRedelivered(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+	a.rememberBranchResult("old news", "done", time.Now().Add(-2*branchNoteWindow))
+
+	if notes := a.takeBranchNotes(time.Now()); len(notes) != 0 {
+		t.Fatalf("expected the stale note dropped, got %+v", notes)
+	}
+}
+
+// TestVoiceScreenScope_SurvivesAReconnect covers the numbered list going missing after a reconnect. Measured 2026-09-09: Connect made a fresh screen scope every dial, so after a resume a click on item 25 answered "call observe_screen first" about a list the model had just been given.
+func TestVoiceScreenScope_SurvivesAReconnect(t *testing.T) {
+	a := NewAgent(nil, nil, nil, nil, "")
+
+	first := a.voiceScreenScope(context.Background())
+	lookStateFrom(first).items = []act.Item{{Ref: "ref-25", Label: "Send"}}
+
+	second := a.voiceScreenScope(context.Background())
+
+	items := lookStateFrom(second).items
+	if len(items) != 1 || items[0].Ref != "ref-25" {
+		t.Fatalf("expected the second connect to see the first's numbered list, got %+v", items)
 	}
 }

@@ -51,6 +51,14 @@ func (b *mockBrain) EpisodesForThread(ctx context.Context, threadID int64, limit
 	return nil, nil
 }
 
+func (b *mockBrain) CreateConversation(ctx context.Context, title, brain string) (int64, error) {
+	return 0, nil
+}
+
+func (b *mockBrain) AddUserTask(ctx context.Context, title string, conversationID int64) (int64, error) {
+	return 0, nil
+}
+
 func (b *mockBrain) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {
 	return nil, nil
 }

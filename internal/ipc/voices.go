@@ -8,6 +8,14 @@ import (
 	"ora/internal/config"
 )
 
+// LiveModelView is one of the two Live models on GET or POST /voices. Trait is what choosing it costs and buys, in one line, because the trade between them — tone against about four seconds of latency — is the whole reason there is a choice.
+type LiveModelView struct {
+	Name    string `json:"name"`
+	Label   string `json:"label"`
+	Trait   string `json:"trait"`
+	Current bool   `json:"current"`
+}
+
 // VoiceView is one voice on GET or POST /voices. Trait is Google's own one-word description of how it sounds ("Bright", "Gravelly"), and Current marks the one a live session will speak in.
 type VoiceView struct {
 	Name    string `json:"name"`
@@ -27,9 +35,24 @@ func Voices(cfg *LiveConfig, _ VoicePreviewer) http.HandlerFunc {
 			writeVoices(w, cfg.Get())
 		case http.MethodPost:
 			var req struct {
-				Name string `json:"name"`
+				Name  string `json:"name"`
+				Model string `json:"model"`
 			}
 			if !DecodeJSON(w, r, &req) {
+				return
+			}
+			// One route, two choices: which voice speaks, and which Live model it speaks through. A body may carry either, and a body carrying neither is a bad request rather than a silent no-op.
+			if req.Model != "" {
+				if !config.ValidVoiceModel(req.Model) {
+					http.Error(w, "unknown live model: "+req.Model, http.StatusBadRequest)
+					return
+				}
+				if err := cfg.Update(func(c *config.OraConfig) { c.LiveModel = req.Model }); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				config.SetVoiceModel(req.Model)
+				writeVoices(w, cfg.Get())
 				return
 			}
 			canonical, ok := config.NormalizeVoice(req.Name)
@@ -88,5 +111,14 @@ func writeVoices(w http.ResponseWriter, cfg config.OraConfig) {
 	for _, name := range config.AvailableVoices {
 		list = append(list, VoiceView{Name: name, Trait: config.VoiceTrait(name), Current: name == current})
 	}
-	writeJSON(w, map[string]any{"voices": list})
+	// The model the config names, not the one the daemon is running on: a change takes effect on the next session, and the picker has to show what was chosen rather than what is still connected.
+	chosen := cfg.LiveModel
+	if !config.ValidVoiceModel(chosen) {
+		chosen = config.DefaultVoiceModel
+	}
+	models := make([]LiveModelView, 0, len(config.LiveVoiceModels))
+	for _, m := range config.LiveVoiceModels {
+		models = append(models, LiveModelView{Name: m.Name, Label: m.Label, Trait: m.Trait, Current: m.Name == chosen})
+	}
+	writeJSON(w, map[string]any{"voices": list, "models": models})
 }

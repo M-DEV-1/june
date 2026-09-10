@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"ora/internal/config"
 	"strings"
-
-	"google.golang.org/genai"
 )
 
 // ConsolidateNotes implements the NoteConsolidator interface internal/db's NoteCompactor asks for, on GeminiSummarizer.
@@ -46,23 +44,13 @@ Return ONLY a JSON array of strings — the final canonical fact set, no comment
 Current facts:
 %s`, strings.Join(numbered, "\n"))
 
-	model := config.BackgroundModel(config.JobNoteConsolidation)
-	var resp *genai.GenerateContentResponse
-	err := g.allow(model)
-	if err == nil {
-		resp, err = g.client.Models.GenerateContent(ctx, model, genai.Text(prompt), &genai.GenerateContentConfig{
-			ResponseMIMEType: "application/json",
-		})
-	}
+	text, err := g.text(ctx, config.JobNoteConsolidation, prompt, true)
 	if err != nil {
-		return nil, fmt.Errorf("consolidate notes llm call: %w", err)
-	}
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("consolidate notes: empty response from model")
+		return nil, fmt.Errorf("consolidate notes: %w", err)
 	}
 
 	var out []string
-	if err := json.Unmarshal([]byte(resp.Candidates[0].Content.Parts[0].Text), &out); err != nil {
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		return nil, fmt.Errorf("parse consolidated notes: %w", err)
 	}
 	return out, nil

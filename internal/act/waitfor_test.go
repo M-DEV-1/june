@@ -76,3 +76,10 @@ func TestMatch_FieldHoldsVerdictNeverEchoesTheField(t *testing.T) {
 		t.Errorf("fail verdict = %v %q, want a fail that does not echo the field", ok, why)
 	}
 }
+
+func TestDescribe_ScreenChanged(t *testing.T) {
+	got := Check{Kind: ScreenChanged, Value: "a recording indicator"}.Describe()
+	if !strings.Contains(got, "screen") || !strings.Contains(got, "a recording indicator") {
+		t.Errorf("Describe() = %q", got)
+	}
+}

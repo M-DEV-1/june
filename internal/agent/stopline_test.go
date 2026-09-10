@@ -264,7 +264,7 @@ func TestExecuteTool_TypeText_RefusesWhenTheFieldNoLongerHoldsTheKeyboard(t *tes
 	if len(f.typed) != 0 {
 		t.Errorf("typed = %v, want nothing typed when the field definitely does not hold the keyboard", f.typed)
 	}
-	if !strings.Contains(got, "could not identify the field") {
+	if !strings.Contains(got, "no place to type") {
 		t.Errorf("result = %q, want the refusal", got)
 	}
 }
@@ -282,5 +282,31 @@ func TestExecuteTool_TypeText_TypesWhenTheFocusCannotBeRead(t *testing.T) {
 
 	if len(f.typed) != 1 || !strings.Contains(got, "typed") {
 		t.Errorf("typed = %v, result = %q, want the text typed on an unreadable focus rather than a refusal", f.typed, got)
+	}
+}
+
+// A click at a point on the screen is how every field in a window without a readable tree gets focused, and how a picture-led click focuses one in a window with a tree. After it the session knows nothing about the field from the click itself, so it asks the tree who holds the keyboard now: a readable place to type gets the text, a readable control that is no place to type is refused by name, and a window that publishes nothing readable gets the text on the click alone, since the press check and the next look are what verify it. Measured on 2026-09-08: the Spotify search box was clicked by point three times and every type_text after it was refused.
+func TestExecuteTool_TypeText_AfterAPointClickTypesIntoWhatHoldsTheKeyboard(t *testing.T) {
+	ctx := context.Background()
+
+	a, f := actingAgent(t)
+	holdsKeyboard(t, act.Node{Role: "entry", Label: "Search", Ref: "r-search"}, true)
+	a.focusLost(ctx)
+	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "ora"}); len(f.typed) != 1 {
+		t.Errorf("typed = %v, result %q; want the text typed into the entry that holds the keyboard", f.typed, got)
+	}
+
+	a, f = actingAgent(t)
+	holdsKeyboard(t, act.Node{Role: "push button", Label: "Send", Ref: "r-send"}, true)
+	a.focusLost(ctx)
+	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "ora"}); len(f.typed) != 0 || !strings.Contains(got, "Send") {
+		t.Errorf("typed = %v, result %q; want a refusal naming the button that holds the keyboard", f.typed, got)
+	}
+
+	a, f = actingAgent(t)
+	holdsKeyboard(t, act.Node{}, false)
+	a.focusLost(ctx)
+	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "ora"}); len(f.typed) != 1 {
+		t.Errorf("typed = %v, result %q; want the text typed on the click alone when nothing readable holds the keyboard", f.typed, got)
 	}
 }

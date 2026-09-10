@@ -3,6 +3,7 @@ package recorder
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,8 +25,11 @@ type fakeCapture struct{ stopped bool }
 func (f *fakeCapture) Stop() { f.stopped = true }
 
 type fakeStore struct {
-	episodes []db.Episode
-	personal []db.PersonalEntry
+	// conversations and turns record what prep filed: the titles of the conversations it opened and the text of the turns it added.
+	conversations []string
+	turns         []string
+	episodes      []db.Episode
+	personal      []db.PersonalEntry
 	// personalWrites records every SetPersonalContext call, subject to content, so a test can see what the meeting updater decided to write.
 	personalWrites map[string]string
 	notes          []string
@@ -365,6 +369,15 @@ func (n *notifications) add(title, body string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.sent = append(n.sent, title+": "+body)
+}
+
+// addAt records a notice that names where it opens, as "title: body @place/id", and like add when it names nowhere.
+func (n *notifications) addAt(title, body, place, id string) {
+	if place == "" {
+		n.add(title, body)
+		return
+	}
+	n.add(title, body+" @"+place+"/"+id)
 }
 
 func (n *notifications) contains(s string) bool {
@@ -1529,4 +1542,14 @@ func TestPickup_DoesNotReadEveryNoteInTheStoreOnEverySweep(t *testing.T) {
 	if store.getNotesCalls != 0 {
 		t.Errorf("the sweep read every note in the store %d times, want none: the backfill runs once at startup", store.getNotesCalls)
 	}
+}
+
+func (f *fakeStore) CreateConversation(ctx context.Context, title, brain string) (int64, error) {
+	f.conversations = append(f.conversations, title)
+	return int64(len(f.conversations)), nil
+}
+
+func (f *fakeStore) AddTurn(ctx context.Context, conversationID int64, role, text, kind string, evidence json.RawMessage, tools []string) (int64, error) {
+	f.turns = append(f.turns, text)
+	return int64(len(f.turns)), nil
 }

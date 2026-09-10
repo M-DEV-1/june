@@ -24,7 +24,7 @@ type Channel string
 const (
 	// ChannelText is Models.GenerateContent against config.TextModel.
 	ChannelText Channel = "text"
-	// ChannelVoice is the Live API against config.VoiceModel, matching production voice (handshake frozen, no per-turn RetrieveRelevant).
+	// ChannelVoice is the Live API against config.VoiceModel(), matching production voice (handshake frozen, no per-turn RetrieveRelevant).
 	ChannelVoice Channel = "voice"
 )
 
@@ -176,11 +176,16 @@ var sourceTagPattern = regexp.MustCompile(`\{"source":\{[^{}]*\}\}`)
 func evidenceFromToolHops(hops []ToolHop) []Evidence {
 	var out []Evidence
 	for _, hop := range hops {
+		// A hit can run to several lines (a note keeps its line breaks) with its tag on the last one, so the lines since the previous tag are the hit's own and go into its excerpt.
+		var pending []string
 		for _, line := range strings.Split(hop.Result, "\n") {
 			loc := sourceTagPattern.FindStringIndex(line)
 			if loc == nil {
+				pending = append(pending, line)
 				continue
 			}
+			excerpt := strings.TrimSpace(strings.Join(append(pending, line[:loc[0]]), "\n"))
+			pending = nil
 			var wrapped struct {
 				Source db.EvidenceSource `json:"source"`
 			}
@@ -192,7 +197,7 @@ func evidenceFromToolHops(hops []ToolHop) []Evidence {
 				ID:      wrapped.Source.ID,
 				Title:   wrapped.Source.Title,
 				When:    wrapped.Source.When,
-				Excerpt: strings.TrimSpace(line[:loc[0]]),
+				Excerpt: excerpt,
 			})
 			if len(out) >= evidenceLimit {
 				return out
@@ -233,9 +238,9 @@ func handshakeInstruction(now time.Time, personal, contextStr string, toolsCount
 }
 
 // screenTaskGuidance tells the ask paths (text and Codex; the live voice handshake in connect.go builds its own prompt and does not include this) that "go somewhere and do X" is a screen task to carry through, not a page to open and leave. Written from three 2026-09-05 traces: one opened a page and answered in nine words without ever looking at the screen, one clicked the nearest button and called a different thing done, and one opened a site's root over the page the user was already reading and spent the rest of its budget getting back. It is deliberately written about screens in general — lists, settings, threads, tables — because a rule that names one kind of site teaches the model nothing about the next one.
-const screenTaskGuidance = `Doing something on the screen — going somewhere, starting something, changing a setting — is one task to see through, not a page to open and a sentence to say. Start from the window already in front: observe_screen first, and work in what's already open rather than opening a site's root over it. Stay in that window — never click a desktop overview, panel, dock or other app's window unless the request names another window; switch_window is the only tool that may bring a different one to front. When the target isn't in the current observe_screen list, scroll_to where it would be and observe_screen again, rather than clicking something else or stopping; narrow by section, group or filter first, then look for the item itself. Once it's in the list, click it there, then observe_screen again to confirm what opened or is playing is that same thing. Use the tool that performs the literal action asked for, not a shortcut to the same end state: scroll_to for scrolling, never a click; type_text for typing, always — open_url opens a page but types nothing. After every action, observe_screen again and check what actually changed. When what came up doesn't match, say so and keep working rather than calling it done; when something needed isn't there at all, say what's missing and what you'll try next.
+const screenTaskGuidance = `Doing something on the screen, going somewhere, starting something, changing a setting, is one task to see through, not a page to open and a sentence to say. Start from the window already in front: observe_screen first, and work in what's already open rather than opening a site's root over it. Stay in that window, never click a desktop overview, panel, dock or other app's window unless the request names another window; switch_window is the only tool that may bring a different one to front. When the target isn't in the current observe_screen list, scroll_to where it would be and observe_screen again, rather than clicking something else or stopping; narrow by section, group or filter first, then look for the item itself. Once it's in the list, click it there, then observe_screen again to confirm what opened or is playing is that same thing. Use the tool that performs the literal action asked for, not a shortcut to the same end state: scroll_to for scrolling, never a click; type_text for typing, always, open_url opens a page but types nothing. After every action, observe_screen again and check what actually changed. When what came up doesn't match, say so and keep working rather than calling it done; when something needed isn't there at all, say what's missing and what you'll try next.
 
-Some of the screen is drawn, not laid out — video, a photo, a canvas, a map, a game — and none of it appears in the observe_screen list. To read it, or to point at or draw on it, call look first and take coordinates from the picture it returns. press_key is for keys no listing offers (Enter, Escape, Tab, Space) and lands wherever focus is, so click the field or player first. click_at and scroll_at are for elements the list has no entry or working action for, and only after a look, in that picture's coordinates.`
+Some of the screen is drawn, not laid out, video, a photo, a canvas, a map, a game, and none of it appears in the observe_screen list. To read it, or to point at or draw on it, call look first and take coordinates from the picture it returns. press_key is for keys no listing offers (Enter, Escape, Tab, Space) and lands wherever focus is, so click the field or player first. click_at and scroll_at are for elements the list has no entry or working action for, and only after a look, in that picture's coordinates.`
 
 // stopLineText is the one safety rule that must survive every prompt this package trims: the sentence telling the model not to press anything irreversible without being told to. It is written out here rather than pulled from systemInstructionText because that prompt is a single long format string in connect.go with no seam to take one sentence out of, and TestStopLineText_IsTheSentenceTheHandshakeCarries fails the moment the two copies drift apart.
 const stopLineText = `Never click anything that sends, pays, deletes or submits unless they have just said "go".`
@@ -257,7 +262,7 @@ func screenTaskStarted(hops []ToolHop) bool {
 }
 
 // supersededListingNote stands in for a screen listing that a later look has replaced. Only the newest observe_screen list is the one click, point_at and scroll_to resolve a number against, so an older listing is both dead weight and a trap: on 2026-09-05 a run pressed item 13 out of a list two looks old and landed in the desktop overview. Each listing costs roughly 1,300 tokens and used to be re-sent on every round after the one that produced it.
-const supersededListingNote = "(an earlier look at the screen; its list is not shown any more and its numbers no longer resolve — only the newest observe_screen list counts)"
+const supersededListingNote = "(an earlier look at the screen; its list is not shown any more and its numbers no longer resolve, only the newest observe_screen list counts)"
 
 // fullScreenListing reports whether a tool result is a whole numbered screen listing rather than an error, a one-line "unchanged" answer, or some other tool'"'"'s output. Input: the tool'"'"'s name and the result string it returned. Output: true only for an observe_screen result that carries the numbered list itself.
 func fullScreenListing(name, result string) bool {
@@ -280,7 +285,7 @@ func replaceSupersededListings(older []*genai.Part, newest *genai.Part) []*genai
 var screenRoundTools = map[string]bool{
 	"look": true, "observe_screen": true, "point_at": true, "show_marks": true, "draw": true,
 	"click": true, "scroll_to": true, "type_text": true, "open_url": true, "save_note": true, "wait_for": true,
-	"press_key": true, "click_at": true, "scroll_at": true, "switch_window": true,
+	"press_key": true, "click_at": true, "scroll_at": true, "switch_window": true, "open_app": true,
 }
 
 // screenTaskWordPattern matches a request naming a screen, a window, an app, a page, or an action that only makes sense done to one — clicking, typing, playing, opening, navigating — so a turn reads as a screen task from its very first round, before any tool has told it a screen is even involved. It is deliberately loose: a false match only costs the model tools it did not need this round, while a missed one is what let the 2026-09-05 runs reach for shell_exec, branch and query_memory on a request that plainly meant the screen, and spend rounds being refused.
@@ -397,22 +402,30 @@ func (a *Agent) AskText(ctx context.Context, question string) (TurnTrace, error)
 
 // AskTextWith is AskText with the conversation so far sent ahead of the question, so a follow-up like "do it again" reads as a follow-up instead of a question out of nowhere. Input: the prior turns (see HistoryFromTurns), nil for a question that stands alone, and the question. Output: the same TurnTrace AskText returns, including when the fallback model or Codex answers — both are given the same history.
 func (a *Agent) AskTextWith(ctx context.Context, history History, question string) (TurnTrace, error) {
-	tr, err := a.askText(ctx, config.TextModel, history, question)
-	if shouldFallBack(err) {
-		slog.Warn("ask text: model unavailable, asking the fallback", "model", config.TextModel, "fallback", config.TextFallbackModel, "error", err)
-		tr, err = a.askText(ctx, config.TextFallbackModel, history, question)
-	}
-	// Codex is the next resort when every Gemini model is unavailable, and only before an action has run: a read like observe_screen can be repeated on the other provider and change nothing, where a click or a keystroke would happen twice. Counting every hop instead refused the hand-over to any turn that had merely looked at the screen, which is how a routine returned a raw 429 on 2026-09-05.
-	if codexFallbackWanted(err, actionHops(tr.ToolHops), codexLoggedIn()) {
-		slog.Warn("ask text: every Gemini model is unavailable, asking Codex", "error", err)
-		tr, err = a.AskCodexWith(ctx, history, question)
-	}
-	// Claude is the last resort, on the user's own subscription, once Codex's own allowance is spent too: Gemini, then Codex, then Claude. Same rule about what has already run: reads may repeat, actions may not.
-	if claudeFallbackWanted(err, actionHops(tr.ToolHops), claudeLoggedIn()) {
-		slog.Warn("ask text: the Codex allowance is spent, asking Claude", "error", err)
-		return a.AskClaudeWith(ctx, history, question)
-	}
-	return tr, err
+	return a.askRouted(ctx, Need{}, history, question)
+}
+
+// askRouted asks the providers the router picks for need, in its order, until one answers. Input: what the question requires, the conversation so far (nil for a question that stands alone) and the question. Output: the answering provider's trace, or the last error when none could answer.
+func (a *Agent) askRouted(ctx context.Context, need Need, history History, question string) (TurnTrace, error) {
+	// Which providers can answer, and in what order, is the router's decision (see router.go): it drops the ones this machine cannot run and the ones known to be out of allowance, then orders what is left by preference — Gemini first because it is cheapest, Claude last because it is also the user's coding workhorse. The fixed chain of ifs this replaces routed on liveness alone, so a question reached a provider that was merely alive rather than one that could answer it.
+	return askInOrder(Route(need), func(id string) (TurnTrace, error) {
+		switch id {
+		case ProviderCodex:
+			return a.AskCodexWith(ctx, history, question)
+		case ProviderAgy:
+			return a.AskAgyWith(ctx, history, question)
+		case ProviderClaude:
+			return a.AskClaudeWith(ctx, history, question)
+		default:
+			// Gemini alone has a second model to try before it counts as unable to answer, because a 503 means that one model is overloaded rather than that the provider is spent.
+			tr, err := a.askText(ctx, config.TextModel, history, question)
+			if shouldFallBack(err) {
+				slog.Warn("ask text: model unavailable, asking the fallback", "model", config.TextModel, "fallback", config.TextFallbackModel, "error", err)
+				tr, err = a.askText(ctx, config.TextFallbackModel, history, question)
+			}
+			return tr, err
+		}
+	})
 }
 
 // shouldFallBack reports whether an ask failed in the one way another model can fix: the API said 503 UNAVAILABLE, the model itself is overloaded. Input: the error from askText, possibly wrapped. Output: true only for a 503 API error.
@@ -423,9 +436,9 @@ func shouldFallBack(err error) bool {
 	return (errors.As(err, &byValue) && byValue.Code == 503) || (errors.As(err, &byPointer) && byPointer.Code == 503)
 }
 
-// AskVoice runs one question through the Live API (config.VoiceModel) as a text client turn, matching production voice: handshake context only, no RetrieveRelevant injection. Input: question text. Output: TurnTrace from output transcription, thought parts, and tool hops.
+// AskVoice runs one question through the Live API (config.VoiceModel()) as a text client turn, matching production voice: handshake context only, no RetrieveRelevant injection. Input: question text. Output: TurnTrace from output transcription, thought parts, and tool hops.
 func (a *Agent) AskVoice(ctx context.Context, question string) (TurnTrace, error) {
-	return a.askVoice(ctx, config.VoiceModel, nil, question)
+	return a.askVoice(ctx, config.VoiceModel(), nil, question)
 }
 
 // AskWith is AskText and AskVoice with the two things a multi-turn eval needs: the conversation so far, sent ahead of the question, and a model name that overrides the channel's default when it is not empty. Input: the channel, the model override ("" keeps the channel's own model), the prior turns as genai Contents in order, and the question. Output: the same TurnTrace the two single-question entry points return.
@@ -438,7 +451,7 @@ func (a *Agent) AskWith(ctx context.Context, ch Channel, model string, history [
 		return a.askText(ctx, model, history, question)
 	case ChannelVoice:
 		if model == "" {
-			model = config.VoiceModel
+			model = config.VoiceModel()
 		}
 		return a.askVoice(ctx, model, history, question)
 	}
@@ -521,6 +534,8 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 			}
 		}
 		cfg.SystemInstruction = &genai.Content{Role: "system", Parts: []*genai.Part{{Text: prompt}}}
+		// What this round was actually handed, which on a screen round is the short list — so a memory tool missing from a screen turn's record reads as the harness withholding it rather than the model passing it over.
+		roundCtx := WithOffered(ctx, toolNames(cfg.Tools))
 		contents := make([]*genai.Content, 0, len(thread)+len(turn)+len(trail))
 		contents = append(contents, thread...)
 		contents = append(contents, turn...)
@@ -565,7 +580,7 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 		round := len(tr.ToolHops)
 		for _, fc := range calls {
 			ObserveTool(ctx, fc.Name, toolActivitySummary(fc.Name, fc.Args))
-			result := a.evalExecute(ctx, fc.Name, fc.Args)
+			result := a.evalExecute(roundCtx, fc.Name, fc.Args)
 			ObserveTool(ctx, fc.Name, resultSummary(fc.Name, result))
 			slog.Info("ask: tool", "tool", fc.Name, "args", toolActivitySummary(fc.Name, fc.Args), "result", resultSummary(fc.Name, result), "detail", toolLogDetail(fc.Name, result))
 			tr.ToolHops = append(tr.ToolHops, ToolHop{Name: fc.Name, Args: fc.Args, Result: result})
@@ -806,7 +821,7 @@ func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Con
 			round := len(tr.ToolHops)
 			for _, fc := range msg.ToolCall.FunctionCalls {
 				ObserveTool(ctx, fc.Name, toolActivitySummary(fc.Name, fc.Args))
-				result := a.evalExecute(ctx, fc.Name, fc.Args)
+				result := a.evalExecute(WithOffered(ctx, toolNames(cfg.Tools)), fc.Name, fc.Args)
 				ObserveTool(ctx, fc.Name, resultSummary(fc.Name, result))
 				slog.Info("ask: tool", "tool", fc.Name, "args", toolActivitySummary(fc.Name, fc.Args), "result", resultSummary(fc.Name, result), "detail", toolLogDetail(fc.Name, result))
 				tr.ToolHops = append(tr.ToolHops, ToolHop{Name: fc.Name, Args: fc.Args, Result: result})
@@ -842,7 +857,7 @@ func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Con
 
 func evalTools() []*genai.Tool {
 	// The same tool list the live session sends for this model. On the gemini-3 live models that list has no Google Search grounding, because pairing it with function tools closes the session with a quota error (measured 2026-09-02 and again here on 2026-09-03 when this still sent it).
-	return liveToolsFor(config.VoiceModel)
+	return liveToolsFor(config.VoiceModel())
 }
 
 // askTools is the tool list an ask offers the model: every tool the ask gate would actually run, and nothing else. A model cannot tell a tool it has been offered but may not use from one it may, so it spends a round finding out — the 2026-09-05 run that ran out of steps spent two of its twelve being refused shell_exec and then branch, both of which it had been handed. Input: none beyond the agent, whose evalWrites flag (see AllowEvalWrites) lifts the gate and so restores the full list. Output: the tools the gate admits, with any entry carrying no function declarations — Gemini's own search grounding, which has nothing to gate — kept as it is.
@@ -915,7 +930,8 @@ var screenToolNames = map[string]bool{"look": true, "observe_screen": true, "poi
 
 // toolLogDetail is what the "ask: tool" log line carries as detail. Input: the tool's name and its full result. Output: "" for a screen tool, else the first 160 runes of the result.
 func toolLogDetail(name, result string) string {
-	if screenToolNames[name] {
+	// A screen tool's result is the front window's title and the head of its accessibility list, which can be a password manager or an inbox, so it stays out of the log; its failure carries none of that, only the reason, and the reason is what a log line saying "failed" was missing.
+	if screenToolNames[name] && !strings.HasPrefix(result, "error") {
 		return ""
 	}
 	return util.Runes(result, 160)
@@ -923,15 +939,15 @@ func toolLogDetail(name, result string) string {
 
 var askAllowedTools = map[string]bool{
 	"look": true, "observe_screen": true, "point_at": true, "show_marks": true, "draw": true, "click": true, "scroll_to": true, "type_text": true, "wait_for": true,
-	"press_key": true, "click_at": true, "scroll_at": true, "switch_window": true,
-	"save_note": true, "personal_context": true, "revise": true, "action_items": true, "query_store": true, "open_url": true,
+	"press_key": true, "click_at": true, "scroll_at": true, "switch_window": true, "open_app": true,
+	"save_note": true, "add_task": true, "personal_context": true, "revise": true, "action_items": true, "query_store": true, "open_url": true,
 	"delegate": true,
 }
 
 // evalExecute runs a tool for an ask, refusing the ones outside the gate. Input: the tool's name and arguments. Output: the tool's result, or a refusal naming the tool. The refusal used to read "disabled in evals (read-only memory eval)", which describes a situation a person typing a question is not in; askTools now keeps a gated tool off the list in the first place, so anything reaching this refusal is a model calling a tool it was never offered, and the message says the plain true thing instead.
 func (a *Agent) evalExecute(ctx context.Context, name string, args map[string]any) string {
 	if !a.evalWrites && !subtaskAllowedTools[name] && !askAllowedTools[name] {
-		return fmt.Sprintf("error: tool %q is not available in an ask", name)
+		return fmt.Sprintf("error: tool %q %s", name, askGateMark)
 	}
 	return a.executeTool(ctx, name, args)
 }

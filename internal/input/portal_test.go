@@ -5,6 +5,7 @@ package input
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -410,4 +411,59 @@ func withScaleFrom(r streamRect, layout func(x, y int) (int, int, bool)) streamR
 	monitorLayout = layout
 	defer func() { monitorLayout = old }()
 	return withStreamScale(r)
+}
+
+// CreateSession is refused with "Missing token" unless the options name the session object with session_handle_token.
+func TestCreateSessionOptionsNameTheSession(t *testing.T) {
+	a, b := createSessionOptions(), createSessionOptions()
+	ta, _ := a["session_handle_token"].Value().(string)
+	tb, _ := b["session_handle_token"].Value().(string)
+	if ta == "" || ta == tb {
+		t.Fatalf("session_handle_token = %q then %q, want distinct non-empty tokens", ta, tb)
+	}
+}
+
+// A click aimed at the second monitor gets "Invalid position" from mutter, since a session's stream covers one monitor; the error must say so, or the model retries the same point (it tried x=3750 four times on 2026-09-08).
+func TestClickAt_SaysWhenThePointIsOffTheSessionsMonitor(t *testing.T) {
+	s := &Session{handle: "/session/1", send: func(_ context.Context, method string, _ ...interface{}) error {
+		if method == "NotifyPointerMotionAbsolute" {
+			return errors.New("Invalid position")
+		}
+		return nil
+	}}
+	err := s.ClickAt(3750, 54)
+	if err == nil || !strings.Contains(err.Error(), "outside the monitor") {
+		t.Errorf("err = %v, want it to name the monitor the session cannot reach", err)
+	}
+}
+
+// The portal answers Start with no restore_token on a session it restored from the saved one; the saved token must survive that, or the consent dialog comes back on the open after next.
+func TestSaveToken_BlankKeepsTheSavedToken(t *testing.T) {
+	dir := t.TempDir()
+	if err := saveToken(dir, "grant-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveToken(dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadToken(dir); got != "grant-1" {
+		t.Errorf("token after a blank save = %q, want the saved one kept", got)
+	}
+}
+
+// A session the portal opened without the keyboard or the pointer in it answers every event with "not allowed". The saved restore token is what brought that grant back, so it must go, or the next open restores the same empty grant instead of asking consent again (measured on this desk on 2026-09-08).
+func TestNotAllowedForgetsTheSavedToken(t *testing.T) {
+	dir := t.TempDir()
+	if err := saveToken(dir, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Session{handle: "/session/1", dataDir: dir, send: func(context.Context, string, ...interface{}) error {
+		return errors.New("Session is not allowed to call NotifyPointer methods")
+	}}
+	if err := s.ClickAt(10, 10); err == nil {
+		t.Fatal("the press should fail")
+	}
+	if loadToken(dir) != "" {
+		t.Fatal("the token that restores a device-less grant should be gone")
+	}
 }

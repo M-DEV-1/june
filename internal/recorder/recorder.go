@@ -3,6 +3,7 @@ package recorder
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,9 @@ type Store interface {
 	AddActionItems(ctx context.Context, items []memory.ActionItem) (int, error)
 	// CloseDoneActionItems closes the open tasks this meeting's own minutes say are finished.
 	CloseDoneActionItems(ctx context.Context, since time.Time) (int, error)
+	// CreateConversation and AddTurn file a meeting prep as a conversation of Ora's own, so the whole brief can be read and answered in the window rather than cut off on a card.
+	CreateConversation(ctx context.Context, title, brain string) (int64, error)
+	AddTurn(ctx context.Context, conversationID int64, role, text, kind string, evidence json.RawMessage, tools []string) (int64, error)
 }
 
 // Recorder owns at most one meeting recording at a time. Start and StopAndProcess are what the tray calls; everything after the stop runs in the background.
@@ -93,7 +97,9 @@ type Recorder struct {
 	findSherpa  func(dataDir string) (string, error)
 	minutes     func(ctx context.Context, prompt string) (string, error)
 	notify      func(title, body string)
-	onAC        func() bool
+	// notifyAt posts a notice that opens somewhere in the window: the meeting prep, which opens the conversation it was filed as. Input: title, body, and the place and row id the card's Open goes to, both "" for a notice that opens nothing in particular.
+	notifyAt func(title, body, place, id string)
+	onAC     func() bool
 }
 
 // New returns a Recorder that writes under dataDir/recordings, reads desktop context from and files minutes into store, and summarises with the Gemini API key apiKey.
@@ -113,6 +119,7 @@ func New(ctx context.Context, dataDir string, store Store, apiKey string) *Recor
 	r.findSherpa = sherpaBinary
 	r.minutes = r.defaultBrain
 	r.notify = notifySend
+	r.notifyAt = notifySendAt
 	r.onAC = OnACPower
 	r.silenceAfter = defaultSilenceAfter
 	r.retryEvery = defaultRetryEvery

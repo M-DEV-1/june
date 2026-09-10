@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -725,5 +726,32 @@ func TestBusNotifier_SlowNotifyDoesNotStallAPress(t *testing.T) {
 	}
 	if n.keyed["task|43"] != 8 {
 		t.Errorf("keyed = %v, want the second notice recorded once its call returned", n.keyed)
+	}
+}
+
+// A snooze coming back carries the same buttons it was pushed back with, so it can be done or pushed back again. It named none, which sendNotice fills in as Open alone, so the card that came back an hour later was a dead end: the one thing the user could not do with a snoozed task was snooze it again.
+func TestSnooze_RefiredNoticeCarriesItsButtons(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	if _, err := store.AddSnooze(ctx, "task", "42", "Still open", "Send the invoice", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("AddSnooze: %v", err)
+	}
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	s := New(store, nil, func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
+	s.maybeSnoozes(ctx)
+
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notices, want 1", len(sent))
+	}
+	var keys []string
+	for _, a := range sent[0].Actions {
+		keys = append(keys, a.Key)
+	}
+	want := []string{actionOpen, actionDone, actionHour, actionEvening, actionTomorrow}
+	if !slices.Equal(keys, want) {
+		t.Errorf("re-fired notice buttons = %v, want %v", keys, want)
 	}
 }

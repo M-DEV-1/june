@@ -2,6 +2,7 @@
 package util
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -66,4 +67,27 @@ func RunesEllipsis(s string, n int) string {
 		return s
 	}
 	return cut + "…"
+}
+
+// DesktopLine names the machine the session runs on, for a prompt: the desktop environment and display server from the session's own variables, and the distribution from /etc/os-release. Nothing is written in; a variable that is not set is left out. Output: one line such as "Ubuntu 24.04.4 LTS, desktop ubuntu:GNOME on wayland", or "Linux" when nothing is known.
+func DesktopLine() string {
+	var parts []string
+	if data, err := os.ReadFile("/etc/os-release"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if v, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
+				parts = append(parts, strings.Trim(v, `"`))
+			}
+		}
+	}
+	if d := os.Getenv("XDG_CURRENT_DESKTOP"); d != "" {
+		line := "desktop " + d
+		if s := os.Getenv("XDG_SESSION_TYPE"); s != "" {
+			line += " on " + s
+		}
+		parts = append(parts, line)
+	}
+	if len(parts) == 0 {
+		return "Linux"
+	}
+	return strings.Join(parts, ", ")
 }

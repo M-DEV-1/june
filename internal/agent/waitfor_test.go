@@ -172,3 +172,18 @@ func TestCheckHolds_CostsOneWalk(t *testing.T) {
 		t.Errorf("three pre-readings walked the screen %d times, want one each for the two that name something to look for", got)
 	}
 }
+
+// The same application renaming its window is not another window taking focus: Spotify's title becomes the song the moment Play is pressed, and on 2026-09-09 the check on that very press was failed for it. Only a different application in front fails a list check.
+func TestWaitFor_ItemChecksAllowTheSameAppUnderANewTitle(t *testing.T) {
+	a, _ := observingAgent(t)
+	ctx := context.Background()
+	app, _, _, _ := a.observe(ctx)
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	a.observe = func(context.Context) (string, string, []act.Node, error) {
+		return app, "AC/DC - Back In Black", []act.Node{{Role: "push button", Label: "Pause", W: 10, H: 10, Showing: true, Ref: "r-pause"}}, nil
+	}
+	got := a.executeTool(ctx, "wait_for", map[string]any{"kind": act.ItemPresent, "value": "Pause", "timeout_ms": 600.0})
+	if !strings.HasPrefix(got, act.WaitPassPrefix) {
+		t.Errorf("item_present = %q, want a pass: same application, new title", got)
+	}
+}

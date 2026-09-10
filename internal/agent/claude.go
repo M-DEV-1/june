@@ -43,12 +43,12 @@ const (
 // ProviderClaude is the Claude Code command line, which serves Anthropic models on the user's own subscription rather than on an API key.
 const ProviderClaude = "claude"
 
-// claudeModel is the model an ask asks for. Input: none. Output: ORA_CLAUDE_MODEL when it is set, else claudeDefaultModel.
+// claudeWebTool is the one built-in tool Ora keeps: the CLI's own web search, which runs on the user's subscription and costs nothing extra. Named once because it goes in both --tools and --allowed-tools, and the two disagreeing means no search and no error saying so.
+const claudeWebTool = "WebSearch"
+
+// claudeModel is the model an ask asks for. Input: none. Output: the model last picked for Claude in the window, else ORA_CLAUDE_MODEL, else claudeDefaultModel.
 func claudeModel() string {
-	if model := strings.TrimSpace(os.Getenv("ORA_CLAUDE_MODEL")); model != "" {
-		return model
-	}
-	return claudeDefaultModel
+	return pickedModel("claude", "ORA_CLAUDE_MODEL", claudeDefaultModel)
 }
 
 // claudeLoggedIn reports whether this machine has a Claude Code login to run under, which is what makes Claude worth handing a question to.
@@ -212,7 +212,7 @@ func (s *claudeToolServer) call(name string, args map[string]any) string {
 		return "error: this turn has no steps left; answer now with what you already have."
 	}
 	ObserveTool(s.askCtx, name, toolActivitySummary(name, args))
-	result := s.agent.evalExecute(s.askCtx, name, args)
+	result := s.agent.evalExecute(WithOffered(s.askCtx, declNames(s.decls)), name, args)
 	ObserveTool(s.askCtx, name, resultSummary(name, result))
 	slog.Info("ask: tool", "tool", name, "args", toolActivitySummary(name, args), "result", resultSummary(name, result), "detail", toolLogDetail(name, result))
 	s.record(ToolHop{Name: name, Args: args, Result: result})
@@ -268,12 +268,14 @@ func writeClaudeAskFiles(mcpURL, instruction string) (dir, mcpConfigPath, system
 
 // claudeArgs is the argument list for one `claude -p` run.
 // Input: the model to ask for, the files writeClaudeAskFiles wrote (the MCP config and the system prompt — the CLI reads both from disk, keeping the tool server's URL and the user's personal context off argv), and the tools to allow. Output: the arguments.
-// The user's own settings, hooks, skills, plugins and MCP servers are all shut out, because the prompt carries text nobody vetted — a meeting transcript, whatever was on the user's screens — and because a hook or a skill of the user's own would change what Ora's answers are made of without Ora knowing. --restricted drops the built-in command-running tools and ignores the settings files; --tools "" drops the rest of the built-in set, leaving the model with Ora's tools and nothing else.
+// The user's own settings, hooks, skills, plugins and MCP servers are all shut out, because the prompt carries text nobody vetted — a meeting transcript, whatever was on the user's screens — and because a hook or a skill of the user's own would change what Ora's answers are made of without Ora knowing. --restricted drops the built-in command-running tools, WebFetch, and the settings files; --tools names the only built-in kept, leaving the model with Ora's tools and that one.
+// WebSearch is the exception, and it is the whole reason an ask that falls back to Claude can look something up: Gemini's grounding is the only web access Ora otherwise has, and on 2026-09-07 its free-tier allowance was spent while the models themselves still answered, so every fallback answered from memory and said it had no web access. This is a deliberate widening — a prompt carrying text nobody vetted can shape a search query, and a query goes to a search engine — accepted because the alternative is an assistant that cannot look anything up whenever one provider's allowance runs out.
 func claudeArgs(model, mcpConfigPath, systemPromptPath string, toolNames []string) []string {
-	allowed := make([]string, 0, len(toolNames))
+	allowed := make([]string, 0, len(toolNames)+1)
 	for _, name := range toolNames {
 		allowed = append(allowed, "mcp__"+claudeMCPServerName+"__"+name)
 	}
+	allowed = append(allowed, claudeWebTool)
 	return []string{
 		"-p",
 		"--output-format", "json",
@@ -281,7 +283,7 @@ func claudeArgs(model, mcpConfigPath, systemPromptPath string, toolNames []strin
 		"--mcp-config", mcpConfigPath,
 		"--strict-mcp-config",
 		"--restricted",
-		"--tools", "",
+		"--tools", claudeWebTool,
 		"--allowed-tools", strings.Join(allowed, ","),
 		"--permission-prompts", "none",
 		"--disable-slash-commands",
@@ -474,12 +476,6 @@ func (b ClaudeBrain) AskTextWith(ctx context.Context, history History, question 
 	return b.Agent.AskClaudeWith(ctx, history, question)
 }
 
-// claudeFallbackWanted says whether a question Codex refused should go to Claude instead: only when Codex answered 429, which is the monthly allowance spent rather than a failure another provider would hit too, only when no tool has run yet so an action is never taken twice, and only when the machine has a Claude login.
-func claudeFallbackWanted(err error, hops int, loggedIn bool) bool {
-	var httpErr codexHTTPError
-	return err != nil && hops == 0 && loggedIn && errors.As(err, &httpErr) && httpErr.Code == http.StatusTooManyRequests
-}
-
 // CodexThenClaude asks Codex first and hands the question to Claude when Codex's allowance is spent, so the unattended jobs and the /ask fallback chain do not stop at the smaller of the two subscriptions. It is the asker shape the ipc server and internal/brain both take.
 type CodexThenClaude struct {
 	Agent *Agent
@@ -488,7 +484,8 @@ type CodexThenClaude struct {
 // AskText answers through Codex, or through Claude when Codex refused because its allowance is spent. Input: the question. Output: whichever turn trace answered, or Codex's own error when Claude is not a way out of it.
 func (b CodexThenClaude) AskText(ctx context.Context, question string) (TurnTrace, error) {
 	tr, err := b.Agent.AskCodex(ctx, question)
-	if claudeFallbackWanted(err, actionHops(tr.ToolHops), claudeLoggedIn()) {
+	// The same rule the router applies: hand on only when the failure is a spent allowance another provider does not share, only while no action has run so a click is never taken twice, and only when this machine has a Claude login.
+	if providerSpent(err) && actionHops(tr.ToolHops) == 0 && claudeLoggedIn() {
 		slog.Warn("ask: the Codex allowance is spent, asking Claude", "error", err)
 		return b.Agent.AskClaude(ctx, question)
 	}

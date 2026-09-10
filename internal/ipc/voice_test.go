@@ -112,10 +112,14 @@ func (f *voiceFakeRunner) setUsage(u agent.TokenUsage) {
 type voiceFailingRunner struct {
 	err   error
 	calls atomic.Int64
+	// goAways is how many runs end on the server's GoAway before err takes over.
+	goAways int64
 }
 
 func (f *voiceFailingRunner) Run(ctx context.Context, mic <-chan []byte) error {
-	f.calls.Add(1)
+	if f.calls.Add(1) <= f.goAways {
+		return agent.ErrGoAway
+	}
 	return f.err
 }
 func (f *voiceFailingRunner) Text() <-chan agent.ResponseChunk { return make(chan agent.ResponseChunk) }
@@ -436,8 +440,9 @@ func TestNewVoiceAgent_WiresTheScreenDrawing(t *testing.T) {
 	defer s.hub.unsubscribe(ch)
 
 	a := newVoiceAgent(s, nil, nil, nil, "")
-	if a.Point == nil || a.Marks == nil {
-		t.Fatalf("voice agent has Point set = %v, Marks set = %v, want both", a.Point != nil, a.Marks != nil)
+	// Draw was the one of the three this wiring missed: a real session on 2026-09-07 called draw with a sensible circle and got "this session cannot draw on the screen" back, because only the typed /ask agent had ever been given it.
+	if a.Point == nil || a.Marks == nil || a.Draw == nil {
+		t.Fatalf("voice agent has Point set = %v, Marks set = %v, Draw set = %v, want all three", a.Point != nil, a.Marks != nil, a.Draw != nil)
 	}
 
 	a.Point(10, 20, 30, 40, "here")
@@ -457,6 +462,17 @@ func TestNewVoiceAgent_WiresTheScreenDrawing(t *testing.T) {
 	want := []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}, {X: 5, Y: 6, W: 7, H: 8, Label: "2"}}
 	if marks.Kind != "marks" || len(marks.Rects) != 2 || marks.Rects[0] != want[0] || marks.Rects[1] != want[1] {
 		t.Errorf("overlay = %+v, want marks numbered 1 and 2 over the given rects", marks)
+	}
+
+	if err := a.Draw("g", "circle", nil, 590, 299, 100, 100, "there"); err != nil {
+		t.Fatalf("Draw: %v", err)
+	}
+	ev, drawn := waitOverlay(t, ch)
+	if ev.Type != "overlay" {
+		t.Errorf("event type = %q, want overlay", ev.Type)
+	}
+	if drawn.Label != "there" || len(drawn.Rects) != 1 || drawn.Rects[0] != (OverlayRect{X: 590, Y: 299, W: 100, H: 100}) {
+		t.Errorf("overlay = %+v, want a circle labelled there around 590,299 100x100", drawn)
 	}
 }
 
@@ -583,8 +599,8 @@ func TestVoiceTurn_RecordsWhatItCostInTokens(t *testing.T) {
 	if u.Provider != agent.ProviderGemini {
 		t.Errorf("provider = %q, want %q", u.Provider, agent.ProviderGemini)
 	}
-	if u.Model != config.VoiceModel {
-		t.Errorf("model = %q, want the configured voice model %q", u.Model, config.VoiceModel)
+	if u.Model != config.VoiceModel() {
+		t.Errorf("model = %q, want the configured voice model %q", u.Model, config.VoiceModel())
 	}
 	if u.InputTokens != 1200 || u.OutputTokens != 340 || u.TotalTokens != 1540 {
 		t.Errorf("counts = %d in, %d out, %d total, want 1200/340/1540", u.InputTokens, u.OutputTokens, u.TotalTokens)
@@ -788,5 +804,42 @@ func TestEmptyUsage_TellsACountedTurnFromAnUncountedBoundary(t *testing.T) {
 		if emptyUsage(u) {
 			t.Errorf("%s reads as empty, so a turn that did cost something would go unfiled", name)
 		}
+	}
+}
+
+// A run that ended on the server's GoAway is not a failure: the session was closed on purpose so it could be resumed before the server's deadline (measured 2026-09-09, three GoAways in 25 minutes). It is redialed at once and does not count toward giving up, so a long conversation is never abandoned for having lasted.
+func TestVoiceDial_AGoAwayRedialsAtOnceAndIsNotAFailure(t *testing.T) {
+	origDelay, origMax, origAttempts := voiceReconnectDelay, voiceMaxReconnectDelay, voiceMaxConsecutiveFailures
+	voiceReconnectDelay = 200 * time.Millisecond
+	voiceMaxReconnectDelay = 400 * time.Millisecond
+	voiceMaxConsecutiveFailures = 2
+	t.Cleanup(func() {
+		voiceReconnectDelay, voiceMaxReconnectDelay, voiceMaxConsecutiveFailures = origDelay, origMax, origAttempts
+	})
+
+	mic := &voiceFakeMic{ch: make(chan []byte)}
+	spk := &voiceFakeSpeaker{}
+	run := &voiceFailingRunner{goAways: 3, err: errors.New("dial gemini: 401 Unauthorized")}
+
+	s := New(nil, nil, nil, nil)
+	v := NewVoice(s, nil, "")
+	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) { return mic, spk, run, nil }
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/voice/start", v.Start)
+	mux.HandleFunc("/voice/status", v.Status)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	started := time.Now()
+	voicePost(t, srv, "/voice/start").Body.Close()
+	waitState(t, srv, "idle")
+
+	if n := run.calls.Load(); n != 5 {
+		t.Fatalf("Run was called %d times, want 5: three GoAway redials that count for nothing, then two failures", n)
+	}
+	// Three GoAway redials at the ordinary delay would alone take 600ms plus backoff; at once they take almost nothing.
+	if took := time.Since(started); took > 700*time.Millisecond {
+		t.Errorf("the run took %v, want the GoAway redials not to wait out the backoff", took)
 	}
 }

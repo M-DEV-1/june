@@ -114,7 +114,8 @@ func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string)
 		return err
 	}
 	// The brief names the full set: it is the scheduler's own moment, so Done clears it and a snooze re-fires it later. A notice that names none offers only Open (see sendNotice).
-	s.say(Notice{Title: "Morning brief", Body: brief, Place: "tasks", Kind: "brief", Actions: noticeActions})
+	// Open goes to the day's own page, where the brief is written in full (see SetDiaryEntry above and the Days screen); it used to open Tasks with no row, and the card's few lines were the only place the brief could be read (2026-09-09).
+	s.say(Notice{Title: "Morning brief", Body: brief, Place: "days", ID: day, Kind: "brief", Actions: noticeActions})
 	// ask came from OpenActionItems, which already keeps only the user's own work ("Me" or an unnamed owner) — asking about the first one needs no further ownership check here.
 	// The question is answered long after this tick's duty deadline has passed, so the answer is applied on a context that outlives it.
 	if len(ask) > 0 {
@@ -141,56 +142,35 @@ const staleNoticeKind = "stale"
 func (s *Scheduler) askAbout(ctx context.Context, a memory.ActionItem) {
 	body := fmt.Sprintf("%s — %s\n\nOpen since %s. Any progress?", a.Owner, a.Text, a.Raised.Format(dayFormat))
 	n := Notice{Title: "Still open", Body: body, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: staleNoticeKind}
-	keys := make([]string, 0, len(askAnswers))
-	labels := make([]string, 0, len(askAnswers))
 	for _, ans := range askAnswers {
 		n.Actions = append(n.Actions, Action{Key: ans.key, Label: ans.label})
-		keys = append(keys, ans.key)
-		labels = append(labels, ans.key+"="+ans.label)
 	}
 
-	// The waiter is registered before the notice goes out, so an answer pressed the instant the card is drawn still has somewhere to land, and released however this returns, so an unanswered question leaves nothing in the registry.
-	answered, release := awaitAnswer(noticeKey(n), keys)
-	defer release()
+	// Applying the answer is handed to Ask rather than done after it returns, so a button pressed once this goroutine has given up still lands on the item: Ask registers it against this notice and Act runs it. Nobody answering changes nothing, and the item comes round again on another morning.
+	Ask(n, s.askWait, s.ask, func(chosen string) error { return s.applyStaleAnswer(ctx, a.NoteID, chosen) })
+}
 
-	var chosen string
-	if sendNotice(n) {
-		timer := time.NewTimer(s.askWait)
-		defer timer.Stop()
-		select {
-		case chosen = <-answered:
-		case <-timer.C:
-			// Nobody answered the card. Nothing is applied, and the item comes round again on another morning.
-			return
-		}
-	} else {
-		release()
-		if s.ask == nil {
-			return
-		}
-		var err error
-		chosen, err = s.ask(n.Title, body, labels)
-		if err != nil {
-			slog.Debug("could not ask about a stale action item", "note_id", a.NoteID, "error", err)
-			return
-		}
-	}
+// applyStaleAnswer records one answer to the stale-item question against the item it was asked about. Input: the note id and the key of the button pressed. Output: an error when the write failed, which the card reports as the press not having taken; a key none of the answers names changes nothing and is not an error, since the card can only offer these three.
+func (s *Scheduler) applyStaleAnswer(ctx context.Context, noteID int64, chosen string) error {
 	for _, ans := range askAnswers {
 		if ans.key != chosen {
 			continue
 		}
 		if ans.status != "" {
-			if err := s.store.SetActionStatus(ctx, a.NoteID, ans.status); err != nil {
-				slog.Warn("could not apply the answer to a stale action item", "note_id", a.NoteID, "error", err)
+			if err := s.store.SetActionStatus(ctx, noteID, ans.status); err != nil {
+				slog.Warn("could not apply the answer to a stale action item", "note_id", noteID, "error", err)
+				return err
 			}
 		}
 		if ans.priority != "" {
-			if err := s.store.SetActionPriority(ctx, a.NoteID, ans.priority); err != nil {
-				slog.Warn("could not apply the answer to a stale action item", "note_id", a.NoteID, "error", err)
+			if err := s.store.SetActionPriority(ctx, noteID, ans.priority); err != nil {
+				slog.Warn("could not apply the answer to a stale action item", "note_id", noteID, "error", err)
+				return err
 			}
 		}
-		return
+		return nil
 	}
+	return nil
 }
 
 // staleAfter is how long an action item may sit open before the brief stops restating it and starts asking how it is going. Roughly a working week: long enough that repeating it would have already worn out its welcome, short enough that the question still lands while the work is live.

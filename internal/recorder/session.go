@@ -248,3 +248,8 @@ func withMeetingDuration(text string, startedAt, stoppedAt time.Time) string {
 func notifySend(title, body string) {
 	proactive.Notify("audio-input-microphone", title, body)
 }
+
+// notifySendAt posts a notice whose card opens the window at place and id, through the same path as notifySend.
+func notifySendAt(title, body, place, id string) {
+	proactive.NotifyAt("audio-input-microphone", title, body, place, id)
+}

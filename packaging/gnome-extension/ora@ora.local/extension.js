@@ -133,7 +133,7 @@ export default class OraWindowRaiserExtension extends Extension {
         invocation.return_value(new GLib.Variant('(b)', [raised]));
     }
 
-    // Lists every open window. Actors whose meta_window is null — one mid-creation, or a helper the compositor owns — are left out, because reading one would throw and take Available, which calls this, down with it. Input: the invocation. Output: none; a JSON string encoding an array of {id, pid, wm_class, title, focused}, one entry per open window, is returned over the bus if the caller is allowed.
+    // Lists every open window. Actors whose meta_window is null — one mid-creation, or a helper the compositor owns — are left out, because reading one would throw and take Available, which calls this, down with it. Input: the invocation. Output: none; a JSON string encoding an array of {id, pid, wm_class, title, focused, x, y, width, height}, the last four being the window's frame in logical screen pixels, one entry per open window, is returned over the bus if the caller is allowed.
     ListAsync(params, invocation) {
         if (!callerIsOra(invocation)) {
             return;
@@ -141,13 +141,21 @@ export default class OraWindowRaiserExtension extends Extension {
         const windows = global.get_window_actors()
             .map(actor => actor.meta_window)
             .filter(win => win)
-            .map(win => ({
-                id: win.get_id(),
-                pid: win.get_pid(),
-                wm_class: win.get_wm_class(),
-                title: win.get_title(),
-                focused: win.has_focus(),
-            }));
+            .map(win => {
+                // The frame rectangle is the one thing nothing else on a Wayland desk can say: a client on the accessibility bus reports its widgets relative to its window and its window at 0,0, so the daemon needs this to turn a listing into screen pixels.
+                const frame = win.get_frame_rect();
+                return {
+                    id: win.get_id(),
+                    pid: win.get_pid(),
+                    wm_class: win.get_wm_class(),
+                    title: win.get_title(),
+                    focused: win.has_focus(),
+                    x: frame.x,
+                    y: frame.y,
+                    width: frame.width,
+                    height: frame.height,
+                };
+            });
         invocation.return_value(new GLib.Variant('(s)', [JSON.stringify(windows)]));
     }
 }

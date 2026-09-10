@@ -115,11 +115,21 @@ func TestAskText_KeepsTheHandshakeWhenTheQuestionNamesNoScreenTask(t *testing.T)
 	if _, err := a.askText(t.Context(), "gemini-test", nil, "what did we settle on for the venue"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got[0].SystemInstruction), "Talk like a sharp friend") {
+	if !strings.Contains(string(got[0].SystemInstruction), "composed, dry-witted aide") {
 		t.Errorf("round 0 must still carry the whole handshake, got %d bytes", len(got[0].SystemInstruction))
 	}
 	if !strings.Contains(string(got[0].Tools), "query_memory") {
 		t.Error("round 0 must still offer the memory tools")
+	}
+}
+
+// The persona is a composed, dry, understated aide: calm and precise, British in rhythm rather than in costume. It never says "sir" and never plays the butler, however Jarvis-like the delivery.
+func TestSystemInstruction_PersonaIsDryAndNeverSaysSir(t *testing.T) {
+	got := systemInstructionStable("linux", "amd64", "sh", 20)
+	for _, want := range []string{"composed, dry-witted aide", "understated", "never \"sir\"", "done only when a tool result this turn says so"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("persona lacks %q", want)
+		}
 	}
 }
 

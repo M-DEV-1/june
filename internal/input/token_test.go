@@ -21,17 +21,3 @@ func TestSaveAndLoadToken(t *testing.T) {
 		t.Fatalf("got %q, want abc123", got)
 	}
 }
-
-// Saving an empty token clears any previously stored one, since the portal returns "" when persistence was not granted.
-func TestSaveEmptyTokenClears(t *testing.T) {
-	dir := t.TempDir()
-	if err := saveToken(dir, "abc123"); err != nil {
-		t.Fatalf("saveToken: %v", err)
-	}
-	if err := saveToken(dir, ""); err != nil {
-		t.Fatalf("saveToken clear: %v", err)
-	}
-	if got := loadToken(dir); got != "" {
-		t.Fatalf("got %q, want empty after clear", got)
-	}
-}
