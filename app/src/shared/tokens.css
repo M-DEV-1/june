@@ -40,43 +40,44 @@
 }
 
 [data-theme="dark"] {
-    --background: #1b1c20;
-    --foreground: #e8e9ec;
-    --card: #26282d;
-    --card-foreground: #e8e9ec;
-    --popover: #2d3036;
-    --popover-foreground: #e8e9ec;
+    /* Midnight black: the page is near-black with a hint of blue rather than graphite, the sidebar a step darker still, and every raised surface a step lighter, so depth comes from the ramp and not from borders alone. */
+    --background: #0a0a0d;
+    --foreground: #ededf0;
+    --card: #131317;
+    --card-foreground: #ededf0;
+    --popover: #19191e;
+    --popover-foreground: #ededf0;
     --primary: #9d90ff;
     --primary-foreground: #17142e;
-    --secondary: #30333a;
-    --secondary-foreground: #e8e9ec;
+    --secondary: #1c1c22;
+    --secondary-foreground: #ededf0;
     --muted: rgba(255, 255, 255, .05);
-    --muted-foreground: #979ba4;
-    --accent: rgba(255, 255, 255, .055);
-    --accent-foreground: #e8e9ec;
+    --muted-foreground: #8e919b;
+    --accent: rgba(255, 255, 255, .06);
+    --accent-foreground: #ededf0;
     --destructive: #f08279;
     --work: #e0b341;
-    --border: rgba(255, 255, 255, .09);
-    --border-strong: rgba(255, 255, 255, .16);
-    --input: rgba(255, 255, 255, .16);
+    --border: rgba(255, 255, 255, .08);
+    --border-strong: rgba(255, 255, 255, .14);
+    --input: rgba(255, 255, 255, .14);
     --ring: #9d90ff;
-    --hover: rgba(255, 255, 255, .055);
-    --selected: rgba(255, 255, 255, .14);
-    --sunken: rgba(255, 255, 255, .05);
-    --shade-1: rgba(0, 0, 0, .3);
-    --shade-2: rgba(0, 0, 0, .45);
-    --shade-3: rgba(0, 0, 0, .6);
+    --hover: rgba(255, 255, 255, .06);
+    --selected: rgba(255, 255, 255, .11);
+    --sunken: rgba(255, 255, 255, .04);
+    --shade-1: rgba(0, 0, 0, .4);
+    --shade-2: rgba(0, 0, 0, .55);
+    --shade-3: rgba(0, 0, 0, .7);
     /* Dark elevation needs more than one bigger shadow alpha: a soft top highlight (light source from above) stacked with the drop shadow, growing at each step, plus a hairline ring on md and lg to separate a floating surface from a background that is barely darker than it. */
-    --shadow-sm: inset 0 1px 0 rgba(255, 255, 255, .05), 0 1px 2px rgba(0, 0, 0, .35);
-    --shadow-md: inset 0 1px 0 rgba(255, 255, 255, .06), 0 6px 16px -4px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .07);
-    --shadow-lg: inset 0 1px 0 rgba(255, 255, 255, .07), 0 20px 44px -12px rgba(0, 0, 0, .7), 0 0 0 1px rgba(255, 255, 255, .09);
+    --shadow-sm: inset 0 1px 0 rgba(255, 255, 255, .05), 0 1px 2px rgba(0, 0, 0, .45);
+    --shadow-md: inset 0 1px 0 rgba(255, 255, 255, .06), 0 6px 16px -4px rgba(0, 0, 0, .65), 0 0 0 1px rgba(255, 255, 255, .07);
+    --shadow-lg: inset 0 1px 0 rgba(255, 255, 255, .07), 0 20px 44px -12px rgba(0, 0, 0, .8), 0 0 0 1px rgba(255, 255, 255, .09);
     --shadow-xl: var(--shadow-lg);
-    --sidebar: #141518;
-    --sidebar-foreground: #e8e9ec;
+    --sidebar: #050507;
+    --sidebar-foreground: #ededf0;
     --sidebar-primary: #9d90ff;
     --sidebar-primary-foreground: #17142e;
-    --sidebar-accent: rgba(255, 255, 255, .055);
-    --sidebar-accent-foreground: #e8e9ec;
-    --sidebar-border: rgba(255, 255, 255, .09);
+    --sidebar-accent: rgba(255, 255, 255, .06);
+    --sidebar-accent-foreground: #ededf0;
+    --sidebar-border: rgba(255, 255, 255, .08);
     --sidebar-ring: #9d90ff;
 }

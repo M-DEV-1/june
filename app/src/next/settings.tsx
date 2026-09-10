@@ -14,17 +14,19 @@ import {
   usePreviewVoiceMutation,
   useSetCaptureMutation,
   useSetClaudeUsageFromLoginMutation,
+  useSetLiveModelMutation,
   useSetVoiceMutation,
   useSettingsQuery,
   useTrackerQuery,
   useUsageQuery,
   useVoicesQuery,
+  type LiveModel,
   type SettingsView,
   type Usage,
   type UsageWindow,
   type Voice,
 } from "./api";
-import { bytes, cachedInput, compact, hhmm, hotkeyKeys, perQuestion, tokens, took } from "./format";
+import { bytes, cachedInput, compact, hhmm, hotkeyKeys, modelEffort, perQuestion, tokens, took } from "./format";
 import { Blank, Group, HEAD, PageHeader, Reading, Scroller, SectionHeading, TAIL, useWide } from "./parts";
 import { settings as settingsUi, ui, useAppDispatch, useAppSelector, type Theme } from "./store";
 
@@ -155,16 +157,28 @@ function errorSentence(e: unknown): string {
 /** The voice picker: a single select showing the current voice and the trait that says how it sounds, with every one of Gemini Live's thirty prebuilt voices behind it the same way, and a play button beside it that previews whichever voice is currently picked. Input: none — it reads GET /voices itself. Output: the section. */
 function VoiceSection() {
   const dispatch = useAppDispatch();
-  const { data: voices = [] } = useVoicesQuery();
+  const { data } = useVoicesQuery();
+  const voices = data?.voices ?? [];
+  const models = data?.models ?? [];
   const [setVoice] = useSetVoiceMutation();
+  const [setLiveModel] = useSetLiveModelMutation();
   const [previewVoice, { isLoading: playing }] = usePreviewVoiceMutation();
   const current = voices.find((v) => v.current);
+  const currentModel = models.find((m) => m.current);
 
   const pick = async (voice: Voice) => {
     try {
       await setVoice(voice.name).unwrap();
     } catch {
       dispatch(ui.noticed("Could not change the voice"));
+    }
+  };
+
+  const pickModel = async (model: LiveModel) => {
+    try {
+      await setLiveModel(model.name).unwrap();
+    } catch {
+      dispatch(ui.noticed("Could not change the voice model"));
     }
   };
 
@@ -183,6 +197,30 @@ function VoiceSection() {
       <SectionHeading>Voice</SectionHeading>
       <p className="mb-3 text-meta text-muted-foreground">Heard the next time a live voice session starts, not the one already running — the daemon reads this when it dials.</p>
       <Group>
+        {models.length > 0 ? (
+          <Row label="Model">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label="Model" className="gap-1 px-1.5 font-normal text-muted-foreground hover:text-foreground">
+                  <span className="text-foreground">{currentModel ? currentModel.label : "not set"}</span>
+                  <ChevronDown className="opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              {/* Two models only, so nothing here scrolls. Each trait is a full sentence about the trade — latency against tone — so it sits on its own line under the label rather than crowding beside it the way a voice's one-word trait does. */}
+              <DropdownMenuContent align="end" className="w-72">
+                {models.map((m) => (
+                  <DropdownMenuItem key={m.name} onClick={() => void pickModel(m)} className="items-start gap-2 whitespace-nowrap">
+                    <Check className={`mt-0.5 size-3.5 shrink-0 ${m.current ? "" : "invisible"}`} />
+                    <span className="flex flex-col whitespace-normal">
+                      <span className={m.current ? "font-medium text-foreground" : undefined}>{m.label}</span>
+                      <span className="text-meta text-muted-foreground">{m.trait}</span>
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </Row>
+        ) : null}
         {voices.length === 0 ? (
           <p className="px-3.5 py-3 text-ui text-muted-foreground">No voices reported.</p>
         ) : (
@@ -546,7 +584,11 @@ export function SettingsScreen() {
                                 onClick={() => void pickModel(b.id, m)}
                                 className={`rounded-full px-2.5 py-1 text-meta outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${m === (b.model || b.models[0]) ? "bg-primary/15 text-foreground" : "bg-muted text-muted-foreground hover:bg-hover hover:text-foreground"}`}
                               >
-                                {m}
+                                {modelEffort(m).model}
+                                {/* Antigravity has no effort setting of its own: it publishes one model id per effort, so the suffix is the dial and is drawn as its own word rather than buried in the id. */}
+                                {modelEffort(m).effort ? (
+                                  <span className="ml-1 opacity-60">· {modelEffort(m).effort}</span>
+                                ) : null}
                               </button>
                             ))
                           )}

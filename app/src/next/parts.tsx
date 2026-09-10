@@ -189,13 +189,13 @@ export function Outline({ sections, active, onPick }: { sections: { id: string; 
  *
  * Input: what the header holds, whether the pane is wide, and whether the page under it has a rail. Output: the bar.
  */
-export function PageHeader({ children, wide = false, railed = false }: { children: ReactNode; wide?: boolean; railed?: boolean }) {
+export function PageHeader({ children, wide = false, railed = false, full = false }: { children: ReactNode; wide?: boolean; railed?: boolean; full?: boolean }) {
+  const row = <div className="flex min-w-0 items-center gap-1">{children}</div>;
   return (
     <header className="relative flex h-12 shrink-0 items-center border-b">
       <SidebarTrigger className="absolute left-2 z-10 text-muted-foreground" />
-      <Reading wide={wide} rail={wide && railed ? <div aria-hidden /> : undefined}>
-        <div className="flex min-w-0 items-center gap-1">{children}</div>
-      </Reading>
+      {/* A page laid out as two columns rather than one reading column, Tasks, has nothing for the header to line up with but the pane's own edges. */}
+      {full ? <div className="w-full pl-12 pr-6">{row}</div> : <Reading wide={wide} rail={wide && railed ? <div aria-hidden /> : undefined}>{row}</Reading>}
     </header>
   );
 }

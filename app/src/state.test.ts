@@ -6,8 +6,8 @@ import {
   askConversation,
   CONVERSATION_MS,
   chipLabel,
-  dotClass,
   dotLabel,
+  faceState,
   failRunningStep,
   isJobLive,
   jobGoal,
@@ -890,35 +890,23 @@ describe("placeholder", () => {
   });
 });
 
-describe("dotClass", () => {
-  it("is amber while the key is held", () => {
-    expect(dotClass(view({ dictating: true }), true)).toBe("on");
-  });
-
-  // Space alone starts dictation and Shift+Space starts a live voice session, so a slipped modifier must be unmistakable: the dot pulses for the session's whole run, not only while it thinks.
-  it("pulses amber while the session listens or thinks, and pulses green while it speaks", () => {
-    expect(
-      dotClass(view({ voice: "voice-1", voiceState: "listening" }), true),
-    ).toBe("on pulse");
-    expect(
-      dotClass(view({ voice: "voice-1", voiceState: "speaking" }), true),
-    ).toBe("ok pulse");
-    expect(
-      dotClass(view({ voice: "voice-1", voiceState: "thinking" }), true),
-    ).toBe("on pulse");
-  });
-
-  it("falls back to the ask states and to the daemon's health", () => {
-    expect(dotClass(view({ state: "asking" }), true)).toBe("on");
-    expect(dotClass(view({ state: "answered" }), true)).toBe("ok");
-    expect(dotClass(view(), true)).toBe("");
-    expect(dotClass(view(), false)).toBe("off");
+describe("faceState", () => {
+  // The face beside the input names the same state the dot did, so the two never disagree.
+  it("names the state the input is in", () => {
+    expect(faceState(view({ dictating: true }), true)).toBe("listening");
+    expect(faceState(view({ voice: "voice-1", voiceState: "speaking" }), true)).toBe("speaking");
+    expect(faceState(view({ voice: "voice-1", voiceState: "thinking" }), true)).toBe("thinking");
+    expect(faceState(view({ voice: "voice-1", voiceState: "listening" }), true)).toBe("listening");
+    expect(faceState(view({ state: "asking" }), true)).toBe("thinking");
+    expect(faceState(view({ state: "answered" }), true)).toBe("done");
+    expect(faceState(view(), true)).toBe("watching");
+    expect(faceState(view(), false)).toBe("asleep");
   });
 });
 
 describe("dotLabel", () => {
-  // The dot's five states differ only by colour, so the label is the only thing a screen reader gets and the only thing a hover tooltip can say. It has to walk the same branches in the same order as dotClass, or the colour and the words disagree.
-  it("names every state dotClass distinguishes, in the same order", () => {
+  // The dot's five states differ only by colour, so the label is the only thing a screen reader gets and the only thing a hover tooltip can say. It has to walk the same branches in the same order as faceState, or the face and the words disagree.
+  it("names every state faceState distinguishes, in the same order", () => {
     expect(dotLabel(view({ dictating: true }), true)).toBe("Listening");
     expect(
       dotLabel(view({ voice: "voice-1", voiceState: "listening" }), true),
@@ -1025,13 +1013,13 @@ describe("voice", () => {
     expect(v.voiceState).toBe("idle");
   });
 
-  it("the placeholder and the dot go back to their resting look once the session is idle", () => {
+  it("the placeholder and the face go back to their resting look once the session is idle", () => {
     const v = say(live(), "state", "idle");
     expect(placeholder(v)).toBe(RESTING_PLACEHOLDER);
-    expect(dotClass(v, true)).toBe("");
+    expect(faceState(v, true)).toBe("watching");
   });
 
-  it("a state event moves the dot", () => {
+  it("a state event moves the face", () => {
     expect(say(live(), "state", "speaking").voiceState).toBe("speaking");
   });
 

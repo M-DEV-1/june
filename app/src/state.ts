@@ -2,6 +2,7 @@
 
 import { truncateAtWord } from "./shared/errorline";
 import { noticeActionSuffix } from "./shared/notice";
+import { type OraState } from "./shared/faces";
 import { THEME_KEY, themeChoice, type Theme } from "./shared/theme";
 import type { DaemonEvent, Notice as WireNotice } from "./daemon";
 import { renderLevelEvent, type LevelDetail } from "./waveform";
@@ -363,13 +364,13 @@ export function placeholder(v: View): string {
   return ASK_PLACEHOLDER;
 }
 
-/** The classes on the status dot. Input: the view and whether the daemon answered its last probe. Output: "on" for amber, "ok" for green, "off" for red, "" for the resting grey. "pulse" is added for the whole time a live voice session runs, not only while it thinks: a session opened by a slipped Shift+Space has to be unmistakable at a glance, not just distinguishable once you notice the colour. */
-export function dotClass(v: View, daemonUp: boolean): string {
-  if (v.dictating) return "on";
-  if (v.voice) return v.voiceState === "speaking" ? "ok pulse" : "on pulse";
-  if (v.state === "asking") return "on";
-  if (v.state === "answered") return "ok";
-  return daemonUp ? "" : "off";
+/** Which of Ora's faces the hover window shows beside the input, from the same signals as dotLabel. Input: the view and whether the daemon is reachable. Output: the state, see src/shared/faces.ts. */
+export function faceState(v: View, daemonUp: boolean): OraState {
+  if (v.dictating) return "listening";
+  if (v.voice) return v.voiceState === "speaking" ? "speaking" : v.voiceState === "thinking" ? "thinking" : "listening";
+  if (v.state === "asking") return "thinking";
+  if (v.state === "answered") return "done";
+  return daemonUp ? "watching" : "asleep";
 }
 
 /** The same status the dot shows, in words, used as its title and aria-label. The dot is a 9px circle whose five states differ only by colour, which tells a screen reader nothing and tells a sighted user only what they happened to learn elsewhere. Input: the view and whether the daemon is reachable. Output: a short phrase naming the current state. */
@@ -995,7 +996,8 @@ export function step(
 
     case "noticeGone":
       // The pointer being over the card is what pauses its timer, and a timer armed before the pointer arrived can still fire; a held card stays up until it is let go.
-      if (view.noticeHeld) return { view };
+      // A card that asked a question is the exception: its answer window closes on the daemon's clock whatever the pointer is doing, so holding it open would leave a button that answers "Could not do that".
+      if (view.noticeHeld && !view.notice?.expires) return { view };
       return {
         view: {
           ...view,

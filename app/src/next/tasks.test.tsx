@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 
-/** Tests for the Tasks screen: the one wide list with no rail beside the sidebar, the picker in the header that names the task the composer is aimed at, the two status changes the daemon takes, and the composer that sends the task itself along with the question. */
+/** Tests for the Tasks screen: the one wide list with no rail beside the sidebar, the detail beside it that names the task the composer is aimed at, the two status changes the daemon takes, and the composer that sends the task itself along with the question. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { ConversationView, Task } from "./api";
-import { openPicker, renderApp } from "./testing";
+import { renderApp } from "./testing";
 
 afterEach(() => {
   cleanup();
@@ -93,35 +93,15 @@ describe("the list", () => {
   });
 });
 
-describe("the picker in the header", () => {
-  it("closes on Escape and gives the keyboard back to the button that opened it", async () => {
+describe("the detail beside the list", () => {
+  it("names the picked task as its heading and says when and where it was raised", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    const trigger = screen.getByRole("button", { name: /Choose a task/ });
-    await userEvent.click(trigger);
-    await screen.findByRole("dialog");
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(document.activeElement).toBe(trigger);
-  });
-
-  it("names the task the composer is aimed at and picks another", async () => {
-    const { store } = renderApp({ tasks, turns: { c1: conversation } }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    const picker = await openPicker("Choose a task");
-    await userEvent.click(picker.getByRole("option", { name: /Book the room/ }));
-    expect(store.getState().ui.taskId).toBe("13");
-    expect(await screen.findByRole("button", { name: /Choose a task.*Book the room/ })).toBeDefined();
-  });
-
-  it("narrows both the picker and the list behind it as the search is typed", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    const picker = await openPicker("Choose a task");
-    await userEvent.type(screen.getByLabelText("Search tasks"), "room");
-    await waitFor(() => expect(list().queryByText("Book the flight")).toBeNull());
-    expect(list().getByText("Book the room")).toBeDefined();
-    expect(picker.getAllByRole("option")).toHaveLength(1);
+    await userEvent.click(list().getByText("Send the TCFD file"));
+    const detail = within(await screen.findByRole("region", { name: "About this task" }));
+    expect(detail.getByRole("heading", { name: "Send the TCFD file" })).toBeDefined();
+    expect(detail.getByText(/TCFD call/)).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Choose a task/ })).toBeNull();
   });
 });
 
@@ -221,7 +201,7 @@ describe("changing a task's status", () => {
 });
 
 describe("talking to a task", () => {
-  it("shows the picked task's conversation under the list", async () => {
+  it("shows the picked task's conversation beside the list", async () => {
     renderApp({ tasks, turns: { c1: conversation } }, { place: "tasks" });
     expect(await screen.findByText("which airline?")).toBeDefined();
   });
@@ -256,12 +236,12 @@ describe("talking to a task", () => {
     await waitFor(() => expect(store.getState().ui.taskChats["12"]).toBe("new"));
   });
 
-  it("shows only the composer, with the empty line as its placeholder, for a task that has no conversation yet", async () => {
+  it("says nothing has been said yet, in the detail, for a task that has no conversation", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     await userEvent.click(list().getByText("Send the TCFD file"));
-    expect(await screen.findByPlaceholderText("Nothing said about “Send the TCFD file” yet.")).toBeDefined();
-    expect(screen.queryByText("Pick a task above to ask about it.")).toBeNull();
+    expect(await screen.findByText("Nothing said about “Send the TCFD file” yet.")).toBeDefined();
+    expect(screen.getByPlaceholderText("Say something about this task…")).toBeDefined();
   });
 });
 

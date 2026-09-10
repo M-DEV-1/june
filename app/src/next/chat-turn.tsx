@@ -20,6 +20,7 @@ import { ReplyMeta } from "./chat-reply";
 import { ThreadRail } from "./chat-rail";
 import { JobTurn } from "./chat-job";
 import { WorkingGrid } from "./working-grid";
+import { Face } from "./face";
 
 /** What the question in flight shows while it runs: the tools called so far as a list of steps down a rule, and under them the dot grid — the one shape that means Ora is busy, whether nothing has arrived yet or the answer is still streaming in. Input: the run. Output: the block. A tool step already says what it did, so the run's status words are left off when they only repeat the last one. */
 function Working({ run }: { run: Run }) {
@@ -48,9 +49,12 @@ function Working({ run }: { run: Run }) {
           </div>
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5">
-          {line ? <p className="text-muted-foreground">{line}</p> : null}
-          <WorkingGrid />
+        <div className="flex gap-2.5">
+          <Face state="thinking" className="text-micro" />
+          <div className="flex flex-col gap-1.5">
+            {line ? <p className="text-muted-foreground">{line}</p> : null}
+            <WorkingGrid />
+          </div>
         </div>
       )}
     </>

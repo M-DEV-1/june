@@ -44,6 +44,29 @@ describe("Meetings", () => {
     expect(picker.getByRole("option", { name: /TCFD statement pattern analysis/ })).toBeDefined();
   });
 
+  it("deletes a meeting whose minutes are not worth keeping, once the question is answered", async () => {
+    const { calls } = renderApp({ meetings }, { place: "meetings" });
+    await screen.findByRole("heading", { name: "TCFD statement pattern analysis" });
+
+    await userEvent.click(screen.getByRole("button", { name: /^Delete/ }));
+    // Nothing is removed on the press alone: a write-up is not recoverable, so the question is asked first.
+    expect(calls.find((c) => c.method === "DELETE")).toBeUndefined();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Delete it" }));
+    await waitFor(() => expect(calls.find((c) => c.method === "DELETE" && c.path === "/meetings/m1")).toBeDefined());
+  });
+
+  it("keeps the meeting when the question is dismissed", async () => {
+    const { calls } = renderApp({ meetings }, { place: "meetings" });
+    await screen.findByRole("heading", { name: "TCFD statement pattern analysis" });
+
+    await userEvent.click(screen.getByRole("button", { name: /^Delete/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Keep it" }));
+
+    expect(calls.find((c) => c.method === "DELETE")).toBeUndefined();
+    expect(screen.getByRole("heading", { name: "TCFD statement pattern analysis" })).toBeDefined();
+  });
+
   it("reads the minutes rather than drawing their markdown", async () => {
     renderApp({ meetings }, { place: "meetings" });
     expect(await screen.findByText("Priya will send the file")).toBeDefined();

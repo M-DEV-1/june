@@ -38,10 +38,7 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 }
 
 .W .in { display: flex; align-items: center; gap: 14px; padding: var(--pad); border-bottom: 1px solid var(--line); }
-.W .in .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
-.W .in .dot.on { background: var(--busy); }
-.W .in .dot.ok { background: var(--ok); }
-.W .in .dot.off { background: var(--bad); }
+.W .in .face { flex: none; padding: 2px 6px; border: 1px solid var(--border-strong); border-radius: 4px; font: 500 11px/1.2 var(--mono); color: var(--fg); white-space: nowrap; }
 /* DESIGN.md's text-lead: the size a document's opening paragraph reads at, used here for the composer's own typed line, at the 500 weight the design system uses to pick a line out rather than just read it. */
 .W .in .q { flex: 1; font-size: 17px; line-height: 1.55; font-weight: 500; letter-spacing: -.008em; min-width: 0; border: 0; outline: 0; background: transparent; color: inherit; font-family: inherit; padding: 0; }
 .W .in .q::placeholder { color: var(--mute); font-weight: 400; }
@@ -68,7 +65,6 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 
 /* The empty state before anything is asked: one calm row, about 64px tall. No divider and no footer until there is text in the input or a turn on screen (see .bare in main.ts's hasContent). */
 .W.bare .in { padding: 17px 24px; border-bottom: none; }
-.W.bare .foot { display: none; }
 
 /* The thread stops growing at six tenths of the screen it is on (--thread-max, set by main.ts from the placement of each open) and scrolls inside itself past that, so an answer that keeps coming never walks the card up the screen. */
 .W .thread { padding: var(--pad); display: grid; gap: 10px; max-height: var(--thread-max, 640px); overflow-y: auto; }
@@ -166,17 +162,11 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .W .evd .h .tw { margin-left: auto; font: 400 13px/1.45 var(--mono); flex: none; }
 /* An answer can cite eight sources; the list scrolls inside the fold-out rather than growing the window past the bottom of the screen. */
 .W .evd .items { max-height: 300px; overflow-y: auto; }
-.W .evd .body { padding: 14px 16px; font-size: 15px; line-height: 1.62; letter-spacing: -.003em; color: var(--fg); border-top: 1px solid var(--line); }
+.W .evd .body { padding: 14px 16px; font-size: 15px; line-height: 1.62; letter-spacing: -.003em; color: var(--fg); border-top: 1px solid var(--line); white-space: pre-wrap; }
 .W .evd .body .im { font-size: 13px; line-height: 1.45; color: var(--mute); margin-bottom: 6px; }
 .W .evd .body .im b { color: var(--fg); font-weight: 500; }
 .W .evd mark { background: var(--mark); color: inherit; padding: 0 2px; border-radius: 3px; }
 
-/* The footer is the quietest line on the card: smallest type allowed, muted colour. */
-.W .foot { display: flex; align-items: center; gap: 6px; padding: 12px 24px 14px; font: 400 13px/1.45 var(--mono); color: var(--mute); border-top: 1px solid var(--line); }
-/* The daemon tag sits alone at the right end of the footer, in the same mono/13px the tag always read at. */
-.W .foot .tag { margin-left: auto; flex: none; font-family: var(--mono); }
-/* The three key hints ("↵ ask", "ctrl↵ new thread", "esc close") are drawn as keycaps: DESIGN.md's text-micro, uppercase, on the sunken wash, the same rounded-xs chip the main window's own hotkey row (settings.tsx) uses for a shortcut. */
-.W .foot span:not(.tag) { font: 500 11px/1.3 var(--body); letter-spacing: .02em; text-transform: uppercase; color: var(--mute); background: var(--well); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
 
 /* The three bars that stand for the microphone while the space bar is held. They sit in the input row all the time and only show once main.ts puts .holding on it, which it does without rebuilding the card so the key release still reaches the listener that started the recording. */
 .W .in .wave { display: none; align-items: center; gap: 3px; height: 18px; flex: none; }
@@ -186,10 +176,9 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .W .in .wave i:nth-child(3) { animation-delay: 300ms; }
 @keyframes wave { 0%, 100% { height: 7px; } 50% { height: 17px; } }
 /* The dot breathes for the whole time a live voice session is running, amber while listening or thinking and green while speaking, so the session stays visible at a glance rather than only readable by its steady colour. */
-.W .in .dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) {
-  .W .in .wave i, .W .in .dot.pulse { animation: none; }
+  .W .in .wave i { animation: none; }
 }
 
 /* The notice card: one of Ora's own moments — the morning brief, the evening close, a task lifted from a meeting — arriving on the daemon's event stream. It is the same surface as the card under it, with its answers on it, so it is dealt with where it appears: no separate desktop banner, nowhere else to go. Shown on its own it sits under the top bar at the right, beside the tray where Ora's indicator is, which is where the user asked for it (see noticePlacement in winplace.ts). */
@@ -216,7 +205,8 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .N .nh { font: 500 11px/1.3 var(--body); letter-spacing: .02em; color: var(--mute); margin-bottom: 2px; }
 /* The title is cut off after two lines for the same reason the body is cut off after three: a card is read in a glance, and a meeting title long enough to wrap five times would otherwise push the buttons off the bottom of the card. */
 .N .nt { font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.N .nb { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--mute); }
+/* The body is shown whole and scrolls within the card's cap rather than being cut after three lines: a meeting brief or a morning brief is several paragraphs, and cut to three lines it could not be read anywhere until the app window was opened (2026-09-09). */
+.N .nb { max-height: 200px; overflow: auto; white-space: pre-wrap; color: var(--mute); }
 /* The buttons, one row, ghost until hovered: Done, the three snoozes and Open, in the order the desktop banner offered them. */
 .N .nr { display: flex; gap: 4px; margin: 10px -6px -4px; flex-wrap: wrap; }
 .N .na { font: 500 12px/1.4 var(--body); color: var(--fg); background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
@@ -224,6 +214,17 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .N .na:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* One muted line under the buttons when a press did not take: the daemon answered with an error or could not be reached, and the card stays up to be pressed again (see actOnNotice in main.ts). */
 .N .nf { color: var(--mute); margin-top: 6px; }
+/* The close cross, in the card's top corner and out of the text's way: shown faintly so it never competes with the title, full strength once the pointer is on the card. The card is small and the pointer is already on it to read it, so a 20px target inside the padding is enough. */
+.N .nx { position: absolute; top: 4px; right: 5px; width: 20px; height: 20px; padding: 0; display: flex; align-items: center; justify-content: center; font: 400 15px/1 var(--body); color: var(--mute); background: transparent; border: 0; border-radius: 5px; cursor: pointer; opacity: .35; transition: opacity 120ms ease, background-color 120ms ease; }
+.N:hover .nx { opacity: 1; }
+.N .nx:hover { background: var(--well); }
+.N .nx:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+/* How long is left to answer a question, drawn rather than written: a hairline under the buttons that empties left to right as the window runs out. The browser runs the animation off the duration the card sets, so it stays true without anything ticking. */
+.N .np { height: 2px; margin-top: 8px; border-radius: 1px; background: var(--line); overflow: hidden; }
+.N .np > i { display: block; height: 100%; background: var(--mute); transform-origin: left center; animation-name: nEmpty; animation-timing-function: linear; animation-fill-mode: forwards; }
+@keyframes nEmpty { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+/* Someone who has asked for less motion still needs to see the window closing, so the bar steps down instead of sliding. */
+@media (prefers-reduced-motion: reduce) { .N .np > i { animation-timing-function: steps(4, end); } }
 /* Stacked over an open card the notice sits above it with a little air; on its own it has the body's padding around it and nothing else. */
 .N.down { margin-bottom: 8px; }
 .N.up { margin-top: 8px; }

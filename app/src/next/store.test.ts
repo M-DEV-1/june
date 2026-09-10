@@ -583,3 +583,25 @@ describe("the stream coming back", () => {
     invalidate.mockRestore();
   });
 });
+
+describe("what the face is told", () => {
+  it("keeps the voice state, recording and dreaming off their events, and how the last question ended", () => {
+    const store = makeStore();
+    store.dispatch(progress.eventArrived({ id: "v1", type: "state", text: "speaking" }));
+    expect(store.getState().progress.voice).toBe("speaking");
+    store.dispatch(progress.eventArrived({ id: "v1", type: "state", text: "idle" }));
+    expect(store.getState().progress.voice).toBeUndefined();
+    store.dispatch(progress.eventArrived({ id: "", type: "recording", text: "on" }));
+    store.dispatch(progress.eventArrived({ id: "", type: "dreaming", text: "on" }));
+    expect(store.getState().progress.recording).toBe(true);
+    expect(store.getState().progress.dreaming).toBe(true);
+    store.dispatch(progress.eventArrived({ id: "", type: "recording", text: "off" }));
+    expect(store.getState().progress.recording).toBe(false);
+    // Only a question that was in flight can end; a stray error with nothing running says nothing.
+    store.dispatch(progress.eventArrived({ id: "a1", type: "error", text: "no" }));
+    expect(store.getState().progress.ended).toBeUndefined();
+    store.dispatch(progress.askSent({ conversationId: "c1", question: "q" }));
+    store.dispatch(progress.eventArrived({ id: "a1", type: "error", text: "no" }));
+    expect(store.getState().progress.ended?.ok).toBe(false);
+  });
+});

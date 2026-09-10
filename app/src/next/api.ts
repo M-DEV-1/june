@@ -227,6 +227,12 @@ export type TrackerStatus = { paused: boolean };
 /** One of Gemini Live's thirty prebuilt voices, on GET or POST /voices. Mirrors ipc.VoiceView. trait is Google's own one-word description of how it sounds ("Bright", "Gravelly"), shown beside the name because thirty star names say nothing on their own about how any of them sounds. current marks the one a live session dials with next; exactly one row carries it. */
 export type Voice = { name: string; trait: string; current: boolean };
 
+/** One of the two Live models on GET or POST /voices. Mirrors ipc.LiveModelView. trait is the trade choosing it costs and buys, in one line — latency against tone. current marks the one a live session dials with next; exactly one row carries it. */
+export type LiveModel = { name: string; label: string; trait: string; current: boolean };
+
+/** GET /voices' whole body: the voice roster and the two Live models beside it. */
+export type Voices = { voices: Voice[]; models: LiveModel[] };
+
 /** One tool call's step inside a computer-use job. Mirrors actjob.Step; outcome is "pass", "fail", or "" before wait_for has checked it, and expect is the change the step was written down to produce. */
 export type ActStep = {
   n: number;
@@ -382,6 +388,11 @@ export const oraApi = createApi({
       providesTags: (_result, _error, date) => [{ type: "Day" as const, id: date }, "Task"],
     }),
     /** Every recording the daemon kept, newest first. */
+    /** Removes one meeting's write-up; the daemon answers 204, and 404 for an id that names no meeting. The recording itself is left on disk. */
+    deleteMeeting: build.mutation<void, string>({
+      query: (id) => ({ url: `/meetings/${encodeURIComponent(id)}`, method: "DELETE" }),
+      invalidatesTags: ["Meeting"],
+    }),
     meetings: build.query<Meeting[], void>({
       query: () => "/meetings",
       transformResponse: (r: { meetings: Meeting[] }) => r.meetings ?? [],
@@ -409,16 +420,22 @@ export const oraApi = createApi({
       transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
       invalidatesTags: ["Brain", "Settings"],
     }),
-    /** The whole voice roster: all thirty of Gemini Live's prebuilt voices, one carrying current true. */
-    voices: build.query<Voice[], void>({
+    /** The whole voice roster and the two Live models beside it: all thirty of Gemini Live's prebuilt voices, one carrying current true, and the two models Ora can speak through, one of which also carries current true. */
+    voices: build.query<Voices, void>({
       query: () => "/voices",
-      transformResponse: (r: { voices: Voice[] }) => r.voices ?? [],
+      transformResponse: (r: Partial<Voices>) => ({ voices: r.voices ?? [], models: r.models ?? [] }),
       providesTags: [{ type: "Voice" as const, id: "LIST" }],
     }),
-    /** Sets which voice Ora speaks in and persists it; the daemon answers the same list GET /voices would, with the new one marked current. A session already under way keeps the voice it dialled with, so this is heard on the next one, not this one. 400 for a name that is not one of the thirty. */
-    setVoice: build.mutation<Voice[], string>({
+    /** Sets which voice Ora speaks in and persists it; the daemon answers the same body GET /voices would, with the new one marked current. A session already under way keeps the voice it dialled with, so this is heard on the next one, not this one. 400 for a name that is not one of the thirty. */
+    setVoice: build.mutation<Voices, string>({
       query: (name) => ({ url: "/voices", method: "POST", body: { name } }),
-      transformResponse: (r: { voices: Voice[] }) => r.voices ?? [],
+      transformResponse: (r: Partial<Voices>) => ({ voices: r.voices ?? [], models: r.models ?? [] }),
+      invalidatesTags: [{ type: "Voice" as const, id: "LIST" }],
+    }),
+    /** Sets which Live model a voice session dials and persists it; the daemon answers the same body GET /voices would, with the new one marked current. Heard on the next session, same as setVoice. 400 for a name that is not one of the two. */
+    setLiveModel: build.mutation<Voices, string>({
+      query: (model) => ({ url: "/voices", method: "POST", body: { model } }),
+      transformResponse: (r: Partial<Voices>) => ({ voices: r.voices ?? [], models: r.models ?? [] }),
       invalidatesTags: [{ type: "Voice" as const, id: "LIST" }],
     }),
     /** Speaks one fixed line out of this machine's speaker in the named voice, without changing which voice is configured — hearing a voice first is the whole point, so nothing here is invalidated. Answers {played: name}. 400 for a name that is not one of the thirty, 500 when synthesis or playback failed, 503 when this daemon has no speaker to play through. */
@@ -503,6 +520,7 @@ export const {
   useActOnNoticeMutation,
   useDaysQuery,
   useDayQuery,
+  useDeleteMeetingMutation,
   useMeetingsQuery,
   useSettingsQuery,
   useSetClaudeUsageFromLoginMutation,
@@ -510,6 +528,7 @@ export const {
   usePickBrainMutation,
   useVoicesQuery,
   useSetVoiceMutation,
+  useSetLiveModelMutation,
   usePreviewVoiceMutation,
   useUsageQuery,
   useTrackerQuery,
@@ -536,10 +555,10 @@ export type Notice = {
   actions?: { key: string; label: string }[];
 };
 
-/** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, "act" is one line of a computer-use job's progress, and "overlay" and "window" are the daemon telling the on-screen accessories and the window itself what to do. This window draws none of the last five, but they do arrive on the same stream, so they are named here rather than left to widen the type at the point of use. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */
+/** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, "act" is one line of a computer-use job's progress, "overlay" and "window" are the daemon telling the on-screen accessories and the window itself what to do, and "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way. This window draws none of the last five, but they do arrive on the same stream, so they are named here rather than left to widen the type at the point of use. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */
 export type DaemonEvent = {
   id: string;
-  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "level" | "act" | "notice" | "overlay" | "window";
+  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "level" | "act" | "notice" | "overlay" | "window" | "recording" | "dreaming";
   text?: string;
   detail?: string;
   evidence?: Evidence[];

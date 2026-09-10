@@ -1,7 +1,7 @@
 /** The one rail every screen shares: New chat, a search over the conversations, the conversations themselves under their date headings with a menu on each row, and the rows at the foot that lead to Tasks, Meetings, Days and Settings. Clicking a conversation from any screen is the way back to Chats, and clicking the lit foot row is the way back too, which is the behaviour the current window settled on. */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Calendar, ListTodo, MoreHorizontal, Pencil, Plus, Repeat, Search, Settings as SettingsIcon, Trash2, Video } from "lucide-react";
+import { Calendar, ListTodo, MoreHorizontal, Pencil, Plus, Repeat, Search, Settings as SettingsIcon, Trash2, Video, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +24,7 @@ import {
 import { useActOnNoticeMutation, useConversationsQuery } from "./api";
 import { chatsShown, groupConversations, shortWhen } from "./format";
 import { useFollowSelection } from "./parts";
+import { Face, useOraState } from "./face";
 import { conversationsUi, ui, useAppDispatch, useAppSelector, type Place } from "./store";
 
 /** One row at the foot of the rail. */
@@ -58,6 +59,7 @@ export function AppSidebar() {
   const dispatch = useAppDispatch();
   const { place, conversationId, query, notice, liveNotice } = useAppSelector((s) => s.ui);
   const { data: convs = [], isFetching, isLoading, isError } = useConversationsQuery();
+  const oraState = useOraState(!isError);
   const [actOnNotice] = useActOnNoticeMutation();
   const list = useRef<HTMLDivElement>(null);
 
@@ -85,6 +87,14 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="gap-2 p-2">
+        {/* Ora itself, first: its face and what it is doing, so the rail opens on who is here rather than on a button. */}
+        <div className="flex items-center gap-2.5 px-2 pt-1 pb-2 group-data-[collapsible=icon]:hidden">
+          <Face state={oraState} />
+          <div className="flex min-w-0 flex-col">
+            <span className="text-ui font-medium">ora</span>
+            <span className="text-micro text-muted-foreground">{oraState}</span>
+          </div>
+        </div>
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton onClick={() => void newChat()} tooltip="New chat" className="h-8 bg-card font-medium shadow-sm hover:bg-card hover:text-primary [&_svg]:text-primary">
@@ -105,12 +115,23 @@ export function AppSidebar() {
           />
         </div>
         {liveNotice ? (
-          <div className="flex flex-col gap-1 px-1 group-data-[collapsible=icon]:hidden">
-            <p role="status" className="text-meta text-muted-foreground">
+          /* A card rather than loose text: this sits between the search field and the list of chats, and a bare sentence with four buttons under it reads as part of neither. The body is held to three lines for the same reason the hover card holds it to three — a morning brief is a paragraph, and unclamped it pushed the chat list down the rail. */
+          <div className="relative flex flex-col gap-1 rounded-lg border bg-card px-2.5 py-2 group-data-[collapsible=icon]:hidden">
+            <button
+              type="button"
+              aria-label={noticeLabel("Close", liveNotice.title)}
+              onClick={() => dispatch(ui.liveNoticeSet(undefined))}
+              className="absolute top-1 right-1 flex size-5 items-center justify-center rounded text-muted-foreground opacity-50 transition-opacity hover:bg-hover hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              <X className="size-3" />
+            </button>
+            {/* The title was stored and never drawn, which left the body to say on its own what the card was about. The right padding keeps it clear of the cross. */}
+            <p className="pr-5 text-ui font-medium">{liveNotice.title}</p>
+            <p role="status" className="line-clamp-3 text-meta text-muted-foreground">
               {liveNotice.body}
             </p>
-            {/* The four words on their own tell a screen reader nothing about what is being done or snoozed, so each button's own label names the notice it belongs to. */}
-            <div className="flex gap-1">
+            {/* The four words on their own tell a screen reader nothing about what is being done or snoozed, so each button's own label names the notice it belongs to. They wrap because the rail is narrow and a notice may name buttons of its own: "Not happening" and "Start recording" are wider than the four this rail has short words for, and in one row they ran off the edge. */}
+            <div className="mt-0.5 flex flex-wrap gap-1">
               {noticeButtons(liveNotice.actions).map(({ key, label }) => (
                 <Button key={key} variant="outline" size="xs" aria-label={noticeLabel(label, liveNotice.title)} onClick={() => act(key)}>
                   {label}

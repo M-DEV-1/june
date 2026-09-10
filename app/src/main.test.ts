@@ -353,6 +353,30 @@ describe("a notice card carries its own buttons", () => {
     }
   });
 
+  it("closes on its own cross without opening the app window or telling the daemon anything", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { dispatch } = await import("./main");
+      await new Promise((r) => setTimeout(r, 0));
+      dispatch({
+        kind: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "42", kind: "task", actions: TASK_ACTIONS },
+        hoverOpen: true,
+      });
+      const bubble = document.getElementById("n")!;
+      fetchMock.mockClear();
+
+      bubble.querySelector<HTMLButtonElement>("button.nx")!.click();
+
+      expect(bubble.hidden).toBe(true);
+      // Neither the notice route nor the window route: the cross is the user saying they have seen it, not an answer and not a request to open anything.
+      expect(fetchMock.mock.calls).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("uses '-' for a notice with no row of its own, the way the daemon's route expects", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -757,12 +781,12 @@ describe("the window the hotkey shows", () => {
     const { wireWindow } = await import("./main");
     const { shell, calls, pressHotkey } = fakeShell();
     wireWindow(shell);
-    await vi.waitFor(() => expect(document.querySelector(".dot")).toBeTruthy());
+    await vi.waitFor(() => expect(document.querySelector(".face")).toBeTruthy());
 
     vi.mocked(probe).mockResolvedValue(false);
     pressHotkey();
     await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
-    expect(document.querySelector(".dot")).toBeTruthy();
+    expect(document.querySelector(".face")).toBeTruthy();
 
     // Hide, then show again: the second miss in a row is the one that is believed.
     pressHotkey();
@@ -983,3 +1007,80 @@ describe("what a render does to the keyboard", () => {
   });
 });
 
+
+// A question's card lives exactly as long as its answer window. The daemon stamps the moment the goroutine waiting on the answer gives up; past it the button 400s, so the card must be gone by then and must say how long is left while it is up.
+describe("a question's card counts down and goes when its answer window closes", () => {
+  const question = (expiresInMs: number) => ({
+    title: "In a meeting?",
+    body: "Online Voice Recorder is using your microphone.",
+    place: "",
+    id: "",
+    kind: "meeting",
+    expires: new Date(Date.now() + expiresInMs).toISOString(),
+    actions: [{ key: "record", label: "Start recording" }],
+  });
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // A bar rather than a number: the card is glanced at, not read. It is a CSS animation timed from what is left, so nothing ticks and the browser keeps it true on its own.
+  it("draws a bar that empties over the time left", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+
+    dispatch({ kind: "notice", notice: question(15000), hoverOpen: true });
+    const bar = document.getElementById("n")!.querySelector<HTMLElement>(".np > i");
+    expect(bar).not.toBeNull();
+    expect(bar!.style.animationDuration).toBe("15000ms");
+  });
+
+  it("takes itself off screen when the answer window closes", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+
+    dispatch({ kind: "notice", notice: question(15000), hoverOpen: true });
+    const bubble = document.getElementById("n")!;
+    expect(bubble.hidden).toBe(false);
+
+    // Still up well past the six seconds an ordinary notice gets, because this card's life is its answer window and not that timer.
+    await vi.advanceTimersByTimeAsync(7000);
+    expect(bubble.hidden).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(bubble.hidden).toBe(true);
+  });
+
+  // A pointer resting on the card pauses the ordinary six seconds. It must not pause this one: the answer window closes on the daemon's clock whatever the pointer is doing, and a card held open past it is a button that no longer works.
+  it("goes even while the pointer is on it", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+
+    dispatch({ kind: "notice", notice: question(15000), hoverOpen: true });
+    const bubble = document.getElementById("n")!;
+    vi.spyOn(bubble, "matches").mockReturnValue(true);
+    dispatch({ kind: "noticeHold" });
+
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(bubble.hidden).toBe(true);
+  });
+
+  // An ordinary notice carries no expiry and keeps the six seconds it always had.
+  it("leaves a notice with no answer window on its own timer", async () => {
+    const { dispatch } = await import("./main");
+    await vi.advanceTimersByTimeAsync(0);
+
+    dispatch({ kind: "notice", notice: { title: "Transcribing meeting", body: "Standup", place: "", id: "", kind: "meeting" }, hoverOpen: true });
+    const bubble = document.getElementById("n")!;
+    expect(bubble.querySelector(".np")).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(7000);
+    expect(bubble.hidden).toBe(true);
+  });
+});

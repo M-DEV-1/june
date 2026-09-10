@@ -78,6 +78,14 @@ describe("the rail", () => {
     expect(store.getState().ui.place).toBe("chats");
   });
 
+  it("shows Ora's face at the head of the rail, watching while nothing is in flight and thinking during an ask", async () => {
+    const { store } = renderApp({ conversations: conversations() }, { conversationId: "c1" });
+    expect(await screen.findByRole("img", { name: "ora is watching" })).toBeDefined();
+    store.dispatch(progress.askSent({ conversationId: "c1", question: "and the flights?" }));
+    // Two thinking faces: the rail's and the one beside the run in the thread.
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "ora is thinking" })).toHaveLength(2));
+  });
+
   it("opens an unsaved draft when New chat is clicked, posting nothing and adding nothing to the list", async () => {
     const { calls, store } = renderApp({ conversations: conversations() });
     await row("Flights to Zurich");
@@ -206,6 +214,42 @@ describe("a live notice's own buttons", () => {
         action: "hour",
       }),
     );
+  });
+
+  it("says what the notice is about, not only what it said", async () => {
+    const { store } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
+      }),
+    );
+
+    // The title was stored and never drawn, so the rail showed a loose sentence under the search field with buttons beneath it and nothing saying what it belonged to.
+    expect(await screen.findByText("Still open")).toBeTruthy();
+    expect(store.getState().ui.liveNotice).toBeDefined();
+  });
+
+  it("closes on its own cross, telling the daemon nothing", async () => {
+    const { store, calls } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
+      }),
+    );
+    const before = calls.length;
+
+    await userEvent.click(await screen.findByRole("button", { name: /^Close/ }));
+
+    await waitFor(() => expect(store.getState().ui.liveNotice).toBeUndefined());
+    expect(screen.queryByRole("button", { name: /^1 h/ })).toBeNull();
+    // Dismissing is the user saying they have seen it: it answers nothing, so nothing is posted.
+    expect(calls.length).toBe(before);
   });
 
   it("names the notice on each button, so the four words are not four unattached labels", async () => {
