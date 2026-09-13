@@ -38,14 +38,14 @@ func TestHandshakePrompt_IncludesImplicitContext(t *testing.T) {
 // Only voice needs the personal-context block and the retrieved-memory block pushed ahead of time, because voice has to be proactive with no chance to reach for a tool mid-turn; a text ask calls query_memory, recall or personal_context when it actually needs a fact. LeanPrompt is what every text ask sends (see ask.go's askText, claude.go's askClaude, codex.go's askCodex, agy.go's askAgy); HandshakePrompt is still what voice sends.
 func TestLeanPrompt_DropsThePersonalAndMemoryBlocksHandshakePromptCarries(t *testing.T) {
 	brain := &toolTestBrain{
-		personal:        map[string]string{"identity": "Their name is Alex Doe."},
+		personal:        map[string]string{"identity": "Their name is Zemna Grumbek."},
 		implicitContext: []string{"[now] Climate Risk Statement Builder ASRS"},
 	}
 	a := NewAgent(nil, nil, brain, nil, "")
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 
 	voice, _ := a.HandshakePrompt(t.Context(), now)
-	if !strings.Contains(voice, "Alex Doe") {
+	if !strings.Contains(voice, "Zemna Grumbek") {
 		t.Fatalf("expected the voice handshake to carry the personal-context line, got %q", voice)
 	}
 	if !strings.Contains(voice, "Climate Risk Statement Builder ASRS") {
@@ -53,7 +53,7 @@ func TestLeanPrompt_DropsThePersonalAndMemoryBlocksHandshakePromptCarries(t *tes
 	}
 
 	text := a.LeanPrompt(now)
-	if strings.Contains(text, "Alex Doe") {
+	if strings.Contains(text, "Zemna Grumbek") {
 		t.Error("the lean text prompt carried the personal-context line the voice handshake carries")
 	}
 	if strings.Contains(text, "Climate Risk Statement Builder ASRS") {

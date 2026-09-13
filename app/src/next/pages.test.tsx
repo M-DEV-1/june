@@ -20,10 +20,10 @@ const meetings: Meeting[] = [
     title: "TCFD statement pattern analysis",
     when: new Date().toISOString(),
     duration_s: 1680,
-    minutes: "# TCFD statement pattern analysis\n## What was said\n- **Priya** will send the file\n## Action items\n- send the file to legal\n",
+    minutes: "# TCFD statement pattern analysis\n## What was said\n- **Vexil** will send the file\n## Action items\n- send the file to legal\n",
     attendees: [
-      { name: "Alex Rivera", heard_only: false },
-      { name: "Priya Shah", heard_only: true },
+      { name: "Zemna Braxen", heard_only: false },
+      { name: "Vexil Quorin", heard_only: true },
     ],
   },
 ];
@@ -38,7 +38,7 @@ describe("Meetings", () => {
   it("names the recording in the header and says when it ran and who was there", async () => {
     renderApp({ meetings }, { place: "meetings" });
     expect(await screen.findByRole("heading", { name: "TCFD statement pattern analysis" })).toBeDefined();
-    expect(screen.getByText(/28 min · Alex Rivera, Priya Shah \(heard\)/)).toBeDefined();
+    expect(screen.getByText(/28 min · Zemna Braxen, Vexil Quorin \(heard\)/)).toBeDefined();
     const picker = await openPicker("Choose a meeting");
     expect(picker.getByText("Today")).toBeDefined();
     expect(picker.getByRole("option", { name: /TCFD statement pattern analysis/ })).toBeDefined();
@@ -69,7 +69,7 @@ describe("Meetings", () => {
 
   it("reads the minutes rather than drawing their markdown", async () => {
     renderApp({ meetings }, { place: "meetings" });
-    expect(await screen.findByText("Priya will send the file")).toBeDefined();
+    expect(await screen.findByText("Vexil will send the file")).toBeDefined();
     expect(screen.getByText("What was said")).toBeDefined();
     expect(screen.queryByText(/##/)).toBeNull();
     // The opening heading only repeats the title, so it is left off; what is left is the page's own heading and the picker naming the same recording.
@@ -84,9 +84,9 @@ describe("Meetings", () => {
     const lists = screen.getAllByRole("list").filter((l) => l.closest(".document"));
     expect(lists).toHaveLength(2);
     expect(within(lists[0]).getAllByRole("listitem")).toHaveLength(1);
-    expect(screen.getByText("Priya will send the file").tagName).toBe("LI");
+    expect(screen.getByText("Vexil will send the file").tagName).toBe("LI");
     // Nothing draws its own bullet character: the marker is the list's, in the margin.
-    expect(screen.getByText("Priya will send the file").textContent).not.toContain("•");
+    expect(screen.getByText("Vexil will send the file").textContent).not.toContain("•");
   });
 
   it("pins what this meeting left the user to do above the minutes, and nothing raised elsewhere", async () => {
@@ -106,15 +106,15 @@ describe("Meetings", () => {
 
   it("says nothing owed at all rather than an empty block", async () => {
     renderApp({ meetings }, { place: "meetings" });
-    await screen.findByText("Priya will send the file");
+    await screen.findByText("Vexil will send the file");
     expect(screen.queryByText("What you owe from this")).toBeNull();
   });
 
   it("leaves only what the picker's search matches, and says when nothing does", async () => {
     renderApp({ meetings }, { place: "meetings" });
-    await screen.findByText("Priya will send the file");
+    await screen.findByText("Vexil will send the file");
     const picker = await openPicker("Choose a meeting");
-    await userEvent.type(screen.getByLabelText("Search meetings"), "priya");
+    await userEvent.type(screen.getByLabelText("Search meetings"), "vexil");
     expect(picker.getByRole("option", { name: /TCFD/ })).toBeDefined();
     await userEvent.clear(screen.getByLabelText("Search meetings"));
     await userEvent.type(screen.getByLabelText("Search meetings"), "nothing like this");
@@ -123,10 +123,10 @@ describe("Meetings", () => {
 
   it("forgets the search when the picker is shut, so no filter outlives the field that set it", async () => {
     const { store } = renderApp({ meetings }, { place: "meetings" });
-    await screen.findByText("Priya will send the file");
+    await screen.findByText("Vexil will send the file");
     await openPicker("Choose a meeting");
-    await userEvent.type(screen.getByLabelText("Search meetings"), "priya");
-    expect(store.getState().ui.query.meetings).toBe("priya");
+    await userEvent.type(screen.getByLabelText("Search meetings"), "vexil");
+    expect(store.getState().ui.query.meetings).toBe("vexil");
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(store.getState().ui.query.meetings).toBe(""));
   });
@@ -135,7 +135,7 @@ describe("Meetings", () => {
     renderApp({ meetings, tasks: meetingWork }, { place: "meetings", wide: true });
     const rail = await screen.findByRole("complementary", { name: "About this meeting" });
     // Who was there, when it ran, and what it left the user to do all move out of the document and sit beside it.
-    expect(within(rail).getByText(/Priya Shah/)).toBeDefined();
+    expect(within(rail).getByText(/Vexil Quorin/)).toBeDefined();
     expect(within(rail).getByText("28 min")).toBeDefined();
     expect(within(rail).getByText("What you owe from this")).toBeDefined();
     // The document's own headings become the outline, which is a way into the page rather than a second copy of it.
@@ -147,10 +147,10 @@ describe("Meetings", () => {
 
   it("draws no rail at all in a narrow pane, and nothing is lost from the page", async () => {
     renderApp({ meetings, tasks: meetingWork }, { place: "meetings" });
-    await screen.findByText("Priya will send the file");
+    await screen.findByText("Vexil will send the file");
     expect(screen.queryByRole("complementary", { name: "About this meeting" })).toBeNull();
     expect(screen.getByText("What you owe from this")).toBeDefined();
-    expect(screen.getByText(/Priya Shah/)).toBeDefined();
+    expect(screen.getByText(/Vexil Quorin/)).toBeDefined();
   });
 
   it("scrolls the document to a section when its outline row is clicked", async () => {

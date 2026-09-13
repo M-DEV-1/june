@@ -303,7 +303,7 @@ function isNoise(s: string): boolean {
   );
 }
 
-/** Whether a title segment reads as a person's name (two or more capitalised words) or as a document (a name with a file extension). Those are the two things the chip is most useful naming, so one of them wins over the position rule. Input: one segment. Output: true for "Priya Shah" and "upload.go", false for "High memory usage". */
+/** Whether a title segment reads as a person's name (two or more capitalised words) or as a document (a name with a file extension). Those are the two things the chip is most useful naming, so one of them wins over the position rule. Input: one segment. Output: true for "Vexil Quorin" and "upload.go", false for "High memory usage". */
 function isSpecific(s: string): boolean {
   const words = s.split(/\s+/);
   return (
@@ -313,7 +313,7 @@ function isSpecific(s: string): boolean {
 }
 
 /** Turns the foreground app and its window title into one label for the context chip. The title is split on the separators window titles use (" | ", " - ", " — " and " – "), a trailing unread count like "(3)" is dropped from each segment, and then two kinds of segment are thrown away: the ones that name the program itself, and the ones that carry no name at all (a memory figure, a meeting code). The label is the most specific segment left — a person or a filename if there is one, otherwise the second-from-last when three or more survive and the first when fewer do — and the chip is that label, a middle dot, and the program's short name. Input: the app name and the window title. Output: the chip text, capped at 34 characters with a trailing ellipsis.
- * "Chat | Priya Shah | Microsoft Teams - High memory usage - 920 MB" splits into five segments; "Microsoft Teams" gives the short name "Teams" and leaves, "920 MB" is dropped as a figure, and of "Chat", "Priya Shah" and "High memory usage" the person wins, so the chip reads "Priya Shah · Teams". */
+ * "Chat | Vexil Quorin | Microsoft Teams - High memory usage - 920 MB" splits into five segments; "Microsoft Teams" gives the short name "Teams" and leaves, "920 MB" is dropped as a figure, and of "Chat", "Vexil Quorin" and "High memory usage" the person wins, so the chip reads "Vexil Quorin · Teams". */
 export function chipLabel(app: string, title: string): string {
   const appTail = lastWord(app).toLowerCase();
   const parts = title

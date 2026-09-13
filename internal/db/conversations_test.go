@@ -16,13 +16,13 @@ func TestConversationsAndTurns(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	id, err := store.CreateConversation(ctx, "what did priya ask about", "claude")
+	id, err := store.CreateConversation(ctx, "what did vexil ask about", "claude")
 	if err != nil {
 		t.Fatalf("CreateConversation: %v", err)
 	}
 
 	evidence := json.RawMessage(`[{"title":"Lodestone sync","meta":"meeting","body":"emission factors"}]`)
-	if _, err := store.AddTurn(ctx, id, "you", "what did priya ask about", "ask", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, id, "you", "what did vexil ask about", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn you: %v", err)
 	}
 	if _, err := store.AddTurn(ctx, id, "ora", "she asked about emission factors", "ask", evidence, []string{"query_memory", "recall"}); err != nil {
@@ -36,7 +36,7 @@ func TestConversationsAndTurns(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("ListConversations returned %d conversations, want 1", len(list))
 	}
-	if list[0].Title != "what did priya ask about" || list[0].Brain != "claude" {
+	if list[0].Title != "what did vexil ask about" || list[0].Brain != "claude" {
 		t.Errorf("ListConversations[0] = %+v, want the title and brain it was created with", list[0])
 	}
 	if list[0].Last != "she asked about emission factors" {
@@ -47,7 +47,7 @@ func TestConversationsAndTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Conversation: %v", err)
 	}
-	if conv.Title != "what did priya ask about" {
+	if conv.Title != "what did vexil ask about" {
 		t.Errorf("Conversation title = %q", conv.Title)
 	}
 
@@ -296,7 +296,7 @@ func TestRenameConversation(t *testing.T) {
 func TestActionNotesStayNotes(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: "Alex", Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: "Zemna", Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
 		t.Fatalf("AddActionItems: %v", err)
 	}
 	notes, err := store.NotesOfKindSince(ctx, memory.ActionNoteKind, time.Time{})

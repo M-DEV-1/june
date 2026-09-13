@@ -42,12 +42,12 @@ const sampleMinutes = `# Lodestone sync
 
 ## Attendees
 **In the meeting**
-- **Alex Rivera (recording)** — ran the demo
-- **Priya Shah** — asked about emission factors
-- a contact (heard as "Ashar") — spoke twice near the end
+- **Zemna Braxen (recording)** — ran the demo
+- **Vexil Quorin** — asked about emission factors
+- a contact (heard as "Oshveln") — spoke twice near the end
 
 **Mentioned or on screen only**
-- Sneha — owns the PFP task
+- Sorrek — owns the PFP task
 `
 
 func TestContext_ReadsTheLatestCapture(t *testing.T) {
@@ -289,7 +289,7 @@ func TestToday_BriefAndTimelineOldestFirst(t *testing.T) {
 	if _, err := store.LogNote(ctx, "The user prefers short answers", "fact"); err != nil {
 		t.Fatalf("seed note: %v", err)
 	}
-	id, err := store.LogNote(ctx, memory.ActionItem{Owner: "Alex", Text: "send the invoice", Status: memory.StatusOpen, Priority: memory.PriorityNormal}.Note(), memory.ActionNoteKind)
+	id, err := store.LogNote(ctx, memory.ActionItem{Owner: "Zemna", Text: "send the invoice", Status: memory.StatusOpen, Priority: memory.PriorityNormal}.Note(), memory.ActionNoteKind)
 	if err != nil {
 		t.Fatalf("seed action: %v", err)
 	}
@@ -366,9 +366,9 @@ func TestMeetings_NewestFirstWithAttendees(t *testing.T) {
 		t.Errorf("a meeting with no attendee section must still carry an empty list, not null")
 	}
 	want := []Attendee{
-		{Name: "Alex Rivera", HeardOnly: false},
-		{Name: "Priya Shah", HeardOnly: false},
-		{Name: "Ashar", HeardOnly: true},
+		{Name: "Zemna Braxen", HeardOnly: false},
+		{Name: "Vexil Quorin", HeardOnly: false},
+		{Name: "Oshveln", HeardOnly: true},
 	}
 	if len(got.Meetings[0].Attendees) != len(want) {
 		t.Fatalf("attendees = %+v, want %+v", got.Meetings[0].Attendees, want)
@@ -421,7 +421,7 @@ func TestMeetings_ReadsDurationMarkerAndStripsIt(t *testing.T) {
 func TestMemorySearch(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
-	if _, err := store.LogNote(ctx, "Priya wants the invoice before Friday", "fact"); err != nil {
+	if _, err := store.LogNote(ctx, "Vexil wants the invoice before Friday", "fact"); err != nil {
 		t.Fatalf("seed note: %v", err)
 	}
 	if _, err := store.DB().Exec(`INSERT INTO notes_archive(note_id, content, kind, created_at, archived_at) VALUES(7, 'the invoice was raised in July', 'fact', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
@@ -471,8 +471,8 @@ func TestPeople_PersonalEntriesThenHeardOnlyNames(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
 	for _, e := range [][2]string{
-		{"identity", "The user is Alex Rivera."},
-		{"priya-shah", "Leads the value chain work."},
+		{"identity", "The user is Zemna Braxen."},
+		{"vexil-quorin", "Leads the value chain work."},
 		{"preferences-communication", "Prefers short answers."},
 	} {
 		if err := store.SetPersonalContext(ctx, e[0], e[1]); err != nil {
@@ -482,7 +482,7 @@ func TestPeople_PersonalEntriesThenHeardOnlyNames(t *testing.T) {
 	if _, err := store.LogNote(ctx, sampleMinutes, "meeting"); err != nil {
 		t.Fatalf("seed meeting: %v", err)
 	}
-	if _, err := store.LogNote(ctx, "Priya Shah is reviewing the deck", "fact"); err != nil {
+	if _, err := store.LogNote(ctx, "Vexil Quorin is reviewing the deck", "fact"); err != nil {
 		t.Fatalf("seed note: %v", err)
 	}
 
@@ -496,17 +496,17 @@ func TestPeople_PersonalEntriesThenHeardOnlyNames(t *testing.T) {
 		t.Fatalf("people = %+v, want the one stored person and the one heard-only name", got.People)
 	}
 	first, second := got.People[0], got.People[1]
-	if first.Name != "Priya Shah" || !first.Seen || first.HeardOnly {
-		t.Errorf("first person = %+v, want a seen Priya Shah", first)
+	if first.Name != "Vexil Quorin" || !first.Seen || first.HeardOnly {
+		t.Errorf("first person = %+v, want a seen Vexil Quorin", first)
 	}
 	if first.Count != 2 {
-		t.Errorf("Priya Shah count = %d, want 2 (the meeting and the fact note)", first.Count)
+		t.Errorf("Vexil Quorin count = %d, want 2 (the meeting and the fact note)", first.Count)
 	}
 	if first.Note == "" {
 		t.Errorf("a stored person should carry their personal-context entry as the note")
 	}
-	if second.Name != "Ashar" || second.Seen || !second.HeardOnly {
-		t.Errorf("second person = %+v, want a heard-only Ashar", second)
+	if second.Name != "Oshveln" || second.Seen || !second.HeardOnly {
+		t.Errorf("second person = %+v, want a heard-only Oshveln", second)
 	}
 }
 
@@ -608,7 +608,7 @@ func TestToday_ReadsOnlyTheNotesTodayNeeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed note: %v", err)
 	}
-	action, err := store.LogNote(ctx, memory.ActionItem{Owner: "Alex", Text: "send the invoice", Status: memory.StatusOpen, Priority: memory.PriorityNormal}.Note(), memory.ActionNoteKind)
+	action, err := store.LogNote(ctx, memory.ActionItem{Owner: "Zemna", Text: "send the invoice", Status: memory.StatusOpen, Priority: memory.PriorityNormal}.Note(), memory.ActionNoteKind)
 	if err != nil {
 		t.Fatalf("seed action: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestMeeting_DeleteRemovesTheWriteUp(t *testing.T) {
 func TestMeeting_DeleteRefusesANoteThatIsNotAMeeting(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
-	id, err := store.LogNote(ctx, "Rohan's daughter is called Meera.", "memory")
+	id, err := store.LogNote(ctx, "Yendric's daughter is called Omvex.", "memory")
 	if err != nil {
 		t.Fatalf("seed note: %v", err)
 	}

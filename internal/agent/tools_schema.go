@@ -318,7 +318,7 @@ func toolDefinitions() []*genai.Tool {
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "do",
 				Description: "Carry out a job of several actions on the user's machine: it plans the whole thing first, takes one step at a time, checks after each step that the change it expected actually happened, and reads what this machine did the last few times it was asked something similar. " +
-					"Use it the moment a request needs more than about three actions, or spans more than one application — \"open Spotify and play this, then open Teams and message Priya, then see if anyone's replied\", \"open a terminal, start Claude and paste this prompt in\" — and for anything you would otherwise drive by calling observe_screen and click over and over. " +
+					"Use it the moment a request needs more than about three actions, or spans more than one application — \"open Spotify and play this, then open Teams and message Vexil, then see if anyone's replied\", \"open a terminal, start Claude and paste this prompt in\" — and for anything you would otherwise drive by calling observe_screen and click over and over. " +
 					"Pass the whole job as one goal in the user's own words, with everything the job needs inside it: a message to send, a prompt to type, a song to play, all of it, because the job cannot hear the conversation it came from. " +
 					"It runs beside you and takes minutes, so carry on talking while it does; the outcome arrives as this call's result and that is when to say how it went. " +
 					"For one action on the window already in front, use the screen tools directly instead. For a question about the world, use branch.",
@@ -396,7 +396,7 @@ func toolDefinitions() []*genai.Tool {
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
 						"action":  {Type: genai.TypeString, Description: "\"view\" to read everything stored, \"set\" to write or edit one subject, \"delete\" to remove one."},
-						"subject": {Type: genai.TypeString, Description: "Short key for the entry, lowercase and hyphenated: \"identity\", \"priya-shah\", \"preferences-communication\". Required for set and delete. Reuse an existing subject to edit it."},
+						"subject": {Type: genai.TypeString, Description: "Short key for the entry, lowercase and hyphenated: \"identity\", \"vexil-quorin\", \"preferences-communication\". Required for set and delete. Reuse an existing subject to edit it."},
 						"content": {Type: genai.TypeString, Description: "For set: the whole entry, written as plain prose about the user or that person. It replaces the subject's previous content, so include what still holds, not just the new part."},
 					},
 					Required: []string{"action"},

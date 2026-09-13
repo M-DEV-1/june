@@ -308,7 +308,7 @@ describe("a notice's action line replaces its title and body in the bubble", () 
     until.setHours(until.getHours() + 1, 0, 0, 0);
     dispatch({
       kind: "notice",
-      notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: until.toISOString() },
+      notice: { title: "Routine", body: "Vexil replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: until.toISOString() },
       hoverOpen: true,
     });
 
@@ -402,7 +402,7 @@ describe("a notice card carries its own buttons", () => {
         kind: "notice",
         notice: {
           title: "Still open",
-          body: "Priya — send the invoice. Open since 28 Aug. Any progress?",
+          body: "Vexil — send the invoice. Open since 28 Aug. Any progress?",
           place: "tasks",
           id: "42",
           kind: "task",
@@ -422,7 +422,7 @@ describe("a notice card carries its own buttons", () => {
       expect(call).toBeDefined();
       expect(JSON.parse(call![1].body)).toEqual({
         title: "Still open",
-        body: "Priya — send the invoice. Open since 28 Aug. Any progress?",
+        body: "Vexil — send the invoice. Open since 28 Aug. Any progress?",
         action: "dropped",
       });
       // The card is kept up until the daemon's follow-up event, the same as every other answer.
@@ -900,11 +900,11 @@ describe("the card's fold-out headers are keyboard controls", () => {
 
   /** Asks a question and answers it with one source, which is the state the evidence fold-out is drawn in. Input: main's dispatch. Output: nothing. */
   const askAndAnswer = (dispatch: (e: Parameters<typeof import("./state").step>[1]) => void) => {
-    dispatch({ kind: "type", value: "what did Priya say" });
+    dispatch({ kind: "type", value: "what did Vexil say" });
     dispatch({ kind: "enter" });
     dispatch({
       kind: "daemonEvent",
-      ev: { id: "", type: "answer", text: "She said yes.", evidence: [{ title: "Re: venue", meta: "Priya · 08:40", body: "Tuesday works." }] },
+      ev: { id: "", type: "answer", text: "She said yes.", evidence: [{ title: "Re: venue", meta: "Vexil · 08:40", body: "Tuesday works." }] },
     });
   };
 
@@ -1028,7 +1028,7 @@ describe("what a render does to the keyboard", () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
     const input = document.querySelector<HTMLInputElement>(".q")!;
-    input.value = "invoice from priya";
+    input.value = "invoice from vexil";
     dispatch({ kind: "type", value: input.value });
     input.setSelectionRange(7, 7);
 

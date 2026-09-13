@@ -28,7 +28,7 @@ func TestParseScheduleAcceptedForms(t *testing.T) {
 		{"weekdays at 9am", Schedule{Kind: "daily", Hour: 9, Minute: 0, Weekdays: true}},
 		{"every 3 hours", Schedule{Kind: "interval", IntervalHours: 3}},
 		{"every 1 hour", Schedule{Kind: "interval", IntervalHours: 1}},
-		{"when Priya replies about the venue", Schedule{Kind: "when", Condition: "Priya replies about the venue"}},
+		{"when Vexil replies about the venue", Schedule{Kind: "when", Condition: "Vexil replies about the venue"}},
 		{" WHEN the PR merges ", Schedule{Kind: "when", Condition: "the PR merges"}},
 	}
 	for _, c := range cases {
@@ -110,7 +110,7 @@ func TestScheduleDueInterval(t *testing.T) {
 
 // TestScheduleDueWhen checks a "when" condition fires immediately with no prior run, is throttled inside minWhenInterval, and fires again once it has passed.
 func TestScheduleDueWhen(t *testing.T) {
-	sched, err := ParseSchedule("when Priya replies")
+	sched, err := ParseSchedule("when Vexil replies")
 	if err != nil {
 		t.Fatalf("ParseSchedule: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestTick_RoutineRunsWithoutHoldingUpTheTick(t *testing.T) {
 func TestRoutine_LastRunIsStampedAfterTheAsk(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.AddRoutine(ctx, "tell me if Priya replied", "when Priya replies about the venue"); err != nil {
+	if _, err := store.AddRoutine(ctx, "tell me if Vexil replied", "when Vexil replies about the venue"); err != nil {
 		t.Fatalf("AddRoutine: %v", err)
 	}
 

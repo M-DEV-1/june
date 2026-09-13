@@ -169,11 +169,11 @@ func TestPruneStageReportsWhatItRemovedAndKept(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
 
-	spokenIn, err := store.CreateConversation(ctx, "what did priya ask about", "claude")
+	spokenIn, err := store.CreateConversation(ctx, "what did vexil ask about", "claude")
 	if err != nil {
 		t.Fatalf("CreateConversation: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, spokenIn, "you", "what did priya ask about", "ask", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, spokenIn, "you", "what did vexil ask about", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn: %v", err)
 	}
 	oldEmpty, err := store.CreateConversation(ctx, "", "claude")

@@ -1129,7 +1129,7 @@ func TestAskCodex_KeepsEveryToolOnceOneOutsideTheScreenSetHasRun(t *testing.T) {
 
 // TestSystemInstructionText_ClockSentenceIsLastForPromptCaching pins the reordering that makes the Codex backend's prompt-prefix cache actually pay: measured against the real endpoint on 2026-09-05, the clock sentence used to sit ahead of the personal-context block and the memory context, so those bytes — and everything after them — moved every ask and could never be served from cache. The clock sentence is now the very last thing in the prompt, so two asks a minute apart, with the same personal context and memory context, are byte-identical up to it.
 func TestSystemInstructionText_ClockSentenceIsLastForPromptCaching(t *testing.T) {
-	personal := "Personal context — things known for certain about the user and their world:\n  Their name is Priya."
+	personal := "Personal context — things known for certain about the user and their world:\n  Their name is Vexil."
 	context := "  [working] Brave: some tab"
 	a := systemInstructionText(time.Date(2026, 9, 5, 9, 0, 0, 0, time.UTC), "linux", "amd64", "sh", personal, context, 20)
 	b := systemInstructionText(time.Date(2026, 9, 5, 9, 1, 0, 0, time.UTC), "linux", "amd64", "sh", personal, context, 20)
@@ -1164,12 +1164,12 @@ func TestSystemInstructionText_ClockSentenceIsLastForPromptCaching(t *testing.T)
 // TestScreenPersonalContext_KeepsIdentityAndFrontMatches covers what a screen round is meant to keep out of the personal-context store: the user's own identity, always, and an entry that names the app in front of it; a preference with nothing to do with either is dropped.
 func TestScreenPersonalContext_KeepsIdentityAndFrontMatches(t *testing.T) {
 	entries := []db.PersonalEntry{
-		{Subject: "identity", Content: "Their name is Priya."},
+		{Subject: "identity", Content: "Their name is Vexil."},
 		{Subject: "browser", Content: "Uses Brave as their daily browser."},
 		{Subject: "diet", Content: "Vegetarian, no onion or garlic."},
 	}
 	got := screenPersonalContext(entries, "brave · PR #13 · GitHub")
-	if !strings.Contains(got, "Their name is Priya.") {
+	if !strings.Contains(got, "Their name is Vexil.") {
 		t.Errorf("must always keep the user's own identity, got %q", got)
 	}
 	if !strings.Contains(got, "Uses Brave as their daily browser.") {
@@ -1224,7 +1224,7 @@ func TestAskCodex_ScreenRoundCarriesTrimmedPersonalContext(t *testing.T) {
 	var bodies []map[string]any
 	c := codexScript(t, &bodies, observeRound("1"), answerRound)
 	a := NewAgent(nil, nil, &toolTestBrain{personal: map[string]string{
-		"identity": "Their name is Priya.",
+		"identity": "Their name is Vexil.",
 		"browser":  "Uses Brave as their daily browser.",
 		"diet":     "Vegetarian, no onion or garlic.",
 	}}, nil, "")
@@ -1241,7 +1241,7 @@ func TestAskCodex_ScreenRoundCarriesTrimmedPersonalContext(t *testing.T) {
 		t.Fatalf("%d rounds, want 2", len(bodies))
 	}
 	second := bodies[1]["instructions"].(string)
-	if !strings.Contains(second, "Their name is Priya.") {
+	if !strings.Contains(second, "Their name is Vexil.") {
 		t.Errorf("a screen round must still carry the user's own identity, got %q", second)
 	}
 	if !strings.Contains(second, "Uses Brave as their daily browser.") {

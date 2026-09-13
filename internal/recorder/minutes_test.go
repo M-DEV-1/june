@@ -49,7 +49,7 @@ func TestBuildPrompt_StampsTheTimelineInLocalTime(t *testing.T) {
 	t.Cleanup(func() { time.Local = saved })
 
 	at := time.Date(2026, 9, 5, 10, 47, 0, 0, time.UTC)
-	store := &fakeStore{episodes: []db.Episode{{App: "Brave", Title: "Meet - abc-defg-hij", ScreenText: "Priya Shah (Presenting)", CreatedAt: at}}}
+	store := &fakeStore{episodes: []db.Episode{{App: "Brave", Title: "Meet - abc-defg-hij", ScreenText: "Vexil Quorin (Presenting)", CreatedAt: at}}}
 	r, _, _ := newTestRecorder(t, store)
 
 	prompt := r.buildPrompt(context.Background(), "[me] hello", at.Add(-time.Minute), at.Add(time.Minute))

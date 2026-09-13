@@ -24,23 +24,23 @@ func TestPersonalContextTool_SetViewDelete(t *testing.T) {
 	a := &Agent{brain: brain}
 
 	if got := a.executeTool(ctx, "personal_context", map[string]any{
-		"action": "set", "subject": "priya-shah", "content": "Priya Shah is the user's colleague at Acme.",
+		"action": "set", "subject": "vexil-quorin", "content": "Vexil Quorin is the user's colleague at Acme.",
 	}); strings.HasPrefix(got, "error:") {
 		t.Fatalf("set failed: %s", got)
 	}
-	if brain.personal["priya-shah"] != "Priya Shah is the user's colleague at Acme." {
-		t.Errorf("set wrote %q", brain.personal["priya-shah"])
+	if brain.personal["vexil-quorin"] != "Vexil Quorin is the user's colleague at Acme." {
+		t.Errorf("set wrote %q", brain.personal["vexil-quorin"])
 	}
 
 	view := a.executeTool(ctx, "personal_context", map[string]any{"action": "view"})
-	if !strings.Contains(view, "priya-shah") || !strings.Contains(view, "colleague at Acme") {
+	if !strings.Contains(view, "vexil-quorin") || !strings.Contains(view, "colleague at Acme") {
 		t.Errorf("view didn't show the entry:\n%s", view)
 	}
 
-	if got := a.executeTool(ctx, "personal_context", map[string]any{"action": "delete", "subject": "priya-shah"}); strings.HasPrefix(got, "error:") {
+	if got := a.executeTool(ctx, "personal_context", map[string]any{"action": "delete", "subject": "vexil-quorin"}); strings.HasPrefix(got, "error:") {
 		t.Fatalf("delete failed: %s", got)
 	}
-	if _, still := brain.personal["priya-shah"]; still {
+	if _, still := brain.personal["vexil-quorin"]; still {
 		t.Error("delete left the entry behind")
 	}
 }
@@ -95,7 +95,7 @@ func TestSystemInstruction_PersonalContextBlock(t *testing.T) {
 	}
 
 	block := personalContextBlock([]db.PersonalEntry{
-		{Subject: "identity", Content: "The user is Alex Rivera."},
+		{Subject: "identity", Content: "The user is Zemna Braxen."},
 		{Subject: "preferences-communication", Content: "The user wants short answers."},
 	})
 	got := systemInstructionText(time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC), "linux", "amd64", "sh", block, "some context", 5)
@@ -103,7 +103,7 @@ func TestSystemInstruction_PersonalContextBlock(t *testing.T) {
 	if !strings.Contains(got, "Personal context, things known for certain about the user and their world:") {
 		t.Error("the personal context block is missing its heading")
 	}
-	if !strings.Contains(got, "The user is Alex Rivera.") || !strings.Contains(got, "The user wants short answers.") {
+	if !strings.Contains(got, "The user is Zemna Braxen.") || !strings.Contains(got, "The user wants short answers.") {
 		t.Error("an entry didn't reach the prompt")
 	}
 	if !strings.Contains(got, "personal_context") {

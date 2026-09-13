@@ -69,7 +69,7 @@ const (
 // selfOwners are the ways an item's owner can say "the person recording" without naming them. The minutes prompt asks for "Me"; models write "You" or "I" anyway when they slip into addressing the reader.
 var selfOwners = []string{"me", "you", "i", "i'll", "myself"}
 
-// OwnerClass says whose task this is. Input: the personal-context identity entry, which names the user and every form they are written down as ("Alex Rivera — goes by Alex") and names nobody else. Output: "me" when the owner is the user, "them" when it is somebody else, "unclear" when nobody can be made out.
+// OwnerClass says whose task this is. Input: the personal-context identity entry, which names the user and every form they are written down as ("Zemna Braxen — goes by Zemna") and names nobody else. Output: "me" when the owner is the user, "them" when it is somebody else, "unclear" when nobody can be made out.
 // An item the minutes left unowned is read a second time, from its own text: a name in front of "will", "to" or "should", or a "Person — work" prefix the bullet parser could not split, all name somebody who is not the user. With no identity on file the user's own name reads as somebody else's, which is deliberate — guessing here would put another person's work on his list.
 // A class the user picked by hand always wins: hearing about a thing in a meeting does not make it his, and the user is the one person who actually knows whose work it is.
 func (a ActionItem) OwnerClass(identity string) string {
@@ -193,7 +193,7 @@ func ParseMinutesActions(minutes, source string, raised time.Time) []ActionItem 
 
 // splitBullet separates one action bullet into its owner and the work owed. Input: the bullet's text with its "- " marker already stripped, in the "**Owner** — what they agreed to do" shape the minutes prompt asks for. Output: the owner with its bold markers removed, the work, and false for a bullet carrying no owner separator at all.
 func splitBullet(bullet string) (owner, text string, ok bool) {
-	// The em dash is what the minutes prompt asks for, and everything else here is what models write anyway — both of today's recordings came back as "Alex: review his code", which parsed as nothing at all, and a plain hyphen is common enough that the window's own renderer already accepts it.
+	// The em dash is what the minutes prompt asks for, and everything else here is what models write anyway — both of today's recordings came back as "Zemna: review his code", which parsed as nothing at all, and a plain hyphen is common enough that the window's own renderer already accepts it.
 	// They are tried in this order so a bullet carrying more than one splits where the prompt told it to, and the hyphen is matched with spaces around it so a hyphenated name is not cut in half.
 	for _, sep := range []string{"—", "–", " - ", ":"} {
 		if owner, text, ok = strings.Cut(bullet, sep); ok {
@@ -317,7 +317,7 @@ func MinutesLabel(minutes string) string {
 	return ""
 }
 
-// OwnedByUser reports whether owner names the user. Input: an action item's owner as the minutes wrote it, and the personal-context identity entry, which names the user and every form they are written down as ("Alex Rivera — goes by Alex") and names nobody else. Output: whether the two refer to the same person. Matching is on whole words, case-insensitively, so a shorter form of the user's name counts and a fragment of it does not. With no identity on file nothing is attributed, since guessing here would put another person's work on the user's list.
+// OwnedByUser reports whether owner names the user. Input: an action item's owner as the minutes wrote it, and the personal-context identity entry, which names the user and every form they are written down as ("Zemna Braxen — goes by Zemna") and names nobody else. Output: whether the two refer to the same person. Matching is on whole words, case-insensitively, so a shorter form of the user's name counts and a fragment of it does not. With no identity on file nothing is attributed, since guessing here would put another person's work on the user's list.
 func OwnedByUser(owner, identity string) bool {
 	owner = strings.TrimSpace(owner)
 	if owner == "" || identity == "" || owner == UnknownOwner {

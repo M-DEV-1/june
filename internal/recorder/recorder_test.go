@@ -234,7 +234,7 @@ func TestRecorder_Pipeline(t *testing.T) {
 // The desktop timeline the tracker recorded during the meeting goes into the prompt, so the model knows which app and which window the call happened in.
 func TestRecorder_PromptCarriesDesktopContext(t *testing.T) {
 	store := &fakeStore{episodes: []db.Episode{
-		{CreatedAt: time.Now(), App: "Brave Browser", Title: "Meet – weekly sync", ScreenText: "participating in a video call | Vikram Goel (Presenting) | Alex Rivera"},
+		{CreatedAt: time.Now(), App: "Brave Browser", Title: "Meet – weekly sync", ScreenText: "participating in a video call | Ravix Dolmen (Presenting) | Zemna Braxen"},
 	}}
 	r, _, _ := newTestRecorder(t, store)
 	var got string
@@ -250,7 +250,7 @@ func TestRecorder_PromptCarriesDesktopContext(t *testing.T) {
 		t.Errorf("prompt is missing the desktop timeline:\n%s", got)
 	}
 	// The window text is what carries participant names, so it has to reach the model, not just the window title.
-	if !strings.Contains(got, "Vikram Goel (Presenting)") {
+	if !strings.Contains(got, "Ravix Dolmen (Presenting)") {
 		t.Errorf("prompt is missing the on-screen participant names:\n%s", got)
 	}
 }
@@ -771,7 +771,7 @@ func TestRecorder_RegeneratesMinutesFromAnExistingTranscript(t *testing.T) {
 	r.minutes = func(ctx context.Context, prompt string) (string, error) {
 		if strings.HasPrefix(prompt, personalUpdateInstruction) {
 			sawPersonalPass = true
-			return `{"updates":[{"subject":"priya-shah","content":"Priya Shah was in the call."}]}`, nil
+			return `{"updates":[{"subject":"vexil-quorin","content":"Vexil Quorin was in the call."}]}`, nil
 		}
 		if !strings.Contains(prompt, "friday works") {
 			t.Errorf("the regenerated minutes prompt is missing the existing transcript:\n%s", prompt)
@@ -936,7 +936,7 @@ func TestOnACPower(t *testing.T) {
 	}
 }
 
-// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Deepak" because a GitHub commit list said "deepak-acme". Personal context is the one store that says who the user is with certainty, so it is what names the [me] speaker — and an empty store must not leave a heading in the prompt with nothing under it.
+// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Zubrik" because a GitHub commit list said "zubrik-acme". Personal context is the one store that says who the user is with certainty, so it is what names the [me] speaker — and an empty store must not leave a heading in the prompt with nothing under it.
 func TestBuildPrompt_PersonalContext(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -946,10 +946,10 @@ func TestBuildPrompt_PersonalContext(t *testing.T) {
 		{
 			name: "carries the personal context entry that names the user",
 			store: &fakeStore{personal: []db.PersonalEntry{
-				{Subject: "identity", Content: "The user is Alex Rivera — goes by Alex; git handle M-DEV-1."},
+				{Subject: "identity", Content: "The user is Zemna Braxen — goes by Zemna; git handle M-DEV-1."},
 			}},
 			check: func(t *testing.T, prompt string) {
-				if !strings.Contains(prompt, "Alex Rivera") {
+				if !strings.Contains(prompt, "Zemna Braxen") {
 					t.Errorf("the minutes prompt must carry the personal context entry that names the user:\n%s", prompt)
 				}
 				if !strings.Contains(prompt, "About the person recording") {
@@ -1067,7 +1067,7 @@ func (s *fakeStore) CloseDoneActionItems(ctx context.Context, since time.Time) (
 	return 0, nil
 }
 
-// Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in. Every item is kept, the other people's included and each with its owner intact — whose an item is comes from its owner read against who the user is, so an "Vikram" bullet is something he is waiting for rather than something the store never heard. Minutes with no action items file normally and lift nothing.
+// Filing a meeting's minutes also lifts its action items out into their own tracked rows, so the things somebody agreed to do outlive the three-day window the minutes themselves are read in. Every item is kept, the other people's included and each with its owner intact — whose an item is comes from its owner read against who the user is, so an "Ravix" bullet is something he is waiting for rather than something the store never heard. Minutes with no action items file normally and lift nothing.
 func TestFileMinutes_ActionItems(t *testing.T) {
 	raised := time.Date(2026, 8, 28, 21, 36, 0, 0, time.UTC)
 	cases := []struct {
@@ -1083,7 +1083,7 @@ func TestFileMinutes_ActionItems(t *testing.T) {
 **md x mf tool — Google Meet, Fri 28 Aug 2026, 21:36–23:08 IST**
 
 ## Action items
-- **Vikram** — carry PR #13 through CI and merge.
+- **Ravix** — carry PR #13 through CI and merge.
 - **Me** — compare these minutes against his own agent's output.
 `,
 			raised: raised,
@@ -1092,7 +1092,7 @@ func TestFileMinutes_ActionItems(t *testing.T) {
 					t.Fatalf("want both action items lifted, got %d: %+v", len(store.actions), store.actions)
 				}
 				mine := store.actions[1]
-				if store.actions[0].Owner != "Vikram" {
+				if store.actions[0].Owner != "Ravix" {
 					t.Errorf("the other person's item was dropped instead of kept to wait on: %+v", store.actions)
 				}
 				if mine.Owner != "Me" || mine.Text != "compare these minutes against his own agent's output." {
@@ -1120,14 +1120,14 @@ func TestFileMinutes_ActionItems(t *testing.T) {
 
 ## Action items
 - **Me** — send the deck by Friday.
-- **Sandeep** — add battery optimisation to the app.
+- **Jandreth** — add battery optimisation to the app.
 - **Owner unclear** — trial attaching walkthrough videos to PRs.
 `,
 			check: func(t *testing.T, store *fakeStore) {
 				if len(store.actions) != 3 {
 					t.Fatalf("want 3 action items lifted, got %d: %+v", len(store.actions), store.actions)
 				}
-				want := []string{memory.MeOwner, "Sandeep", memory.UnknownOwner}
+				want := []string{memory.MeOwner, "Jandreth", memory.UnknownOwner}
 				for i, a := range store.actions {
 					if a.Owner != want[i] {
 						t.Errorf("item %d owner = %q, want %q", i, a.Owner, want[i])
@@ -1358,7 +1358,7 @@ func TestRecorder_LiveSnapshot_NoneRunning(t *testing.T) {
 // While a meeting is running, LiveSnapshot reads the window and participants off the same screen text prep.go uses, and reports that nothing has been transcribed yet: whisper only ever runs once, after the recording stops, so there is no transcript to show mid-call.
 func TestRecorder_LiveSnapshot_WhileRecording(t *testing.T) {
 	store := &fakeStore{episodes: []db.Episode{
-		{CreatedAt: time.Now(), Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"},
+		{CreatedAt: time.Now(), Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"},
 	}}
 	r, _, _ := newTestRecorder(t, store)
 	before := time.Now()
@@ -1377,8 +1377,8 @@ func TestRecorder_LiveSnapshot_WhileRecording(t *testing.T) {
 	if snap.Window != "Meet - abc-defg-hij - Brave" {
 		t.Errorf("Window = %q, want the meeting window's title", snap.Window)
 	}
-	if len(snap.Participants) != 1 || snap.Participants[0] != "Priya Shah" {
-		t.Errorf("Participants = %v, want [Priya Shah]", snap.Participants)
+	if len(snap.Participants) != 1 || snap.Participants[0] != "Vexil Quorin" {
+		t.Errorf("Participants = %v, want [Vexil Quorin]", snap.Participants)
 	}
 	if len(snap.SegmentsSoFar) != 0 {
 		t.Errorf("SegmentsSoFar = %v, want empty: transcription is one pass at stop, not incremental", snap.SegmentsSoFar)
@@ -1444,7 +1444,7 @@ func TestProcess_UpdatesPersonalContextOnTheRetryThatFirstFilesTheMinutes(t *tes
 	r, _, _ := newTestRecorder(t, store)
 	r.minutes = func(ctx context.Context, prompt string) (string, error) {
 		if strings.HasPrefix(prompt, personalUpdateInstruction) {
-			return `{"updates":[{"subject":"priya-shah","content":"Priya Shah is a colleague at Acme."}]}`, nil
+			return `{"updates":[{"subject":"vexil-quorin","content":"Vexil Quorin is a colleague at Acme."}]}`, nil
 		}
 		return "# Minutes\n\n- ship friday", nil
 	}
@@ -1458,7 +1458,7 @@ func TestProcess_UpdatesPersonalContextOnTheRetryThatFirstFilesTheMinutes(t *tes
 	if err := r.process(context.Background(), s); err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	if got := store.personalWrites["priya-shah"]; got == "" {
+	if got := store.personalWrites["vexil-quorin"]; got == "" {
 		t.Error("a meeting whose first attempt failed never updated personal context, so what it taught Ora is lost for good")
 	}
 }

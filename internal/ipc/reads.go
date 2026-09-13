@@ -609,7 +609,7 @@ func minutesTitle(minutes string) string {
 	return "Meeting"
 }
 
-// heardMarker is how the minutes prompt asks a name the speech recogniser only heard to be written, for example: a contact (heard as "Ashar").
+// heardMarker is how the minutes prompt asks a name the speech recogniser only heard to be written, for example: a contact (heard as "Oshveln").
 const heardMarker = `heard as "`
 
 // heardNames pulls every name the minutes marked as heard-only. Input: the minutes markdown. Output: the names inside each `heard as "…"` marker, in the order they appear, deduplicated.

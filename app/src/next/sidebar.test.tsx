@@ -322,13 +322,13 @@ describe("a live notice's own buttons", () => {
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine", actions: [{ key: "default", label: "Open in Ora" }] },
+        notice: { title: "Routine", body: "Vexil replied about the venue.", place: "", id: "7", kind: "routine", actions: [{ key: "default", label: "Open in Ora" }] },
       }),
     );
     // Open is the one button the app window drops: it is already the thing Open would open.
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Done/ })).toBeNull());
     expect(screen.queryByRole("button", { name: /^Evening/ })).toBeNull();
-    expect(screen.getByText("Priya replied about the venue.")).toBeDefined();
+    expect(screen.getByText("Vexil replied about the venue.")).toBeDefined();
   });
 
   it("replaces the buttons with the rail line's own text once the daemon answers", async () => {
@@ -413,7 +413,7 @@ describe("a job running while you are elsewhere", () => {
       progress.eventArrived({
         id: "act-9",
         type: "act",
-        detail: JSON.stringify({ kind: "started", state: "planning", text: "open spotify and play Teenage Dream, then message Priya" }),
+        detail: JSON.stringify({ kind: "started", state: "planning", text: "open spotify and play Teenage Dream, then message Vexil" }),
       }),
     );
     store.dispatch(
@@ -421,7 +421,7 @@ describe("a job running while you are elsewhere", () => {
     );
 
     const strip = await screen.findByRole("status", { name: "Running now" });
-    expect(within(strip).getByText("open spotify and play Teenage Dream, then message Priya")).toBeDefined();
+    expect(within(strip).getByText("open spotify and play Teenage Dream, then message Vexil")).toBeDefined();
     expect(within(strip).getByText(/step 1/i)).toBeDefined();
   });
 

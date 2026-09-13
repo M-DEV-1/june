@@ -88,7 +88,7 @@ func TestDayPage(t *testing.T) {
 	if err := store.SetDiaryEntry(ctx, today, "day", "The demo went out."); err != nil {
 		t.Fatalf("seed diary: %v", err)
 	}
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: "Alex", Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: "Zemna", Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
 		t.Fatalf("seed action item: %v", err)
 	}
 	convID, err := store.CreateConversation(ctx, "the flight", "")

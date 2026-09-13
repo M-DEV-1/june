@@ -14,7 +14,7 @@ import (
 
 func TestLoadGold_ReadsTheSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "questions.jsonl")
-	os.WriteFile(path, []byte(`{"id":"G01","kind":"single","tags":["meeting"],"turns":[{"q":"who was on the call?","gold":"Karan.","must":["Karan"],"must_not":["Rakesh"]}],"source":"note#196","note":"one fact"}
+	os.WriteFile(path, []byte(`{"id":"G01","kind":"single","tags":["meeting"],"turns":[{"q":"who was on the call?","gold":"Trelvo.","must":["Trelvo"],"must_not":["Ulgra"]}],"source":"note#196","note":"one fact"}
 
 {"id":"M01","kind":"multi","tags":["follow-up"],"turns":[{"q":"what did I demo?","gold":"Sonar.","must":["Sonar"]},{"q":"and who asked about it?","gold":"Ro.","must":["Ro"]}],"source":"note#178"}
 `), 0644)
@@ -26,7 +26,7 @@ func TestLoadGold_ReadsTheSchema(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("want 2 items, got %d", len(items))
 	}
-	if items[0].ID != "G01" || items[0].Turns[0].MustNot[0] != "Rakesh" {
+	if items[0].ID != "G01" || items[0].Turns[0].MustNot[0] != "Ulgra" {
 		t.Errorf("first item read wrong: %+v", items[0])
 	}
 	if items[1].Kind != "multi" || len(items[1].Turns) != 2 {
@@ -38,16 +38,16 @@ func TestLoadGold_ReadsTheSchema(t *testing.T) {
 }
 
 func TestGoldPass_MechanicalCheck(t *testing.T) {
-	spec := goldTurnSpec{Must: []string{"Karan"}, MustNot: []string{"Rakesh", "Var "}}
+	spec := goldTurnSpec{Must: []string{"Trelvo"}, MustNot: []string{"Ulgra", "Nex "}}
 	cases := []struct {
 		answer string
 		want   bool
 	}{
-		{"Karan Mehta was on it.", true},
-		{"karan mehta was on it.", true},
-		{"Karan and Rakesh were on it.", false},
-		{"Karan and Var were on it.", false},
-		{"Karan and Varoon were on it.", true},
+		{"Trelvo Kordis was on it.", true},
+		{"trelvo kordis was on it.", true},
+		{"Trelvo and Ulgra were on it.", false},
+		{"Trelvo and Nex were on it.", false},
+		{"Trelvo and Nexpo were on it.", true},
 		{"Nobody I can see.", false},
 		{"   ", false},
 	}
@@ -228,18 +228,18 @@ func TestGoldPass_MatchesAnAnswerSpelledOutInProse(t *testing.T) {
 	}
 }
 
-// "Var " is written with a trailing space to mean the name and not the start of Varoon. Padding the answer before folding is what makes that hold at the end of a sentence, where there is no space after the name.
+// "Nex " is written with a trailing space to mean the name and not the start of Nexpo. Padding the answer before folding is what makes that hold at the end of a sentence, where there is no space after the name.
 func TestGoldPass_ATrailingSpaceStillMeansTheWholeWord(t *testing.T) {
-	spec := goldTurnSpec{MustNot: []string{"Var "}}
+	spec := goldTurnSpec{MustNot: []string{"Nex "}}
 	cases := []struct {
 		answer string
 		want   bool
 	}{
-		{"Karan and Varoon were on it.", true},
+		{"Trelvo and Nexpo were on it.", true},
 		{"Nobody else was around.", true},
-		{"On the call: Priya and Var.", false},
-		{"On the call: Priya and Var", false},
-		{"Var was there.", false},
+		{"On the call: Vexil and Nex.", false},
+		{"On the call: Vexil and Nex", false},
+		{"Nex was there.", false},
 	}
 	for _, c := range cases {
 		if got := goldPass(c.answer, spec); got != c.want {
@@ -250,15 +250,15 @@ func TestGoldPass_ATrailingSpaceStillMeansTheWholeWord(t *testing.T) {
 
 // A resumed run looks an answer up by arm, item id and turn number. None of those say what was asked, so editing a question in place — the ordinary way a gold set is sharpened between runs — silently scored the old answer against the new question. The question text has to match or the turn is asked again.
 func TestRunGoldItem_ReAsksAQuestionThatWasEditedSinceTheTrace(t *testing.T) {
-	item := goldItem{ID: "G01", Turns: []goldTurnSpec{{Q: "who was on the 12:35 call?", Must: []string{"Priya"}}}}
+	item := goldItem{ID: "G01", Turns: []goldTurnSpec{{Q: "who was on the 12:35 call?", Must: []string{"Vexil"}}}}
 	asked := 0
 	fn := func(ctx context.Context, prior []trajTurn, q string) (string, []trajCall, error) {
 		asked++
-		return "Priya was, and nobody else.", nil, nil
+		return "Vexil was, and nobody else.", nil, nil
 	}
 
 	stale := map[goldKey]goldAnswer{{Arm: "claude", ID: "G01", Turn: 1}: {
-		ID: "G01", Turn: 1, Arm: "claude", Question: "who was on the call?", Answer: "Priya.",
+		ID: "G01", Turn: 1, Arm: "claude", Question: "who was on the call?", Answer: "Vexil.",
 	}}
 	got := runGoldItem(context.Background(), "claude", fn, item, &goldHalt{}, stale)
 	if asked != 1 {
@@ -269,7 +269,7 @@ func TestRunGoldItem_ReAsksAQuestionThatWasEditedSinceTheTrace(t *testing.T) {
 	}
 
 	fresh := map[goldKey]goldAnswer{{Arm: "claude", ID: "G01", Turn: 1}: {
-		ID: "G01", Turn: 1, Arm: "claude", Question: item.Turns[0].Q, Answer: "Priya, nobody else.",
+		ID: "G01", Turn: 1, Arm: "claude", Question: item.Turns[0].Q, Answer: "Vexil, nobody else.",
 	}}
 	asked = 0
 	got = runGoldItem(context.Background(), "claude", fn, item, &goldHalt{}, fresh)

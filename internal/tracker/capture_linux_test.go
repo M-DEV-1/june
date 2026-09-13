@@ -384,7 +384,7 @@ func TestActiveOrFallback(t *testing.T) {
 		scan := func() (activeWindow, bool) {
 			return activeWindow{ref: brave, app: "brave", title: "Ora - GitHub", focused: true}, true
 		}
-		ref, app, title, ok := activeOrFallback(files, "chrome", "Chat | Priya | Microsoft Teams", true, false, scan)
+		ref, app, title, ok := activeOrFallback(files, "chrome", "Chat | Vexil | Microsoft Teams", true, false, scan)
 		if !ok || ref != brave || app != "brave" || title != "Ora - GitHub" {
 			t.Fatalf("activeOrFallback = %v, %q, %q, %v, want the window that claims the keyboard focus", ref, app, title, ok)
 		}

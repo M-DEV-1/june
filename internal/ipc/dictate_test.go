@@ -94,7 +94,7 @@ func newDictationTest(t *testing.T, mic micSource, tx *fakeTranscriber) (*Dictat
 	d := NewDictation(s)
 	d.openMic = func() (micSource, error) { return mic, nil }
 	d.transcribe = tx.run
-	d.prompt = func(ctx context.Context) string { return "People: Alex Rivera." }
+	d.prompt = func(ctx context.Context) string { return "People: Zemna Braxen." }
 	d.rate = dictateRate
 
 	mux := http.NewServeMux()
@@ -164,7 +164,7 @@ func TestDictationStartStopReturnsTranscript(t *testing.T) {
 	if body.Text != "hello there, this is the whole thought chain." {
 		t.Fatalf("text = %q, want the transcriber's text trimmed", body.Text)
 	}
-	if tx.prompt != "People: Alex Rivera." {
+	if tx.prompt != "People: Zemna Braxen." {
 		t.Fatalf("prompt = %q, want the priming prompt", tx.prompt)
 	}
 	if !mic.wasClosed() {
@@ -323,8 +323,8 @@ func TestResampleTo16k(t *testing.T) {
 }
 
 func TestDictationPromptNames(t *testing.T) {
-	got := dictationPromptFrom([]string{"identity", "sneha-kumar", "preferences-tone", "rohit"})
-	if got != "Notes. People: Sneha Kumar, Rohit." {
+	got := dictationPromptFrom([]string{"identity", "sorrek-thivan", "preferences-tone", "yalven"})
+	if got != "Notes. People: Sorrek Thivan, Yalven." {
 		t.Fatalf("prompt = %q", got)
 	}
 	if got := dictationPromptFrom([]string{"identity"}); got != "" {

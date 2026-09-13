@@ -137,7 +137,7 @@ func meetingParticipantsInBody(eps []db.Episode) []string {
 	return collectMeetingNames(eps, false, nil)
 }
 
-// meetingRoleSuffix strips the role or presence tag a meeting app hangs off a name in its own roster — "Sam Iyer (Host)", "Priya Shah (Presenting)", "Karan Mehta (Host, me)" — so the name underneath can be read and deduplicated on its own. It only strips a trailing parenthetical that actually names a role; a surname that happens to end in a parenthetical of something else is left alone.
+// meetingRoleSuffix strips the role or presence tag a meeting app hangs off a name in its own roster — "Emzor Wandel (Host)", "Vexil Quorin (Presenting)", "Trelvo Kordis (Host, me)" — so the name underneath can be read and deduplicated on its own. It only strips a trailing parenthetical that actually names a role; a surname that happens to end in a parenthetical of something else is left alone.
 var meetingRoleSuffix = regexp.MustCompile(`(?i)\s*\([^()]*\b(?:host|co-?host|organizer|organiser|presenting|guest|you|me)\b[^()]*\)\s*$`)
 
 // hasCase reports whether w contains at least one letter that has upper and lower forms, so the all-caps check in looksLikeName only applies to scripts where all caps means anything; Devanagari or CJK words have no case and must not be mistaken for shouting. Input: one word. Output: true when a cased letter is present.
@@ -175,7 +175,7 @@ func isCaselessLetter(r rune) bool {
 	return unicode.ToUpper(r) == unicode.ToLower(r)
 }
 
-// caselessNameRuneCap is the longest a run of caseless writing may be and still be read as a person's name. A name is a few runes long and a sentence is not, which is the only thing left to judge by once capitalisation, digits and colons have all been used up. It is set at 16 rather than lower because a Devanagari name carries its vowels as combining marks and so counts long for its size: "राहुल शर्मा" is already 11 runes, and a three-word name in the same script would not fit under a tighter cap.
+// caselessNameRuneCap is the longest a run of caseless writing may be and still be read as a person's name. A name is a few runes long and a sentence is not, which is the only thing left to judge by once capitalisation, digits and colons have all been used up. It is set at 16 rather than lower because a Devanagari name carries its vowels as combining marks and so counts long for its size: "तोव्रिन मज़ेक" is already 13 runes, and a three-word name in the same script would not fit under a tighter cap.
 const caselessNameRuneCap = 16
 
 // isUnspacedLetter reports whether r belongs to a script written without spaces between words — Han, the two Japanese kana, Hangul and Thai. Input: one rune. Output: true when a run of such letters is a whole clause rather than a single word.
@@ -262,7 +262,7 @@ func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []str
 					return
 				}
 				if !knownSet[key] {
-					// The app's own name is written on its window as prominently as anybody's: a Teams window reads "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams", where two of the three capitalised phrases are the software. What names the window cannot also name a person in it. Nor can its own toolbar, or anything that is not shaped like a name in the first place.
+					// The app's own name is written on its window as prominently as anybody's: a Teams window reads "Microsoft Teams (PWA) - Chat | Vexil Quorin | Microsoft Teams", where two of the three capitalised phrases are the software. What names the window cannot also name a person in it. Nor can its own toolbar, or anything that is not shaped like a name in the first place.
 					// ponytail: a person whose whole name is a chrome word ("Chat", "Hand") is dropped here. Telling the toolbar button "Chat" from a person named Chat needs knowing the user's contacts, which is exactly what the knownSet check above already grants to anyone in personal context; it stops being dropped once that person is known too, not by refining this heuristic further.
 					if tracker.IsMeetingWindow("", name) || hasChromeWord(name) || !looksLikeName(name) {
 						return

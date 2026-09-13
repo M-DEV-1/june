@@ -1,4 +1,4 @@
-/** The Routines screen: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Priya replies about the venue, tell me" — added as free text plus a schedule, and a list of what is running with what each last said, a way to run one right now, and a way to drop it. */
+/** The Routines screen: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Vexil replies about the venue, tell me" — added as free text plus a schedule, and a list of what is running with what each last said, a way to run one right now, and a way to drop it. */
 
 import { MoreHorizontal, Play, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
@@ -88,7 +88,7 @@ function NewRoutine() {
           </Button>
         </div>
         <p id={hintId} className="text-meta text-muted-foreground">
-          A clock time, an interval, or something to wait for: “weekdays at 8”, “every 3 hours”, “when Priya replies about the venue”.
+          A clock time, an interval, or something to wait for: “weekdays at 8”, “every 3 hours”, “when Vexil replies about the venue”.
         </p>
       </div>
     </div>

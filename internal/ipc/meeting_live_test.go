@@ -37,7 +37,7 @@ func TestMeetingLive_WhileRecording(t *testing.T) {
 	snap := recorder.LiveSnapshot{
 		StartedAt:     started,
 		Window:        "Meet - weekly sync - Brave",
-		Participants:  []string{"Priya Shah"},
+		Participants:  []string{"Vexil Quorin"},
 		SegmentsSoFar: []recorder.LiveSegment{},
 		Note:          "transcribed at the end",
 	}
@@ -58,8 +58,8 @@ func TestMeetingLive_WhileRecording(t *testing.T) {
 	if got.Window != snap.Window {
 		t.Errorf("window = %q, want %q", got.Window, snap.Window)
 	}
-	if len(got.Participants) != 1 || got.Participants[0] != "Priya Shah" {
-		t.Errorf("participants = %v, want [Priya Shah]", got.Participants)
+	if len(got.Participants) != 1 || got.Participants[0] != "Vexil Quorin" {
+		t.Errorf("participants = %v, want [Vexil Quorin]", got.Participants)
 	}
 	if got.SegmentsSoFar == nil || len(got.SegmentsSoFar) != 0 {
 		t.Errorf("segments_so_far = %v, want an empty, non-null list", got.SegmentsSoFar)

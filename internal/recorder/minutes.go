@@ -24,7 +24,7 @@ The transcript labels every line with who spoke it:
   [call:S1], [call:S2], ... — the other people on the call, captured from the computer's speakers and separated by voice. Each number is one person for the whole meeting: everything labelled [call:S3] is the same voice from start to finish. The numbers are arbitrary and carry no meaning beyond that.
   [call]    — a line the voice separation could not place. Treat it as an unknown speaker, not as a person in its own right and not as the same person as any other bare [call] line.
 
-Because a numbered speaker is one consistent person, a name established anywhere applies everywhere that number appears. If [call:S4] is addressed as "Ajay" once, then every [call:S4] line in the meeting is Ajay, including the ones before the name was used.
+Because a numbered speaker is one consistent person, a name established anywhere applies everywhere that number appears. If [call:S4] is addressed as "Velmuth" once, then every [call:S4] line in the meeting is Velmuth, including the ones before the name was used.
 
 The separation is good but not perfect. When people talk over each other the voices blend, so a line may land on the wrong number, and a person who spoke only briefly may be merged into someone else. Where a line's content plainly contradicts its number — a name, a role, an obvious continuation of someone else's sentence — trust the content and say the attribution is unclear rather than forcing it.
 
@@ -44,7 +44,7 @@ Rules for naming:
   - Name everyone you can. Work at it: a name used once in the whole meeting, a person thanked at the end, a name in the meeting chat on screen, someone answering when addressed — all of these bind a name to a voice, and a name you can support is always better than a description.
   - When you genuinely cannot name someone, never leave them as a bare label. Describe them in a sentence or two that would let the reader work out who it was: what they were responsible for, what they talked about, who they answered to or were answering, when in the meeting they spoke, whether they were presenting. "The person who demoed the emissions upload and kept asking about custom emission factors" is useful. "A second participant" is not — it tells the reader nothing they could act on or recognise.
   - The transcript comes from speech recognition, so names in it may be misspelled. Where the screen context has the same name spelled properly, use that spelling.
-  - A name or acronym that appears only in the transcript, with no match on screen and none in "About the person recording", is a guess by the recogniser. Write it once as heard and marked so, for example a contact (heard as "Ashar") or the (heard as "PSP") task, and do not turn it into a fact about who someone is. On 2026-09-03 the recogniser turned Sneha into Ashar and PFP into PSP, and both were written into memory as true.
+  - A name or acronym that appears only in the transcript, with no match on screen and none in "About the person recording", is a guess by the recogniser. Write it once as heard and marked so, for example a contact (heard as "Oshveln") or the (heard as "PSP") task, and do not turn it into a fact about who someone is. On 2026-09-03 the recogniser turned Sorrek into Oshveln and PFP into PSP, and both were written into memory as true.
   - For the [me] speaker: this is always the same one person, the owner of this computer. What the user has told Ora about themselves is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
 
 A section with nothing to report is a section you omit — heading and all — rather than fill in with a sentence that says so. Never write "Nothing recoverable", "Nothing was decided", "None beyond the above" or anything to that effect: a reader learns nothing from being told a section is empty that they would not already conclude from its absence. This applies to every section below, including a bullet inside "Your part" that would otherwise have nothing to fill it.
@@ -82,7 +82,7 @@ Write each one on its own bullet in exactly this shape, with an em dash between 
 The owner is one of exactly two things, and nothing else — no role, no parenthetical, no "(recording)", and never "Owner unclear":
   - "Me", for anything the [me] speaker owes. Write it exactly, never their own name — for example "- **Me** — send the deck by Friday". "About the person recording" above names them; that name in the transcript is this person, so "<their name> will send the deck", "you'll send the deck" and "I'll send the deck" are all "Me".
   - One other person's name, for anything somebody else promised to do. Everyone but the [me] speaker keeps their own name.
-Write the work so somebody who was not in the call can read it a week later: name the thing, the person or the file it is about, and what is being done to it. "Send Priya the TCFD emissions file before the Q3 review" is an item; "send the file" is not.
+Write the work so somebody who was not in the call can read it a week later: name the thing, the person or the file it is about, and what is being done to it. "Send Vexil the TCFD emissions file before the Q3 review" is an item; "send the file" is not.
 The user's list is built from the "Me" items alone, so an item filed under the wrong owner either buries his own work or puts somebody else's on his plate.
 
 ## Attendees
@@ -133,7 +133,7 @@ func (r *Recorder) aboutTheUser(ctx context.Context) string {
 }
 
 // contextMargin widens the window of screen history a meeting's prompt is built from, at both ends. The meeting app's window is open before anyone joins and stays open after the call drops, and the names on it are as true a minute either side as they are during.
-// It is not a guess: in the 2026-08-31 16:17 recording the other participant's name reached the database exactly once, at 16:28, one minute after the recording stopped — from the window switcher, listing the Teams window whose title read "Microsoft Teams (PWA) - Chat | Priya Shah". Queried on the recording's exact bounds, that episode was a minute out of reach and the minutes said the speaker could not be identified.
+// It is not a guess: in the 2026-08-31 16:17 recording the other participant's name reached the database exactly once, at 16:28, one minute after the recording stopped — from the window switcher, listing the Teams window whose title read "Microsoft Teams (PWA) - Chat | Vexil Quorin". Queried on the recording's exact bounds, that episode was a minute out of reach and the minutes said the speaker could not be identified.
 const contextMargin = 3 * time.Minute
 
 // screenTextBudget caps how much of one episode's captured window text goes into the prompt. The names and presenter labels a meeting app shows sit near the front of what accessibility reads out, so the head of the text is the part worth keeping.
@@ -143,7 +143,7 @@ const (
 	meetingTextBudget = 1500
 )
 
-// desktopTimeline renders the meeting window's episodes as "HH:MM app — window title" lines followed by the text read off that window, which is what carries participant names ("Vikram Goel (Presenting)", chat senders, the meeting title).
+// desktopTimeline renders the meeting window's episodes as "HH:MM app — window title" lines followed by the text read off that window, which is what carries participant names ("Ravix Dolmen (Presenting)", chat senders, the meeting title).
 // Consecutive episodes with the same app, title and text collapse to one line, since the tracker samples every couple of seconds and most samples repeat.
 func (r *Recorder) desktopTimeline(ctx context.Context, since, until time.Time) string {
 	episodes, err := r.store.EpisodesInWindow(ctx, since.Add(-contextMargin), until.Add(contextMargin), episodeLimit)

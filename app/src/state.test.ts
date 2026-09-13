@@ -365,19 +365,19 @@ describe("daemonEvent", () => {
     const ev: DaemonEvent = {
       id: "1",
       type: "answer",
-      text: "Nearly. Priya said yes for Tuesday.",
+      text: "Nearly. Vexil said yes for Tuesday.",
       evidence: [
-        { title: "Re: venue", meta: "Priya · 08:40", body: "..." },
-        { title: "Re: parking", meta: "Priya · 08:41", body: "..." },
+        { title: "Re: venue", meta: "Vexil · 08:40", body: "..." },
+        { title: "Re: parking", meta: "Vexil · 08:41", body: "..." },
       ],
     };
     const { view: next } = step(askedView(), { kind: "daemonEvent", ev });
     expect(next.matters[0].turns[0].a).toBe(
-      "Nearly. Priya said yes for Tuesday.",
+      "Nearly. Vexil said yes for Tuesday.",
     );
     expect(next.matters[0].turns[0].evidence).toEqual([
-      { title: "Re: venue", meta: "Priya · 08:40", body: "..." },
-      { title: "Re: parking", meta: "Priya · 08:41", body: "..." },
+      { title: "Re: venue", meta: "Vexil · 08:40", body: "..." },
+      { title: "Re: parking", meta: "Vexil · 08:41", body: "..." },
     ]);
   });
 
@@ -740,19 +740,19 @@ describe("contextLoaded", () => {
   it("delegates a multi-segment title to chipLabel", () => {
     const ctx: ContextInfo = {
       app: "Google Chrome",
-      title: "Chat | Akshay Rathod | Microsoft Teams",
+      title: "Chat | Dremik Yolvane | Microsoft Teams",
       text: "",
     };
     const { view: next } = step(view(), { kind: "contextLoaded", ctx });
-    expect(next.contextChip).toBe("Akshay Rathod · Teams");
+    expect(next.contextChip).toBe("Dremik Yolvane · Teams");
   });
 });
 
 describe("chipLabel", () => {
   it("pairs the specific segment with the shortened site name for a multi-segment title", () => {
     expect(
-      chipLabel("Google Chrome", "Chat | Akshay Rathod | Microsoft Teams"),
-    ).toBe("Akshay Rathod · Teams");
+      chipLabel("Google Chrome", "Chat | Dremik Yolvane | Microsoft Teams"),
+    ).toBe("Dremik Yolvane · Teams");
   });
 
   it("shows the app alone when the title is empty", () => {
@@ -762,8 +762,8 @@ describe("chipLabel", () => {
   it.each([
     [
       "Google Chrome",
-      "Chat | Priya Shah | Microsoft Teams - High memory usage - 920 MB",
-      "Priya Shah · Teams",
+      "Chat | Vexil Quorin | Microsoft Teams - High memory usage - 920 MB",
+      "Vexil Quorin · Teams",
     ],
     ["Google Chrome", "Q3 hiring plan — Docs", "Q3 hiring plan · Docs"],
     ["Thunderbird", "Inbox (3) - Mail", "Inbox · Mail"],
@@ -805,9 +805,9 @@ describe("sourceMeta", () => {
   });
 
   it("leaves a meta part that is not a timestamp alone", () => {
-    expect(sourceMeta("Re: venue", "mail · Priya Nair 08:40")).toEqual([
+    expect(sourceMeta("Re: venue", "mail · Vexil Zelbrak 08:40")).toEqual([
       "mail",
-      "Priya Nair 08:40",
+      "Vexil Zelbrak 08:40",
     ]);
   });
 });
@@ -1026,9 +1026,9 @@ describe("voice", () => {
   it("heard opens a you turn and said fills its answer", () => {
     let v = say(live(), "heard", "is the venue sorted?");
     v = say(v, "said", "Nearly.");
-    v = say(v, "said", " Priya said yes.");
+    v = say(v, "said", " Vexil said yes.");
     expect(v.matters[0].turns).toEqual([
-      { q: "is the venue sorted?", a: "Nearly. Priya said yes." },
+      { q: "is the venue sorted?", a: "Nearly. Vexil said yes." },
     ]);
   });
 
@@ -1370,7 +1370,7 @@ describe("notice", () => {
   it("keeps a notice's own actions and sends the pressed key to the daemon", () => {
     const ask: Notice = {
       title: "Still open",
-      body: "Priya — send the invoice. Open since 28 Aug. Any progress?",
+      body: "Vexil — send the invoice. Open since 28 Aug. Any progress?",
       place: "tasks",
       id: "42",
       kind: "task",

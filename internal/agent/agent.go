@@ -44,7 +44,7 @@ type ContextReader interface {
 	SetUserTaskTitle(ctx context.Context, id int64, title string) error
 	SetUserTaskDone(ctx context.Context, id int64, done bool) error
 	DeleteUserTask(ctx context.Context, id int64) error
-	// OpenActionItems backs the action_items tool (tools.go). "What do I owe?" is a question about a column, not about meaning: the rows say "[open/normal] Alex Rivera — check out develop-essentials-api", which shares no words with the question and sits nowhere near it in embedding space. Asked through query_memory it returned ten summaries about attending meetings and not one action item, so the structural query gets its own door.
+	// OpenActionItems backs the action_items tool (tools.go). "What do I owe?" is a question about a column, not about meaning: the rows say "[open/normal] Zemna Braxen — check out develop-essentials-api", which shares no words with the question and sits nowhere near it in embedding space. Asked through query_memory it returned ten summaries about attending meetings and not one action item, so the structural query gets its own door.
 	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
 	// EpisodesForThread backed the retired thread_evidence tool. No tool calls it now; left on the interface rather than rippling its removal into the store.
 	EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error)

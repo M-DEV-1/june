@@ -1455,7 +1455,7 @@ func TestExecuteTool_Recall_BigWindowClimbsToSummaries(t *testing.T) {
 // "What do I owe?" is a question about a column, not about meaning, and query_memory answered it with ten summaries about attending meetings. The action_items tool reads the list directly, and leads each line with the id so revise can close one without a second lookup.
 func TestExecuteTool_ActionItemsListsWhatIsOwed(t *testing.T) {
 	brain := &toolTestBrain{openActions: []memory.ActionItem{
-		{NoteID: 41, Owner: "Alex Rivera", Text: "push the value chain branch", Status: memory.StatusOpen, Priority: memory.PriorityNormal},
+		{NoteID: 41, Owner: "Zemna Braxen", Text: "push the value chain branch", Status: memory.StatusOpen, Priority: memory.PriorityNormal},
 	}}
 	got := NewAgent(nil, nil, brain, nil, "").ExecuteTool(context.Background(), "action_items", map[string]any{})
 	if !strings.Contains(got, "[note#41]") || !strings.Contains(got, "push the value chain branch") {
@@ -3666,17 +3666,17 @@ func TestAddTaskHandsBackTheRefToReviseIt(t *testing.T) {
 
 func TestExecuteTool_Do_HandsTheGoalToTheJobRunnerAndReportsWhatItSaid(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	goal := "open spotify and play Teenage Dream, then open teams and message Priya that I am running late"
+	goal := "open spotify and play Teenage Dream, then open teams and message Vexil that I am running late"
 	var asked string
 	a.RunJob = func(ctx context.Context, g string) (string, error) {
 		asked = g
-		return "done: Teenage Dream is playing and the message to Priya is sitting in a draft", nil
+		return "done: Teenage Dream is playing and the message to Vexil is sitting in a draft", nil
 	}
 	result := a.executeTool(context.Background(), "do", map[string]any{"goal": goal})
 	if asked != goal {
 		t.Errorf("the runner was given %q, want the goal as spoken: %q", asked, goal)
 	}
-	if !strings.Contains(result, "the message to Priya is sitting in a draft") {
+	if !strings.Contains(result, "the message to Vexil is sitting in a draft") {
 		t.Errorf("do returned %q, want what the job said when it ended", result)
 	}
 }

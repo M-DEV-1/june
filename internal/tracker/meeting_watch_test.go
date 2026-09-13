@@ -23,7 +23,7 @@ func TestWatchMeetingWindow_SkipsWhatTheTickLoopSkips(t *testing.T) {
 			app: "", title: "", text: "", want: false,
 		},
 		"an ordinary call": {
-			app: "teams", title: "Chat | Priya | Microsoft Teams", text: "who is presenting", want: true,
+			app: "teams", title: "Chat | Vexil | Microsoft Teams", text: "who is presenting", want: true,
 		},
 	}
 

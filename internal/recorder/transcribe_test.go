@@ -384,11 +384,11 @@ func TestPrimingPrompt(t *testing.T) {
 		{
 			name: "carries the window's acronyms and names, within budget, as sentences",
 			eps: []db.Episode{
-				{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Priya Shah: ok sure ping me. Alex Rivera: I also found this INFORM Risk Scoring formula and the GRDI numbers. INFORM again. GRDI again."},
+				{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Vexil Quorin: ok sure ping me. Zemna Braxen: I also found this INFORM Risk Scoring formula and the GRDI numbers. INFORM again. GRDI again."},
 				{Title: "Acme Essentials - Climate Reporting Platform - Brave", ScreenText: "Climate Risk Studio Double Materiality Assessment ASRS"},
 			},
 			check: func(t *testing.T, got string) {
-				for _, want := range []string{"INFORM", "GRDI", "ASRS", "Priya Shah", "Climate Risk Studio"} {
+				for _, want := range []string{"INFORM", "GRDI", "ASRS", "Vexil Quorin", "Climate Risk Studio"} {
 					if !strings.Contains(got, want) {
 						t.Errorf("priming prompt is missing %q:\n%s", want, got)
 					}
@@ -424,7 +424,7 @@ func TestPrimingPrompt(t *testing.T) {
 		{
 			// Whisper keeps only the last whisperMaxContext tokens of this prompt, so participant names matter more than terms for getting the transcript right and have to come after them, where truncation can't reach them.
 			name: "names come after terms so they survive truncation",
-			eps:  []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"}},
+			eps:  []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"}},
 			check: func(t *testing.T, got string) {
 				termsAt, participantsAt := strings.Index(got, "Terms:"), strings.Index(got, "Participants:")
 				if termsAt == -1 || participantsAt == -1 {
@@ -433,7 +433,7 @@ func TestPrimingPrompt(t *testing.T) {
 				if participantsAt < termsAt {
 					t.Errorf("participants must come after terms, got:\n%s", got)
 				}
-				if !strings.HasSuffix(got, "Priya Shah.") {
+				if !strings.HasSuffix(got, "Vexil Quorin.") {
 					t.Errorf("the participant name should be the last thing in the prompt, got:\n%s", got)
 				}
 			},
@@ -442,15 +442,15 @@ func TestPrimingPrompt(t *testing.T) {
 			// Only the window the call is actually running in names the people on the call: a WhatsApp tab open at the same time must not contribute its chat senders as participants.
 			name: "participants come only from the meeting window",
 			eps: []db.Episode{
-				{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Rohit Verma: Kal shaam ko bhej dunga"},
-				{App: "Brave Browser", Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vikram Goel: sharing my screen now"},
+				{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Yalven Pravik: Kal shaam ko bhej dunga"},
+				{App: "Brave Browser", Title: "Meet - abc-defg-hij - Brave", ScreenText: "Ravix Dolmen: sharing my screen now"},
 			},
 			check: func(t *testing.T, got string) {
 				_, participants, _ := strings.Cut(got, "Participants:")
-				if strings.Contains(participants, "Rohit") {
+				if strings.Contains(participants, "Yalven") {
 					t.Errorf("a WhatsApp sender was named as a meeting participant: %q", participants)
 				}
-				if !strings.Contains(participants, "Vikram Goel") {
+				if !strings.Contains(participants, "Ravix Dolmen") {
 					t.Errorf("the meeting window's own chat sender was dropped: %q", participants)
 				}
 			},
@@ -458,9 +458,9 @@ func TestPrimingPrompt(t *testing.T) {
 		{
 			// The names the store already knows are the cheapest priming there is, so they go into the prompt after the screen's own terms.
 			name:  "known people from personal context are included",
-			known: []string{"Priya Shah", "Sneha"},
+			known: []string{"Vexil Quorin", "Sorrek"},
 			check: func(t *testing.T, got string) {
-				for _, want := range []string{"Priya Shah", "Sneha"} {
+				for _, want := range []string{"Vexil Quorin", "Sorrek"} {
 					if !strings.Contains(got, want) {
 						t.Errorf("prompt %q lacks known person %q", got, want)
 					}
@@ -536,9 +536,9 @@ func TestTranscribeWAV_PassesThresholdsAndPrompt(t *testing.T) {
 
 // Whisper reads its priming prompt back as speech on occasion, which then reads as something a person said. stripPromptEcho is what removes it, and this is the test that it is actually wired into the run rather than merely defined.
 func TestStripPromptEcho_DropsTheEchoedPrompt(t *testing.T) {
-	const prompt = "Meeting notes. Terms: INFORM, GRDI. Participants: Vikram Goel."
+	const prompt = "Meeting notes. Terms: INFORM, GRDI. Participants: Ravix Dolmen."
 	segs := []Segment{
-		{Start: 0, End: time.Second, Speaker: speakerCall, Text: "Participants: Vikram Goel. Good afternoon."},
+		{Start: 0, End: time.Second, Speaker: speakerCall, Text: "Participants: Ravix Dolmen. Good afternoon."},
 		{Start: 2 * time.Second, End: 3 * time.Second, Speaker: speakerCall, Text: "is my screen visible?"},
 	}
 	got := stripPromptEcho(segs, prompt)
@@ -585,11 +585,11 @@ func TestMarkerLooped(t *testing.T) {
 	}
 }
 
-// personNamesFromContext turns the store's hyphenated person subjects into the names whisper should hear: "priya-shah" is "Priya Shah". Subjects that are not people (identity, preferences-*) are left out.
+// personNamesFromContext turns the store's hyphenated person subjects into the names whisper should hear: "vexil-quorin" is "Vexil Quorin". Subjects that are not people (identity, preferences-*) are left out.
 func TestPersonNamesFromContext(t *testing.T) {
-	entries := []db.PersonalEntry{{Subject: "identity", Content: "x"}, {Subject: "priya-shah", Content: "x"}, {Subject: "preferences-notes", Content: "x"}, {Subject: "krish-littlebird", Content: "x"}}
+	entries := []db.PersonalEntry{{Subject: "identity", Content: "x"}, {Subject: "vexil-quorin", Content: "x"}, {Subject: "preferences-notes", Content: "x"}, {Subject: "melvorn-littlebird", Content: "x"}}
 	got := personNamesFromContext(entries)
-	want := []string{"Priya Shah", "Krish Littlebird"}
+	want := []string{"Vexil Quorin", "Melvorn Littlebird"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -630,8 +630,8 @@ func runArgs(t *testing.T, argLog string) []string {
 
 // The priming prompt is a spelling aid, and whisper sometimes reads it back as the first thing said in the meeting, which the minutes model then takes as evidence about who was in the call. This is the test that stripPromptEcho is actually wired into the run rather than merely defined.
 func TestTranscribeWAV_DropsThePromptWhisperReadBackAsSpeech(t *testing.T) {
-	prompt := "A meeting recording. Participants: Rohit Verma, Claude Artifact."
-	bin := fakeWhisper(t, "[00:00:00.000 --> 00:00:02.000]   Participants: Rohit Verma, Claude Artifact.\n[00:00:03.000 --> 00:00:05.000]   shall we ship on friday", "")
+	prompt := "A meeting recording. Participants: Yalven Pravik, Claude Artifact."
+	bin := fakeWhisper(t, "[00:00:00.000 --> 00:00:02.000]   Participants: Yalven Pravik, Claude Artifact.\n[00:00:03.000 --> 00:00:05.000]   shall we ship on friday", "")
 
 	segs, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerCall, prompt, 0)
 	if err != nil {
@@ -647,7 +647,7 @@ func TestTranscribeWAV_TheUnprimedRetryKeepsTheModelFlags(t *testing.T) {
 	looped := "[00:00:00.000 --> 00:00:01.000]   [ Silence ]\n[00:00:01.000 --> 00:00:02.000]   [ Silence ]\n[00:00:02.000 --> 00:00:03.000]   hello"
 	bin, argLog := fakeWhisperLogging(t, looped)
 
-	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "Participants: Priya Shah.", 0); err != nil {
+	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "Participants: Vexil Quorin.", 0); err != nil {
 		t.Fatalf("transcribeWAV: %v", err)
 	}
 

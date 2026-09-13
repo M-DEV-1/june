@@ -1242,7 +1242,7 @@ func TestBuildEvidence_CarriesAMeetingsActionItems(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		b.WriteString(fmt.Sprintf("- attendee %d — spoke throughout\n", i))
 	}
-	b.WriteString("\n## Action items\n- Alex: push the value chain branch\n")
+	b.WriteString("\n## Action items\n- Zemna: push the value chain branch\n")
 
 	got := meetingEvidenceBody(b.String())
 

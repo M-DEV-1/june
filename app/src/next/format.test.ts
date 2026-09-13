@@ -260,10 +260,10 @@ describe("the searches over each list", () => {
 
   it("matches a meeting on its title and on who was there", () => {
     const list = [
-      meeting({ id: "a", attendees: [{ name: "Priya", heard_only: false }] }),
+      meeting({ id: "a", attendees: [{ name: "Vexil", heard_only: false }] }),
       meeting({ id: "b", title: "Other" }),
     ];
-    expect(meetingsShown(list, "priya").map((m) => m.id)).toEqual(["a"]);
+    expect(meetingsShown(list, "vexil").map((m) => m.id)).toEqual(["a"]);
   });
 });
 
@@ -340,21 +340,21 @@ describe("meetings", () => {
   it("names who was there and marks a name that was only heard", () => {
     expect(
       meetingWho([
-        { name: "Priya", heard_only: false },
-        { name: "Sam", heard_only: true },
+        { name: "Vexil", heard_only: false },
+        { name: "Emzor", heard_only: true },
       ]),
-    ).toBe("Priya, Sam (heard)");
+    ).toBe("Vexil, Emzor (heard)");
     expect(meetingWho([])).toBe("");
   });
 
   it("reads the minutes into headings, bullets and paragraphs and drops the heading that repeats the title", () => {
     const lines = minutesLines(
-      "# Standup\n\n## What was said\n- **Priya** will send the file\nA plain sentence.\n",
+      "# Standup\n\n## What was said\n- **Vexil** will send the file\nA plain sentence.\n",
       "Standup",
     );
     expect(lines).toEqual([
       { kind: "h", text: "What was said" },
-      { kind: "bullet", text: "Priya will send the file" },
+      { kind: "bullet", text: "Vexil will send the file" },
       { kind: "text", text: "A plain sentence." },
     ]);
   });
@@ -602,12 +602,12 @@ describe("reading the daemon's real minutes", () => {
 
   it("leaves a short bullet a bullet, and still keeps its lead phrase apart", () => {
     const lines = minutesLines(
-      "- **Said to you** — Priya agreed the pattern set is good enough.",
+      "- **Said to you** — Vexil agreed the pattern set is good enough.",
     );
     expect(lines).toEqual([
       {
         kind: "bullet",
-        text: "Priya agreed the pattern set is good enough.",
+        text: "Vexil agreed the pattern set is good enough.",
         lead: "Said to you",
       },
     ]);
@@ -656,7 +656,7 @@ describe("reading the daemon's real minutes", () => {
   it("makes a label of any bullet with items indented under it, keeping its lead phrase apart", () => {
     const lines = minutesLines(
       [
-        "- **Priya Shah** — took two things away",
+        "- **Vexil Quorin** — took two things away",
         "  - Combine the two tables into one.",
         "- Someone else said something short.",
       ].join("\n"),
@@ -665,7 +665,7 @@ describe("reading the daemon's real minutes", () => {
     expect(lines[0]).toEqual({
       kind: "label",
       text: "took two things away",
-      lead: "Priya Shah",
+      lead: "Vexil Quorin",
     });
   });
 
@@ -678,8 +678,8 @@ describe("reading the daemon's real minutes", () => {
   });
 
   it("does not mistake a dash inside a sentence for a lead phrase", () => {
-    expect(minutesLines("- Priya — who leads the work — agreed.")).toEqual([
-      { kind: "bullet", text: "Priya — who leads the work — agreed." },
+    expect(minutesLines("- Vexil — who leads the work — agreed.")).toEqual([
+      { kind: "bullet", text: "Vexil — who leads the work — agreed." },
     ]);
   });
 });

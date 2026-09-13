@@ -673,7 +673,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// The unattended jobs were wired with a late-bound hand-over brain before the ask agent existed; publishing it here is what makes their 429 and 503 fallbacks live. It hands on again from Codex to Claude when Codex's own allowance is spent, so one spent subscription does not lose the day's summaries and minutes.
 	publishCodexFallback(brain.FromAsker(agent.CodexThenClaude{Agent: askAgent}))
 
-	// A routine asks through the same tool-calling path the window's /ask uses, so "when Priya replies about the venue" can look at the screen and the store rather than answer from a bare prompt.
+	// A routine asks through the same tool-calling path the window's /ask uses, so "when Vexil replies about the venue" can look at the screen and the store rather than answer from a bare prompt.
 	scheduler.SetRoutineAsk(func(ctx context.Context, q string) (string, error) {
 		tr, err := askAgent.AskText(ctx, q)
 		return tr.Answer, err

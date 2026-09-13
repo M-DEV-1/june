@@ -185,9 +185,9 @@ func TestWindowFor_PrefersTheWindowOverTheProcess(t *testing.T) {
 	// A call in a browser tab is the case the process name cannot describe: the process is "chrome" whether the tab is a meeting, a spreadsheet or a video. The window title is the only thing that says which, and Ora already records it every couple of seconds. Reading the most recent one matters because an app can have more than one window on record: the wrong pick here would report a stale screen instead of the meeting itself.
 	eps := []db.Episode{
 		{App: "Google Chrome", Title: "Inbox (12)"},
-		{App: "Google Chrome", Title: "Calendar | Karan Mehta | Microsoft Teams"},
+		{App: "Google Chrome", Title: "Calendar | Trelvo Kordis | Microsoft Teams"},
 	}
-	if got := windowFor("Chrome", eps); got != "Calendar | Karan Mehta | Microsoft Teams" {
+	if got := windowFor("Chrome", eps); got != "Calendar | Trelvo Kordis | Microsoft Teams" {
 		t.Errorf("windowFor = %q, want the most recent window for that process", got)
 	}
 }
@@ -204,7 +204,7 @@ func TestDescribe(t *testing.T) {
 			name:  "uses windows where there are any, falls back to the process name, and trims",
 			users: []string{"Chrome", "Discord"},
 			eps: []db.Episode{
-				{App: "Google Chrome", Title: "Calendar | Karan Mehta | Microsoft Teams - High memory usage - 1.2 GB"},
+				{App: "Google Chrome", Title: "Calendar | Trelvo Kordis | Microsoft Teams - High memory usage - 1.2 GB"},
 			},
 			check: func(t *testing.T, got []string) {
 				if len(got) != 2 {
@@ -213,7 +213,7 @@ func TestDescribe(t *testing.T) {
 				if len([]rune(got[0])) > maxNameRunes {
 					t.Errorf("name is %d runes, want it cut to %d: %q", len([]rune(got[0])), maxNameRunes, got[0])
 				}
-				if !strings.HasPrefix(got[0], "Calendar | Karan Mehta") {
+				if !strings.HasPrefix(got[0], "Calendar | Trelvo Kordis") {
 					t.Errorf("got[0] = %q, want the window title", got[0])
 				}
 				if got[1] != "Discord" {
@@ -227,13 +227,13 @@ func TestDescribe(t *testing.T) {
 			users: []string{"Brave", "Chrome"},
 			eps: []db.Episode{
 				{App: "Brave", Title: "Meet – abc-defg-hij - Microphone recording - Brave"},
-				{App: "Chrome", Title: "Calendar | Priya Shah | Microsoft Teams - High memory usage - 852 MB"},
+				{App: "Chrome", Title: "Calendar | Vexil Quorin | Microsoft Teams - High memory usage - 852 MB"},
 			},
 			check: func(t *testing.T, got []string) {
 				if got[0] != "Meet – abc-defg-hij" {
 					t.Errorf("got[0] = %q, want the meeting without the browser's status", got[0])
 				}
-				if got[1] != "Calendar | Priya Shah | Microsoft Teams" {
+				if got[1] != "Calendar | Vexil Quorin | Microsoft Teams" {
 					t.Errorf("got[1] = %q, want the meeting without the memory warning", got[1])
 				}
 			},

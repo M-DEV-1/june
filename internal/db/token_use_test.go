@@ -38,7 +38,7 @@ func TestAddTokenUse(t *testing.T) {
 			OutputTokens: 340,
 			TotalTokens:  1540,
 			DurationMS:   2750,
-			Question:     "what did priya ask about",
+			Question:     "what did vexil ask about",
 			At:           at,
 		})
 
@@ -59,7 +59,7 @@ func TestAddTokenUse(t *testing.T) {
 		if u.DurationMS != 2750 {
 			t.Errorf("duration came back %d ms, want 2750", u.DurationMS)
 		}
-		if u.Question != "what did priya ask about" {
+		if u.Question != "what did vexil ask about" {
 			t.Errorf("question came back %q", u.Question)
 		}
 		if !u.At.Equal(at) {

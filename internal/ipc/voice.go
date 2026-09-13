@@ -124,7 +124,7 @@ func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store
 	if s.screen != nil {
 		a.SetBufferProvider(s.screen)
 	}
-	// do hands a whole chain of work to the job runner, which plans it, checks each step and reads what this machine did the last few times (see ActJobs.Spoken). Without this a spoken "open Spotify and play this, then message Priya" is driven one raw tool call at a time inside the conversation, with no plan and nothing verified.
+	// do hands a whole chain of work to the job runner, which plans it, checks each step and reads what this machine did the last few times (see ActJobs.Spoken). Without this a spoken "open Spotify and play this, then message Vexil" is driven one raw tool call at a time inside the conversation, with no plan and nothing verified.
 	a.RunJob = runJob
 	// point_at rings through the same overlay path POST /overlay uses, so the extension has one thing to listen to whether the ring came from a typed ask or from speech. A spoken ring belongs to no /ask, so it is stamped with the non-ask id rather than with an id that names a question the user never typed.
 	a.Point = func(x, y, w, h int, label string) error { return s.Ring(overlayNoAsk, x, y, w, h, label) }

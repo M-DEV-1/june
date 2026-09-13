@@ -485,10 +485,10 @@ describe("a notice's action reaching the window", () => {
       event({
         id: "",
         type: "notice",
-        notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: "2026-09-05T18:00:00" },
+        notice: { title: "Routine", body: "Vexil replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: "2026-09-05T18:00:00" },
       }),
     );
-    expect(store.getState().ui.notice).toEqual({ text: "Priya replied about the venue.: Snoozed until 18:00", kind: "info" });
+    expect(store.getState().ui.notice).toEqual({ text: "Vexil replied about the venue.: Snoozed until 18:00", kind: "info" });
     expect(invalidate).not.toHaveBeenCalledWith(["Task"]);
     invalidate.mockRestore();
     vi.useRealTimers();

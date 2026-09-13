@@ -92,7 +92,7 @@ type alias struct {
 }
 
 // New builds a Tearer from the personal_context entries, which is the whole gazetteer. Input: the rows db.Store.PersonalContext returns; entries that are not a person (the user's own "identity", the "preference..." subjects) are skipped, since the subject of those is not a name and no name can be derived from it.
-// Each person contributes their full name, and -- only when the subject is a plain first-and-last name -- each of the two words on its own, so "Priya" and "Shah" both resolve. A longer subject like "priya-shah-mother" contributes only the full name: its last word is an ordinary English noun, and matching "mother" everywhere would attach the wrong person to half the sentences in the store.
+// Each person contributes their full name, and -- only when the subject is a plain first-and-last name -- each of the two words on its own, so "Vexil" and "Quorin" both resolve. A longer subject like "vexil-quorin-mother" contributes only the full name: its last word is an ordinary English noun, and matching "mother" everywhere would attach the wrong person to half the sentences in the store.
 func New(entries []db.PersonalEntry) *Tearer {
 	t := &Tearer{Unknown: NoUnknownNames{}}
 	for _, e := range entries {
@@ -110,7 +110,7 @@ func New(entries []db.PersonalEntry) *Tearer {
 				alias{text: words[1], subject: e.Subject})
 		}
 	}
-	// A bare first name shared by two subjects ("priya" is in both "priya-shah" and "priya-shah-mother") has to resolve the same way every time or the id is not stable. Shortest subject first, then alphabetical, makes that deterministic and picks the person whose name it plainly is over the longer qualified subject.
+	// A bare first name shared by two subjects ("vexil" is in both "vexil-quorin" and "vexil-quorin-mother") has to resolve the same way every time or the id is not stable. Shortest subject first, then alphabetical, makes that deterministic and picks the person whose name it plainly is over the longer qualified subject.
 	sort.SliceStable(t.aliases, func(i, j int) bool {
 		a, b := t.aliases[i], t.aliases[j]
 		if a.text != b.text {

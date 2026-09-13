@@ -19,7 +19,7 @@ type PersonalEntry struct {
 }
 
 // SetPersonalContext writes content under subject, replacing whatever was there before. The subject is the key, so saying the same thing twice edits one row instead of adding a second — that is the whole point of the table.
-// Input: a short plain or kebab-case subject ("identity", "priya-shah") and the entry's prose. Output: an error if either is blank or the write fails.
+// Input: a short plain or kebab-case subject ("identity", "vexil-quorin") and the entry's prose. Output: an error if either is blank or the write fails.
 func (s *Store) SetPersonalContext(ctx context.Context, subject, content string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SetPersonalContext")
@@ -96,7 +96,7 @@ func IsPersonSubject(subject string) bool {
 	return subject != "" && !nonPersonSubjects[subject] && !strings.HasPrefix(subject, "preference")
 }
 
-// PersonSubjectName turns a personal-context subject into the name to show or speak. Input: a hyphenated (or underscore/space separated) lowercase subject such as "priya-shah". Output: "Priya Shah".
+// PersonSubjectName turns a personal-context subject into the name to show or speak. Input: a hyphenated (or underscore/space separated) lowercase subject such as "vexil-quorin". Output: "Vexil Quorin".
 func PersonSubjectName(subject string) string {
 	words := strings.FieldsFunc(subject, func(r rune) bool { return r == '-' || r == '_' || r == ' ' })
 	for i, word := range words {

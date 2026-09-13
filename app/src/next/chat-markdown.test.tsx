@@ -47,7 +47,7 @@ describe("ReplyMarkdown", () => {
     const store = makeStore();
     render(
       <Provider store={store}>
-        <ReplyMarkdown text="[write to her](mailto:priya@example.com)" />
+        <ReplyMarkdown text="[write to her](mailto:vexil@example.com)" />
       </Provider>,
     );
     // POST /open refuses any scheme but http and https (see internal/ipc/open.go), and this window never navigates itself, so there is nothing a click could do.

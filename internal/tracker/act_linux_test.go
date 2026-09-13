@@ -64,7 +64,7 @@ func TestVerifyAgainst(t *testing.T) {
 		{name: "an unlabelled entry", nowRole: "entry", role: "entry"},
 		// For a content role the label is the node's own contents, not a name somebody chose for it, so it changes whenever the user types — and typing into a box is the ordinary thing to do between listing it and clicking it. Comparing the contents refused those clicks and sent the model to look at the screen again.
 		{name: "the user typed a character into the listed entry", nowRole: "entry", nowLabel: "hello!", role: "entry", label: "hello"},
-		{name: "the paragraph that was listed was edited", nowRole: "text", nowLabel: "Dear Bob,", role: "text", label: "Dear Bo"},
+		{name: "the paragraph that was listed was edited", nowRole: "text", nowLabel: "Dear Dranik,", role: "text", label: "Dear Dran"},
 		// A control's label is a name, so a changed one still means a different element.
 		{name: "another label on a button", nowRole: "push button", nowLabel: "Delete", role: "push button", label: "Send", wantErr: true},
 	}
