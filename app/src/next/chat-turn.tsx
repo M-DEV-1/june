@@ -33,8 +33,10 @@ function Working({ run }: { run: Run }) {
           {run.steps.map((s, i) => (
             <li
               key={`${s.name}-${i}`}
-              className="text-meta text-muted-foreground"
+              className="flex items-center gap-1.5 text-meta text-muted-foreground"
             >
+              {/* A face only where one means something: a step the daemon marked failed. A face on every row would be a bullet point wearing a face, which is the thing to avoid. */}
+              {s.failed ? <Face state="refused" className="text-micro" /> : null}
               <span className="font-medium text-foreground">{s.name}</span>
               {s.detail ? <span className="ml-2">{s.detail}</span> : null}
             </li>
@@ -43,7 +45,10 @@ function Working({ run }: { run: Run }) {
       ) : null}
       {run.answer ? (
         <div>
-          <p className="whitespace-pre-wrap">{run.answer}</p>
+          <div className="flex gap-2.5">
+            <Face state="thinking" className="text-micro" />
+            <p className="whitespace-pre-wrap">{run.answer}</p>
+          </div>
           <div className="mt-1.5">
             <WorkingGrid />
           </div>
@@ -201,6 +206,12 @@ export function Thread({
                           : ""
                       }
                     >
+                      {/* Only a reply that went wrong opens with a face. An ordinary answer does not need one announcing it — the words are the reply, and a face on every turn is decoration. */}
+                      {t.kind === "error" ? (
+                        <div className="mb-1">
+                          <Face state="refused" />
+                        </div>
+                      ) : null}
                       <ReplyMarkdown text={turnText(t)} />
                       <ReplyMeta turn={t} folded={!wide || !sources} />
                     </div>

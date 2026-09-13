@@ -1,12 +1,16 @@
 /** What sits under one of Ora's replies in the thread: the grey line saying when it was said and what it read, folded away behind a click. */
 
+import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import type { Evidence, Turn } from "./api";
 import { hhmm } from "./format";
 import { ui, useAppDispatch, useAppSelector } from "./store";
 
-/** One of the quotes behind an answer, drawn as the thing that was read rather than as a field: the source and when it was on one grey line, the words themselves on a sunken block under it. Input: the rows the daemon sent. Output: the stack of them. */
+/** How many sources the rail shows before folding the rest behind "show all": a rail beside a wide thread has a capped, scrolling height, but a reply with dozens of sources should not hand a reader that much to scroll through before they can even see what it did. The full window's own fold under a reply (ReplyMeta, unaffected by this) already asks a click to see any of them, so it lists every one once opened. */
+const RAIL_PREVIEW = 6;
+
+/** One of the quotes behind an answer, drawn as the thing that was read rather than as a field: the source and when it was on one grey line, the words themselves on a sunken block under it. Input: the rows the daemon sent, and whether this is the rail's compact list. Output: the stack of them. In the compact form, more than RAIL_PREVIEW sources are folded behind a "show all N" control rather than all listed at once. */
 export function Quotes({
   evidence,
   compact,
@@ -14,11 +18,13 @@ export function Quotes({
   evidence: Evidence[];
   compact?: boolean;
 }) {
+  const [all, setAll] = useState(false);
+  const shown = compact && !all ? evidence.slice(0, RAIL_PREVIEW) : evidence;
   return (
     <div
       className={compact ? "flex flex-col gap-3" : "mt-3 flex flex-col gap-2"}
     >
-      {evidence.map((e, i) => (
+      {shown.map((e, i) => (
         <div
           key={`${e.title}-${i}`}
           className={
@@ -41,6 +47,15 @@ export function Quotes({
           </p>
         </div>
       ))}
+      {compact && !all && evidence.length > RAIL_PREVIEW ? (
+        <button
+          type="button"
+          onClick={() => setAll(true)}
+          className="self-start rounded-sm text-meta text-muted-foreground underline-offset-2 outline-none hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          show all {evidence.length}
+        </button>
+      ) : null}
     </div>
   );
 }

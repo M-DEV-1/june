@@ -96,6 +96,14 @@ type toolTestBrain struct {
 	deletedNoteID int64
 	deleteNoteErr error
 
+	// taskTitleID/taskTitle, taskDoneID/taskDone and deletedTaskID capture what revise's task path asked the store to do; taskErr forces all three to fail.
+	taskTitleID   int64
+	taskTitle     string
+	taskDoneID    int64
+	taskDone      bool
+	deletedTaskID int64
+	taskErr       error
+
 	// savedFoldTask/savedFoldResult capture SaveFold's args; unconsumedFolds backs UnconsumedFolds' return value; consumedFoldIDs records every id passed to ConsumeFold, in order — for the branch dead-session-fallback and next-session-surfacing tests.
 	savedFoldTask   string
 	savedFoldResult string
@@ -188,6 +196,30 @@ func (b *toolTestBrain) EpisodesForThread(ctx context.Context, threadID int64, l
 func (b *toolTestBrain) CreateConversation(ctx context.Context, title, brain string) (int64, error) {
 	b.convTitles = append(b.convTitles, title)
 	return int64(len(b.convTitles)), nil
+}
+
+func (b *toolTestBrain) SetUserTaskTitle(ctx context.Context, id int64, title string) error {
+	if b.taskErr != nil {
+		return b.taskErr
+	}
+	b.taskTitleID, b.taskTitle = id, title
+	return nil
+}
+
+func (b *toolTestBrain) SetUserTaskDone(ctx context.Context, id int64, done bool) error {
+	if b.taskErr != nil {
+		return b.taskErr
+	}
+	b.taskDoneID, b.taskDone = id, done
+	return nil
+}
+
+func (b *toolTestBrain) DeleteUserTask(ctx context.Context, id int64) error {
+	if b.taskErr != nil {
+		return b.taskErr
+	}
+	b.deletedTaskID = id
+	return nil
 }
 
 func (b *toolTestBrain) AddUserTask(ctx context.Context, title string, conversationID int64) (int64, error) {
@@ -647,7 +679,7 @@ func TestLiveTools_IncludesFunctionDeclarationsAndGoogleSearch(t *testing.T) {
 	}
 }
 
-// TestToolDefinitions_AllNonBlocking verifies every function declaration is declared NON_BLOCKING. Left unset, the Live API treats a declaration as BLOCKING, which makes the model stop talking and stop listening for the whole duration of a tool call — a memory lookup that takes two seconds turns into two seconds of dead air on a voice call. NON_BLOCKING lets the model keep the conversation going while the result comes back out of band (see toolResponseScheduling for how the result is then folded in).
+// TestToolDefinitions_AllNonBlocking verifies every function declaration is declared NON_BLOCKING. Left unset, the Live API treats a declaration as BLOCKING, which makes the model stop talking and stop listening for the whole duration of a tool call — a memory lookup that takes two seconds turns into two seconds of dead air on a voice call. NON_BLOCKING lets the model keep the conversation going while the result comes back out of band (see scheduleFor for how the result is then folded in).
 func TestToolDefinitions_AllNonBlocking(t *testing.T) {
 	for _, tool := range toolDefinitions() {
 		for _, fd := range tool.FunctionDeclarations {
@@ -1608,6 +1640,9 @@ func drawingAgent(t *testing.T) (a *Agent, drawn *[]string) {
 			{Role: "push button", Label: "Send", X: 200, Y: 300, W: 40, H: 20, Showing: true, Ref: "r-2"},
 		}, nil
 	}
+	// NewAgent wires the real desktop-entry reader and the real launcher, which start real applications on whatever machine runs the tests — a test that reached open_app opened a browser window on the developer's own screen. Every test agent gets a fixed list and a launcher that records instead; a test that wants to watch a launch replaces these with its own.
+	a.desktopEntries = func() map[string]string { return map[string]string{} }
+	a.launchApp = func(path string) error { return fmt.Errorf("this test never wired a launcher, so nothing was started") }
 	drawn = &[]string{}
 	a.Draw = func(_, shape string, points [][2]int, x, y, w, h int, label string) error {
 		*drawn = append(*drawn, fmt.Sprintf("%s %v %d,%d,%d,%d %q", shape, points, x, y, w, h, label))
@@ -1913,6 +1948,56 @@ func TestExecuteTool_Click_GuardedWithoutAReadableRectangle(t *testing.T) {
 	}
 	if !strings.Contains(got, "look again") {
 		t.Errorf("result = %q, want it to tell the model to look again", got)
+	}
+}
+
+// Most clicks succeed through doAction, and those deserve to see the pointer indicator too, not only the ones that fall back to a real press. The tap has to land at the element's rectangle read fresh, not the one observe_screen listed, since the page can have scrolled between the list and the click.
+func TestExecuteTool_Click_TapsTheFreshCentreBeforeASuccessfulAction(t *testing.T) {
+	a, f := ringingAgent(t, act.Node{Role: "push button", Label: "Play", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-play"})
+	var taps []string
+	a.Tap = func(x, y int, label string) error {
+		taps = append(taps, fmt.Sprintf("%s %d,%d", label, x, y))
+		return nil
+	}
+	tapLead = 0
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+	f.at.X, f.at.Y = 14, 24
+	got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
+	if len(taps) != 1 || taps[0] != "Play 54,39" {
+		t.Errorf("taps = %v, want exactly one tap at the fresh centre (54,39), not the listed one (50,35); result %q", taps, got)
+	}
+	if len(f.clicked) != 1 {
+		t.Errorf("clicked = %v, want the click to still go through doAction", f.clicked)
+	}
+}
+
+// The pointer fallback fires when the element has no accessibility action at all; it has to click where the element is now, not where observe_screen's stale list left it, and it must not tap a second time on top of the tap the click already showed before trying doAction.
+func TestExecuteTool_Click_PointerFallbackUsesTheFreshRectangle(t *testing.T) {
+	a, f := ringingAgent(t, act.Node{Role: "push button", Label: "Brave", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-brave"})
+	a.capture = nil
+	f.readErr = nil
+	a.doAction = func(ctx context.Context, ref string) (string, error) {
+		return "", errors.New("the element offers no action to fire")
+	}
+	in := &fakeInput{}
+	a.input = onceInput(func(ctx context.Context) (InputDevice, error) { return in, nil })
+	var taps []string
+	a.Tap = func(x, y int, label string) error {
+		taps = append(taps, fmt.Sprintf("%d,%d", x, y))
+		return nil
+	}
+	tapLead = 0
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+	f.at.X, f.at.Y = 14, 24
+	got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
+	if len(in.calls) != 1 || in.calls[0] != "click 54,39" {
+		t.Errorf("pointer = %v, want one click at the fresh centre (54,39), not the listed one (50,35)", in.calls)
+	}
+	if len(taps) != 1 || taps[0] != "54,39" {
+		t.Errorf("taps = %v, want exactly one tap, at the fresh centre, not one per attempt", taps)
+	}
+	if !strings.Contains(got, "via pointer") {
+		t.Errorf("result = %q, want it to say the pointer did it", got)
 	}
 }
 
@@ -2408,7 +2493,7 @@ func TestOnceInput_ReopensWhenThePortalSaysTheSessionIsGone(t *testing.T) {
 
 // Every new tool has to be offered to a screen round, allowed through the ask gate, and kept out of the log file, or it is declared and unusable.
 func TestScreenToolLists_CarryTheKeyboardAndPointerTools(t *testing.T) {
-	for _, name := range []string{"press_key", "click_at", "scroll_at"} {
+	for _, name := range []string{"press_key", "click", "scroll_at"} {
 		if !askAllowedTools[name] || !screenRoundTools[name] || !screenToolNames[name] {
 			t.Errorf("%s: allowed=%v screenRound=%v screenNames=%v, want all three", name, askAllowedTools[name], screenRoundTools[name], screenToolNames[name])
 		}
@@ -2448,9 +2533,9 @@ func switchingAgent(t *testing.T, front func() (string, string)) (*Agent, *fakeI
 		}
 		return app, title, nil, nil
 	}
-	keyWait, verifyFor := switchKeyWait, switchVerifyFor
-	switchKeyWait, switchVerifyFor = 0, 0
-	t.Cleanup(func() { switchKeyWait, switchVerifyFor = keyWait, verifyFor })
+	verifyFor := switchVerifyFor
+	switchVerifyFor = 0
+	t.Cleanup(func() { switchVerifyFor = verifyFor })
 	return a, in
 }
 
@@ -2501,96 +2586,6 @@ func TestExecuteTool_SwitchWindow_SaysWhenTheAppIsAlreadyInFront(t *testing.T) {
 	}
 	if strings.HasPrefix(got, "error") || !strings.Contains(got, "Brave · News") {
 		t.Errorf("result = %q, want it to say that window is already in front", got)
-	}
-}
-
-// GNOME gives an unprivileged daemon no way to raise another application's window, so the switch is the shell's own search driven through the portal keyboard: Super, the name, Enter, in that order.
-func TestExecuteTool_SwitchWindow_PressesSuperTypesTheNameAndPressesEnter(t *testing.T) {
-	var in *fakeInput
-	a, in := switchingAgent(t, func() (string, string) {
-		if in != nil && len(in.calls) >= 3 {
-			return "Brave", "News"
-		}
-		return "mail", "Inbox"
-	})
-	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
-	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
-	want := []string{"press Super", "type Brave", "press Enter"}
-	if !slices.Equal(in.calls, want) {
-		t.Errorf("keyboard = %v, want %v", in.calls, want)
-	}
-	if !strings.Contains(got, "switched to") || !strings.Contains(got, "Brave · News") {
-		t.Errorf("result = %q, want it to say which window came forward", got)
-	}
-}
-
-// A search that matched nothing leaves the window where it was, and the overview may still be over the screen, so one Escape closes it and the answer says plainly that nothing moved.
-func TestExecuteTool_SwitchWindow_SaysWhenTheFrontWindowDidNotChange(t *testing.T) {
-	a, in := switchingAgent(t, func() (string, string) { return "mail", "Inbox" })
-	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
-	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
-	want := []string{"press Super", "type Brave", "press Enter", "press Escape"}
-	if !slices.Equal(in.calls, want) {
-		t.Errorf("keyboard = %v, want the search closed again with Escape", in.calls)
-	}
-	if !strings.Contains(got, "still") || !strings.Contains(got, "mail · Inbox") {
-		t.Errorf("result = %q, want it to say the front window did not change", got)
-	}
-}
-
-// The search matches an installed application name, not a window title, so the top result can be something else entirely; saying which window actually came forward is what keeps the next round from acting in the wrong one.
-func TestExecuteTool_SwitchWindow_SaysWhenSomethingElseCameForward(t *testing.T) {
-	var in *fakeInput
-	a, in := switchingAgent(t, func() (string, string) {
-		if in != nil && len(in.calls) >= 3 {
-			return "Slack", "General"
-		}
-		return "mail", "Inbox"
-	})
-	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
-	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
-	want := []string{"press Super", "type Brave", "press Enter"}
-	if !slices.Equal(in.calls, want) {
-		t.Errorf("keyboard = %v, want no Escape, because activating the wrong result already closed the overview", in.calls)
-	}
-	if !strings.Contains(got, "Slack · General") || !strings.Contains(got, "not") || !strings.Contains(got, "Brave") {
-		t.Errorf("result = %q, want it to name the window that came forward instead", got)
-	}
-}
-
-// Super can be swallowed — a modal holds the grab, the compositor is busy — and the name would then be typed into whatever already had focus, a document or a compose box. Nothing is typed until the shell's own search is showing.
-func TestExecuteTool_SwitchWindow_TypesNothingWhenTheOverviewNeverOpens(t *testing.T) {
-	a, in := switchingAgent(t, func() (string, string) { return "mail", "Inbox" })
-	// The shell's search never appears, however long it is waited for: the front window stays the user's mail all through.
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		return "mail", "Inbox", nil, nil
-	}
-	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
-	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
-	if !slices.Equal(in.calls, []string{"press Super"}) {
-		t.Errorf("keyboard = %v, want Super pressed and nothing typed", in.calls)
-	}
-	if !strings.HasPrefix(got, "error") {
-		t.Errorf("result = %q, want an error saying the desktop search never opened", got)
-	}
-}
-
-// Super toggles the overview, so pressing it on an overview that is already up closes it and the name lands in whatever comes back to the front. It is pressed only when the overview is not already showing.
-func TestExecuteTool_SwitchWindow_DoesNotPressSuperWhenTheOverviewIsAlreadyOpen(t *testing.T) {
-	a, in := switchingAgent(t, func() (string, string) { return "mail", "Inbox" })
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		if slices.Contains(in.calls, "press Enter") {
-			return "Brave", "News", nil, nil
-		}
-		return "gnome-shell", "Activities", overviewNodes(), nil
-	}
-	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
-	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
-	if !slices.Equal(in.calls, []string{"type Brave", "press Enter"}) {
-		t.Errorf("keyboard = %v, want the name typed into the overview that was already open", in.calls)
-	}
-	if !strings.Contains(got, "switched to") {
-		t.Errorf("result = %q, want the switch reported", got)
 	}
 }
 
@@ -2662,25 +2657,6 @@ func TestRaiseWindow_GivesUpOnAShellThatNeverAnswers(t *testing.T) {
 	}
 	if !raiser.hadDeadline {
 		t.Error("the extension was called with no deadline, so a wedged shell would hold the whole turn")
-	}
-}
-
-// A tool the model is never told about is a tool it never calls: the switch has to be declared, offered to a screen round, allowed through the ask gate, kept out of the log file, and counted as an action rather than a look.
-func TestSwitchWindow_IsDeclaredAndCarriedByEveryScreenToolList(t *testing.T) {
-	if !askAllowedTools["switch_window"] || !screenRoundTools["switch_window"] || !screenToolNames["switch_window"] || !screenActionToolNames["switch_window"] {
-		t.Errorf("allowed=%v screenRound=%v screenNames=%v action=%v, want all four", askAllowedTools["switch_window"], screenRoundTools["switch_window"], screenToolNames["switch_window"], screenActionToolNames["switch_window"])
-	}
-	declared := false
-	for _, d := range ToolDeclarations() {
-		if d.Name == "switch_window" {
-			declared = true
-		}
-	}
-	if !declared {
-		t.Error("switch_window is not declared, so no model can call it")
-	}
-	if !strings.Contains(screenTaskGuidance, "switch_window") {
-		t.Error("screenTaskGuidance never mentions switch_window, so a request naming another app has nothing telling it to switch first")
 	}
 }
 
@@ -2789,32 +2765,7 @@ func TestExecuteTool_SwitchWindow_FallsBackToTheWindowTitle(t *testing.T) {
 	}
 }
 
-// Until the extension is installed and the user has logged back in, the shell's own search is the only way in, so an extension that is not there falls through to the keys rather than failing the switch.
-func TestExecuteTool_SwitchWindow_UsesTheKeysWhenTheExtensionIsNotThere(t *testing.T) {
-	raiser := &fakeRaiser{available: false}
-	var in *fakeInput
-	a, in := switchingAgent(t, func() (string, string) {
-		if in != nil && len(in.calls) >= 3 {
-			return "Brave", "News"
-		}
-		return "mail", "Inbox"
-	})
-	a.UseWindowRaiser(raiser)
-	ctx := WithQuestion(context.Background(), "switch to Brave and read the headline")
-	got := a.executeTool(ctx, "switch_window", map[string]any{"app": "Brave"})
-	want := []string{"press Super", "type Brave", "press Enter"}
-	if !slices.Equal(in.calls, want) {
-		t.Errorf("keyboard = %v, want %v", in.calls, want)
-	}
-	if len(raiser.calls) != 0 {
-		t.Errorf("raiser = %v, want nothing asked of an extension that is not loaded", raiser.calls)
-	}
-	if !strings.Contains(got, "switched to") {
-		t.Errorf("result = %q, want the switch reported the same way whichever path made it", got)
-	}
-}
-
-// TestScreenRoundDeclarations_StayShort holds the fifteen screen-round declarations to a byte budget and checks the rules that only a declaration carries are still in one. Every screen round of a Codex or Claude ask re-sends all fifteen, so a byte here is paid on every round of every screen task; the budget is what keeps the round under the 3,000-token bound TestAskCodex_ScreenRoundsStayUnderThreeThousandTokens measures. Input: none. Output: a failure naming the total when the declarations grow back.
+// TestScreenRoundDeclarations_StayShort holds the screen-round declarations to a byte budget and checks the rules that only a declaration carries are still in one. Every screen round of a Codex or Claude ask re-sends all of them, so a byte here is paid on every round of every screen task; the budget is what keeps the round under the 3,000-token bound TestAskCodex_ScreenRoundsStayUnderThreeThousandTokens measures. Input: none. Output: a failure naming the total when the declarations grow back.
 func TestScreenRoundDeclarations_StayShort(t *testing.T) {
 	decls := trimToDeclarations((&Agent{}).askToolDeclarations(), screenRoundTools)
 	if len(decls) != len(screenRoundTools) {
@@ -2830,19 +2781,20 @@ func TestScreenRoundDeclarations_StayShort(t *testing.T) {
 		byName[tool.Name] = strings.ToLower(tool.Description)
 	}
 	// 6,450 bytes leaves the measured round at 2,989 tokens: the rest of a round (instruction, thread, the newest screen listing) is about 5,450 bytes, and 3,000 tokens is 12,000 bytes at four bytes a token. It was 6,400 until draw started taking a list of shapes instead of one, which is about 25 more tokens on every screen round; the turn that marked up a diagram on 2026-09-05 spent ten rounds and 38,335 input tokens drawing ten shapes one per round, and now spends one. That leaves the last round 11 tokens under the 3,000 bound — the next word added to any screen-round declaration fails TestAskCodex_ScreenRoundsStayUnderThreeThousandTokens.
-	// Raised to 6,850 on 2026-09-08 for open_app, the sixteenth: an installed application opened as itself instead of through open_url and a browser tab, which is what the Spotify ask that day failed on. About 100 tokens a round.
+	// Raised to 6,850 on 2026-09-08 for open_app, the sixteenth: an installed application opened as itself instead of through open_url and a browser tab, which is what the Spotify ask that day failed on. About 100 tokens a round. set_budget, the seventeenth declaration briefly, is gone again (see agent.maxAskIterations, a plain hard cap in place of a self-set one), so this is back down near that mark; 6,900 leaves headroom for the wording that has moved since without reopening the budget on every future word change.
 	const screenRoundDeclarationBudget = 6900
 	if total > screenRoundDeclarationBudget {
 		t.Errorf("the screen-round declarations are %d bytes, want at most %d", total, screenRoundDeclarationBudget)
 	}
 	// Each rule is stated in exactly one declaration; the word checked for is the shortest one that phrasing cannot lose without losing the rule.
 	for _, rule := range []struct{ tool, word string }{
-		{"click_at", "look"},        // coordinates come only from a delivered look
-		{"click", "observe_screen"}, // observe_screen after every action
-		{"click", "submits"},        // the stop line on send, pay, delete, submit
-		{"type_text", "secret"},     // secrets are never typed
-		{"press_key", "type_text"},  // press_key for keys, type_text for text
-		{"switch_window", "names"},  // only when the request names the application
+		{"click", "look"},              // a bare point's coordinates come only from a delivered look
+		{"click", "observe_screen"},    // observe_screen after every action
+		{"click", "submits"},           // the stop line on send, pay, delete, submit
+		{"click", "then"},              // the burst is only for UI that will not survive a round trip
+		{"type_text", "secret"},        // secrets are never typed
+		{"press_key", "type_text"},     // press_key for keys, type_text for text
+		{"open_app", "never open_url"}, // an installed application is opened, not its website
 	} {
 		if !strings.Contains(byName[rule.tool], rule.word) {
 			t.Errorf("%s's description no longer says %q: %q", rule.tool, rule.word, byName[rule.tool])
@@ -2880,7 +2832,7 @@ func TestListMeetingNotes_NewestFirstAndCapped(t *testing.T) {
 	}
 	b.notes = append(b.notes, db.Note{ID: 999, Kind: "fact", Content: "not a meeting", CreatedAt: base})
 	a := NewAgent(nil, nil, b, nil, "")
-	got := a.listMeetingNotes(context.Background(), time.Time{}, time.Time{})
+	got := a.listMeetingNotes(context.Background(), base, time.Time{})
 	if strings.Contains(got, "not a meeting") {
 		t.Errorf("a non-meeting note was listed: %s", got)
 	}
@@ -2893,6 +2845,23 @@ func TestListMeetingNotes_NewestFirstAndCapped(t *testing.T) {
 	// One line per meeting plus the closing count line; the note formatter repeats the reference inside each line, so lines are counted rather than references.
 	if n := len(strings.Split(got, "\n")); n != maxMeetingNotesListed+1 {
 		t.Errorf("listed %d lines, want the cap of %d plus the count line", n, maxMeetingNotesListed)
+	}
+}
+
+// "Can you access the latest meeting notes" with no window listed thirty sets of minutes at 4,500 characters each on 2026-09-10, one round of 178k input tokens for an answer about one meeting. With no window the list is the newest few and a count of the rest; a window still gets the full cap.
+func TestListMeetingNotes_NoWindowListsOnlyTheNewestFew(t *testing.T) {
+	b := &toolTestBrain{}
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < 10; i++ {
+		b.notes = append(b.notes, db.Note{ID: int64(i + 1), Kind: "meeting", Content: fmt.Sprintf("# Standup %d", i+1), CreatedAt: base.Add(time.Duration(i) * time.Hour)})
+	}
+	a := NewAgent(nil, nil, b, nil, "")
+	got := a.listMeetingNotes(context.Background(), time.Time{}, time.Time{})
+	if n := len(strings.Split(got, "\n")); n != latestMeetingNotesListed+1 {
+		t.Errorf("listed %d lines, want %d plus the count line: %s", n, latestMeetingNotesListed, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("and %d more", 10-latestMeetingNotesListed)) {
+		t.Errorf("result does not count the meetings left out: %s", got)
 	}
 }
 
@@ -3228,22 +3197,34 @@ func TestExecuteTool_ScrollTo_RefusesAStaleElement(t *testing.T) {
 	}
 }
 
-// WithToolObserver/ObserveTool round-trip: a context carrying an observer must deliver both name and summary to it exactly as given.
+// WithToolObserver/ObserveTool round-trip: a context carrying an observer must deliver name, summary and the failed flag to it exactly as given.
 func TestWithToolObserver_RoundTrips(t *testing.T) {
 	var got []string
-	ctx := WithToolObserver(context.Background(), func(name, summary string) {
-		got = append(got, name+":"+summary)
+	ctx := WithToolObserver(context.Background(), func(name, summary string, failed bool) {
+		got = append(got, fmt.Sprintf("%s:%s:%v", name, summary, failed))
 	})
-	ObserveTool(ctx, "click", "pressing Reload")
-	if len(got) != 1 || got[0] != "click:pressing Reload" {
+	ObserveTool(ctx, "click", "pressing Reload", false)
+	if len(got) != 1 || got[0] != "click:pressing Reload:false" {
+		t.Errorf("observer round-trip = %v", got)
+	}
+}
+
+// ObserveTool must deliver failed=true through to the observer on an after-call report of a failed tool.
+func TestWithToolObserver_RoundTripsFailed(t *testing.T) {
+	var got []string
+	ctx := WithToolObserver(context.Background(), func(name, summary string, failed bool) {
+		got = append(got, fmt.Sprintf("%s:%s:%v", name, summary, failed))
+	})
+	ObserveTool(ctx, "click", "error: element not found", true)
+	if len(got) != 1 || got[0] != "click:error: element not found:true" {
 		t.Errorf("observer round-trip = %v", got)
 	}
 }
 
 // A context with no observer attached, or one attached as an explicit nil, must be a silent no-op rather than a nil-func panic — askText and askVoice call this on every tool hop of every turn, most of which (a plain /ask with no live window watching) carry no observer at all.
 func TestObserveTool_NoObserverIsANoop(t *testing.T) {
-	ObserveTool(context.Background(), "click", "pressing Reload")
-	ObserveTool(WithToolObserver(context.Background(), nil), "click", "pressing Reload")
+	ObserveTool(context.Background(), "click", "pressing Reload", false)
+	ObserveTool(WithToolObserver(context.Background(), nil), "click", "pressing Reload", false)
 }
 
 // The gate that lets a text ask run tools without AllowEvalWrites has to admit whatever a real /ask turn needs, since the daemon never sets AllowEvalWrites: it now also allows the store-writing tools that need no HITL approval (save_note, personal_context, revise, action_items, query_store, open_url), while the ones gated behind ToolApprovalChan (shell_exec, read_file, list_files) stay blocked, because nothing in the daemon reads that channel to answer the prompt.
@@ -3540,4 +3521,213 @@ func TestExecuteTool_Click_SameAppTitleChange(t *testing.T) {
 			t.Errorf("result = %q, want it to name both the window now in front and the one the list came from", got)
 		}
 	})
+}
+
+// TestRaiseWindow_PrefersTheAppsOwnWindowOverATabNamedAfterIt is the Spotify bug from 2026-09-11: a Chromium window showing the Spotify web player is titled "Spotify Premium", so it matched the name "Spotify" before the real Spotify window did and was raised instead. A window's WM_CLASS is the application; its title is the document or page, which can be named after anything.
+func TestRaiseWindow_PrefersTheAppsOwnWindowOverATabNamedAfterIt(t *testing.T) {
+	raiser := &fakeRaiser{
+		available: true,
+		windows: []window.Window{
+			{Pid: 100, WmClass: "chromium", Title: "Spotify Premium"},
+			{Pid: 200, WmClass: "spotify", Title: "Spotify"},
+		},
+		raises: map[string]bool{"pid 100": true, "pid 200": true},
+	}
+	a := &Agent{}
+	a.UseWindowRaiser(raiser)
+
+	ok, how := a.raiseWindow(context.Background(), "Spotify")
+	if !ok {
+		t.Fatal("no window was raised at all")
+	}
+	if how != "pid 200" {
+		t.Errorf("raised %s, want pid 200, the window whose WM_CLASS is spotify", how)
+	}
+}
+
+// TestFrontIsApp_DoesNotReadATabTitleAsTheApplication guards the other half of the same bug: "Chromium · Spotify Premium" is Chromium in front, not Spotify, so open_app must not report Spotify as already there and skip starting it.
+func TestFrontIsApp_DoesNotReadATabTitleAsTheApplication(t *testing.T) {
+	for _, c := range []struct {
+		front, app string
+		want       bool
+	}{
+		{"Chromium · Spotify Premium", "Spotify", false},
+		{"Spotify · Daily Mix 1", "Spotify", true},
+		{"Spotify", "Spotify", true},
+		{"Brave Browser · Feed | LinkedIn - Brave", "Brave", true},
+	} {
+		if got := frontIsApp(c.front, c.app); got != c.want {
+			t.Errorf("frontIsApp(%q, %q) = %v, want %v", c.front, c.app, got, c.want)
+		}
+	}
+}
+
+// TestOpenApp_DoesNotStartASecondCopyWhenTheWindowIsAlreadyOpen is the "why does it keep opening tabs" case: raising the window failed for some reason of the shell's, so open_app fell through to launching, and a browser that is already running answers a second invocation by opening another window. When the extension can see a window of that application, launching is the wrong move whatever the raise did.
+func TestOpenApp_DoesNotStartASecondCopyWhenTheWindowIsAlreadyOpen(t *testing.T) {
+	a, _ := switchingAgent(t, func() (string, string) { return "mail", "Inbox" })
+	// Stubbed before anything else: the real launcher starts a real application on the machine running the test.
+	var launched []string
+	a.launchApp = func(path string) error { launched = append(launched, path); return nil }
+	a.desktopEntries = func() map[string]string { return map[string]string{"/apps/brave.desktop": "Brave"} }
+	raiser := &fakeRaiser{
+		available: true,
+		windows:   []window.Window{{Pid: 300, WmClass: "brave-browser", Title: "New Tab"}},
+		raises:    map[string]bool{}, // every activation fails, which is what sends open_app to the launch path
+	}
+	a.UseWindowRaiser(raiser)
+
+	out := a.openApp(context.Background(), "Brave")
+
+	if !strings.Contains(out, "already open") {
+		t.Errorf("open_app said %q, want it to say the window is already open rather than starting another", out)
+	}
+	if len(launched) > 0 {
+		t.Errorf("open_app launched a second copy: %v", launched)
+	}
+}
+
+// --- revise on a task the user keeps on their list ---
+
+// The last conversation of 2026-09-12 broke on this three times. Ora added a research task, the user asked for the right context to be put on it, then asked for it to be deleted, and every attempt was refused: "revise only handles note and thread refs, not \"task\"". The revise tool's own description had been promising action-item support all along, and an action item is a note; a row on the Tasks screen is not, and nothing could touch one.
+func TestReviseOnATaskTheUserKeeps(t *testing.T) {
+	t.Run("rewords it", func(t *testing.T) {
+		b := &toolTestBrain{}
+		a := NewAgent(nil, nil, b, nil, "")
+		got := a.executeTool(context.Background(), "revise", map[string]any{"ref": "task#3", "content": "research fly brain training: compute, timeline, links"})
+		if got != "updated" {
+			t.Fatalf("revise = %q, want it to reword the task", got)
+		}
+		if b.taskTitleID != 3 || b.taskTitle != "research fly brain training: compute, timeline, links" {
+			t.Errorf("store saw id %d title %q, want the ref's id and the new words", b.taskTitleID, b.taskTitle)
+		}
+	})
+
+	t.Run("removes it, which is what a dropped task means with no dropped column to put it in", func(t *testing.T) {
+		for _, args := range []map[string]any{
+			{"ref": "task#3", "remove": true},
+			{"ref": "task#3", "state": "dropped"},
+		} {
+			b := &toolTestBrain{}
+			a := NewAgent(nil, nil, b, nil, "")
+			if got := a.executeTool(context.Background(), "revise", args); got != "deleted" {
+				t.Errorf("revise %v = %q, want the task gone", args, got)
+			}
+			if b.deletedTaskID != 3 {
+				t.Errorf("revise %v deleted task %d, want 3", args, b.deletedTaskID)
+			}
+		}
+	})
+
+	t.Run("ticks it done and opens it again", func(t *testing.T) {
+		for _, tc := range []struct {
+			state string
+			done  bool
+		}{{"done", true}, {"open", false}} {
+			b := &toolTestBrain{}
+			a := NewAgent(nil, nil, b, nil, "")
+			if got := a.executeTool(context.Background(), "revise", map[string]any{"ref": "task#3", "state": tc.state}); got != "updated" {
+				t.Errorf("revise state %q = %q, want updated", tc.state, got)
+			}
+			if b.taskDoneID != 3 || b.taskDone != tc.done {
+				t.Errorf("state %q set task %d done=%v, want 3 done=%v", tc.state, b.taskDoneID, b.taskDone, tc.done)
+			}
+		}
+	})
+
+	t.Run("says so plainly when the id names nothing", func(t *testing.T) {
+		b := &toolTestBrain{taskErr: errors.New("no task with id 9")}
+		a := NewAgent(nil, nil, b, nil, "")
+		got := a.executeTool(context.Background(), "revise", map[string]any{"ref": "task#9", "content": "whatever"})
+		if !strings.HasPrefix(got, "error") {
+			t.Errorf("revise = %q, want an error the model can act on", got)
+		}
+	})
+}
+
+// add_task gave back only the words it had filed, so a correction a moment later had no id to aim at. On 2026-09-12 the model guessed "note#2", which was a real note belonging to something else entirely, and the write was refused for the right reason by luck rather than design.
+func TestAddTaskHandsBackTheRefToReviseIt(t *testing.T) {
+	b := &toolTestBrain{}
+	a := NewAgent(nil, nil, b, nil, "")
+	got := a.executeTool(context.Background(), "add_task", map[string]any{"title": "research the fly brain"})
+	if !strings.Contains(got, "task#1") {
+		t.Errorf("add_task = %q, want it to name the ref revise takes", got)
+	}
+	if !strings.Contains(got, "research the fly brain") {
+		t.Errorf("add_task = %q, want the title in it too", got)
+	}
+}
+
+// --- do ---
+//
+// A chain of several actions said out loud — open Spotify and play this, then open Teams and message someone, then look for new messages — was driven one raw tool call at a time inside the live conversation before this tool existed.
+// The job runner in internal/actjob plans first, checks each step against the change it expected, budgets itself at twice its own estimate and reads what this machine did the last few times it was asked something similar, but it was reachable only through POST /act, which only the window posts to.
+// So a five-part request spoken aloud got no plan, no verification and no memory of the last run: in the session of 2026-09-12 21:19 a request to read one web page took three and a half minutes and the user brought the window forward himself.
+// do is the voice session's way into that runner.
+
+func TestExecuteTool_Do_HandsTheGoalToTheJobRunnerAndReportsWhatItSaid(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	goal := "open spotify and play Teenage Dream, then open teams and message Priya that I am running late"
+	var asked string
+	a.RunJob = func(ctx context.Context, g string) (string, error) {
+		asked = g
+		return "done: Teenage Dream is playing and the message to Priya is sitting in a draft", nil
+	}
+	result := a.executeTool(context.Background(), "do", map[string]any{"goal": goal})
+	if asked != goal {
+		t.Errorf("the runner was given %q, want the goal as spoken: %q", asked, goal)
+	}
+	if !strings.Contains(result, "the message to Priya is sitting in a draft") {
+		t.Errorf("do returned %q, want what the job said when it ended", result)
+	}
+}
+
+// A do that never reached a runner, or whose job failed, must say so. Told "started", the model tells the user their chain is running and then answers questions about a job that does not exist.
+func TestExecuteTool_Do_NeverClaimsAChainIsRunningWhenItIsNot(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		runner func(context.Context, string) (string, error)
+		args   map[string]any
+	}{
+		{"no runner wired to this session", nil, map[string]any{"goal": "open spotify and play something"}},
+		{"the runner refused the job", func(context.Context, string) (string, error) { return "", errors.New("another job is already running") }, map[string]any{"goal": "open spotify and play something"}},
+		{"no goal to work on", func(context.Context, string) (string, error) { return "done: nothing", nil }, map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+			a.RunJob = tc.runner
+			result := a.executeTool(context.Background(), "do", tc.args)
+			if toolOutcome(result) != "error" {
+				t.Errorf("do returned %q, want an error the model can read", result)
+			}
+		})
+	}
+}
+
+// A toggle renames itself the instant it is pressed, and pressing it again must not be refused for that.
+// Play becomes Pause, Mute becomes Unmute, on the same element with the same reference. The staleness check treated the new name as evidence the number now pointed at something else and sent the model back to observe_screen: on 2026-09-11 that cost three rounds and a full re-listing to press one button. The name is still checked, because the stop line is judged on it — it is judged on what the element says now.
+func TestExecuteTool_Click_AToggleThatRenamedItselfIsStillTheSameButton(t *testing.T) {
+	a, f := ringingAgent(t, act.Node{Role: "push button", Label: "Mute", X: 10, Y: 20, W: 60, H: 30, Ref: "btn", Showing: true})
+	ctx := context.Background()
+	a.executeTool(ctx, "observe_screen", map[string]any{})
+	f.stale = &tracker.Relabelled{Now: "Unmute", Was: "Mute"}
+
+	got := a.executeTool(ctx, "click", map[string]any{"n": 1.0})
+	if strings.HasPrefix(got, "error") {
+		t.Fatalf("the second press was refused: %q", got)
+	}
+	if len(f.clicked) != 1 {
+		t.Fatalf("the button was pressed %d times, want 1", len(f.clicked))
+	}
+	if !strings.Contains(got, "Unmute") {
+		t.Errorf("result = %q, want it to name the button as it is now", got)
+	}
+
+	// The other half of the same rule: a name is what the stop line is judged on, so anything that is not a plain rename is still refused rather than pressed.
+	f.stale = errors.New("it is now a invalid, not a push button")
+	if got := a.executeTool(ctx, "click", map[string]any{"n": 1.0}); !strings.HasPrefix(got, "error") {
+		t.Errorf("an element that is no longer a button was pressed anyway: %q", got)
+	}
+	if len(f.clicked) != 1 {
+		t.Errorf("the button was pressed %d times, want the second attempt refused", len(f.clicked))
+	}
 }

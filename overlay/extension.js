@@ -16,6 +16,20 @@ const DONE_MS = 4000;
 // How long a dropped or refused /events connection waits before redialing.
 const RECONNECT_MS = 3000;
 
+// FACES holds the first face for each of Ora's states, the same one app/src/shared/faces.ts lists first for that state. GJS cannot import that TS module, so this is a hand-kept copy; app/src/shared/extension-faces.test.ts reads both files and fails if they drift apart.
+const FACES = {
+    listening: '(•_•)',
+    thinking: '(￢_￢)…',
+    speaking: '(-‿^)',
+    done: '(•‿•)b',
+};
+
+// faced puts a state's face in front of the word for it. Input: the word beside the clock, which is also an Ora state name when FACES has an entry for it. Output: the face, a space, then the word — or the word alone when the word names no state FACES knows.
+function faced(word) {
+    const f = FACES[word];
+    return f ? `${f} ${word}` : word;
+}
+
 // log writes one line to the journal carrying the extension's uuid, so `journalctl --user -b -g ora@local` finds it.
 function log(message) {
     console.log(`ora@local: ${message}`);
@@ -165,7 +179,7 @@ export default class OraExtension extends Extension {
                 const bytes = session.send_and_read_finish(res);
                 const status = JSON.parse(new TextDecoder().decode(bytes.get_data()));
                 if (status.active && status.state !== 'idle')
-                    this._setWord(status.state);
+                    this._setWord(faced(status.state));
             } catch (e) {
                 // No daemon, or a body that is not the status JSON: the word simply stays empty until an event arrives.
             }
@@ -227,13 +241,13 @@ export default class OraExtension extends Extension {
     _onEvent(ev) {
         switch (ev.type) {
         case 'state':
-            this._setWord(ev.text === 'idle' ? '' : ev.text);
+            this._setWord(ev.text === 'idle' ? '' : faced(ev.text));
             break;
         case 'status':
-            this._setWord('working');
+            this._setWord(`${FACES.thinking} working`);
             break;
         case 'done':
-            this._setWord('done');
+            this._setWord(faced('done'));
             this._doneTimer = this._addTimer(DONE_MS, () => this._setWord(''));
             break;
         case 'error':

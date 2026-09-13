@@ -7,7 +7,7 @@ import type { Meeting, Task } from "./api";
 import { dayHeading, hhmm, minutesSection, shortWhen } from "./format";
 import { ui, useAppDispatch } from "./store";
 
-/** The heading in a set of minutes that says what the meeting was about, which is the part that places a task raised in it. */
+/** The heading in a set of minutes that says what the meeting was about, which is the part that places a task raised in it. Must match internal/recorder/minutes.go's CoveredHeading constant; TestCoveredHeadingMatchesFrontend in internal/recorder checks that this file still contains it. */
 const COVERED = "What the meeting covered";
 
 /** The lines of context themselves. Input: the meeting the task came from. Output: up to six of what it covered, or nothing when the minutes have no such section. */

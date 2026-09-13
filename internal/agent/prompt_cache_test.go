@@ -125,7 +125,7 @@ func TestAskText_KeepsTheHandshakeWhenTheQuestionNamesNoScreenTask(t *testing.T)
 
 // The persona is a composed, dry, understated aide: calm and precise, British in rhythm rather than in costume. It never says "sir" and never plays the butler, however Jarvis-like the delivery.
 func TestSystemInstruction_PersonaIsDryAndNeverSaysSir(t *testing.T) {
-	got := systemInstructionStable("linux", "amd64", "sh", 20)
+	got := systemInstructionStable("linux", "amd64", "sh", voiceCommunicationStyle, 20)
 	for _, want := range []string{"composed, dry-witted aide", "understated", "never \"sir\"", "done only when a tool result this turn says so"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("persona lacks %q", want)

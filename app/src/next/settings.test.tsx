@@ -45,7 +45,7 @@ const usage: Usage = {
 
 describe("the first run", () => {
   it("lists the daemon's own steps while nothing can answer, and re-reads /settings when Check again is clicked", async () => {
-    const steps = ["Set GEMINI_API_KEY in ~/.config/ora/env.", "Or sign in with the Claude CLI: run claude login."];
+    const steps = ["Set GEMINI_API_KEY in /home/you/.local/share/ora/env.", "Or sign in with the Claude CLI: run claude login."];
     const { calls } = renderApp({ settings: { ...settings, first_run: { gemini_key: false, codex_login: false, claude_cli: false, local_model: false, steps } } }, { place: "settings" });
     expect(await screen.findByText("Ora cannot answer yet")).toBeDefined();
     // Each step reads verbatim as the daemon's own sentence — the tokens in it a person would actually type are just marked as code inside it.
@@ -245,5 +245,36 @@ describe("the token ledger", () => {
     await screen.findByText("This machine");
     expect(within(await screen.findByRole("main")).getByText("Recent calls")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Usage" })).toBeNull();
+  });
+
+  // A web search costs the plan a request and no tokens at all, so the four token tables above draw Exa as a row of zeros and there is nowhere else the count appears. These are the rows that say what the searching actually spent.
+  it("draws what each web search provider has spent, which the token tables cannot show", async () => {
+    const limits = {
+      exa: { limits: [{ window: "monthly", used_fraction: 0.25, resets_at: "", source: "250 calls this month (token_use ledger)" }], limits_at: new Date().toISOString() },
+      tavily: { limits: [{ window: "monthly", used_fraction: 0.6, resets_at: "", source: "api.tavily.com/usage account.plan_usage" }], limits_at: new Date().toISOString() },
+    };
+    renderApp({ settings, usage: { ...usage, limits } }, { place: "settings" });
+    const section = within(await screen.findByRole("group", { name: "Web search" }));
+    // Named the way a person says them, not by the map's own keys, and each one carries the percent of its plan that has gone.
+    expect(section.getByText("Exa")).toBeDefined();
+    expect(section.getByText("Tavily")).toBeDefined();
+    expect(section.getByText("250 calls this month (token_use ledger)")).toBeDefined();
+    expect(section.getByTestId("search-bar-exa-monthly").style.width).toBe("25%");
+    expect(section.getByTestId("search-bar-tavily-monthly").style.width).toBe("60%");
+  });
+
+  it("says nothing about web search on a machine whose daemon reported no search provider at all", async () => {
+    renderApp({ settings, usage }, { place: "settings" });
+    await screen.findByText("Recent calls");
+    expect(screen.queryByRole("group", { name: "Web search" })).toBeNull();
+  });
+
+  // A search provider with no configured ceiling is reported with used_fraction 0, which is "there is no bar to draw" rather than "nothing has been spent" — the call count in the source line is the whole reading in that case.
+  it("names a provider with no known ceiling without drawing it an empty bar", async () => {
+    const limits = { exa: { limits: [{ window: "monthly", used_fraction: 0, resets_at: "", source: "11 calls this month (token_use ledger)" }], limits_at: new Date().toISOString() } };
+    renderApp({ settings, usage: { ...usage, limits } }, { place: "settings" });
+    const section = within(await screen.findByRole("group", { name: "Web search" }));
+    expect(section.getByText("11 calls this month (token_use ledger)")).toBeDefined();
+    expect(section.queryByTestId("search-bar-exa-monthly")).toBeNull();
   });
 });

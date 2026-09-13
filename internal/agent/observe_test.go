@@ -73,8 +73,12 @@ func TestExecuteTool_ObserveScreen_ListsNumberedNodes(t *testing.T) {
 	if !strings.HasPrefix(got, "brave · PR #13 · GitHub\n") {
 		t.Errorf("result does not start with the window line: %q", got)
 	}
-	if !strings.Contains(got, `[1] push button "Merge" (50,35)`) || !strings.Contains(got, `[2] link "Checks" (130,210)`) {
+	if !strings.Contains(got, `[1] push button "Merge"`) || !strings.Contains(got, `[2] link "Checks"`) {
 		t.Errorf("result lacks the numbered lines: %q", got)
+	}
+	// The number is the whole handle. A centre printed beside it is a coordinate in a third space no tool on this list takes, and the model spends it as if it were one (see act.TestFormatLines).
+	if strings.Contains(got, "(50,35)") || strings.Contains(got, "(130,210)") {
+		t.Errorf("the listing still publishes screen coordinates: %q", got)
 	}
 }
 

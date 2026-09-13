@@ -2,7 +2,7 @@
 
 import { truncateAtWord } from "./shared/errorline";
 import { noticeActionSuffix } from "./shared/notice";
-import { type OraState } from "./shared/faces";
+import {type OraState} from "./shared/faces";
 import { THEME_KEY, themeChoice, type Theme } from "./shared/theme";
 import type { DaemonEvent, Notice as WireNotice } from "./daemon";
 import { renderLevelEvent, type LevelDetail } from "./waveform";
@@ -397,7 +397,14 @@ export function applyToolEvent(
 ): ToolStep[] {
   const running = steps[steps.length - 1];
   if (running && running.finishedAt === undefined) {
-    return [...steps.slice(0, -1), { ...running, finishedAt: now }];
+    return [
+      ...steps.slice(0, -1),
+      {
+        ...running,
+        finishedAt: now,
+        ...(ev.failed ? { error: ev.detail || "failed" } : {}),
+      },
+    ];
   }
   const name = ev.text ?? "";
   const detail = ev.detail ?? "";

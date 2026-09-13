@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -72,12 +73,12 @@ type claudeToolServer struct {
 	path     string
 	listener net.Listener
 	server   *http.Server
-	// mu guards steps and hops together, because the CLI may have more than one call in flight: the step budget has to be checked and reserved in the one locked section, or two calls that both see a step free can both spend it and run one tool more than the cap allows.
+	// mu guards annotations, steps and hops together, because the CLI may have more than one call in flight.
 	mu sync.Mutex
-	// steps is how many of this run's step budget have been reserved so far, checked and incremented together in reserveStep.
-	steps int
-	// annotations is how many marks this run has drawn on the screen. They are counted apart from steps because drawing over the screen changes nothing the model has to read back, and counted at all because this path has no round bound of its own — the two loops in ask.go and the one in codex.go stop at maxAskRounds whatever their step count says, and without this a run that did nothing but draw would never end.
+	// annotations is how many marks this run has drawn on the screen. They are counted apart from the step cap because drawing over the screen changes nothing the model has to read back, and counted at all because this path has no round bound of its own — the two loops in ask.go and the one in codex.go stop at maxAskRounds whatever their step count says, and without this a run that did nothing but draw would never end.
 	annotations int
+	// steps is how many of this run's tool calls have counted against maxAskIterations so far (annotations and a repeated observe_screen of the same screen do not, the same as the other ask paths — see sameScreenAgain, onlyAnnotated).
+	steps int
 	// hops are the tool calls this run made, in call order.
 	hops []ToolHop
 }
@@ -128,7 +129,18 @@ func (s *claudeToolServer) record(hop ToolHop) {
 	s.hops = append(s.hops, hop)
 }
 
-// reserveStep claims one of this run's step budget, checking the cap and spending a step in the same locked section — otherwise two tool calls arriving at once could both see one step free and both spend it, running one tool more than the cap allows. Output: true when a step was claimed, false when the budget was already spent.
+// reserveAnnotation claims one of this run's allowance for marks on the screen, which is counted apart from the step cap because an annotation changes nothing the model must then re-read (see annotationTools). The allowance is maxAskRounds, the same hard bound the round-based loops stop at, so a run that does nothing but draw still ends. Output: true when one was claimed, false when the allowance is spent.
+func (s *claudeToolServer) reserveAnnotation() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.annotations >= maxAskRounds {
+		return false
+	}
+	s.annotations++
+	return true
+}
+
+// reserveStep claims one of this run's maxAskIterations tool-call steps, the same hard cap every other ask path stops at. Annotation tools never call this (see call()); everything else does, one claim per call, with no dedup for a repeated observe_screen of the same screen — the round-based paths' sameScreenAgain has nothing to batch here, since this server sees one call at a time. Output: true when a step was claimed, false once the cap is spent, which is call()'s cue to refuse every tool call from here on.
 func (s *claudeToolServer) reserveStep() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,15 +151,11 @@ func (s *claudeToolServer) reserveStep() bool {
 	return true
 }
 
-// reserveAnnotation claims one of this run's allowance for marks on the screen, which is counted apart from the step budget because an annotation changes nothing the model must then re-read (see annotationTools). The allowance is maxAskRounds, the same hard bound the round-based loops stop at, so a run that does nothing but draw still ends. Output: true when one was claimed, false when the allowance is spent.
-func (s *claudeToolServer) reserveAnnotation() bool {
+// Capped reports whether this run spent its full maxAskIterations tool-call steps, so askClaude can end the turn on capError the way every round-based ask path does when its loop runs out, rather than trusting an answer the CLI gave after being refused every tool call past the cap.
+func (s *claudeToolServer) Capped() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.annotations >= maxAskRounds {
-		return false
-	}
-	s.annotations++
-	return true
+	return s.steps >= maxAskIterations
 }
 
 // handle answers one JSON-RPC request from the CLI. Input: an HTTP POST carrying an MCP request. Output: the JSON-RPC reply, 202 for a notification (which carries no id and expects no answer), and 405 for anything that is not a POST.
@@ -199,7 +207,7 @@ func (s *claudeToolServer) handle(w http.ResponseWriter, r *http.Request) {
 	writeClaudeRPC(w, req.ID, result, nil)
 }
 
-// call runs one tool for the model and returns what to tell it. Input: the tool's name and arguments as the CLI sent them. Output: the tool's result, a refusal when the tool is outside the ask's gate, or a note that the turn has no steps left once the step cap is reached.
+// call runs one tool for the model and returns what to tell it. Input: the tool's name and arguments as the CLI sent them. Output: the tool's result, or a refusal when the tool is outside the ask's gate, has drawn on the screen as much as its allowance permits, or has spent the run's maxAskIterations tool-call steps — askClaude ends that run on capError once Capped() says so, whatever the CLI itself goes on to answer.
 func (s *claudeToolServer) call(name string, args map[string]any) string {
 	if args == nil {
 		args = map[string]any{}
@@ -209,11 +217,11 @@ func (s *claudeToolServer) call(name string, args map[string]any) string {
 			return "error: this turn has marked the screen as much as it can; answer now with what you already have."
 		}
 	} else if !s.reserveStep() {
-		return "error: this turn has no steps left; answer now with what you already have."
+		return "error: this turn has run out of steps; answer now with what you already have."
 	}
-	ObserveTool(s.askCtx, name, toolActivitySummary(name, args))
+	ObserveTool(s.askCtx, name, toolActivitySummary(name, args), false)
 	result := s.agent.evalExecute(WithOffered(s.askCtx, declNames(s.decls)), name, args)
-	ObserveTool(s.askCtx, name, resultSummary(name, result))
+	ObserveTool(s.askCtx, name, resultSummary(name, result), strings.HasPrefix(result, "error"))
 	slog.Info("ask: tool", "tool", name, "args", toolActivitySummary(name, args), "result", resultSummary(name, result), "detail", toolLogDetail(name, result))
 	s.record(ToolHop{Name: name, Args: args, Result: result})
 	return result
@@ -340,6 +348,44 @@ func claudeHead(s string) string {
 	return util.RunesEllipsis(util.OneLine(s), 300)
 }
 
+// claudeSourceLinkPattern matches one "[Title](url)" markdown link inside a Sources block.
+var claudeSourceLinkPattern = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
+
+// stripSourcesBlock splits off Claude's own trailing "Sources:" block — the plain-text list of markdown links its built-in WebSearch tool appends after an answer that used it — since that tool runs outside Ora's own MCP server and so leaves nothing in tr.ToolHops for evidenceFromToolHops to read a citation from. Input: the raw answer text. Output: the answer with the block (and the blank line before it) removed, and one Evidence entry per link found in the block, kind "web", in the order they appeared. Both are returned unchanged when the text carries no such block: "Sources:" must open a line of its own (not just occur inside the prose) and that line's block must contain at least one markdown link, or nothing is stripped.
+func stripSourcesBlock(answer string) (string, []Evidence) {
+	idx := strings.LastIndex(answer, "Sources:")
+	if idx == -1 || (idx > 0 && answer[idx-1] != '\n') {
+		return answer, nil
+	}
+	block := answer[idx:]
+	links := claudeSourceLinkPattern.FindAllStringSubmatch(block, -1)
+	if len(links) == 0 {
+		return answer, nil
+	}
+	rest := strings.TrimRight(answer[:idx], "\n \t")
+	evidence := make([]Evidence, 0, len(links))
+	for _, m := range links {
+		evidence = append(evidence, Evidence{Kind: "web", Title: strings.TrimSpace(m[1]), Excerpt: strings.TrimSpace(m[2])})
+	}
+	return rest, evidence
+}
+
+// claudeScreenTools is the tool set a Claude ask offers when isScreenTask says the question is a screen task: screenRoundTools (see ask.go) plus the tools that read memory rather than the screen — query_memory, query_store, recall and personal_context. A round deciding which numbered button to press does not need the whole memory surface, but it still needs a way to pull one fact into view, the name of the user's earbuds, a contact, so those four stay rather than going with the rest of the memory teaching. The tools that write to memory beyond save_note (already in screenRoundTools) go with it: add_task, revise, action_items and branch all need the full handshake to know when they apply.
+var claudeScreenTools = unionToolSets(screenRoundTools, map[string]bool{
+	"query_memory": true, "query_store": true, "recall": true, "personal_context": true,
+})
+
+// unionToolSets merges any number of tool-name sets into one. Input: the sets to merge. Output: a new set containing every name any of them held.
+func unionToolSets(sets ...map[string]bool) map[string]bool {
+	out := make(map[string]bool)
+	for _, s := range sets {
+		for name := range s {
+			out[name] = true
+		}
+	}
+	return out
+}
+
 // AskClaude answers a question through the Claude Code command line on the user's own subscription, running Ora's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "claude/<model>", or the trace so far and an error.
 func (a *Agent) AskClaude(ctx context.Context, question string) (TurnTrace, error) {
 	return a.AskClaudeWith(ctx, nil, question)
@@ -385,7 +431,13 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	defer cancel()
 	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
 	ctx = withAskLookState(ctx)
-	instruction, handshake := a.HandshakePrompt(ctx, start)
+	instruction := a.LeanPrompt(start)
+	var handshake []string
+	// A screen task (see isScreenTask in ask.go) gets the short screen prompt instead of the full handshake, and later, once the tool server exists, the short screen tool set instead of every tool the ask gate allows.
+	screenTask := isScreenTask(question, nil)
+	if screenTask {
+		instruction = screenTaskInstruction()
+	}
 
 	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
@@ -410,6 +462,9 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 		return tr, err
 	}
 	defer server.Close()
+	if screenTask {
+		server.decls = trimToDeclarations(server.decls, claudeScreenTools)
+	}
 
 	// The question is the last thing the model reads: the thread comes first, then this turn's time and recalled memory, then the reference to a close past run, then what was actually asked.
 	var prompt strings.Builder
@@ -438,6 +493,9 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	tr.Evidence = evidenceFromToolHops(tr.ToolHops)
 	tr.ImageTokens = lookTokensSpent(ctx)
 	tr.Duration = time.Since(start)
+	if server.Capped() {
+		return tr, capError(tr.ToolHops)
+	}
 	if err != nil {
 		return tr, err
 	}
@@ -453,7 +511,9 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	if res.IsError {
 		return tr, fmt.Errorf("claude: the run failed (%s): %s", res.Subtype, claudeHead(res.Result))
 	}
-	tr.Answer = strings.TrimSpace(res.Result)
+	answer, sources := stripSourcesBlock(strings.TrimSpace(res.Result))
+	tr.Answer = answer
+	tr.Evidence = append(tr.Evidence, sources...)
 	slog.Debug("ask claude: done", "model", model, "turns", res.NumTurns, "tools", len(tr.ToolHops), "input_tokens", res.Usage.InputTokens, "output_tokens", res.Usage.OutputTokens, "cached_input_tokens", res.Usage.CacheReadTokens, "duration", tr.Duration)
 	if tr.Answer == "" {
 		return tr, errors.New("claude: the run returned no text")

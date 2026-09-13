@@ -87,9 +87,18 @@ describe("the list", () => {
     await waitFor(() => expect(document.activeElement?.getAttribute("data-row-id")).toBe("12"));
   });
 
-  it("says there is nothing to do rather than showing an empty list", async () => {
+  it("says there is nothing to do rather than showing an empty list, with a watching face above the line", async () => {
     renderApp({}, { place: "tasks" });
-    expect(await screen.findByText("Nothing to do.")).toBeDefined();
+    const line = await screen.findByText("Nothing to do.");
+    // The sidebar carries its own permanent face chip, so this looks only at the one sitting right above the empty line.
+    expect(within(line.parentElement!).getByRole("img", { name: "ora is watching" })).toBeDefined();
+  });
+
+  it("shows an asleep face and says it is not connected when the daemon does not answer", async () => {
+    renderApp({ fails: ["GET /tasks"] }, { place: "tasks" });
+    // The detail pane on the right shows its own asleep face too, since its thread is also unanswered, so more than one is expected here.
+    expect(await screen.findByText("Not connected.")).toBeDefined();
+    expect(screen.getAllByRole("img", { name: "ora is asleep" }).length).toBeGreaterThan(0);
   });
 });
 
@@ -121,6 +130,26 @@ describe("changing a task's status", () => {
     await userEvent.click(await screen.findByRole("menuitem", { name: "Drop it" }));
     await waitFor(() => expect(calls.find((c) => c.path === "/tasks/12/done")?.body).toEqual({ status: "dropped" }));
     await waitFor(() => expect(list().queryByText("Send the TCFD file")).toBeNull());
+  });
+
+  // Three finished tasks sat on the list struck through with only Reopen in their menu, and nothing anywhere removed one: GET /tasks answers with every row whatever its done flag says, and the list filters on the search box alone.
+  it("deletes a task of the user's own and takes it off the list", async () => {
+    const { calls } = renderApp({ tasks }, { place: "tasks" });
+    await screen.findByRole("button", { name: "More for Book the flight" });
+    await userEvent.click(screen.getByRole("button", { name: "More for Book the flight" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await waitFor(() => expect(calls.find((c) => c.method === "DELETE" && c.path === "/tasks/task-1")).toBeDefined());
+    await waitFor(() => expect(list().queryByText("Book the flight")).toBeNull());
+  });
+
+  // A noticed item is a note in memory, and deleting it would take a line out of a meeting's minutes rather than off a list. Dropping it is what that is for, and the daemon answers 400 to a delete of one.
+  it("offers to drop a noticed item rather than delete it", async () => {
+    renderApp({ tasks }, { place: "tasks" });
+    await screen.findByRole("button", { name: "More for Send the TCFD file" });
+    await userEvent.click(screen.getByRole("button", { name: "More for Send the TCFD file" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Drop it" })).toBeDefined();
+    expect(within(menu).queryByRole("menuitem", { name: "Delete" })).toBeNull();
   });
 
   it("does not offer to drop a task the user typed in, because the daemon refuses it", async () => {

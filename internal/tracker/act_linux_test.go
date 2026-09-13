@@ -46,41 +46,32 @@ func TestRefRoundTrip(t *testing.T) {
 	}
 }
 
-// The staleness check is what stands between the model's numbered list and the screen it was made from. A list is a snapshot: the accessibility reference in it stays valid while the page scrolls under it, so an element that has merely moved still answers to its old number, and both the ring drawn for the user and the click fired afterwards are then aimed at whatever has taken its place. Comparing the rectangle catches that. It also tells two unlabelled entries in the same form apart, which the role and the label alone cannot do at all.
+// verifyAgainst tells the model whether a node from its numbered list is still what the list said it was, so a click fires on the right element rather than on whatever a recycled object path now names. It no longer compares rectangles at all: a click fires the accessibility action on the ref itself, so a stale rectangle never stopped it from landing on the right element, and comparing one only ever produced a false refusal — Teams' title carries a live memory count, and the window placer that corrects a listing's coordinates by title used to miss on the exact-title lookup when that count changed between the list and the click, moving every rectangle by a monitor's width or the desktop's top-bar height and refusing a perfectly good click. The role and the label are still compared.
 func TestVerifyAgainst(t *testing.T) {
-	was := rect{X: 10, Y: 200, W: 300, H: 30}
 	cases := []struct {
 		name              string
 		nowRole, nowLabel string
-		now               rect
 		role, label       string
-		was               rect
 		wantErr           bool
 	}{
-		{name: "unchanged", nowRole: "push button", nowLabel: "Send", now: was, role: "push button", label: "Send", was: was},
-		{name: "gone", nowRole: "", now: was, role: "push button", label: "Send", was: was, wantErr: true},
-		{name: "another role", nowRole: "link", nowLabel: "Send", now: was, role: "push button", label: "Send", was: was, wantErr: true},
-		{name: "another label", nowRole: "push button", nowLabel: "Delete", now: was, role: "push button", label: "Send", was: was, wantErr: true},
-		{name: "a few pixels of relayout", nowRole: "push button", nowLabel: "Send", now: rect{X: 12, Y: 202, W: 300, H: 30}, role: "push button", label: "Send", was: was, wantErr: false},
-		{name: "the page scrolled a row", nowRole: "push button", nowLabel: "Send", now: rect{X: 10, Y: 240, W: 300, H: 30}, role: "push button", label: "Send", was: was, wantErr: true},
-		{name: "moved sideways", nowRole: "push button", nowLabel: "Send", now: rect{X: 400, Y: 200, W: 300, H: 30}, role: "push button", label: "Send", was: was, wantErr: true},
-		{name: "resized", nowRole: "push button", nowLabel: "Send", now: rect{X: 10, Y: 200, W: 80, H: 30}, role: "push button", label: "Send", was: was, wantErr: true},
-		{name: "no longer showing", nowRole: "push button", nowLabel: "Send", now: rect{}, role: "push button", label: "Send", was: was, wantErr: true},
-		// An empty box to type in is exactly what type_text aims at, and it carries no label at all, so the rectangle is the only thing that distinguishes it from the next box down the form.
-		{name: "an unlabelled entry that stayed put", nowRole: "entry", now: was, role: "entry", was: was},
-		{name: "the entry below the one that was listed", nowRole: "entry", now: rect{X: 10, Y: 250, W: 300, H: 30}, role: "entry", was: was, wantErr: true},
-		// The list can show a node with no size only if it never had one; nothing then to compare against, so the rectangle is not part of the answer.
-		{name: "nothing remembered to compare", nowRole: "entry", now: was, role: "entry", was: rect{}},
-		// For a content role the label is the node's own contents, not a name somebody chose for it, so it changes whenever the user types — and typing into a box is the ordinary thing to do between listing it and clicking it. The role and the rectangle still say it is the same box. Comparing the contents refused those clicks and sent the model to look at the screen again.
-		{name: "the user typed a character into the listed entry", nowRole: "entry", nowLabel: "hello!", now: was, role: "entry", label: "hello", was: was},
-		{name: "the paragraph that was listed was edited", nowRole: "text", nowLabel: "Dear Bob,", now: was, role: "text", label: "Dear Bo", was: was},
+		{name: "unchanged", nowRole: "push button", nowLabel: "Send", role: "push button", label: "Send"},
+		{name: "gone", nowRole: "", role: "push button", label: "Send", wantErr: true},
+		{name: "another role", nowRole: "link", nowLabel: "Send", role: "push button", label: "Send", wantErr: true},
+		{name: "another label", nowRole: "push button", nowLabel: "Delete", role: "push button", label: "Send", wantErr: true},
+		// The page moving under the list, or a stale title changing the window placer's shift, no longer refuses the click: the role and label still match.
+		{name: "the page has scrolled or the window's placement has drifted", nowRole: "push button", nowLabel: "Send", role: "push button", label: "Send"},
+		// An empty box to type in carries no label at all, and the role alone is what the caller has to go on.
+		{name: "an unlabelled entry", nowRole: "entry", role: "entry"},
+		// For a content role the label is the node's own contents, not a name somebody chose for it, so it changes whenever the user types — and typing into a box is the ordinary thing to do between listing it and clicking it. Comparing the contents refused those clicks and sent the model to look at the screen again.
+		{name: "the user typed a character into the listed entry", nowRole: "entry", nowLabel: "hello!", role: "entry", label: "hello"},
+		{name: "the paragraph that was listed was edited", nowRole: "text", nowLabel: "Dear Bob,", role: "text", label: "Dear Bo"},
 		// A control's label is a name, so a changed one still means a different element.
-		{name: "another label on a button", nowRole: "push button", nowLabel: "Delete", now: was, role: "push button", label: "Send", was: was, wantErr: true},
+		{name: "another label on a button", nowRole: "push button", nowLabel: "Delete", role: "push button", label: "Send", wantErr: true},
 	}
 	for _, c := range cases {
-		err := verifyAgainst(c.nowRole, c.nowLabel, c.now, c.role, c.label, c.was)
+		err := VerifyAgainst(c.nowRole, c.nowLabel, c.role, c.label)
 		if (err != nil) != c.wantErr {
-			t.Errorf("%s: verifyAgainst(...) = %v, want error: %v", c.name, err, c.wantErr)
+			t.Errorf("%s: VerifyAgainst(...) = %v, want error: %v", c.name, err, c.wantErr)
 		}
 	}
 }
@@ -162,6 +153,56 @@ func TestWindowMonitor(t *testing.T) {
 		if ok != c.wantOK || (ok && got != c.want) {
 			t.Errorf("%s: windowMonitor(%+v, %v, %v) = %+v, %v; want %+v, %v", c.name, c.frame, c.mons, c.pointer, got, ok, c.want, c.wantOK)
 		}
+	}
+}
+
+// shiftFromPlacer is where the pid fix lands: shiftOf asks the wired placer by pid and title rather than by title alone, since a title that carries a live status word — Teams' "High memory usage - 985 MB" becoming "1,005 MB" between a listing and the click it drew — no longer names the window the placer already knows by pid. The placer's answer wins over the size-based guess whenever it has one; the guess is only what is left when no placer is wired or the placer does not know this window.
+func TestShiftFromPlacer(t *testing.T) {
+	frame := rect{X: 2421, Y: 191, W: 649, H: 823}
+	restore := windowPlacer
+	t.Cleanup(func() { windowPlacer = restore })
+
+	windowPlacer = func(ctx context.Context, pid uint32, title string) (x, y, w, h int, ok bool) {
+		if pid == 4242 {
+			return 501, 0, 649, 823, true
+		}
+		return 0, 0, 0, 0, false
+	}
+	dx, dy, ok := shiftFromPlacer(context.Background(), 4242, "Teams - 1,005 MB", frame)
+	if !ok || dx != 501-2421 || dy != 0-191 {
+		t.Errorf("shiftFromPlacer(known pid) = %d,%d,%v; want %d,%d,true", dx, dy, ok, 501-2421, 0-191)
+	}
+
+	if _, _, ok := shiftFromPlacer(context.Background(), 9999, "some other window", frame); ok {
+		t.Error("shiftFromPlacer must say false for a pid the placer does not know")
+	}
+
+	windowPlacer = nil
+	if _, _, ok := shiftFromPlacer(context.Background(), 4242, "Teams", frame); ok {
+		t.Error("shiftFromPlacer must say false when no placer is wired")
+	}
+}
+
+// A GTK4 Wayland client such as gnome-control-center answers the accessibility bus with 0,0 for its window frame no matter where it is floating on the screen, so windowShift's size-based guess never fires for it: a floating window is not full screen, not maximized, and is left alone at dx,dy = 0,0, which presses window-relative coordinates as if they were desktop ones. The shell extension's window list carries the real frame, matched by pid the same way compositorFront matches, and its answer is asked before windowShift's guess ever runs (see shiftOf), so this is the case that actually fixes the gnome-control-center click.
+func TestShiftFromPlacer_FloatingWindowReportedAtOrigin(t *testing.T) {
+	frame := rect{X: 0, Y: 0, W: 500, H: 400}
+	restore := windowPlacer
+	t.Cleanup(func() { windowPlacer = restore })
+
+	windowPlacer = func(ctx context.Context, pid uint32, title string) (x, y, w, h int, ok bool) {
+		if pid == 4343 {
+			return 1200, 300, 500, 400, true
+		}
+		return 0, 0, 0, 0, false
+	}
+	dx, dy, ok := shiftFromPlacer(context.Background(), 4343, "Settings", frame)
+	if !ok || dx != 1200 || dy != 300 {
+		t.Errorf("shiftFromPlacer(floating window at origin) = %d,%d,%v; want 1200,300,true", dx, dy, ok)
+	}
+
+	// A window the shell does not know about (a different pid) gets no answer from the placer, which is exactly the signal that leaves windowShift's own guess as the only source: a frame reported at 0,0 with a size neither maximized nor full screen stays at dx,dy = 0,0 there too (see "a floating window cannot be placed and is left alone" in TestWindowShift).
+	if _, _, ok := shiftFromPlacer(context.Background(), 9999, "Settings", frame); ok {
+		t.Error("shiftFromPlacer must say false for a window the shell does not list, falling back to windowShift's guess")
 	}
 }
 

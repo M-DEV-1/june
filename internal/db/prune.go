@@ -59,8 +59,8 @@ func (s *Store) PruneActRuns(ctx context.Context, keep int, failedGrace time.Dur
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM act_runs WHERE id IN (
 			SELECT r.id FROM act_runs r
-			-- The three finished states are finishedActJobStates in act_jobs.go; change them there and here together.
-			WHERE (r.job_id = '' OR r.job_state IN ('done', 'stopped', 'failed'))
+			-- The finished states come from finishedActJobStates in act_jobs.go, built into this IN-list below.
+			WHERE (r.job_id = '' OR r.job_state IN (`+finishedActJobStatesSQL()+`))
 			  AND NOT (r.outcome <> 'ok' AND r.started_at >= datetime('now', '-' || ? || ' seconds'))
 			  AND NOT `+runHasNote+`
 			ORDER BY r.id DESC
@@ -72,6 +72,23 @@ func (s *Store) PruneActRuns(ctx context.Context, keep int, failedGrace time.Dur
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("prune act runs: %w", err)
+	}
+	return n, nil
+}
+
+// PruneToolCalls deletes tool_calls rows older than olderThan. Input: ctx and the age a row must reach before it may go — the pruning stage hands this the same failedGrace window PruneActRuns uses for a failed run, since a tool call is exactly the kind of trace a failed run's grace period is already there to protect. olderThan of zero or less prunes nothing. Output: how many rows were deleted.
+func (s *Store) PruneToolCalls(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		return 0, nil
+	}
+	cutoff := sqliteUTC(time.Now().Add(-olderThan))
+	res, err := s.db.ExecContext(ctx, `DELETE FROM tool_calls WHERE created_at < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("prune tool calls: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune tool calls: %w", err)
 	}
 	return n, nil
 }

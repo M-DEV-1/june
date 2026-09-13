@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+
 /** One animation as the page uses it: something that can be cancelled and that calls onfinish when its time is up. */
 type FakeAnimation = { cancel: () => void; onfinish: (() => void) | null };
 
@@ -152,5 +153,55 @@ describe("the overlay page", () => {
 
     expect(layoutCalls).toBe(before + 1);
     expect(complained.mock.calls.flat().join(" ")).toContain("ora: overlay");
+  });
+  it("holds the pointer while screen-driving tools keep coming, and lets it go once the ask is done", async () => {
+    await startPage();
+    const pointer = document.getElementById("pointer") as HTMLElement;
+
+    send("ask-1", JSON.stringify({ kind: "tap", points: [[100, 100]] }));
+    vi.advanceTimersByTime(50);
+    expect(pointer.style.opacity).toBe("1");
+
+    // Under stillness the flight is instant, so on its own the pointer would be gone 8 seconds after the tap. Each later tool event pushes that out again.
+    vi.advanceTimersByTime(6000);
+    pageListener?.({ payload: JSON.stringify({ id: "ask-1", type: "tool", text: "click" }) });
+    vi.advanceTimersByTime(6000);
+    expect(pointer.style.opacity).toBe("1");
+    pageListener?.({ payload: JSON.stringify({ id: "ask-1", type: "tool", text: "type_text" }) });
+    vi.advanceTimersByTime(6000);
+    expect(pointer.style.opacity).toBe("1");
+
+    // A tool that does not touch the screen holds nothing.
+    pageListener?.({ payload: JSON.stringify({ id: "ask-1", type: "tool", text: "query_memory" }) });
+    vi.advanceTimersByTime(2100);
+    expect(pointer.style.opacity).toBe("0");
+
+    // And the end of the ask lets it go within a moment rather than the full idle time.
+    send("ask-1", JSON.stringify({ kind: "tap", points: [[100, 100]] }));
+    vi.advanceTimersByTime(50);
+    expect(pointer.style.opacity).toBe("1");
+    pageListener?.({ payload: JSON.stringify({ id: "ask-1", type: "done" }) });
+    vi.advanceTimersByTime(1600);
+    expect(pointer.style.opacity).toBe("0");
+  });
+
+  it("puts the point face before a ring's label", async () => {
+    await startPage();
+    const shapes = document.getElementById("shapes") as HTMLElement;
+
+    send("ask-1", JSON.stringify({ kind: "ring", label: "Inbox", rects: [{ x: 100, y: 100, w: 200, h: 80 }], ttl_ms: 1000 }));
+
+    const label = shapes.querySelector(".label") as HTMLElement;
+    expect(label.textContent).toBe("Inbox");
+  });
+
+  it("draws no pill for a tap, label or not", async () => {
+    await startPage();
+    send("ask-1", JSON.stringify({ kind: "tap", label: "Songs", points: [[100, 100]] }));
+    vi.advanceTimersByTime(50);
+    send("ask-1", JSON.stringify({ kind: "tap", label: "Search", points: [[300, 100]] }));
+    vi.advanceTimersByTime(50);
+    expect(document.querySelectorAll("#shapes .label").length).toBe(0);
+    expect((document.getElementById("pointer") as HTMLElement).style.opacity).toBe("1");
   });
 });

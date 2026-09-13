@@ -18,6 +18,8 @@ type pruneReport struct {
 	runsRemoved         int64
 	runsKeptForNotes    int64
 	runsKeptFailedYoung int64
+	// toolCallsRemoved is how many tool_calls rows older than failedGrace were deleted — the same window PruneActRuns gives a failed run before the count cap can take it.
+	toolCallsRemoved int64
 }
 
 // pruneStage runs the store's two retention passes in order, conversations then act runs, counting what each one held back as well as what it removed. Input: ctx. Output: the report, or the store's own error the moment one of the four calls fails.
@@ -43,12 +45,18 @@ func (r *Runner) pruneStage(ctx context.Context) (pruneReport, error) {
 		return pruneReport{}, err
 	}
 
+	removedToolCalls, err := r.store.PruneToolCalls(ctx, failedGrace)
+	if err != nil {
+		return pruneReport{}, err
+	}
+
 	return pruneReport{
 		conversationsRemoved:   removedConversations,
 		conversationsProtected: protectedConversations,
 		runsRemoved:            removedRuns,
 		runsKeptForNotes:       keptForNotes,
 		runsKeptFailedYoung:    keptFailedYoung,
+		toolCallsRemoved:       removedToolCalls,
 	}, nil
 }
 

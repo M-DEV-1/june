@@ -227,7 +227,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/people", auth(ipcServer.People))
 
 	// The window's voice: the daemon runs the same Gemini Live loop the terminal client does, and what the session hears, says and calls rides the /events stream above. Route bodies are in internal/ipc/voice.go.
-	voiceSession := ipc.NewVoice(ipcServer, store, apiKey)
+	voiceSession := ipc.NewVoice(ipcServer, store, apiKey, actJobs.Spoken)
 	mux.HandleFunc("/voice/start", auth(voiceSession.Start))
 	mux.HandleFunc("/voice/stop", auth(voiceSession.Stop))
 	mux.HandleFunc("/voice/status", auth(voiceSession.Status))
@@ -255,7 +255,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/brains", auth(ipc.Brains(liveConfig, brainLimits)))
 	mux.HandleFunc("/overlay", auth(ipcServer.Overlay))
 	mux.HandleFunc("/settings", auth(ipc.Settings(config.DataDir(), liveConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime)))
-	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, brainLimits)))
+	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, appConfig.ExaMonthlyRequests, brainLimits)))
 }
 
 // brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the config accessor (for the Gemini model those requests are metered under, and for whether the Claude read is turned on, both read under its lock since POST /settings writes that flag from another request goroutine) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker (skipped entirely when config.OraConfig.ClaudeUsageFromLogin is off), Codex's whatever its last response's headers said, and nothing at all for Grok and Ollama, which expose no allowance to read.

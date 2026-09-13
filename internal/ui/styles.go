@@ -4,8 +4,7 @@ import "github.com/charmbracelet/lipgloss"
 
 type Styles struct {
 	// 1. Tonal Palette
-	BgInput  lipgloss.Color
-	BgStatus lipgloss.Color
+	BgInput lipgloss.Color
 
 	// 2. Ink Palette
 	White       lipgloss.Color
@@ -55,8 +54,7 @@ type Styles struct {
 func DefaultStyles() Styles {
 	s := Styles{
 		// elevations
-		BgInput:  lipgloss.Color("#09090b"),
-		BgStatus: lipgloss.Color("#070709"),
+		BgInput: lipgloss.Color("#09090b"),
 
 		// inks
 		White:       lipgloss.Color("#e4e4e7"), // zinc 200

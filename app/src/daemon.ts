@@ -1,11 +1,12 @@
 /** HTTP/SSE client for the local daemon at http://127.0.0.1:6942. No DOM or state here, just I/O. */
 
 import { TOKEN_HEADER, devToken } from "./shared/token";
+import { DAEMON_HOST_PORT } from "./next/daemon-url";
 
 export { TOKEN_HEADER, devToken };
 
 /** Where the daemon listens. Only setPort moves it, which is how a test or a throwaway build can point the client somewhere else without stopping the user's real daemon. */
-let base = "http://127.0.0.1:6942";
+let base = `http://${DAEMON_HOST_PORT}`;
 
 /** Points every call in this module at a different port on 127.0.0.1. Input: the port as digits. Output: nothing; a non-numeric value is ignored so a stray query string cannot redirect the client. */
 export function setPort(port: string): void {
@@ -126,6 +127,8 @@ export type DaemonEvent = {
   text?: string;
   /** Carried on a "tool" event (a short summary of what that call is doing or found), on an "act" event (the job progress, as JSON text — see internal/ipc/actjob.go's ActEmitter) and on a "level" event (the session's mic/speaker amplitude as JSON text, {"mic":0-1,"speaker":0-1} — see internal/ipc/voice.go's levels and waveform.ts's renderLevelEvent). */
   detail?: string;
+  /** Only meaningful on the after-call "tool" event: true when that tool call's result was an error, so a step closes as failed instead of done. */
+  failed?: boolean;
   evidence?: { title: string; meta: string; body: string }[];
   /** Only carried on a "notice" event: the whole card. */
   notice?: Notice;

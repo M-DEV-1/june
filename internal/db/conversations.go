@@ -237,6 +237,42 @@ func (s *Store) UserTasks(ctx context.Context) ([]UserTask, error) {
 	return out, rows.Err()
 }
 
+// SetUserTaskTitle rewrites one of the user's own tasks. Input: the task's id and its new title. Output: an error when nothing matched the id, on the same rule SetUserTaskDone holds to.
+//
+// A task could be created and ticked and nothing else until 2026-09-12, when the user asked three times to put the right context on one Ora had just made for him and was refused every time. A task whose words cannot be corrected is a task that has to be made again from scratch.
+func (s *Store) SetUserTaskTitle(ctx context.Context, id int64, title string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE user_tasks SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, strings.TrimSpace(title), id)
+	if err != nil {
+		return fmt.Errorf("set user task title: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set user task title: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no task with id %d", id)
+	}
+	return nil
+}
+
+// DeleteUserTask removes one of the user's own tasks outright. Input: the task's id. Output: an error when nothing matched it.
+//
+// Ticking a task done is not the same as never having wanted it: a task Ora added by mistake, or one the user asks it to get rid of, has to go rather than sit on the list struck through. Nothing in the product could remove one before 2026-09-12.
+func (s *Store) DeleteUserTask(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM user_tasks WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete user task: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete user task: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no task with id %d", id)
+	}
+	return nil
+}
+
 // SetUserTaskDone marks one of the user's own tasks done or open again. An id that matches nothing is an error, not a silent no-op — reporting a tick the store never took would lose it.
 func (s *Store) SetUserTaskDone(ctx context.Context, id int64, done bool) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE user_tasks SET done = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, done, id)

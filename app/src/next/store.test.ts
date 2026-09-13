@@ -75,7 +75,7 @@ describe("what the window is showing", () => {
 
   it("clears the notice before Escape does anything else", () => {
     const store = makeStore({ ui: { place: "settings", back: "chats" } });
-    store.dispatch(ui.noticed("Could not delete"));
+    store.dispatch(ui.noticed({ text: "Could not delete", kind: "error" }));
     store.dispatch(escaped());
     expect(store.getState().ui.notice).toBeUndefined();
     expect(store.getState().ui.place).toBe("settings");
@@ -280,6 +280,25 @@ describe("the question in flight", () => {
 });
 
 describe("a computer-use job in flight", () => {
+  // The plan the model writes on its first round used to live only in the job's own prompt, so the thread opened with the goal — the user's own words back at them — and went straight to "Step 1". What makes watching an agent work bearable is being told what it is about to do, so you can see it deviate.
+  it("shows the plan and the estimate it opened with, before any step", () => {
+    const store = makeStore();
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "play S16 E8" }));
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    store.dispatch(
+      progress.eventArrived({
+        id: "act-1",
+        type: "act",
+        detail: JSON.stringify({ kind: "plan", state: "stepping", step: 6, text: "open Netflix, find the episode, press play" }),
+      }),
+    );
+    expect(store.getState().progress.jobs.c1).toMatchObject({
+      plan: "open Netflix, find the episode, press play",
+      estimate: 6,
+      steps: [],
+    });
+  });
+
   it("folds its steps, its question and its closing spend into the job", () => {
     const store = makeStore();
     store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
@@ -431,7 +450,7 @@ describe("a notice's action reaching the window", () => {
         notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
       }),
     );
-    expect(store.getState().ui.notice).toBe("Send the invoice: Done");
+    expect(store.getState().ui.notice).toEqual({ text: "Send the invoice: Done", kind: "info" });
   });
 
   it("tells the Tasks cache to read the list again for a task closed this way", () => {
@@ -469,7 +488,7 @@ describe("a notice's action reaching the window", () => {
         notice: { title: "Routine", body: "Priya replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: "2026-09-05T18:00:00" },
       }),
     );
-    expect(store.getState().ui.notice).toBe("Priya replied about the venue.: Snoozed until 18:00");
+    expect(store.getState().ui.notice).toEqual({ text: "Priya replied about the venue.: Snoozed until 18:00", kind: "info" });
     expect(invalidate).not.toHaveBeenCalledWith(["Task"]);
     invalidate.mockRestore();
     vi.useRealTimers();
@@ -484,7 +503,7 @@ describe("a notice's action reaching the window", () => {
         notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
       }),
     );
-    expect(store.getState().ui.notice).toBe("Send the invoice: Done");
+    expect(store.getState().ui.notice).toEqual({ text: "Send the invoice: Done", kind: "info" });
   });
 
   it("leaves the rail line's text alone for a notice arriving fresh, with no action yet, and holds it as the live one instead", () => {
@@ -501,7 +520,9 @@ describe("a notice's action reaching the window", () => {
       }),
     );
     expect(store.getState().ui.notice).toBeUndefined();
-    expect(store.getState().ui.liveNotice).toEqual({ kind: "brief", id: "", title: "Morning brief", body: "Two things are still open." });
+    // at is stamped on arrival rather than sent by the daemon, so it is checked for being a time and not for a value this test could know.
+    expect(store.getState().ui.liveNotice).toMatchObject({ kind: "brief", id: "", title: "Morning brief", body: "Two things are still open." });
+    expect(store.getState().ui.liveNotice?.at).toBeTypeOf("number");
   });
 
   it("clears the live notice once the daemon's answer comes back with its action set, the same event a desktop press produces", () => {
@@ -513,7 +534,7 @@ describe("a notice's action reaching the window", () => {
         notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task" },
       }),
     );
-    expect(store.getState().ui.liveNotice).toEqual({ kind: "task", id: "task-42", title: "Still open", body: "Send the invoice" });
+    expect(store.getState().ui.liveNotice).toMatchObject({ kind: "task", id: "task-42", title: "Still open", body: "Send the invoice" });
 
     store.dispatch(
       progress.eventArrived({

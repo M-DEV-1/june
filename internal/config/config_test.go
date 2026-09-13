@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -335,5 +336,13 @@ func TestTrackerDwellTime_IsMilliseconds(t *testing.T) {
 	}
 	if got := time.Duration(DefaultDwellTime) * time.Millisecond; got != 15*time.Second {
 		t.Errorf("the default dwell time is %v once the call site converts it, want 15s", got)
+	}
+}
+
+// TestVersion_LooksLikeSemver pins the shape internal/obs and internal/ui build their reported version strings from: obs tags telemetry with it plainly and ui prefixes it with "v" and suffixes "-alpha", so a value that stopped looking like "0.1.1" would show up wrong in both places at once.
+func TestVersion_LooksLikeSemver(t *testing.T) {
+	parts := strings.Split(Version, ".")
+	if len(parts) != 3 {
+		t.Errorf("Version = %q, want three dot-separated parts like \"0.1.1\"", Version)
 	}
 }

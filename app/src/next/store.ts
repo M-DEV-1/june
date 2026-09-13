@@ -40,9 +40,11 @@ type UiState = {
   /** The conversation opened for a task that had none of its own, by task id. A task Ora noticed in a meeting is a note, not a row the daemon can hang a conversation off, and there is no route that ties the two together, so the window remembers the pairing for as long as it is open and reuses it rather than opening a second conversation on the next question. */
   taskChats: Record<string, string>;
   paletteOpen: boolean;
-  notice?: string;
+  /** What the sidebar's notice line says, and whether it reads as a failure (red, "text-destructive") or as plain status (the normal muted foreground). */
+  notice?: { text: string; kind: "info" | "error" };
   /** The most recent notice to reach the window with no action yet — the live one the rail line offers Done/1h/Evening/Tomorrow buttons for. Cleared the moment the daemon's answer comes back as the same notice with its action set (see reactToNotice), which is what the buttons are replaced by. */
-  liveNotice?: Pick<Notice, "kind" | "id" | "title" | "body" | "actions">;
+  /** at is when the notice reached this window, stamped here because the daemon sends none: the card reads it against the clock to say "now", then "5m ago" (see noticeAge). */
+  liveNotice?: Pick<Notice, "kind" | "id" | "title" | "body" | "actions"> & { at: number };
 };
 
 /** What Escape does, dispatched once and answered by whichever slices have something to give up. */
@@ -135,8 +137,8 @@ const uiSlice = createSlice({
     paletteToggled(s, a: PayloadAction<boolean | undefined>) {
       s.paletteOpen = a.payload ?? !s.paletteOpen;
     },
-    /** Says on one line that a write did not go through, or clears what was said. */
-    noticed(s, a: PayloadAction<string | undefined>) {
+    /** Says on one line that a write did not go through, or that something succeeded, or clears what was said. */
+    noticed(s, a: PayloadAction<UiState["notice"]>) {
       s.notice = a.payload;
     },
     /** Records, or clears, the live notice the rail line offers buttons for — see reactToNotice, the only dispatcher. */
@@ -216,7 +218,7 @@ const settingsSlice = createSlice({
 });
 
 /** One tool the agent called while answering: the tool's name and the one line it reported about what it did. */
-export type Step = { name: string; detail: string };
+export type Step = { name: string; detail: string; failed?: boolean };
 
 /** The question in flight: which conversation it was asked in, what was asked, the last working line, the answer as far as it has arrived, the tools called so far, and what the answer was drawn from. The window waits on one question at a time, exactly as the current window does, so a message on the stream that belongs to something else — a question asked in the hover window, a voice session — changes nothing here. */
 export type Run = {
@@ -251,6 +253,10 @@ export type JobRun = {
   conversationId: string;
   goal: string;
   state: string;
+  /** What the model said it was going to do, written on its first round and sent once. The goal is the user's own words; this is the model's reading of them, which is what makes a step that wanders off it visible. */
+  plan?: string;
+  /** How many steps the model guessed the whole job would take, sent alongside the plan. Not a limit: the budget is twice it, and running out asks rather than fails (see actjob.outOfRoomQuestion). */
+  estimate?: number;
   steps: JobStepRow[];
   question?: string;
   say?: string;
@@ -258,8 +264,8 @@ export type JobRun = {
   startedAt: number;
 };
 
-/** The shape of an "act" event's JSON detail (see internal/actjob.Event on the Go side). kind is "started", "step", "verified", "question", "answered", "paused", "resumed" or "done". */
-type ActDetail = { kind: string; state: string; text: string; expect?: string; outcome?: string; held_before?: boolean; spend?: Spend };
+/** The shape of an "act" event's JSON detail (see internal/actjob.Event on the Go side). kind is "started", "plan", "step", "verified", "question", "answered", "paused", "resumed" or "done". */
+type ActDetail = { kind: string; state: string; text: string; step?: number; expect?: string; outcome?: string; held_before?: boolean; spend?: Spend };
 
 /** Decodes one "act" event's detail. Input: the detail text off the wire. Output: the parts, or every field empty when the text will not parse — which never happens against a daemon that sent it, but leaves nothing to throw on a malformed one. */
 function parseActDetail(detail: string | undefined): ActDetail {
@@ -350,11 +356,21 @@ const progressSlice = createSlice({
       if (ev.type === "act") {
         // The job this belongs to is the one whose id matches; a job whose POST /act has not answered yet has no id to match, and takes what arrives, the same tolerance an ask's own id race gets.
         const jobs = Object.values(s.jobs);
-        const job = jobs.find((j) => j.id && j.id === ev.id) ?? jobs.find((j) => !j.id);
-        if (!job) return;
         const d = parseActDetail(ev.detail);
+        let job = jobs.find((j) => j.id && j.id === ev.id) ?? jobs.find((j) => !j.id);
+        // A job this window never posted: the voice session's do tool starts one in the daemon, so the first this window hears of it is its own "started" event, which carries the goal. Filed under the job's id, since there is no chat it was asked from. Without this every event of a spoken job was dropped and the running-now strip stayed empty through a chain the user could hear happening.
+        if (!job && d.kind === "started" && ev.id) {
+          job = { id: ev.id, conversationId: "", goal: d.text, state: d.state, steps: [], startedAt: Date.now() };
+          s.jobs[ev.id] = job;
+        }
+        if (!job) return;
         if (d.state) job.state = d.state;
         switch (d.kind) {
+          case "plan":
+            // step carries the model's own estimate on a plan event, not a step number.
+            job.plan = d.text;
+            job.estimate = d.step;
+            break;
           case "step":
             job.steps.push({ n: job.steps.length + 1, text: d.text, expect: d.expect ?? "", startedAt: Date.now() });
             break;
@@ -395,7 +411,7 @@ const progressSlice = createSlice({
           run.status = ev.text ?? "";
           break;
         case "tool":
-          run.steps.push({ name: ev.text ?? "", detail: ev.detail ?? "" });
+          run.steps.push({ name: ev.text ?? "", detail: ev.detail ?? "", failed: ev.failed });
           run.status = ev.detail || ev.text || "";
           break;
         case "answer":
@@ -425,12 +441,12 @@ export const progress = progressSlice.actions;
 /** What a "notice" event does outside the progress slice. One arriving fresh, with no action yet, becomes the sidebar's liveNotice — the rail line's own Done/1h/Evening/Tomorrow buttons, wired through useActOnNoticeMutation in sidebar.tsx. Once its action is set — the daemon's answer to one of those buttons, or to the desktop notification's own — it says so on the rail line instead (the one surface every notice already reaches, alongside the routine run result "Could not add that routine" and the rest of ui.notice's callers), clears liveNotice so the buttons are gone, and, for a task notice pressed Done, tells the Tasks screen's cache to read the list again, since the daemon closed that task through its own task-done path (see internal/proactive/notify.go's markDone) without this window's POST /tasks/{id}/done ever running to invalidate it. */
 function reactToNotice(n: Notice, api: { dispatch: AppDispatch }): void {
   if (!n.action) {
-    api.dispatch(uiSlice.actions.liveNoticeSet({ kind: n.kind, id: n.id, title: n.title, body: n.body, actions: n.actions }));
+    api.dispatch(uiSlice.actions.liveNoticeSet({ kind: n.kind, id: n.id, title: n.title, body: n.body, actions: n.actions, at: Date.now() }));
     return;
   }
   api.dispatch(uiSlice.actions.liveNoticeSet(undefined));
   const msg = noticeActionMessage(n);
-  if (msg !== undefined) api.dispatch(uiSlice.actions.noticed(msg));
+  if (msg !== undefined) api.dispatch(uiSlice.actions.noticed({ text: msg, kind: "info" }));
   if (n.kind === "task" && n.action === "done")
     api.dispatch(oraApi.util.invalidateTags(["Task"]));
 }

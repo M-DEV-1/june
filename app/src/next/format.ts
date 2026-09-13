@@ -45,6 +45,27 @@ export function shortWhen(iso: string, now: Date = new Date()): string {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
+/** How long ago a notice landed, for the line the notice card puts beside "Ora". Input: the moment it arrived, in milliseconds, and the clock to read it against. Output: "now" under a minute, then "5m ago", then "1h ago".
+ * Minutes and hours only: a notice that has been up for a day is not a live notice any more, and a stamp ahead of the clock — a machine resyncing its time — reads as "now" rather than as a negative count.
+ */
+export function noticeAge(at: number, now: Date = new Date()): string {
+  const seconds = Math.floor((now.getTime() - at) / 1000);
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
+}
+
+/** The greeting the front door opens with, by the hour it actually is rather than by anything stored. Input: the moment. Output: "Good morning.", "Good afternoon." or "Good evening.".
+ * The boundaries are the ordinary English ones: morning until noon, afternoon until five, evening after that. Small hours read as morning, which is what a person says at 3am even when it feels wrong.
+ */
+export function greeting(now: Date = new Date()): string {
+  const h = now.getHours();
+  if (h < 12) return "Good morning.";
+  if (h < 17) return "Good afternoon.";
+  return "Good evening.";
+}
+
 /** The heading that separates one day of a conversation from the next. Input: a timestamp and the moment to compare it against. Output: "Friday 4 September", with " · today" added when it is today. */
 export function dayHeading(iso: string, now: Date = new Date()): string {
   const d = new Date(iso);

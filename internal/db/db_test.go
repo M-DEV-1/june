@@ -2437,3 +2437,82 @@ func TestDeleteNote_MissingID_Errors(t *testing.T) {
 		t.Error("expected an error deleting a nonexistent note id, got nil")
 	}
 }
+
+// TestStore_GetImplicitContext_CarriesTheNightsUnderstanding is the sleep-time-compute wiring: the understanding doc the night rewrites is the one thing Ora computed while the user was away, and until now no live session read it. It must arrive first in the handshake context, before the live threads and the relevance hits, because it is the standing model everything else is read against.
+func TestStore_GetImplicitContext_CarriesTheNightsUnderstanding(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	const doc = "He works on ora most evenings and tests before he writes. His partner is Ada."
+	if err := store.SetDiaryEntry(ctx, "", "understanding", doc); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+	if err := store.SetWorkingState(ctx, "user is reading the dream package"); err != nil {
+		t.Fatalf("SetWorkingState: %v", err)
+	}
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+	if len(branch) == 0 {
+		t.Fatal("GetImplicitContext returned nothing")
+	}
+	if !strings.HasPrefix(branch[0], "[understanding]") || !strings.Contains(branch[0], "tests before he writes") {
+		t.Errorf("the night's understanding must lead the context, got first line %q in %+v", branch[0], branch)
+	}
+}
+
+// TestStore_GetImplicitContext_UnderstandingDoesNotSuppressTheColdStartWalk guards the one way this wiring could break something: the recursive summary walk only runs when nothing else was synthesized, so an understanding doc must not count as "something synthesized" and starve a cold-start store of its summaries.
+func TestStore_GetImplicitContext_UnderstandingDoesNotSuppressTheColdStartWalk(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if err := store.SetDiaryEntry(ctx, "", "understanding", "He is an engineer who works late."); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "Fallback Task",
+		Summary:  "Checking the cold start still walks the summary tree",
+	})
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+	var hasUnderstanding, hasSummary bool
+	for _, line := range branch {
+		if strings.HasPrefix(line, "[understanding]") {
+			hasUnderstanding = true
+		}
+		if strings.Contains(line, "still walks the summary tree") {
+			hasSummary = true
+		}
+	}
+	if !hasUnderstanding || !hasSummary {
+		t.Errorf("cold start wants both the understanding and the summary walk, got understanding=%v summary=%v in %+v", hasUnderstanding, hasSummary, branch)
+	}
+}
+
+// TestStore_GetImplicitContext_TrimsARunawayUnderstanding keeps a doc that grew past its instructed length from eating the handshake: the block is cut to understandingContextCap runes.
+func TestStore_GetImplicitContext_TrimsARunawayUnderstanding(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	long := strings.Repeat("a very long standing model of the user. ", 200)
+	if err := store.SetDiaryEntry(ctx, "", "understanding", long); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+	if len(branch) == 0 {
+		t.Fatal("GetImplicitContext returned nothing")
+	}
+	if runes := len([]rune(branch[0])); runes > db.UnderstandingContextCap+32 {
+		t.Errorf("understanding line is %d runes, want it cut near %d", runes, db.UnderstandingContextCap)
+	}
+}

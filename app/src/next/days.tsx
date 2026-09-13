@@ -10,7 +10,7 @@ import { Page } from "./day-page";
 export function DaysScreen() {
   const dispatch = useAppDispatch();
   const { date, query } = useAppSelector((s) => s.ui);
-  const { data: days = [], isError } = useDaysQuery();
+  const { data: days = [], isError, isLoading } = useDaysQuery();
   const [wide, pane] = useWide();
 
   const listed = daysShown(activeDays(days), query.days);
@@ -41,6 +41,7 @@ export function DaysScreen() {
         ) : (
           <Blank
             up={!isError}
+            loading={isLoading}
             empty="No days written yet."
             hint="Ora writes a page for the day each night, from what it saw and heard. The first one appears after the first full day it has been running."
           />

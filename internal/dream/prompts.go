@@ -66,11 +66,12 @@ Principles:
 - The promoted and high-confidence hypotheses below are your hardest-won conclusions; the rewrite must carry them.
 - Keep what is still true, correct what the week contradicted, and cut what has expired.
 - Fold in only durable things: what will still be true and still matter weeks from now.
+- The coarser entries below are the user's record further back — years, months, weeks. Read them for what has held across all of it, not for what happened on any one day.
 - Declarative plain prose, about 300 words, no markdown.
 - Output only the rewritten understanding — no preamble, no commentary.`
 
-// understandingPrompt assembles the rewrite call: the instruction, the current doc, the strong hypotheses, and the week's diary first lines. Every section is present, "(none)" when empty, so the model never guesses whether material was withheld or just absent.
-func understandingPrompt(current string, strong []db.Hypothesis, week []db.DiaryDay) string {
+// understandingPrompt assembles the rewrite call: the instruction, the current doc, the strong hypotheses, the coarse diary tiers (years, months, weeks) in full, and the recent dailies as first lines. Every section is present, "(none)" when empty, so the model never guesses whether material was withheld or just absent.
+func understandingPrompt(current string, strong []db.Hypothesis, past []coarseEntry, week []db.DiaryDay) string {
 	var b strings.Builder
 	b.WriteString(understandingInstruction)
 	b.WriteString("\n\n--- Current understanding ---\n")
@@ -86,6 +87,13 @@ func understandingPrompt(current string, strong []db.Hypothesis, week []db.Diary
 	}
 	for _, h := range strong {
 		fmt.Fprintf(&b, "%s (%s, confidence %s)\n", h.Statement, h.Status, h.Confidence)
+	}
+	b.WriteString("\n--- The record further back, coarsest first ---\n")
+	if len(past) == 0 {
+		b.WriteString("(none)\n")
+	}
+	for _, p := range past {
+		fmt.Fprintf(&b, "[%s starting %s] %s\n", p.kind, p.day, strings.TrimSpace(p.content))
 	}
 	b.WriteString("\n--- The week, one line per day ---\n")
 	if len(week) == 0 {

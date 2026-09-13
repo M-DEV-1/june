@@ -97,8 +97,8 @@ type VoiceSession struct {
 	speaker audio.Speaker
 }
 
-// NewVoice builds the daemon's voice session. Input: the server whose hub the session broadcasts on and whose live activity buffer the handshake reads, the store the agent uses as its memory and the session files each turn's token count in, and the Gemini API key. Output: the session, idle; register its Start, Stop and Status methods on the mux (see cmd/daemon.go for the route names).
-func NewVoice(s *Server, store *db.Store, apiKey string) *VoiceSession {
+// NewVoice builds the daemon's voice session. Input: the server whose hub the session broadcasts on and whose live activity buffer the handshake reads, the store the agent uses as its memory and the session files each turn's token count in, the Gemini API key, and the way a spoken chain of work reaches the job runner — ActJobs.Spoken in the daemon, nil for a session that cannot start one, which makes the do tool say so. Output: the session, idle; register its Start, Stop and Status methods on the mux (see cmd/daemon.go for the route names).
+func NewVoice(s *Server, store *db.Store, apiKey string, runJob func(context.Context, string) (string, error)) *VoiceSession {
 	v := &VoiceSession{hub: s.hub, store: store, state: "idle"}
 	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) {
 		mic, err := audio.NewMic()
@@ -110,13 +110,13 @@ func NewVoice(s *Server, store *db.Store, apiKey string) *VoiceSession {
 			mic.Close()
 			return nil, nil, nil, fmt.Errorf("speaker: %w", err)
 		}
-		return mic, speaker, liveAgent{newVoiceAgent(s, mic, speaker, store, apiKey)}, nil
+		return mic, speaker, liveAgent{newVoiceAgent(s, mic, speaker, store, apiKey, runJob)}, nil
 	}
 	return v
 }
 
 // newVoiceAgent builds the live agent one voice session drives. Input: the server the session broadcasts on, the session's microphone and speaker, the store the agent uses as its memory, and the Gemini API key. Output: the agent, configured with the live model and the user's chosen voice and wired to the screen. Extracted from NewVoice so the wiring is testable without opening the user's real microphone.
-func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store *db.Store, apiKey string) *agent.Agent {
+func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store *db.Store, apiKey string, runJob func(context.Context, string) (string, error)) *agent.Agent {
 	a := agent.NewAgent(mic, speaker, store, nil, apiKey)
 	a.SetModel(config.VoiceModel())
 	a.SetVoice(config.LoadConfig().Voice)
@@ -124,6 +124,8 @@ func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store
 	if s.screen != nil {
 		a.SetBufferProvider(s.screen)
 	}
+	// do hands a whole chain of work to the job runner, which plans it, checks each step and reads what this machine did the last few times (see ActJobs.Spoken). Without this a spoken "open Spotify and play this, then message Priya" is driven one raw tool call at a time inside the conversation, with no plan and nothing verified.
+	a.RunJob = runJob
 	// point_at rings through the same overlay path POST /overlay uses, so the extension has one thing to listen to whether the ring came from a typed ask or from speech. A spoken ring belongs to no /ask, so it is stamped with the non-ask id rather than with an id that names a question the user never typed.
 	a.Point = func(x, y, w, h int, label string) error { return s.Ring(overlayNoAsk, x, y, w, h, label) }
 	// draw goes through the same overlay path as point_at and show_marks. Server.Draw stamps it with whichever ask is running, which for a spoken session is none, so it lands under the same non-ask id the other two use.
@@ -333,6 +335,8 @@ func (v *VoiceSession) watch(ctx context.Context, id string, run voiceRunner) {
 			if tool.Phase == agent.ToolStarted {
 				v.setState(id, "thinking")
 				v.emit(id, "tool", tool.Name)
+			} else if tool.Phase == agent.ToolFinished {
+				v.hub.broadcast(Event{ID: id, Type: "tool", Text: tool.Name, Failed: tool.Err, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 			}
 		}
 	}

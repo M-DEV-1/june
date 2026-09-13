@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -84,6 +85,22 @@ func dialA11y(ctx context.Context) (*dbus.Conn, error) {
 		return nil, err
 	}
 	return conn, nil
+}
+
+// pidCache remembers the pid behind an accessibility-bus unique name, since a connection's unique name never changes owner for as long as that connection lives, so one lookup per name is all GetConnectionUnixProcessID is ever worth.
+var pidCache sync.Map
+
+// busPid asks the accessibility bus which process owns a connection's unique name, such as ":1.61" — the same identity a node's ref carries as its bus name. Input: a context bounding the call, the live connection and the unique name. Output: the pid and true, cached after the first successful read; 0 and false when the bus cannot answer.
+func busPid(ctx context.Context, conn *dbus.Conn, name string) (uint32, bool) {
+	if v, ok := pidCache.Load(name); ok {
+		return v.(uint32), true
+	}
+	var pid uint32
+	if err := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetConnectionUnixProcessID", 0, name).Store(&pid); err != nil {
+		return 0, false
+	}
+	pidCache.Store(name, pid)
+	return pid, true
 }
 
 // getParent reads the accessible's Parent property, which for a top-level window is its application. Output: the zero aref when the property cannot be read.

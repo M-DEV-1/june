@@ -385,12 +385,15 @@ func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action strin
 	n := Notice{Title: title, Body: body, Kind: kind, ID: id}
 	// A notice that asked a question of its own is answered by the goroutine waiting on it, whatever its button was called: that is what carries "dropped" and "low", neither of them one of the four this switch knows, back to the stale-item question. Nothing else changes — a key that notice never offered falls through to the switch and is refused there, and there is no banner to close, since a waiter is only registered when a window took the notice.
 	if deliverAnswer(noticeKey(n), action) {
+		s.closeBanner(n)
 		return nil
 	}
 	// Nobody was waiting, which happens whenever the question's goroutine has already given up, the daemon has restarted since the card was drawn, or the card was drawn on a second surface. The button still has to work, so the notice's own registered action runs instead.
 	if do := noticeActionFor(kind, id, action); do != nil {
 		slog.Info("notice: no goroutine was waiting, doing what the button asks for directly", "kind", kind, "action", action)
-		return do()
+		err := do()
+		s.closeBanner(n)
+		return err
 	}
 	slog.Debug("notice: no goroutine is waiting on this press and nothing is registered for it", "key", noticeKey(n), "action", action, "waiting", waitingKeys())
 	var err error
@@ -402,12 +405,19 @@ func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action strin
 	default:
 		return ErrBadNoticeAction
 	}
-	if s.notifier != nil {
-		if cerr := s.notifier.Close(noticeKey(n)); cerr != nil {
-			slog.Debug("could not close a notice's own banner after a window press", "kind", kind, "id", id, "error", cerr)
-		}
-	}
+	s.closeBanner(n)
 	return err
+}
+
+// closeBanner dismisses one notice's own desktop banner once its button has been applied, so a question answered on one surface stops asking itself on the other. Input: the notice. Output: none; a failure is logged and nothing else, since the press it would be reported on has already been dealt with.
+// Called on every path of Act that applied something, and on none that refused: until 2026-09-12 only the fallback switch closed anything, so a press a goroutine was waiting on and a press with a registered action both left their banner sitting on screen. That is the "sometimes notifications do not close" — sometimes, because which of the three paths a press takes is what decided it.
+func (s *Scheduler) closeBanner(n Notice) {
+	if s.notifier == nil {
+		return
+	}
+	if err := s.notifier.Close(noticeKey(n)); err != nil {
+		slog.Debug("could not close a notice's own banner after its button was applied", "kind", n.Kind, "id", n.ID, "error", err)
+	}
 }
 
 // snoozeUntil is when a snoozed notice comes back. Input: the moment the button was pressed and its key. Output: one hour later for "hour"; today at eveningHour for "evening", or tomorrow's when that hour has already gone by; tomorrow at morningHour for "tomorrow"; the zero time for any other key.

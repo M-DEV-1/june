@@ -37,12 +37,13 @@ type ActionItem struct {
 	Key   string `json:"key"`
 }
 
-// Event is one line of the /events SSE stream. Type is one of "status", "tool", "answer", "done", "error". Text carries that type's payload: "Checking." for status, a tool name for tool, the final answer for answer, an error message for error, and is empty for done. Detail is only populated on tool events: a short summary of what that tool call is doing (its args before it runs) or found (its result after), so the window can show live progress while a multi-step turn is still going. Evidence and Actions are only populated on answer events, and so is ConversationID: it names the conversation the answer was stored in, so the window knows which thread to append it to.
+// Event is one line of the /events SSE stream. Type is one of "status", "tool", "answer", "done", "error". Text carries that type's payload: "Checking." for status, a tool name for tool, the final answer for answer, an error message for error, and is empty for done. Detail is only populated on tool events: a short summary of what that tool call is doing (its args before it runs) or found (its result after), so the window can show live progress while a multi-step turn is still going. Failed is only meaningful on the after-call tool event: true when that tool's result was an error, so the window can show a failed step instead of a done one. Evidence and Actions are only populated on answer events, and so is ConversationID: it names the conversation the answer was stored in, so the window knows which thread to append it to.
 type Event struct {
 	ID             string         `json:"id"`
 	Type           string         `json:"type"`
 	Text           string         `json:"text"`
 	Detail         string         `json:"detail"`
+	Failed         bool           `json:"failed,omitempty"`
 	Evidence       []EvidenceItem `json:"evidence"`
 	Actions        []ActionItem   `json:"actions"`
 	ConversationID string         `json:"conversation_id"`
@@ -80,6 +81,20 @@ func usedScreenTool(trace agent.TurnTrace) bool {
 		}
 	}
 	return false
+}
+
+// afterScreenRun kicks the end-of-ask lesson hook (agent.Agent.AfterScreenRun) for a screen-tool trace, in the background so it can never hold up the ask's own response — the hook may make a reflective model call of its own. Input: the asker this ask used, the finished trace, and its outcome ("ok" or "error"). Output: none; a trace that never touched the screen, or an asker whose brain does not implement the hook (a test fake, or a brain with no lesson store wired), is silently skipped.
+func (s *Server) afterScreenRun(asker Asker, trace agent.TurnTrace, outcome string) {
+	if !usedScreenTool(trace) {
+		return
+	}
+	hook, ok := asker.(interface {
+		AfterScreenRun(ctx context.Context, trace agent.TurnTrace, outcome string)
+	})
+	if !ok {
+		return
+	}
+	go hook.AfterScreenRun(context.Background(), trace, outcome)
 }
 
 // recordActRun files trace as an act run when it used a screen tool, on its own context so a wedged store cannot hold the ask goroutine open. Input: the finished trace, the bare question the user asked, its outcome ("ok" or "error") and the error message ("" for ok). The question is passed in rather than read off the trace because the trace carries the question as the model saw it, which on a window ask is prefixed with up to 600 runes of whatever was on screen; that text is not the question and has no business sitting in a table nothing ages out. Failures are logged, never returned: recording a run must never fail the ask itself.
@@ -435,11 +450,13 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 
 	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
 	defer cancel()
-	ctx = agent.WithToolObserver(ctx, func(name, summary string) {
-		s.hub.broadcast(Event{ID: id, Type: "tool", Text: name, Detail: summary, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
+	ctx = agent.WithToolObserver(ctx, func(name, summary string, failed bool) {
+		s.hub.broadcast(Event{ID: id, Type: "tool", Text: name, Detail: summary, Failed: failed, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 	})
 	// Every tool this question runs is filed under the conversation it belongs to, so a later pass can read what the model reached for and what it was offered — which is the only record of it, since the activity feed is thrown away and act runs only ever covered the screen tools.
 	ctx = agent.WithToolRecorder(ctx, toolRecorder(s.store, "ask", convID))
+	// The ask's own id is also what ties its tool calls together as one turn — there is exactly one model turn per ask, so no extra id needs minting here.
+	ctx = agent.WithTurnID(ctx, id)
 	if allowGo {
 		ctx = agent.WithGo(ctx)
 	}
@@ -454,6 +471,7 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 	if err != nil {
 		s.recordActRun(trace, question, "error", err.Error())
 		s.recordTokenUse(trace, question, "text")
+		s.afterScreenRun(asker, trace, "error")
 		if convID != 0 {
 			// Filed as Ora's turn of kind "error" so the thread never shows a question with nothing under it.
 			storeCtx, storeCancel := context.WithTimeout(context.Background(), storeTurnTimeout)
@@ -470,6 +488,7 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 
 	s.recordActRun(trace, question, "ok", "")
 	s.recordTokenUse(trace, question, "text")
+	s.afterScreenRun(asker, trace, "ok")
 	// The tool events themselves already went out live, via the ToolObserver wired onto ctx above — this only rebuilds the list of names for storage, not for broadcast, so they are not shown twice.
 	tools := make([]string, 0, len(trace.ToolHops))
 	for _, hop := range trace.ToolHops {

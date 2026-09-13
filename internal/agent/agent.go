@@ -31,7 +31,7 @@ type ContextReader interface {
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	SetPersonalContext(ctx context.Context, subject, content string) error
 	DeletePersonalContext(ctx context.Context, subject string) error
-	// SetActionStatus backs the "revise" tool's state path (tools.go). An action item is a notes row whose content carries its own status, so a plain content edit could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead. SetActionPriority is unused by any tool now that revise only exposes state — kept for the store's own callers.
+	// SetActionStatus backs the "revise" tool's state path (tools.go). An action item is a notes row whose content carries its own status, so a plain content edit could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead. SetActionPriority sets how much an action item matters and is called from the proactive briefing flow, not from any agent tool.
 	SetActionStatus(ctx context.Context, id int64, status string) error
 	SetActionPriority(ctx context.Context, id int64, priority string) error
 	// SetActionText backs the "revise" tool's content path for an action item: it re-renders the line around the corrected work text instead of writing over it, and reports db.ErrNotActionItem for an id that is an ordinary note, which is how revise knows to fall back to UpdateNote.
@@ -40,6 +40,10 @@ type ContextReader interface {
 	// A conversation is opened for the task the same way the window's own createTask does it, so the row on the Tasks screen leads somewhere when it is clicked.
 	CreateConversation(ctx context.Context, title, brain string) (int64, error)
 	AddUserTask(ctx context.Context, title string, conversationID int64) (int64, error)
+	// SetUserTaskTitle, SetUserTaskDone and DeleteUserTask back the "revise" tool's task path (tools.go). A row on the Tasks screen is not a note, so the note path cannot reach it, and until 2026-09-12 nothing could: Ora added a task, the user asked three times to correct its wording and then to delete it, and every attempt came back "revise only handles note and thread refs". Ticking one done was the only thing the whole product could do to a task it had created.
+	SetUserTaskTitle(ctx context.Context, id int64, title string) error
+	SetUserTaskDone(ctx context.Context, id int64, done bool) error
+	DeleteUserTask(ctx context.Context, id int64) error
 	// OpenActionItems backs the action_items tool (tools.go). "What do I owe?" is a question about a column, not about meaning: the rows say "[open/normal] Alex Rivera — check out develop-essentials-api", which shares no words with the question and sits nowhere near it in embedding space. Asked through query_memory it returned ten summaries about attending meetings and not one action item, so the structural query gets its own door.
 	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
 	// EpisodesForThread backed the retired thread_evidence tool. No tool calls it now; left on the interface rather than rippling its removal into the store.
@@ -130,11 +134,18 @@ type Agent struct {
 	launchApp      func(path string) error
 	// Marks draws one numbered mark over each of the given items, for the show_marks tool. The daemon sets it to the overlay hub; nil means this session cannot draw, and show_marks says so. Its error is what Point's is.
 	Marks func(items []act.Item) error
+	// RunJob hands a whole chain of work to the daemon's job runner and returns when the job has ended, for the do tool. The daemon sets it to the runner (see internal/actjob); nil means this session cannot start a job, and do says so rather than promising one.
+	// A func rather than the runner itself because the runner's own executor is an Agent, so a package-level dependency here would be a cycle. The waiting and the wording of the outcome belong to whoever wires it, which is why this returns the sentence the model reads rather than a job.
+	RunJob func(ctx context.Context, goal string) (string, error)
 	// Draw draws an arrow, line, path, box or circle on the screen with a label beside it, for the draw tool. Points carries the path for arrow/line/path; x, y, w, h carry the rectangle to draw around or inscribe within for box/circle, and are ignored otherwise. The daemon sets it to the overlay hub's Draw method; nil means this session cannot draw, and draw says so. Returns an error naming what was wrong when shape is none of the five.
 	// group names the one draw call every shape of a drawing came from, so the overlay keeps them on screen together instead of each one wiping the last. A drawing is several shapes and the overlay is told them one at a time; without a name shared by all of them the only thing it can do with the second is replace the first, which is why a twenty-shape formula showed up as one stroke on 2026-09-07.
 	Draw func(group, shape string, points [][2]int, x, y, w, h int, label string) error
 	// lastTarget holds the newest ScreenTarget a point_at, click or draw(on) call recorded, so a later ask's bare "it" resolves against what was actually done rather than a fresh screen read. It is the one piece of screen memory that outlives an ask on purpose — see rememberTarget in tools.go. The list observe_screen produced, the answer it gave and the field a click focused all belong to one ask and live on its context instead; see askLookState and askState in tools.go.
 	lastTarget atomic.Value
+	// turnMu guards turnID, since receiveLoop sets and clears it on its own goroutine while runToolCall reads it from a separate goroutine per tool call.
+	turnMu sync.Mutex
+	// turnID is the id minted for the voice session's current model turn, so every tool call the turn makes files under the same turn_id. Set the moment the turn's first content arrives (see receiveLoop's ModelTurn handling) and cleared at TurnComplete/GenerationComplete; empty between turns and before the first one.
+	turnID string
 	// askScreen is the screen state a tool call driven directly rather than through an ask reads and writes, since only an ask attaches one to its context. See askState in tools.go.
 	askScreen askLookState
 	// capture takes the picture the look tool sends the model: tracker.CaptureFront in production, a fake in tests. nil means this session cannot see the screen, and look says so.
@@ -180,6 +191,9 @@ type Agent struct {
 	typedTurnActive atomic.Bool
 	// toolResponseAt is the wall-clock time (unix nanoseconds) of the most recent INTERRUPT-scheduled FunctionResponse send, or 0 when none is outstanding. The Live server interrupts its own generation to fold such a result in and reports that with the same ServerContent.Interrupted flag a user barge-in uses; receiveLoop consumes this to tell the two apart. See toolInterruptWindow in connect.go.
 	toolResponseAt atomic.Int64
+
+	// agySess is the one live agy process this agent keeps between asks — see agy_session.go.
+	agySess agySessionState
 }
 
 // markToolResponseSent records that an INTERRUPT-scheduled tool result is being delivered right now, so the interrupt the server raises to fold it in isn't mistaken for the user cutting in.

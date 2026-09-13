@@ -755,3 +755,47 @@ func TestSnooze_RefiredNoticeCarriesItsButtons(t *testing.T) {
 		t.Errorf("re-fired notice buttons = %v, want %v", keys, want)
 	}
 }
+
+// Act promises in its own comment that applying a button also dismisses that notice's desktop banner, so a question answered in the window does not sit on screen asking it again. Two of its three paths returned before ever getting there: a press a goroutine was waiting on, and a press some code had registered an action for. Only the fallback switch closed anything.
+// This is the "sometimes notifications don't close" of 2026-09-12: sometimes, because which path a press takes decides it, and the registered-action path is the common one.
+func TestAct_ClosesTheBannerOnEveryPathThatApplied(t *testing.T) {
+	t.Run("a press some code registered an action for", func(t *testing.T) {
+		ctx := context.Background()
+		s, _, f := testScheduler(t)
+		ran := false
+		setNoticeActionFor("meeting", "7", actionDone, func() error { ran = true; return nil })
+		t.Cleanup(func() { setNoticeActionFor("meeting", "7", actionDone, nil) })
+		s.say(Notice{Title: "Recording?", Body: "A call is on screen", Kind: "meeting", ID: "7"})
+
+		if err := s.Act(ctx, "meeting", "7", "Recording?", "A call is on screen", actionDone); err != nil {
+			t.Fatalf("Act: %v", err)
+		}
+		if !ran {
+			t.Fatal("the registered action did not run, so this test is not exercising that path")
+		}
+		if len(f.closed) != 1 || f.closed[0] != "meeting|7" {
+			t.Errorf("closed = %v, want the banner for meeting|7 closed", f.closed)
+		}
+	})
+
+	t.Run("a press a goroutine was waiting on", func(t *testing.T) {
+		ctx := context.Background()
+		s, _, f := testScheduler(t)
+		s.say(Notice{Title: "Still open?", Body: "Send the invoice", Kind: "stale", ID: "155"})
+
+		// The stale-item question waits on its own answer channel, which is what carries a button its switch has never heard of, such as "dropped".
+		key := noticeKey(Notice{Title: "Still open?", Kind: "stale", ID: "155"})
+		answered, stop := awaitAnswer(key, []string{"dropped"})
+		t.Cleanup(stop)
+
+		if err := s.Act(ctx, "stale", "155", "Still open?", "Send the invoice", "dropped"); err != nil {
+			t.Fatalf("Act: %v", err)
+		}
+		if got := <-answered; got != "dropped" {
+			t.Fatalf("the waiter heard %q, want dropped", got)
+		}
+		if len(f.closed) != 1 || f.closed[0] != "stale|155" {
+			t.Errorf("closed = %v, want the banner for stale|155 closed", f.closed)
+		}
+	})
+}

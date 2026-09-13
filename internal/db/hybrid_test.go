@@ -5,6 +5,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1790,5 +1791,35 @@ func TestReconcileVectors_FailedBatchAddsEachDocumentOnItsOwn(t *testing.T) {
 	}
 	if len(vidx.IDs()) != 2 {
 		t.Errorf("index holds %v, want both notes added one at a time after the batch failed", vidx.IDs())
+	}
+}
+
+// deadEmbedder is the embedding engine after Close: every call fails at once, in memory, with no I/O. That speed is what turned one interrupted sweep into a log storm.
+type deadEmbedder struct{ calls int }
+
+func (d *deadEmbedder) Embed(ctx context.Context, task string, text string) ([]float32, error) {
+	d.calls++
+	return nil, errors.New("embed engine: closed")
+}
+
+// A sweep whose embedding engine has shut down under it must stop, not walk the rest of its candidate list one failure at a time.
+// The daemon cancels the root context on SIGTERM and closes the embed engine a few steps later, while a sweep started at boot is still running. Because a closed engine refuses in microseconds with no I/O, the loop got through thousands of candidates per second, logging one ERROR each: 17,596 lines of "embed engine: closed" and 12,082 of "context canceled" in three bursts, 29,763 of the log's 29,941 ERROR lines in eight days, all from this one loop. Nothing was lost — the next sweep re-derives what still has no vector — so the only cost was the noise, and the noise buried everything else.
+func TestReconcileVectors_StopsWhenTheEmbedEngineHasGone(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	for i := 0; i < 25; i++ {
+		if _, err := store.LogNote(ctx, fmt.Sprintf("note number %d", i), "fact"); err != nil {
+			t.Fatalf("LogNote: %v", err)
+		}
+	}
+	emb := &deadEmbedder{}
+	store.SetEmbedder(emb)
+	store.SetVectorIndex(&fakeHybridVectorIndex{})
+
+	if _, err := store.ReconcileVectors(ctx, 100); err == nil {
+		t.Error("the sweep reported success while every embed failed")
+	}
+	if emb.calls != 1 {
+		t.Errorf("the sweep called the dead engine %d times, want 1: it must give up on the first refusal, not once per candidate", emb.calls)
 	}
 }

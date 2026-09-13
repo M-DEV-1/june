@@ -180,7 +180,7 @@ func TestParseMinutesActions_EdgeCases(t *testing.T) {
 	}
 }
 
-// Half the action items in a meeting belong to somebody else. Asking the user "any progress?" about a task another person owes is the wrong question, so an item has to know whose it is. The identity entry names the user and every way they are written down, and names nobody else, which is what makes it the test. A substring that is not a whole word must not match ("KS" inside another word is not the user), and with no identity on file nothing can be attributed at all.
+// Half the action items in a meeting belong to somebody else. Asking the user "any progress?" about a task another person owes is the wrong question, so an item has to know whose it is. The identity entry names the user and every way they are written down, and names nobody else, which is what makes it the test. A substring that is not a whole word must not match ("Riv" inside another word is not the user), and with no identity on file nothing can be attributed at all.
 func TestOwnedByUser(t *testing.T) {
 	const fullIdentity = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
 	cases := []struct {
@@ -191,13 +191,13 @@ func TestOwnedByUser(t *testing.T) {
 	}{
 		{name: "his full name", owner: "Alex Rivera", identity: fullIdentity, want: true},
 		{name: "the name he goes by", owner: "Alex", identity: fullIdentity, want: true},
-		{name: "whatever case the model chose", owner: "alex ks", identity: fullIdentity, want: true},
+		{name: "whatever case the model chose", owner: "alex rivera", identity: fullIdentity, want: true},
 		{name: "another person", owner: "Vikram", identity: fullIdentity, want: false},
 		{name: "another person, again", owner: "Krish", identity: fullIdentity, want: false},
 		{name: "another person by full name", owner: "Priya Shah", identity: fullIdentity, want: false},
 		{name: "nobody took it, not the user's by default", owner: UnknownOwner, identity: fullIdentity, want: false},
 		{name: "no owner at all", owner: "", identity: fullIdentity, want: false},
-		{name: "a fragment of the name is not the whole word", owner: "Mahad", identity: "The user is Alex Rivera.", want: false},
+		{name: "a fragment of the name is not the whole word", owner: "Riv", identity: "The user is Alex Rivera.", want: false},
 		{name: "no identity on file attributes nothing", owner: "Alex Rivera", identity: "", want: false},
 	}
 	for _, tc := range cases {

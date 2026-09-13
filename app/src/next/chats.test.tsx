@@ -7,7 +7,7 @@ import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { Brain, ConversationSummary, ConversationView } from "./api";
-import { progress } from "./store";
+import { DRAFT_CHAT, progress, ui } from "./store";
 import { renderApp } from "./testing";
 
 afterEach(() => {
@@ -432,6 +432,27 @@ describe("asking a question", () => {
 });
 
 describe("a fresh chat draft", () => {
+  // The front door said "Pick a chat on the left, or start a new one", which is an instruction about the furniture rather than anything Ora has to offer. The design he approved opens with the face, the time of day, one line saying Ora has been keeping track, and a few things it can actually do.
+  it("greets by time of day on a new chat and offers something to do", async () => {
+    const { store } = renderApp({ conversations: summary, turns: { c1: view } }, { conversationId: "c1" });
+    store.dispatch(ui.chatDraftOpened());
+    // The greeting itself is whichever one the clock says; which hour gives which is greeting()'s own business, tested in format.test.ts.
+    expect(await screen.findByText(/^Good (morning|afternoon|evening)\.$/)).toBeDefined();
+    expect(screen.getByText(/keeping track/)).toBeDefined();
+    // Gone: the line about the furniture.
+    expect(screen.queryByText(/Pick a chat on the left/)).toBeNull();
+  });
+
+  it("puts a suggestion in the composer rather than sending it, so it can be edited first", async () => {
+    const { store, calls } = renderApp({ conversations: summary, turns: { c1: view } }, { conversationId: "c1" });
+    store.dispatch(ui.chatDraftOpened());
+    const chip = await screen.findByRole("button", { name: "Summarise my day" });
+    await userEvent.click(chip);
+    expect(store.getState().ui.ask[DRAFT_CHAT]).toBe("Summarise my day");
+    // Nothing was asked: a suggestion is a starting point, not a command.
+    expect(calls.find((c) => c.path === "/ask")).toBeUndefined();
+  });
+
   it("takes a question on New chat, and opens the conversation the daemon names back", async () => {
     const { calls, store } = renderApp(
       { conversations: summary, turns: { c1: view } },
@@ -718,7 +739,9 @@ describe("starting a job", () => {
     );
     const box = await screen.findByLabelText("Ask Ora");
     await userEvent.type(box, "do: reorder the slides{Enter}");
-    expect(await screen.findByText("reorder the slides")).toBeDefined();
+    // The goal now reads in two places at once and both are wanted: the turn it was asked in, and the sidebar's running strip, which is what keeps a job visible from another screen. This one is about the turn.
+    const asked = await screen.findAllByText("reorder the slides");
+    expect(asked.some((el) => el.closest('[aria-label="Running now"]') === null)).toBe(true);
     await waitFor(() =>
       expect(calls.find((c) => c.path === "/act")?.body).toEqual({
         goal: "reorder the slides",
@@ -729,6 +752,30 @@ describe("starting a job", () => {
     await waitFor(() =>
       expect(store.getState().progress.jobs.c1.id).toBe("act-1"),
     );
+  });
+
+  // The plan the model writes on its first round lived only in its own prompt, so the thread opened with the goal handed back and went straight to "Step 1". Being told what it is about to do is what makes a step that wanders off it visible.
+  it("shows the plan it opened with above the steps", async () => {
+    const { store } = renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1" },
+    );
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    store.dispatch(
+      progress.eventArrived({
+        id: "act-1",
+        type: "act",
+        detail: JSON.stringify({
+          kind: "plan",
+          state: "stepping",
+          step: 6,
+          text: "open the deck, move Slide 4 up, check the order",
+        }),
+      }),
+    );
+    expect(await screen.findByText("open the deck, move Slide 4 up, check the order")).toBeDefined();
+    expect(screen.getByText(/about 6 steps/)).toBeDefined();
   });
 
   it("shows each step as it arrives, with a tick once it checks out and a cross once it does not", async () => {

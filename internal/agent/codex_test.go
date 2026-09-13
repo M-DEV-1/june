@@ -553,8 +553,46 @@ func TestAskCodex_RunsToolsThroughTheGateAndFillsTheTrace(t *testing.T) {
 	}
 }
 
-// A round that keeps calling tools past the step cap ends with the same out-of-steps error the Gemini path gives, with the hops kept in the trace. shell_exec is refused every time and so is never a look at a screen, which means every round here spends a step and the loop stops at the step cap rather than the hard round bound.
-func TestAskCodex_StopsAtTheIterationCap(t *testing.T) {
+// When the model sends arguments that don't parse as JSON, the tool must not run with an empty-args fallback: the call is refused and the model sees an "error: " result naming what it sent, so it can retry with valid JSON instead of the tool silently doing the wrong thing.
+func TestAskCodex_ToolCallWithUnparsableArgumentsIsRefused(t *testing.T) {
+	var calls atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			io.WriteString(w, sse(
+				`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell_exec","arguments":"{not json"}}`,
+				`{"type":"response.completed","response":{"model":"gpt-5.5","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`))
+			return
+		}
+		io.WriteString(w, sse(
+			`{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"Done."}]}}`,
+			`{"type":"response.completed","response":{"model":"gpt-5.5","usage":{"input_tokens":4,"output_tokens":1,"total_tokens":5}}}`))
+	}))
+	defer backend.Close()
+	c := codexTestClient(backend.URL, "http://127.0.0.1:1/never", writeCodexAuth(t, map[string]any{"access_token": "a", "account_id": "acct_1"}))
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+
+	tr, err := a.askCodex(t.Context(), c, nil, "list my files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.ToolHops) != 1 {
+		t.Fatalf("hops = %+v", tr.ToolHops)
+	}
+	hop := tr.ToolHops[0]
+	if hop.Name != "shell_exec" || len(hop.Args) != 0 {
+		t.Errorf("hop = %+v, want empty args and no tool run", hop)
+	}
+	if !strings.HasPrefix(hop.Result, "error: ") || !strings.Contains(hop.Result, "shell_exec") {
+		t.Errorf("result = %q, want an error naming shell_exec", hop.Result)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("calls = %d, want 2 rounds", calls.Load())
+	}
+}
+
+// A round that keeps calling tools forever ends with the same out-of-steps error the Gemini path gives, with the hops kept in the trace. shell_exec is refused every time and so is never a look at a screen, which means every round here spends one of the ask's maxAskIterations steps and the loop stops there rather than running on to the round bound (maxAskRounds).
+func TestAskCodex_StopsAtTheStepCapWithCapError(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, sse(
@@ -569,7 +607,7 @@ func TestAskCodex_StopsAtTheIterationCap(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 	if len(tr.ToolHops) != maxAskIterations {
-		t.Errorf("%d hops, want %d", len(tr.ToolHops), maxAskIterations)
+		t.Errorf("%d hops, want exactly the step cap of %d", len(tr.ToolHops), maxAskIterations)
 	}
 }
 

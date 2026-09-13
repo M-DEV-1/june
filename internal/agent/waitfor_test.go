@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"ora/internal/act"
+	"ora/internal/tracker"
 )
 
 // TestWaitFor_PassesAsSoonAsTheChangeComes checks the tool polls rather than sleeping out its timeout: the title changes on the third look, and wait_for reports the change without waiting the full five seconds.
@@ -32,6 +34,26 @@ func TestWaitFor_PassesAsSoonAsTheChangeComes(t *testing.T) {
 	}
 	if looks.Load() < 3 {
 		t.Errorf("wait_for looked %d times, want it to have polled", looks.Load())
+	}
+}
+
+// When the camera can never take a single picture, waitForScreenChange used to run out the whole timeout and then say "the screen looks the same as before the action", which claims a comparison was made when none ever was. It must instead say plainly that no baseline screenshot was available.
+func TestWaitFor_ScreenChangedSaysNoBaselineWasAvailable(t *testing.T) {
+	a, _ := observingAgent(t)
+	pressPoll = 0
+	a.capture = func(ctx context.Context) (tracker.Capture, error) {
+		return tracker.Capture{}, errors.New("camera unavailable")
+	}
+	ctx := context.Background()
+	got := a.executeTool(ctx, "wait_for", map[string]any{"kind": act.ScreenChanged, "value": "a recording indicator", "timeout_ms": 50.0})
+	if !strings.HasPrefix(got, act.WaitFailPrefix) {
+		t.Fatalf("wait_for = %q, want a failure", got)
+	}
+	if strings.Contains(got, "looks the same") {
+		t.Errorf("wait_for = %q, want it to say no baseline was available rather than claim a comparison was made", got)
+	}
+	if !strings.Contains(got, "no baseline") {
+		t.Errorf("wait_for = %q, want it to say no baseline screenshot was available", got)
 	}
 }
 

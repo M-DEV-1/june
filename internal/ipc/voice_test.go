@@ -140,7 +140,7 @@ func newVoiceServerStore(t *testing.T, store *db.Store) (*httptest.Server, *Voic
 	run := newVoiceFakeRunner()
 
 	s := New(nil, store, nil, nil)
-	v := NewVoice(s, store, "")
+	v := NewVoice(s, store, "", nil)
 	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) {
 		return mic, spk, run, nil
 	}
@@ -439,10 +439,11 @@ func TestNewVoiceAgent_WiresTheScreenDrawing(t *testing.T) {
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
 
-	a := newVoiceAgent(s, nil, nil, nil, "")
+	a := newVoiceAgent(s, nil, nil, nil, "", func(context.Context, string) (string, error) { return "done", nil })
 	// Draw was the one of the three this wiring missed: a real session on 2026-09-07 called draw with a sensible circle and got "this session cannot draw on the screen" back, because only the typed /ask agent had ever been given it.
-	if a.Point == nil || a.Marks == nil || a.Draw == nil {
-		t.Fatalf("voice agent has Point set = %v, Marks set = %v, Draw set = %v, want all three", a.Point != nil, a.Marks != nil, a.Draw != nil)
+	// RunJob is the same class of miss and the one that matters most: unset, a spoken chain of actions is driven one raw tool call at a time inside the conversation, with no plan and nothing verified.
+	if a.Point == nil || a.Marks == nil || a.Draw == nil || a.RunJob == nil {
+		t.Fatalf("voice agent has Point set = %v, Marks set = %v, Draw set = %v, RunJob set = %v, want all four", a.Point != nil, a.Marks != nil, a.Draw != nil, a.RunJob != nil)
 	}
 
 	a.Point(10, 20, 30, 40, "here")
@@ -506,7 +507,7 @@ func TestVoiceDial_GivesUpAfterConsecutiveFailures(t *testing.T) {
 	run := &voiceFailingRunner{err: errors.New("dial gemini: 401 Unauthorized")}
 
 	s := New(nil, nil, nil, nil)
-	v := NewVoice(s, nil, "")
+	v := NewVoice(s, nil, "", nil)
 	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) {
 		return mic, spk, run, nil
 	}
@@ -537,7 +538,7 @@ func TestVoiceDial_GivesUpAfterConsecutiveFailures(t *testing.T) {
 // TestVoiceGiveUp_EndsTheWatchGoroutine checks the other half of giving up: giveUp must cancel the session's context, or watch — parked in a select on ctx.Done() and the agent's own channels, neither of which a runner that only ever fails ever closes — leaks forever instead of returning once dial gives up. Drives watch directly (rather than through Start/dial) so the assertion is a channel close, not a goroutine count that an httptest.Server's own long-lived connection goroutines would make noisy.
 func TestVoiceGiveUp_EndsTheWatchGoroutine(t *testing.T) {
 	s := New(nil, nil, nil, nil)
-	v := NewVoice(s, nil, "")
+	v := NewVoice(s, nil, "", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	run := newVoiceFakeRunner() // Text()/Tools() channels that nothing ever writes to or closes, the same as a run that has already returned would leave watch's select with nothing to read.
@@ -822,7 +823,7 @@ func TestVoiceDial_AGoAwayRedialsAtOnceAndIsNotAFailure(t *testing.T) {
 	run := &voiceFailingRunner{goAways: 3, err: errors.New("dial gemini: 401 Unauthorized")}
 
 	s := New(nil, nil, nil, nil)
-	v := NewVoice(s, nil, "")
+	v := NewVoice(s, nil, "", nil)
 	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) { return mic, spk, run, nil }
 
 	mux := http.NewServeMux()

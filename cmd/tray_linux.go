@@ -5,7 +5,7 @@ package cmd
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"fmt"
 	"image"
 	"image/color"
@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sort"
 	"sync/atomic"
 
 	"ora/internal/recorder"
@@ -22,8 +23,8 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 )
 
-//go:embed tray_icon_linux.png
-var trayIconPNG []byte
+//go:embed tray
+var trayIcons embed.FS
 
 // statusDotSize is the side length of the rendered status indicator (px).
 const statusDotSize = 16
@@ -72,26 +73,44 @@ var (
 	dotPaused = statusDotPNG(color.RGBA{R: 0xd2, G: 0x99, B: 0x22, A: 0xff}) // amber: paused
 )
 
-// trayIconPixmaps decodes the embedded ORA logo into a single SNI icon pixmap.
+// trayIconPixmaps decodes every embedded size of the ORA logo into one SNI icon pixmap each.
 // SNI pixmaps are ARGB32 in network byte order: A,R,G,B per pixel.
+// One entry per size because IconPixmap is an array and the host picks the one closest to its own panel height: handed a single large pixmap it scales that down itself, which is what left the face blurred. The files are drawn at these exact sizes rather than resampled from one master (see scripts/make-icons.py).
+// Output: the pixmaps, smallest first, or an error if the embedded directory cannot be read or holds something that is not an image.
 func trayIconPixmaps() ([]sniPixmap, error) {
-	img, _, err := image.Decode(bytes.NewReader(trayIconPNG))
+	entries, err := trayIcons.ReadDir("tray")
 	if err != nil {
 		return nil, err
 	}
-	b := img.Bounds()
-	w, h := b.Dx(), b.Dy()
-	rgba := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(rgba, rgba.Bounds(), img, b.Min, draw.Src)
+	pixmaps := make([]sniPixmap, 0, len(entries))
+	for _, entry := range entries {
+		raw, err := trayIcons.ReadFile("tray/" + entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		img, _, err := image.Decode(bytes.NewReader(raw))
+		if err != nil {
+			return nil, fmt.Errorf("tray icon %s: %w", entry.Name(), err)
+		}
+		b := img.Bounds()
+		w, h := b.Dx(), b.Dy()
+		rgba := image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(rgba, rgba.Bounds(), img, b.Min, draw.Src)
 
-	data := make([]byte, w*h*4)
-	for i, p := 0, 0; i < len(rgba.Pix); i, p = i+4, p+4 {
-		data[p] = rgba.Pix[i+3]   // A
-		data[p+1] = rgba.Pix[i]   // R
-		data[p+2] = rgba.Pix[i+1] // G
-		data[p+3] = rgba.Pix[i+2] // B
+		data := make([]byte, w*h*4)
+		for i, p := 0, 0; i < len(rgba.Pix); i, p = i+4, p+4 {
+			data[p] = rgba.Pix[i+3]   // A
+			data[p+1] = rgba.Pix[i]   // R
+			data[p+2] = rgba.Pix[i+1] // G
+			data[p+3] = rgba.Pix[i+2] // B
+		}
+		pixmaps = append(pixmaps, sniPixmap{Width: int32(w), Height: int32(h), Data: data})
 	}
-	return []sniPixmap{{Width: int32(w), Height: int32(h), Data: data}}, nil
+	if len(pixmaps) == 0 {
+		return nil, fmt.Errorf("no tray icons are embedded")
+	}
+	sort.Slice(pixmaps, func(i, j int) bool { return pixmaps[i].Width < pixmaps[j].Width })
+	return pixmaps, nil
 }
 
 // sniToolTip matches the D-Bus signature (s a(iiay) s s) for StatusNotifierItem ToolTip.
@@ -175,9 +194,9 @@ func (m *dbusMenu) recording() bool {
 
 // items is the single source of truth for the menu: every property of every item, in display order. GetLayout, GetGroupProperties and GetProperty all read from here so the three views can never disagree about a label.
 func (m *dbusMenu) items() []dbusMenuItemProps {
-	pauseLabel := "Pause Tracking"
+	pauseLabel := "Pause Observation"
 	if m.paused.Load() {
-		pauseLabel = "Resume Tracking"
+		pauseLabel = "Resume Observation"
 	}
 	item := func(id int32, label string, enabled bool) dbusMenuItemProps {
 		return dbusMenuItemProps{ID: id, Properties: map[string]dbus.Variant{
@@ -219,9 +238,9 @@ func (m *dbusMenu) refresh() {
 
 func (m *dbusMenu) statusLabel() string {
 	if m.paused.Load() {
-		return "Tracking paused"
+		return "Paused"
 	}
-	return "Ora is tracking"
+	return "Observing"
 }
 
 // statusIcon returns the rendered status dot (PNG bytes) matching the current tracking state, for the menu item's icon-data property.

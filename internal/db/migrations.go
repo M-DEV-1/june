@@ -574,6 +574,69 @@ var migrations = []Migration{
 			return nil
 		},
 	},
+	{
+		Version: 9,
+		Name:    "0009_add_act_run_budget",
+		Up: func(ctx context.Context, tx *sql.Tx) error {
+			// These three columns backed the self-set step budget a run ended on. That budget is gone — replaced by a plain hard cap on tool-call steps (see agent.maxAskIterations) — so nothing writes or reads these any more; they stay in the table, unused, rather than this migration being rewritten to drop them, since it has already run on machines in the field.
+			cols := []struct{ name, decl string }{
+				{"budget_planned", "INTEGER NOT NULL DEFAULT 0"},
+				{"budget_used", "INTEGER NOT NULL DEFAULT 0"},
+				{"budget_extensions", "INTEGER NOT NULL DEFAULT 0"},
+			}
+			for _, col := range cols {
+				if err := ensureColumnInTx(ctx, tx, "act_runs", col.name, col.decl); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
+	{
+		Version: 10,
+		Name:    "0010_add_lessons",
+		Up: func(ctx context.Context, tx *sql.Tx) error {
+			// One row per lesson learned from a screen run in one app: what to do differently next time, how many times showing it preceded a run that ended ok (hits) versus one that ended in error (misses). lesson_vectors mirrors act_run_vectors -- the embedding of goal+lesson, kept in its own table for the same reason: a lesson can be dropped (see db.Store.ScoreLessonsUsed) without a dangling vector row, since ON DELETE CASCADE follows it.
+			if _, err := tx.ExecContext(ctx, `
+				CREATE TABLE IF NOT EXISTS lessons (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					app TEXT NOT NULL DEFAULT '',
+					goal TEXT NOT NULL DEFAULT '',
+					lesson TEXT NOT NULL,
+					hits INTEGER NOT NULL DEFAULT 0,
+					misses INTEGER NOT NULL DEFAULT 0,
+					created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					last_used_at DATETIME
+				);
+				CREATE INDEX IF NOT EXISTS idx_lessons_app ON lessons(app);
+
+				CREATE TABLE IF NOT EXISTS lesson_vectors (
+					lesson_id INTEGER PRIMARY KEY REFERENCES lessons(id) ON DELETE CASCADE,
+					vec BLOB NOT NULL
+				);
+			`); err != nil {
+				return fmt.Errorf("create lessons: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		Version: 11,
+		Name:    "0011_add_tool_calls_output_and_turn",
+		Up: func(ctx context.Context, tx *sql.Tx) error {
+			// output holds the tool's actual result text, truncated to 2048 bytes on a UTF-8 rune boundary by util.UTF8Bytes at write time.
+			// Until now the store kept only a short summary word ("done", "failed"), which is enough to say a call happened but not enough to say what it returned, so nothing could be replayed or debugged from this table alone.
+			if err := ensureColumnInTx(ctx, tx, "tool_calls", "output", "TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
+			// turn_id ties every tool call made in one model turn together: the ask id on the ask path, and a per-turn id minted at each voice turn's start on the voice path.
+			// Grouping by conversation_id alone cannot tell two tool calls from the same model turn apart from two calls a user's two separate questions happened to make back to back.
+			if err := ensureColumnInTx(ctx, tx, "tool_calls", "turn_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
+			return nil
+		},
+	},
 }
 
 // runMigrations applies all pending schema migrations sequentially in transactions.

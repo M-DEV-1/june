@@ -208,7 +208,9 @@ func TestInstallDesktopEntry_RefreshesAgainWhenAnIconChanges(t *testing.T) {
 	}
 }
 
-// TestScaleIcon_ShrinksTheMasterToEverySize checks the scaler on the embedded master: every size comes out square at the size asked for, and the master's solid corner stays solid instead of fading, which is what happens when a scaler averages the pixels outside the image in with the ones inside it.
+// TestScaleIcon_ShrinksTheMasterToEverySize checks the scaler on the embedded master: every size comes out square at the size asked for, and a pixel on the master's own edge stays solid instead of fading, which is what happens when a scaler averages the pixels outside the image in with the ones inside it.
+// The probe is the middle of the top edge rather than the corner. It was the corner until 2026-09-12, when the app icon became a rounded square and its corners turned legitimately transparent; the middle of an edge is still inside the art and still sits exactly where sampling past the boundary would show up.
+// Nearly opaque rather than exactly opaque, because the tile is a superellipse with an anti-aliased edge (see scripts/make-icons.py): its top-centre pixel is 99.6% opaque by design. A scaler bleeding the empty space outside the image in would read near zero there, which is what this is looking for, so the bar is set where it separates those two and nowhere tighter.
 func TestScaleIcon_ShrinksTheMasterToEverySize(t *testing.T) {
 	master, err := png.Decode(bytes.NewReader(appIconPNG))
 	if err != nil {
@@ -224,8 +226,8 @@ func TestScaleIcon_ShrinksTheMasterToEverySize(t *testing.T) {
 			t.Errorf("expected scaleIcon to return %dx%d, got %dx%d", size, size, got.Dx(), got.Dy())
 			continue
 		}
-		if _, _, _, alpha := scaled.At(0, 0).RGBA(); alpha != 0xffff {
-			t.Errorf("expected the top left corner of the %dx%d icon to stay opaque, got alpha %d", size, size, alpha)
+		if _, _, _, alpha := scaled.At(size/2, 0).RGBA(); alpha < 0xf000 {
+			t.Errorf("expected the middle of the %dx%d icon's top edge to stay opaque, got alpha %d", size, size, alpha)
 		}
 	}
 }

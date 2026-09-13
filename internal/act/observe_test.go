@@ -91,7 +91,8 @@ func TestFilterCapCutsTheTailAndKeepsTreeOrder(t *testing.T) {
 	}
 }
 
-// Every line the model sees is number, role, label and the centre of the node, since the centre is what a click or a ring is aimed at; labels are cut so one long link cannot eat the budget.
+// Every line the model sees is number, role and label, and nothing else; labels are cut so one long link cannot eat the budget.
+// The line used to end with the node's centre in desktop screen pixels, which no tool accepts: click and point_at take the number, click_at and scroll_at take pixels of the last picture. Printing a third coordinate space beside the number got it used as one — on 2026-09-10 a click_at arrived at 3232,821, which is 1920 (one monitor width) plus a second-monitor x read straight off this listing, and was refused for being outside a 1280-wide picture.
 func TestFormatLines(t *testing.T) {
 	items := []Item{
 		{N: 1, Role: "push button", Label: "Send", X: 10, Y: 20, W: 80, H: 30},
@@ -99,7 +100,7 @@ func TestFormatLines(t *testing.T) {
 	}
 	got := Format(items)
 	lines := strings.Split(got, "\n")
-	if lines[0] != `[1] push button "Send" (50,35)` {
+	if lines[0] != `[1] push button "Send"` {
 		t.Errorf("line 1 = %q", lines[0])
 	}
 	if len(lines[1]) > 90 {

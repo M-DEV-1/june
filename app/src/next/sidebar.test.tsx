@@ -7,7 +7,7 @@ import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { ConversationSummary } from "./api";
-import { progress } from "./store";
+import { progress, ui } from "./store";
 import { renderApp } from "./testing";
 
 afterEach(() => {
@@ -232,6 +232,26 @@ describe("a live notice's own buttons", () => {
     expect(store.getState().ui.liveNotice).toBeDefined();
   });
 
+  // The design sheets of 2026-09-12 draw a notice as a face tile, then "Ora" with how long ago it landed, then the line, then the detail under it in muted grey. The card said only the title and the body, so it read as a loose paragraph with buttons rather than as something Ora said.
+  it("reads as a notification from Ora: the face, the name, how long ago, then the words", async () => {
+    const { store } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: { title: "Your daily brief is ready.", body: "3 key things, 2 decisions, 1 follow-up.", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
+      }),
+    );
+
+    const card = await screen.findByRole("group", { name: "Notice from Ora" });
+    expect(within(card).getByText("Ora")).toBeDefined();
+    expect(within(card).getByText("now")).toBeDefined();
+    expect(within(card).getByText("Your daily brief is ready.")).toBeDefined();
+    expect(within(card).getByText("3 key things, 2 decisions, 1 follow-up.")).toBeDefined();
+    expect(within(card).getByRole("img", { name: /^ora is/ })).toBeDefined();
+  });
+
   it("closes on its own cross, telling the daemon nothing", async () => {
     const { store, calls } = renderApp({ conversations: conversations() });
     await row("Flights to Zurich");
@@ -333,5 +353,87 @@ describe("a live notice's own buttons", () => {
 
     expect(await screen.findByText("Send the invoice: Done")).toBeDefined();
     expect(screen.queryByRole("button", { name: /^1 h/ })).toBeNull();
+  });
+});
+
+describe("the notice line", () => {
+  it("opens with the noticed face, whatever the notice says", async () => {
+    const { store } = renderApp({ conversations: [] });
+    store.dispatch(ui.noticed({ text: "Routine started", kind: "info" }));
+    expect(await screen.findByText("Routine started")).toBeDefined();
+    expect(screen.getByRole("img", { name: "ora is noticed" })).toBeDefined();
+  });
+
+  it("colours a success notice with the normal muted foreground, not destructive red", async () => {
+    const { store } = renderApp({ conversations: [] });
+    store.dispatch(ui.noticed({ text: "Routine started", kind: "info" }));
+    const line = await screen.findByText("Routine started");
+    expect(line.className).toContain("text-muted-foreground");
+    expect(line.className).not.toContain("text-destructive");
+  });
+
+  it("colours a failure notice with destructive red", async () => {
+    const { store } = renderApp({ conversations: [] });
+    store.dispatch(ui.noticed({ text: "Could not delete", kind: "error" }));
+    const line = await screen.findByText("Could not delete");
+    expect(line.className).toContain("text-destructive");
+  });
+});
+
+// A job runs for minutes and the user goes on to another screen while it does, which left it with nowhere to be seen: the step list lives inside the turn that opened it, so walking to Tasks or Days meant losing sight of a task still moving things on the real desktop. The sidebar is on every screen, and the notice card already sits in it, so a running job belongs in the same place.
+describe("a job running while you are elsewhere", () => {
+  it("shows what is running from any screen, with the step it is on and a way to stop it", async () => {
+    const { store, calls } = renderApp({ conversations: conversations() }, { place: "days" });
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    store.dispatch(
+      progress.eventArrived({
+        id: "act-1",
+        type: "act",
+        detail: JSON.stringify({ kind: "plan", state: "stepping", step: 6, text: "open the deck, move Slide 4 up" }),
+      }),
+    );
+    store.dispatch(
+      progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4" }) }),
+    );
+
+    const strip = await screen.findByRole("status", { name: "Running now" });
+    expect(within(strip).getByText("reorder the slides")).toBeDefined();
+    // The count reads against the model's own estimate rather than against a limit nobody set.
+    expect(within(strip).getByText(/step 1 of about 6/i)).toBeDefined();
+
+    await userEvent.click(within(strip).getByRole("button", { name: "Stop reorder the slides" }));
+    await waitFor(() => expect(calls.find((c) => c.path === "/act/act-1/stop")).toBeDefined());
+  });
+
+  // A job the user starts by speaking is opened by the daemon, not by this window, so no jobSent ever ran for it and s.jobs has no entry to match its id against. Before this the reducer dropped every one of its events and the strip stayed empty through a four-minute chain the user could hear happening.
+  it("shows a job the daemon started on its own, from the voice session", async () => {
+    const { store } = renderApp({ conversations: conversations() }, { place: "days" });
+    store.dispatch(
+      progress.eventArrived({
+        id: "act-9",
+        type: "act",
+        detail: JSON.stringify({ kind: "started", state: "planning", text: "open spotify and play Teenage Dream, then message Priya" }),
+      }),
+    );
+    store.dispatch(
+      progress.eventArrived({ id: "act-9", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Opening Spotify" }) }),
+    );
+
+    const strip = await screen.findByRole("status", { name: "Running now" });
+    expect(within(strip).getByText("open spotify and play Teenage Dream, then message Priya")).toBeDefined();
+    expect(within(strip).getByText(/step 1/i)).toBeDefined();
+  });
+
+  it("says nothing at all once the job has ended", async () => {
+    const { store } = renderApp({ conversations: conversations() }, { place: "days" });
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    expect(await screen.findByRole("status", { name: "Running now" })).toBeDefined();
+
+    store.dispatch(
+      progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "done", state: "done", text: "Reordered." }) }),
+    );
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Running now" })).toBeNull());
   });
 });

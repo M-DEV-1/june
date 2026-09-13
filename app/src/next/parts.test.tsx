@@ -9,11 +9,53 @@ import { Provider } from "react-redux";
 import { useState } from "react";
 
 import type { Brain, UsageLimit } from "./api";
-import { BrainPicker, Scroller, UsageBar } from "./parts";
+import { Blank, BrainPicker, Nothing, Scroller, UsageBar } from "./parts";
 import { makeStore } from "./store";
 import { stubBrowser } from "./testing";
 
 afterEach(cleanup);
+
+describe("Nothing's face", () => {
+  it("is watching when the daemon answered with an empty list", () => {
+    render(<Nothing up empty="Nothing to do." />);
+    expect(screen.getByRole("img", { name: "ora is watching" })).toBeDefined();
+    expect(screen.getByText("Nothing to do.")).toBeDefined();
+  });
+
+  it("is asleep when the daemon did not answer, and says so instead of the empty line", () => {
+    render(<Nothing up={false} empty="Nothing to do." />);
+    expect(screen.getByRole("img", { name: "ora is asleep" })).toBeDefined();
+    expect(screen.getByText("Not connected.")).toBeDefined();
+    expect(screen.queryByText("Nothing to do.")).toBeNull();
+  });
+
+  it("is thinking on the first fetch, holding back the empty line so it cannot flash before the data does", () => {
+    render(<Nothing up empty="Nothing to do." loading />);
+    expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
+    expect(screen.queryByText("Nothing to do.")).toBeNull();
+  });
+});
+
+describe("Blank's face", () => {
+  it("is watching when the daemon answered with nothing there", () => {
+    render(<Blank up empty="No meetings recorded yet." />);
+    expect(screen.getByRole("img", { name: "ora is watching" })).toBeDefined();
+    expect(screen.getByText("No meetings recorded yet.")).toBeDefined();
+  });
+
+  it("is asleep when the daemon did not answer", () => {
+    render(<Blank up={false} empty="No meetings recorded yet." />);
+    expect(screen.getByRole("img", { name: "ora is asleep" })).toBeDefined();
+    expect(screen.getByText("Nothing is answering")).toBeDefined();
+  });
+
+  it("is thinking on the first fetch, holding back the hint so it cannot flash before the data does", () => {
+    render(<Blank up empty="No meetings recorded yet." hint="Ora writes minutes once it has recorded one." loading />);
+    expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
+    expect(screen.queryByText("No meetings recorded yet.")).toBeNull();
+    expect(screen.queryByText("Ora writes minutes once it has recorded one.")).toBeNull();
+  });
+});
 
 /** Gives the scrolling region the size jsdom will not: a viewport 800px tall holding 4,000px of thread. Mirrors the same helper in chats.test.tsx. Input: the region. Output: nothing; it is mutated in place. */
 function tall(view: HTMLElement): void {

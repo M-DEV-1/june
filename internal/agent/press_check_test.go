@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -68,6 +69,55 @@ func TestExecuteTool_ClickAt_ReportsAPressThatChangedNothing(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "error") || !strings.Contains(got, "nothing on the screen changed") {
 		t.Errorf("result = %q, want the miss reported", got)
+	}
+}
+
+// A press that changes the screen somewhere other than under the pointer still landed on something. The 120-pixel box only sees a highlight or a menu opening next to the button; a link that navigates the page, a tab that switches, a button that opens a panel on the other side of the window all leave the box identical and the rest of the screen different. Nineteen times in the week to 2026-09-12 the loop was told "it landed on nothing" and went to look again after a press that had worked.
+func TestExecuteTool_ClickAt_APressThatChangedTheScreenElsewhereIsNotAMiss(t *testing.T) {
+	a, _ := typingAgent(t)
+	pressSettle, tapLead = 0, 0
+	still := shot(t, nil)
+	// The point is at image 100,100; the box around it is image 70..130. This block is well outside it, and is 9% of the screen.
+	elsewhere := image.Rect(0, 0, 60, 60)
+	after := shot(t, &elsewhere)
+	a.capture = func(ctx context.Context) (tracker.Capture, error) { return still, nil }
+	ctx := lookedAt(t, a) // takes a picture of its own, so the press's own pair is wired up after it
+	shots := 0
+	a.capture = func(ctx context.Context) (tracker.Capture, error) {
+		shots++
+		if shots == 1 {
+			return still, nil
+		}
+		return after, nil
+	}
+	got := a.executeTool(ctx, "click_at", map[string]any{"x": 100.0, "y": 100.0})
+	if strings.Contains(got, "landed on nothing") {
+		t.Errorf("result = %q, want the press accepted: the screen changed, just not under the pointer", got)
+	}
+}
+
+// When every picture taken after the press fails to come back or fails to decode, pressCheck used to return "" the same as a confirmed hit, so the caller reported the press as a success it never verified. It must instead say the check could not be done, and must not claim the press landed.
+func TestPressCheck_ReportsCouldNotVerifyWhenScreenshotsFail(t *testing.T) {
+	a, _ := typingAgent(t)
+	pressSettle, pressPoll = 30*time.Millisecond, 5*time.Millisecond
+	still := shot(t, nil)
+	first := true
+	a.capture = func(ctx context.Context) (tracker.Capture, error) {
+		if first {
+			first = false
+			return still, nil
+		}
+		return tracker.Capture{}, errors.New("capture failed")
+	}
+	got := a.pressCheck(context.Background(), a.beforePress(context.Background()), 200, 232)
+	if got == "" {
+		t.Fatal("check = \"\", want a could-not-verify report, not a silent pass")
+	}
+	if strings.Contains(got, "landed on nothing") {
+		t.Errorf("check = %q, want it to say the check could not be done, not that the press missed", got)
+	}
+	if !strings.Contains(got, "could not verify") {
+		t.Errorf("check = %q, want it to say the check could not be verified", got)
 	}
 }
 

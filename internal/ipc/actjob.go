@@ -39,6 +39,12 @@ func actEventLine(ev actjob.Event) string {
 	switch ev.Kind {
 	case "started":
 		return "Started: " + ev.Text
+	case "plan":
+		// Step carries the model's own estimate on a plan event, not a step number.
+		if ev.Step > 0 {
+			return fmt.Sprintf("The plan, about %d steps: %s", ev.Step, ev.Text)
+		}
+		return "The plan: " + ev.Text
 	case "step":
 		return fmt.Sprintf("Step %d: %s — expecting %s", ev.Step, ev.Text, ev.Expect)
 	case "verified":
@@ -76,6 +82,46 @@ func NewActJobs(runner *actjob.Runner) *ActJobs { return &ActJobs{runner: runner
 
 // actJobReadTimeout bounds the store reads a route makes, so a wedged store answers with an error rather than holding the request open.
 const actJobReadTimeout = 5 * time.Second
+
+// spokenJobPoll is how often Spoken asks the runner where the job has got to. A var only so tests cost no wall time.
+var spokenJobPoll = 250 * time.Millisecond
+
+// Spoken runs a whole job for the voice session and comes back when it has ended, which is what the live agent's do tool calls (see Agent.RunJob).
+// The job is started the same way POST /act starts one and runs in the daemon rather than inside this call, so the session hanging up does not take the job with it. The waiting is here rather than in the agent because the agent cannot import the runner: the runner's own executor is an agent.
+// Input: a context to bound the waiting, and the goal in the user's own words. Output: the sentence for Ora to say, or an error when the runner would not open the job at all.
+// A job that gets stuck asks the user one question and waits: that comes back as the question, so Ora asks it out loud, and the job is left standing where the window's running-now strip shows it waiting.
+// ponytail: no way back in from speech yet — answering a stuck job means POST /act/{id}/answer from the window. Give do an answer form when a real run needs it.
+func (j *ActJobs) Spoken(ctx context.Context, goal string) (string, error) {
+	id, err := j.runner.Start(ctx, goal, actjob.Opts{})
+	if err != nil {
+		return "", err
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			// The session is going away, the job is not: it keeps running in the daemon and the window can still watch, stop or answer it.
+			return "", ctx.Err()
+		case <-time.After(spokenJobPoll):
+		}
+		job, err := j.runner.Job(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		switch job.State {
+		case actjob.Done, actjob.Stopped:
+			return job.Say, nil
+		case actjob.Failed:
+			if job.Say != "" {
+				return job.Say, nil
+			}
+			return "", fmt.Errorf("the job did not finish: %s", job.Err)
+		case actjob.Stuck:
+			return job.Question, nil
+		case actjob.Paused:
+			return job.Summary, nil
+		}
+	}
+}
 
 // Start handles POST /act. Input: JSON body {"goal": string, "window": string, "brain": string, "summary_brain": string, "budget": {"wall_seconds": number, "input_tokens": number, "steps": number}} — everything but the goal optional, and an omitted part of the budget taking the default (five minutes, 200k input tokens, 40 steps). Output: 202 with {"id": string} as soon as the job is on disk; the job then runs in the daemon and its progress arrives on /events as "act" events tagged with that id. A body that will not decode, an empty goal, or a brain this daemon has no model for gets 400; a failure of the daemon's own — the store refusing the first checkpoint — gets 500.
 func (j *ActJobs) Start(w http.ResponseWriter, r *http.Request) {

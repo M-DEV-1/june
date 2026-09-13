@@ -22,19 +22,8 @@ var (
 	tp *sdktrace.TracerProvider
 )
 
-// maxLogBytes is how large ora.log may grow before the next start rolls it aside. The log is written at Debug and carries the first 160 characters of every tool result, so on a busy day it grows fast; nothing else in the tree ever truncated it.
-const maxLogBytes = 50 << 20
-
-// rotateLog renames path to path+".1" when the file has grown past maxLogBytes, so the next open starts a fresh log and at most two are ever kept. Input: the log's path. Output: none — a missing file, a failed stat or a failed rename all leave things as they are, since a log that cannot be rotated is no reason to refuse to start.
-func rotateLog(path string) {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() <= maxLogBytes {
-		return
-	}
-	if err := os.Rename(path, path+".1"); err != nil {
-		fmt.Fprintf(os.Stderr, "ora: could not rotate %s: %v\n", path, err)
-	}
-}
+// maxLogBytes is how large ora.log may grow before it is rolled aside mid-run. The log is written at Debug and carries up to 2048 bytes of every tool result's detail, so on a busy day it grows fast; RotatingWriter keeps at most three rolled-aside generations beyond the live file.
+const maxLogBytes = 20 << 20
 
 // global slog logger, otel traceprovider init
 // returns shutdown, must defer in main.go
@@ -46,17 +35,11 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	// The log is 0600, readable only by the user who runs Ora. Every tool call writes the first 160 characters of its result here, and for observe_screen that is the title and the contents of whatever window was in front — a password manager, an inbox — so nobody else with an account on the machine may read it.
+	// The log is 0600, readable only by the user who runs Ora. Every tool call writes up to 2048 bytes of its result here, and for observe_screen that is the title and the contents of whatever window was in front — a password manager, an inbox — so nobody else with an account on the machine may read it.
 	logPath := filepath.Join(logDir, "ora.log")
-	rotateLog(logPath)
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	logFile, err := NewRotatingWriter(logPath, maxLogBytes, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
-	}
-	// Opening an existing file does not change its mode, so a log written by an older build is still world-readable until this tightens it.
-	if err := os.Chmod(logPath, 0600); err != nil {
-		logFile.Close()
-		return nil, fmt.Errorf("failed to secure log file: %w", err)
 	}
 
 	// custom slog Handler pulls trace/span out of ctx and injects them into every json log line
@@ -94,7 +77,7 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	res, _ := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String("ora"),
-			semconv.ServiceVersionKey.String("0.1.1"),
+			semconv.ServiceVersionKey.String(config.Version),
 		),
 	)
 

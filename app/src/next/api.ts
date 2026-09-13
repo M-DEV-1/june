@@ -4,11 +4,12 @@ import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type Fetch
 import { invoke } from "@tauri-apps/api/core";
 
 import { TOKEN_HEADER, devToken } from "../shared/token";
+import { DAEMON_HOST_PORT } from "./daemon-url";
 
 export { devToken };
 
 /** Where the daemon listens. */
-const base = "http://127.0.0.1:6942";
+const base = `http://${DAEMON_HOST_PORT}`;
 
 /** The shared IPC secret, held in memory only and never logged. Undefined until refreshToken has read one. */
 let token: string | undefined;
@@ -218,8 +219,21 @@ export type UsageCall = {
   cached_input_tokens?: number;
 };
 
-/** GET /usage: what each provider has cost in tokens today and over the last seven days, a figure per day of that week, and the calls themselves as a log. Every number is a count the daemon read from its own ledger; nothing here is a price. budget_used_fraction is how much of the plan's own allowance has gone, 0 to 1, and is optional because the daemon does not report it yet. */
-export type Usage = { today: UsageWindow; week: UsageWindow; days: UsageDay[]; recent: UsageCall[]; budget_used_fraction?: number };
+/** One provider's own allowance windows as GET /usage reports them, keyed by provider id in Usage.limits. Mirrors ipc.ProviderLimits; limits_at is when the reading was taken, RFC3339. */
+export type ProviderLimits = { limits: UsageLimit[]; limits_at: string };
+
+/** The providers in Usage.limits that are web search rather than brains: the two engines branch() reaches the web through, named as internal/agent/websearch.go names them. A search spends a request and no tokens, so these are the only place its cost shows — the token tables draw them as rows of zeros. */
+export const SEARCH_PROVIDERS = ["exa", "tavily"] as const;
+
+/** GET /usage: what each provider has cost in tokens today and over the last seven days, a figure per day of that week, and the calls themselves as a log. Every number is a count the daemon read from its own ledger; nothing here is a price. budget_used_fraction is how much of the plan's own allowance has gone, 0 to 1, and is optional because the daemon does not report it yet. limits holds each provider's own plan allowance keyed by provider id, brains and the search engines together, and is optional so a daemon too old to send it still parses. */
+export type Usage = {
+  today: UsageWindow;
+  week: UsageWindow;
+  days: UsageDay[];
+  recent: UsageCall[];
+  budget_used_fraction?: number;
+  limits?: Record<string, ProviderLimits>;
+};
 
 /** GET /status: whether the tracker is paused right now. POST /pause and POST /resume are what change it. */
 export type TrackerStatus = { paused: boolean };
@@ -356,6 +370,23 @@ export const oraApi = createApi({
         };
         // Both tasks and allTasks hold the same rows the daemon does; patching whichever of the two are actually cached (updateQueryData is a no-op on one that is not) keeps Mine and Theirs on the Tasks screen, and the Days page once it refetches, from showing three different answers to "is this done" between the click and the daemon's own reply.
         const patches = [dispatch(oraApi.util.updateQueryData("tasks", undefined, move)), dispatch(oraApi.util.updateQueryData("allTasks", undefined, move))];
+        try {
+          await queryFulfilled;
+        } catch {
+          patches.forEach((p) => p.undo());
+        }
+      },
+    }),
+    /** Takes one of the user's own tasks off the list for good. The daemon answers 204, 400 for a noticed item (which is dropped instead, since deleting it would take a line out of a meeting's minutes) and 404 for an id that names no task. The row leaves both lists the moment it is clicked and comes back if the daemon refuses. */
+    deleteTask: build.mutation<void, string>({
+      query: (id) => ({ url: `/tasks/${encodeURIComponent(id)}`, method: "DELETE" }),
+      invalidatesTags: ["Task"],
+      async onQueryStarted(id, { dispatch, queryFulfilled }) {
+        const drop = (draft: Task[]) => {
+          const at = draft.findIndex((t) => t.id === id);
+          if (at >= 0) draft.splice(at, 1);
+        };
+        const patches = [dispatch(oraApi.util.updateQueryData("tasks", undefined, drop)), dispatch(oraApi.util.updateQueryData("allTasks", undefined, drop))];
         try {
           await queryFulfilled;
         } catch {
@@ -516,6 +547,7 @@ export const {
   useAllTasksQuery,
   useCreateTaskMutation,
   useSetTaskStatusMutation,
+  useDeleteTaskMutation,
   useSetTaskOwnerMutation,
   useActOnNoticeMutation,
   useDaysQuery,
@@ -561,6 +593,8 @@ export type DaemonEvent = {
   type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "level" | "act" | "notice" | "overlay" | "window" | "recording" | "dreaming";
   text?: string;
   detail?: string;
+  /** Only meaningful on the after-call "tool" event: true when that tool call's result was an error. */
+  failed?: boolean;
   evidence?: Evidence[];
   conversation_id?: string;
   notice?: Notice;

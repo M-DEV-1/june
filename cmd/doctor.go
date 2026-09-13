@@ -106,7 +106,7 @@ func runDoctor(ctx context.Context) []doctorCheck {
 	if _, err := os.Stat(filepath.Join(config.DataDir(), "portal-input-token")); err != nil {
 		out = append(out, doctorCheck{Name: "pointer and keyboard", Detail: "no saved consent", Fix: "the first press will show the portal's consent dialog once; allow it"})
 	} else {
-		out = append(out, doctorCheck{Name: "pointer and keyboard", Detail: "consent saved; the session covers one monitor", OK: true})
+		out = append(out, doctorCheck{Name: "pointer and keyboard", Detail: "consent saved; how many monitors it covers is only known once the session opens", OK: true})
 	}
 	// Daemon: everything above is driven by it.
 	if resp, err := http.Get("http://127.0.0.1:" + DaemonPort + "/ping"); err != nil {

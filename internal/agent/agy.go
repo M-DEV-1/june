@@ -3,14 +3,11 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -99,16 +96,7 @@ func agyEnv(tempHome string) []string {
 	return append(env, "HOME="+tempHome)
 }
 
-// agyArgs is the argument list for one `agy --print` run. Input: the model to ask for ("" leaves --model off, keeping the CLI's own default) and the whole prompt, instruction included since agy has no system-prompt flag of its own. Output: the arguments. --dangerously-skip-permissions is deliberately never included here — see the package comment.
-func agyArgs(model, prompt string) []string {
-	args := []string{"--print", prompt, "--output-format", "json", "--disable-slash-commands", "--print-timeout", agyAskTimeout.String()}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	return args
-}
-
-// agyResult is the object `agy --print --output-format json` prints when the run is over.
+// agyResult is the object agy's "result" event carries when a turn is over.
 type agyResult struct {
 	Status   string `json:"status"`
 	Response string `json:"response"`
@@ -123,34 +111,6 @@ type agyResult struct {
 	} `json:"usage"`
 }
 
-// agyRunner runs one CLI process to completion. Input: the environment to run it under (HOME pointed at the throwaway mirror) and the arguments. Output: its stdout, or an error naming what went wrong. A test replaces it with a stub so a whole ask, tool calls included, runs without the CLI.
-type agyRunner func(ctx context.Context, env []string, args []string) ([]byte, error)
-
-// runAgyCLI is the runner that actually starts the command line. The working directory is an empty temporary one, so the CLI finds no project files of the user's to read, matching runClaudeCLI.
-func runAgyCLI(binary string) agyRunner {
-	return func(ctx context.Context, env []string, args []string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, binary, args...)
-		cmd.Env = env
-		cmd.Dir = os.TempDir()
-		var out, stderr bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &stderr
-		// Killing the child does not kill its own children, and stdout stays open as long as any of them holds it, so without this a hung run would block here for as long as its grandchildren live.
-		cmd.WaitDelay = 2 * time.Second
-		if err := cmd.Run(); err != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return nil, fmt.Errorf("agy: the run timed out after %s", agyAskTimeout)
-			}
-			// A run that failed still prints its result object on stdout, and that object says more about why than the exit status does, so it is preferred when it is there.
-			if len(out.Bytes()) > 0 {
-				return out.Bytes(), nil
-			}
-			return nil, fmt.Errorf("agy: %w: %s", err, agyHead(stderr.String()))
-		}
-		return out.Bytes(), nil
-	}
-}
-
 // agyHead is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line.
 func agyHead(s string) string {
 	return util.RunesEllipsis(util.OneLine(s), 300)
@@ -163,17 +123,18 @@ func (a *Agent) AskAgy(ctx context.Context, question string) (TurnTrace, error) 
 
 // AskAgyWith is AskAgy with the conversation so far sent ahead of the question, so a follow-up reads as one. Input: the prior turns (see HistoryFromTurns), nil for a question that stands alone, and the question. Output: the same TurnTrace AskAgy returns.
 func (a *Agent) AskAgyWith(ctx context.Context, history History, question string) (TurnTrace, error) {
-	return a.askAgy(ctx, runAgyCLI(agyBinary), agyModel(), history, question)
+	return a.askAgy(ctx, newAgyProcess, agyModel(), history, question)
 }
 
-// askAgy is AskAgyWith against the given runner and model, so a test can drive a whole ask without the command line.
-func (a *Agent) askAgy(ctx context.Context, run agyRunner, model string, history History, question string) (TurnTrace, error) {
+// askAgy is AskAgyWith against the given session constructor and model, so a test can drive a whole ask without the command line. newProc is called only when a fresh process has to be started — reusing the agent's live one, when there is one for this model, never calls it again.
+func (a *Agent) askAgy(ctx context.Context, newProc func() agySessionRunner, model string, history History, question string) (TurnTrace, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, agyAskTimeout)
 	defer cancel()
 	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
 	ctx = withAskLookState(ctx)
-	instruction, handshake := a.HandshakePrompt(ctx, start)
+	instruction := a.LeanPrompt(start)
+	var handshake []string
 
 	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
@@ -196,53 +157,17 @@ func (a *Agent) askAgy(ctx context.Context, run agyRunner, model string, history
 		Usage:     TokenUsage{Provider: ProviderAgy},
 	}
 
-	// claudeToolServer is reused as it is: it already runs every call through the ask's own gate, step budget and hop recording, and does not care which CLI is on the other end of the HTTP connection.
-	server, err := a.startClaudeToolServer(ctx)
-	if err != nil {
-		tr.Duration = time.Since(start)
-		return tr, err
-	}
-	defer server.Close()
-
-	// agy has no system-prompt flag, so Ora's instruction goes at the head of the prompt text instead of in a file of its own. After it, the same order askClaude sends: the thread, then this turn's time and recalled memory, then the reference to a close past run, then the question last.
-	var prompt strings.Builder
-	prompt.WriteString(instruction + "\n\n")
-	if thread := claudeThread(history); thread != "" {
-		prompt.WriteString(thread + "\n")
-	}
-	prompt.WriteString(turnContext(start, injected) + "\n\n")
-	if reference := a.ActReferenceFor(ctx, question, start); reference != "" {
-		prompt.WriteString(reference + "\n\n")
-	}
-	prompt.WriteString(question)
-
-	realHome, err := os.UserHomeDir()
-	if err != nil {
-		tr.Duration = time.Since(start)
-		return tr, fmt.Errorf("agy: finding the real home directory to mirror: %w", err)
-	}
-	tempHome, err := os.MkdirTemp(os.TempDir(), "ora-agy-ask-")
-	if err != nil {
-		tr.Duration = time.Since(start)
-		return tr, fmt.Errorf("agy: making the ask's own temp home: %w", err)
-	}
-	defer os.RemoveAll(tempHome)
-	if err := buildAgyHome(realHome, tempHome, server.URL()); err != nil {
-		tr.Duration = time.Since(start)
-		return tr, err
-	}
-
-	out, err := run(ctx, agyEnv(tempHome), agyArgs(model, prompt.String()))
-	tr.ToolHops = server.Hops()
-	tr.Evidence = evidenceFromToolHops(tr.ToolHops)
+	reference := a.ActReferenceFor(ctx, question, start)
+	res, hops, capped, err := a.runAgyTurn(ctx, newProc, model, instruction, history, start, injected, reference, question)
+	tr.ToolHops = hops
+	tr.Evidence = evidenceFromToolHops(hops)
 	tr.ImageTokens = lookTokensSpent(ctx)
 	tr.Duration = time.Since(start)
+	if capped {
+		return tr, capError(hops)
+	}
 	if err != nil {
 		return tr, err
-	}
-	var res agyResult
-	if err := json.Unmarshal(out, &res); err != nil {
-		return tr, fmt.Errorf("agy: could not parse what the command line printed: %w (%s)", err, agyHead(string(out)))
 	}
 	if res.Status != "SUCCESS" {
 		return tr, fmt.Errorf("agy: the run failed (%s): %s", res.Status, agyHead(res.Response))

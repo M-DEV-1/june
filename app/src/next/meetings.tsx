@@ -28,7 +28,7 @@ import { Minutes, minutesBlocks, sectionId } from "./meeting-minutes";
 export function MeetingsScreen() {
   const dispatch = useAppDispatch();
   const { meetingId, query } = useAppSelector((s) => s.ui);
-  const { data: meetings = [], isError } = useMeetingsQuery();
+  const { data: meetings = [], isError, isLoading } = useMeetingsQuery();
   const { data: tasks = [] } = useTasksQuery();
   const [removeMeeting] = useDeleteMeetingMutation();
   const [asking, setAsking] = useState(false);
@@ -111,7 +111,12 @@ export function MeetingsScreen() {
             </article>
           </Reading>
         ) : (
-          <Blank up={!isError} empty="No meetings recorded yet." hint="Ora writes minutes for a call once it has recorded one. Turn recording on in the config file and the next call lands here." />
+          <Blank
+            up={!isError}
+            loading={isLoading}
+            empty="No meetings recorded yet."
+            hint="Ora writes minutes for a call once it has recorded one. Turn recording on in the config file and the next call lands here."
+          />
         )}
       </Scroller>
 
@@ -132,7 +137,7 @@ export function MeetingsScreen() {
                 void removeMeeting(selected.id)
                   .unwrap()
                   .then(() => dispatch(ui.meetingOpened(next)))
-                  .catch(() => dispatch(ui.noticed("Could not delete")));
+                  .catch(() => dispatch(ui.noticed({ text: "Could not delete", kind: "error" })));
               }}
             >
               Delete it

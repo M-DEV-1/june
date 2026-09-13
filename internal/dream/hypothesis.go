@@ -147,7 +147,8 @@ func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bo
 	now := r.now()
 	var items []evidenceItem
 
-	dailies, err := r.store.DiaryDays(ctx, nightMinus(night, 6), night)
+	back := r.sweepBack(ctx, night)
+	dailies, err := r.store.DiaryDays(ctx, nightMinus(night, back), night)
 	if err != nil {
 		return ev, err
 	}
@@ -157,7 +158,7 @@ func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bo
 		items = append(items, evidenceItem{secDiary, at, fmt.Sprintf("--- Diary entry, %s ---\n%s\n", d.Day, d.Content)})
 	}
 
-	work, err := r.store.SummaryTimeline(ctx, now.AddDate(0, 0, -7), now)
+	work, err := r.store.SummaryTimeline(ctx, now.AddDate(0, 0, -(back+1)), now)
 	if err != nil {
 		return ev, err
 	}

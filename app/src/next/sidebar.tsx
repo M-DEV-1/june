@@ -22,9 +22,10 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { useActOnNoticeMutation, useConversationsQuery } from "./api";
-import { chatsShown, groupConversations, shortWhen } from "./format";
+import { chatsShown, groupConversations, noticeAge, shortWhen } from "./format";
 import { useFollowSelection } from "./parts";
 import { Face, useOraState } from "./face";
+import { RunningNow } from "./running-now";
 import { conversationsUi, ui, useAppDispatch, useAppSelector, type Place } from "./store";
 
 /** One row at the foot of the rail. */
@@ -114,24 +115,34 @@ export function AppSidebar() {
             className="h-8 rounded-full border-transparent bg-sidebar-accent pl-8 text-ui"
           />
         </div>
+        <RunningNow />
         {liveNotice ? (
-          /* A card rather than loose text: this sits between the search field and the list of chats, and a bare sentence with four buttons under it reads as part of neither. The body is held to three lines for the same reason the hover card holds it to three — a morning brief is a paragraph, and unclamped it pushed the chat list down the rail. */
-          <div className="relative flex flex-col gap-1 rounded-lg border bg-card px-2.5 py-2 group-data-[collapsible=icon]:hidden">
-            <button
-              type="button"
-              aria-label={noticeLabel("Close", liveNotice.title)}
-              onClick={() => dispatch(ui.liveNoticeSet(undefined))}
-              className="absolute top-1 right-1 flex size-5 items-center justify-center rounded text-muted-foreground opacity-50 transition-opacity hover:bg-hover hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-            >
-              <X className="size-3" />
-            </button>
-            {/* The title was stored and never drawn, which left the body to say on its own what the card was about. The right padding keeps it clear of the cross. */}
-            <p className="pr-5 text-ui font-medium">{liveNotice.title}</p>
-            <p role="status" className="line-clamp-3 text-meta text-muted-foreground">
-              {liveNotice.body}
-            </p>
+          /* A card rather than loose text: this sits between the search field and the list of chats, and a bare sentence with four buttons under it reads as part of neither.
+             Laid out the way the design sheets of 2026-09-12 draw a notification: the face, then "Ora" with how long ago it landed, then the line, then the detail under it. Said by someone, in other words, rather than posted by the window — which is the whole difference between a notice and a banner.
+             The body is held to three lines for the same reason the hover card holds it to three: a morning brief is a paragraph, and unclamped it pushed the chat list down the rail. */
+          <div role="group" aria-label="Notice from Ora" className="relative flex gap-2 rounded-lg border bg-card px-2.5 py-2 group-data-[collapsible=icon]:hidden">
+            <Face state={liveNotice.kind === "error" ? "refused" : "noticed"} className="mt-0.5 text-meta" />
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              {/* The sender line. The cross sits in the same row rather than floating over the corner, so nothing has to be padded clear of it. */}
+              <div className="flex items-baseline gap-2">
+                <span className="text-meta font-medium text-foreground">Ora</span>
+                <span className="ml-auto text-micro text-muted-foreground">{noticeAge(liveNotice.at, now)}</span>
+                <button
+                  type="button"
+                  aria-label={noticeLabel("Close", liveNotice.title)}
+                  onClick={() => dispatch(ui.liveNoticeSet(undefined))}
+                  className="-mr-0.5 flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground opacity-50 transition-opacity hover:bg-hover hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+              {/* The title was stored and never drawn, which left the body to say on its own what the card was about. */}
+              <p className="text-ui text-foreground">{liveNotice.title}</p>
+              <p role="status" className="line-clamp-3 text-meta text-muted-foreground">
+                {liveNotice.body}
+              </p>
             {/* The four words on their own tell a screen reader nothing about what is being done or snoozed, so each button's own label names the notice it belongs to. They wrap because the rail is narrow and a notice may name buttons of its own: "Not happening" and "Start recording" are wider than the four this rail has short words for, and in one row they ran off the edge. */}
-            <div className="mt-0.5 flex flex-wrap gap-1">
+            <div className="mt-1 flex flex-wrap gap-1">
               {noticeButtons(liveNotice.actions).map(({ key, label }) => (
                 <Button key={key} variant="outline" size="xs" aria-label={noticeLabel(label, liveNotice.title)} onClick={() => act(key)}>
                   {label}
@@ -143,11 +154,16 @@ export function AppSidebar() {
                 Could not do that
               </p>
             ) : null}
+            </div>
           </div>
         ) : notice ? (
-          <p role="status" className="px-1 text-meta text-destructive group-data-[collapsible=icon]:hidden">
-            {notice}
-          </p>
+          // ui.notice carries its own kind now, so a failure reads red (text-destructive) and plain status reads the same muted foreground as the rest of the sidebar's secondary text. The face sits outside the role="status" paragraph so the line's own textContent — what other screens assert against — still reads as the notice's words alone.
+          <div className="flex items-center gap-1.5 px-1 group-data-[collapsible=icon]:hidden">
+            <Face state={notice.kind === "error" ? "refused" : "noticed"} />
+            <p role="status" className={`text-meta ${notice.kind === "error" ? "text-destructive" : "text-muted-foreground"}`}>
+              {notice.text}
+            </p>
+          </div>
         ) : null}
       </SidebarHeader>
 

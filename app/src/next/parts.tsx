@@ -11,10 +11,12 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { usePickBrainMutation, type Brain, type UsageLimit } from "./api";
 import { atBottom, hhmm } from "./format";
+import { Face } from "./face";
 import { ui, useAppDispatch, useAppSelector, type Queries } from "./store";
+import { DAEMON_HOST_PORT } from "./daemon-url";
 
 /** Where the daemon listens, named once so what the offline pane says cannot drift from what the window actually calls. */
-export const DAEMON_ADDRESS = "127.0.0.1:6942";
+export const DAEMON_ADDRESS = DAEMON_HOST_PORT;
 
 /** The one reading column the whole window sets its text in: 68 characters at 15px, centred, with the same margins at every window width. A wider window gets wider margins rather than bigger text, which is why nothing here changes with a breakpoint. Defined in index.css so the rule lives with the other tokens. */
 export const MEASURE = "measure";
@@ -96,20 +98,29 @@ export function useFollowSelection(container: RefObject<HTMLElement | null>, id?
   }, [id]);
 }
 
-/** What an empty list says where there is room for one short line. Input: whether the daemon answered and the sentence for an answer with nothing in it. Output: that line. */
-export function Nothing({ up, empty }: { up: boolean; empty: string }) {
-  return <p className="px-2 py-6 text-ui text-muted-foreground">{up ? empty : "Not connected."}</p>;
+/** What an empty list says where there is room for one short line, with Ora's own face above it — the hero of the empty state, sized a step up from the page's own heading rather than left at the sidebar chip's size. Input: whether the daemon answered, the sentence for an answer with nothing in it, and whether the list is still on its first fetch. While loading, the real empty sentence is held back and a "thinking" face shows instead, so "Nothing to do." never flashes before the data it describes has actually arrived. Output: the block. */
+export function Nothing({ up, empty, loading }: { up: boolean; empty: string; loading?: boolean }) {
+  const state = loading ? "thinking" : up ? "watching" : "asleep";
+  const line = loading ? "Looking…" : up ? empty : "Not connected.";
+  return (
+    <div className="flex flex-col items-center gap-2 px-2 py-6 text-center">
+      <Face state={state} className="text-title" />
+      <p className="text-ui text-muted-foreground">{line}</p>
+    </div>
+  );
 }
 
-/** What an empty pane says, which is the whole reading side of the window and so gets the three parts an empty state is made of: one line in the text colour naming what is not there, one muted sentence saying what to do about it, and the action itself when there is one to offer. Input: whether the daemon answered, the line for an answer with nothing in it, the sentence under it, and the action. Output: a centred block. */
-export function Blank({ up, empty, hint, action }: { up: boolean; empty: string; hint?: string; action?: ReactNode }) {
-  const title = up ? empty : "Nothing is answering";
-  const under = up ? hint : `Ora's daemon should be listening on ${DAEMON_ADDRESS}. The window keeps trying and fills in on its own once it is back.`;
+/** What an empty pane says, which is the whole reading side of the window and so gets the four parts an empty state is made of: Ora's own face as its hero, one line in the text colour naming what is not there, one muted sentence saying what to do about it, and the action itself when there is one to offer. Input: whether the daemon answered, the line for an answer with nothing in it, the sentence under it, the action, and whether the pane is still on its first fetch. While loading, the hint and action are held back and the face shows "thinking" with a short "Looking…" in place of the real empty line, so the real copy never flashes before data arrives. Output: a centred block. */
+export function Blank({ up, empty, hint, action, loading }: { up: boolean; empty: string; hint?: string; action?: ReactNode; loading?: boolean }) {
+  const state = loading ? "thinking" : up ? "watching" : "asleep";
+  const title = loading ? "Looking…" : up ? empty : "Nothing is answering";
+  const under = loading ? undefined : up ? hint : `Ora's daemon should be listening on ${DAEMON_ADDRESS}. The window keeps trying and fills in on its own once it is back.`;
   return (
-    <div className="m-auto flex max-w-[46ch] flex-col items-center gap-2 px-8 py-12 text-center">
+    <div className="m-auto flex max-w-[46ch] flex-col items-center gap-3 px-8 py-12 text-center">
+      <Face state={state} className="text-title" />
       <p className="text-doc text-foreground">{title}</p>
       {under ? <p className="text-read text-muted-foreground">{under}</p> : null}
-      {up && action ? <div className="mt-2">{action}</div> : null}
+      {up && !loading && action ? <div className="mt-2">{action}</div> : null}
     </div>
   );
 }
@@ -143,10 +154,10 @@ export function Reading({ wide, rail, children }: { wide: boolean; rail?: ReactN
   );
 }
 
-/** The rail beside a document. Input: what it names itself to a screen reader and what it holds. Output: the column, 280px wide and pinned to the top of the region as the document scrolls past it, with a hairline down its left edge so it reads as a column next to the document rather than a second document floating beside it. */
+/** The rail beside a document. Input: what it names itself to a screen reader and what it holds. Output: the column, 280px wide and pinned to the top of the region as the document scrolls past it, with a hairline down its left edge so it reads as a column next to the document rather than a second document floating beside it. Capped to the pane's own height, less the header's h-12, and scrolling within itself past that, so a reply with many sources grows inside the rail instead of over the thread beside it. */
 export function Rail({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <aside aria-label={label} className="sticky top-0 flex w-[280px] shrink-0 flex-col gap-7 self-start border-l border-hairline pl-6">
+    <aside aria-label={label} className="sticky top-0 flex max-h-[calc(100vh-3rem)] w-[280px] shrink-0 flex-col gap-7 self-start overflow-y-auto border-l border-hairline pl-6">
       {children}
     </aside>
   );
@@ -410,7 +421,7 @@ export function BrainPicker({ current, brains }: { current: string; brains: Brai
     try {
       await pickBrain({ brain: b.id, model: b.model || b.models?.[0] || "" }).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not change the brain"));
+      dispatch(ui.noticed({ text: "Could not change the brain", kind: "error" }));
     }
   };
 

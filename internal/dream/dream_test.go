@@ -1279,3 +1279,102 @@ func TestCompactStage_CommitsTheWeeksBuiltBeforeAFailure(t *testing.T) {
 		t.Errorf("the week compacted before the failure was thrown away: %q", got)
 	}
 }
+
+// TestShadow_AnswersTheNightWhenThePrimaryBrainIsDown is the real failure this machine hit: the dream brain (grok) returned "402 Payment Required" on every call from 2026-09-03 onward, so every stage aborted and four nights in a row committed nothing — while the local shadow model answered all 174 of those calls and its replies were thrown away by design. When the primary is down and a shadow is running, the shadow's reply is what the night uses.
+func TestShadow_AnswersTheNightWhenThePrimaryBrainIsDown(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	down := &fakeBrain{}
+	r := newRunner(store, down, yesProbes(), at(23, 30))
+	r.brain = func(ctx context.Context, prompt string) (string, error) {
+		return "", errors.New("API error (status 402 Payment Required)")
+	}
+	local := &fakeBrain{verdicts: "[]", extract: `[{"statement":"He reads the changelog before upgrading anything.","confidence":"medium"}]`, und: "An understanding the local model wrote.", compact: "A week.", report: "The night, in one line."}
+	r.Shadow = local.fn
+
+	r.Tick(ctx)
+
+	run, ok, err := store.DreamRun(ctx, night)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !run.Finished {
+		t.Fatalf("the night must finish on the shadow's answers when the primary brain is down: %+v ok=%v", run, ok)
+	}
+	open, err := store.OpenHypotheses(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adopted bool
+	for _, h := range open {
+		if strings.Contains(h.Statement, "changelog") {
+			adopted = true
+		}
+	}
+	if !adopted {
+		t.Errorf("the shadow's adopted hypothesis never landed: %+v", open)
+	}
+	doc, err := store.DiaryEntry(ctx, "", "understanding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc, "local model wrote") {
+		t.Errorf("the understanding doc was not rewritten from the shadow's reply, got %q", doc)
+	}
+}
+
+// TestShadow_PrimaryStillWinsWhenItAnswers keeps the fallback from quietly demoting the dream brain: a working primary's reply is the night's, and the shadow stays a traced spectator.
+func TestShadow_PrimaryStillWinsWhenItAnswers(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "The primary's understanding.", compact: "A week.", report: "One line."}
+	r := newRunner(store, primary, yesProbes(), at(23, 30))
+	local := &fakeBrain{verdicts: "[]", extract: "[]", und: "The shadow's understanding.", compact: "A week.", report: "One line."}
+	r.Shadow = local.fn
+
+	r.Tick(ctx)
+
+	doc, err := store.DiaryEntry(ctx, "", "understanding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc, "primary's") {
+		t.Errorf("a working primary must still write the night, got %q", doc)
+	}
+}
+
+// TestDream_StopsRetryingANightWhoseBrainKeepsFailing bounds the retry storm behind the same outage: the daemon ticks every five minutes, so a stage that aborts on a dead brain was re-attempted 76 times in one night (2026-09-03's trace). After failedAttemptCap aborts the night is left for tomorrow.
+func TestDream_StopsRetryingANightWhoseBrainKeepsFailing(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(dayFormat)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	down := &fakeBrain{}
+	r := newRunner(store, down, yesProbes(), at(23, 30))
+	r.brain = func(ctx context.Context, prompt string) (string, error) {
+		calls++
+		return "", errors.New("API error (status 402 Payment Required)")
+	}
+
+	for i := 0; i < 12; i++ {
+		r.Tick(ctx)
+	}
+
+	if calls > failedAttemptCap {
+		t.Errorf("a dead brain cost %d calls across 12 ticks, want no more than %d", calls, failedAttemptCap)
+	}
+	if calls == 0 {
+		t.Error("the night never tried at all")
+	}
+}

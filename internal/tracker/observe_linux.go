@@ -111,17 +111,6 @@ func observeWalk(ctx context.Context, conn *dbus.Conn, ref aref, depth int, visi
 	return out
 }
 
-// getExtents reads one node's rectangle in real screen pixels, through org.a11y.atspi.Component and then screenShift, which corrects a window that answers a request for screen coordinates with its own window coordinates. Output: x, y, width, height in pixels, all zero when the node has no Component interface, the call fails, or the node is not on the screen.
-// This is the single-node path, the one Verify uses, and it pays a walk up to the window and a read of the desktop's work area on top of the node's own read. It has to correct, not skip: Verify compares what it reads here against the rectangle the listing showed, and the listing is in screen pixels, so an uncorrected read would differ by the height of the top bar and Verify would refuse every click on a maximized window as having moved. An observe pass uses correctListing instead, which is the same correction worked out once for a whole listing.
-func getExtents(ctx context.Context, conn *dbus.Conn, ref aref) (x, y, w, h int) {
-	got, err := readPlace(ctx, conn, ref)
-	if err != nil || got.W <= 0 || got.H <= 0 {
-		return 0, 0, 0, 0
-	}
-	dx, dy := screenShift(ctx, conn, ref)
-	return got.X + dx, got.Y + dy, got.W, got.H
-}
-
 // walkWithOwnBudget runs one window's walk against a fresh maxNodes budget of its own, rather than one a caller shares across several windows, and logs — like walkWindow — when the bound rather than the end of the tree is what stopped it. Input: a context and the walk, which takes the visited counter it must count into. Output: whatever the walk produced.
 func walkWithOwnBudget(ctx context.Context, walk func(visited *int) []act.Node) []act.Node {
 	visited := 0

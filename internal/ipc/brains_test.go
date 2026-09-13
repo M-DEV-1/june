@@ -431,3 +431,14 @@ func TestFirstFields_ReadsBothTableShapes(t *testing.T) {
 		t.Errorf("ollama list = %v, want just the one model with the header skipped", got)
 	}
 }
+
+// TestLoginFilePaths checks that claudeCredentialsPath and codexAuthPath build the exact paths every login check and account read in this package uses, so a change here cannot drift from the other.
+func TestLoginFilePaths(t *testing.T) {
+	home := "/home/someone"
+	if got, want := claudeCredentialsPath(home), filepath.Join(home, ".claude", ".credentials.json"); got != want {
+		t.Errorf("claudeCredentialsPath(%q) = %q, want %q", home, got, want)
+	}
+	if got, want := codexAuthPath(home), filepath.Join(home, ".codex", "auth.json"); got != want {
+		t.Errorf("codexAuthPath(%q) = %q, want %q", home, got, want)
+	}
+}

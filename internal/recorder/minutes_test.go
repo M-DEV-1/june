@@ -2,6 +2,8 @@ package recorder
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,5 +59,17 @@ func TestBuildPrompt_StampsTheTimelineInLocalTime(t *testing.T) {
 	}
 	if strings.Contains(prompt, "10:47") {
 		t.Errorf("timeline row is still stamped in UTC:\n%s", prompt)
+	}
+}
+
+// TestCoveredHeadingMatchesFrontend checks that app/src/next/task-about.tsx still contains the CoveredHeading text, since that file reads the same heading out of rendered minutes to show a task's originating meeting summary, and the two are typed independently in Go and TypeScript.
+func TestCoveredHeadingMatchesFrontend(t *testing.T) {
+	path := filepath.Join("..", "..", "app", "src", "next", "task-about.tsx")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), CoveredHeading) {
+		t.Errorf("%s no longer contains %q; update its COVERED constant to match internal/recorder.CoveredHeading", path, CoveredHeading)
 	}
 }
