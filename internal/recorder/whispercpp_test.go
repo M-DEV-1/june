@@ -142,3 +142,34 @@ func TestTranscribeWAV_GPUWaitStopsOnContextCancel(t *testing.T) {
 		t.Fatal("a cancelled wait must surface an error, not hang or run anyway")
 	}
 }
+
+// Five of eleven dictations in the six days to 2026-09-13 died for want of card memory and were redone on the CPU, costing 12.9 to 20.7 seconds each while the user waited. The releaser that asks the embedding server off the card existed the whole time and only the meeting path called it, so a dictation walked onto a full card, crashed, and paid for the retry. Asking is the first thing a run does now, whoever started it.
+func TestRunWhisper_AsksTheCardsOtherTenantToLeaveFirst(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "stub")
+	// The stub records that it ran, so the order of the ask and the run can be checked rather than assumed.
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch "+filepath.Join(dir, "ran")+"\necho words\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	var askedBeforeTheRun bool
+	var asked int
+	SetGPUReleaser(func() bool {
+		asked++
+		_, err := os.Stat(filepath.Join(dir, "ran"))
+		askedBeforeTheRun = os.IsNotExist(err)
+		return true
+	})
+	t.Cleanup(func() { SetGPUReleaser(nil) })
+
+	if _, _, err := RunWhisper(context.Background(), bin, nil); err != nil {
+		t.Fatalf("RunWhisper: %v", err)
+	}
+	if asked == 0 {
+		t.Fatal("the run never asked the card's other tenant to leave, so a dictation still walks onto a full card")
+	}
+	if !askedBeforeTheRun {
+		t.Errorf("asked after the decode had already started, which is too late to stop the crash")
+	}
+}
