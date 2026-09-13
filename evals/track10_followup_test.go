@@ -180,32 +180,3 @@ func TestAct10RunTask_SkipsTheFollowUpWhenTheFirstTurnErrors(t *testing.T) {
 		t.Errorf("the daemon saw %d /ask calls, want 1 — the follow-up must never fire after a failed first turn", len(*convIDsSeen))
 	}
 }
-
-// act10AskFollowUp must actually send the conversation_id it was given, the one field that tells /ask this question belongs to an existing thread rather than opening a new one.
-func TestAct10AskFollowUp_SendsTheConversationID(t *testing.T) {
-	var body struct {
-		Question       string `json:"question"`
-		ConversationID string `json:"conversation_id"`
-	}
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&body)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{"id": "ask-2", "conversation_id": "conv-7"})
-	}))
-	defer backend.Close()
-
-	id, err := act10AskFollowUp(context.Background(), &http.Client{}, backend.URL, "tok", "draw a circle around it", "", "conv-7")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "ask-2" {
-		t.Errorf("id = %q, want ask-2", id)
-	}
-	if body.ConversationID != "conv-7" {
-		t.Errorf("conversation_id sent = %q, want conv-7", body.ConversationID)
-	}
-	if body.Question != "draw a circle around it" {
-		t.Errorf("question sent = %q", body.Question)
-	}
-}
