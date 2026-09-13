@@ -41,7 +41,20 @@ var rootCmd = &cobra.Command{
 var exitCode int
 
 // Execute runs the root command. Called once by main.main().
+// loadEnvFiles reads the two files a key may live in, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way ora is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
+// It runs for every command, not just the daemon. ora doctor used to read only the environment the shell handed over, so a key in the file the first-run panel tells the user to write was invisible to it, and doctor reported no brain on a machine that had one.
+func loadEnvFiles() {
+	cwdEnv := godotenv.Load()
+	dataEnv := godotenv.Load(filepath.Join(config.DataDir(), "env"))
+	if cwdEnv != nil && dataEnv != nil {
+		slog.Info("no .env file found, reading the environment as it is", "looked_in", []string{".env", filepath.Join(config.DataDir(), "env")})
+	}
+	secureEnvFile(".env")
+	secureEnvFile(filepath.Join(config.DataDir(), "env"))
+}
+
 func Execute() {
+	loadEnvFiles()
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -77,13 +90,7 @@ func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 
 	// Two places, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way ora is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
 	// Without the second, the key had exactly one source and it was relative to the process's working directory: start ora from anywhere but the checkout and GEMINI_API_KEY was empty, which is voice failing completely with nothing in the log to say why. The first-run panel has been telling the user to put the key in this file all along, and nothing read it.
-	cwdEnv := godotenv.Load()
-	dataEnv := godotenv.Load(filepath.Join(config.DataDir(), "env"))
-	if cwdEnv != nil && dataEnv != nil {
-		slog.Info("no .env file found, reading the environment as it is", "looked_in", []string{".env", filepath.Join(config.DataDir(), "env")})
-	}
-	secureEnvFile(".env")
-	secureEnvFile(filepath.Join(config.DataDir(), "env"))
+	loadEnvFiles()
 	// global context that listens for sigint
 	// SIGTERM as well as SIGINT: kill, a logout and a system shutdown all send SIGTERM, and catching only SIGINT meant every one of those killed the process outright with no cleanup — abandoning a meeting recording mid-call.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
