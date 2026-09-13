@@ -230,8 +230,8 @@ func TestRunner_HappyPath(t *testing.T) {
 	for _, ev := range events() {
 		kinds = append(kinds, ev.Kind)
 	}
-	if strings.Join(kinds, ",") != "started,step,verified,done" {
-		t.Errorf("events = %v, want started,step,verified,done", kinds)
+	if strings.Join(kinds, ",") != "started,plan,step,verified,done" {
+		t.Errorf("events = %v, want started,plan,step,verified,done", kinds)
 	}
 	if last := events()[len(events())-1]; last.Spend == nil || last.Spend.Rounds != 2 {
 		t.Errorf("the done event carries %+v, want the token accounting", last.Spend)
@@ -694,6 +694,10 @@ func TestRedactedExpect(t *testing.T) {
 			}
 		})
 	}
+	// A type_text step that named no check at all stays empty rather than gaining a redacted value for a check that never existed.
+	if got := redactedExpect("type_text", act.Check{}); got.Value != "" || got.Kind != "" {
+		t.Errorf("redactedExpect(type_text, empty) = %+v, want it untouched", got)
+	}
 }
 
 // TestRunner_FieldHoldsExpectOfTypedTextIsRedacted checks the case the plain type_text redaction above cannot reach on its own: a step's Expect naming field_holds with the same text just typed, which otherwise lands in the checkpoint and on the event stream even though StorableArgs already dropped it from the step's own arguments. The live wait_for check must still see the real text, since only that lets the step actually pass.
@@ -792,25 +796,26 @@ func TestRunner_SaveRefusesACheckpointThatWillNotMarshal(t *testing.T) {
 	}
 }
 
-// TestRunner_ResumeRaisesASpentBudget checks a job that ended on its step budget comes back when it is resumed with a bigger one, and that the fields the caller left at zero keep what the checkpoint had. It also checks that running out of steps says how far the job got in plain words rather than claiming the goal was reached, and names what it was about to do next.
+// TestRunner_ResumeRaisesASpentBudget checks POST-style resume takes a budget and applies it over the spent one, so a job that ended on its budget can be sent back in with more, and the fields the caller left at zero keep what the checkpoint had. It also checks that ending on a budget says how far the job got in plain words rather than claiming the goal was reached.
+//
+// It is the token budget that ends this job, not the step budget: running out of steps is only a bad guess at the size of the task and now asks the user rather than ending (see outOfRoomQuestion), so tokens are the budget that still ends a job outright.
 func TestRunner_ResumeRaisesASpentBudget(t *testing.T) {
 	exec := &fakeExec{}
 	r, _, _ := newRunner(t, exec, script(
 		stepReply("click", "S16 E8"),
 		stepReply("click", "S16 E8"),
-		stepReply("click", "S16 E8"),
-		stepReply("click", "S16 E8"),
 		doneReply("Playing now."),
 	))
-	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: time.Minute, InputTokens: 200000, Steps: 3}})
+	// Each round of the test model costs a thousand input tokens, so this runs out on the third round's check, before the reply that would have said done.
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: time.Minute, InputTokens: 1500, Steps: 40}})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	job := waitState(t, r, id, Failed, Done, Stuck)
-	if job.State != Failed || len(job.Steps) != 3 {
-		t.Fatalf("job = %q with %d steps, want failed on the three-step budget", job.State, len(job.Steps))
+	if job.State != Failed || !strings.Contains(job.Err, "token") {
+		t.Fatalf("job = %q (%s), want failed on the token budget", job.State, job.Err)
 	}
-	for _, want := range []string{"3 step", "play S16 E8"} {
+	for _, want := range []string{"step", "play S16 E8"} {
 		if !strings.Contains(job.Say, want) {
 			t.Errorf("the closing words %q do not mention %q", job.Say, want)
 		}
@@ -818,18 +823,15 @@ func TestRunner_ResumeRaisesASpentBudget(t *testing.T) {
 	if strings.Contains(strings.ToLower(job.Say), "done") {
 		t.Errorf("the closing words %q claim the job finished", job.Say)
 	}
-	if err := r.Resume(context.Background(), id, Budget{Steps: 12}); err != nil {
+	if err := r.Resume(context.Background(), id, Budget{InputTokens: 500000}); err != nil {
 		t.Fatalf("Resume with a raised budget: %v", err)
 	}
-	job = waitState(t, r, id, Done, Stopped)
+	job = waitState(t, r, id, Done, Stopped, Failed)
 	if job.State != Done {
 		t.Fatalf("state = %q (%s), want done on the raised budget", job.State, job.Err)
 	}
-	if job.Budget.Steps != 12 || job.Budget.InputTokens != 200000 {
-		t.Errorf("budget = %+v, want the raised steps and the checkpoint's own token budget", job.Budget)
-	}
-	if len(job.Steps) != 4 {
-		t.Errorf("steps = %d, want the three already taken and one more", len(job.Steps))
+	if job.Budget.InputTokens != 500000 || job.Budget.Steps != 40 {
+		t.Errorf("budget = %+v, want the raised tokens and the checkpoint's own step budget", job.Budget)
 	}
 }
 
@@ -940,14 +942,6 @@ func TestFromPromptFunc_EstimatesWhatTheSeamDoesNotReport(t *testing.T) {
 	}
 	if usage.Model != "claude-cli" || usage.Input != 100 || usage.Output != 10 {
 		t.Errorf("usage = %+v, want claude-cli with 100 in and 10 out", usage)
-	}
-}
-
-// A type_text step that named no check at all stays empty rather than gaining a redacted value for a check that never existed.
-func TestRedactedExpect_LeavesAnEmptyCheckAlone(t *testing.T) {
-	got := redactedExpect("type_text", act.Check{})
-	if got.Value != "" || got.Kind != "" {
-		t.Errorf("redactedExpect(type_text, empty) = %+v, want it untouched", got)
 	}
 }
 
@@ -1398,8 +1392,9 @@ func TestRunner_ACheckThatAlreadyHeldIsNotCountedAsAFailure(t *testing.T) {
 	}
 	job := waitState(t, r, id, Failed, Done, Stuck, Stopped)
 
-	if job.State != Failed || !strings.Contains(job.Err, "step") {
-		t.Fatalf("state = %q (%s), want it to run out of steps rather than get stuck", job.State, job.Err)
+	// Spending the steps is now a question rather than an end, and the question it asks is the out-of-room one, not the three-failed-checks one — which is the whole point: none of those checks counted as a failure.
+	if job.State != Stuck || !strings.Contains(job.Question, "not there yet") {
+		t.Fatalf("state = %q, question = %q, want it to run out of room rather than get stuck on failed checks", job.State, job.Question)
 	}
 	if job.FailsInARow != 0 {
 		t.Errorf("fails in a row = %d after %d steps whose checks already held, want 0", job.FailsInARow, len(job.Steps))
@@ -1480,5 +1475,322 @@ func TestRunner_GivesTheLookAllowanceBackEveryRound(t *testing.T) {
 	exec.smu.Unlock()
 	if rounds < 3 {
 		t.Errorf("EndScreenRound ran %d times, want once per round (three rounds: look, click, done)", rounds)
+	}
+}
+
+// A job could only ever poke the screen. Its prompt named eleven tools, all of them screen or app actions, so nothing in a forty-step job could look anything up or remember anything: Orient had one input, the pixels in front of it. The tools were reachable through the Executor seam the whole time — ExecuteAskTool handles branch, query_memory and recall — so the only thing stopping a job from using them was that the prompt never said they existed.
+func TestSystemPromptOffersSearchAndMemory(t *testing.T) {
+	for _, tool := range []string{"branch", "query_memory", "recall"} {
+		if !strings.Contains(systemPrompt, tool) {
+			t.Errorf("the job's system prompt never names %q, so a job can never call it", tool)
+		}
+	}
+}
+
+// Searching and remembering change nothing on the screen, so the verify step has nothing to wait for. They have to count as reads, or every lookup would be checked against a screen change that was never coming and would fail, three of them in a row would trip the stuck counter, and the job would stop to ask the user why its own research did not move the page.
+func TestSearchAndMemoryCountAsReads(t *testing.T) {
+	for _, tool := range []string{"branch", "query_memory", "recall"} {
+		if !isRead(tool) {
+			t.Errorf("isRead(%q) = false; a lookup changes no screen and must not be checked against one", tool)
+		}
+	}
+	// The actions must still be checked. A click that is treated as a read is a click nothing verifies.
+	for _, tool := range []string{"click", "type_text", "press_key", "click_at", "open_app", "open_url", "switch_window", "scroll_to"} {
+		if isRead(tool) {
+			t.Errorf("isRead(%q) = true; an action has to be verified", tool)
+		}
+	}
+}
+
+// wallGuard took the wall budget by value when the job started, so a job that raised its own budget mid-flight kept the clock it was born with and got killed on the old one. It has to read the budget the job holds now.
+func TestWallGuard_HonorsABudgetRaisedMidFlight(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l := &live{
+		job:     Job{Budget: Budget{Wall: 150 * time.Millisecond}},
+		ctx:     ctx,
+		cancel:  cancel,
+		started: time.Now(),
+		working: make(chan struct{}, 1),
+	}
+	go wallGuard(l, l.job.Budget.Wall)
+
+	// Raise it well past what the guard was started with, before the original would have fired.
+	l.set(func(j *Job) { j.Budget.Wall = 10 * time.Second })
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("the job was cancelled on the wall budget it started with, not the one it now holds")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// estimateReply is a step reply that also carries the model's own guess at how many steps the whole task needs.
+func estimateReply(tool, expect string, estimate int) string {
+	b, _ := json.Marshal(map[string]any{
+		"plan":     "click play, then check the title",
+		"next":     "click " + tool,
+		"tool":     tool,
+		"args":     map[string]any{"n": 1},
+		"expect":   map[string]string{"kind": act.TitleContains, "value": expect},
+		"estimate": estimate,
+	})
+	return string(b)
+}
+
+// The model is the only thing that knows roughly how big a task is, and looking at the screen and switching windows are steps too, so its own guess is the honest starting point. It gets twice what it asks for, because the whole point is room to get things wrong and still finish.
+func TestRunner_DoublesTheModelsOwnEstimate(t *testing.T) {
+	exec := &fakeExec{}
+	r, _, _ := newRunner(t, exec, script(
+		estimateReply("click", "S16 E8", 20),
+		doneReply("Playing now."),
+	))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Done, Failed, Stuck)
+	if job.Estimate != 20 {
+		t.Errorf("estimate = %d, want the 20 the model asked for", job.Estimate)
+	}
+	if job.Budget.Steps != 40 {
+		t.Errorf("step budget = %d, want twice the estimate", job.Budget.Steps)
+	}
+}
+
+// An estimate only ever adds room. A model that lowballs a task must not talk its own budget down below what it was given, or a bad guess on round one becomes a task that cannot finish.
+func TestRunner_ASmallEstimateNeverShrinksTheBudget(t *testing.T) {
+	exec := &fakeExec{}
+	r, _, _ := newRunner(t, exec, script(
+		estimateReply("click", "S16 E8", 2),
+		doneReply("Playing now."),
+	))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Steps: 30}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Done, Failed, Stuck)
+	if job.Budget.Steps != 30 {
+		t.Errorf("step budget = %d, want the 30 it was given rather than twice a two-step guess", job.Budget.Steps)
+	}
+}
+
+// There are two honest ways for a task to end: it finishes, or it admits it cannot and asks for help. Running out of room is the second of those, not a silent failure, so it asks — and saying yes has to actually buy it more room, or it would ask again on the very next round forever.
+func TestRunner_OutOfRoomAsksRatherThanFailing(t *testing.T) {
+	exec := &fakeExec{}
+	r, _, _ := newRunner(t, exec, script(
+		estimateReply("click", "S16 E8", 1),
+		stepReply("click", "S16 E8"),
+		stepReply("click", "S16 E8"),
+		doneReply("Playing now."),
+	))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: time.Minute, InputTokens: 200000, Steps: 1}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Stuck, Failed, Done)
+	if job.State != Stuck {
+		t.Fatalf("state = %q (%s), want it to ask for help rather than fail", job.State, job.Err)
+	}
+	// The question has to say what it has spent and that it has not got there, so the answer is an informed one.
+	if !strings.Contains(job.Question, "step") {
+		t.Errorf("the question %q does not mention the steps it has taken", job.Question)
+	}
+	before := job.Budget.Steps
+	if err := r.Answer(id, "yes, keep going"); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	job = waitState(t, r, id, Done, Failed)
+	if job.State != Done {
+		t.Fatalf("state = %q (%s) after being told to carry on, want done", job.State, job.Err)
+	}
+	if job.Budget.Steps <= before {
+		t.Errorf("step budget = %d after a yes, want more than the %d it had", job.Budget.Steps, before)
+	}
+}
+
+// Chaining taps in one call is the efficiency a task earns by getting good, and it was reachable from the voice path only. A job that cannot chain pays a model round trip for every tap of a menu that has already closed by the time the round comes back.
+func TestSystemPromptOffersClickChaining(t *testing.T) {
+	if !strings.Contains(systemPrompt, "then") {
+		t.Error("the job's system prompt never mentions chaining taps, so a job pays a round trip per tap")
+	}
+}
+
+// What he likes about watching an agent work is that it says what it is going to do and then does it, so you can tell a deviation from a plan you were told. A job writes a plan on its first round and carries it in every later prompt, but for its whole life it never left the job: the event stream opened with the goal, which is the user's own words handed back, and then went straight to "Step 1". Nothing said what the thirty steps about to arrive were for.
+func TestRunner_SaysThePlanBeforeItStarts(t *testing.T) {
+	first, _ := json.Marshal(map[string]any{
+		"plan":     "open Netflix, find the episode, press play",
+		"estimate": 6,
+		"next":     "click play",
+		"tool":     "click",
+		"args":     map[string]any{"n": 1},
+		"expect":   map[string]string{"kind": act.TitleContains, "value": "S16 E8"},
+	})
+	exec := &fakeExec{}
+	r, _, events := newRunner(t, exec, script(string(first), doneReply("It is playing S16 E8.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Done, Failed, Stuck)
+
+	all := events()
+	planAt, stepAt := -1, -1
+	for i, ev := range all {
+		if ev.Kind == "plan" && planAt < 0 {
+			planAt = i
+		}
+		if ev.Kind == "step" && stepAt < 0 {
+			stepAt = i
+		}
+	}
+	if planAt < 0 {
+		t.Fatal("no plan event, so the plan the model wrote never reached the user")
+	}
+	if plan := all[planAt]; plan.Text != "open Netflix, find the episode, press play" {
+		t.Errorf("plan event says %q, want the plan the model actually wrote", plan.Text)
+	}
+	// The estimate rides the plan event: it is written in the same breath, it is the model's own guess at the size of the job, and it is what makes the step count arriving afterwards mean anything.
+	if plan := all[planAt]; plan.Step != 6 {
+		t.Errorf("plan event carries estimate %d, want the model's own estimate of 6 steps", plan.Step)
+	}
+	if stepAt >= 0 && planAt > stepAt {
+		t.Errorf("the plan arrived at event %d, after the first step at %d — it has to come before the work", planAt, stepAt)
+	}
+	// One plan per job: a plan restated every round is not a plan, and the job already refuses to rewrite the one it is working to.
+	planned := 0
+	for _, ev := range all {
+		if ev.Kind == "plan" {
+			planned++
+		}
+	}
+	if planned != 1 {
+		t.Errorf("%d plan events, want exactly one", planned)
+	}
+}
+
+// refExec is an executor that also supplies the past-run reference block, the way the daemon's agent does.
+type refExec struct {
+	fakeExec
+	block string
+	asked []string
+}
+
+func (e *refExec) ActReferenceFor(ctx context.Context, goal string, now time.Time) string {
+	e.asked = append(e.asked, goal)
+	return e.block
+}
+
+// A job planned from nothing every time. The block that shows a model its own past runs, step by step, with the lessons it drew from them, has been built and populated since 2026-09-09 and had exactly one caller: the ask path, at agent/ask.go. The long-horizon path never read it, so a task done yesterday was re-derived from scratch today while a one-shot screen question got the benefit of history.
+func TestRunner_PlansAgainstWhatItDidBefore(t *testing.T) {
+	exec := &refExec{block: "WHAT YOU DID LAST TIME\n- 2 days ago, \"play the next episode\": clicked Netflix, clicked play"}
+	r, _, _ := newRunner(t, exec, script(stepReply("click", "S16 E8"), doneReply("Playing.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Done, Failed, Stuck)
+
+	if len(exec.asked) == 0 {
+		t.Fatal("the job never asked for the reference block, so it planned against nothing")
+	}
+	if exec.asked[0] != "play S16 E8" {
+		t.Errorf("looked up %q, want the job's own goal", exec.asked[0])
+	}
+	// Looked up once for the job, not once a round: the block is about the goal, which does not change, and a lookup every round would pay an embedding search forty times over for the same answer.
+	if len(exec.asked) != 1 {
+		t.Errorf("looked it up %d times, want once for the whole job", len(exec.asked))
+	}
+	if !strings.Contains(BuildPrompt(mustJob(t, r, id)), "WHAT YOU DID LAST TIME") {
+		t.Error("the reference block is not in the job's prompt")
+	}
+}
+
+// mustJob reads a job back or fails the test.
+func mustJob(t *testing.T, r *Runner, id string) Job {
+	t.Helper()
+	job, err := r.Job(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Job(%s): %v", id, err)
+	}
+	return job
+}
+
+// burstReply is a decision that takes several actions in one round, checked once at the end.
+func burstReply(expect string, tools ...string) string {
+	var then []map[string]any
+	for _, t := range tools[1:] {
+		then = append(then, map[string]any{"tool": t, "args": map[string]any{"n": 1}})
+	}
+	b, _ := json.Marshal(map[string]any{
+		"plan":   "do the sequence that worked last time",
+		"next":   "the whole burst",
+		"tool":   tools[0],
+		"args":   map[string]any{"n": 1},
+		"then":   then,
+		"expect": map[string]string{"kind": act.TitleContains, "value": expect},
+	})
+	return string(b)
+}
+
+// One action a round is what a job had to pay whether or not it had done the task before, so a sequence of five known taps cost five model rounds, five screen readings and five checks. The frontier's answer is to dispatch a predicted sequence in one go and check the end state once, which is also the cheapest thing: four of those five rounds were the cost, not the taps.
+func TestRunner_TakesAKnownSequenceInOneRound(t *testing.T) {
+	exec := &fakeExec{}
+	r, _, events := newRunner(t, exec, script(burstReply("S16 E8", "click", "click", "press_key"), doneReply("Playing.")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Done, Failed, Stuck)
+	if job.State != Done {
+		t.Fatalf("state = %q (%s), want done", job.State, job.Err)
+	}
+
+	// Every action in order, then one check for the whole burst — not one check each.
+	calls := exec.names()
+	want := []string{"observe_screen", "click", "click", "press_key", "wait_for", "observe_screen"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Errorf("tool calls = %v, want %v", calls, want)
+	}
+	// One round, so one step: the budget counts model rounds, which is what a job's cost actually is, and a burst that buys three actions for one round should buy room as well as time.
+	if len(job.Steps) != 1 {
+		t.Fatalf("steps = %d, want the burst recorded as one step", len(job.Steps))
+	}
+	// The checkpoint has to say every action the burst took. A daemon that dies mid-burst and comes back believing one click happened would take the other two again on the user's real screen, which is the guarantee the one-action loop gave and a burst must not quietly drop.
+	if got := job.Steps[0].Burst; len(got) != 3 {
+		t.Fatalf("the step records %d actions, want all 3 the burst took", len(got))
+	}
+	if job.Steps[0].Burst[2].Tool != "press_key" {
+		t.Errorf("the last recorded action is %q, want press_key", job.Steps[0].Burst[2].Tool)
+	}
+	if job.Spend.Rounds != 2 {
+		t.Errorf("rounds = %d, want two: the burst and the done", job.Spend.Rounds)
+	}
+	// The trail has to say what actually happened on the screen, or a user watching sees one click where three landed.
+	var stepLine string
+	for _, ev := range events() {
+		if ev.Kind == "step" {
+			stepLine = ev.Text
+		}
+	}
+	if !strings.Contains(stepLine, "3") {
+		t.Errorf("the step line says %q, want it to say how many actions the burst took", stepLine)
+	}
+}
+
+// A burst whose check fails says nothing about which action in it went wrong, so the job must not credit any of them and must not be left thinking one particular tap failed.
+func TestRunner_ABurstThatFailsItsCheckCountsAsOneFailure(t *testing.T) {
+	exec := &fakeExec{verdicts: []bool{false}}
+	r, _, _ := newRunner(t, exec, script(burstReply("S16 E8", "click", "click")))
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	job := waitState(t, r, id, Stuck, Failed, Done)
+	if job.FailsInARow != stuckAfter {
+		t.Errorf("fails in a row = %d, want the burst to count once each time, reaching %d", job.FailsInARow, stuckAfter)
+	}
+	if job.State != Stuck {
+		t.Errorf("state = %q, want stuck once the same burst has failed %d times", job.State, stuckAfter)
 	}
 }
