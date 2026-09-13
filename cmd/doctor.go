@@ -108,6 +108,8 @@ func runDoctor(ctx context.Context) []doctorCheck {
 	} else {
 		out = append(out, doctorCheck{Name: "pointer and keyboard", Detail: "consent saved; how many monitors it covers is only known once the session opens", OK: true})
 	}
+	home, _ := os.UserHomeDir()
+	out = append(out, brainCheck(home, os.Getenv("GEMINI_API_KEY")))
 	// Daemon: everything above is driven by it.
 	if resp, err := http.Get("http://127.0.0.1:" + DaemonPort + "/ping"); err != nil {
 		out = append(out, doctorCheck{Name: "daemon", Detail: "not answering on " + DaemonPort, Fix: "run ora"})
@@ -116,6 +118,28 @@ func runDoctor(ctx context.Context) []doctorCheck {
 		out = append(out, doctorCheck{Name: "daemon", Detail: "answering", OK: true})
 	}
 	return out
+}
+
+// brainCheck reports whether Ora has anything to think with. Everything else doctor checks is about the desk — the buses, the screen, the pointer — and a machine can pass all of it and still not answer a single question, which is exactly what a clean install does before a key or a login is in place. Input: the home directory the CLI login files live under, and the Gemini API key as the environment gives it. Output: the check, naming every brain it found, or saying how to give it one.
+func brainCheck(home, apiKey string) doctorCheck {
+	var found []string
+	if strings.TrimSpace(apiKey) != "" {
+		found = append(found, "a Gemini API key")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", ".credentials.json")); err == nil {
+		found = append(found, "a Claude subscription")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "auth.json")); err == nil {
+		found = append(found, "a ChatGPT subscription")
+	}
+	if len(found) == 0 {
+		return doctorCheck{
+			Name:   "brain",
+			Detail: "no brain: nothing here can answer a question",
+			Fix:    "put GEMINI_API_KEY in " + filepath.Join(config.DataDir(), "env") + ", or run claude login, or codex login",
+		}
+	}
+	return doctorCheck{Name: "brain", Detail: strings.Join(found, ", "), OK: true}
 }
 
 // anyFrame reports whether at least one listed window carries a frame rectangle.
