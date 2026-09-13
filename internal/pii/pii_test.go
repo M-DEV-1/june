@@ -98,7 +98,7 @@ func TestTear_TwoPeopleInOneSentence(t *testing.T) {
 	if got := torn.Subjects(); !reflect.DeepEqual(got, []string{"priya-shah", "vikram-rao"}) {
 		t.Errorf("subjects %v, want [priya-shah vikram-rao]", got)
 	}
-	if torn.Text != "[[PERSON_ea47aff2]] and [[PERSON_a8bad8f6]] are both coming" {
+	if torn.Text != "[[PERSON_ea47aff2]] and [[PERSON_6656340a]] are both coming" {
 		t.Errorf("text: %q", torn.Text)
 	}
 }
