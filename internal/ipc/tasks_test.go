@@ -270,7 +270,7 @@ func TestTasksListsOnlyTheUsersOwnNoticedItems(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
 	items := []memory.ActionItem{
-		{Owner: "Priya", Text: "send the workbook", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
+		{Owner: "Vexil", Text: "send the workbook", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
 		{Owner: memory.MeOwner, Text: "push the PR", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
 	}
 	if _, err := store.AddActionItems(ctx, items); err != nil {
@@ -290,12 +290,12 @@ func TestTasksListsOnlyTheUsersOwnNoticedItems(t *testing.T) {
 func TestTasksOwnerFilter(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera — goes by Alex."); err != nil {
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen — goes by Zemna."); err != nil {
 		t.Fatal(err)
 	}
 	items := []memory.ActionItem{
-		{Owner: "Alex Rivera", Text: "raise the PR", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
-		{Owner: "Priya Shah", Text: "send the workbook", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
+		{Owner: "Zemna Braxen", Text: "raise the PR", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
+		{Owner: "Vexil Quorin", Text: "send the workbook", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
 		{Owner: memory.UnknownOwner, Text: "clean up the lockfile situation", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "PRDO sync", Raised: time.Now()},
 	}
 	if _, err := store.AddActionItems(ctx, items); err != nil {

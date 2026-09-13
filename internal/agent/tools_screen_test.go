@@ -169,7 +169,7 @@ func TestObserveResult_DoesNotRepeatTheBrowserHintOnAnUnchangedLook(t *testing.T
 func TestNoteRefsCarryTheReviseAffordance(t *testing.T) {
 	lines := []string{
 		`[note#312] The user takes one scoop of a supplement every morning.`,
-		`[summary (Thu Sep 3 15:15, 8d ago)] chatted with Priya Shah on Microsoft Teams`,
+		`[summary (Thu Sep 3 15:15, 8d ago)] chatted with Vexil Quorin on Microsoft Teams`,
 	}
 	got := withReviseHint(strings.Join(lines, "\n"))
 	if !strings.Contains(got, reviseHint) {
@@ -186,7 +186,7 @@ func TestNoteRefsCarryTheReviseAffordance(t *testing.T) {
 // A result with nothing revise can act on must not pay for the line. Only notes carry a ref revise takes.
 func TestNoReviseAffordanceWithoutANoteRef(t *testing.T) {
 	for _, result := range []string{
-		`[summary (Thu Sep 3 15:15, 8d ago)] chatted with Priya Shah on Microsoft Teams`,
+		`[summary (Thu Sep 3 15:15, 8d ago)] chatted with Vexil Quorin on Microsoft Teams`,
 		"no memory matches",
 		"",
 	} {

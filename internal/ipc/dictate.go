@@ -387,7 +387,7 @@ func fileExists(path string) bool {
 // dictationPromptBudget caps the priming prompt in characters, for the same reason internal/recorder caps its own: whisper keeps only the last few hundred tokens of what it is primed with, so a longer prompt has its front silently cut off.
 const dictationPromptBudget = 500
 
-// dictationPromptFrom turns the store's personal-context subjects into the sentence whisper is primed with, so a name spoken into the microphone is spelled the way memory already spells it. Input: the subjects, as stored ("sneha-kumar"). Output: a line like "Notes. People: Sneha Kumar, Rohit.", or "" when there is nobody to name; the user's own identity entry and their preferences are skipped, and the sentence is capped at dictationPromptBudget characters.
+// dictationPromptFrom turns the store's personal-context subjects into the sentence whisper is primed with, so a name spoken into the microphone is spelled the way memory already spells it. Input: the subjects, as stored ("sorrek-thivan"). Output: a line like "Notes. People: Sorrek Thivan, Yalven.", or "" when there is nobody to name; the user's own identity entry and their preferences are skipped, and the sentence is capped at dictationPromptBudget characters.
 // It is written as capitalised, punctuated English on purpose: whisper continues the prompt's register as well as its vocabulary, and a bare lowercase word list comes back as a lowercase unpunctuated transcript.
 func dictationPromptFrom(subjects []string) string {
 	var b strings.Builder

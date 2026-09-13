@@ -88,7 +88,7 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	return stripPromptEcho(parseSegments(out, speaker, offset), prompt), nil
 }
 
-// stripPromptEcho removes the priming prompt from the front of the transcript when whisper reads it back as speech instead of only conditioning on it. In the 2026-08-31 recording the first transcript line was "Participants: Rohit Verma, Claude Artifact." — the tail of the prompt, printed at 00:00:00 as though someone had said it, and then read by the minutes model as evidence about who was in the call.
+// stripPromptEcho removes the priming prompt from the front of the transcript when whisper reads it back as speech instead of only conditioning on it. In the 2026-08-31 recording the first transcript line was "Participants: Yalven Pravik, Claude Artifact." — the tail of the prompt, printed at 00:00:00 as though someone had said it, and then read by the minutes model as evidence about who was in the call.
 // Whisper keeps only the last whisperMaxContext tokens of the prompt, so the echo can be any suffix of it. Sentences are stripped one at a time off the front of the first segment, and a segment left empty is dropped.
 func stripPromptEcho(segs []Segment, prompt string) []Segment {
 	if len(segs) == 0 || prompt == "" {
@@ -426,10 +426,10 @@ const primingPromptBudget = 500
 // acronymPattern matches an all-capitals token — INFORM, GRDI, ASRS, ESG. These are exactly the words speech recognition mangles ("ND game" for INFORM) and exactly the words a meeting's own screens are full of.
 var acronymPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,5}\b`)
 
-// properNounPattern matches a run of two or more capitalised words — "Climate Risk Studio", "Acme Essentials", "Priya Shah". One capitalised word on its own is almost always a sentence start, so the run has to be at least two.
+// properNounPattern matches a run of two or more capitalised words — "Climate Risk Studio", "Acme Essentials", "Vexil Quorin". One capitalised word on its own is almost always a sentence start, so the run has to be at least two.
 var properNounPattern = regexp.MustCompile(`\b[A-Z][a-z]+(?: [A-Z][a-z0-9]+)+\b`)
 
-// chatSenderPattern matches a name written the way a chat window writes it: at the start of its own line, immediately before a colon, as in "Priya Shah: ok sure ping me". The line anchor is what keeps it off the labels an app puts mid-sentence ("Industry Division: Health Care"), which look identical without it.
+// chatSenderPattern matches a name written the way a chat window writes it: at the start of its own line, immediately before a colon, as in "Vexil Quorin: ok sure ping me". The line anchor is what keeps it off the labels an app puts mid-sentence ("Industry Division: Health Care"), which look identical without it.
 var chatSenderPattern = regexp.MustCompile(`(?m)^\s*([A-Z][a-z]+(?: [A-Z][a-z]+| [A-Z]{2,4})+):`)
 
 // chromeWords is the capitalised furniture every browser, app window and meeting-call toolbar carries regardless of what the meeting is about. A candidate term or roster name is thrown away if any of its words is in here, which is what keeps "Insights Settings Private Branches" and "Datepicker All" out of a prompt about climate risk scoring, and "Mute", "Share Screen" or "Raise Hand" out of a participant list.
@@ -471,7 +471,7 @@ func personNamesFromContext(entries []db.PersonalEntry) []string {
 	return names
 }
 
-// primingPromptFor is primingPrompt with the people the store already knows added after the screen's own terms, within the same budget. Whisper spells a name the way it is primed to: on 2026-09-03 a call primed only with "Terms: API." wrote "Ashar" for Sneha, and that guess became a person in memory. People go last because the prompt is cut from the front when it is too long.
+// primingPromptFor is primingPrompt with the people the store already knows added after the screen's own terms, within the same budget. Whisper spells a name the way it is primed to: on 2026-09-03 a call primed only with "Terms: API." wrote "Oshveln" for Sorrek, and that guess became a person in memory. People go last because the prompt is cut from the front when it is too long.
 func primingPromptFor(eps []db.Episode, people []string) string {
 	base := primingPromptBody(eps)
 	if len(people) == 0 {
@@ -512,7 +512,7 @@ func primingPromptBody(eps []db.Episode) string {
 		counts[key]++
 	}
 
-	// A name written immediately before a colon is how a chat window labels who typed something. Only the meeting's own window counts: on 2026-08-31 a WhatsApp tab open during a standup put "Rohit Verma" and "Claude Artifact" into the prompt as the meeting's participants, and whisper printed them back as the first line of the transcript.
+	// A name written immediately before a colon is how a chat window labels who typed something. Only the meeting's own window counts: on 2026-08-31 a WhatsApp tab open during a standup put "Yalven Pravik" and "Claude Artifact" into the prompt as the meeting's participants, and whisper printed them back as the first line of the transcript.
 	for _, e := range eps {
 		inMeeting := isMeetingWindow(e.App, e.Title)
 		for _, text := range []string{e.Title, e.UserActivity, e.ScreenText, e.VisibleText} {

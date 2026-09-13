@@ -155,7 +155,7 @@ func TestAskAgy_ADifferentConversationStartsANewProcess(t *testing.T) {
 	if fake.starts != 1 {
 		t.Fatalf("the same conversation continuing started %d processes, want 1", fake.starts)
 	}
-	other := History{genai.NewContentFromText("what is my manager's name", genai.RoleUser), genai.NewContentFromText("Priya", genai.RoleModel)}
+	other := History{genai.NewContentFromText("what is my manager's name", genai.RoleUser), genai.NewContentFromText("Vexil", genai.RoleModel)}
 	if _, err := a.askAgy(t.Context(), newProc, "gemini-3-pro", other, "and her role?"); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestAskAgy_RestartsADeadProcessWithInstructionAndHistory(t *testing.T) {
 	}
 	t.Cleanup(a.CloseAgySession)
 
-	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Priya"}})
+	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Vexil"}})
 	if _, err := a.askAgy(t.Context(), newProc, "", history, "hello"); err != nil {
 		t.Fatal(err)
 	}

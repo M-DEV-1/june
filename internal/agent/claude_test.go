@@ -393,14 +393,14 @@ func TestAskClaudeWith_SendsThePriorTurns(t *testing.T) {
 		prompt = stdin
 		return []byte(`{"result":"done","is_error":false}`), nil
 	}
-	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Priya"}})
+	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Vexil"}})
 	if _, err := a.askClaude(t.Context(), run, "sonnet", history, "when"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prompt, "who did I meet") || !strings.Contains(prompt, "Priya") {
+	if !strings.Contains(prompt, "who did I meet") || !strings.Contains(prompt, "Vexil") {
 		t.Errorf("the thread is missing from the prompt: %q", prompt)
 	}
-	if strings.Index(prompt, "Priya") > strings.Index(prompt, "when") {
+	if strings.Index(prompt, "Vexil") > strings.Index(prompt, "when") {
 		t.Errorf("the thread came after the question: %q", prompt)
 	}
 }

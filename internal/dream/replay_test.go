@@ -109,8 +109,8 @@ func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testin
 	insertSummaryNode(t, store, "Elsewhere", "wandered off topic", base.Add(4*time.Minute))
 
 	shadow := &fakeShadowSeq{replies: []string{
-		`{"salience":2,"facts":["Shipped the API"],"people":["Alice"],"thread":"Project Nimbus"}`,
-		`{"salience":1,"facts":["shipped the api"],"people":["Alice","Bob"],"thread":"Project Nimbus"}`,
+		`{"salience":2,"facts":["Shipped the API"],"people":["Korveth"],"thread":"Project Nimbus"}`,
+		`{"salience":1,"facts":["shipped the api"],"people":["Korveth","Dranik"],"thread":"Project Nimbus"}`,
 		`{"salience":3,"facts":["Read chapter 3"],"people":[],"thread":"none"}`,
 		`{"salience":0,"facts":["Should not appear"],"people":["Ghost"],"thread":"Project Nimbus"}`,
 		`{"salience":1,"facts":["Wandered off topic"],"people":[],"thread":"Some Hallucinated Subject"}`,
@@ -146,8 +146,8 @@ func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testin
 		"## Project Nimbus (score 3)",
 		"State: mid sprint",
 		"Shipped the API (x2)",
-		"Alice (x2)",
-		"Bob\n",
+		"Korveth (x2)",
+		"Dranik\n",
 		"## none (score 4)",
 		"Read chapter 3 (x1)",
 		"Wandered off topic (x1)",

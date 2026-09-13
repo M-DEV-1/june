@@ -135,7 +135,7 @@ func TestSystemInstruction_PersonaIsDryAndNeverSaysSir(t *testing.T) {
 
 // The handshake the ask paths open with is what a provider's prompt cache has to match, and a cache can only match a prefix. Everything that reads the same on every ask therefore comes first — who Ora is, how it talks, this machine, the screen-task guidance — and the three things that change (the personal block, the memory lines, the clock) are the tail. Two asks a minute apart must agree on every byte up to that tail.
 func TestHandshakeInstruction_OnlyTheTailChangesBetweenAsks(t *testing.T) {
-	const personal = "Personal context — things known for certain about the user and their world:\n  Their name is Priya."
+	const personal = "Personal context — things known for certain about the user and their world:\n  Their name is Vexil."
 	const contextStr = "  [working] Brave: some tab"
 	now := time.Date(2026, 9, 5, 9, 0, 0, 0, time.UTC)
 	first := handshakeInstruction(now, personal, contextStr, 20)
@@ -151,7 +151,7 @@ func TestHandshakeInstruction_OnlyTheTailChangesBetweenAsks(t *testing.T) {
 	if first[:head] != second[:head] {
 		t.Error("two asks a minute apart differ before the tail; everything stable must come first")
 	}
-	if strings.Contains(first[:head], "Their name is Priya.") {
+	if strings.Contains(first[:head], "Their name is Vexil.") {
 		t.Error("the personal block is in the stable head; it changes between asks and belongs in the tail")
 	}
 	// 2,048 tokens is the smallest prefix the flash models will serve out of their implicit cache, and this codebase estimates four characters to the token (see internal/tally/weekly.go), so the stable head has to be at least this many characters to be cacheable at all.
@@ -177,7 +177,7 @@ func TestAskClaude_SystemPromptFileIsTheSameUpToItsTail(t *testing.T) {
 		}
 		return stub(ctx, args, stdin)
 	}
-	a := NewAgent(nil, nil, &toolTestBrain{personal: map[string]string{"identity": "Their name is Priya."}}, nil, "")
+	a := NewAgent(nil, nil, &toolTestBrain{personal: map[string]string{"identity": "Their name is Vexil."}}, nil, "")
 	for _, question := range []string{"what did we settle on for the venue", "and what about the date"} {
 		if _, err := a.askClaude(t.Context(), run, "claude-test", nil, question); err != nil {
 			t.Fatal(err)
@@ -193,7 +193,7 @@ func TestAskClaude_SystemPromptFileIsTheSameUpToItsTail(t *testing.T) {
 	if prompts[0][:head] != prompts[1][:head] {
 		t.Error("two asks wrote different system prompts before the tail; everything stable must come first")
 	}
-	if strings.Contains(prompts[0][:head], "Their name is Priya.") {
+	if strings.Contains(prompts[0][:head], "Their name is Vexil.") {
 		t.Error("the personal block is in the stable head; it changes between asks and belongs in the tail")
 	}
 }

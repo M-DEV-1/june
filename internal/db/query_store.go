@@ -107,7 +107,7 @@ func (s *Store) QueryStore(ctx context.Context, query string, rowCap int) (strin
 	return b.String(), nil
 }
 
-// renderQueryStoreRow joins one scanned row's values with a tab. A pipe would be ambiguous: a window title like "Chat | Priya Shah | Microsoft Teams" carries its own pipes, and a reader could not tell those from column boundaries. NULL becomes the literal "NULL"; []byte (sqlite's BLOB/untyped scan type) is rendered as a string since Ora's own tables never store binary in a column worth querying this way.
+// renderQueryStoreRow joins one scanned row's values with a tab. A pipe would be ambiguous: a window title like "Chat | Vexil Quorin | Microsoft Teams" carries its own pipes, and a reader could not tell those from column boundaries. NULL becomes the literal "NULL"; []byte (sqlite's BLOB/untyped scan type) is rendered as a string since Ora's own tables never store binary in a column worth querying this way.
 func renderQueryStoreRow(values []any) string {
 	parts := make([]string, len(values))
 	for i, v := range values {

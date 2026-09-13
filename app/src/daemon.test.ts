@@ -53,7 +53,7 @@ describe("ask", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "abc123", conversation_id: "70" }) });
     vi.stubGlobal("fetch", fetchMock);
 
-    const res = await ask("is the venue sorted?", "Mail · Priya Nair");
+    const res = await ask("is the venue sorted?", "Mail · Vexil Zelbrak");
 
     expect(res).toEqual({ id: "abc123", conversationId: "70" });
     expect(fetchMock).toHaveBeenCalledWith(
@@ -61,7 +61,7 @@ describe("ask", () => {
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: "is the venue sorted?", context: "Mail · Priya Nair", conversation_id: "" }),
+        body: JSON.stringify({ question: "is the venue sorted?", context: "Mail · Vexil Zelbrak", conversation_id: "" }),
       }),
     );
     vi.unstubAllGlobals();

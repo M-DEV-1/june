@@ -213,15 +213,15 @@ func TestAskAgyWith_SendsThePriorTurns(t *testing.T) {
 	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"done"}`}}
 	newProc := func() agySessionRunner { return fake }
 	t.Cleanup(a.CloseAgySession)
-	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Priya"}})
+	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Vexil"}})
 	if _, err := a.askAgy(t.Context(), newProc, "", history, "when"); err != nil {
 		t.Fatal(err)
 	}
 	prompt := fake.sends[0]
-	if !strings.Contains(prompt, "who did I meet") || !strings.Contains(prompt, "Priya") {
+	if !strings.Contains(prompt, "who did I meet") || !strings.Contains(prompt, "Vexil") {
 		t.Errorf("the thread is missing from the prompt: %q", prompt)
 	}
-	if strings.Index(prompt, "Priya") > strings.LastIndex(prompt, "when") {
+	if strings.Index(prompt, "Vexil") > strings.LastIndex(prompt, "when") {
 		t.Errorf("the thread came after the question: %q", prompt)
 	}
 }

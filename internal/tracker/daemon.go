@@ -387,7 +387,7 @@ func (d *Daemon) watchMeetingWindow(ctx context.Context) {
 				continue
 			}
 			slog.Debug("read the call's window", "app", app, "runes", len([]rune(text)))
-			// The title is captured even when the body is empty, which is the normal case rather than an edge one: a Chromium window exposes no accessibility text unless the browser was launched with --force-renderer-accessibility, and a meeting in a browser tab is how most calls happen here. The title alone is what names the other person — a Teams tab reads "Chat | Priya Shah | Microsoft Teams" — so requiring body text threw away the only thing on the machine that answers "who was in the room".
+			// The title is captured even when the body is empty, which is the normal case rather than an edge one: a Chromium window exposes no accessibility text unless the browser was launched with --force-renderer-accessibility, and a meeting in a browser tab is how most calls happen here. The title alone is what names the other person — a Teams tab reads "Chat | Vexil Quorin | Microsoft Teams" — so requiring body text threw away the only thing on the machine that answers "who was in the room".
 			// The watcher emits onto the same channel the tick loop does, so it goes through the same two calls the tick loop makes before a window becomes an episode: Normalize, so a window with no application name is still filed under one rather than reaching the store with App and Title both empty, and skipReason, which is where the blocklist, Ora's own window and an unidentifiable window are refused.
 			act := *Normalize(app, title)
 			act.ScreenText = text

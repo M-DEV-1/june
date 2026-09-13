@@ -16,7 +16,7 @@ func TestSnoozeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddSnooze(past): %v", err)
 	}
-	if _, err := store.AddSnooze(ctx, "routine", "7", "Routine", "Priya replied", now.Add(time.Hour)); err != nil {
+	if _, err := store.AddSnooze(ctx, "routine", "7", "Routine", "Vexil replied", now.Add(time.Hour)); err != nil {
 		t.Fatalf("AddSnooze(future): %v", err)
 	}
 

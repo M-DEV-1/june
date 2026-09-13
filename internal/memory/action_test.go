@@ -13,8 +13,8 @@ const realMinutes = `# Meeting minutes
 - Keep JSONB as the storage approach.
 
 ## Action items
-- **Alex Rivera** — wire up Value Chain Activity Generation on Essentials and implement the small PRDO generation module.
-- **Alex Rivera** — finish the local ` + "`acme-essentials`" + ` setup: restore the DB dump, resolve the asdf/` + "`.tool-versions`" + ` Node mismatch.
+- **Zemna Braxen** — wire up Value Chain Activity Generation on Essentials and implement the small PRDO generation module.
+- **Zemna Braxen** — finish the local ` + "`acme-essentials`" + ` setup: restore the DB dump, resolve the asdf/` + "`.tool-versions`" + ` Node mismatch.
 - **Owner unclear** — clean up the mixed lockfile situation in the frontend; raised but not assigned.
 
 ## Open questions
@@ -28,8 +28,8 @@ func TestParseMinutesActions(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("want 3 action items, got %d: %+v", len(got), got)
 	}
-	if got[0].Owner != "Alex Rivera" {
-		t.Errorf("owner = %q, want %q", got[0].Owner, "Alex Rivera")
+	if got[0].Owner != "Zemna Braxen" {
+		t.Errorf("owner = %q, want %q", got[0].Owner, "Zemna Braxen")
 	}
 	if got[0].Text != "wire up Value Chain Activity Generation on Essentials and implement the small PRDO generation module." {
 		t.Errorf("text = %q", got[0].Text)
@@ -51,12 +51,12 @@ func TestParseMinutesActions(t *testing.T) {
 }
 
 func TestActionItem_NoteIsOneReadableLine(t *testing.T) {
-	a := ActionItem{Owner: "Krish", Text: "reply on WhatsApp during his leave.", Status: StatusOpen, Priority: PriorityLow, Source: "md x mf tool", Raised: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)}
+	a := ActionItem{Owner: "Melvorn", Text: "reply on WhatsApp during his leave.", Status: StatusOpen, Priority: PriorityLow, Source: "md x mf tool", Raised: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)}
 	note := a.Note()
 	if strings.Contains(note, "\n") {
 		t.Errorf("note spans lines, which the FTS mirror stores as one blob: %q", note)
 	}
-	for _, want := range []string{"[open/low]", "Krish", "reply on WhatsApp", "md x mf tool", "2026-08-28"} {
+	for _, want := range []string{"[open/low]", "Melvorn", "reply on WhatsApp", "md x mf tool", "2026-08-28"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note %q is missing %q", note, want)
 		}
@@ -71,7 +71,7 @@ func TestParseAction(t *testing.T) {
 	}{
 		{
 			name: "a hand-edited note still parses",
-			note: "[done/high] Alex Rivera — finish the acme-essentials setup. (essentials setup, 2026-08-28)",
+			note: "[done/high] Zemna Braxen — finish the acme-essentials setup. (essentials setup, 2026-08-28)",
 			check: func(t *testing.T, got ActionItem, ok bool) {
 				if !ok {
 					t.Fatal("refused a hand-edited action note")
@@ -101,7 +101,7 @@ func TestParseAction(t *testing.T) {
 
 // An action note carries the day its meeting happened, not the minute: "how long has this been sitting" is a question about days, and the note is meant to read like a sentence a person wrote.
 func TestParseAction_RaisedIsTruncatedToItsDay(t *testing.T) {
-	a := ActionItem{Owner: "Vikram", Text: "settle payment.", Status: StatusOpen, Priority: PriorityNormal, Source: "md x mf tool", Raised: time.Date(2026, 8, 28, 19, 19, 0, 0, time.UTC)}
+	a := ActionItem{Owner: "Ravix", Text: "settle payment.", Status: StatusOpen, Priority: PriorityNormal, Source: "md x mf tool", Raised: time.Date(2026, 8, 28, 19, 19, 0, 0, time.UTC)}
 	got, ok := ParseAction(a.Note())
 	if !ok {
 		t.Fatal("refused its own output")
@@ -116,7 +116,7 @@ func TestMinutesLabel(t *testing.T) {
 	for _, tc := range []struct{ name, minutes, want string }{
 		{"bold title", "# Meeting minutes\n\n**md x mf tool — Google Meet, Fri 28 Aug 2026, 21:36–23:08 IST**\n\n## Attendees\n", "md x mf tool"},
 		{"bold title with comma", "# Meeting minutes\n\n**climate risk sync — Fri 28 Aug 2026, 14:03–14:41 (38m)**\n\n## Attendees\n", "climate risk sync"},
-		{"no title line", "# Meeting minutes\n\n## Attendees\n- Alex Rivera\n", ""},
+		{"no title line", "# Meeting minutes\n\n## Attendees\n- Zemna Braxen\n", ""},
 		{"empty", "", ""},
 	} {
 		if got := MinutesLabel(tc.minutes); got != tc.want {
@@ -127,7 +127,7 @@ func TestMinutesLabel(t *testing.T) {
 
 // Minutes with no title line leave an item with no meeting name. The date still has to survive, and the line must not read as if the name were blank.
 func TestActionItem_NoteWithoutSource(t *testing.T) {
-	a := ActionItem{Owner: "Alex Rivera", Text: "finish the setup.", Status: StatusOpen, Priority: PriorityNormal, Raised: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)}
+	a := ActionItem{Owner: "Zemna Braxen", Text: "finish the setup.", Status: StatusOpen, Priority: PriorityNormal, Raised: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)}
 	note := a.Note()
 	if strings.Contains(note, ", 2026") {
 		t.Errorf("note renders an empty meeting name: %q", note)
@@ -180,25 +180,25 @@ func TestParseMinutesActions_EdgeCases(t *testing.T) {
 	}
 }
 
-// Half the action items in a meeting belong to somebody else. Asking the user "any progress?" about a task another person owes is the wrong question, so an item has to know whose it is. The identity entry names the user and every way they are written down, and names nobody else, which is what makes it the test. A substring that is not a whole word must not match ("Riv" inside another word is not the user), and with no identity on file nothing can be attributed at all.
+// Half the action items in a meeting belong to somebody else. Asking the user "any progress?" about a task another person owes is the wrong question, so an item has to know whose it is. The identity entry names the user and every way they are written down, and names nobody else, which is what makes it the test. A substring that is not a whole word must not match ("Brax" inside another word is not the user), and with no identity on file nothing can be attributed at all.
 func TestOwnedByUser(t *testing.T) {
-	const fullIdentity = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
+	const fullIdentity = "The user is Zemna Braxen — goes by Zemna; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
 	cases := []struct {
 		name     string
 		owner    string
 		identity string
 		want     bool
 	}{
-		{name: "his full name", owner: "Alex Rivera", identity: fullIdentity, want: true},
-		{name: "the name he goes by", owner: "Alex", identity: fullIdentity, want: true},
-		{name: "whatever case the model chose", owner: "alex rivera", identity: fullIdentity, want: true},
-		{name: "another person", owner: "Vikram", identity: fullIdentity, want: false},
-		{name: "another person, again", owner: "Krish", identity: fullIdentity, want: false},
-		{name: "another person by full name", owner: "Priya Shah", identity: fullIdentity, want: false},
+		{name: "his full name", owner: "Zemna Braxen", identity: fullIdentity, want: true},
+		{name: "the name he goes by", owner: "Zemna", identity: fullIdentity, want: true},
+		{name: "whatever case the model chose", owner: "zemna braxen", identity: fullIdentity, want: true},
+		{name: "another person", owner: "Ravix", identity: fullIdentity, want: false},
+		{name: "another person, again", owner: "Melvorn", identity: fullIdentity, want: false},
+		{name: "another person by full name", owner: "Vexil Quorin", identity: fullIdentity, want: false},
 		{name: "nobody took it, not the user's by default", owner: UnknownOwner, identity: fullIdentity, want: false},
 		{name: "no owner at all", owner: "", identity: fullIdentity, want: false},
-		{name: "a fragment of the name is not the whole word", owner: "Riv", identity: "The user is Alex Rivera.", want: false},
-		{name: "no identity on file attributes nothing", owner: "Alex Rivera", identity: "", want: false},
+		{name: "a fragment of the name is not the whole word", owner: "Brax", identity: "The user is Zemna Braxen.", want: false},
+		{name: "no identity on file attributes nothing", owner: "Zemna Braxen", identity: "", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,8 +219,8 @@ func TestActionItem_Mine(t *testing.T) {
 		{"me", true},
 		{"  Me  ", true},
 		{UnknownOwner, true},
-		{"Vikram", false},
-		{"Priya Shah", false},
+		{"Ravix", false},
+		{"Vexil Quorin", false},
 		{"", false},
 	} {
 		if got := (ActionItem{Owner: tc.owner}).Mine(); got != tc.want {
@@ -230,7 +230,7 @@ func TestActionItem_Mine(t *testing.T) {
 }
 
 // identityEntry is the personal-context line that says who the user is, copied from what the store actually holds.
-const identityEntry = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
+const identityEntry = "The user is Zemna Braxen — goes by Zemna; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
 
 // OwnerClass reads an item's owner text against the personal-context identity entry and, when set, an explicit override (the minutes named him, but hearing about a thing does not make it his — the user can say by hand that a "me" reading is wrong, and that call must win over whatever the owner text would otherwise read as). With no identity on file at all his own name is left unclassified as somebody else's, since guessing here would put another person's work on his list.
 func TestOwnerClass(t *testing.T) {
@@ -242,22 +242,22 @@ func TestOwnerClass(t *testing.T) {
 		override   string
 		want       string
 	}{
-		{name: "his full name", owner: "Alex Rivera", text: "Rework the hardcoded location-finder logic.", want: OwnerMe},
-		{name: "the name he goes by", owner: "Alex", text: "Report status on the PFP task.", want: OwnerMe},
+		{name: "his full name", owner: "Zemna Braxen", text: "Rework the hardcoded location-finder logic.", want: OwnerMe},
+		{name: "the name he goes by", owner: "Zemna", text: "Report status on the PFP task.", want: OwnerMe},
 		{name: "the label the prompt asks for", owner: "Me", text: "send the deck by Friday", want: OwnerMe},
 		{name: "written as you", owner: "You", text: "send the deck by Friday", want: OwnerMe},
 		{name: "written as I", owner: "I", text: "send the deck by Friday", want: OwnerMe},
-		{name: "another person", owner: "Priya Shah", text: "Create the Northwind Freight test account.", want: OwnerThem},
+		{name: "another person", owner: "Vexil Quorin", text: "Create the Northwind Freight test account.", want: OwnerThem},
 		{name: "a role rather than a name", owner: "The project lead", text: "Give campaign managers access to his ElevenLabs account.", want: OwnerThem},
 		{name: "no subject at all", owner: UnknownOwner, text: "clean up the mixed lockfile situation in the frontend; raised but not assigned.", want: OwnerUnclear},
 		{name: "unclear but qualified", owner: "Owner unclear (workstream lead)", text: "Set up the X API dashboard via Proton email.", want: OwnerThem},
 		{name: "a bolded person prefix left in the text", owner: UnknownOwner, text: "**Every campaign manager (including Imanshu)** — Choose a market and post it in the group chat.", want: OwnerThem},
-		{name: "a name before will", owner: UnknownOwner, text: "Krish will take the technical interviews for the developer hire.", want: OwnerThem},
-		{name: "a name before to", owner: UnknownOwner, text: "Handed to Sam to finish the load testing task.", want: OwnerThem},
+		{name: "a name before will", owner: UnknownOwner, text: "Melvorn will take the technical interviews for the developer hire.", want: OwnerThem},
+		{name: "a name before to", owner: UnknownOwner, text: "Handed to Emzor to finish the load testing task.", want: OwnerThem},
 		{name: "a name before should", owner: UnknownOwner, text: "Nikunj should add the Verity-workflow task to the sprint board.", want: OwnerThem},
 		{name: "a capitalised first word is not a name", owner: UnknownOwner, text: "Define how the knowledge pool concept should work in practice.", want: OwnerUnclear},
-		{name: "no identity on file leaves his own name unclassified", owner: "Alex Rivera", text: "Continue transition-risk work.", noIdentity: true, want: OwnerThem},
-		{name: "an override wins over the parsed owner", owner: "Alex Rivera", text: "Continue transition-risk work.", override: OwnerThem, want: OwnerThem},
+		{name: "no identity on file leaves his own name unclassified", owner: "Zemna Braxen", text: "Continue transition-risk work.", noIdentity: true, want: OwnerThem},
+		{name: "an override wins over the parsed owner", owner: "Zemna Braxen", text: "Continue transition-risk work.", override: OwnerThem, want: OwnerThem},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -295,7 +295,7 @@ func TestEvidenceCloses(t *testing.T) {
 	}{
 		{"the pull request it names was merged", deploy, "Merged the Value Chain risk-statements PR #5632 to main today.", true},
 		{"the work is named as finished", deploy, "Finished the Value Chain risk-statements deploy this morning.", true},
-		{"named but not finished", deploy, "Discussed the Value Chain risk-statements PR with Priya and agreed a review order.", false},
+		{"named but not finished", deploy, "Discussed the Value Chain risk-statements PR with Vexil and agreed a review order.", false},
 		{"finished, but a different piece of work", deploy, "Merged the emissions-factor PR #5601; the Value Chain risk-statements deploy is still pending.", false},
 		{"a reference is matched whole, not as a prefix", ActionItem{Owner: "Me", Text: "review #12."}, "Merged #123 this morning.", false},
 		{"a reference matched exactly does close", ActionItem{Owner: "Me", Text: "review #12."}, "Merged #12 this morning.", true},

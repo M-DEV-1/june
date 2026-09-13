@@ -45,11 +45,11 @@ func TestPruneEmptyConversationsKeepsAnythingSaid(t *testing.T) {
 	store := newFileStore(t)
 	ctx := context.Background()
 
-	spokenIn, err := store.CreateConversation(ctx, "what did priya ask about", "claude")
+	spokenIn, err := store.CreateConversation(ctx, "what did vexil ask about", "claude")
 	if err != nil {
 		t.Fatalf("CreateConversation: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, spokenIn, "you", "what did priya ask about", "ask", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, spokenIn, "you", "what did vexil ask about", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn: %v", err)
 	}
 	backdateConversation(t, store, spokenIn, 30*24*time.Hour)
@@ -334,11 +334,11 @@ func TestProtectedConversationsCountsWhatThePassRefusedToTake(t *testing.T) {
 	store := newFileStore(t)
 	ctx := context.Background()
 
-	spokenIn, err := store.CreateConversation(ctx, "what did priya ask about", "claude")
+	spokenIn, err := store.CreateConversation(ctx, "what did vexil ask about", "claude")
 	if err != nil {
 		t.Fatalf("CreateConversation: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, spokenIn, "you", "what did priya ask about", "ask", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, spokenIn, "you", "what did vexil ask about", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn: %v", err)
 	}
 	backdateConversation(t, store, spokenIn, 48*time.Hour)

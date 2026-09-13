@@ -43,15 +43,15 @@ func TestMentionCount(t *testing.T) {
 	ctx := context.Background()
 
 	for _, n := range []struct{ content, kind string }{
-		{"Priya Shah leads the value chain work", "fact"},
-		{"# Sync\nPriya Shah walked through the demo", "meeting"},
-		{"Sneha owns the PFP task", "fact"},
+		{"Vexil Quorin leads the value chain work", "fact"},
+		{"# Sync\nVexil Quorin walked through the demo", "meeting"},
+		{"Sorrek owns the PFP task", "fact"},
 	} {
 		if _, err := store.LogNote(ctx, n.content, n.kind); err != nil {
 			t.Fatalf("seed note: %v", err)
 		}
 	}
-	if _, err := store.db.ExecContext(ctx, `INSERT INTO nodes(parent_id, type, content) VALUES(NULL, 'digest', 'Priya Shah again')`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO nodes(parent_id, type, content) VALUES(NULL, 'digest', 'Vexil Quorin again')`); err != nil {
 		t.Fatalf("seed digest: %v", err)
 	}
 
@@ -59,8 +59,8 @@ func TestMentionCount(t *testing.T) {
 		name string
 		want int
 	}{
-		{"Priya Shah", 2},
-		{"Sneha", 1},
+		{"Vexil Quorin", 2},
+		{"Sorrek", 1},
 		{"Nobody At All", 0},
 		{"", 0},
 	}

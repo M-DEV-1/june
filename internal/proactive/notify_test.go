@@ -210,7 +210,7 @@ func TestDone_OnRoutineNotice_ClosesNothing(t *testing.T) {
 	called := 0
 	s.SetTaskDone(func(context.Context, string) error { called++; return nil })
 
-	s.say(Notice{Title: "Routine", Body: "Priya replied about the venue.", Kind: "routine", ID: "7"})
+	s.say(Notice{Title: "Routine", Body: "Vexil replied about the venue.", Kind: "routine", ID: "7"})
 	f.press(t, 0, "done")
 
 	if called != 0 {
@@ -502,7 +502,7 @@ func TestMaybeTaskNotices_CapsPerMeetingAndSkipsOthers(t *testing.T) {
 		{Owner: "Me", Text: "Book the venue", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
 		{Owner: "Me", Text: "Review the PR", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
 		{Owner: "Me", Text: "Write the doc", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
-		{Owner: "Priya", Text: "Confirm the vendor", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
+		{Owner: "Vexil", Text: "Confirm the vendor", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "Standup", Raised: time.Now()},
 	}
 	if _, err := store.AddActionItems(ctx, items); err != nil {
 		t.Fatalf("AddActionItems: %v", err)
@@ -511,7 +511,7 @@ func TestMaybeTaskNotices_CapsPerMeetingAndSkipsOthers(t *testing.T) {
 	s.maybeTaskNotices(ctx)
 
 	if f.count() != 3 {
-		t.Fatalf("posted %d task notices, want 3 (capped, none for the item owned by Priya)", f.count())
+		t.Fatalf("posted %d task notices, want 3 (capped, none for the item owned by Vexil)", f.count())
 	}
 	for i, p := range f.sent {
 		if p.title != "New task from Standup" {
@@ -520,7 +520,7 @@ func TestMaybeTaskNotices_CapsPerMeetingAndSkipsOthers(t *testing.T) {
 		if len(p.actions) != len(noticeActions) {
 			t.Errorf("notice %d offered %d buttons, want the full set of %d", i, len(p.actions), len(noticeActions))
 		}
-		if strings.Contains(p.body, "Priya") || strings.Contains(p.body, "vendor") {
+		if strings.Contains(p.body, "Vexil") || strings.Contains(p.body, "vendor") {
 			t.Errorf("notice %d body = %q, should never carry someone else's item", i, p.body)
 		}
 	}

@@ -46,12 +46,12 @@ func TestPrepMeeting_Silent(t *testing.T) {
 		},
 		{
 			name:     "the meeting is identified but no past minutes match",
-			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}},
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}},
 		},
 		{
 			name:        "ORA_NO_MEETING_PREP=1 is the alpha kill switch",
-			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}},
-			noteContent: "# Meeting minutes\n\nPriya Shah agreed to send the deck.",
+			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}},
+			noteContent: "# Meeting minutes\n\nVexil Quorin agreed to send the deck.",
 			killSwitch:  true,
 		},
 		{
@@ -105,12 +105,12 @@ func TestPrepMeeting_Matches(t *testing.T) {
 	}{
 		{
 			name:        "matches by participant and notifies",
-			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: ok sure ping me"}},
-			notes:       []string{"# Meeting minutes\n\nPriya Shah agreed to send the deck by Friday."},
-			reply:       "Priya still owes the deck from last time.",
+			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: ok sure ping me"}},
+			notes:       []string{"# Meeting minutes\n\nVexil Quorin agreed to send the deck by Friday."},
+			reply:       "Vexil still owes the deck from last time.",
 			wantContain: "deck",
 			checkPrompt: func(t *testing.T, prompt string) {
-				if !strings.Contains(prompt, "Priya Shah agreed to send the deck") {
+				if !strings.Contains(prompt, "Vexil Quorin agreed to send the deck") {
 					t.Errorf("prompt is missing the matched minutes:\n%s", prompt)
 				}
 			},
@@ -126,10 +126,10 @@ func TestPrepMeeting_Matches(t *testing.T) {
 		{
 			// The most recently filed matching note wins, not just any match, since GetNotes already orders newest first.
 			name:     "the most recent matching note wins",
-			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}},
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}},
 			notes: []string{
-				"# Meeting minutes\n\nPriya Shah: older meeting, decided the budget.",
-				"# Meeting minutes\n\nPriya Shah: newest meeting, decided the venue.",
+				"# Meeting minutes\n\nVexil Quorin: older meeting, decided the budget.",
+				"# Meeting minutes\n\nVexil Quorin: newest meeting, decided the venue.",
 			},
 			reply: "ok",
 			checkPrompt: func(t *testing.T, prompt string) {
@@ -170,9 +170,9 @@ func TestPrepMeeting_Matches(t *testing.T) {
 
 // A brain call that is not back within the timeout must be dropped, even if it eventually returns text — a prep that lands mid-meeting is noise, not help. This needs its own deadline configuration and a real sleep, so it cannot share the table above.
 func TestPrepMeeting_DropsSilentlyWhenTheBrainIsTooSlow(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck.", noteKind); err != nil {
+	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nVexil Quorin agreed to send the deck.", noteKind); err != nil {
 		t.Fatal(err)
 	}
 	r.prepTimeout = 10 * time.Millisecond
@@ -192,14 +192,14 @@ func TestPrepMeeting_DropsSilentlyWhenTheBrainIsTooSlow(t *testing.T) {
 
 // Start is the call-detection hook: it must fire prep without making the caller wait for it. This polls for an async result, so it cannot share the table above.
 func TestStart_FiresMeetingPrepAsynchronously(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Priya Shah: hello"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}}}
 	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nPriya Shah agreed to send the deck.", noteKind); err != nil {
+	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nVexil Quorin agreed to send the deck.", noteKind); err != nil {
 		t.Fatal(err)
 	}
 	var got notifications
 	r.notifyAt = got.addAt
-	r.minutes = func(ctx context.Context, prompt string) (string, error) { return "Priya still owes the deck.", nil }
+	r.minutes = func(ctx context.Context, prompt string) (string, error) { return "Vexil still owes the deck.", nil }
 
 	if err := r.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -256,8 +256,8 @@ func TestPickMeetingNote(t *testing.T) {
 		},
 		{
 			name:         "matches on a participant named on screen",
-			notes:        append(twelveMeetingNotes(), db.Note{ID: 99, Kind: "meeting", Content: "# Sync\nPriya walked through the value chain work."}),
-			participants: []string{"Priya"},
+			notes:        append(twelveMeetingNotes(), db.Note{ID: 99, Kind: "meeting", Content: "# Sync\nVexil walked through the value chain work."}),
+			participants: []string{"Vexil"},
 			wantOK:       true,
 			wantID:       99,
 		},
@@ -297,37 +297,37 @@ func TestCollectMeetingNames(t *testing.T) {
 		{
 			// Fixtures are the flattened single-string shape an accessibility tree actually produces for a participants pane — one long run of text, not one name per line.
 			name: "google meet roster ignores mute/host tags and the app's own name",
-			eps:  []db.Episode{{Title: "Meet - team-sync-call - Brave", ScreenText: "People (3)\nSam Iyer (Host)\nPriya Shah (Presenting)\nRohit Verma\nYou\nMute\nCamera\nPresent now\nMore options\nLeave call"}},
-			want: []string{"Sam Iyer", "Priya Shah", "Rohit Verma"},
-			deny: []string{"Mute", "Camera", "Present", "More", "Leave", "You", "Sam Iyer (Host)", "Priya Shah (Presenting)"},
+			eps:  []db.Episode{{Title: "Meet - team-sync-call - Brave", ScreenText: "People (3)\nEmzor Wandel (Host)\nVexil Quorin (Presenting)\nYalven Pravik\nYou\nMute\nCamera\nPresent now\nMore options\nLeave call"}},
+			want: []string{"Emzor Wandel", "Vexil Quorin", "Yalven Pravik"},
+			deny: []string{"Mute", "Camera", "Present", "More", "Leave", "You", "Emzor Wandel (Host)", "Vexil Quorin (Presenting)"},
 		},
 		{
 			name: "teams roster ignores its own app name and toolbar",
-			eps:  []db.Episode{{Title: "Microsoft Teams (PWA) - Chat | Priya Shah | Microsoft Teams", ScreenText: "Participants (2)\nPriya Shah (Organizer)\nVikram Goel\nYou\nRaise Hand\nReact\nMore\nLeave"}},
-			want: []string{"Priya Shah", "Vikram Goel"},
-			deny: []string{"Microsoft Teams", "Raise Hand", "Chat", "More", "Leave", "You", "Priya Shah (Organizer)"},
+			eps:  []db.Episode{{Title: "Microsoft Teams (PWA) - Chat | Vexil Quorin | Microsoft Teams", ScreenText: "Participants (2)\nVexil Quorin (Organizer)\nRavix Dolmen\nYou\nRaise Hand\nReact\nMore\nLeave"}},
+			want: []string{"Vexil Quorin", "Ravix Dolmen"},
+			deny: []string{"Microsoft Teams", "Raise Hand", "Chat", "More", "Leave", "You", "Vexil Quorin (Organizer)"},
 		},
 		{
 			name: "zoom roster ignores its own controls",
-			eps:  []db.Episode{{Title: "Zoom Meeting", ScreenText: "Participants (2)\nKaran Mehta (Host, me)\nNeha Kapoor\nMute All\nUnmute\nStop Video\nShare Screen\nRecord\nEnd Meeting"}},
-			want: []string{"Karan Mehta", "Neha Kapoor"},
-			deny: []string{"Zoom Meeting", "Share Screen", "Mute All", "Stop Video", "End Meeting", "Karan Mehta (Host, me)"},
+			eps:  []db.Episode{{Title: "Zoom Meeting", ScreenText: "Participants (2)\nTrelvo Kordis (Host, me)\nFenrik Halvo\nMute All\nUnmute\nStop Video\nShare Screen\nRecord\nEnd Meeting"}},
+			want: []string{"Trelvo Kordis", "Fenrik Halvo"},
+			deny: []string{"Zoom Meeting", "Share Screen", "Mute All", "Stop Video", "End Meeting", "Trelvo Kordis (Host, me)"},
 		},
 		{
 			// The same person named twice — once tagged with a role in the roster, once as a chat sender with no tag — must collapse to one attendee, not two.
 			name: "the same person tagged twice collapses to one attendee",
 			eps: []db.Episode{
-				{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer (Host) Priya Shah"},
-				{Title: "Meet - team-sync - Brave", ScreenText: "Sam Iyer: let's get started"},
+				{Title: "Meet - team-sync - Brave", ScreenText: "Emzor Wandel (Host) Vexil Quorin"},
+				{Title: "Meet - team-sync - Brave", ScreenText: "Emzor Wandel: let's get started"},
 			},
-			wantOnce: []string{"Sam Iyer"},
+			wantOnce: []string{"Emzor Wandel"},
 		},
 		{
 			// A name already known from personal context is kept even when its shape would otherwise get it dropped — here a five-word name past the four-word limit ordinary candidates are held to.
 			name:  "a known long name is kept even past the ordinary word-count limit",
-			eps:   []db.Episode{{Title: "Meet - family catch-up - Brave", ScreenText: "Sri Lakshmi Venkata Subramaniam Iyer\nYou\nMute\nLeave call"}},
-			known: personNamesFromContext([]db.PersonalEntry{{Subject: "sri-lakshmi-venkata-subramaniam-iyer", Content: "the user's aunt"}}),
-			want:  []string{"Sri Lakshmi Venkata Subramaniam Iyer"},
+			eps:   []db.Episode{{Title: "Meet - family catch-up - Brave", ScreenText: "Ovren Kelvara Tumbrel Emzoran Wandel\nYou\nMute\nLeave call"}},
+			known: personNamesFromContext([]db.PersonalEntry{{Subject: "ovren-kelvara-tumbrel-emzoran-wandel", Content: "the user's aunt"}}),
+			want:  []string{"Ovren Kelvara Tumbrel Emzoran Wandel"},
 		},
 		{
 			// Two capitalised interface words strung together must never come out as a name, known or not — an app's toolbar is never a person, however name-shaped the phrase reads.
@@ -339,30 +339,30 @@ func TestCollectMeetingNames(t *testing.T) {
 			// A name written in a script without case — Devanagari here, Tamil there — must reach the participant list the same way a Latin name does.
 			name: "a caseless script name reaches the roster the way a Latin one does",
 			eps: []db.Episode{
-				{Title: "Meet - team-sync - Brave", ScreenText: "People (2)\nराहुल\nYou\nMute\nLeave call"},
-				{Title: "Meet - team-sync - Brave", ScreenText: "Participants (2)\nபிரியா\nYou\nMute\nLeave call"},
+				{Title: "Meet - team-sync - Brave", ScreenText: "People (2)\nतोव्रिन\nYou\nMute\nLeave call"},
+				{Title: "Meet - team-sync - Brave", ScreenText: "Participants (2)\nவெக்சில்\nYou\nMute\nLeave call"},
 			},
-			want: []string{"राहुल", "பிரியா"},
+			want: []string{"तोव्रिन", "வெக்சில்"},
 			deny: []string{"Mute", "Leave", "You"},
 		},
 		{
 			// A Hinglish meeting mixes a Latin name and a Devanagari name on the same line, and both must be read off it.
 			name: "a Hinglish line yields both its Latin and Devanagari names",
-			eps:  []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "Rohit Verma राहुल\nMute\nLeave call"}},
-			want: []string{"Rohit Verma", "राहुल"},
+			eps:  []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "Yalven Pravik तोव्रिन\nMute\nLeave call"}},
+			want: []string{"Yalven Pravik", "तोव्रिन"},
 		},
 		{
 			// A line of chat text is not a roster line, and nothing on it — least of all the app's own words for mute, leave and participants — is a person on the call.
 			name:     "CJK chat text with a colon is not a participant",
-			eps:      []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "李伟: 静音 离开会议 参会者 我马上加入会议\n王芳: 好的 我们开始吧 请大家静音\nMute\nLeave call"}},
+			eps:      []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "泽姆纳: 静音 离开会议 参会者 我马上加入会议\n布拉克森: 好的 我们开始吧 请大家静音\nMute\nLeave call"}},
 			wantNone: true,
 		},
 		{
 			// A roster lists one name per line, and a name in a caseless script is written across two words there just as a Latin one is. It must arrive as the whole name rather than as its two words separately.
 			name: "a caseless roster line is read as one whole name, not two halves",
-			eps:  []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "People (3)\nराहुल शर्मा\nRohit Verma\nYou\nMute\nLeave call"}},
-			want: []string{"राहुल शर्मा"},
-			deny: []string{"राहुल", "शर्मा"},
+			eps:  []db.Episode{{Title: "Meet - team-sync - Brave", ScreenText: "People (3)\nतोव्रिन मज़ेक\nYalven Pravik\nYou\nMute\nLeave call"}},
+			want: []string{"तोव्रिन मज़ेक"},
+			deny: []string{"तोव्रिन", "मज़ेक"},
 		},
 		{
 			// Han is written without spaces between words, so a line of chat text, a toolbar button and a pane heading are each one unbroken run of letters exactly as a Chinese name would be. None of the three is a participant.
@@ -408,9 +408,9 @@ func TestLooksLikeName_ScriptsWithoutCaseAreNotShouting(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"प्रिया नायर", true},
-		{"田中 太郎", true},
-		{"Sam Iyer", true},
+		{"वेक्सिल ज़ेल्ब्रक", true},
+		{"ゼムナ ブラクセン", true},
+		{"Emzor Wandel", true},
 		{"MUTE", false},
 		{"Share Screen 2", false},
 	}
@@ -427,15 +427,15 @@ func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
 	if got := meetingName(title); got != "Daily Ai Sprint Standup" {
 		t.Fatalf("meetingName = %q, want the meeting's own name", got)
 	}
-	store := &fakeStore{episodes: []db.Episode{{Title: title, ScreenText: "Manish Kumar: joining now"}}}
+	store := &fakeStore{episodes: []db.Episode{{Title: title, ScreenText: "Oskrev Thivan: joining now"}}}
 	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nManish Kumar agreed to drop the Bill Eval Studio UI.", noteKind); err != nil {
+	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nOskrev Thivan agreed to drop the Bill Eval Studio UI.", noteKind); err != nil {
 		t.Fatal(err)
 	}
 	var got notifications
 	r.notifyAt = got.addAt
 	r.minutes = func(ctx context.Context, prompt string) (string, error) {
-		return "Manish agreed to drop the Bill Eval Studio UI last time.", nil
+		return "Oskrev agreed to drop the Bill Eval Studio UI last time.", nil
 	}
 
 	r.prepMeeting()

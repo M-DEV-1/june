@@ -379,7 +379,7 @@ var migrations = []Migration{
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
-	-- routines: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Priya replies about the venue, tell me". schedule is left as the free text the user typed; internal/proactive parses it into when to check. last_answer holds what the model said the last time it ran, "NOTHING" included, so the window can show what happened without re-running it. Not memory — never indexed, never searched.
+	-- routines: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Vexil replies about the venue, tell me". schedule is left as the free text the user typed; internal/proactive parses it into when to check. last_answer holds what the model said the last time it ran, "NOTHING" included, so the window can show what happened without re-running it. Not memory — never indexed, never searched.
 	CREATE TABLE IF NOT EXISTS routines (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		text TEXT NOT NULL,

@@ -32,7 +32,7 @@ func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora — diary.go", "building the diary seam"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex."); err != nil {
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna."); err != nil {
 		t.Fatalf("SetPersonalContext: %v", err)
 	}
 	yesterday := time.Now().AddDate(0, 0, -1).Format(dayFormat)
@@ -70,7 +70,7 @@ func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 	if len(prompts) != 2 {
 		t.Fatalf("brain called %d times, want 2 (diary then understanding)", len(prompts))
 	}
-	for _, want := range []string{"Yesterday was quiet.", "Alex", "A person who codes at night."} {
+	for _, want := range []string{"Yesterday was quiet.", "Zemna", "A person who codes at night."} {
 		if !strings.Contains(prompts[0], want) {
 			t.Errorf("diary prompt is missing %q", want)
 		}
@@ -173,7 +173,7 @@ func TestScheduler_Brief_DeliversOncePerDay(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
-	if _, err := store.LogNote(ctx, "Minutes: Alex to send the deck by Friday", "meeting"); err != nil {
+	if _, err := store.LogNote(ctx, "Minutes: Zemna to send the deck by Friday", "meeting"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
 	yesterday := time.Now().AddDate(0, 0, -1).Format(dayFormat)
@@ -543,7 +543,7 @@ func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
-	openItem(t, store, "Krish", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
+	openItem(t, store, "Melvorn", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
 
 	var asks int32
 	var prompts []string
@@ -561,7 +561,7 @@ func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	if n := atomic.LoadInt32(&asks); n != 0 {
-		t.Errorf("asked the user for progress on Krish's task %d times", n)
+		t.Errorf("asked the user for progress on Melvorn's task %d times", n)
 	}
 	if strings.Contains(prompts[0], "reply on WhatsApp during his leave.") {
 		t.Error("an item owed by somebody else reached the brief")

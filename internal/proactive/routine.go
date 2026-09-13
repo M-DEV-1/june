@@ -13,7 +13,7 @@ import (
 	"ora/internal/db"
 )
 
-// Schedule is one routine's parsed schedule. Kind is "daily" (Weekdays true restricts it to Monday-Friday), "interval", or "when" — the last left as free text for the model to judge for itself every time it is checked, since no clock can tell whether Priya has replied.
+// Schedule is one routine's parsed schedule. Kind is "daily" (Weekdays true restricts it to Monday-Friday), "interval", or "when" — the last left as free text for the model to judge for itself every time it is checked, since no clock can tell whether Vexil has replied.
 type Schedule struct {
 	Kind          string
 	Hour, Minute  int

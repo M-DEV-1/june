@@ -52,7 +52,7 @@ func TestOpenActionItems_OnlyTheUsersOwn(t *testing.T) {
 
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
 		item("Me", "send the deck by Friday."),
-		item("Vikram", "carry PR #13 through CI and merge."),
+		item("Ravix", "carry PR #13 through CI and merge."),
 		item(memory.UnknownOwner, "trial attaching walkthrough videos to PRs."),
 	}); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestOpenActionItems_OnlyTheUsersOwn(t *testing.T) {
 		t.Fatalf("want 2 open items, got %d: %+v", len(open), open)
 	}
 	for _, a := range open {
-		if a.Owner == "Vikram" {
+		if a.Owner == "Ravix" {
 			t.Errorf("returned an item owed by somebody else: %+v", a)
 		}
 	}
@@ -205,7 +205,7 @@ func TestSetOwnerClass_Rejects(t *testing.T) {
 }
 
 // testIdentity is the personal-context entry that says who the user is, the same shape the store migrates in on open.
-const testIdentity = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1."
+const testIdentity = "The user is Zemna Braxen — goes by Zemna; git handle M-DEV-1."
 
 // With an identity on file the user's own name is his work, and an item nobody was named for is not — which is the whole complaint about the tasks page: it was full of other people's business.
 func TestActionItemsByOwner(t *testing.T) {
@@ -215,9 +215,9 @@ func TestActionItemsByOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
-		item("Alex Rivera", "raise the PR for the prompt change."),
+		item("Zemna Braxen", "raise the PR for the prompt change."),
 		item("Me", "send the deck by Friday."),
-		item("Priya Shah", "create the Northwind Freight test account."),
+		item("Vexil Quorin", "create the Northwind Freight test account."),
 		item(memory.UnknownOwner, "clean up the mixed lockfile situation in the frontend."),
 	}); err != nil {
 		t.Fatal(err)
@@ -304,7 +304,7 @@ func TestCloseDoneActionItems_TheMeetingThatRaisedItCannotCloseIt(t *testing.T) 
 	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
 		t.Fatal(err)
 	}
-	raiser := "1:1 with Priya Shah"
+	raiser := "1:1 with Vexil Quorin"
 	a := item(memory.MeOwner, "rebase the two pending branches and push them in logical chunks.")
 	// The recorder raises an item with the recording's own start (liftActionItems in internal/recorder/recorder.go), so the minutes and the items they raise always share a day; that pair is what identifies the raising meeting now that its name alone no longer does.
 	a.Source, a.Raised = raiser, time.Now()

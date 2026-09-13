@@ -170,12 +170,12 @@ func TestRun_RecordsAGeminiTurnUnderItsOwnProvider(t *testing.T) {
 
 	trace := agent.TurnTrace{
 		Model:    "gemini-3-flash",
-		Question: "who is priya",
+		Question: "who is vexil",
 		Answer:   "a colleague",
 		Usage:    agent.TokenUsage{Provider: agent.ProviderGemini, InputTokens: 900, OutputTokens: 60, TotalTokens: 960},
 	}
 	s := New(&fakeAsker{trace: trace}, store, nil, nil)
-	s.run(s.asker, "ask-1", convID, "who is priya", "", false, nil)
+	s.run(s.asker, "ask-1", convID, "who is vexil", "", false, nil)
 
 	uses, err := store.TokenUseRecent(ctx, 10)
 	if err != nil {

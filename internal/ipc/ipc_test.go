@@ -277,13 +277,13 @@ func TestHub_LevelBurstDoesNotDropStalledClient(t *testing.T) {
 // evidenceFor turns the agent's evidence rows into the window's evidence items: the title as it is, kind and when joined as the meta line, the excerpt as the body, in the agent's order; a turn with no evidence yields an empty, non-nil list so the JSON stays [] and never null.
 func TestEvidenceFor(t *testing.T) {
 	trace := agent.TurnTrace{Evidence: []agent.Evidence{
-		{Kind: "meeting", ID: 153, Title: "Lodestone sync", When: "2026-08-26", Excerpt: "after the demo the PFP task goes to Sneha"},
-		{Kind: "note", ID: 9, Title: "", When: "", Excerpt: "Priya wants the invoice first"},
+		{Kind: "meeting", ID: 153, Title: "Lodestone sync", When: "2026-08-26", Excerpt: "after the demo the PFP task goes to Sorrek"},
+		{Kind: "note", ID: 9, Title: "", When: "", Excerpt: "Vexil wants the invoice first"},
 	}}
 	got := evidenceFor(trace)
 	want := []EvidenceItem{
-		{Title: "Lodestone sync", Meta: "meeting · 2026-08-26", Body: "after the demo the PFP task goes to Sneha"},
-		{Title: "note", Meta: "note", Body: "Priya wants the invoice first"},
+		{Title: "Lodestone sync", Meta: "meeting · 2026-08-26", Body: "after the demo the PFP task goes to Sorrek"},
+		{Title: "note", Meta: "note", Body: "Vexil wants the invoice first"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d items, want %d: %+v", len(got), len(want), got)

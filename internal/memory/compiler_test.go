@@ -625,10 +625,10 @@ func TestCompiler_LinkWindowClosesBeforeTheAttributionCall(t *testing.T) {
 	}
 }
 
-// The compiler writes summaries from screen text that names the user in the third person — a calendar entry "Meeting with Alex Rivera" became "participated in a scheduled meeting with Alex Rivera" on 2026-09-01, and Ora then told the user about their meetings with Alex. The prompt has to say who the user is.
+// The compiler writes summaries from screen text that names the user in the third person — a calendar entry "Meeting with Zemna Braxen" became "participated in a scheduled meeting with Zemna Braxen" on 2026-09-01, and Ora then told the user about their meetings with Zemna. The prompt has to say who the user is.
 func TestAttributePrompt_NamesTheUser(t *testing.T) {
-	prompt := memory.AttributePrompt(nil, nil, "The user is Alex Rivera — goes by Alex.")
-	if !strings.Contains(prompt, "Alex Rivera") {
+	prompt := memory.AttributePrompt(nil, nil, "The user is Zemna Braxen — goes by Zemna.")
+	if !strings.Contains(prompt, "Zemna Braxen") {
 		t.Errorf("prompt does not carry the identity line:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "third party") {

@@ -2364,7 +2364,7 @@ func TestRetrieveRelevant_NoteExcerptSurvivesPastEpisodeCap(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
-	body := "Attendees: Alex, Priya. " + strings.Repeat("the payments team walked through the checkout flow again. ", 8) + "DECISION: ship the kubernetes migration on Friday."
+	body := "Attendees: Zemna, Vexil. " + strings.Repeat("the payments team walked through the checkout flow again. ", 8) + "DECISION: ship the kubernetes migration on Friday."
 	if _, err := store.LogNote(ctx, body, "meeting"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
