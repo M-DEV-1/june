@@ -43,6 +43,37 @@ var DaemonPort = func() string {
 	return "6942"
 }()
 
+// pickPlacedWindow chooses which of the shell's windows the tracker.UseWindowPlacer wiring should answer for a node's window. A title alone can miss: Teams' title carries a live memory count that changes between the listing that read it and the click that verifies it, so the exact string the tracker asks for by then names nothing. The pid it also carries names the right process regardless of what its title has become, so it is tried first: the exact title among that pid's windows, then the pid's focused window, then its only window. The exact title across every window, the placer's old behaviour, is what is left when the pid itself is 0 or matches nothing. Input: the open windows the shell extension reports, the pid the accessibility bus gave for the node's connection, and the title the accessibility bus read for its window. Output: the chosen window and true, or false when nothing matches.
+func pickPlacedWindow(windows []window.Window, pid uint32, title string) (window.Window, bool) {
+	var byPid []window.Window
+	if pid != 0 {
+		for _, w := range windows {
+			if w.Pid == pid {
+				byPid = append(byPid, w)
+			}
+		}
+	}
+	for _, w := range byPid {
+		if w.Title == title {
+			return w, true
+		}
+	}
+	for _, w := range byPid {
+		if w.Focused {
+			return w, true
+		}
+	}
+	if len(byPid) == 1 {
+		return byPid[0], true
+	}
+	for _, w := range windows {
+		if w.Title == title {
+			return w, true
+		}
+	}
+	return window.Window{}, false
+}
+
 // pingHandler answers with this process's build identity — the client compares it against its own to detect a daemon that's been running since before the most recent rebuild (see checkDaemonBuildMismatch in root.go). Extracted as a named function so it's testable in isolation from the rest of the daemon's mux.
 func pingHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
@@ -122,6 +153,15 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	brainUsage := brain.NewUsageStore(config.DataDir())
 	agent.SetUsageRecorder(brainUsage)
 
+	// Every Exa or Tavily call web_search makes files its own row on the same token ledger a model call does, so the cost view shows a search counting against the account's quota. See defaultWebSearch and recordSearchUse in internal/agent/websearch.go.
+	agent.SetSearchUsageRecorder(func(u db.TokenUse) {
+		storeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := store.AddTokenUse(storeCtx, u); err != nil {
+			slog.Warn("could not file a web search token use", "provider", u.Provider, "error", err)
+		}
+	})
+
 	meetingRecorder = recorder.New(ctx, config.DataDir(), store, apiKey)
 	// A meeting write-up that hits a spent daily allowance is finished by Codex instead of being dropped.
 	meetingRecorder.SetMinutesFallback(backgroundFallbackBrain())
@@ -180,6 +220,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	if embedEngine != nil {
 		// A whisper GPU decode and the embedding server share one small card; when the card is short, the recorder may evict an idle embedding server (it respawns on the next embed).
 		recorder.SetGPUReleaser(embedEngine.StopIfIdle)
+		// The eviction above only asks once, before the decode. This is what keeps the server off the card for the whole of it, whatever the window's polling does to client presence in the meantime.
+		embedEngine.SetGPUGate(recorder.GPUBusy)
 		// 10000 = the deck's agreed pruning cap for the vector index.
 		index, err := vector.NewChromemIndex(filepath.Join(config.DataDir(), "vectors"), config.LocalEmbedDim, 10000)
 		if err != nil {
@@ -514,11 +556,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		if !ipcServer.Subscribed(time.Minute) {
 			return nil
 		}
-		// Only when Ora's own window is the one in front, which is what it is whenever a question was asked from the hover. Every background capture the tracker takes on its own runs while the user is in something else, and those must not pay the settle wait.
-		a, err := trackerImpl.GetActiveWindow()
-		if err != nil || a == nil || !tracker.IsOraWindow(a.App, a.Title) {
-			return nil
-		}
+		// Every capture pays the settle wait, not only the ones taken while Ora's window is in front: during a computer-use job the target application holds the focus while the hover stays up over it with its live steps, and a guard keyed on focus left the hover in every picture the job took (found 2026-09-10). A window already hidden ignores the instruction, so the cost when the hover is down is the wait alone.
 		ipcServer.Tell("conceal")
 		time.Sleep(concealSettle)
 		return func() { ipcServer.Tell("reveal") }
@@ -585,17 +623,16 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 		return 0, "", false
 	})
-	tracker.UseWindowPlacer(func(ctx context.Context, title string) (x, y, w, h int, ok bool) {
+	tracker.UseWindowPlacer(func(ctx context.Context, pid uint32, title string) (x, y, w, h int, ok bool) {
 		windows, err := windowRaiser.List(ctx)
 		if err != nil {
 			return 0, 0, 0, 0, false
 		}
-		for _, win := range windows {
-			if win.Title == title && win.W > 0 && win.H > 0 {
-				return win.X, win.Y, win.W, win.H, true
-			}
+		win, ok := pickPlacedWindow(windows, pid, title)
+		if !ok || win.W <= 0 || win.H <= 0 {
+			return 0, 0, 0, 0, false
 		}
-		return 0, 0, 0, 0, false
+		return win.X, win.Y, win.W, win.H, true
 	})
 	go func() {
 		raiser, err := window.New()
@@ -622,6 +659,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	for _, provider := range []string{config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI} {
 		actModels[provider] = actjob.FromPromptFunc(provider, brain.FromConfig(config.BrainConfig{Provider: provider}, apiKey))
 	}
+	// askAgent is the job runner's executor, and it also carries the past-run reference block a job plans against: the runner picks that up by asserting actjob.Referencer off the executor it was given, so nothing here passes it explicitly. Asserted at compile time because a silent failure of that assertion looks exactly like a job with no history to plan against, which is what it did before 2026-09-12.
+	var _ actjob.Referencer = askAgent
 	actRunner := actjob.New(store, askAgent, actModels, "default", ipc.ActEmitter(ipcServer))
 	actJobs := ipc.NewActJobs(actRunner)
 	// A job the last daemon left in flight is never picked up by itself: resuming one moves things on the user's screen, so it waits to be asked for by name.
@@ -720,6 +759,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			}
 		})
 		// Five seconds: database/sql's Close waits for every connection in use to come back, and the daemon's background sweeps — vector reconciliation, note consolidation, episodic compaction — hold one for the length of their query. Five is long enough for a statement to finish and short enough that a sweep caught mid-flight does not keep the port bound.
+		// The Antigravity process an ask keeps alive is this daemon's child too; left running it would hold Ora's tool server and answer nobody. Three seconds: the kill is immediate and the reap runs in the background.
+		within("stopping the agy session", 3*time.Second, askAgent.CloseAgySession)
 		within("closing the store", 5*time.Second, func() { store.Close() })
 		// The window raiser's session-bus connection is this process's too, so it is released here rather than left to process exit. Two seconds: closing a D-Bus connection is local and takes microseconds; the bound is there for a wedged bus, not for the work.
 		within("closing the window raiser", 2*time.Second, func() {

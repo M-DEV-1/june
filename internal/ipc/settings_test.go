@@ -24,7 +24,8 @@ func withEmptyFirstRun(t *testing.T) {
 }
 
 // noFirstRunSteps is the FirstRunView a config with no brain, no login files and no local model produces: nothing is set up, so every step is listed.
-var noFirstRunSteps = FirstRunView{Steps: firstRunSteps(FirstRunView{})}
+// A function rather than a package variable because one of the steps now names a real path under the data directory, and a variable is evaluated at init — before a test has pointed HOME at its own temp directory, so it named the developer's own home.
+func noFirstRunSteps() FirstRunView { return FirstRunView{Steps: firstRunSteps(FirstRunView{})} }
 
 // noopSave is the persist function for a test that never posts a change and so never needs one to actually write anything.
 func noopSave(config.OraConfig) error { return nil }
@@ -79,7 +80,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
 				VoiceModel: config.VoiceModel(), Brain: config.TextModel, EmbedModel: config.LocalEmbedModel,
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
-				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
+				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps(), ClaudeUsageFromLogin: true,
 			},
 		},
 		{
@@ -91,7 +92,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
 				VoiceModel: config.VoiceModel(), Brain: "claude-cli sonnet", EmbedModel: "none",
 				MeetingsEnabled: false, CaptureEnabled: false, KeepAudioDays: -1,
-				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
+				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps(), ClaudeUsageFromLogin: true,
 			},
 		},
 		{
@@ -103,7 +104,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
 				VoiceModel: config.VoiceModel(), Brain: config.BrainClaudeCLI, EmbedModel: "none",
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
-				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps, ClaudeUsageFromLogin: true,
+				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps(), ClaudeUsageFromLogin: true,
 			},
 		},
 	}

@@ -57,8 +57,8 @@ type FirstRunView struct {
 func firstRun(cfg config.OraConfig, home string) FirstRunView {
 	v := FirstRunView{
 		GeminiKey:  os.Getenv("GEMINI_API_KEY") != "",
-		CodexLogin: exists(filepath.Join(home, ".codex", "auth.json")),
-		ClaudeCLI:  exists(filepath.Join(home, ".claude", ".credentials.json")),
+		CodexLogin: exists(codexAuthPath(home)),
+		ClaudeCLI:  exists(claudeCredentialsPath(home)),
 		LocalModel: cfg.LocalText.Enabled(cfg),
 	}
 	v.Steps = firstRunSteps(v)
@@ -71,7 +71,7 @@ func firstRunSteps(v FirstRunView) []string {
 		return []string{}
 	}
 	return []string{
-		"Set GEMINI_API_KEY in ~/.config/ora/env.",
+		"Set GEMINI_API_KEY in " + filepath.Join(config.DataDir(), "env") + ".",
 		"Or sign in with the Claude CLI: run claude login.",
 		"Or sign in with the Codex CLI: run codex login.",
 		"Or point ora-config.json at a local model.",

@@ -3,7 +3,9 @@
 package input
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"sync"
@@ -57,6 +59,9 @@ func TestSelectSourcesOptions(t *testing.T) {
 	if got := opts["cursor_mode"].Value().(uint32); got != 1 {
 		t.Fatalf("cursor_mode = %v, want 1 (hidden)", got)
 	}
+	if got := opts["multiple"].Value().(bool); got != true {
+		t.Fatalf("multiple = %v, want true, so the consent dialog can grant every monitor", got)
+	}
 }
 
 // parseResponse reports success (code 0) with its results dict.
@@ -88,55 +93,157 @@ func TestParseResponseMalformed(t *testing.T) {
 	}
 }
 
-// parseStream pulls the PipeWire node id and, when present, the monitor's (width, height) and (x, y) position out of the Start response's "streams" array of (u, a{sv}) structs, which godbus decodes as []interface{} of []interface{} since the struct's Go shape isn't known statically. The "size" and "position" properties are themselves (ii) structs, decoded the same way. No "size" property (some compositors omit it) yields width and height 0, which callers treat as "unknown bounds", and an empty or malformed streams value yields all zeros rather than panicking; ClickAt still works for relative-only compositors, just without absolute positioning.
-func TestParseStreamWithSize(t *testing.T) {
+// parseStreams pulls the PipeWire node id and, when present, the monitor's position and size out of every entry in the Start response's "streams" array of (u, a{sv}) structs, one per monitor the consent dialog granted. No "size" property (some compositors omit it) yields width and height 0, which callers treat as unknown bounds.
+// Every case goes through a real encode and decode, because the types godbus produces are the whole point here: this test used to hand-build the Variant from a Go []interface{} literal, which is not what the decoder ever returns for a(ua{sv}) — it returns [][]interface{}. parseStreams asserted the literal's type, so it matched in the test and never once matched in production: every session ran with zero granted streams, clicks went out with node id 0, and the portal range-checked them against whichever monitor it picked. That is what "Invalid position", "the point is outside the monitor this pointer session reaches" and finally "coordinate (960, 557) is negative" all were.
+func TestParseStreams(t *testing.T) {
+	// position and size are (ii) structs on the wire, not arrays of int, so they are built as Go structs here too; an []int32 would encode as "ai" and decode to a shape pairOf never sees.
+	type pair struct{ A, B int32 }
+	type stream struct {
+		Node  uint32
+		Props map[string]dbus.Variant
+	}
 	cases := []struct {
-		name    string
-		streams dbus.Variant
-		node    uint32
-		rect    streamRect
+		name string
+		sent []stream
+		want []streamInfo
 	}{
-		{"with size", dbus.MakeVariant([]interface{}{
-			[]interface{}{uint32(42), map[string]dbus.Variant{
-				"size": dbus.MakeVariant([]interface{}{int32(1920), int32(1080)}),
+		{"with size", []stream{{Node: 42, Props: map[string]dbus.Variant{
+			"size": dbus.MakeVariant(pair{1920, 1080}),
+		}}}, []streamInfo{{Node: 42, Rect: streamRect{W: 1920, H: 1080}}}},
+		{"no size", []stream{{Node: 7, Props: map[string]dbus.Variant{}}}, []streamInfo{{Node: 7}}},
+		{"empty", []stream{}, nil},
+		{"with position", []stream{{Node: 42, Props: map[string]dbus.Variant{
+			"position": dbus.MakeVariant(pair{1920, 0}),
+			"size":     dbus.MakeVariant(pair{2560, 1440}),
+		}}}, []streamInfo{{Node: 42, Rect: streamRect{X: 1920, W: 2560, H: 1440}}}},
+		// Two monitors granted at once, as SelectSources' "multiple" option allows: both entries must survive parsing, not just the first.
+		{"two monitors", []stream{
+			{Node: 11, Props: map[string]dbus.Variant{
+				"position": dbus.MakeVariant(pair{0, 0}),
+				"size":     dbus.MakeVariant(pair{1920, 1080}),
 			}},
-		}), 42, streamRect{W: 1920, H: 1080}},
-		{"no size", dbus.MakeVariant([]interface{}{
-			[]interface{}{uint32(7), map[string]dbus.Variant{}},
-		}), 7, streamRect{}},
-		{"empty", dbus.MakeVariant([]interface{}{}), 0, streamRect{}},
-		{"with position", dbus.MakeVariant([]interface{}{
-			[]interface{}{uint32(42), map[string]dbus.Variant{
-				"position": dbus.MakeVariant([]interface{}{int32(1920), int32(0)}),
-				"size":     dbus.MakeVariant([]interface{}{int32(2560), int32(1440)}),
+			{Node: 12, Props: map[string]dbus.Variant{
+				"position": dbus.MakeVariant(pair{1920, 0}),
+				"size":     dbus.MakeVariant(pair{1920, 1080}),
 			}},
-		}), 42, streamRect{X: 1920, Y: 0, W: 2560, H: 1440}},
+		}, []streamInfo{
+			{Node: 11, Rect: streamRect{W: 1920, H: 1080}},
+			{Node: 12, Rect: streamRect{X: 1920, W: 1920, H: 1080}},
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			node, rect := parseStream(c.streams)
-			if node != c.node || rect != c.rect {
-				t.Fatalf("got (%d, %+v), want (%d, %+v)", node, rect, c.node, c.rect)
+			got := parseStreams(overTheBus(t, c.sent))
+			if len(got) != len(c.want) {
+				t.Fatalf("got %+v, want %+v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("got %+v, want %+v", got, c.want)
+				}
 			}
 		})
 	}
 }
 
+// overTheBus encodes one Response signal carrying the given streams and decodes it back, so what reaches parseStreams is the type godbus really produces rather than the one a literal happens to have. Input: the streams as the portal would send them. Output: the decoded "streams" Variant.
+func overTheBus(t *testing.T, streams any) dbus.Variant {
+	t.Helper()
+	results := map[string]dbus.Variant{"streams": dbus.MakeVariant(streams)}
+	msg := &dbus.Message{
+		Type: dbus.TypeSignal,
+		Headers: map[dbus.HeaderField]dbus.Variant{
+			dbus.FieldPath:      dbus.MakeVariant(dbus.ObjectPath("/org/freedesktop/portal/desktop/request/1")),
+			dbus.FieldInterface: dbus.MakeVariant("org.freedesktop.portal.Request"),
+			dbus.FieldMember:    dbus.MakeVariant("Response"),
+			dbus.FieldSignature: dbus.MakeVariant(dbus.SignatureOf(uint32(0), results)),
+		},
+		Body: []interface{}{uint32(0), results},
+	}
+	var buf bytes.Buffer
+	if err := msg.EncodeTo(&buf, binary.LittleEndian); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	back, err := dbus.DecodeMessage(&buf)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	decoded, ok := back.Body[1].(map[string]dbus.Variant)
+	if !ok {
+		t.Fatalf("results decoded as %T, want map[string]dbus.Variant", back.Body[1])
+	}
+	return decoded["streams"]
+}
+
+// A grant that really carries no screen stream must fail at Open, not one click at a time. Without a stream there is no monitor to map a point onto, so every later click fails deep in the mapping with a message about the coordinate rather than about the missing grant.
+func TestOpenSequenceRefusesAGrantWithNoStreams(t *testing.T) {
+	p := &fakePortal{noStreams: true}
+	_, _, _, err := openSequence(context.Background(), p, "")
+	if err == nil {
+		t.Fatal("openSequence accepted a grant with no screen stream")
+	}
+	if p.closedHandle != "session-1" {
+		t.Errorf("closedHandle = %q, want the refused session closed", p.closedHandle)
+	}
+}
+
 // With known monitor bounds from Open, an out-of-range coordinate is rejected with a typed error instead of being passed through to the portal.
 func TestToStreamKnownBounds(t *testing.T) {
-	rect := streamRect{W: 1920, H: 1080}
-	if _, _, err := toStream(-1, 100, rect); err == nil {
+	streams := []streamInfo{{Node: 1, Rect: streamRect{W: 1920, H: 1080}}}
+	if _, _, _, err := toStream(-1, 100, streams); err == nil {
 		t.Fatal("expected error for negative x")
 	}
-	if _, _, err := toStream(100, 1081, rect); err == nil {
+	if _, _, _, err := toStream(100, 1081, streams); err == nil {
 		t.Fatal("expected error for y past height")
 	}
-	if _, _, err := toStream(1920, 1080, rect); err != nil {
+	if _, _, _, err := toStream(1920, 1080, streams); err != nil {
 		t.Fatalf("boundary coordinate should be valid: %v", err)
 	}
+	if _, _, node, err := toStream(100, 100, streams); err != nil || node != 1 {
+		t.Fatalf("toStream = (node %v, err %v), want node 1, no error", node, err)
+	}
 	var coordErr *CoordinateError
-	if _, _, err := toStream(-1, 0, rect); !errors.As(err, &coordErr) {
+	if _, _, _, err := toStream(-1, 0, streams); !errors.As(err, &coordErr) {
 		t.Fatalf("error should be a *CoordinateError, got %T", err)
+	}
+}
+
+// A point on the second of two granted monitors maps into that stream's own space, not the first's, and carries that stream's node id so NotifyPointerMotionAbsolute is told the right one.
+func TestToStreamPicksTheStreamThatCoversThePoint(t *testing.T) {
+	streams := []streamInfo{
+		{Node: 11, Rect: streamRect{X: 0, Y: 0, W: 1920, H: 1080}},
+		{Node: 12, Rect: streamRect{X: 1920, Y: 0, W: 1920, H: 1080}},
+	}
+	x, y, node, err := toStream(2850, 423, streams)
+	if err != nil {
+		t.Fatalf("toStream: %v", err)
+	}
+	if node != 12 || x != 930 || y != 423 {
+		t.Fatalf("toStream = (node %d, %v, %v), want (12, 930, 423)", node, x, y)
+	}
+
+	x, y, node, err = toStream(100, 100, streams)
+	if err != nil || node != 11 || x != 100 || y != 100 {
+		t.Fatalf("toStream on the first monitor = (node %d, %v, %v, %v), want (11, 100, 100, nil)", node, x, y, err)
+	}
+}
+
+// A point in neither monitor's rectangle — off both edges, or in a gap between two monitors that do not touch — is refused with a CoordinateError naming how many monitors the session covers.
+func TestToStreamRejectsAPointOnNeitherMonitor(t *testing.T) {
+	streams := []streamInfo{
+		{Node: 11, Rect: streamRect{X: 0, Y: 0, W: 1920, H: 1080}},
+		{Node: 12, Rect: streamRect{X: 1920, Y: 0, W: 1920, H: 1080}},
+	}
+	_, _, _, err := toStream(5000, 100, streams)
+	var coordErr *CoordinateError
+	if !errors.As(err, &coordErr) {
+		t.Fatalf("error should be a *CoordinateError, got %T (%v)", err, err)
+	}
+	if coordErr.Monitors != 2 {
+		t.Fatalf("Monitors = %d, want 2", coordErr.Monitors)
+	}
+	if !strings.Contains(err.Error(), "2 monitor") {
+		t.Fatalf("error %q should name the monitor count", err.Error())
 	}
 }
 
@@ -166,7 +273,7 @@ func TestOpenSequenceClosesOnFailure(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, _, _, _, err := openSequence(context.Background(), c.p, "")
+			_, _, _, err := openSequence(context.Background(), c.p, "")
 			if !errors.Is(err, errBoom) {
 				t.Fatalf("err = %v, want errBoom", err)
 			}
@@ -180,7 +287,7 @@ func TestOpenSequenceClosesOnFailure(t *testing.T) {
 // A createSession failure has no handle to leak, so closeSession must never be called.
 func TestOpenSequenceCreateSessionFailureNoClose(t *testing.T) {
 	p := &fakePortal{createSessionErr: errBoom}
-	_, _, _, _, err := openSequence(context.Background(), p, "")
+	_, _, _, err := openSequence(context.Background(), p, "")
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want errBoom", err)
 	}
@@ -192,12 +299,13 @@ func TestOpenSequenceCreateSessionFailureNoClose(t *testing.T) {
 // The success path never calls closeSession.
 func TestOpenSequenceSuccessNoClose(t *testing.T) {
 	p := &fakePortal{}
-	handle, stream, rect, _, err := openSequence(context.Background(), p, "")
+	handle, streams, _, err := openSequence(context.Background(), p, "")
 	if err != nil {
 		t.Fatalf("openSequence: %v", err)
 	}
-	if handle != "session-1" || stream != 42 || rect != (streamRect{W: 1920, H: 1080}) {
-		t.Fatalf("got (%q, %d, %+v)", handle, stream, rect)
+	want := []streamInfo{{Node: 42, Rect: streamRect{W: 1920, H: 1080}}}
+	if handle != "session-1" || len(streams) != 1 || streams[0] != want[0] {
+		t.Fatalf("got (%q, %+v)", handle, streams)
 	}
 	if p.closedHandle != "" {
 		t.Fatalf("closedHandle = %q, want none", p.closedHandle)
@@ -212,6 +320,7 @@ type fakePortal struct {
 	selectDevicesErr error
 	selectSourcesErr error
 	startErr         error
+	noStreams        bool // the portal answered Start with a grant carrying no screen stream
 	closedHandle     string
 }
 
@@ -230,11 +339,14 @@ func (f *fakePortal) selectSources(_ context.Context, _ string) error {
 	return f.selectSourcesErr
 }
 
-func (f *fakePortal) start(_ context.Context, _ string) (uint32, streamRect, string, error) {
+func (f *fakePortal) start(_ context.Context, _ string) ([]streamInfo, string, error) {
 	if f.startErr != nil {
-		return 0, streamRect{}, "", f.startErr
+		return nil, "", f.startErr
 	}
-	return 42, streamRect{W: 1920, H: 1080}, "", nil
+	if f.noStreams {
+		return nil, "", nil
+	}
+	return []streamInfo{{Node: 42, Rect: streamRect{W: 1920, H: 1080}}}, "", nil
 }
 
 func (f *fakePortal) closeSession(handle string) error {
@@ -315,30 +427,64 @@ func TestPressKeyReleasesWhatItPressedWhenAPressFails(t *testing.T) {
 	}
 }
 
+// TypeText used to hand its whole press/release sequence to paceEvents, which stops at the first error: if a character's own release call failed, that key stayed down from the compositor's point of view for whatever the model sent next (a click, a chord, more typed text), with no attempt to bring it back up. A failed release must be retried once before the error is returned, mirroring the recovery PressKey already does for a chord.
+func TestTypeText_RetriesAReleaseThatFailsBeforeReturning(t *testing.T) {
+	var events [][3]interface{}
+	sent := 0
+	s := &Session{handle: "/session/1", send: func(_ context.Context, method string, args ...interface{}) error {
+		sent++
+		events = append(events, [3]interface{}{method, args[2], args[3]})
+		if sent == 2 {
+			return errBoom
+		}
+		return nil
+	}}
+
+	err := s.TypeText("ab")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("err = %v, want errBoom", err)
+	}
+	// Call 1: press 'a'. Call 2: release 'a', fails. Call 3 must be a retry of that same release, not a press of 'b'.
+	if len(events) < 3 {
+		t.Fatalf("recorded %d calls, want at least 3 (press, failed release, retried release)", len(events))
+	}
+	press, firstRelease, retry := events[0], events[1], events[2]
+	if press[1].(int32) != 'a' || press[2].(uint32) != keyStatePressed {
+		t.Fatalf("call 1 = %v, want a press of 'a'", press)
+	}
+	if firstRelease[1].(int32) != 'a' || firstRelease[2].(uint32) != keyStateReleased {
+		t.Fatalf("call 2 = %v, want a release of 'a'", firstRelease)
+	}
+	if retry[1].(int32) != 'a' || retry[2].(uint32) != keyStateReleased {
+		t.Fatalf("call 3 = %v, want a retried release of 'a', not moving on to 'b'", retry)
+	}
+}
+
 // NotifyPointerMotionAbsolute takes coordinates in the granted stream's own space, while a click or a scroll arrives in whole-desktop coordinates read off a whole-desktop screenshot. On a monitor that does not start at the desktop origin the two differ by that monitor's position, and a click on the second screen used to be refused as outside the monitor or land on the first one.
 func TestToStreamSubtractsTheMonitorOrigin(t *testing.T) {
-	rect := streamRect{X: 1920, Y: 0, W: 2560, H: 1440}
-	x, y, err := toStream(2020, 100, rect)
+	streams := []streamInfo{{Node: 1, Rect: streamRect{X: 1920, Y: 0, W: 2560, H: 1440}}}
+	x, y, _, err := toStream(2020, 100, streams)
 	if err != nil || x != 100 || y != 100 {
 		t.Fatalf("toStream = (%v, %v, %v), want (100, 100, nil)", x, y, err)
 	}
 	// A point on the other monitor is off this stream entirely, and is refused rather than sent as a negative coordinate.
-	if _, _, err := toStream(100, 100, rect); err == nil {
+	if _, _, _, err := toStream(100, 100, streams); err == nil {
 		t.Fatal("a point left of the granted monitor should be refused")
 	}
 	// Past the far edge of the granted monitor, measured from its own origin, is refused too.
-	if _, _, err := toStream(4481, 100, rect); err == nil {
+	if _, _, _, err := toStream(4481, 100, streams); err == nil {
 		t.Fatal("a point past the granted monitor's width should be refused")
 	}
 }
 
 // A compositor that reports neither position nor size leaves the behaviour as it was: the point is passed through untouched and only a negative one is refused.
 func TestToStreamWithoutStreamProperties(t *testing.T) {
-	x, y, err := toStream(50000, 50000, streamRect{})
+	streams := []streamInfo{{Node: 1, Rect: streamRect{}}}
+	x, y, _, err := toStream(50000, 50000, streams)
 	if err != nil || x != 50000 || y != 50000 {
 		t.Fatalf("toStream = (%v, %v, %v), want the point passed through", x, y, err)
 	}
-	if _, _, err := toStream(-1, 0, streamRect{}); err == nil {
+	if _, _, _, err := toStream(-1, 0, streams); err == nil {
 		t.Fatal("a negative coordinate should be refused")
 	}
 }
@@ -373,18 +519,19 @@ func TestToStreamScalesToTheStreamsOwnPixels(t *testing.T) {
 	if rect.Scale != 2 {
 		t.Fatalf("scale = %v, want 2 from a 3840-wide stream on a 1920-wide monitor", rect.Scale)
 	}
-	x, y, err := toStream(1900, 1000, rect)
+	streams := []streamInfo{{Node: 1, Rect: rect}}
+	x, y, _, err := toStream(1900, 1000, streams)
 	if err != nil || x != 3800 || y != 2000 {
 		t.Fatalf("toStream = (%v, %v, %v), want (3800, 2000, nil)", x, y, err)
 	}
 	// The far corner of the monitor is still the far corner of the stream, and a point beyond it is still refused.
-	if _, _, err := toStream(1921, 0, rect); err == nil {
+	if _, _, _, err := toStream(1921, 0, streams); err == nil {
 		t.Fatal("a point past the monitor's logical width should be refused")
 	}
 
 	// A second monitor at 1920,0 logical, 2560x1440 logical, streamed at 5120x2880.
 	second := withScaleFrom(streamRect{X: 1920, Y: 0, W: 5120, H: 2880}, func(x, y int) (int, int, bool) { return 2560, 1440, true })
-	x, y, err = toStream(2020, 100, second)
+	x, y, _, err = toStream(2020, 100, []streamInfo{{Node: 2, Rect: second}})
 	if err != nil || x != 200 || y != 200 {
 		t.Fatalf("toStream on the second monitor = (%v, %v, %v), want (200, 200, nil)", x, y, err)
 	}
@@ -398,7 +545,7 @@ func TestToStreamAtScaleOneIsUnchanged(t *testing.T) {
 		t.Fatalf("scales = %v and %v, want 1 and 1", unscaled.Scale, unknown.Scale)
 	}
 	for _, rect := range []streamRect{unscaled, unknown, {X: 1920, Y: 0, W: 2560, H: 1440}} {
-		x, y, err := toStream(2020, 100, rect)
+		x, y, _, err := toStream(2020, 100, []streamInfo{{Node: 1, Rect: rect}})
 		if err != nil || x != 100 || y != 100 {
 			t.Errorf("toStream(%+v) = (%v, %v, %v), want (100, 100, nil)", rect, x, y, err)
 		}
@@ -423,17 +570,17 @@ func TestCreateSessionOptionsNameTheSession(t *testing.T) {
 	}
 }
 
-// A click aimed at the second monitor gets "Invalid position" from mutter, since a session's stream covers one monitor; the error must say so, or the model retries the same point (it tried x=3750 four times on 2026-09-08).
+// A click aimed off every monitor the session covers gets "Invalid position" back from mutter as the last-resort backstop (toStream should normally catch this first); the error must say so, or the model retries the same point (it tried x=3750 four times on 2026-09-08, back when a session held only one stream and toStream itself would have caught this case).
 func TestClickAt_SaysWhenThePointIsOffTheSessionsMonitor(t *testing.T) {
-	s := &Session{handle: "/session/1", send: func(_ context.Context, method string, _ ...interface{}) error {
+	s := &Session{handle: "/session/1", streams: []streamInfo{{Node: 1, Rect: streamRect{}}}, send: func(_ context.Context, method string, _ ...interface{}) error {
 		if method == "NotifyPointerMotionAbsolute" {
 			return errors.New("Invalid position")
 		}
 		return nil
 	}}
 	err := s.ClickAt(3750, 54)
-	if err == nil || !strings.Contains(err.Error(), "outside the monitor") {
-		t.Errorf("err = %v, want it to name the monitor the session cannot reach", err)
+	if err == nil || !strings.Contains(err.Error(), "outside every monitor") {
+		t.Errorf("err = %v, want it to name the monitors the session cannot reach", err)
 	}
 }
 
@@ -457,7 +604,7 @@ func TestNotAllowedForgetsTheSavedToken(t *testing.T) {
 	if err := saveToken(dir, "tok"); err != nil {
 		t.Fatal(err)
 	}
-	s := &Session{handle: "/session/1", dataDir: dir, send: func(context.Context, string, ...interface{}) error {
+	s := &Session{handle: "/session/1", dataDir: dir, streams: []streamInfo{{Node: 1, Rect: streamRect{}}}, send: func(context.Context, string, ...interface{}) error {
 		return errors.New("Session is not allowed to call NotifyPointer methods")
 	}}
 	if err := s.ClickAt(10, 10); err == nil {

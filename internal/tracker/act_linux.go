@@ -182,24 +182,23 @@ var windowRoles = map[string]bool{"frame": true, "window": true, "dialog": true,
 // maxParentHops bounds the walk from a node up to its window, so a tree that answers with a cycle cannot spin here for ever. Measured on this desk on 2026-09-05, Brave's address bar sits seven levels under its frame, so this is several times what a real page needs.
 const maxParentHops = 40
 
-// windowPlacer answers where a window titled title really is on the screen, in logical pixels, and false when it cannot say. nil until UseWindowPlacer wires one in; the daemon wires the bundled shell extension's window list, which is the only thing on a Wayland desk that knows.
-var windowPlacer func(ctx context.Context, title string) (x, y, w, h int, ok bool)
+// windowPlacer answers where a window really is on the screen, in logical pixels, and false when it cannot say. Input: the pid of the process that owns the window, and its title. Output: the window's frame and true, false when it cannot be matched. nil until UseWindowPlacer wires one in; the daemon wires the bundled shell extension's window list, which is the only thing on a Wayland desk that knows.
+var windowPlacer func(ctx context.Context, pid uint32, title string) (x, y, w, h int, ok bool)
 
-// UseWindowPlacer wires in the reader of real window positions. Input: a function answering the frame of the window with that exact title, and false when there is none or nothing can say. Output: none. Call it before the first observe; a placer is asked on every correction and may answer false until the shell extension is reachable.
-func UseWindowPlacer(f func(ctx context.Context, title string) (x, y, w, h int, ok bool)) {
+// UseWindowPlacer wires in the reader of real window positions. Input: a function answering the frame of the window owned by that pid, preferring the one titled title when the pid owns more than one, and false when there is none or nothing can say. Output: none. Call it before the first observe; a placer is asked on every correction and may answer false until the shell extension is reachable.
+func UseWindowPlacer(f func(ctx context.Context, pid uint32, title string) (x, y, w, h int, ok bool)) {
 	windowPlacer = f
 }
 
-// shiftOf is how far a node's window has to move to be where it really is on the screen. Input: a context, the bus connection and the node's ref. Output: the shift to add to x and to y, and false when the node's window cannot be found. The placer's answer wins when it has one for the window's title, since it is a measurement; the size-based guess in windowShift is the fallback for a desk with no extension.
+// shiftOf is how far a node's window has to move to be where it really is on the screen. Input: a context, the bus connection and the node's ref. Output: the shift to add to x and to y, and false when the node's window cannot be found. The placer's answer wins when it has one, since it is a measurement; the size-based guess in windowShift is the fallback for a desk with no extension.
 func shiftOf(ctx context.Context, conn *dbus.Conn, ref aref) (dx, dy int, ok bool) {
 	frame, win, ok := windowOf(ctx, conn, ref)
 	if !ok {
 		return 0, 0, false
 	}
-	if windowPlacer != nil {
-		if x, y, _, _, ok := windowPlacer(ctx, getName(ctx, conn, win)); ok {
-			return x - frame.X, y - frame.Y, true
-		}
+	pid, _ := busPid(ctx, conn, win.Name)
+	if dx, dy, ok := shiftFromPlacer(ctx, pid, getName(ctx, conn, win), frame); ok {
+		return dx, dy, true
 	}
 	d, ok := deskNow()
 	if !ok {
@@ -207,6 +206,18 @@ func shiftOf(ctx context.Context, conn *dbus.Conn, ref aref) (dx, dy int, ok boo
 	}
 	dx, dy = windowShift(frame, d)
 	return dx, dy, true
+}
+
+// shiftFromPlacer asks the wired window placer for one node's window shift, matched by the pid of the process that owns the accessibility connection rather than by title alone: a title that carries a live status such as a memory count changes between the listing and the click, and a title match that must be exact then misses the window it just found by pid, falling back to a size-based guess that can differ from the real shift by a monitor's width. Input: a context, the window's pid and title, and the frame the accessibility bus reported for it. Output: the shift, and true when the placer is wired and has an answer for this window; false otherwise, which leaves the size-based guess in windowShift as the only source left.
+func shiftFromPlacer(ctx context.Context, pid uint32, title string, frame rect) (dx, dy int, ok bool) {
+	if windowPlacer == nil {
+		return 0, 0, false
+	}
+	x, y, _, _, ok := windowPlacer(ctx, pid, title)
+	if !ok {
+		return 0, 0, false
+	}
+	return x - frame.X, y - frame.Y, true
 }
 
 // windowOf walks up from a node to the top-level window it is drawn in. Input: a context, the bus connection and the node's ref. Output: that window's rectangle as the bus reports it in screen coordinates, the window's ref, and true; false when the chain breaks or runs past maxParentHops before a window is reached.
@@ -333,7 +344,7 @@ func windowShift(frame rect, d desk) (dx, dy int) {
 
 // windowMonitor picks the monitor a window is on. Input: the window's rectangle as the bus reported it, the monitors, and the pointer's position (-1,-1 when X could not say). Output: that monitor and true, or false when nothing here can place the window.
 // The reported corner answers it whenever the window can say where it is. A native Wayland client cannot: it answers 0,0, which on a desk with more than one monitor names the monitor at the desktop origin whatever monitor the window is really on — a maximized Brave on the right-hand monitor got no x shift and every rectangle in its listing named a point one monitor's width to the left of the element it was for. The pointer is then the second opinion, and it is the same stand-in screenLayout already uses to say which monitor a stored frame came from.
-// ponytail: the pointer is wrong when the user's hand is on one monitor and the keyboard focus on another. The extension's window list would settle it, but it reports no geometry today; add x, y to its List reply if this ever misplaces a ring.
+// ponytail: the pointer is wrong when the user's hand is on one monitor and the keyboard focus on another. The extension's window list settles that better when it is wired: shiftFromPlacer asks it for the window's real frame, by pid, before windowShift (and this monitor guess inside it) ever runs, so this pointer-based guess is now only the fallback for a desk with no extension reachable.
 func windowMonitor(frame rect, mons []rect, pointer image.Point) (rect, bool) {
 	if frame.X == 0 && frame.Y == 0 && len(mons) > 1 {
 		if m, ok := monitorAt(pointer.X, pointer.Y, mons); ok {
@@ -402,10 +413,7 @@ func desktopBounds() (work, screen rect, ok bool) {
 // netWorkArea is the root-window property every EWMH desktop publishes its work area in: the screen less whatever its own panels have reserved.
 const netWorkArea = "_NET_WORKAREA"
 
-// movedBy is how far, in pixels, an element's rectangle may differ from the one observe_screen recorded and still count as the same element in the same place. It covers the rounding a scaled display introduces and little else: a list that has scrolled moves a row by at least its own height, and two entries stacked in a form sit further apart than this even when neither carries a label.
-const movedBy = 8
-
-// Verify checks that a node still is what observe_screen described, since a toolkit can hand a recycled object path to a different element after a page re-renders, and since a page that scrolls under the list leaves every number pointing at the right element in the wrong place. Input: a context, the node's Ref, the role and label the list showed, and the rectangle it showed. Output: nil when the role, the label and the rectangle all still match (the label check is skipped when the list showed none and when the role is a content role, whose label is the node's own contents, the rectangle check when the list showed no size), or an error naming what changed or that the node has gone.
+// Verify checks that a node still is what observe_screen described, since a toolkit can hand a recycled object path to a different element after a page re-renders. Input: a context, the node's Ref, and the role and label the list showed; x, y, w and h are accepted for compatibility with the caller's fixed signature but no longer read or compared — a click fires the accessibility action on the ref itself, so a stale rectangle never stopped it from landing on the right element, and it only ever caused a refusal when a page changed under the node between the listing and the click, such as a live status word changing in a window's title. Output: nil when the role and the label still match (the label check is skipped when the list showed none, and for a content role, whose label is the node's own contents), or an error naming what changed or that the node has gone.
 func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error {
 	ctx, cancel := context.WithTimeout(ctx, actTimeout)
 	defer cancel()
@@ -418,7 +426,7 @@ func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error 
 		return err
 	}
 	nowRole := getRoleName(ctx, conn, r)
-	// The label and the rectangle each cost a round trip, so neither is read when there is nothing in the list to compare it against, and the label is not read at all for a content role, whose label is not compared.
+	// The label costs a round trip, so it is not read when there is nothing in the list to compare it against, and not read at all for a content role, whose label is not compared.
 	nowLabel := ""
 	if label != "" && !act.ContentRole(role) {
 		nowLabel = getName(ctx, conn, r)
@@ -426,44 +434,31 @@ func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error 
 			nowLabel = strings.TrimSpace(getText(ctx, conn, r))
 		}
 	}
-	now := rect{}
-	if w > 0 && h > 0 {
-		now.X, now.Y, now.W, now.H = getExtents(ctx, conn, r)
-	}
-	return verifyAgainst(nowRole, nowLabel, now, role, label, rect{X: x, Y: y, W: w, H: h})
+	return VerifyAgainst(nowRole, nowLabel, role, label)
 }
 
-// verifyAgainst compares what an element is now with what observe_screen recorded for it. Input: the role, label and rectangle read from the element just now, then the role, label and rectangle the numbered list showed. Output: nil when they still describe the same element in the same place, or an error naming what changed; an empty label in the list means the list held none, and a rectangle of no size in the list means it held none either, and neither is then compared; a content role's label is not compared at all.
-func verifyAgainst(nowRole, nowLabel string, now rect, role, label string, was rect) error {
+// Relabelled reports that the element is still there, still the same role, and still answering on the same reference, but carries a different name than the list recorded. It is a distinct type because it is the one difference a caller can carry on through: a Play button that now says Pause is the same button, and the only thing that must change is which name the stop line is judged against.
+type Relabelled struct{ Now, Was string }
+
+func (e *Relabelled) Error() string {
+	return fmt.Sprintf("it is now labelled %q, not %q", e.Now, e.Was)
+}
+
+// VerifyAgainst compares what an element is now with what observe_screen recorded for it. Input: the role and label read from the element just now, then the role and label the numbered list showed. Output: nil when they still describe the same element, a *Relabelled when only the name changed, or an error naming what else changed; an empty label in the list means the list held none, and a content role's label is not compared at all.
+// Exported so an end-to-end test can put a fake accessibility read through the same decision the bus-backed one makes, rather than a second copy of the rule that can drift from it.
+func VerifyAgainst(nowRole, nowLabel string, role, label string) error {
 	if nowRole == "" {
 		return errors.New("the element has gone")
 	}
 	if nowRole != role {
 		return fmt.Errorf("it is now a %s, not a %s", nowRole, role)
 	}
-	// A content role's label is the node's own contents — what is typed in an entry, what a run of page text says — not a name anybody chose for it, so it changes whenever the user types and says nothing about whether this is still the same element. The role and the rectangle still do. Comparing it refused a click on a box the user had just typed into, which is the ordinary thing to happen between listing a box and clicking it.
+	// A content role's label is the node's own contents — what is typed in an entry, what a run of page text says — not a name anybody chose for it, so it changes whenever the user types and says nothing about whether this is still the same element. The role still does. Comparing it refused a click on a box the user had just typed into, which is the ordinary thing to happen between listing a box and clicking it.
 	if label != "" && !act.ContentRole(role) && nowLabel != label {
-		return fmt.Errorf("it is now labelled %q, not %q", nowLabel, label)
-	}
-	if was.W <= 0 || was.H <= 0 {
-		return nil
-	}
-	if now.W <= 0 || now.H <= 0 {
-		return errors.New("it is no longer showing on the screen")
-	}
-	if moved(now, was) {
-		return fmt.Errorf("it is now at %d,%d %dx%d, not %d,%d %dx%d: the page has moved under the list", now.X, now.Y, now.W, now.H, was.X, was.Y, was.W, was.H)
+		return &Relabelled{Now: nowLabel, Was: label}
 	}
 	return nil
 }
-
-// moved reports whether two rectangles are too far apart to be the same element in the same place. Input: the rectangle read from the element now and the one observe_screen recorded. Output: true when any of the four numbers differs by more than movedBy pixels.
-func moved(now, was rect) bool {
-	return away(now.X, was.X) || away(now.Y, was.Y) || away(now.W, was.W) || away(now.H, was.H)
-}
-
-// away reports whether two pixel counts differ by more than movedBy.
-func away(a, b int) bool { return a-b > movedBy || b-a > movedBy }
 
 // Focused reports whether an element holds the keyboard focus right now, so a caller about to type can check that the box it is typing into is the box its guards were applied to: a click that opened a dialog, or an application that moved the focus itself, leaves the remembered element no longer the one the keys reach. Input: a context and the node's Ref from act.Node. Output: true when STATE_FOCUSED is set on that element, false when the element answered and the bit is not set, and an error when the answer says nothing either way — a malformed ref, an unreachable bus, or a GetState that timed out, named an element that has gone, or came back with no state words at all.
 // The empty answer is an error rather than a false because the two are not the same thing to the caller: a toolkit that does not publish the bit on the node the walk listed, which Chromium and Electron often do not, would otherwise read as "some other element has the keyboard" and stop a legitimate typing.

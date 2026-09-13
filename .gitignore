@@ -49,3 +49,6 @@ evals/trajectories/
 
 # Local-only reading copies of the old planning docs, restored from the pre-rewrite history. Never tracked: they were purged from git on 2026-09-07 and must not come back.
 notes-local/
+
+# seeded design canvas payload (2.5MB, regenerate with seed-canvas.mjs)
+design/ora-onboarding.html

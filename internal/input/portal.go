@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,22 +55,29 @@ var errClosed = errors.New("input: session is closed")
 // CoordinateError reports a pointer coordinate rejected before it reached the portal.
 type CoordinateError struct {
 	X, Y          float64
-	Width, Height int // the known monitor bounds, or 0 if the stream never reported a size
+	Width, Height int // the known bounds of the one monitor the session covers, or 0 if the stream never reported a size
+	// Monitors is the number of monitors this session covers, set only when the point missed every one of them (the multi-monitor case). Zero means the single-stream, legacy shape below applies instead.
+	Monitors int
+	// TokenPath is where the saved restore token lives, so the message can tell the user how to re-grant. Filled in by the Session methods that know dataDir; blank when toStream is called directly.
+	TokenPath string
 }
 
 func (e *CoordinateError) Error() string {
-	if e.Width == 0 && e.Height == 0 {
-		return fmt.Sprintf("input: coordinate (%.0f, %.0f) is negative", e.X, e.Y)
+	if e.Monitors > 0 {
+		msg := fmt.Sprintf("input: coordinate (%.0f, %.0f) is outside every monitor this pointer session reaches (granted %d monitor(s))", e.X, e.Y, e.Monitors)
+		if e.TokenPath != "" {
+			msg += fmt.Sprintf("; delete %s and let the next click ask again", e.TokenPath)
+		}
+		return msg
 	}
 	return fmt.Sprintf("input: coordinate (%.0f, %.0f) is outside the %dx%d monitor", e.X, e.Y, e.Width, e.Height)
 }
 
 // Session is an open RemoteDesktop portal session that can inject keyboard and pointer input into the GNOME Wayland desktop.
 type Session struct {
-	conn   *dbus.Conn
-	stream uint32 // ScreenCast PipeWire node id backing absolute pointer motion; 0 if none was granted
-	// rect is where the granted monitor sits on the desktop and how big it is, from the stream's "position" and "size" properties; all zero when the compositor reported neither. Pointer coordinates arrive in whole-desktop space and are mapped into this rectangle's own space before they are sent (see toStream).
-	rect streamRect
+	conn *dbus.Conn
+	// streams is every ScreenCast stream the session was granted, one per monitor the user picked in the consent dialog (or restored via a saved token). Pointer coordinates arrive in whole-desktop space; toStream picks whichever stream's rectangle contains a given point and maps into that stream's own space before it is sent.
+	streams []streamInfo
 	// dataDir holds the saved restore token; blank in tests that never touch the disk.
 	dataDir string
 
@@ -122,7 +130,7 @@ func (s *Session) closeLocked() string {
 	return h
 }
 
-// Open starts a RemoteDesktop session covering keyboard and pointer: it restores a saved restore_token from dataDir if one exists, otherwise the user sees the portal's one-time consent dialog. Also opens a ScreenCast monitor stream, which NotifyPointerMotionAbsolute requires to map (x, y) to a screen. dataDir is created (mode 0700) if missing, since the restore_token must be written there.
+// Open starts a RemoteDesktop session covering keyboard and pointer: it restores a saved restore_token from dataDir if one exists, otherwise the user sees the portal's one-time consent dialog. Also opens a ScreenCast stream per monitor the user granted, which NotifyPointerMotionAbsolute requires to map (x, y) to a screen. dataDir is created (mode 0700) if missing, since the restore_token must be written there.
 func Open(ctx context.Context, dataDir string) (*Session, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -132,14 +140,21 @@ func Open(ctx context.Context, dataDir string) (*Session, error) {
 		return nil, fmt.Errorf("session bus: %w", err)
 	}
 
-	handle, stream, rect, newToken, err := openSequence(ctx, &realPortal{conn: conn}, loadToken(dataDir))
+	handle, streams, newToken, err := openSequence(ctx, &realPortal{conn: conn}, loadToken(dataDir))
 	if err != nil {
 		return nil, err
 	}
 	if err := saveToken(dataDir, newToken); err != nil {
 		return nil, fmt.Errorf("save token: %w", err)
 	}
-	return &Session{conn: conn, handle: handle, stream: stream, rect: withStreamScale(rect), dataDir: dataDir}, nil
+	for i := range streams {
+		streams[i].Rect = withStreamScale(streams[i].Rect)
+	}
+	// A saved token from an older, one-monitor grant keeps restoring that same one-monitor grant on every later Open; the portal never asks again on its own. Whether that is actually a problem depends on how many monitors the desk has, which isn't known here, so this is only a log line, not a hard failure: on a genuinely single-monitor desk it is expected and harmless.
+	if len(streams) == 1 {
+		fmt.Fprintf(os.Stderr, "input: pointer session covers 1 monitor; on a multi-monitor desk this usually means an old grant, delete %s and the next click will ask again\n", filepath.Join(dataDir, tokenFile))
+	}
+	return &Session{conn: conn, handle: handle, streams: streams, dataDir: dataDir}, nil
 }
 
 // portalOps is the set of fallible RemoteDesktop/ScreenCast steps openSequence drives. Splitting it out from Session lets the failure-cleanup logic in openSequence be tested against a fake, without a live D-Bus session.
@@ -147,32 +162,37 @@ type portalOps interface {
 	createSession(ctx context.Context) (string, error)
 	selectDevices(ctx context.Context, handle, restoreToken string) error
 	selectSources(ctx context.Context, handle string) error
-	start(ctx context.Context, handle string) (stream uint32, rect streamRect, restoreToken string, err error)
+	start(ctx context.Context, handle string) (streams []streamInfo, restoreToken string, err error)
 	closeSession(handle string) error
 }
 
 // openSequence runs the CreateSession -> SelectDevices -> SelectSources -> Start handshake. If any step after createSession fails, it closes the session it opened before returning the error, so a failed Open never leaks a live portal session (and the orphaned PipeWire stream that comes with it).
-func openSequence(ctx context.Context, p portalOps, restoreToken string) (handle string, stream uint32, rect streamRect, newToken string, err error) {
+func openSequence(ctx context.Context, p portalOps, restoreToken string) (handle string, streams []streamInfo, newToken string, err error) {
 	handle, err = p.createSession(ctx)
 	if err != nil {
-		return "", 0, streamRect{}, "", err
+		return "", nil, "", err
 	}
 
 	if err = p.selectDevices(ctx, handle, restoreToken); err != nil {
 		_ = p.closeSession(handle)
-		return "", 0, streamRect{}, "", err
+		return "", nil, "", err
 	}
 	if err = p.selectSources(ctx, handle); err != nil {
 		_ = p.closeSession(handle)
-		return "", 0, streamRect{}, "", err
+		return "", nil, "", err
 	}
 
-	stream, rect, newToken, err = p.start(ctx, handle)
+	streams, newToken, err = p.start(ctx, handle)
 	if err != nil {
 		_ = p.closeSession(handle)
-		return "", 0, streamRect{}, "", err
+		return "", nil, "", err
 	}
-	return handle, stream, rect, newToken, nil
+	// A grant with no screen stream has no monitor to map a point onto, so every click on it fails one at a time, deep in the mapping, with a message about the coordinate rather than about the missing grant. Refusing here says it once, in the one place that knows why.
+	if len(streams) == 0 {
+		_ = p.closeSession(handle)
+		return "", nil, "", errors.New("the portal granted no screen stream, so the pointer has no monitor to aim at")
+	}
+	return handle, streams, newToken, nil
 }
 
 // Close ends the portal session so the compositor can release the associated PipeWire stream. Safe to call more than once.
@@ -190,6 +210,12 @@ type streamRect struct {
 	X, Y  int
 	W, H  int
 	Scale float64
+}
+
+// streamInfo pairs one granted ScreenCast stream's PipeWire node id with the rectangle it covers, so toStream can pick the right stream for a point and NotifyPointerMotionAbsolute can be told which node the coordinate belongs to.
+type streamInfo struct {
+	Node uint32
+	Rect streamRect
 }
 
 // monitorLayout reports the logical size of the monitor holding a desktop point. It is nil until something wires a reader in (see UseMonitorLayout), and while it is nil every stream is taken to be one stream pixel to one logical pixel.
@@ -212,24 +238,45 @@ func withStreamScale(r streamRect) streamRect {
 	return r
 }
 
-// toStream maps a point in whole-desktop logical coordinates into the granted stream's own coordinate space, which is what NotifyPointerMotionAbsolute takes, and rejects one that is not on that monitor. Input: the logical desktop point and the granted stream's rectangle. Output: the point measured from the monitor's own top-left corner and multiplied by the stream's scale, or a CoordinateError when the monitor's size is known and the point is outside it. With no size reported the point is passed through with only the origin taken off and only a negative result refused, which is what this did before the position was read.
-// The origin is taken off before the scale goes on, because the stream's position is in logical pixels and its size is in the stream's own. A stream whose scale could not be worked out is mapped at 1, which is right on an unscaled monitor and is the assumption that still stands everywhere else.
-func toStream(x, y float64, r streamRect) (float64, float64, error) {
-	scale := r.Scale
-	if scale <= 0 {
-		scale = 1
-	}
-	sx, sy := (x-float64(r.X))*scale, (y-float64(r.Y))*scale
-	if r.W > 0 || r.H > 0 {
-		if sx < 0 || sy < 0 || sx > float64(r.W) || sy > float64(r.H) {
-			return 0, 0, &CoordinateError{X: x, Y: y, Width: r.W, Height: r.H}
+// toStream maps a point in whole-desktop logical coordinates into whichever granted stream's rectangle contains it, which is what NotifyPointerMotionAbsolute takes, and rejects a point that is on none of them. Input: the logical desktop point and every stream the session was granted. Output: the point measured from that monitor's own top-left corner and multiplied by its stream's scale, the node id of the stream it landed on, or a CoordinateError when the point is outside every stream whose size is known.
+// The origin is taken off before the scale goes on, because a stream's position is in logical pixels and its size is in the stream's own. A stream whose scale could not be worked out is mapped at 1, which is right on an unscaled monitor and is the assumption that still stands everywhere else.
+// A stream that reports no size at all (some compositors omit it) is treated as covering wherever a point lands, exactly as a single such stream did before multi-monitor support existed: only a negative coordinate is refused. That stream is tried last, after every sized stream has had a chance to claim the point.
+func toStream(x, y float64, streams []streamInfo) (float64, float64, uint32, error) {
+	var unsized *streamInfo
+	for i := range streams {
+		r := streams[i].Rect
+		if r.W <= 0 && r.H <= 0 {
+			if unsized == nil {
+				unsized = &streams[i]
+			}
+			continue
 		}
-		return sx, sy, nil
+		scale := r.Scale
+		if scale <= 0 {
+			scale = 1
+		}
+		sx, sy := (x-float64(r.X))*scale, (y-float64(r.Y))*scale
+		if sx >= 0 && sy >= 0 && sx <= float64(r.W) && sy <= float64(r.H) {
+			return sx, sy, streams[i].Node, nil
+		}
 	}
-	if sx < 0 || sy < 0 {
-		return 0, 0, &CoordinateError{X: x, Y: y}
+	if unsized != nil {
+		r := unsized.Rect
+		scale := r.Scale
+		if scale <= 0 {
+			scale = 1
+		}
+		sx, sy := (x-float64(r.X))*scale, (y-float64(r.Y))*scale
+		if sx < 0 || sy < 0 {
+			return 0, 0, 0, &CoordinateError{X: x, Y: y, Monitors: len(streams)}
+		}
+		return sx, sy, unsized.Node, nil
 	}
-	return sx, sy, nil
+	if len(streams) == 1 {
+		// Exactly one, sized stream: keep the old single-monitor message naming that monitor's bounds.
+		return 0, 0, 0, &CoordinateError{X: x, Y: y, Width: streams[0].Rect.W, Height: streams[0].Rect.H}
+	}
+	return 0, 0, 0, &CoordinateError{X: x, Y: y, Monitors: len(streams)}
 }
 
 // PressKey sends a full press-then-release for the named key or chord (e.g. "Enter", "Ctrl+L"), paced keyDelay apart. Modifiers in a chord are pressed first and released last, in reverse order, so the compositor sees them held down for the whole chord.
@@ -264,6 +311,7 @@ func (s *Session) PressKey(name string) error {
 }
 
 // TypeText presses and releases each character of text in turn via its X11 keysym, paced keyDelay apart, so arbitrary Unicode text can be typed without needing a keycode mapping for every character. Characters with no sensible keysym (see runeKeysym) are silently skipped rather than sent as a bogus chord.
+// Every key that goes down is retried on release before TypeText gives up, the same as PressKey does for a chord: a release call that fails would otherwise leave that key held from the compositor's point of view for whatever the model sends next.
 func (s *Session) TypeText(text string) error {
 	s.acting.Lock()
 	defer s.acting.Unlock()
@@ -272,23 +320,45 @@ func (s *Session) TypeText(text string) error {
 		return err
 	}
 
-	var events []func() error
 	for _, r := range text {
 		sym, ok := runeKeysym(r)
 		if !ok {
 			continue
 		}
-		events = append(events,
-			func() error { return s.notifyKeysym(handle, sym, keyStatePressed) },
-			func() error { return s.notifyKeysym(handle, sym, keyStateReleased) },
-		)
+		if err := s.notifyKeysym(handle, sym, keyStatePressed); err != nil {
+			return err
+		}
+		time.Sleep(keyDelay)
+		if err := s.notifyKeysym(handle, sym, keyStateReleased); err != nil {
+			releaseHeldKeysym(s, handle, sym)
+			return err
+		}
+		time.Sleep(keyDelay)
 	}
-	return paceEvents(events, keyDelay, time.Sleep)
+	return nil
 }
 
-// ClickAt moves the pointer to (x, y), in whole-desktop coordinates, and clicks the left button. The point is mapped into the granted stream's own space first, since that is what the portal's absolute motion takes.
+// releaseHeldKeysym is the recovery TypeText runs when a release call fails: one more attempt to bring that key back up before the error is reported, so a single failed release does not leave a key chorded into whatever the model sends next. Its own error is not reported; the original release's error is what TypeText already has to give.
+func releaseHeldKeysym(s *Session, handle string, sym int32) {
+	s.notifyKeysym(handle, sym, keyStateReleased)
+}
+
+// coordinateForStream maps a whole-desktop point into whichever granted stream covers it, filling in the CoordinateError's TokenPath when the point is on none of them, so the message tells the user exactly what to delete to re-grant.
+func (s *Session) coordinateForStream(x, y float64) (float64, float64, uint32, error) {
+	sx, sy, node, err := toStream(x, y, s.streams)
+	if err != nil {
+		var ce *CoordinateError
+		if errors.As(err, &ce) && ce.TokenPath == "" && s.dataDir != "" {
+			ce.TokenPath = filepath.Join(s.dataDir, tokenFile)
+		}
+		return 0, 0, 0, err
+	}
+	return sx, sy, node, nil
+}
+
+// ClickAt moves the pointer to (x, y), in whole-desktop coordinates, and clicks the left button. The point is mapped into whichever granted stream covers it first, since that is what the portal's absolute motion takes.
 func (s *Session) ClickAt(x, y float64) error {
-	x, y, err := toStream(x, y, s.rect)
+	x, y, node, err := s.coordinateForStream(x, y)
 	if err != nil {
 		return err
 	}
@@ -298,7 +368,7 @@ func (s *Session) ClickAt(x, y float64) error {
 	if err != nil {
 		return err
 	}
-	if err := s.notifyMotion(handle, x, y); err != nil {
+	if err := s.notifyMotion(handle, node, x, y); err != nil {
 		return err
 	}
 	if err := s.notifyButton(handle, btnLeft, keyStatePressed); err != nil {
@@ -309,7 +379,7 @@ func (s *Session) ClickAt(x, y float64) error {
 
 // ScrollAt moves the pointer to (x, y), in whole-desktop coordinates, and scrolls dy discrete vertical steps (positive is down).
 func (s *Session) ScrollAt(x, y float64, dy int32) error {
-	x, y, err := toStream(x, y, s.rect)
+	x, y, node, err := s.coordinateForStream(x, y)
 	if err != nil {
 		return err
 	}
@@ -319,10 +389,15 @@ func (s *Session) ScrollAt(x, y float64, dy int32) error {
 	if err != nil {
 		return err
 	}
-	if err := s.notifyMotion(handle, x, y); err != nil {
+	if err := s.notifyMotion(handle, node, x, y); err != nil {
 		return err
 	}
 	return s.call("NotifyPointerAxisDiscrete", dbus.ObjectPath(handle), map[string]dbus.Variant{}, axisVertical, dy)
+}
+
+// Monitors reports how many ScreenCast streams — one per monitor the consent dialog granted, or restored from a saved token — this session covers.
+func (s *Session) Monitors() int {
+	return len(s.streams)
 }
 
 // The Notify* methods below are fire-and-forget: they have no Request/Response handshake, just a plain method reply.
@@ -339,11 +414,11 @@ func (s *Session) notifyButton(handle string, button int32, state uint32) error 
 	return s.call("NotifyPointerButton", dbus.ObjectPath(handle), map[string]dbus.Variant{}, button, state)
 }
 
-func (s *Session) notifyMotion(handle string, x, y float64) error {
-	err := s.call("NotifyPointerMotionAbsolute", dbus.ObjectPath(handle), map[string]dbus.Variant{}, s.stream, x, y)
-	// Mutter answers "Invalid position" for a point outside the one monitor's stream this session was granted, which is what a click aimed at a second monitor gets; said as what it is, so the model aims at the monitor it can reach instead of retrying the same point. Measured on this desk on 2026-09-08 with clicks at x=3750 on a two-monitor desk.
+func (s *Session) notifyMotion(handle string, node uint32, x, y float64) error {
+	err := s.call("NotifyPointerMotionAbsolute", dbus.ObjectPath(handle), map[string]dbus.Variant{}, node, x, y)
+	// Mutter answers "Invalid position" for a point outside the stream it was sent against, which toStream should have already caught by picking the right stream for the point; this is the backstop for whatever toStream missed (a stream this session was never actually granted, or a gap between two monitors that neither stream's rectangle covers). Measured on this desk on 2026-09-08 with clicks at x=3750 on a two-monitor desk, back when a session held only one stream.
 	if err != nil && strings.Contains(err.Error(), "Invalid position") {
-		return fmt.Errorf("the point is outside the monitor this pointer session reaches (the session covers one monitor; a point on another cannot be clicked from here): %w", err)
+		return fmt.Errorf("the point is outside every monitor this pointer session reaches (granted %d monitor(s)): %w", s.Monitors(), err)
 	}
 	return err
 }
@@ -395,11 +470,12 @@ func (p *realPortal) selectDevices(ctx context.Context, handle, restoreToken str
 	return err
 }
 
-// selectSourcesOptions restricts the ScreenCast stream to monitors with the cursor hidden from the video, since the stream here is only ever used for its PipeWire node id, never viewed.
+// selectSourcesOptions restricts the ScreenCast sources to monitors with the cursor hidden from the video, since the stream here is only ever used for its PipeWire node id, never viewed. multiple lets the user pick every monitor in the consent dialog instead of just one, which is what lets the pointer reach every screen on a multi-monitor desk; with a saved restore_token the earlier choice (however many monitors that was) is what comes back, not this flag.
 func selectSourcesOptions() map[string]dbus.Variant {
 	return map[string]dbus.Variant{
 		"types":       dbus.MakeVariant(uint32(1)), // monitor
 		"cursor_mode": dbus.MakeVariant(uint32(1)), // hidden
+		"multiple":    dbus.MakeVariant(true),
 	}
 }
 
@@ -409,47 +485,50 @@ func (p *realPortal) selectSources(ctx context.Context, handle string) error {
 	return err
 }
 
-// start begins the session (the point at which the one-time consent dialog appears) and returns the ScreenCast stream's PipeWire node id, its monitor size if reported, and any restore_token to save for next time.
-func (p *realPortal) start(ctx context.Context, handle string) (stream uint32, rect streamRect, restoreToken string, err error) {
+// start begins the session (the point at which the one-time consent dialog appears) and returns every granted ScreenCast stream's PipeWire node id and monitor size if reported, and any restore_token to save for next time.
+func (p *realPortal) start(ctx context.Context, handle string) (streams []streamInfo, restoreToken string, err error) {
 	results, err := portalRequest(ctx, p.conn, remoteDesktopIface+".Start",
 		[]interface{}{dbus.ObjectPath(handle), ""}, map[string]dbus.Variant{})
 	if err != nil {
-		return 0, streamRect{}, "", err
+		return nil, "", err
 	}
 	if v, ok := results["restore_token"]; ok {
 		restoreToken, _ = v.Value().(string)
 	}
 	if v, ok := results["streams"]; ok {
-		stream, rect = parseStream(v)
+		streams = parseStreams(v)
 	}
-	return stream, rect, restoreToken, nil
+	return streams, restoreToken, nil
 }
 
 func (p *realPortal) closeSession(handle string) error {
 	return p.conn.Object(portalDest, dbus.ObjectPath(handle)).Call(sessionIface+".Close", 0).Err
 }
 
-// parseStream pulls the PipeWire node id and, when present, the granted monitor's position and size out of a Start response's "streams" result: an array of (u node_id, a{sv} props) structs. godbus decodes an unknown-shape D-Bus struct as []interface{}, so each stream arrives as []interface{}{uint32, map[string]dbus.Variant}, and the "position" and "size" properties (each itself a (ii) struct) the same way. Returns a zero rectangle for whichever of the two the compositor did not report.
-func parseStream(v dbus.Variant) (node uint32, rect streamRect) {
-	streams, ok := v.Value().([]interface{})
-	if !ok || len(streams) == 0 {
-		return 0, streamRect{}
+// parseStreams pulls the PipeWire node id and, when present, the granted position and size of every stream out of a Start response's "streams" result: an array of (u node_id, a{sv} props) structs, one per monitor the consent dialog granted.
+// The outer value is a{sv}'s "streams" entry with signature a(ua{sv}), and godbus decodes that whole array as [][]interface{} — one []interface{}{uint32, map[string]dbus.Variant} per stream. It is the array that is typed, not each element: asserting []interface{} on the outer value never matched, so this returned nil for every real reply and every session ran with no monitor to aim at. The inner "position" and "size" properties are (ii) structs on their own, each decoded as []interface{} of two int32, which is what pairOf reads.
+// Each entry's rectangle is zero for whichever of position or size the compositor did not report. A malformed entry is skipped rather than aborting the whole list.
+func parseStreams(v dbus.Variant) []streamInfo {
+	raw, ok := v.Value().([][]interface{})
+	if !ok || len(raw) == 0 {
+		return nil
 	}
-	entry, ok := streams[0].([]interface{})
-	if !ok || len(entry) == 0 {
-		return 0, streamRect{}
+	streams := make([]streamInfo, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) == 0 {
+			continue
+		}
+		node, _ := entry[0].(uint32)
+		var rect streamRect
+		if len(entry) >= 2 {
+			if props, ok := entry[1].(map[string]dbus.Variant); ok {
+				rect.X, rect.Y = pairOf(props["position"])
+				rect.W, rect.H = pairOf(props["size"])
+			}
+		}
+		streams = append(streams, streamInfo{Node: node, Rect: rect})
 	}
-	node, _ = entry[0].(uint32)
-	if len(entry) < 2 {
-		return node, streamRect{}
-	}
-	props, ok := entry[1].(map[string]dbus.Variant)
-	if !ok {
-		return node, streamRect{}
-	}
-	rect.X, rect.Y = pairOf(props["position"])
-	rect.W, rect.H = pairOf(props["size"])
-	return node, rect
+	return streams
 }
 
 // pairOf reads a portal (ii) struct property, which godbus hands over as []interface{} of two int32. Input: the property, which may be the zero Variant when the compositor did not report it. Output: the two numbers, or 0, 0 when it is missing or not that shape.

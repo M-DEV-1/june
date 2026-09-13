@@ -28,8 +28,11 @@ const (
 	ChannelVoice Channel = "voice"
 )
 
-// maxAskIterations bounds tool-call round trips on both AskText and AskVoice so a runaway loop can't hang an eval. Twelve because a screen task is observe, act, observe again, several times over; a memory question is done in two or three.
-const maxAskIterations = 12
+// maxAskIterations is the hard cap on tool-call steps a single ask may spend, on every path that runs a tool loop (askText, askVoice, askCodex, and the Claude/Antigravity command-line paths via claudeToolServer): fifty, past which the loop stops and returns capError naming where it got to. A round that only re-observed a screen already seen, or only drew on it, does not spend a step (see sameScreenAgain, onlyAnnotated), so a task that looks twice for every action it takes still fits.
+const maxAskIterations = 50
+
+// askWallClock is the one hard stop on askText's tool loop, alongside the step cap above: past this much wall time since the turn started, the request in flight fails on its own deadline and the loop returns rather than spinning forever. The Codex, Claude and Antigravity paths already wrap their own call in a timeout of the same size (codexAskTimeout, claudeAskTimeout, agyAskTimeout); this is askText's equivalent, since Gemini's own GenerateContent path had none. A package var, not a const, so a test can shrink it rather than waiting twelve minutes for the stop to prove itself.
+var askWallClock = 12 * time.Minute
 
 // ToolHop is one model-initiated tool call plus the string we sent back.
 type ToolHop struct {
@@ -67,6 +70,8 @@ type TurnTrace struct {
 	ImageTokens int
 	// LastTarget is the screen item this turn's tools last acted on or pointed at (see tools.go's ScreenTarget), nil when none of them did. It reflects the agent's own running memory of the newest one (a.screenTarget), which is what a later ask's bare "it" is resolved against — see WithLastTargetHint.
 	LastTarget *ScreenTarget
+	// LessonsShown is the id of every lesson the reference block put in front of the model this turn (see RenderLessonBlock), for the end-of-ask hook (AfterScreenRun) to score once the run's outcome is known.
+	LessonsShown []int64
 }
 
 // Provider names, as they are stored and as the screen that shows what each model provider costs groups by.
@@ -119,8 +124,8 @@ func (u *TokenUsage) addLive(md *genai.UsageMetadata) {
 	u.addCached(int(md.CachedContentTokenCount))
 }
 
-// ToolObserver is called by askText's and askVoice's tool loops around each tool call, so a live caller can show progress while a multi-step turn is still running instead of learning about it only once the whole answer is back. Input: the tool's name and a short summary of what it is doing — its argument summary before the call runs, its result summary after. Output: none.
-type ToolObserver func(name, summary string)
+// ToolObserver is called by askText's and askVoice's tool loops around each tool call, so a live caller can show progress while a multi-step turn is still running instead of learning about it only once the whole answer is back. Input: the tool's name and a short summary of what it is doing — its argument summary before the call runs, its result summary after — and failed, which is always false on the before-call and, on the after-call, true when the result string starts with "error" (the same convention ToolActivity.Err and resultSummary follow elsewhere). Output: none.
+type ToolObserver func(name, summary string, failed bool)
 
 // toolObserverKey is the unexported context key WithToolObserver stores under, so only this package's own toolObserverFrom can read it back.
 type toolObserverKey struct{}
@@ -135,12 +140,12 @@ func toolObserverFrom(ctx context.Context) ToolObserver {
 	if fn, _ := ctx.Value(toolObserverKey{}).(ToolObserver); fn != nil {
 		return fn
 	}
-	return func(string, string) {}
+	return func(string, string, bool) {}
 }
 
-// ObserveTool calls the ToolObserver attached to ctx, if any, with name and summary. Exported (unlike toolObserverFrom itself) so a caller in another package — the ipc package's tests, standing in for what askText's real tool loop does around one call — can drive the same observer a live turn would report through, without needing the unexported context key.
-func ObserveTool(ctx context.Context, name, summary string) {
-	toolObserverFrom(ctx)(name, summary)
+// ObserveTool calls the ToolObserver attached to ctx, if any, with name, summary and failed. Exported (unlike toolObserverFrom itself) so a caller in another package — the ipc package's tests, standing in for what askText's real tool loop does around one call — can drive the same observer a live turn would report through, without needing the unexported context key.
+func ObserveTool(ctx context.Context, name, summary string, failed bool) {
+	toolObserverFrom(ctx)(name, summary, failed)
 }
 
 // questionKey is the unexported context key WithQuestion stores under, so only this package's own questionFrom can read it back.
@@ -232,9 +237,33 @@ func (a *Agent) HandshakePrompt(ctx context.Context, now time.Time) (instruction
 	return handshakeInstruction(now, personalContextBlock(personalEntries), strings.Join(contextParts, "\n"), toolsCount), contextParts
 }
 
+// LeanPrompt builds the system instruction a text ask sends: the same skeleton, tool guidance and stop line HandshakePrompt builds, but with no personal-context block and no retrieved-memory block. The user's decision behind it: only voice needs memory pushed ahead of time, because voice has to be proactive with no chance to reach for a tool mid-turn; a text ask can call query_memory, recall or personal_context when it actually needs a fact, so paying for the roughly nine thousand tokens of memory context on every question is waste the tools already recover for free. Input: the moment, for the clock line. Output: the instruction text.
+func (a *Agent) LeanPrompt(now time.Time) string {
+	tools := liveTools()
+	toolsCount := 0
+	if len(tools) > 0 {
+		toolsCount = len(tools[0].FunctionDeclarations)
+	}
+	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount) + "\n\n" + screenTaskGuidance + leanInstructionTail(now)
+}
+
+// textCommunicationStyle is the <communication_style> block for the text-ask paths (this file): unlike voiceCommunicationStyle, these replies are rendered as markdown in the chat pane (see app/src/next/chat-markdown.tsx), so the rules here are about how a written reply should read rather than how a spoken one should sound.
+const textCommunicationStyle = `- Lead with the answer, then the reasons; every part of what they asked gets answered in the same reply, making them ask twice is friction, not brevity. No padding, never withheld substance: small talk gets a sentence, a real question gets the content, compact and complete.
+- This reply is read on a screen, not spoken, so structure is allowed but it has to earn its place. Prose is the default. A list is for three or more parallel items a reader would scan (steps, options, findings), never for one point or a line of argument. A table is for comparing the same fields across several rows. A code block is for anything they would copy: a command, a path, an error, a snippet. A heading is for a reply long enough to need finding your way around, roughly over three hundred words, and never for a short one.
+- Plain words. Say what happened, the number, and what it means; cut any sentence whose shape does the work the fact should do: no punchy fragments for effect, no metaphor standing in for a figure, no "not just X, it is Y", no tricolons, no remarks about the reply itself.
+- Memory tools hand you raw captures: window titles, spreadsheet columns, terminal text. That is evidence, not your answer: no file path, extension, process name, URL, timestamp or stored label unless they asked for it or need it to act; say it the way they would. Give action items, findings and dates together in the order they matter, not in the order the tool returned them.
+- A memory lookup takes under a tenth of a second, never announce it: no "let me check", no "one moment", just call the tool and answer. Mention only what will actually take time, a shell command, a large file read, a search already flagged as still running, in one short line.
+- Whatever you find, say it. An empty result is an answer: "nothing in there about that, want me to look somewhere else?" A partial one is too: say what you actually got. No meta-acknowledgements ("got it", "sure", "noted") and no narrating your own process.
+- Reply in the language they used, and keep that language to the end of the reply.`
+
+// leanInstructionTail is systemInstructionTail with the personal-context and retrieved-memory blocks left out, keeping only the clock a text ask still needs to resolve "yesterday" or "this morning" for itself. Input: the moment. Output: the tail text.
+func leanInstructionTail(now time.Time) string {
+	return fmt.Sprintf("\n\nRight now it is %s, use this as your anchor for anything time-related (\"yesterday\", \"this morning\"); convert the period they mean into concrete since/until dates yourself.", nowAnchor(now))
+}
+
 // handshakeInstruction lays the ask paths' system instruction out for a prompt cache: everything that reads the same on every ask first (systemInstructionStable, then screenTaskGuidance), and only then the parts that change between asks (the personal block, the memory lines and the clock). Measured 2026-09-05 on Codex: with the changing parts in the middle, the cache matched 3,840 of a 10,300-token opening round; the one round where they happened not to change matched 9,984. Input: the moment, the personal context block ("" for none), the assembled context lines and the tool count. Output: the instruction text.
 func handshakeInstruction(now time.Time, personal, contextStr string, toolsCount int) string {
-	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), toolsCount) + "\n\n" + screenTaskGuidance + systemInstructionTail(now, personal, contextStr)
+	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount) + "\n\n" + screenTaskGuidance + systemInstructionTail(now, personal, contextStr)
 }
 
 // screenTaskGuidance tells the ask paths (text and Codex; the live voice handshake in connect.go builds its own prompt and does not include this) that "go somewhere and do X" is a screen task to carry through, not a page to open and leave. Written from three 2026-09-05 traces: one opened a page and answered in nine words without ever looking at the screen, one clicked the nearest button and called a different thing done, and one opened a site's root over the page the user was already reading and spent the rest of its budget getting back. It is deliberately written about screens in general — lists, settings, threads, tables — because a rule that names one kind of site teaches the model nothing about the next one.
@@ -280,12 +309,12 @@ func replaceSupersededListings(older []*genai.Part, newest *genai.Part) []*genai
 	return append(older[:0], newest)
 }
 
-// screenRoundTools is the tool set a round of a screen task is offered: everything that looks at or acts on the screen, open_url, which 3 of the 53 recorded screen asks reached for after their first look, and save_note, so a screen task can still leave itself a note without regaining the rest of the memory surface. The whole list of 15 costs 3,091 tokens, measured against the backend on 2026-09-05, and it is re-sent on every round; these nine cost a good deal less than that, and the memory tools that go are of no use to a round deciding which numbered button to press.
+// screenRoundTools is the tool set a round of a screen task is offered: everything that looks at or acts on the screen, open_url, which 3 of the 53 recorded screen asks reached for after their first look, and save_note, so a screen task can still leave itself a note without regaining the rest of the memory surface. click_at is not among them any more: click itself now takes a bare x,y as well as a number, and a list of further taps for UI that closes before another round can see it, so one declaration covers what two used to. The whole list of 15 costs 3,091 tokens, measured against the backend on 2026-09-05, and it is re-sent on every round; these nine cost a good deal less than that, and the memory tools that go are of no use to a round deciding which numbered button to press.
 // What this gives up, measured over the same 53 asks: one of them called query_memory after its first screen tool and would now have to answer without it. Putting a name back in this map is the whole of undoing that.
 var screenRoundTools = map[string]bool{
 	"look": true, "observe_screen": true, "point_at": true, "show_marks": true, "draw": true,
 	"click": true, "scroll_to": true, "type_text": true, "open_url": true, "save_note": true, "wait_for": true,
-	"press_key": true, "click_at": true, "scroll_at": true, "switch_window": true, "open_app": true,
+	"press_key": true, "scroll_at": true, "open_app": true,
 }
 
 // screenTaskWordPattern matches a request naming a screen, a window, an app, a page, or an action that only makes sense done to one — clicking, typing, playing, opening, navigating — so a turn reads as a screen task from its very first round, before any tool has told it a screen is even involved. It is deliberately loose: a false match only costs the model tools it did not need this round, while a missed one is what let the 2026-09-05 runs reach for shell_exec, branch and query_memory on a request that plainly meant the screen, and spend rounds being refused.
@@ -471,11 +500,15 @@ var geminiBaseURL string
 func (a *Agent) askText(ctx context.Context, model string, history []*genai.Content, question string) (TurnTrace, error) {
 	start := time.Now()
 	now := start
+	// One of the two hard stops on this loop, alongside maxAskIterations: no request past this deadline can go out. See askWallClock.
+	ctx, cancel := context.WithTimeout(ctx, askWallClock)
+	defer cancel()
 	// Carried on ctx so a screen tool deep in the loop — click, checking whether the front window changed out from under it — can tell whether this very question named the window it now finds in front.
 	ctx = WithQuestion(ctx, question)
 	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
 	ctx = withAskLookState(ctx)
-	instruction, handshake := a.HandshakePrompt(ctx, now)
+	instruction := a.LeanPrompt(now)
+	var handshake []string
 
 	recallCtx, cancel := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
@@ -505,7 +538,8 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	}
 
 	// The turn is assembled in three pieces rather than one growing slice, because two of them shrink once the turn turns into a screen task: the thread is cut to its last turns and the instruction is swapped for the screen one. The reference to a close past run goes in here, with the turn, since it is built from this question and the store and so differs on every ask — putting it in the instruction would be a different prompt prefix every time and nothing after it could be cached.
-	turn := a.WithActReference(ctx, now, question, buildTurnContent(now, injected, question))
+	turn, shownLessons := a.WithActReference(ctx, now, question, buildTurnContent(now, injected, question))
+	tr.LessonsShown = shownLessons
 	// A bare "it", "that" or "again" names nothing of its own — see the night of 2026-09-05, when "draw a circle around it" resolved against a fresh screen listing instead of the button turn 1 had just ringed. When this ask remembers a screen target and the question is one of those bare references, one sentence naming it goes in ahead of the question, the same way the act-reference block above does.
 	if remembered, ok := a.screenTarget(); ok && isBareReference(question) && hintApplies(remembered, a.frontWindowNow(ctx)) {
 		turn = WithLastTargetHint(remembered, turn)
@@ -523,8 +557,12 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	// Gemini serves a request out of its implicit cache only where the prefix is the same bytes, and only from 2,048 tokens of prefix upwards, so what a screen round narrows to is decided here, once, rather than each round: a question whose own words already name a screen task (isScreenTask with no hops) opens on the screen instruction, the cut thread and the screen tools at round 0 and keeps all three, and every round then only appends to what the round before it sent.
 	screenThread := lastTurns(history, maxScreenHistoryTurns)
 	screenAsk := isScreenTask(question, nil)
-	spent, screen := 0, ""
-	for i := 0; i < maxAskRounds && spent < maxAskIterations; i++ {
+	screen := ""
+	// steps is how many rounds of this loop have actually spent one of the ask's maxAskIterations tool-call steps (sameScreenAgain and onlyAnnotated below decide which rounds do not), so the loop can stop and hand back capError the moment the cap is hit rather than running on to maxAskRounds.
+	steps := 0
+	for i := 0; i < maxAskRounds; i++ {
+		// The look allowance comes back at every model round, the same boundary voice gives it back at. It used to be attached once per ask and never reset, so a typed ask with a fifty-step budget had two pictures for the whole of it while the refusal told the model it had "already looked twice this turn" — the most frequent refusal in the log, 57 of them, and the one that ended runs that legitimately had to look after each action.
+		lookStateFrom(ctx).resetLooks()
 		prompt, thread := instruction, history
 		cfg.Tools = tools
 		if screenAsk || screenTaskStarted(tr.ToolHops) {
@@ -579,9 +617,9 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 		var pictures []*genai.Part
 		round := len(tr.ToolHops)
 		for _, fc := range calls {
-			ObserveTool(ctx, fc.Name, toolActivitySummary(fc.Name, fc.Args))
+			ObserveTool(ctx, fc.Name, toolActivitySummary(fc.Name, fc.Args), false)
 			result := a.evalExecute(roundCtx, fc.Name, fc.Args)
-			ObserveTool(ctx, fc.Name, resultSummary(fc.Name, result))
+			ObserveTool(ctx, fc.Name, resultSummary(fc.Name, result), strings.HasPrefix(result, "error"))
 			slog.Info("ask: tool", "tool", fc.Name, "args", toolActivitySummary(fc.Name, fc.Args), "result", resultSummary(fc.Name, result), "detail", toolLogDetail(fc.Name, result))
 			tr.ToolHops = append(tr.ToolHops, ToolHop{Name: fc.Name, Args: fc.Args, Result: result})
 			// The stop line already built its full answer — the refused action and the one-line question to unlock it — so the turn ends here on the model's own words rather than risking a further round that talks around the refusal or tries the click again a different way.
@@ -603,11 +641,14 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 			}
 		}
 		if round := tr.ToolHops[round:]; !sameScreenAgain(&screen, round) && !onlyAnnotated(round) {
-			spent++
+			steps++
 		}
 		trail = append(trail, genai.NewContentFromParts(parts, genai.RoleUser))
 		if len(pictures) > 0 {
 			trail = append(trail, genai.NewContentFromParts(pictures, genai.RoleUser))
+		}
+		if steps >= maxAskIterations {
+			break
 		}
 	}
 	tr.ImageTokens = lookTokensSpent(ctx)
@@ -820,9 +861,9 @@ func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Con
 			var responses []*genai.FunctionResponse
 			round := len(tr.ToolHops)
 			for _, fc := range msg.ToolCall.FunctionCalls {
-				ObserveTool(ctx, fc.Name, toolActivitySummary(fc.Name, fc.Args))
+				ObserveTool(ctx, fc.Name, toolActivitySummary(fc.Name, fc.Args), false)
 				result := a.evalExecute(WithOffered(ctx, toolNames(cfg.Tools)), fc.Name, fc.Args)
-				ObserveTool(ctx, fc.Name, resultSummary(fc.Name, result))
+				ObserveTool(ctx, fc.Name, resultSummary(fc.Name, result), strings.HasPrefix(result, "error"))
 				slog.Info("ask: tool", "tool", fc.Name, "args", toolActivitySummary(fc.Name, fc.Args), "result", resultSummary(fc.Name, result), "detail", toolLogDetail(fc.Name, result))
 				tr.ToolHops = append(tr.ToolHops, ToolHop{Name: fc.Name, Args: fc.Args, Result: result})
 				responses = append(responses, &genai.FunctionResponse{
@@ -928,18 +969,19 @@ func (a *Agent) AllowEvalWrites() { a.evalWrites = true }
 // screenToolNames are the tools whose results describe what is on the user's screen: a window title and the head of its accessibility list. That text can be a password manager, an inbox or a private chat, so it never goes into the log file even though the log is the user's own.
 var screenToolNames = map[string]bool{"look": true, "observe_screen": true, "point_at": true, "show_marks": true, "click": true, "scroll_to": true, "type_text": true, "wait_for": true, "press_key": true, "click_at": true, "scroll_at": true, "switch_window": true}
 
-// toolLogDetail is what the "ask: tool" log line carries as detail. Input: the tool's name and its full result. Output: "" for a screen tool, else the first 160 runes of the result.
+// toolLogDetail is what the "ask: tool" log line carries as detail. Input: the tool's name and its full result. Output: "" for a screen tool, else up to the first 2048 bytes of the result, cut on a UTF-8 rune boundary.
 func toolLogDetail(name, result string) string {
 	// A screen tool's result is the front window's title and the head of its accessibility list, which can be a password manager or an inbox, so it stays out of the log; its failure carries none of that, only the reason, and the reason is what a log line saying "failed" was missing.
 	if screenToolNames[name] && !strings.HasPrefix(result, "error") {
 		return ""
 	}
-	return util.Runes(result, 160)
+	// 2048 bytes matches the cap ToolRecord.Output keeps in the store, so the log line and the durable record never disagree about how much of a result is worth keeping; still capped so a huge file read cannot fill the log on its own.
+	return util.UTF8Bytes(result, 2048)
 }
 
 var askAllowedTools = map[string]bool{
 	"look": true, "observe_screen": true, "point_at": true, "show_marks": true, "draw": true, "click": true, "scroll_to": true, "type_text": true, "wait_for": true,
-	"press_key": true, "click_at": true, "scroll_at": true, "switch_window": true, "open_app": true,
+	"press_key": true, "click_at": true, "scroll_at": true, "open_app": true,
 	"save_note": true, "add_task": true, "personal_context": true, "revise": true, "action_items": true, "query_store": true, "open_url": true,
 	"delegate": true,
 }
@@ -955,6 +997,179 @@ func (a *Agent) evalExecute(ctx context.Context, name string, args map[string]an
 // ExecuteAskTool runs one tool exactly as an ask's own tool loop would: the same gate, the same stop line, the same screen tools. It is exported so a long-running computer-use job (internal/actjob) drives its steps through this one path rather than a second copy of the rules about what may be clicked and what may not. Input: the tool's name and arguments. Output: the tool's result, or the gate's refusal.
 func (a *Agent) ExecuteAskTool(ctx context.Context, name string, args map[string]any) string {
 	return a.evalExecute(ctx, name, args)
+}
+
+// lessonCapPerRun bounds how many lessons one screen run may write — automatic and reflective together — so one chatty run cannot flood an app's lessons in a single go.
+const lessonCapPerRun = 2
+
+// reflectiveLessonMinHops is the fewest tool hops a screen run must have made before the end-of-ask hook spends a model call asking what it would do differently. A run of one or two hops finished before there was anything to reflect on.
+const reflectiveLessonMinHops = 3
+
+// reflectivePromptFmt is the question the end-of-ask hook asks the same brain that just ran the turn, once per screen run that both had room left under lessonCapPerRun and did enough (see reflectiveLessonMinHops) to be worth asking about. In order: the app, the question the run was given, and what it actually did (reflectiveRunSummary).
+//
+// The run has to be in the question. Until 2026-09-12 this named only the app, and the call goes through AskText, which builds a fresh ask with a memory lookup of its own — so the model answered about whatever that lookup surfaced rather than about the run. That is how a run whose question was "open spotify, play classic rock playlist" filed a lesson about skipping a Spearman's correlation search: the run was never shown to it.
+//
+// It asks for one imperative line and a bare NONE otherwise, because the old wording ("Reply \"nothing\" if nothing") got "Nothing worth flagging — just browsing, a Meet call, and a PDF read" instead, nineteen times out of twenty-one. isNothingReply still guards the hedges, since a prompt cannot make a model obey.
+const reflectivePromptFmt = `A screen run in %s has just finished.
+
+It was asked: %q
+
+What it did:
+%s
+
+Reply with one short imperative line a later run in this app could follow — a way of reaching something that worked, or a way that does not. Write about this run only. If there is nothing worth carrying forward, reply with the single word NONE and nothing else.`
+
+// reflectiveHopCap is how many of a run's hops the reflective question shows. Twelve, the same count actReferenceStepCap holds a past run to: past that a run was feeling its way around rather than following a way that worked, and the tail is where that shows, so the last twelve are the ones kept.
+const reflectiveHopCap = 12
+
+// reflectiveResultRunes bounds each hop's result inside the summary. Enough for a whole error sentence ("error: there is no element 99 in the last observe_screen list") and for a click's own confirmation, short enough that twelve hops of a screen listing cannot turn one reflective call into a second full prompt.
+const reflectiveResultRunes = 140
+
+// reflectiveRunSummary renders what a run did, one hop per line, as "tool: result". Input: the run's hops in call order. Output: the last reflectiveHopCap of them with each result capped, or "" when there were none.
+//
+// The result is kept, unlike db.RenderActStep's plain-words rendering of the same hops, because a failure is the whole thing worth learning from — "error: there is no element 99" is the lesson, and a summary that says only "clicked item 99" hides it.
+func reflectiveRunSummary(hops []ToolHop) string {
+	if len(hops) == 0 {
+		return ""
+	}
+	if len(hops) > reflectiveHopCap {
+		hops = hops[len(hops)-reflectiveHopCap:]
+	}
+	lines := make([]string, 0, len(hops))
+	for _, hop := range hops {
+		result := strings.TrimSpace(util.RunesEllipsis(hop.Result, reflectiveResultRunes))
+		if result == "" {
+			result = "(no result)"
+		}
+		lines = append(lines, "- "+hop.Name+": "+result)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// screenHopFailRe and screenHopOKRe recognise a click or scroll_to's own result wording — toolError's "could not click [%d] %s %q: %v" / "could not scroll to [%d] %s %q: %v" and the plain "clicked [%d] %s %q via %s" / "scrolled to [%d] %s %q" (tools.go) — so automaticLessons can read what failed and what later worked straight off a run's hops, with no model call.
+var (
+	screenHopFailRe = regexp.MustCompile(`^error: could not (?:click|scroll to) \[\d+\] (\S+) "([^"]*)": (.+)`)
+	screenHopOKRe   = regexp.MustCompile(`^(?:clicked|scrolled to) \[\d+\] (\S+) "([^"]*)"(?: via (\w+))?`)
+)
+
+// screenElem identifies one screen element the way a run's own hops name it: its accessibility role and its label, the pair click and scroll_to both put in their result text. Item numbers are not part of it — observe_screen mints a fresh one on every look, so the same button can be [12] on one hop and [15] on the next.
+type screenElem struct{ role, label string }
+
+// automaticLessons finds, from a screen run's hops alone, every element the run failed on and then later succeeded on — a click or scroll_to whose result matched screenHopFailRe, followed later by one on the same role and label that matched screenHopOKRe — and writes each as one lesson line in the exact shape "<app>: <role> <label>: <what failed>; <what worked>". Input: the app the run happened in, its tool hops in call order, and the most lines to return. Output: up to cap lines, in the order their failures happened.
+//
+// ponytail: matches only on "the same element" (role+label), not "the same window" as well — every run this reads is already scoped to one app's front window, so the wider match the task allows would only ever widen it to the same pairs this already finds. Add the window check if a run ever spans more than one window.
+func automaticLessons(app string, hops []ToolHop, maxLines int) []string {
+	if maxLines <= 0 {
+		return nil
+	}
+	var out []string
+	failed := map[screenElem]string{}
+	for _, hop := range hops {
+		if hop.Name != "click" && hop.Name != "scroll_to" {
+			continue
+		}
+		if m := screenHopFailRe.FindStringSubmatch(hop.Result); m != nil {
+			failed[screenElem{m[1], m[2]}] = strings.TrimSpace(m[3])
+			continue
+		}
+		m := screenHopOKRe.FindStringSubmatch(hop.Result)
+		if m == nil {
+			continue
+		}
+		elem := screenElem{m[1], m[2]}
+		reason, hadFailed := failed[elem]
+		if !hadFailed {
+			continue
+		}
+		delete(failed, elem)
+		worked := "it worked the next time"
+		if m[3] != "" {
+			worked = "worked via " + m[3]
+		}
+		out = append(out, fmt.Sprintf("%s: %s %q: %s; %s", app, elem.role, elem.label, reason, worked))
+		if len(out) >= maxLines {
+			break
+		}
+	}
+	return out
+}
+
+// nothingHedges are the openings a reflective reply takes when it means "nothing" but will not say only that. Every one of these was written by the real model into the real store: on 2026-09-12, 19 of the 21 lessons it held were one of these sentences, all of them retrievable and all of them due to be put in front of a later run as guidance.
+//
+// ponytail: a list of openings, not a classifier. It is matched against what the model actually wrote on this machine, so a new hedge shape gets stored once and then added here. Spending a second model call to judge the first is not worth it for a line whose whole value is that it can be dropped for free.
+var nothingHedges = []string{
+	"nothing worth", "nothing jumps", "nothing stands", "nothing of note", "nothing to report",
+	"nothing to flag", "nothing to add", "nothing much", "nothing obvious", "nothing here",
+	"nothing there", "nothing that", "nothing in particular", "nothing —", "nothing -", "nothing,",
+}
+
+// isNothingReply reports whether a reflective call's answer says there is nothing to add, so a blank turn writes no lesson instead of filing one. It catches the sentinel reflectivePromptFmt asks for ("none"), the bare word in any case or punctuation ("Nothing."), and the hedged forms in nothingHedges.
+//
+// The hedges are the reason this is more than an equality check. The old guard compared against the single word "nothing", so "Nothing worth flagging — just browsing, a Meet call, and a PDF read" passed straight through it and was filed as a lesson. A reply that opens with "nothing" and then says something real — "Nothing on the page worked until I focused the field first, so click it before typing" — is not a hedge and is kept.
+func isNothingReply(reply string) bool {
+	bare := strings.ToLower(strings.TrimSpace(reply))
+	bare = strings.Trim(bare, ` .!"'`)
+	if bare == "" || bare == "nothing" || bare == "none" {
+		return true
+	}
+	for _, hedge := range nothingHedges {
+		if strings.HasPrefix(bare, hedge) {
+			return true
+		}
+	}
+	return false
+}
+
+// reflectiveLesson asks the same brain that just ran a screen turn, in one plain question through AskText — the cheapest existing entry point that gets a plain answer back without offering it screen tools it has no reason to reach for on a question about itself — what a later run in app should carry forward from this one. Input: ctx, the app, and the finished trace, whose question and hops go into the prompt so the model is reflecting on this run rather than on whatever its own memory lookup turned up. Output: the model's own words, trimmed, or "" when it said there was nothing, the call failed, app is "", or the run had no hops to describe.
+func (a *Agent) reflectiveLesson(ctx context.Context, app string, trace TurnTrace) string {
+	if app == "" {
+		return ""
+	}
+	summary := reflectiveRunSummary(trace.ToolHops)
+	if summary == "" {
+		return ""
+	}
+	tr, err := a.AskText(ctx, fmt.Sprintf(reflectivePromptFmt, app, trace.Question, summary))
+	if err != nil {
+		slog.Warn("lessons: the reflective call failed, skipping", "error", err)
+		return ""
+	}
+	reply := strings.TrimSpace(tr.Answer)
+	if isNothingReply(reply) {
+		return ""
+	}
+	return reply
+}
+
+// AfterScreenRun is the end-of-ask hook for a finished screen run. It first scores the lessons this run was shown (see RenderLessonBlock, TurnTrace.LessonsShown) against how the run ended, then writes up to lessonCapPerRun new ones: first the automatic ones a hop sequence alone proves (automaticLessons), then, if there is still room and the run did enough to be worth asking about (reflectiveLessonMinHops), one reflective line from the same brain that ran it. Input: ctx — the caller's own, not the ask's, since a finished turn must not be held up by this — the finished trace and its outcome ("ok" or "error"). Output: none; every failure is logged and swallowed, the same way recordActRun's own store writes are, because a lesson missed is not a turn failed.
+func (a *Agent) AfterScreenRun(ctx context.Context, trace TurnTrace, outcome string) {
+	store, ok := a.brain.(interface {
+		ScoreLessonsUsed(ctx context.Context, ids []int64, outcome string) error
+		AddLesson(ctx context.Context, app, goal, lesson string) (int64, error)
+	})
+	if !ok {
+		return
+	}
+	if len(trace.LessonsShown) > 0 {
+		if err := store.ScoreLessonsUsed(ctx, trace.LessonsShown, outcome); err != nil {
+			slog.Warn("lessons: could not score the lessons this run was shown", "error", err)
+		}
+	}
+	app := a.frontWindowApp()
+	if app == "" {
+		return
+	}
+	lines := automaticLessons(app, trace.ToolHops, lessonCapPerRun)
+	if len(lines) < lessonCapPerRun && len(trace.ToolHops) >= reflectiveLessonMinHops {
+		if reflective := a.reflectiveLesson(ctx, app, trace); reflective != "" {
+			lines = append(lines, reflective)
+		}
+	}
+	for _, line := range lines {
+		if _, err := store.AddLesson(ctx, app, trace.Question, line); err != nil {
+			slog.Warn("lessons: could not store a lesson", "error", err)
+		}
+	}
 }
 
 // splitParts separates a model turn's parts into the text meant for the user and the thoughts the model marked as such. Input: the parts of one candidate. Output: the concatenated user-facing text and the thought texts in order.

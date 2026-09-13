@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -68,6 +70,66 @@ func targetMismatchNote(question string, remembered *ScreenTarget, gotLabel stri
 // unchangedScreenMarker opens the answer a repeat look gets. It is matched, not just printed: sameScreenAgain in ask.go reads it to know that a look which returned this text saw the screen it had already seen, so a round spent on it does not spend a step.
 const unchangedScreenMarker = "(unchanged since the last look"
 
+// frameOnlyHint is appended to an observe_screen result when the window published nothing but its own frame buttons, so the model knows to fall back to look instead of reporting an empty screen.
+const frameOnlyHint = "\n(this window publishes none of its content to the accessibility tree; call look to see the page as a picture, and click_at with points from that picture)"
+
+// frameOnlyLabels are the window-frame button labels that, alone, mean a window's own content never reached the accessibility bus. This happens with Chromium-family browsers run without --force-renderer-accessibility: the window manager's minimize/maximize/restore/close controls still publish, but the page itself does not.
+var frameOnlyLabels = map[string]bool{"Minimize": true, "Maximize": true, "Restore": true, "Close": true}
+
+// reviseHint is appended to a memory read whose hits include a note, because a note is the only thing revise can change or remove and the ref it needs is right there in the line above.
+//
+// The system prompt already says to fix memory in the same turn, and it lost. On 2026-09-12 the user said "you can delete note"; Ora called query_memory, got "[note#312]" back, said "Understood, I've deleted that note about the supplement then", and never called revise. The note is still in the store. A rule sitting in nine thousand tokens of system prompt competes with everything else in it; a line attached to the result the model is reading at the moment it decides does not.
+//
+// ponytail: this makes the next action salient, it cannot make a model take it. What would actually close the gap is noticing that Ora claimed a change no tool call made and feeding that back as a lesson. That needs the spoken text and the turn's tool calls compared in one place, which is a bigger piece of work than this line.
+const reviseHint = "\n(any [note#N] above can be corrected or removed right now with revise — if they asked you to change or forget one, call it in this turn; saying you did without calling it leaves the wrong fact in memory.)"
+
+// noteRefPattern matches the "[note#N]" ref db.FormatNoteHit puts on a note hit, which is the only hit shape revise takes.
+var noteRefPattern = regexp.MustCompile(`\[note#\d+\]`)
+
+// withReviseHint appends reviseHint to a memory read's result when that result actually holds a note ref. Input: the result as query_memory or recall built it. Output: the same result with the hint on the end, or unchanged when there is no note in it — a search that returned only screen summaries has nothing revise could act on, so it does not pay for the line.
+func withReviseHint(result string) string {
+	if !noteRefPattern.MatchString(result) {
+		return result
+	}
+	return result + reviseHint
+}
+
+// browserKeysHint is appended to an observe_screen result when the window in front is a browser. A browser's tab strip and address bar are chrome, not page content, so they are never in the listing, and a model that only knows what the listing holds reads that absence as "there is nothing here to close a tab with" and says out loud that it cannot. On 2026-09-12 that happened three times in one session — refusing to switch a tab, refusing to close tabs, refusing to open a link — with press_key available the whole time.
+//
+// It names what can be done and the key that does it, because the gap is not that the model lacks press_key; it is that nothing connects "close a tab" to "Ctrl+W". The keys are the ones the session actually needed, not every shortcut a browser has: a longer list costs every browser look more tokens to carry guesses nobody asked for.
+const browserKeysHint = "\n(this is a browser: its tabs and address bar are chrome, not page content, so they are never listed above — reach them with press_key. Ctrl+W closes the tab in front, Ctrl+Tab moves to the next tab, Ctrl+T opens a new one, Ctrl+L selects the address bar.)"
+
+// browserMarkers are the lowercase fragments that identify a browser in the app name observe reports ("Brave Browser", "Chromium", "Google Chrome", "Firefox"). Fragments rather than whole names because the same browser reports itself differently depending on how it was started — snap Brave comes through as "Brave Browser", and an X11 window activated through its mutter frame reports the frame's own name (see the note in internal/act) — and "chrom" covers Chromium and Chrome together.
+var browserMarkers = []string{"brave", "chrom", "firefox", "edge", "safari", "vivaldi", "opera"}
+
+// isBrowser reports whether an app name observe returned is a browser, so observeResult knows whether browserKeysHint is worth its tokens. Input: the app name, in whatever case it arrived. Output: true when any browserMarkers fragment is in it.
+func isBrowser(app string) bool {
+	lower := strings.ToLower(app)
+	for _, marker := range browserMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// frameOnly reports whether lines, an observe_screen listing already split one item per line, contains nothing but window-frame buttons: every line is a push button whose label is Minimize, Maximize, Restore or Close. An empty listing counts too, since a window with no readable content shows the same nothing either way. Input: the numbered listing lines, in act.Format's `[n] role "label" (x,y)` shape. Output: true when the listing carries no content of its own to act on.
+func frameOnly(lines []string) bool {
+	for _, line := range lines {
+		isFrameButton := false
+		for label := range frameOnlyLabels {
+			if strings.Contains(line, `push button "`+label+`"`) {
+				isFrameButton = true
+				break
+			}
+		}
+		if !isFrameButton {
+			return false
+		}
+	}
+	return true
+}
+
 // maxChangedLines is how many lines may differ before a look is sent as a whole list instead of as the lines that changed. Twelve, because past that the page has moved rather than ticked over, and a model piecing a page together out of a dozen scattered corrections is worse off than one reading the page.
 const maxChangedLines = 12
 
@@ -76,6 +138,13 @@ const maxChangedLines = 12
 func observeResult(app, title string, lines []string, previous screenSnapshot) string {
 	window := app + " · " + title
 	full := window + "\n" + strings.Join(lines, "\n")
+	if frameOnly(lines) {
+		full += frameOnlyHint
+	}
+	// Only on the full listing, never on the two short answers below. Those exist to save tokens on a window already described, and this hint is stable for the app, so the copy sent with that window's first full listing is still in the conversation. A window not described yet always renders full, which is where the hint is needed.
+	if isBrowser(app) {
+		full += browserKeysHint
+	}
 	if previous.app != app || previous.title != title || len(previous.lines) != len(lines) {
 		return full
 	}
@@ -94,8 +163,11 @@ func observeResult(app, title string, lines []string, previous screenSnapshot) s
 	return full
 }
 
-// maxLooksPerAsk is how many pictures of the screen one ask may send. A picture is by far the most expensive thing a turn can carry — roughly 1,200 tokens for a 1280-wide screenful, against about 1,300 for a whole observe_screen listing — and two is what the question this was built for needs: one look at what is playing, and one more after something has moved.
+// maxLooksPerAsk is how many pictures of the screen one typed ask may send. A picture is by far the most expensive thing a turn can carry — roughly 1,200 tokens for a 1280-wide screenful, against about 1,300 for a whole observe_screen listing — and two is what the question this was built for needs: one look at what is playing, and one more after something has moved. It is the default an askLookState is given when nothing sets maxLooks explicitly.
 const maxLooksPerAsk = 2
+
+// voiceMaxLooksPerTurn is how many pictures one turn of the voice conversation may send. A spoken task such as "scroll down and tell me what is there" legitimately needs a look after each action it takes, so the voice scope is given a larger budget than a typed ask's single question-and-answer (see voiceScreenScope in connect.go). The allowance comes back at the end of every model turn (see endLiveTurn), so this bounds one turn, not the whole session.
+const voiceMaxLooksPerTurn = 6
 
 // lookTokenCost estimates what an image of this size costs the model to read. Input: the picture's width and height in pixels. Output: the token count, at one token per 750 pixels, which is what Anthropic documents and close to what the other two charge. No provider reports its input broken down by part, so this is an estimate on purpose — it is here so a turn that sent two screenfuls does not look, in the ledger, exactly like one that sent none.
 func lookTokenCost(w, h int) int {
@@ -109,9 +181,10 @@ type askLookState struct {
 	look *tracker.Capture
 	// lookUndelivered is true between a look being taken and the picture being handed to the model, so each picture is sent exactly once, with the tool result that produced it.
 	lookUndelivered bool
-	// looks is how many pictures this ask has taken (see maxLooksPerAsk) and lookTokens what they are estimated to have cost.
+	// looks is how many pictures this ask has taken and lookTokens what they are estimated to have cost. maxLooks is how many it may take before looksLeft refuses another; zero means the state was built without setting it explicitly, and cap() falls back to maxLooksPerAsk.
 	looks      int
 	lookTokens int
+	maxLooks   int
 	// items is the []act.Item the last observe_screen listed, which a number from the model resolves against, and snap is the answer that look produced, so a repeat look can say what changed instead of sending the whole list again.
 	items []act.Item
 	snap  screenSnapshot
@@ -120,6 +193,23 @@ type askLookState struct {
 	focusUnknown bool
 	// beforeShot is the picture a screen_changed check keeps before the action, for wait_for to compare against (see CheckHolds and waitFor).
 	beforeShot tracker.Capture
+	// branches is how many background searches this ask has run. Unlike looks it is not given back at a round boundary: a search costs a call against a monthly search allowance, not this turn's tokens.
+	branches int
+}
+
+// maxBranchesPerAsk is how many background web searches one ask may run. The old cap went when the Gemini-subtask engine it guarded was retired, and nothing replaced it, so an agentic loop could call branch as often as it liked. It no longer spends the daily Gemini allowance, but it does spend a real search allowance — Tavily's free tier is a thousand calls a month, which one determined session could make a dent in.
+const maxBranchesPerAsk = 6
+
+// takeBranch records one background search against this ask's allowance. Input: the ask's context. Output: true when there was one left to take.
+func takeBranch(ctx context.Context) bool {
+	s := lookStateFrom(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.branches >= maxBranchesPerAsk {
+		return false
+	}
+	s.branches++
+	return true
 }
 
 // streamDrawn is one shape that was resolved while the model was still writing the call it belongs to, whether it drew or not. The Codex stream hands over each shape the moment its object closes, so the ink starts before the round has finished rather than after it (see parseCodexStream); the phrase and the target are what the draw tool would have produced had it drawn the shape itself. Err carries the tool error when the shape failed instead — a shape refused during the stream still has to occupy its place in this slice, or the shapes it precedes in the finished call would be shifted onto the wrong entries.
@@ -165,7 +255,7 @@ type askLookStateKey struct{}
 
 // withAskLookState attaches a fresh, empty look state to ctx, one per ask, so the look allowance, the picture draw maps coordinates against and what it cost all belong to the ask now starting rather than to whatever ask ran before it. Input: the ask's own context. Output: a context carrying the new state, to use for every tool call the ask makes.
 func withAskLookState(ctx context.Context) context.Context {
-	return context.WithValue(ctx, askLookStateKey{}, &askLookState{})
+	return context.WithValue(ctx, askLookStateKey{}, &askLookState{maxLooks: maxLooksPerAsk})
 }
 
 // NewScreenScope gives one caller its own screen state — the numbered list observe_screen produced, the picture look took, how many looks it has taken and what they cost, and which control the last click focused — in place of the agent-wide state a directly driven tool call would otherwise read and write. A long-running computer-use job (internal/actjob) calls it once and makes every tool call of that job with the context it returns, so two jobs never resolve a number against each other's window and a job's screenshots count against its own look allowance. Input: the job's own context. Output: a context carrying fresh screen state.
@@ -270,12 +360,35 @@ func markLookDelivered(ctx context.Context) {
 	s.lookUndelivered = false
 }
 
+// lookCap reports the most pictures this ask's state may take before looksLeft refuses another: maxLooks when the state set one, maxLooksPerAsk otherwise (a state built by lookStateFrom's throwaway fallback, or one from before withAskLookState started setting it). Must be called with s.mu held.
+func (s *askLookState) lookCap() int {
+	if s.maxLooks > 0 {
+		return s.maxLooks
+	}
+	return maxLooksPerAsk
+}
+
 // looksLeft reports whether this ask may take another picture.
 func looksLeft(ctx context.Context) bool {
 	s := lookStateFrom(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.looks < maxLooksPerAsk
+	return s.looks < s.lookCap()
+}
+
+// looksCap reports the look allowance in effect for this ask's state, for the refusal message to quote back the actual cap rather than a hardcoded number.
+func looksCap(ctx context.Context) int {
+	s := lookStateFrom(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lookCap()
+}
+
+// resetLooks gives this state's look allowance back, at a model turn boundary. Input: none. Output: none.
+func (s *askLookState) resetLooks() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.looks = 0
 }
 
 // takeLook hands the newest picture to whichever brain is assembling the request, once. Output: the capture and true the first time it is called after a look, false every other time — the picture goes to the model with the tool result that produced it and never again.
@@ -718,7 +831,8 @@ func (a *Agent) drawPoints(ctx context.Context, args map[string]any, allowFromTo
 
 // livePoint returns the centre of an element as it is on the screen right now, after checking the number still points at the element observe_screen listed. Input: a context and the listed item. Output: the point to draw through, or the tool error to hand back when the element has moved out from under its number or cannot be read, in which case nothing is drawn — the same rule point_at follows, because a line drawn to where an element used to be points at whatever has taken its place.
 func (a *Agent) livePoint(ctx context.Context, it act.Item) ([2]int, string) {
-	if errText := a.stillThere(ctx, it); errText != "" {
+	it, errText := a.stillThere(ctx, it)
+	if errText != "" {
 		return [2]int{}, errText
 	}
 	x, y, w, h, errText := a.freshRect(ctx, it)
@@ -736,7 +850,8 @@ func (a *Agent) drawRect(ctx context.Context, args map[string]any) (x, y, w, h i
 		if errText != "" {
 			return 0, 0, 0, 0, nil, errText
 		}
-		if errText := a.stillThere(ctx, resolved); errText != "" {
+		resolved, errText = a.stillThere(ctx, resolved)
+		if errText != "" {
 			return 0, 0, 0, 0, nil, errText
 		}
 		x, y, w, h, errText := a.freshRect(ctx, resolved)
@@ -789,15 +904,22 @@ func (a *Agent) stopBeforeClick(ctx context.Context, it act.Item, window string)
 	return fmt.Sprintf("Stopped before clicking [%d] %s %q in %q.%s %s", it.N, it.Role, it.Label, window, unseen, consentPrompt(matchedVerb(it, window)))
 }
 
-// stillThere runs the staleness check on an element the model named by number, before anything is drawn around it or done to it. Input: a context and the item observe_screen listed. Output: "" when the element is still the role, label and rectangle the list showed, or the tool error to hand back when it is not.
-func (a *Agent) stillThere(ctx context.Context, it act.Item) string {
+// stillThere runs the staleness check on an element the model named by number, before anything is drawn around it or done to it. Input: a context and the item observe_screen listed. Output: the item to act on, and "" when the element is still what the list showed, or the tool error to hand back when it is not.
+// An element that is only renamed comes back with its new name rather than a refusal. A toggle renames itself the moment it is pressed — Play becomes Pause, Mute becomes Unmute — so the second press on the same number was refused for the element having done exactly what the first press asked. The log has the model spending three rounds and a full re-listing on one of these to press a button whose reference never changed. The name still matters, because the stop line is judged on it, so it is the new name the guards downstream see.
+func (a *Agent) stillThere(ctx context.Context, it act.Item) (act.Item, string) {
 	if a.verify == nil {
-		return ""
+		return it, ""
 	}
-	if err := a.verify(ctx, it.Ref, it.Role, it.Label, it.X, it.Y, it.W, it.H); err != nil {
-		return toolError(fmt.Sprintf("[%d] %s %q is not what observe_screen listed there, look again: %v", it.N, it.Role, it.Label, err))
+	err := a.verify(ctx, it.Ref, it.Role, it.Label, it.X, it.Y, it.W, it.H)
+	if err == nil {
+		return it, ""
 	}
-	return ""
+	var renamed *tracker.Relabelled
+	if errors.As(err, &renamed) {
+		it.Label = renamed.Now
+		return it, ""
+	}
+	return it, toolError(fmt.Sprintf("[%d] %s %q is not what observe_screen listed there, look again: %v", it.N, it.Role, it.Label, err))
 }
 
 // freshRect reads where an element is on the screen right now, so a ring goes around the element rather than around the rectangle it occupied when observe_screen made its list; the accessibility reference stays valid while the page scrolls under it, so the remembered rectangle can by now be over something else entirely. Input: a context and the item observe_screen listed. Output: the element's current rectangle, or an empty rectangle and the tool error to hand back when it cannot be read or has no size on screen, in which case nothing is drawn at all — a ring in the wrong place is what the user reads before saying go.
@@ -845,9 +967,8 @@ func (a *Agent) frontWindowNow(ctx context.Context) string {
 	return app + " · " + title
 }
 
-// How the window switch is paced. GNOME drops a keystroke sent before its own search field has been drawn, and again before the search has narrowed to a result, so the name is typed only once the overview has actually come up (see waitForOverview) and there is a wait after it is typed; both are variables so a test can set them to zero and cost no wall time. raiserTimeout bounds the extension's three D-Bus calls on their own, because they run inside gnome-shell and a busy shell must cost this tool two seconds rather than the whole turn.
+// How the window switch is paced. switchVerifyFor is how long the front window is watched for the raise to show up in the accessibility tree, which lags the shell extension that did the raising. raiserTimeout bounds the extension's three D-Bus calls on their own, because they run inside gnome-shell and a busy shell must cost this tool two seconds rather than the whole turn. Both are variables so a test can set them to zero and cost no wall time.
 var (
-	switchKeyWait   = 400 * time.Millisecond
 	switchVerifyFor = 2 * time.Second
 	raiserTimeout   = 2 * time.Second
 )
@@ -880,83 +1001,10 @@ func namesApp(text, app string) bool {
 	return false
 }
 
-// shellApps are the names GNOME's own shell publishes itself under on the accessibility bus. A window read under one of these is the shell's own chrome — the overview, the dash, the top bar — not an application the user is in.
-var shellApps = map[string]bool{"gnome-shell": true, "org.gnome.shell": true, "gjs": true}
-
-// overviewOpen reports whether the shell's overview search is on the screen right now, read from the same accessibility tree observe_screen walks: while the overview is up the shell itself is what has focus, and it publishes a showing box to type the search into. Input: a context. Output: true only when the shell is what is in front and that box is showing; false whenever the tree cannot be read, so a switch refuses rather than typing into whatever else has focus.
-func (a *Agent) overviewOpen(ctx context.Context) bool {
-	app, _, nodes, err := a.observe(ctx)
-	if err != nil || !shellApps[strings.ToLower(strings.TrimSpace(app))] {
-		return false
-	}
-	for _, n := range nodes {
-		if !n.Showing || (n.Role != "entry" && n.Role != "text") {
-			continue
-		}
-		if n.Label == "" || strings.Contains(strings.ToLower(n.Label), "search") {
-			return true
-		}
-	}
-	return false
-}
-
-// waitForOverview polls until the shell's overview search is showing or the wait runs out, since the overview takes a moment to draw after Super and a name typed before it is drawn is dropped by GNOME or lands somewhere else. Input: a context. Output: true if the overview came up in time.
-func (a *Agent) waitForOverview(ctx context.Context) bool {
-	// Five times the pacing wait: enough for a shell mid-animation, and zero in tests, where one look is taken and that is the answer.
-	deadline := time.Now().Add(5 * switchKeyWait)
-	for {
-		if a.overviewOpen(ctx) {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		select {
-		case <-time.After(waitPollEvery):
-		case <-ctx.Done():
-			return false
-		}
-	}
-}
-
-// switchWindow brings another application's window to the front. It has two ways in and tries them in that order: the bundled GNOME Shell extension, which raises a window the way the shell itself does and puts nothing on the user's screen (see internal/window), and failing that the shell's own search driven through the portal keyboard — Super, the application's name, Enter — which is all an unprivileged daemon has on a GNOME Wayland session without that extension. Either way it then reads what actually came forward, since the search matches an installed application name rather than a window title and its top result can be something else entirely. Input: a context carrying the ask's own question (see WithQuestion) and the application to bring forward. Output: what happened, in the words the model reads back: the window it switched to, the window that is still in front, the window that came forward instead, or a tool error.
-// It refuses when the request is about the window in front and not this application: a task that names the window it started in stays there, and leaving it is the user's decision, not the model's. A request that names no window at all leaves the choice of application to the model, since "play it" or "close the tab" can only be done somewhere. Nothing but the given name is ever typed, and nothing is pressed or raised at all when the window asked for is already in front.
-func (a *Agent) switchWindow(ctx context.Context, app string) string {
-	if app == "" {
-		return toolError("switch_window needs the app to bring to the front")
-	}
-	before := a.frontWindowNow(ctx)
-	if namesApp(before, app) {
-		return fmt.Sprintf("%q is already the window in front; nothing was pressed", before)
-	}
-	question := questionFrom(ctx)
-	if frontApp, _, _ := strings.Cut(before, windowSep); frontApp != "" && !namesApp(question, app) && namesApp(question, frontApp) {
-		return toolError(fmt.Sprintf("I won't switch to %q: what was asked is about %q, and this task stays in the window it started in", app, frontApp))
-	}
-	if ok, how := a.raiseWindow(ctx, app); ok {
-		return a.switchOutcome(ctx, app, before, how, nil)
-	}
-	dev, errText := a.inputDevice(ctx)
-	if errText != "" {
-		return errText
-	}
-	// Super toggles the overview, so it is pressed only when the overview is not already up, and the name is typed only once the overview is actually showing: a Super the shell swallowed would otherwise put the name into whatever already had focus, the user's own document or compose box.
-	if !a.overviewOpen(ctx) {
-		if err := dev.PressKey("Super"); err != nil {
-			return toolError("could not open the desktop search: " + err.Error())
-		}
-		if !a.waitForOverview(ctx) {
-			return toolError("the desktop search never opened after Super, so nothing was typed and nothing moved")
-		}
-	}
-	if err := dev.TypeText(app); err != nil {
-		return toolError("could not type the app's name into the desktop search: " + err.Error())
-	}
-	time.Sleep(switchKeyWait)
-	if err := dev.PressKey("Enter"); err != nil {
-		return toolError("could not press Enter on the desktop search: " + err.Error())
-	}
-	return a.switchOutcome(ctx, app, before, "", dev)
+// frontIsApp reports whether a window reading of the form "app · title" is a window of the named application, judged on the application half alone. The title half is the document or the page, which can be named after anything at all: a Chromium window showing the Spotify web player reads as "Chromium · Spotify Premium", and reading that as Spotify is what made open_app report Spotify as already in front and start nothing. Input: the window reading and the application name. Output: whether the application half names it.
+func frontIsApp(front, app string) bool {
+	appHalf, _, _ := strings.Cut(front, windowSep)
+	return namesApp(appHalf, app)
 }
 
 // raiseWindow asks the GNOME Shell extension to bring the application's window forward. The pid of the process that owns a window is the most exact key there is, so List is read first and any open window whose class or title already names the app is raised by its pid; failing that (no extension, nothing in the list matched, or the pid activation itself did not land) it falls back to the looser text matches the extension does itself, WM_CLASS before title since a title is often a document name and not the app. Input: a context bounding the D-Bus calls and the application name. Output: true and the key that found it ("pid 1234", `wm_class "brave-browser"` or `title "Brave"`) when a window was raised; false and "" when there is no extension wired up, it is not loaded in the running shell, it matched nothing, or every call failed — every one of which means the keyboard path is what is left.
@@ -971,12 +1019,18 @@ func (a *Agent) raiseWindow(ctx context.Context, app string) (bool, string) {
 		return false, ""
 	}
 	if windows, err := a.raiser.List(ctx); err == nil {
-		for _, w := range windows {
-			if !namesApp(w.WmClass, app) && !namesApp(w.Title, app) {
-				continue
-			}
-			if ok, err := a.raiser.ByPid(ctx, w.Pid); err == nil && ok {
-				return true, fmt.Sprintf("pid %d", w.Pid)
+		// Two passes, WM_CLASS before title, because a window's class is its application and its title is only what it happens to be showing. One pass over both let a Chromium window titled "Spotify Premium" be raised as Spotify while the real Spotify window sat further down the list.
+		for _, byClass := range []bool{true, false} {
+			for _, w := range windows {
+				if byClass != namesApp(w.WmClass, app) {
+					continue
+				}
+				if !byClass && !namesApp(w.Title, app) {
+					continue
+				}
+				if ok, err := a.raiser.ByPid(ctx, w.Pid); err == nil && ok {
+					return true, fmt.Sprintf("pid %d", w.Pid)
+				}
 			}
 		}
 	}
@@ -1033,13 +1087,7 @@ func (a *Agent) raiseBrowser(ctx context.Context) string {
 // A switch that did not land can leave the shell's search sitting over everything, so it is closed again with one Escape — but only when a live read says it is still up, since the same key sent at the user's own window discards whatever was in it. Whether that press lands changes nothing about the report, which is about the switch.
 func (a *Agent) switchOutcome(ctx context.Context, app, before, how string, dev InputDevice) string {
 	after := a.frontWindowAfterSwitch(ctx, app)
-	// Escape only while the overview is actually still up: sent at anything else it is a keystroke into the user's own window, where it discards a draft or closes a dialog.
-	if !namesApp(after, app) && dev != nil && a.overviewOpen(ctx) {
-		_ = dev.PressKey("Escape")
-		// The overview is not a window: it sits over the user's own rather than replacing it, so what to report is read again once it is gone, otherwise every miss reports the shell itself as the window in front.
-		after = a.frontWindowAfterSwitch(ctx, app)
-	}
-	if namesApp(after, app) {
+	if frontIsApp(after, app) {
 		if how != "" {
 			return fmt.Sprintf("switched to %q, raised by %s; call observe_screen to see it", after, how)
 		}
@@ -1060,7 +1108,7 @@ func (a *Agent) frontWindowAfterSwitch(ctx context.Context, app string) string {
 	deadline := time.Now().Add(switchVerifyFor)
 	for {
 		front := a.frontWindowNow(ctx)
-		if namesApp(front, app) || !time.Now().Before(deadline) {
+		if frontIsApp(front, app) || !time.Now().Before(deadline) {
 			return front
 		}
 		select {
@@ -1105,12 +1153,9 @@ func liveScreenScope(ctx context.Context) context.Context {
 }
 
 // endLiveTurn gives the session's look allowance back at a model turn boundary. Input: the session's context. Output: none.
-// The allowance is maxLooksPerAsk, which is two, and it is meant to bound one question rather than a conversation: without this a session that looked twice in its first minute could never look again however long it ran. What the looks left behind — the newest picture and the numbered list observe_screen produced — is deliberately kept, because the model lists the screen, replies, and is then asked to draw around item 3.
+// The allowance is the state's own maxLooks (see askLookState), and this is meant to bound one turn rather than a conversation: without this a session that used up its looks in its first minute could never look again however long it ran. What the looks left behind — the newest picture and the numbered list observe_screen produced — is deliberately kept, because the model lists the screen, replies, and is then asked to draw around item 3.
 func endLiveTurn(ctx context.Context) {
-	s := lookStateFrom(ctx)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.looks = 0
+	lookStateFrom(ctx).resetLooks()
 }
 
 // EndScreenRound gives the look allowance back at a round boundary of a long job, the way endLiveTurn does at a model turn of a live session, and keeps the picture the last look took. Input: the job's screen scope context. Output: none.

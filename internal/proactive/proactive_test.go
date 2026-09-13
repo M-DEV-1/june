@@ -231,6 +231,8 @@ func TestScheduler_Brief_WaitsForUserActivity(t *testing.T) {
 
 // lastSunday returns the most recent date on or before base that falls on a Sunday, keeping base's clock time. The weekly-study tests inject this as the scheduler's now: it must sit at or slightly before the real wall clock, because the activity gate compares the injected now against episode rows the store stamps with the real clock — a next-Sunday-in-the-future fake makes every fresh episode look days stale and the trigger never fires (that is exactly how these tests broke the first Monday they ran).
 func lastSunday(base time.Time) time.Time {
+	// Strictly before today, even when today is a Sunday. The freshness gate these tests rely on compares the fake clock against an episode logged at the real time, so a fake Sunday later in the day than the real clock reads as "that activity has not happened yet" and the pass never fires — which is what happened running these at 03:00 on Sunday 2026-09-13, against a fake clock pinned to 09:00.
+	base = base.AddDate(0, 0, -1)
 	for base.Weekday() != time.Sunday {
 		base = base.AddDate(0, 0, -1)
 	}
