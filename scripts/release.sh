@@ -42,5 +42,10 @@ cp packaging/gnome-extension/ora@ora.local/metadata.json packaging/gnome-extensi
 
 "$root/scripts/check-stage.sh" "$dist"
 
+# The thing a person downloads is one file, not a directory, and the tar has to carry the executable bits install.sh relies on.
+echo "packing the archive..."
+tar -czf "$root/dist/ora-$version.tar.gz" -C "$root/dist" "ora-$version"
+
 echo "staged: $dist"
+echo "archive: $root/dist/ora-$version.tar.gz"
 du -ah "$dist" | sort -k2
