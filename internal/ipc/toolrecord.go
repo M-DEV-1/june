@@ -29,6 +29,8 @@ func toolRecorder(store *db.Store, path string, convID int64) agent.ToolRecorder
 			Args:           r.Args,
 			Outcome:        r.Outcome,
 			Result:         r.Result,
+			Output:         r.Output,
+			TurnID:         r.TurnID,
 			DurationMS:     r.Duration.Milliseconds(),
 			Offered:        r.Offered,
 		}); err != nil {

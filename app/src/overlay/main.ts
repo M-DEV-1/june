@@ -59,8 +59,8 @@ const STAGGER_BUDGET_MS = 3000;
 /** How a stroke draws itself on: quick at first, easing off as it reaches the end, the way a hand slows at the end of a line. */
 const INK_EASING = "cubic-bezier(0.33, 0, 0.2, 1)";
 
-/** How long the pointer stays on screen after the ink is finished, in milliseconds. The ink outlives it, because the ink is what the user is being shown and the pointer is only what drew it. */
-const POINTER_IDLE_MS = 1500;
+/** How long the pointer stays on screen after the ink is finished or a tap has landed, in milliseconds. Long enough to bridge the gap between one action and the next in a task, so the pointer reads as a cursor that is working rather than a flash the user has to be watching for: measured on 2026-09-11, a fade after 1.5 seconds left no cursor on screen at all between clicks. */
+const POINTER_IDLE_MS = 8000;
 
 /** The height a tap's ripple is sized from, in desktop pixels, since a bare point has no rectangle of its own: about the height of a button, so the ripple reads as a press on a control rather than a dot or a splash. */
 const TAP_RIPPLE_H = 36;
@@ -327,8 +327,8 @@ async function draw(text: string, askID: string): Promise<void> {
     setMood("act");
     const arrival = flyTo(at);
     ripple(at, rippleSize({ x: px, y: py, w: 0, h: TAP_RIPPLE_H }, layout), arrival);
-    if (pointerTimer !== undefined) clearTimeout(pointerTimer);
-    pointerTimer = window.setTimeout(() => (pointer.style.opacity = "0"), arrival + POINTER_IDLE_MS);
+    // A tap is the pointer alone, whatever label came with it: a task is a run of taps, and a pill on each one turned a Spotify window into nine pills on 2026-09-11. Labels belong to rings, arrows and marks, where the model chose to name something.
+    holdPointer(arrival + POINTER_IDLE_MS);
     return;
   }
   let shapes = shapesFor(spec, layout);
@@ -349,7 +349,8 @@ async function draw(text: string, askID: string): Promise<void> {
   const rect = spec.rects?.[0];
   const now = Date.now();
   const tap = spec.kind === "ring" && rect !== undefined && shouldRipple(rect.label || spec.label || "", rect, lastRing, now);
-  setMood(moodFor(spec.kind, tap));
+  const mood = moodFor(spec.kind, tap);
+  setMood(mood);
   if (rect && spec.kind === "ring") lastRing = { rect, at: now };
 
   // The pointer flies to where the first stroke begins, because that is where the drawing starts; an event with no ink to draw leaves it where it was.
@@ -371,7 +372,19 @@ async function draw(text: string, askID: string): Promise<void> {
   clearTimer = window.setTimeout(fadeOut, readable + inkEnd);
 }
 
-/** Acts on one event off the daemon's stream. Input: the JSON text of one event. Output: nothing; anything that is not an overlay event is another window's business. */
+/** The tools that drive the screen. While one of these is running or another is about to, the pointer stays where it last landed, so a task made of several clicks reads as one cursor at work rather than a flash per click. */
+const SCREEN_TOOLS = new Set(["click", "click_at", "scroll_at", "scroll_to", "type_text", "press_key", "switch_window", "open_app", "wait_for", "point_at", "draw", "show_marks", "look", "observe_screen"]);
+
+/** How long after the ask reports done, or the voice session goes back to listening, the pointer stays before fading, in milliseconds. */
+const POINTER_RELEASE_MS = 1500;
+
+/** Puts the pointer's fade off by delay from now, replacing any fade already waiting. Input: the delay in milliseconds. Output: nothing. */
+function holdPointer(delay: number): void {
+  if (pointerTimer !== undefined) clearTimeout(pointerTimer);
+  pointerTimer = window.setTimeout(() => (pointer.style.opacity = "0"), delay);
+}
+
+/** Acts on one event off the daemon's stream. Input: the JSON text of one event. Output: nothing; a drawing is drawn, a screen tool starting keeps the pointer up, the end of an ask or of a spoken turn lets it go, and anything else is another window's business. */
 function onEvent(payload: string): void {
   let ev: DaemonEvent;
   try {
@@ -379,7 +392,13 @@ function onEvent(payload: string): void {
   } catch {
     return;
   }
-  if (ev.type === "overlay" && typeof ev.text === "string") void draw(ev.text, ev.id);
+  if (ev.type === "overlay" && typeof ev.text === "string") {
+    void draw(ev.text, ev.id);
+    return;
+  }
+  if (pointer.style.opacity !== "1") return;
+  if (ev.type === "tool" && typeof ev.text === "string" && SCREEN_TOOLS.has(ev.text)) holdPointer(POINTER_IDLE_MS);
+  else if (ev.type === "done" || (ev.type === "state" && ev.text === "listening")) holdPointer(POINTER_RELEASE_MS);
 }
 
 /** Asks Rust where this window sits on the desk and how big its pixels are, so global screen coordinates can be turned into positions on the page. Input: none. Output: nothing; a failed call leaves the last layout in place. */

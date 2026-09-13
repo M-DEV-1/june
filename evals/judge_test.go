@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"ora/internal/brain"
 	"ora/internal/config"
@@ -28,7 +27,7 @@ func spendTodaysQuota(t *testing.T, dir, model string) {
 	t.Helper()
 	limit, _ := brain.DefaultQuotaOptions().For(model)
 	counts := map[string]map[string]int{
-		time.Now().Format("2006-01-02"): {model: limit.Limit - limit.Reserved},
+		brain.QuotaDay(): {model: limit.Limit - limit.Reserved},
 	}
 	data, err := json.Marshal(counts)
 	if err != nil {
@@ -62,7 +61,7 @@ func TestMeteredGemini_TakesASlot(t *testing.T) {
 	if err := json.Unmarshal(raw, &counts); err != nil {
 		t.Fatal(err)
 	}
-	if got := counts[time.Now().Format("2006-01-02")][config.TextModel]; got != 1 {
+	if got := counts[brain.QuotaDay()][config.TextModel]; got != 1 {
 		t.Fatalf("today's count for %s = %d, want 1", config.TextModel, got)
 	}
 }

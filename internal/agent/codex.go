@@ -280,7 +280,8 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	defer cancel()
 	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
 	ctx = withAskLookState(ctx)
-	instruction, handshake := a.HandshakePrompt(ctx, start)
+	instruction := a.LeanPrompt(start)
+	var handshake []string
 
 	// Fetched again here, separately from the copy HandshakePrompt already rendered into instruction: a screen round drops instruction for screenTaskInstruction() and needs its own, trimmed personal context back (see screenPersonalContext), which the untrimmed handshake copy cannot supply.
 	personalEntries, err := a.brain.PersonalContext(ctx)
@@ -327,9 +328,11 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	screenThread := lastTurns(historyItems, maxScreenHistoryTurns)
 	screenAsk := isScreenTask(question, nil)
 	screenPrompt := ""
-	// The cap counts steps that showed something new, not rounds — see sameScreenAgain and maxAskRounds in ask.go, both shared with the Gemini text loop.
-	spent, screen := 0, ""
-	for i := 0; i < maxAskRounds && spent < maxAskIterations; i++ {
+	// sameScreenAgain and onlyAnnotated (ask.go) decide which rounds count as one of the ask's maxAskIterations steps; maxAskRounds bounds a run that does nothing but repeat those.
+	screen := ""
+	// steps is how many rounds have actually spent one of the maxAskIterations steps, the same hard cap askText enforces.
+	steps := 0
+	for i := 0; i < maxAskRounds; i++ {
 		prompt, thread, offered := instruction, historyItems, tools
 		offeredNames := declNames(decls)
 		if screenAsk || screenTaskStarted(tr.ToolHops) {
@@ -411,14 +414,22 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 		hopsBefore := len(tr.ToolHops)
 		for _, call := range round.Calls {
 			args := map[string]any{}
+			var result string
+			var parseFailed bool
 			if call.Arguments != "" {
-				if json.Unmarshal([]byte(call.Arguments), &args) != nil {
+				if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+					parseFailed = true
 					args = map[string]any{}
+					raw := util.RunesEllipsis(call.Arguments, 200)
+					slog.Warn("ask codex: tool call arguments did not parse", "tool", call.Name, "arguments", raw, "error", err)
+					result = toolError(fmt.Sprintf("the arguments for %s did not parse as JSON: %s", call.Name, raw))
 				}
 			}
-			ObserveTool(ctx, call.Name, toolActivitySummary(call.Name, args))
-			result := a.evalExecute(WithOffered(withStreamDrawn(ctx, call.ID, early[call.ID]), offeredNames), call.Name, args)
-			ObserveTool(ctx, call.Name, resultSummary(call.Name, result))
+			ObserveTool(ctx, call.Name, toolActivitySummary(call.Name, args), false)
+			if !parseFailed {
+				result = a.evalExecute(WithOffered(withStreamDrawn(ctx, call.ID, early[call.ID]), offeredNames), call.Name, args)
+			}
+			ObserveTool(ctx, call.Name, resultSummary(call.Name, result), strings.HasPrefix(result, "error"))
 			slog.Info("ask: tool", "tool", call.Name, "args", toolActivitySummary(call.Name, args), "result", resultSummary(call.Name, result), "detail", toolLogDetail(call.Name, result))
 			tr.ToolHops = append(tr.ToolHops, ToolHop{Name: call.Name, Args: args, Result: result})
 			// The output is paired to the call by call_id, falling back to the item id so a backend that sends only one of the two still gets a pairable answer.
@@ -440,7 +451,10 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 			}
 		}
 		if round := tr.ToolHops[hopsBefore:]; !sameScreenAgain(&screen, round) && !onlyAnnotated(round) {
-			spent++
+			steps++
+		}
+		if steps >= maxAskIterations {
+			break
 		}
 	}
 	tr.Evidence = evidenceFromToolHops(tr.ToolHops)

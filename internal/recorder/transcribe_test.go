@@ -442,7 +442,7 @@ func TestPrimingPrompt(t *testing.T) {
 			// Only the window the call is actually running in names the people on the call: a WhatsApp tab open at the same time must not contribute its chat senders as participants.
 			name: "participants come only from the meeting window",
 			eps: []db.Episode{
-				{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Rohit Verma: Abhi renew hua"},
+				{App: "Brave Browser", Title: "WhatsApp - Brave", ScreenText: "Rohit Verma: Kal shaam ko bhej dunga"},
 				{App: "Brave Browser", Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vikram Goel: sharing my screen now"},
 			},
 			check: func(t *testing.T, got string) {

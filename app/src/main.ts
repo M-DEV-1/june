@@ -39,6 +39,7 @@ import {
 // The key a clicked notice's target is left under is defined beside the code in the app window that reads it, so there is one spelling of it rather than two.
 import { OPEN_AT_KEY } from "./app/state";
 import { FACE_TICK_MS, face } from "./shared/faces";
+import { markdown } from "./markdown";
 import { initialView, venueScript } from "./mock";
 import {
   actAnswer,
@@ -523,7 +524,7 @@ function voiceStopIcon(): string {
   return `<svg viewBox="0 0 16 16" width="12" height="12"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>`;
 }
 
-/** The whole card while a live voice session runs, replacing the input and the thread entirely — the way Gemini Live and ChatGPT's own voice mode take over the screen instead of sharing it with the composer. Ora's braille rows (see voiceWaveInnerHtml) sit centred as the surface's centrepiece; the state word and transcript above and below it read off the same view and matter the resting card would; the stop control ends the session the same way Shift+Space does (see the click handler in render()). Input: the view and the matter the session's turns are landing in. Output: the surface's HTML. */
+/** The whole card while a live voice session runs, replacing the input and the thread entirely — the way Gemini Live and ChatGPT's own voice mode take over the screen instead of sharing it with the composer. Ora's braille rows (see voiceWaveInnerHtml) sit centred as the surface's centrepiece; the state word and transcript above and below it read off the same view and matter the resting card would; the state word is bare, because the wave already says Ora is there; the stop control ends the session the same way Shift+Space does (see the click handler in render()). Input: the view and the matter the session's turns are landing in. Output: the surface's HTML. */
 function voiceSurfaceHtml(v: View, m: Matter): string {
   return `
     <div class="voicebox">
@@ -541,7 +542,7 @@ function voiceSurfaceHtml(v: View, m: Matter): string {
 /** The words shown after the shortcuts in the input's placeholder used to be the only way a user with the input empty and nothing running learned that Space and Shift+Space did anything at all. They now live permanently beside the input instead, in the same slot the window's context chip uses once the daemon reports one, at DESIGN.md's text-micro (11px/1.3/500/+0.02em) rather than the chip's own size, so they read as a quiet legend rather than a second copy of what the chip says. */
 const HINT_TEXT = "⎵ dictate · ⇧⎵ voice";
 
-/** What the input's placeholder actually renders. Same as state.ts's placeholder(v) except at rest, where the full RESTING_PLACEHOLDER sentence (which used to carry the two shortcut hints inline) shortens to "Ask Ora" now that the hints live beside the input instead (see HINT_TEXT and cardHtml). Input: the view. Output: the placeholder text to render. */
+/** What the input's placeholder actually renders. Same as state.ts's placeholder(v), except at rest, where the full RESTING_PLACEHOLDER sentence (which used to carry the two shortcut hints inline) shortens to "Ask Ora" now that the hints live beside the input instead (see HINT_TEXT and cardHtml). Input: the view. Output: the placeholder text to render. */
 function displayPlaceholder(v: View): string {
   const p = placeholder(v);
   return p === RESTING_PLACEHOLDER ? "Ask Ora" : p;
@@ -832,18 +833,11 @@ function conversationSepHtml(turns: Matter["turns"], i: number): string {
   return label ? `<div class="conv-sep">${esc(label)}</div>` : "";
 }
 
-/** The thread under the input line: every finished turn folded to a grey question-and-answer pair, then the turn on screen with its question in grey; the live step list or its collapsed summary; the answer in big type; and the evidence fold-out. A quiet separator breaks the thread wherever one conversation lapsed and the next began (see conversationSepHtml), so a follow-up asked minutes later does not read as carrying on from an exchange it has nothing to do with. Input: the view and the matter. Output: the thread's HTML, or "" when nothing has been asked. */
+/** The thread under the input line: only the newest turn — its question in grey, the live step list or its collapsed summary, the answer in big type, and the evidence fold-out. Older turns stay in the matter's own state and in the full window; the hover floods the screen if it renders the whole back-and-forth, so it shows just what is happening now. Input: the view and the matter. Output: the thread's HTML, or "" when nothing has been asked. */
 function threadHtml(v: View, m: Matter): string {
   const last = m.turns[m.turns.length - 1];
   if (!last) return "";
 
-  const folded = m.turns
-    .slice(0, -1)
-    .map(
-      (t, i) =>
-        `${conversationSepHtml(m.turns, i)}<div class="prev"><b>${esc(t.q)}</b>${esc(t.a.replace(/<\/?b>/g, ""))}</div>`,
-    )
-    .join("");
   const evidence = last.evidence ?? [];
   const steps = last.steps ?? [];
   // The "answer" event lands a beat before "done" flips the state, so a turn can be mid-transition with an answer already in hand but state still "asking" — last.a, not v.state alone, is what decides whether the step list is still the live one or something to collapse.
@@ -858,13 +852,12 @@ function threadHtml(v: View, m: Matter): string {
         : stepsHtml(steps);
 
   return `<div class="thread">
-      ${folded}
       ${conversationSepHtml(m.turns, m.turns.length - 1)}
       ${qqHtml(v, last)}
       ${last.job && isJobLive(last.job.state) ? jobControlsHtml(last.job) : ""}
       ${stepsBlock}
       ${last.job ? jobQuestionHtml(last.job) : ""}
-      ${stillAsking ? "" : `<div class="a">${last.a ? rich(last.a) : ""}</div>`}
+      ${stillAsking ? "" : `<div class="a">${last.a ? markdown(last.a) : ""}</div>`}
       ${last.job?.spend ? spendLineHtml(last.job.spend) : ""}
       ${
         evidence.length > 0

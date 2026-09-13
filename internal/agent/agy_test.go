@@ -3,10 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,66 +136,17 @@ func TestBuildAgyHome_ToleratesAMissingRealGemini(t *testing.T) {
 	}
 }
 
-// agyStub answers as the CLI would: it reads the HOME it was given, finds Ora's tool server from the mcp config that HOME's .gemini/config holds, does the MCP handshake, calls the tools it was asked to call, and prints the object `agy --print --output-format json` prints.
-func agyStub(callNames []string, response string) agyRunner {
-	return func(ctx context.Context, env []string, args []string) ([]byte, error) {
-		home := ""
-		for _, e := range env {
-			if v, ok := strings.CutPrefix(e, "HOME="); ok {
-				home = v
-			}
-		}
-		if home == "" {
-			return nil, errors.New("the stub was given no HOME")
-		}
-		raw, err := os.ReadFile(filepath.Join(home, ".gemini", "config", "mcp_config.json"))
-		if err != nil {
-			return nil, err
-		}
-		var cfg struct {
-			MCPServers map[string]struct {
-				URL string `json:"serverUrl"`
-			} `json:"mcpServers"`
-		}
-		if err := json.Unmarshal(raw, &cfg); err != nil {
-			return nil, err
-		}
-		url := cfg.MCPServers[agyMCPServerName].URL
-		if url == "" {
-			return nil, errors.New("the stub found no ora server in the mcp config")
-		}
-		post := func(method string, id int, params any) error {
-			body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-			resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
-			if err != nil {
-				return err
-			}
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			return nil
-		}
-		if err := post("initialize", 0, map[string]any{"protocolVersion": "2025-11-25"}); err != nil {
-			return nil, err
-		}
-		if err := post("tools/list", 1, nil); err != nil {
-			return nil, err
-		}
-		for i, name := range callNames {
-			if err := post("tools/call", 2+i, map[string]any{"name": name, "arguments": map[string]any{"purpose": "looking"}}); err != nil {
-				return nil, err
-			}
-		}
-		out, _ := json.Marshal(json.RawMessage(fmt.Sprintf(`{"status":"SUCCESS","response":%s}`, mustJSON(response))))
-		return out, nil
-	}
-}
-
 // A whole ask through the CLI fills the trace: the answer, the tools the model ran with their results, the recalled lines, and the model name.
 func TestAskAgy_RunsToolsAndFillsTheTrace(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{retrieveRelevantResult: []string{"recalled line"}}, nil, "")
-	run := agyStub([]string{"observe_screen"}, "  Brave is in front.  ")
+	fake := &fakeAgySession{
+		responses: []string{`{"status":"SUCCESS","response":"  Brave is in front.  "}`},
+		toolCalls: map[int][]string{0: {"observe_screen"}},
+	}
+	newProc := func() agySessionRunner { return fake }
+	t.Cleanup(a.CloseAgySession)
 
-	tr, err := a.askAgy(t.Context(), run, "gemini-3-pro", nil, "what window is in front")
+	tr, err := a.askAgy(t.Context(), newProc, "gemini-3-pro", nil, "what window is in front")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +164,13 @@ func TestAskAgy_RunsToolsAndFillsTheTrace(t *testing.T) {
 	}
 }
 
-// An empty model leaves --model off the argument list, keeping the CLI's own default, and the trace names the provider alone.
+// An empty model leaves --model off the session's argument list, keeping the CLI's own default, and the trace names the provider alone.
 func TestAskAgy_LeavesModelOffWhenEmpty(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := agyStub(nil, "done")
-	tr, err := a.askAgy(t.Context(), run, "", nil, "hello")
+	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"done"}`}}
+	newProc := func() agySessionRunner { return fake }
+	t.Cleanup(a.CloseAgySession)
+	tr, err := a.askAgy(t.Context(), newProc, "", nil, "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,56 +180,44 @@ func TestAskAgy_LeavesModelOffWhenEmpty(t *testing.T) {
 }
 
 // Ora's own instruction goes at the head of the prompt text, because agy has no system-prompt flag of its own, and the question is still the last thing the model reads.
+// agy is a text ask, so its instruction is the lean prompt (see LeanPrompt in ask.go): personal context does not belong in it, only the persona, the tool guidance and the stop line — a fact from the personal-context store must not be in the prompt at all.
 func TestAskAgy_PutsTheInstructionAtTheHeadOfThePromptAndNeverSkipsPermissions(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{personal: map[string]string{"home": "the user's home address is 42 Example Street"}}, nil, "")
-	var seenArgs []string
-	var prompt string
-	run := func(ctx context.Context, env []string, args []string) ([]byte, error) {
-		seenArgs = args
-		for i, arg := range args {
-			if arg == "--print" {
-				prompt = args[i+1]
-			}
-		}
-		return []byte(`{"status":"SUCCESS","response":"done"}`), nil
-	}
-	if _, err := a.askAgy(t.Context(), run, "", nil, "hello"); err != nil {
+	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"done"}`}}
+	newProc := func() agySessionRunner { return fake }
+	t.Cleanup(a.CloseAgySession)
+	if _, err := a.askAgy(t.Context(), newProc, "", nil, "hello"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prompt, "42 Example Street") {
+	prompt := agyLineText(t, fake.sends[0])
+	if !strings.Contains(prompt, "You are Ora.") {
 		t.Errorf("the instruction is not in the prompt: %q", prompt)
+	}
+	if strings.Contains(prompt, "42 Example Street") {
+		t.Errorf("a text ask's prompt must not carry the personal-context store: %q", prompt)
 	}
 	if !strings.HasSuffix(prompt, "hello") {
 		t.Errorf("the question is not the last thing the model reads: %q", prompt)
 	}
-	if strings.Index(prompt, "42 Example Street") > strings.LastIndex(prompt, "hello") {
+	if strings.Index(prompt, "You are Ora.") > strings.LastIndex(prompt, "hello") {
 		t.Errorf("the instruction came after the question: %q", prompt)
 	}
-	joined := strings.Join(seenArgs, " ")
-	if strings.Contains(joined, "--dangerously-skip-permissions") {
-		t.Errorf("agy must never be given a blanket permission skip: %s", joined)
-	}
-	if strings.Contains(joined, "42 Example Street") {
-		// The prompt is one argv entry after --print, so this only checks nothing else duplicated it elsewhere.
+	if strings.Contains(prompt, "--dangerously-skip-permissions") {
+		t.Errorf("agy must never be given a blanket permission skip: %q", prompt)
 	}
 }
 
 // The prior turns go in ahead of the question, so a follow-up reads as a follow-up.
 func TestAskAgyWith_SendsThePriorTurns(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	var prompt string
-	run := func(ctx context.Context, env []string, args []string) ([]byte, error) {
-		for i, arg := range args {
-			if arg == "--print" {
-				prompt = args[i+1]
-			}
-		}
-		return []byte(`{"status":"SUCCESS","response":"done"}`), nil
-	}
+	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"done"}`}}
+	newProc := func() agySessionRunner { return fake }
+	t.Cleanup(a.CloseAgySession)
 	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Priya"}})
-	if _, err := a.askAgy(t.Context(), run, "", history, "when"); err != nil {
+	if _, err := a.askAgy(t.Context(), newProc, "", history, "when"); err != nil {
 		t.Fatal(err)
 	}
+	prompt := fake.sends[0]
 	if !strings.Contains(prompt, "who did I meet") || !strings.Contains(prompt, "Priya") {
 		t.Errorf("the thread is missing from the prompt: %q", prompt)
 	}
@@ -289,13 +226,13 @@ func TestAskAgyWith_SendsThePriorTurns(t *testing.T) {
 	}
 }
 
-// A CLI run that reports anything but SUCCESS is an error carrying what it said, not an answer.
+// A run that reports anything but SUCCESS is an error carrying what it said, not an answer.
 func TestAskAgy_ReportsAFailedRun(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := func(ctx context.Context, env []string, args []string) ([]byte, error) {
-		return []byte(`{"status":"ERROR","response":"the plan's daily quota is spent"}`), nil
-	}
-	tr, err := a.askAgy(t.Context(), run, "", nil, "hello")
+	fake := &fakeAgySession{responses: []string{`{"status":"ERROR","response":"the plan's daily quota is spent"}`}}
+	newProc := func() agySessionRunner { return fake }
+	t.Cleanup(a.CloseAgySession)
+	tr, err := a.askAgy(t.Context(), newProc, "", nil, "hello")
 	if err == nil || !strings.Contains(err.Error(), "quota is spent") {
 		t.Errorf("err = %v", err)
 	}
@@ -332,17 +269,17 @@ func TestAgyModel(t *testing.T) {
 	}
 }
 
-// agyArgs carries the model only when one was named, and never carries a system-prompt flag since agy has none.
-func TestAgyArgs(t *testing.T) {
-	withModel := strings.Join(agyArgs("gemini-3-pro", "the prompt"), " ")
+// agySessionArgs carries the model only when one was named, and always reads and writes NDJSON, one turn per line.
+func TestAgySessionArgs(t *testing.T) {
+	withModel := strings.Join(agySessionArgs("gemini-3-pro"), " ")
 	if !strings.Contains(withModel, "--model gemini-3-pro") {
 		t.Errorf("args = %q, want --model gemini-3-pro", withModel)
 	}
-	withoutModel := strings.Join(agyArgs("", "the prompt"), " ")
+	withoutModel := strings.Join(agySessionArgs(""), " ")
 	if strings.Contains(withoutModel, "--model") {
 		t.Errorf("args = %q, want no --model when none was named", withoutModel)
 	}
-	for _, want := range []string{"--print the prompt", "--output-format json", "--disable-slash-commands"} {
+	for _, want := range []string{"--input-format stream-json", "--output-format stream-json", "--disable-slash-commands"} {
 		if !strings.Contains(withoutModel, want) {
 			t.Errorf("args = %q, missing %q", withoutModel, want)
 		}
@@ -376,10 +313,10 @@ func TestAgyResult_CarriesWhatTheRunCost(t *testing.T) {
 // The trace records what the run cost. The cache read is input, because it is what the model read; the thinking is not added to the output, because agy already counts it there; and agy's own total_tokens is not used, because it leaves the cache read out.
 func TestAskAgy_RecordsWhatTheRunCost(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := func(ctx context.Context, env []string, args []string) ([]byte, error) {
-		return []byte(`{"status":"SUCCESS","response":"hi","num_turns":2,"usage":{"input_tokens":6436,"output_tokens":35,"thinking_tokens":26,"cache_read_tokens":8127,"total_tokens":6471}}`), nil
-	}
-	tr, err := a.askAgy(t.Context(), run, "", nil, "hello")
+	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"hi","num_turns":2,"usage":{"input_tokens":6436,"output_tokens":35,"thinking_tokens":26,"cache_read_tokens":8127,"total_tokens":6471}}`}}
+	newProc := func() agySessionRunner { return fake }
+	t.Cleanup(a.CloseAgySession)
+	tr, err := a.askAgy(t.Context(), newProc, "", nil, "hello")
 	if err != nil {
 		t.Fatal(err)
 	}

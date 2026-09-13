@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"ora/internal/agent"
 	"ora/internal/config"
@@ -131,7 +130,7 @@ func TestMetered_GatesGeminiButNotCLI(t *testing.T) {
 	dir := t.TempDir()
 	opts := QuotaOptions{config.TextModel: {Limit: 1, Reserved: 0}}
 	// The day's one request is spent already, so the gate has something to refuse without needing a call that reaches Google.
-	spent := fmt.Sprintf(`{%q:{%q:1}}`, time.Now().Format("2006-01-02"), config.TextModel)
+	spent := fmt.Sprintf(`{%q:{%q:1}}`, QuotaDay(), config.TextModel)
 	if err := os.WriteFile(filepath.Join(dir, "brain_quota.json"), []byte(spent), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}

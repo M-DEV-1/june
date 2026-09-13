@@ -1,4 +1,4 @@
-// Package dream is the daemon's overnight loop: while the machine sits idle on mains between the dream hour and the morning brief, it tests the hypotheses Ora's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. This slice is judge-only — every model call goes to the configured brain; the local grinder model is a later slice.
+// Package dream is the daemon's overnight loop: while the machine sits idle on mains between the dream hour and the morning brief, it tests the hypotheses Ora's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. Every model call goes to the configured dream brain, with the local shadow model standing in whenever that brain fails.
 package dream
 
 import (
@@ -40,6 +40,8 @@ const (
 	retireContradictions = 2
 	// staleAfterDays retires an open hypothesis that has sat this long without ever being tested.
 	staleAfterDays = 30
+	// failedAttemptCap is how many times one night may abort on a stage error before it is left for tomorrow. The daemon ticks every five minutes, so an unreachable dream brain used to be re-attempted for the whole window — 76 times on the night of 2026-09-03, every one of them a paid call that returned "402 Payment Required". A preempted night does not count against this: only a real stage failure does.
+	failedAttemptCap = 3
 	// defaultWatchEvery is how often the preemption watcher polls for the user's return.
 	defaultWatchEvery = 5 * time.Second
 	// inputFreshAfter is how fresh InputIdle's report must be for the watcher to read it as "real input just happened". Below the polling cadence of a moment ago, so a probe read moments after a keypress still counts.
@@ -52,6 +54,11 @@ const (
 	compactAfterDays = 7
 	// compactWeeksToMonth is how old, in weeks, a week entry must be before it may fold into its month's entry.
 	compactWeeksToMonth = 10
+	// compactMonthsToYear is how old, in months, a month entry must be before its year may fold into one kind='year' entry.
+	compactMonthsToYear = 6
+	// weekBack is how many days before the night the stages normally read, and sweepBackCap is how far back they will stretch after missed nights. The machine dual-boots, so a run of nights with the daemon simply not there is normal; the next night that does run reads back to the last one that finished instead of pretending only yesterday happened.
+	weekBack     = 6
+	sweepBackCap = 20
 )
 
 // contradictedMark is what a contradiction's evidence line contains, and what the retirement mechanic counts. The lines are written by evidenceLine below, so the format is ours to rely on.
@@ -71,6 +78,9 @@ type Probes struct {
 
 // Store is the slice of *db.Store the dreaming needs: the night's own run bookkeeping and hypothesis ledger, the diary it reads and rewrites, and the grounded evidence every stage judges against. Declared here rather than taking *db.Store whole, so this package states its entire data dependency in one place and widening it is a deliberate edit instead of an accident.
 type Store interface {
+	// DreamRunsSince returns the run rows from sinceNight onward, oldest first — how the night works out whether any were missed.
+	DreamRunsSince(ctx context.Context, sinceNight string) ([]db.DreamRun, error)
+
 	// The night's run row and its stage tokens. A wake that finds an unfinished run resumes from stages_done rather than repeating committed work.
 	StartDreamRun(ctx context.Context, night string) error
 	DreamRun(ctx context.Context, night string) (run db.DreamRun, ok bool, err error)
@@ -103,6 +113,7 @@ type Store interface {
 	PruneEmptyConversations(ctx context.Context, olderThan time.Duration) (int64, error)
 	ProtectedActRuns(ctx context.Context, failedGrace time.Duration) (withNotes, failedYoung int64, err error)
 	PruneActRuns(ctx context.Context, keep int, failedGrace time.Duration) (int64, error)
+	PruneToolCalls(ctx context.Context, olderThan time.Duration) (int64, error)
 
 	// The grounded evidence the judging calls read, plus the store's own notion of "now" so a night is not measured against the wrong day.
 	SummaryTimeline(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error)
@@ -143,6 +154,10 @@ type Runner struct {
 	// ShadowLifecycle optionally starts the server Shadow talks to before the night's stages and stops it after. Zero value (both funcs nil) means the shadow's backend is already reachable, or there is none to manage.
 	ShadowLifecycle ShadowLifecycle
 
+	// failNight and failCount bound how often one night retries after a stage error — see failedAttemptCap. In memory only: a daemon restart gives the night a fresh budget, which is the right call, since a restart is often the fix.
+	failNight string
+	failCount int
+
 	// activeShadow is what ask() actually fires this run: a copy of Shadow, cleared for the run alone when ShadowLifecycle.Start fails, so a bad night never mutates the Shadow the next night would otherwise get.
 	activeShadow brain.Brain
 
@@ -181,6 +196,38 @@ func (r *Runner) windowStart(night string) time.Time {
 		return time.Time{}
 	}
 	return time.Date(d.Year(), d.Month(), d.Day(), r.dreamHour, 0, 0, 0, time.Local)
+}
+
+// sweepBack reports how many days before night this run should read. Normally weekBack; when the last finished run is older than that — the machine was in another OS, or off — it stretches back to cover the gap, capped at sweepBackCap so a month away does not put a month of diary in one prompt.
+func (r *Runner) sweepBack(ctx context.Context, night string) int {
+	runs, err := r.store.DreamRunsSince(ctx, nightMinus(night, sweepBackCap))
+	if err != nil {
+		slog.Warn("dreaming: could not check for missed nights, reading the usual week", "night", night, "error", err)
+		return weekBack
+	}
+	last := ""
+	for _, run := range runs {
+		if run.Finished && run.Night < night && run.Night > last {
+			last = run.Night
+		}
+	}
+	if last == "" {
+		return sweepBackCap
+	}
+	gap := int(dayOf(night).Sub(dayOf(last)).Hours() / 24)
+	if gap <= weekBack {
+		return weekBack
+	}
+	if gap > sweepBackCap {
+		return sweepBackCap
+	}
+	return gap
+}
+
+// dayOf parses a night key into local midnight; a malformed key gives the zero time, which only ever shortens a sweep.
+func dayOf(night string) time.Time {
+	d, _ := time.ParseInLocation(dayFormat, night, time.Local)
+	return d
 }
 
 // nightMinus returns the night key days earlier, for age comparisons — ISO date strings compare lexically.
@@ -251,7 +298,18 @@ func (r *Runner) Tick(ctx context.Context) {
 	if !forced && fallback && now.Sub(r.windowStart(night)) < missingDiaryGrace {
 		return
 	}
-	r.dream(ctx, night, run, exists, locked && !forced, lastEpisode, fallback, forced)
+	if r.failNight != night {
+		r.failNight, r.failCount = night, 0
+	}
+	if r.failCount >= failedAttemptCap {
+		return
+	}
+	if err := r.dream(ctx, night, run, exists, locked && !forced, lastEpisode, fallback, forced); err != nil {
+		r.failCount++
+		if r.failCount >= failedAttemptCap {
+			slog.Warn("dreaming: the night is left for tomorrow, its stages kept failing", "night", night, "attempts", r.failCount, "error", err)
+		}
+	}
 }
 
 // SetBrain swaps which backend dreams — the daemon calls it when the config names a dedicated dream brain.
@@ -273,8 +331,8 @@ func (r *Runner) consumeForceMarker() bool {
 	return true
 }
 
-// dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error — a cancelled context included — just returns; nothing partial was committed and the next wake resumes from stages_done.
-func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback, forced bool) {
+// dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error returns it; nothing partial was committed and the next wake resumes from stages_done. A night cut short by the user coming back returns nil, because preemption is not a failure and must not spend the night's retry budget (see failedAttemptCap).
+func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback, forced bool) error {
 	if r.OnNight != nil {
 		r.OnNight(true)
 		defer r.OnNight(false)
@@ -282,7 +340,7 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 	if !exists {
 		if err := r.store.StartDreamRun(ctx, night); err != nil {
 			slog.Warn("dreaming: starting the run failed", "night", night, "error", err)
-			return
+			return err
 		}
 		slog.Info("dreaming: starting the night", "night", night, "mode", "judge-only")
 	} else {
@@ -316,50 +374,50 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 	}
 
 	var hyp *stageReport
-	if !slices.Contains(done, "hyp") {
+	if !slices.Contains(done, db.StageHyp) {
 		rep, err := r.hypStage(ctx, night, fallback)
 		if err != nil {
 			slog.Warn("dreaming: hypothesis stage did not commit", "night", night, "error", err)
-			return
+			return stageFailure(ctx, err)
 		}
 		hyp = &rep
 		slog.Info("dreaming: hypothesis stage committed", "night", night, "tested", rep.tested, "promoted", rep.promoted, "retired", rep.retired, "adopted", rep.adopted)
 	}
 
 	undRan := false
-	if !slices.Contains(done, "und") {
+	if !slices.Contains(done, db.StageUnd) {
 		if err := r.undStage(ctx, night); err != nil {
 			slog.Warn("dreaming: understanding stage did not commit", "night", night, "error", err)
-			return
+			return stageFailure(ctx, err)
 		}
 		undRan = true
 		slog.Info("dreaming: understanding stage committed", "night", night)
 	}
 
 	var comp *compactReport
-	if !slices.Contains(done, "compact") {
+	if !slices.Contains(done, db.StageCompact) {
 		rep, err := r.compactStage(ctx, night)
 		if err != nil {
 			slog.Warn("dreaming: compaction stage did not commit", "night", night, "error", err)
-			return
+			return stageFailure(ctx, err)
 		}
 		comp = &rep
-		slog.Info("dreaming: compaction stage committed", "night", night, "weeks", rep.weeks, "months", rep.months)
+		slog.Info("dreaming: compaction stage committed", "night", night, "weeks", rep.weeks, "months", rep.months, "years", rep.years)
 	}
 
 	var replay *replayReport
-	if !slices.Contains(done, "replay") {
+	if !slices.Contains(done, db.StageReplay) {
 		rep, err := r.replayStage(ctx, night)
 		if err != nil {
 			slog.Warn("dreaming: replay stage did not commit", "night", night, "error", err)
-			return
+			return stageFailure(ctx, err)
 		}
 		replay = &rep
 		slog.Info("dreaming: replay stage finished", "night", night, "skipped", rep.skipped, "partial", rep.partial, "items", rep.items, "piles", rep.piles)
 	}
 
 	// The procedures stage now carries a stages_done token like the other stages, so a night that already ran it does not re-read the act runs on a later wake. Its error handling stays soft, though: a stage failure (or a failed commit) is only logged and the night carries on — a missing procedure note must not cost the night its morning report the way a failed hypothesis or understanding stage does.
-	if !slices.Contains(done, "procedures") {
+	if !slices.Contains(done, db.StageProcedures) {
 		if proc, err := r.proceduresStage(ctx, night); err != nil {
 			slog.Warn("dreaming: procedures stage failed", "night", night, "error", err)
 		} else {
@@ -387,7 +445,8 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		} else {
 			slog.Info("dreaming: pruning stage finished", "night", night,
 				"conversations_removed", p.conversationsRemoved, "conversations_kept", p.conversationsProtected,
-				"act_runs_removed", p.runsRemoved, "act_runs_kept_for_notes", p.runsKeptForNotes, "act_runs_kept_failed", p.runsKeptFailedYoung)
+				"act_runs_removed", p.runsRemoved, "act_runs_kept_for_notes", p.runsKeptForNotes, "act_runs_kept_failed", p.runsKeptFailedYoung,
+				"tool_calls_removed", p.toolCallsRemoved)
 			if err := r.store.CommitPruneStage(ctx, night); err != nil {
 				slog.Warn("dreaming: pruning stage did not commit its token", "night", night, "error", err)
 			}
@@ -396,9 +455,18 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 
 	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, comp, replay, notes); err != nil {
 		slog.Warn("dreaming: finishing the night failed", "night", night, "error", err)
-		return
+		return stageFailure(ctx, err)
 	}
 	slog.Info("dreaming: night finished", "night", night)
+	return nil
+}
+
+// stageFailure reports whether a stage's error should count against the night's retry budget. Input: the night's own cancellable context and the stage error. Output: the error itself, or nil when the context was already cancelled — the user came back, or the daemon is going down, and neither is the brain's fault.
+func stageFailure(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 // watchForUser cancels the night's work the moment the user comes back: the session unlocking (when the lock was the idle signal at start), or real input arriving fresh per InputIdle when that probe is wired and healthy. Only when the probe is nil or erroring does a new episode fall back as the return signal — screen-content changes (autoplay, an unread-count title) are not activity, so they must not preempt a night the input probe still calls idle. A cancelled stage's transaction never commits, so preemption loses at most one in-flight brain call.
@@ -434,18 +502,26 @@ func (r *Runner) watchForUser(ctx context.Context, cancel context.CancelFunc, lo
 	}
 }
 
-// ask runs one traced brain call: the raw reply — any thinking text a model emits included — lands in the night's trace file before anything parses it. When a shadow is active, the same prompt is then fired at it too, after the primary call has already returned — its reply is only ever traced, never used for anything the primary call's result feeds.
+// ask runs one traced brain call: the raw reply — any thinking text a model emits included — lands in the night's trace file before anything parses it. When a shadow is active, the same prompt is then fired at it too. Normally the shadow is a spectator and only its trace line survives, but when the primary call failed the shadow's reply becomes the night's answer: a dream brain that is unreachable or out of credit used to end the night with nothing committed, while the local model answered the same prompt seconds later and was thrown away.
 func (r *Runner) ask(ctx context.Context, night, kind, prompt string) (string, error) {
 	reply, err := r.brain(ctx, prompt)
 	r.traceCall(night, kind, reply, err)
-	if r.activeShadow != nil {
-		r.shadowAsk(ctx, night, kind, prompt)
+	if r.activeShadow == nil {
+		return reply, err
 	}
-	return reply, err
+	shadowReply, shadowErr := r.shadowAsk(ctx, night, kind, prompt)
+	if err == nil {
+		return reply, nil
+	}
+	if shadowErr != nil || strings.TrimSpace(shadowReply) == "" {
+		return reply, err
+	}
+	slog.Info("dreaming: the dream brain failed, the night carries on with the local model's answer", "night", night, "kind", kind, "error", err)
+	return shadowReply, nil
 }
 
-// shadowAsk fires prompt at the active shadow brain under its own generous timeout (a local Q2 model can take minutes on a long prompt), tracing the reply under kind+"-shadow" into the same night's JSONL. It still respects the parent ctx: a preempted night (the user came back) cuts the shadow call short exactly like the primary one. A shadow failure is only logged — it never fails the stage that called ask, since the shadow never influences the night.
-func (r *Runner) shadowAsk(ctx context.Context, night, kind, prompt string) {
+// shadowAsk fires prompt at the active shadow brain under its own generous timeout (a local Q2 model can take minutes on a long prompt), tracing the reply under kind+"-shadow" into the same night's JSONL. It still respects the parent ctx: a preempted night (the user came back) cuts the shadow call short exactly like the primary one. Input: the night key, the call kind and the prompt. Output: the shadow's reply and its error, both of which ask ignores unless the primary call already failed. A shadow failure is only logged — on its own it never fails a stage.
+func (r *Runner) shadowAsk(ctx context.Context, night, kind, prompt string) (string, error) {
 	shadowCtx, cancel := context.WithTimeout(ctx, shadowTimeout)
 	defer cancel()
 	reply, err := r.activeShadow(shadowCtx, prompt)
@@ -453,6 +529,7 @@ func (r *Runner) shadowAsk(ctx context.Context, night, kind, prompt string) {
 	if err != nil {
 		slog.Warn("dreaming: shadow brain call failed", "night", night, "kind", kind, "error", err)
 	}
+	return reply, err
 }
 
 // traceCall appends one JSONL line for a brain call to <DataDir>/dreams/<night>.jsonl. Best-effort by design: a failed trace write is logged and never fails a stage.

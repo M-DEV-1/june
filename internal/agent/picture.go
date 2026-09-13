@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 
 	"ora/internal/tracker"
 )
@@ -32,6 +33,7 @@ func deliverPicture(ctx context.Context, c tracker.Capture) bool {
 		return false
 	}
 	if err := send(ctx, c); err != nil {
+		slog.Warn("failed to deliver the look's picture to the voice session", "error", err)
 		return false
 	}
 	markLookDelivered(ctx)

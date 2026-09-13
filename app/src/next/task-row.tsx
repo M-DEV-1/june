@@ -3,11 +3,11 @@
  * The row itself is a plain list item with no role of its own, and picking it is one button inside it. It was an option in a listbox once, which is wrong: an option may hold no interactive descendants, and every row holds two or three — the tick, the More menu, and on a noticed task the owner menu — so a screen reader in listbox mode could reach none of them and read all their labels as part of the row's own name instead.
  */
 
-import { Check, MoreHorizontal, RotateCcw, X } from "lucide-react";
+import { Check, MoreHorizontal, RotateCcw, Trash2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { useSetTaskStatusMutation, type Task, type TaskStatus } from "./api";
+import { useDeleteTaskMutation, useSetTaskStatusMutation, type Task, type TaskStatus } from "./api";
 import { shortWhen, taskDetail } from "./format";
 import { ui, useAppDispatch } from "./store";
 import { TaskTick } from "./task-tick";
@@ -17,6 +17,7 @@ import { OwnerControl } from "./task-owner";
 export function TaskRow({ task, selected, now }: { task: Task; selected: boolean; now: Date }) {
   const dispatch = useAppDispatch();
   const [setStatus] = useSetTaskStatusMutation();
+  const [deleteTask] = useDeleteTaskMutation();
   const detail = taskDetail(task);
   const when = task.when ? shortWhen(task.when, now) : "";
   // Only an action item Ora noticed can be dropped: the daemon answers 400 for a dropped task of the user's own, because user_tasks has nowhere to hold a third state.
@@ -26,7 +27,15 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
     try {
       await setStatus({ id: task.id, status }).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not change that task"));
+      dispatch(ui.noticed({ text: "Could not change that task", kind: "error" }));
+    }
+  };
+
+  const remove = async () => {
+    try {
+      await deleteTask(task.id).unwrap();
+    } catch {
+      dispatch(ui.noticed({ text: "Could not delete that task", kind: "error" }));
     }
   };
 
@@ -88,7 +97,12 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
             <DropdownMenuItem variant="destructive" onClick={() => void set("dropped")}>
               <X /> Drop it
             </DropdownMenuItem>
-          ) : null}
+          ) : (
+            // Only the user's own tasks are deleted: a noticed item is a line of a meeting's minutes, and Drop it above is what that is for. A ticked task used to have nowhere to go — the menu offered Reopen and nothing else — so a finished list only ever grew.
+            <DropdownMenuItem variant="destructive" onClick={() => void remove()}>
+              <Trash2 /> Delete
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
       {task.source === "noticed" ? <OwnerControl task={task} /> : null}

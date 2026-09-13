@@ -107,6 +107,15 @@ func (s *Store) ActJob(ctx context.Context, id string) (ActJobRow, error) {
 // finishedActJobStates are the states a job never comes back from, so a daemon starting up leaves them alone.
 var finishedActJobStates = []any{"done", "stopped", "failed"}
 
+// finishedActJobStatesSQL renders finishedActJobStates as a quoted, comma-separated SQL IN-list, for callers such as PruneActRuns that build a literal IN (...) clause rather than binding placeholders.
+func finishedActJobStatesSQL() string {
+	quoted := make([]string, len(finishedActJobStates))
+	for i, s := range finishedActJobStates {
+		quoted[i] = "'" + s.(string) + "'"
+	}
+	return strings.Join(quoted, ", ")
+}
+
 // UnfinishedActJobs lists the jobs that had not reached an end state when they were last checkpointed, newest first — what a daemon offers to resume after a restart. Input: none. Output: the rows with their checkpoints.
 func (s *Store) UnfinishedActJobs(ctx context.Context) ([]ActJobRow, error) {
 	rows, err := s.db.QueryContext(ctx,

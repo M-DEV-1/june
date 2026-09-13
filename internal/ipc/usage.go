@@ -3,10 +3,12 @@ package ipc
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
 
+	"ora/internal/agent"
 	"ora/internal/brain"
 	"ora/internal/db"
 	"ora/internal/util"
@@ -109,8 +111,8 @@ type UsageView struct {
 	Limits map[string]ProviderLimits `json:"limits"`
 }
 
-// Usage builds the GET /usage handler. Input: the store's token ledger, the daily budget set for a provider (config.OraConfig.DailyTokenBudgetFor; nil is the same as a config with no budgets set), and optionally the same allowance lookup GET /brains uses, so the settings page can draw the providers' own usage bars beside the token spend. Output: a handler writing UsageView as JSON, or 500 when the ledger cannot answer — an empty answer would read as "you have spent nothing", which is a different thing from "the store is broken".
-func Usage(ledger TokenLedger, budgetFor func(provider string) int, limitsFor ...BrainLimits) http.HandlerFunc {
+// Usage builds the GET /usage handler. Input: the store's token ledger, the daily budget set for a provider (config.OraConfig.DailyTokenBudgetFor; nil is the same as a config with no budgets set), the Exa plan's monthly request ceiling (config.OraConfig.ExaMonthlyRequests; 0 means unset), and optionally the same allowance lookup GET /brains uses, so the settings page can draw the providers' own usage bars beside the token spend. Output: a handler writing UsageView as JSON, or 500 when the ledger cannot answer — an empty answer would read as "you have spent nothing", which is a different thing from "the store is broken".
+func Usage(ledger TokenLedger, budgetFor func(provider string) int, exaMonthlyRequests int, limitsFor ...BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		today := startOfToday(time.Now())
@@ -121,6 +123,12 @@ func Usage(ledger TokenLedger, budgetFor func(provider string) int, limitsFor ..
 			return
 		}
 		weekTotals, err := ledger.TokenTotalsSince(ctx, today.AddDate(0, 0, -(usageDays-1)))
+		if err != nil {
+			fail(w, err, http.StatusInternalServerError)
+			return
+		}
+		// monthTotals backs the Exa row of Limits below: Exa's own usage endpoint needs a team-management key Ora does not hold (see internal/agent/websearch.go), so calls-this-month off the same ledger every other row is built from is the only reading there is.
+		monthTotals, err := ledger.TokenTotalsSince(ctx, startOfMonth(today))
 		if err != nil {
 			fail(w, err, http.StatusInternalServerError)
 			return
@@ -139,28 +147,62 @@ func Usage(ledger TokenLedger, budgetFor func(provider string) int, limitsFor ..
 		todayWindow := usageWindow(todayTotals)
 		applyBudgets(todayWindow.Providers, budgetFor)
 
+		limits := providerLimits(ctx, limitsFor)
+		if exa, ok := exaProviderLimits(monthTotals, exaMonthlyRequests); ok {
+			limits["exa"] = exa
+		}
+
 		writeJSON(w, UsageView{
 			Today:  todayWindow,
 			Week:   usageWindow(weekTotals),
 			Days:   daySeries(days, today),
 			Recent: usageCalls(recent),
-			Limits: providerLimits(ctx, limitsFor),
+			Limits: limits,
 		})
 	}
 }
 
-// providerLimits collects each brain's allowance windows for the settings page. Input: the request's context and the optional lookup Usage was given. Output: a map from brain id to its windows, holding only the brains that have any, and empty rather than null when no lookup was given.
+// startOfMonth is midnight on the 1st of t's own calendar month, in t's own location — the window exaProviderLimits' "calls this month" is counted over.
+func startOfMonth(t time.Time) time.Time {
+	y, m, _ := t.Date()
+	return time.Date(y, m, 1, 0, 0, 0, 0, t.Location())
+}
+
+// providerLimits collects each brain's allowance windows for the settings page, plus Tavily's own monthly plan usage under the id "tavily". Tavily is not a brain the picker offers, but its reading rides the same recorder Claude's and Codex's already fill (see internal/agent/websearch.go's RefreshTavilyUsage), so it is read here — throttled to once every ten minutes by RefreshTavilyUsage itself, the same rule Claude's own read holds to — and surfaced through the exact same lookup and map every brain row already uses, with no changes to that lookup itself. Input: the request's context and the optional lookup Usage was given. Output: a map from id to its windows, holding only the ones that have any, and empty rather than null when no lookup was given.
 func providerLimits(ctx context.Context, limitsFor []BrainLimits) map[string]ProviderLimits {
 	out := map[string]ProviderLimits{}
 	if len(limitsFor) == 0 || limitsFor[0] == nil {
 		return out
 	}
-	for _, id := range brainIDs {
+	agent.RefreshTavilyUsage(ctx)
+	ids := append(append([]string{}, brainIDs...), "tavily")
+	for _, id := range ids {
 		if snap, ok := limitsFor[0](ctx, id); ok && len(snap.Limits) > 0 {
 			out[id] = ProviderLimits{Limits: snap.Limits, LimitsAt: rfc3339(snap.At)}
 		}
 	}
 	return out
+}
+
+// exaProviderLimits builds the exa row for the usage view's Limits map: a local monthly call count against exaMonthlyRequests, since Exa's own usage endpoint needs a team-management key Ora does not hold (see internal/agent/websearch.go). Input: this month's per-provider ledger totals — the same rows AddTokenUse gets one of for every Exa call, see internal/agent/websearch.go's recordSearchUse — and the configured monthly ceiling, 0 meaning unknown. Output: the row and true when Exa has been called at all this month; false, meaning nothing to show, when it has not been called this month at all. UsedFraction is left at zero, which the window reads as "no bar to draw", when the ceiling is unknown; the call count itself is always named in Source so the number is visible either way, and no plan size is ever guessed at.
+func exaProviderLimits(monthTotals []TokenTotal, exaMonthlyRequests int) (ProviderLimits, bool) {
+	calls := 0
+	for _, t := range monthTotals {
+		if t.Provider == "exa" {
+			calls += t.Calls
+		}
+	}
+	if calls == 0 {
+		return ProviderLimits{}, false
+	}
+	limit := brain.UsageLimit{
+		Window: "monthly",
+		Source: fmt.Sprintf("%d calls this month (token_use ledger)", calls),
+	}
+	if exaMonthlyRequests > 0 {
+		limit.UsedFraction = float64(calls) / float64(exaMonthlyRequests)
+	}
+	return ProviderLimits{Limits: []brain.UsageLimit{limit}, LimitsAt: rfc3339(time.Now())}, true
 }
 
 // applyBudgets sets BudgetUsedFraction on each of today's provider rows, in place. Input: today's provider totals and the budget lookup Usage was given, nil meaning no budgets are set at all. Output: none; a provider budgetFor reports 0 for is left at the zero value, the same as "spent nothing".

@@ -13,8 +13,11 @@ import (
 	"ora/internal/util"
 )
 
+// CoveredHeading is the minutes heading for the section that says what the meeting was about. app/src/next/task-about.tsx reads this same heading (as its own COVERED constant) to pull that section back out of the minutes for a task's detail pane, so the two must always read the same six words; TestCoveredHeadingMatchesFrontend checks that.
+const CoveredHeading = "What the meeting covered"
+
 // minutesInstruction tells the model what to make of the transcript. The microphone side is [me]; the system-audio side is [call], a single pooled label covering every remote voice, and the model's job is to put names to it from the screen context and from what was said.
-const minutesInstruction = `You are writing the minutes of a meeting from an automatic transcript, for the person who recorded it. They will read this instead of remembering the meeting, so it is written for them first and about the meeting second.
+var minutesInstruction = `You are writing the minutes of a meeting from an automatic transcript, for the person who recorded it. They will read this instead of remembering the meeting, so it is written for them first and about the meeting second.
 
 The transcript labels every line with who spoke it:
   [me]      — the person whose computer recorded this, captured from their microphone. Always the same one person.
@@ -62,7 +65,7 @@ This section is about the [me] speaker only, and it is the reason the user opene
 - **You now owe** — what [me] committed to, or was asked for, with any date or deadline said out loud. One bullet per thing. If nothing was asked of them, omit this bullet rather than inventing a task or writing that nothing was asked.
 If [me] barely spoke, say so in one line and move on. Never pad this section to make it look substantial.
 
-## What the meeting covered
+## ` + CoveredHeading + `
 The threads of the meeting, one bullet per thread, in the order they came up. A thread is a topic somebody opened and the room discussed — not every sentence. Attribute to named people where the evidence allows. This is where everything that was not about [me] goes.
 
 ## What others committed to

@@ -72,3 +72,28 @@ describe("ReplyMarkdown", () => {
     openSpy.mockRestore();
   });
 });
+
+// A code block is something Ora produced to be used elsewhere — a prompt to paste into another tool, a command to run — and there was no way to get it out of the pane but to select it by hand, which in a narrow chat column with a horizontal scrollbar means dragging past the edge.
+describe("ReplyMarkdown code blocks", () => {
+  it("copies the block's text to the clipboard on its own button", async () => {
+    const written: string[] = [];
+    Object.assign(navigator, { clipboard: { writeText: (t: string) => { written.push(t); return Promise.resolve(); } } });
+    render(<ReplyMarkdown text={"```\nDesign brief: Logo for Ora\n```"} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(written).toEqual(["Design brief: Logo for Ora"]);
+    // Saying it went is the whole confirmation: a clipboard has nothing to show for itself.
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeDefined();
+  });
+
+  // A WebKitGTK webview off a secure origin has no navigator.clipboard at all, and an unhandled rejection there would leave the button saying "Copy" with no word of what happened.
+  it("says so when the clipboard is not there to write to", async () => {
+    Object.assign(navigator, { clipboard: undefined });
+    render(<ReplyMarkdown text={"```\nsome text\n```"} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(await screen.findByRole("button", { name: "Could not copy" })).toBeDefined();
+  });
+});

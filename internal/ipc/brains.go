@@ -18,6 +18,16 @@ import (
 	"ora/internal/config"
 )
 
+// claudeCredentialsPath is where the Claude CLI writes its login, under the given home directory. Every place this daemon checks whether the user is signed in to Claude, or reads a field out of that login, goes through this so the path is typed once.
+func claudeCredentialsPath(home string) string {
+	return filepath.Join(home, ".claude", ".credentials.json")
+}
+
+// codexAuthPath is where the Codex CLI writes its login, under the given home directory. Every place this daemon checks whether the user is signed in to Codex, or reads a field out of that login, goes through this so the path is typed once.
+func codexAuthPath(home string) string {
+	return filepath.Join(home, ".codex", "auth.json")
+}
+
 // ollamaListTimeout bounds the `ollama list` call this route makes, so a wedged local server cannot hang the window's settings screen.
 const ollamaListTimeout = 3 * time.Second
 
@@ -140,8 +150,8 @@ func onPath(name string) bool {
 // brainList builds the rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them, with signed_in false on any brain internal/brain cannot actually answer with and limits_note saying why.
 func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(string) bool, limitsFor BrainLimits) []BrainView {
 	def := defaultBrainID(cfg.Brain.Provider)
-	claudeAccount := plainField(filepath.Join(home, ".claude", ".credentials.json"), "claudeAiOauth", "subscriptionType")
-	codexAccount := plainField(filepath.Join(home, ".codex", "auth.json"), "", "auth_mode")
+	claudeAccount := plainField(claudeCredentialsPath(home), "claudeAiOauth", "subscriptionType")
+	codexAccount := plainField(codexAuthPath(home), "", "auth_mode")
 
 	// Both rosters come out of the cache rather than off the command line: `agy models` takes about three and a half seconds, and this route runs on every settings render and again after every pick.
 	ollamaModels := []string{}
@@ -171,7 +181,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		{
 			ID:       "codex",
 			Name:     "Codex",
-			SignedIn: exists(filepath.Join(home, ".codex", "auth.json")),
+			SignedIn: exists(codexAuthPath(home)),
 			Account:  codexAccount,
 			Models:   []string{"gpt-5.5", "gpt-5.6-luna"},
 			Note:     "OpenAI endorses using a Codex login from open-source harnesses, so Ora may call it under the plan the user already pays for.",
@@ -194,7 +204,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		{
 			ID:       "claude",
 			Name:     "Claude",
-			SignedIn: exists(filepath.Join(home, ".claude", ".credentials.json")),
+			SignedIn: exists(claudeCredentialsPath(home)),
 			Account:  claudeAccount,
 			Models:   []string{"haiku", "sonnet", "opus"},
 			Note:     "Ora runs Claude through Anthropic's own command line, because a third-party login is billed as extra usage on top of the subscription. It is drawn last because the same subscription is the user's own coding workhorse, so Ora spends it only when the others are out.",

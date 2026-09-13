@@ -573,3 +573,44 @@ func TestDeleteConversation_UnlinksTheTasksThatPointedAtIt(t *testing.T) {
 		}
 	}
 }
+
+// On 2026-09-12 the user asked three times to change and then delete a task Ora had just made for him, and every attempt was refused: a row in user_tasks could be created and ticked and nothing else, ever, by any part of the product. Correcting its words and getting rid of it are the two things he actually asked for.
+func TestUserTaskCanBeRewordedAndRemoved(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	id, err := store.AddUserTask(ctx, "research fly brain training", 0)
+	if err != nil {
+		t.Fatalf("AddUserTask: %v", err)
+	}
+
+	if err := store.SetUserTaskTitle(ctx, id, "research fly brain training: compute, timeline, links"); err != nil {
+		t.Fatalf("SetUserTaskTitle: %v", err)
+	}
+	tasks, err := store.UserTasks(ctx)
+	if err != nil {
+		t.Fatalf("UserTasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "research fly brain training: compute, timeline, links" {
+		t.Fatalf("tasks = %+v, want the reworded title", tasks)
+	}
+
+	if err := store.DeleteUserTask(ctx, id); err != nil {
+		t.Fatalf("DeleteUserTask: %v", err)
+	}
+	tasks, err = store.UserTasks(ctx)
+	if err != nil {
+		t.Fatalf("UserTasks after delete: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("tasks = %+v, want none left", tasks)
+	}
+
+	// An id that matches nothing must say so rather than report a change it never made, the same rule SetUserTaskDone already holds to.
+	if err := store.SetUserTaskTitle(ctx, id, "gone"); err == nil {
+		t.Error("SetUserTaskTitle on a deleted task returned no error")
+	}
+	if err := store.DeleteUserTask(ctx, id); err == nil {
+		t.Error("DeleteUserTask on a deleted task returned no error")
+	}
+}

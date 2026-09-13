@@ -192,7 +192,7 @@ func TestWithActReferencePutsTheBlockAheadOfWhatTheUserSaid(t *testing.T) {
 	a := NewAgent(nil, nil, brain, nil, "")
 	const question = "show me how to change subtitles"
 
-	contents := a.WithActReference(context.Background(), refNow, question, buildTurnContent(refNow, nil, question))
+	contents, _ := a.WithActReference(context.Background(), refNow, question, buildTurnContent(refNow, nil, question))
 	if len(contents) != 1 {
 		t.Fatalf("WithActReference returned %d contents, want the one turn it was given", len(contents))
 	}
@@ -226,7 +226,7 @@ func TestWithActReferenceLeavesTheTurnAloneWhenThereIsNoReference(t *testing.T) 
 	for name, brain := range brains {
 		t.Run(name, func(t *testing.T) {
 			a := NewAgent(nil, nil, brain, nil, "")
-			contents := a.WithActReference(context.Background(), refNow, question, buildTurnContent(refNow, nil, question))
+			contents, _ := a.WithActReference(context.Background(), refNow, question, buildTurnContent(refNow, nil, question))
 			if len(contents[0].Parts) != 2 {
 				t.Fatalf("the turn has %d parts, want the context and the question it started with", len(contents[0].Parts))
 			}

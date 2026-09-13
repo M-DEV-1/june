@@ -88,9 +88,8 @@ func TestClaudeToolServer_InitializesAndListsTheAskTools(t *testing.T) {
 	}
 }
 
-// A tools/call runs the tool through the ask's own gate, answers with its result as MCP text content, and records the call as a tool hop the trace can carry.
-// Every call runs the tool through the same gate an ask uses and records the hop with its args and result, and past the step cap the server stops running tools and says so, so a model that keeps calling cannot spend the user's machine without end.
-func TestClaudeToolServer_StopsAtTheStepCap(t *testing.T) {
+// A tools/call runs the tool through the ask's own gate, answers with its result as MCP text content, and records the call as a tool hop the trace can carry. Once a run has spent all of its maxAskIterations steps, every call after that is refused without running, so askClaude can end the turn on capError (see Capped()) rather than trusting whatever the CLI does with a refusal. Nothing here stops the CLI mid-run on its own; the wall clock it is started under (claudeAskTimeout) is the other hard stop.
+func TestClaudeToolServer_RefusesToolCallsPastTheStepCap(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	s, err := a.startClaudeToolServer(t.Context())
 	if err != nil {
@@ -101,28 +100,32 @@ func TestClaudeToolServer_StopsAtTheStepCap(t *testing.T) {
 	var first, last string
 	for i := 0; i < maxAskIterations+1; i++ {
 		call := rpcPost(t, s, "tools/call", 3, map[string]any{"name": "shell_exec", "arguments": map[string]any{"command": "ls"}})
-		last = call["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+		text := call["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 		if i == 0 {
-			first = last
+			first = text
 		}
+		last = text
 	}
 	if !strings.Contains(first, "not available in an ask") {
 		t.Errorf("the first call's result text = %q", first)
 	}
-	if !strings.Contains(last, "no steps left") {
-		t.Errorf("the call past the cap answered %q", last)
+	if !strings.Contains(last, "run out of steps") {
+		t.Errorf("the call past the step cap did not carry the refusal: %q", last)
 	}
 	hops := s.Hops()
 	if len(hops) != maxAskIterations {
-		t.Errorf("%d hops recorded, cap is %d", len(hops), maxAskIterations)
+		t.Errorf("%d hops recorded, want exactly the cap of %d (the call past it must not run)", len(hops), maxAskIterations)
+	}
+	if !s.Capped() {
+		t.Error("Capped() = false, want true once the step cap is spent")
 	}
 	if hops[0].Name != "shell_exec" || hops[0].Args["command"] != "ls" || hops[0].Result != first {
 		t.Errorf("first hop = %+v", hops[0])
 	}
 }
 
-// Two tool calls that arrive at once when the run is one step below its cap must not both spend the last step: the check and the reservation of the step have to happen in the same locked section, or two calls can each see one step left and both take it, running one more tool than the cap allows.
-func TestClaudeToolServer_TwoConcurrentCallsAtCapMinusOneOnlyOneWins(t *testing.T) {
+// Two tool calls that arrive at once when the run is one step below its cap must not both be admitted: the read and the increment in reserveStep have to happen in the same locked section, or two concurrent calls could each see the cap as not yet reached and the run would spend one more step than maxAskIterations allows.
+func TestClaudeToolServer_TwoConcurrentCallsAtTheCapOnlyOneRuns(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	s, err := a.startClaudeToolServer(t.Context())
 	if err != nil {
@@ -148,12 +151,12 @@ func TestClaudeToolServer_TwoConcurrentCallsAtCapMinusOneOnlyOneWins(t *testing.
 
 	refused := 0
 	for _, r := range results {
-		if strings.Contains(r, "no steps left") {
+		if strings.Contains(r, "run out of steps") {
 			refused++
 		}
 	}
 	if refused != 1 {
-		t.Errorf("%d of the two concurrent calls at the last step were refused, want exactly 1", refused)
+		t.Errorf("%d of the two concurrent calls at the cap were refused, want exactly 1", refused)
 	}
 	if len(s.Hops()) != maxAskIterations {
 		t.Errorf("%d hops recorded, want exactly the cap of %d", len(s.Hops()), maxAskIterations)
@@ -357,8 +360,12 @@ func TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(instruction), "42 Example Street") {
-			t.Errorf("system prompt file = %q, want the personal context in it", instruction)
+		// Claude is a text ask, so its instruction is the lean prompt (see LeanPrompt in ask.go): the persona and the tool guidance, but not the personal-context store.
+		if !strings.Contains(string(instruction), "You are Ora.") {
+			t.Errorf("system prompt file = %q, want the lean instruction in it", instruction)
+		}
+		if strings.Contains(string(instruction), "42 Example Street") {
+			t.Errorf("system prompt file = %q, a text ask's instruction must not carry the personal-context store", instruction)
 		}
 		return []byte(`{"result":"done","is_error":false}`), nil
 	}
@@ -395,6 +402,106 @@ func TestAskClaudeWith_SendsThePriorTurns(t *testing.T) {
 	}
 	if strings.Index(prompt, "Priya") > strings.Index(prompt, "when") {
 		t.Errorf("the thread came after the question: %q", prompt)
+	}
+}
+
+// claudeCapturingRun returns a runner that reads the system prompt file and lists the tools the tool server offers, for a test that needs to see what an askClaude call sent without driving a whole tool call through the stub.
+func claudeCapturingRun(t *testing.T, systemPrompt *string, toolNames *[]string) claudeRunner {
+	t.Helper()
+	return func(ctx context.Context, args []string, stdin string) ([]byte, error) {
+		var url string
+		for i, arg := range args {
+			switch arg {
+			case "--system-prompt-file":
+				raw, err := os.ReadFile(args[i+1])
+				if err != nil {
+					return nil, err
+				}
+				*systemPrompt = string(raw)
+			case "--mcp-config":
+				raw, err := os.ReadFile(args[i+1])
+				if err != nil {
+					return nil, err
+				}
+				var cfg struct {
+					MCPServers map[string]struct {
+						URL string `json:"url"`
+					} `json:"mcpServers"`
+				}
+				if err := json.Unmarshal(raw, &cfg); err != nil {
+					return nil, err
+				}
+				url = cfg.MCPServers["ora"].URL
+			}
+		}
+		body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		var reply struct {
+			Result struct {
+				Tools []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+			} `json:"result"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+			return nil, err
+		}
+		for _, tool := range reply.Result.Tools {
+			*toolNames = append(*toolNames, tool.Name)
+		}
+		return []byte(`{"result":"done","is_error":false}`), nil
+	}
+}
+
+// A screen question ("open spotify and play back in black") is recognised as a screen task before any tool has run, so it gets the short screen prompt rather than the full handshake, and the tool server offers it only the screen tools plus the memory-reading tools, not the full ask tool set.
+func TestAskClaude_ScreenQuestionGetsTheShortPromptAndScreenTools(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	var systemPrompt string
+	var toolNames []string
+	run := claudeCapturingRun(t, &systemPrompt, &toolNames)
+	if _, err := a.askClaude(t.Context(), run, "sonnet", nil, "open spotify and play back in black"); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(systemPrompt, "<persona>") || strings.Contains(systemPrompt, "memory_guidelines") {
+		t.Errorf("system prompt still carries the persona/memory teaching text: %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "working the user's screen for them") || !strings.Contains(systemPrompt, "Never click anything that sends, pays, deletes or submits") {
+		t.Errorf("system prompt = %q, want the screen task guidance and the stop line", systemPrompt)
+	}
+
+	got := make(map[string]bool, len(toolNames))
+	for _, name := range toolNames {
+		got[name] = true
+	}
+	if !got["click"] || !got["query_memory"] {
+		t.Errorf("tools/list = %v, want click and query_memory", toolNames)
+	}
+	if got["delegate"] || got["branch"] {
+		t.Errorf("tools/list = %v, want no delegate or web-only tools on a screen round", toolNames)
+	}
+}
+
+// A memory question ("what is my manager's name") is not a screen task, so it keeps the full handshake prompt and every tool the ask gate allows.
+func TestAskClaude_MemoryQuestionGetsTheFullPromptAndAllTools(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	var systemPrompt string
+	var toolNames []string
+	run := claudeCapturingRun(t, &systemPrompt, &toolNames)
+	if _, err := a.askClaude(t.Context(), run, "sonnet", nil, "what is my manager's name"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(systemPrompt, "<persona>") || !strings.Contains(systemPrompt, "memory_guidelines") {
+		t.Errorf("system prompt = %q, want the full handshake teaching", systemPrompt)
+	}
+
+	if len(toolNames) != len(a.askToolDeclarations()) {
+		t.Errorf("tools/list = %d tools, want the full %d the ask gate allows", len(toolNames), len(a.askToolDeclarations()))
 	}
 }
 

@@ -566,6 +566,39 @@ describe("the thread stays pinned to the newest turn", () => {
   });
 });
 
+// The hover used to render every turn in the matter, folded but still on screen, which flooded the card the longer a conversation ran. Older turns stay in the matter's own state; only what the hover draws changed.
+describe("the hover shows only the newest turn", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("renders just the third question and answer, not the first two", async () => {
+    const { dispatch } = await import("./main");
+    await new Promise((r) => setTimeout(r, 0));
+
+    dispatch({ kind: "type", value: "first question" });
+    dispatch({ kind: "enter" });
+    dispatch({ kind: "daemonEvent", ev: { id: "", type: "answer", text: "first answer" } });
+
+    dispatch({ kind: "type", value: "second question" });
+    dispatch({ kind: "enter" });
+    dispatch({ kind: "daemonEvent", ev: { id: "", type: "answer", text: "second answer" } });
+
+    dispatch({ kind: "type", value: "third question" });
+    dispatch({ kind: "enter" });
+    dispatch({ kind: "daemonEvent", ev: { id: "", type: "answer", text: "third answer" } });
+
+    const thread = document.querySelector(".thread")!;
+    expect(thread.querySelector(".qq")!.textContent).toContain("third question");
+    expect(thread.querySelector(".a")!.textContent).toContain("third answer");
+    expect(thread.textContent).not.toContain("first question");
+    expect(thread.textContent).not.toContain("second question");
+    expect(thread.querySelector(".prev")).toBeNull();
+  });
+});
+
 // A snooze the daemon could not write answers 500 (see internal/ipc/notices.go). The card used to come down at the press, before the request had even gone out, so a refusal read as done and the item was never seen again.
 describe("a notice the daemon refuses", () => {
   beforeEach(() => {

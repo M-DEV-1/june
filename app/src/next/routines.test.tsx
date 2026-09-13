@@ -40,9 +40,24 @@ describe("the list", () => {
     expect(list().getByText(/Ship the report/)).toBeDefined();
   });
 
-  it("says there are none yet rather than showing an empty list", async () => {
+  it("says there are none yet rather than showing an empty list, with a watching face above the line", async () => {
     renderApp({}, { place: "routines" });
-    expect(await screen.findByText("No routines yet. Write one above.")).toBeDefined();
+    const line = await screen.findByText("No routines yet. Write one above.");
+    // The sidebar carries its own permanent face chip, so this looks only at the one sitting right above the empty line.
+    expect(within(line.parentElement!).getByRole("img", { name: "ora is watching" })).toBeDefined();
+  });
+
+  it("shows a thinking face and holds back the empty line while the first fetch is still in flight", () => {
+    renderApp({}, { place: "routines" });
+    // Not awaited: the fake daemon's answer has not landed yet on this very first render, so the query is still loading. getAllByRole rather than getByRole because the sidebar shows its own permanent "watching" chip alongside it.
+    expect(screen.getAllByRole("img", { name: "ora is thinking" }).length).toBeGreaterThan(0);
+    expect(screen.queryByText("No routines yet. Write one above.")).toBeNull();
+  });
+
+  it("shows an asleep face when the daemon does not answer", async () => {
+    renderApp({ fails: ["GET /routines"] }, { place: "routines" });
+    const line = await screen.findByText("Not connected.");
+    expect(within(line.parentElement!).getByRole("img", { name: "ora is asleep" })).toBeDefined();
   });
 });
 

@@ -1,4 +1,4 @@
-/** What a "do:" job shows in the thread while it runs and once it ends: the state word, the ticking clock, the Stop/Pause controls, the step list, the stuck question and the closing line with what it cost. */
+/** What a "do:" job shows in the thread while it runs and once it ends: the state word, the ticking clock, the Stop/Pause controls, the plan it opened with, the step list, the stuck question and the closing line with what it cost. */
 
 import { useEffect, useState } from "react";
 import { Check, Circle, Pause, Play, Square, X } from "lucide-react";
@@ -51,7 +51,7 @@ function JobStepView({ step }: { step: JobRun["steps"][number] }) {
   );
 }
 
-/** What a "do:" job shows while it runs and once it ends: the state word and, while it is still going, the ticking clock and the Stop/Pause controls beside it; the steps taken so far, each with its own tick or cross; the one question a stuck job is waiting on, whose answer is whatever the composer sends next; and, once it has ended, the closing sentence and what it cost. Input: the job. Output: the block. */
+/** What a "do:" job shows while it runs and once it ends: the state word and, while it is still going, the ticking clock and the Stop/Pause controls beside it; the plan the model wrote on its first round, with its own guess at how many steps the job would take; the steps taken so far, each with its own tick or cross; the one question a stuck job is waiting on, whose answer is whatever the composer sends next; and, once it has ended, the closing sentence and what it cost. Input: the job. Output: the block. */
 export function JobTurn({ job }: { job: JobRun }) {
   const [stopJob] = useStopJobMutation();
   const [setJobPause] = useSetJobPauseMutation();
@@ -89,6 +89,12 @@ export function JobTurn({ job }: { job: JobRun }) {
           </div>
         ) : null}
       </div>
+      {job.plan ? (
+        <div className="mt-2 text-meta text-muted-foreground">
+          <p className="text-foreground">{job.plan}</p>
+          {job.estimate ? <p>about {job.estimate} steps</p> : null}
+        </div>
+      ) : null}
       {job.steps.length ? (
         <ol className="mt-2 flex flex-col gap-1.5 border-l border-hairline-strong pl-4">
           {job.steps.map((s) => (

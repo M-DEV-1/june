@@ -20,7 +20,7 @@ export function OwnerControl({ task }: { task: Task }) {
     try {
       await setOwner({ id: task.id, owner }).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not change who owns that task"));
+      dispatch(ui.noticed({ text: "Could not change who owns that task", kind: "error" }));
     }
   };
 

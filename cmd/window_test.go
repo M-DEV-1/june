@@ -162,3 +162,22 @@ func TestWindowLog_AppendsInTheDataDir(t *testing.T) {
 		t.Errorf("mode = %v; want 0600 like ora.log", info.Mode().Perm())
 	}
 }
+
+// The restart line must carry the reason, not just "exit status 1". Read against the machine's real window.log shape: a tao panic whose message is the GTK failure.
+func TestLastWindowWords_NamesThePanicNotTheBacktrace(t *testing.T) {
+	dir := t.TempDir()
+	body := "event stream: ready\nevent stream: tick\n" +
+		"thread 'main' (12345) panicked at /tao-0.35.3/src/event_loop.rs:217:53:\n" +
+		"Failed to initialize gtk backend!: BoolError { message: \"Failed to initialize GTK\" }\n" +
+		"note: run with `RUST_BACKTRACE=1`\n"
+	if err := os.WriteFile(filepath.Join(dir, "window.log"), []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := lastWindowWords(dir)
+	if !strings.Contains(got, "panicked at") {
+		t.Errorf("lastWindowWords = %q, want the panic line", got)
+	}
+	if lastWindowWords(t.TempDir()) != "" {
+		t.Error("a missing window.log must say nothing rather than fail")
+	}
+}

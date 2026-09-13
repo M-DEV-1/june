@@ -12,6 +12,9 @@ import (
 	"ora/internal/util"
 )
 
+// Version is Ora's release number, the one source of truth for every place that reports it: internal/obs/telemetry.go tags telemetry with it plainly, and internal/ui/ui.go wraps it as "v0.1.1-alpha" for the terminal banner.
+const Version = "0.1.1"
+
 type OraConfig struct {
 	Tracker TrackerConfig `json:"tracker"`
 	// Voice is the Gemini Live prebuilt voice name used for the assistant's spoken output (see AvailableVoices).
@@ -54,6 +57,8 @@ type OraConfig struct {
 	DailyTokenBudget map[string]int `json:"daily_token_budget,omitempty"`
 	// ClaudeUsageFromLogin is whether GET /brains reads the Claude row's usage bars from the undocumented https://api.anthropic.com/api/oauth/usage endpoint, using the access token Claude Code's own login already wrote to ~/.claude/.credentials.json. Defaults to on; a pointer, like ProactiveAudio, so a config written before this field existed is distinguishable from one where the user explicitly turned it off. Read it through ClaudeUsageFromLoginEnabled rather than directly.
 	ClaudeUsageFromLogin *bool `json:"claude_usage_from_login,omitempty"`
+	// ExaMonthlyRequests is the request ceiling of the user's own Exa plan, so GET /usage can show calls-this-month against it as a fraction. Exa's own usage endpoint needs a team-management key Ora does not hold (see internal/agent/websearch.go), so this is the only ceiling there is, and it is never guessed: 0 means unset, and the usage view then shows the call count with no bar.
+	ExaMonthlyRequests int `json:"exa_monthly_requests,omitempty"`
 }
 
 // ClaudeUsageFromLoginEnabled reports whether the Claude usage endpoint should be read. Unset means on.

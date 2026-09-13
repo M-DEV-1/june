@@ -75,27 +75,49 @@ func TestShouldReregister(t *testing.T) {
 }
 
 // The Linux tray must advertise the ORA logo as an icon pixmap, not a theme icon name. SNI pixmaps are ARGB32 in network byte order (A,R,G,B per pixel).
+// IconPixmap is an array, a(iiay), and the host picks whichever entry is closest to its panel height. Until 2026-09-12 one 128x128 entry was all it had, so every shell scaled that down to around 22px with its own scaler and the face came out blurred and grey. Every panel size is now drawn at its own size (see scripts/make-icons.py) and offered, so a host with a 22px bar finds 22px and resamples nothing.
 func TestTrayIconPixmap(t *testing.T) {
 	pixmaps, err := trayIconPixmaps()
 	if err != nil {
 		t.Fatalf("trayIconPixmaps: %v", err)
 	}
-	if len(pixmaps) != 1 {
-		t.Fatalf("want 1 pixmap, got %d", len(pixmaps))
+	if len(pixmaps) < 2 {
+		t.Fatalf("want a pixmap for every panel size, got %d", len(pixmaps))
 	}
-	p := pixmaps[0]
-	if p.Width != 128 || p.Height != 128 {
-		t.Fatalf("want 128x128, got %dx%d", p.Width, p.Height)
+	have := map[int32]bool{}
+	for _, p := range pixmaps {
+		if p.Width != p.Height {
+			t.Errorf("pixmap %dx%d is not square", p.Width, p.Height)
+		}
+		if want := int(p.Width * p.Height * 4); len(p.Data) != want {
+			t.Errorf("%dx%d: want %d bytes of ARGB data, got %d", p.Width, p.Height, want, len(p.Data))
+		}
+		have[p.Width] = true
 	}
-	if want := int(p.Width * p.Height * 4); len(p.Data) != want {
-		t.Fatalf("want %d bytes of ARGB data, got %d", want, len(p.Data))
+	// 22 and 24 are the panel heights a GNOME or KDE bar actually asks for; without one of them present the host is back to scaling something else down.
+	if !have[22] && !have[24] {
+		t.Errorf("no pixmap at a panel height: got %v", have)
 	}
 
-	// Alpha is the first byte of each pixel and the logo is opaque.
+	// The largest pixmap is the specimen for the checks below. At 16px every stem is about a pixel wide with anti-aliasing on both sides of it, so no pixel there reaches full opacity — true of any small icon, and nothing to do with what these assertions are about.
+	p := pixmaps[len(pixmaps)-1]
+
+	// Alpha is the first byte of each pixel, which is what this checks by finding both kinds: the icon is the bare face on transparency, so its ink is fully opaque and its background is fully clear.
+	// Until 2026-09-12 this asserted every pixel was opaque, which described the art of the day — a purple face on a solid black tile — rather than anything the protocol asks for. A tray icon has to sit on a bar that may be light or dark, so an opaque tile of either colour is wrong on one of them, and SNI pixmaps are ARGB32 precisely so alpha can say so. Having both values present is also the only way to tell alpha really is in the first byte rather than the last.
+	var opaque, clear int
 	for i := 0; i < len(p.Data); i += 4 {
-		if p.Data[i] != 0xFF {
-			t.Fatalf("pixel %d not opaque: alpha=%d", i/4, p.Data[i])
+		switch p.Data[i] {
+		case 0xFF:
+			opaque++
+		case 0x00:
+			clear++
 		}
+	}
+	if opaque == 0 {
+		t.Error("no fully opaque pixel, so nothing was actually drawn")
+	}
+	if clear == 0 {
+		t.Error("no fully clear pixel, so the icon is a solid tile and will be wrong on a bar of the opposite shade")
 	}
 
 	// Real image data, not a blank fill.

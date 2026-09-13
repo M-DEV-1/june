@@ -163,8 +163,8 @@ func TestActRoutes_StartThenReadThenFinish(t *testing.T) {
 		}
 		kinds = append(kinds, parsed.Kind)
 	}
-	if strings.Join(kinds, ",") != "started,step,verified,done" {
-		t.Fatalf("event kinds = %v, want started,step,verified,done", kinds)
+	if strings.Join(kinds, ",") != "started,plan,step,verified,done" {
+		t.Fatalf("event kinds = %v, want started,plan,step,verified,done", kinds)
 	}
 	for _, ev := range events() {
 		if ev.Text == "" {
@@ -220,10 +220,13 @@ func TestActRoutes_StopPauseResumeAndAnswer(t *testing.T) {
 }
 
 // TestActRoutes_ResumeCarriesARaisedBudget checks POST /act/{id}/resume takes the same budget shape POST /act does and applies it over the spent one, so a job that ran out of steps can be sent back in with more of them.
+//
+// It is the token budget that is exhausted here, not the step budget: running out of steps is only a bad guess at the size of the task and now asks the user rather than ending the job, so tokens are the budget that still leaves a job in the failed state Resume reopens.
 func TestActRoutes_ResumeCarriesARaisedBudget(t *testing.T) {
+	// Each round of this test's model costs 500 input tokens, so a budget of 1000 runs out on the third round's check, before the reply that would have said done.
 	j, runner, _ := jobServer(t, &jobExec{}, stepJSON, stepJSON, `{"done":true,"say":"It is playing."}`)
 
-	w := post(t, j, "POST", "/act", `{"goal":"play S16 E8","budget":{"steps":1}}`)
+	w := post(t, j, "POST", "/act", `{"goal":"play S16 E8","budget":{"input_tokens":1000}}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("POST /act = %d (%s), want 202", w.Code, w.Body.String())
 	}
@@ -233,15 +236,12 @@ func TestActRoutes_ResumeCarriesARaisedBudget(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &started)
 	waitJobState(t, runner, started.ID, actjob.Failed)
 
-	if got := post(t, j, "POST", "/act/"+started.ID+"/resume", `{"budget":{"steps":5}}`); got.Code != http.StatusNoContent {
+	if got := post(t, j, "POST", "/act/"+started.ID+"/resume", `{"budget":{"input_tokens":500000}}`); got.Code != http.StatusNoContent {
 		t.Fatalf("resume with a raised budget = %d (%s), want 204", got.Code, got.Body.String())
 	}
 	job := waitJobState(t, runner, started.ID, actjob.Done)
-	if job.Budget.Steps != 5 {
-		t.Errorf("budget = %+v, want the five steps the resume asked for", job.Budget)
-	}
-	if len(job.Steps) != 2 {
-		t.Errorf("steps = %d, want the one taken on the first budget and one more", len(job.Steps))
+	if job.Budget.InputTokens != 500000 {
+		t.Errorf("budget = %+v, want the tokens the resume asked for", job.Budget)
 	}
 	if got := post(t, j, "POST", "/act/"+started.ID+"/resume", `not json`); got.Code != http.StatusBadRequest {
 		t.Errorf("a resume body that will not decode = %d, want 400", got.Code)
@@ -367,4 +367,24 @@ func waitForStep(t *testing.T, r *actjob.Runner, id string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("job %s recorded no verified step", id)
+}
+
+// TestSpokenJob_WaitsForTheJobThenHandsBackWhatItSaid covers the way in for the voice session's do tool. The live agent's RunJob is this, so what it returns is what Ora reads out when the chain lands; before it existed a spoken chain of actions never reached the runner at all and was driven one raw tool call at a time inside the conversation.
+func TestSpokenJob_WaitsForTheJobThenHandsBackWhatItSaid(t *testing.T) {
+	j, _, _ := jobServer(t, &jobExec{}, stepJSON, `{"done":true,"say":"It is playing S16 E8."}`)
+	said, err := j.Spoken(context.Background(), "open netflix and press play")
+	if err != nil {
+		t.Fatalf("Spoken: %v", err)
+	}
+	if !strings.Contains(said, "It is playing S16 E8.") {
+		t.Errorf("Spoken returned %q, want the job's own closing words", said)
+	}
+}
+
+// A job the runner would not open must come back as an error, so do says nothing started rather than leaving the user waiting on a chain that never began.
+func TestSpokenJob_RefusesAGoalTheRunnerWouldNotOpen(t *testing.T) {
+	j, _, _ := jobServer(t, &jobExec{}, stepJSON)
+	if said, err := j.Spoken(context.Background(), "   "); err == nil {
+		t.Errorf("Spoken on an empty goal returned %q with no error, want the runner's refusal", said)
+	}
 }

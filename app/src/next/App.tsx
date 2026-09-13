@@ -173,7 +173,7 @@ export default function App() {
     try {
       await rename({ id: renamingId, title }).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not rename"));
+      dispatch(ui.noticed({ text: "Could not rename", kind: "error" }));
     }
   };
 
@@ -187,7 +187,7 @@ export default function App() {
       await remove(id).unwrap();
       if (id === conversationId) dispatch(next ? ui.conversationOpened(next) : ui.chatDraftOpened());
     } catch {
-      dispatch(ui.noticed("Could not delete"));
+      dispatch(ui.noticed({ text: "Could not delete", kind: "error" }));
     }
   };
 

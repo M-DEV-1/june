@@ -19,6 +19,8 @@ import { FirstRunPanel } from "./settings";
 import { DRAFT_CHAT, useAppSelector } from "./store";
 import { Composer } from "./chat-composer";
 import { Thread } from "./chat-turn";
+import { ChatSuggestions } from "./chat-welcome";
+import { greeting } from "./format";
 
 export { Composer, Thread };
 
@@ -71,12 +73,14 @@ export function ChatsScreen() {
           view={view}
           up={!isError}
           loading={isLoading || listLoading}
-          empty={
+          // A chat that exists and is empty says so. A fresh draft is the front door instead: the time of day, one line saying Ora has been keeping track, and a few things it can do.
+          empty={shownId ? "Nothing said in this chat yet." : greeting()}
+          hint={
             shownId
-              ? "Nothing said in this chat yet."
-              : "Pick a chat on the left, or start a new one."
+              ? "Ask a question below and Ora answers from what it has seen and heard."
+              : "I have been keeping track. What would you like to do?"
           }
-          hint="Ask a question below and Ora answers from what it has seen and heard."
+          action={shownId ? undefined : <ChatSuggestions />}
           run={mine}
           job={mineJob}
           wide={wide}

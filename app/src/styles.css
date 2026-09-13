@@ -70,6 +70,14 @@ body { padding: 10px 18px 24px; color: var(--fg); font: 16px/1.5 var(--body); }
 .W .thread { padding: var(--pad); display: grid; gap: 10px; max-height: var(--thread-max, 640px); overflow-y: auto; }
 /* The answer is the loudest thing on the card: DESIGN.md's text-lead, the size an opening paragraph reads at, and full-strength colour. */
 .W .a { font-size: 17px; line-height: 1.55; letter-spacing: -.008em; color: var(--fg); }
+/* The reply is markdown now (see src/markdown.ts), so its blocks need the spacing the browser's own defaults would give a document rather than a chat line: paragraphs apart, lists indented enough for the marker to sit outside the text. */
+.W .a p { margin: 0 0 .7em; }
+.W .a p:last-child { margin-bottom: 0; }
+.W .a ul, .W .a ol { margin: 0 0 .7em; padding-left: 1.25em; }
+.W .a ul:last-child, .W .a ol:last-child { margin-bottom: 0; }
+.W .a li { margin: 0 0 .3em; }
+.W .a li:last-child { margin-bottom: 0; }
+.W .a code { font: 0.9em/1.4 var(--mono, ui-monospace, monospace); background: var(--hairline, rgba(127,127,127,.14)); border-radius: 4px; padding: .1em .35em; }
 .W .a b { font-weight: 600; }
 /* The question the answer on screen belongs to, and above it every earlier turn folded to a grey question-and-answer pair. DESIGN.md's text-read: what a person reads a sentence of. */
 .W .qq { color: var(--mute); font-size: 15px; line-height: 1.62; letter-spacing: -.003em; }

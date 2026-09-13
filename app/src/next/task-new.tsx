@@ -20,7 +20,7 @@ export function NewTask() {
       const made = await createTask(title).unwrap();
       dispatch(ui.taskOpened(made.id));
     } catch {
-      dispatch(ui.noticed("Could not add that task"));
+      dispatch(ui.noticed({ text: "Could not add that task", kind: "error" }));
     }
   };
 

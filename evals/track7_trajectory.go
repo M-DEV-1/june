@@ -64,6 +64,7 @@ var trajStubs = map[string]string{
 	"list_files":       "error: no filesystem in this eval — answer without reading files",
 	"read_clipboard":   "error: no clipboard in this eval",
 	"branch":           "error: no sub-agent in this eval — use query_memory or recall directly",
+	"do":               "error: no screen in this eval — there is nothing to carry a job out on",
 	"look":             "error: no screen in this eval — there is no picture to read anything off",
 	"observe_screen":   "error: no screen in this eval — everything you know about their day has to come from the memory tools",
 	"point_at":         "error: no screen in this eval — say where it is in words instead",
@@ -77,6 +78,7 @@ var trajStubs = map[string]string{
 	"click_at":         "error: no screen in this eval — say where to click instead",
 	"scroll_at":        "error: no screen in this eval — say where to scroll instead",
 	"switch_window":    "error: no screen in this eval — say which app to switch to instead",
+	"open_app":         "error: no desktop in this eval — say which app to open instead",
 	"delegate":         "error: no other agent in this eval — do the work yourself with the tools you have",
 }
 

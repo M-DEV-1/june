@@ -127,7 +127,7 @@ func (a *Agent) keepBeforeShot(ctx context.Context) {
 	s.mu.Unlock()
 }
 
-// waitForScreenChange polls pictures of the screen until one differs from the picture kept before the action, or the timeout runs out. A wait with no kept picture takes one now, so the check then says whether the screen goes on changing. Input: the call's context and how long to wait. Output: the same pass and fail lines the list checks give.
+// waitForScreenChange polls pictures of the screen until one differs from the picture kept before the action, or the timeout runs out. A wait with no kept picture takes one now, so the check then says whether the screen goes on changing; if no baseline picture can be taken at all, the timeout ends with a message saying so, rather than the "looks the same" message that would wrongly claim a comparison was made. Input: the call's context and how long to wait. Output: the same pass and fail lines the list checks give.
 func (a *Agent) waitForScreenChange(ctx context.Context, timeout time.Duration) string {
 	if a.capture == nil {
 		return toolError("wait_for screen_changed needs the camera, and none is wired")
@@ -142,8 +142,17 @@ func (a *Agent) waitForScreenChange(ctx context.Context, timeout time.Duration) 
 		before = s.beforeShot
 		s.mu.Unlock()
 	}
+	// hadBaseline records whether a picture to compare against was ever obtained. Without one, every comparison in the loop below is unknowable, and running out the clock must not be reported as "the screen looks the same" — that claims a comparison happened when none could.
+	hadBaseline := len(before.Data) > 0
 	deadline := time.Now().Add(timeout)
 	for {
+		if !hadBaseline {
+			a.keepBeforeShot(ctx)
+			s.mu.Lock()
+			before = s.beforeShot
+			s.mu.Unlock()
+			hadBaseline = len(before.Data) > 0
+		}
 		after, err := a.capture(ctx)
 		if err == nil {
 			if changed, known := screenChanged(before, after); known && changed {
@@ -154,11 +163,17 @@ func (a *Agent) waitForScreenChange(ctx context.Context, timeout time.Duration) 
 			}
 		}
 		if !time.Now().Before(deadline) {
+			if !hadBaseline {
+				return fmt.Sprintf("%s%s: no baseline screenshot was available, so nothing could be compared", act.WaitFailPrefix, timeout.Round(time.Millisecond))
+			}
 			return fmt.Sprintf("%s%s: the screen looks the same as before the action", act.WaitFailPrefix, timeout.Round(time.Millisecond))
 		}
 		select {
 		case <-time.After(pressPoll):
 		case <-ctx.Done():
+			if !hadBaseline {
+				return fmt.Sprintf("%s%s: no baseline screenshot was available, so nothing could be compared", act.WaitFailPrefix, timeout.Round(time.Millisecond))
+			}
 			return fmt.Sprintf("%s%s: the screen looks the same as before the action", act.WaitFailPrefix, timeout.Round(time.Millisecond))
 		}
 	}

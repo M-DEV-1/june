@@ -35,6 +35,38 @@ func TestHandshakePrompt_IncludesImplicitContext(t *testing.T) {
 	}
 }
 
+// Only voice needs the personal-context block and the retrieved-memory block pushed ahead of time, because voice has to be proactive with no chance to reach for a tool mid-turn; a text ask calls query_memory, recall or personal_context when it actually needs a fact. LeanPrompt is what every text ask sends (see ask.go's askText, claude.go's askClaude, codex.go's askCodex, agy.go's askAgy); HandshakePrompt is still what voice sends.
+func TestLeanPrompt_DropsThePersonalAndMemoryBlocksHandshakePromptCarries(t *testing.T) {
+	brain := &toolTestBrain{
+		personal:        map[string]string{"identity": "Their name is Alex Doe."},
+		implicitContext: []string{"[now] Climate Risk Statement Builder ASRS"},
+	}
+	a := NewAgent(nil, nil, brain, nil, "")
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+
+	voice, _ := a.HandshakePrompt(t.Context(), now)
+	if !strings.Contains(voice, "Alex Doe") {
+		t.Fatalf("expected the voice handshake to carry the personal-context line, got %q", voice)
+	}
+	if !strings.Contains(voice, "Climate Risk Statement Builder ASRS") {
+		t.Fatalf("expected the voice handshake to carry the retrieved context block, got %q", voice)
+	}
+
+	text := a.LeanPrompt(now)
+	if strings.Contains(text, "Alex Doe") {
+		t.Error("the lean text prompt carried the personal-context line the voice handshake carries")
+	}
+	if strings.Contains(text, "Climate Risk Statement Builder ASRS") {
+		t.Error("the lean text prompt carried the retrieved-memory block")
+	}
+	if !strings.Contains(text, screenTaskGuidance) {
+		t.Error("the lean text prompt dropped the tool and screen guidance")
+	}
+	if !strings.Contains(text, stopLineText) {
+		t.Error("the lean text prompt dropped the stop line")
+	}
+}
+
 func TestEvalExecute_BlocksNonMemoryTools(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	got := a.evalExecute(t.Context(), "shell_exec", map[string]any{"command": "rm -rf /"})
@@ -644,7 +676,7 @@ func TestSameScreenAgain_OnlyCountsALookThatShowedSomethingNew(t *testing.T) {
 	}
 }
 
-// TestAskText_RepeatedLooksDoNotSpendTheCap runs the whole text loop against a model that does nothing but call observe_screen. Every look comes back with the same window, so none of them moves the task on: the loop must keep going past maxAskIterations rather than stopping twelve identical looks in, must still stop at the hard round bound rather than spinning forever, and must end by naming the window it was looking at all along.
+// TestAskText_RepeatedLooksDoNotSpendTheCap runs the whole text loop against a model that does nothing but call observe_screen. Every look comes back with the same window, so none of them moves the task on: the loop must keep going past maxAskIterations rather than stopping at the step cap, must still stop at the hard round bound rather than spinning forever, and must end by naming the window it was looking at all along.
 func TestAskText_RepeatedLooksDoNotSpendTheCap(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -667,6 +699,57 @@ func TestAskText_RepeatedLooksDoNotSpendTheCap(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "PR #13 · GitHub") {
 		t.Errorf("err = %q, want it to name the window it last saw", err)
+	}
+}
+
+// TestAskText_StopsAtTheStepCapWithCapError runs the whole text loop against a model that keeps calling a real tool forever, each call distinct (a fresh add_task title every round), so every round spends one of the ask's maxAskIterations steps rather than being absorbed by sameScreenAgain or onlyAnnotated. The loop must stop the moment it reaches the cap and hand back capError, not run on to the round-based safety net (maxAskRounds).
+func TestAskText_StopsAtTheStepCapWithCapError(t *testing.T) {
+	var n int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"add_task","args":{"title":"step %d"}}}]}}]}`, n)
+	}))
+	defer backend.Close()
+	geminiBaseURL = backend.URL
+	t.Cleanup(func() { geminiBaseURL = "" })
+
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "test-key")
+	tr, err := a.askText(t.Context(), "gemini-test", nil, "file tasks forever")
+	if err == nil {
+		t.Fatal("a loop that never stops calling tools must come back as an error once the cap is spent")
+	}
+	if len(tr.ToolHops) != maxAskIterations {
+		t.Errorf("%d tool hops, want exactly the cap of %d", len(tr.ToolHops), maxAskIterations)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d", maxAskIterations)) {
+		t.Errorf("err = %q, want capError to name how many steps it ran out after", err)
+	}
+}
+
+// The one hard stop on askText's loop alongside the step cap is the wall clock (askWallClock): a turn that keeps calling tools still has to end once that much time has passed, so a runaway loop cannot hang the daemon. The test shrinks the wall clock rather than waiting twelve minutes for the real one to prove itself.
+func TestAskText_StopsAtTheWallClock(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"add_task","args":{"title":"x"}}}]}}]}`)
+	}))
+	defer backend.Close()
+	geminiBaseURL = backend.URL
+	t.Cleanup(func() { geminiBaseURL = "" })
+
+	old := askWallClock
+	askWallClock = 20 * time.Millisecond
+	t.Cleanup(func() { askWallClock = old })
+
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "test-key")
+	start := time.Now()
+	_, err := a.askText(t.Context(), "gemini-test", nil, "keep filing tasks forever")
+	if err == nil {
+		t.Fatal("a loop that never stops calling tools must come back as an error once the wall clock passes")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("askText took %s to stop after a %s wall clock", elapsed, askWallClock)
 	}
 }
 

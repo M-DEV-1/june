@@ -12,7 +12,7 @@ import (
 	"ora/internal/db"
 )
 
-// undStage rewrites the standing understanding doc from the current doc, the strong hypotheses and the week's diary first lines, one brain call, committed with the stage token in one transaction.
+// undStage rewrites the standing understanding doc, one brain call, committed with the stage token in one transaction. It reads the whole diary pyramid rather than only the last week: every year entry, the last twelve months, the last eight weeks and the recent dailies. The coarse tiers are already compressed, so the whole of the user's record costs a few thousand tokens, and the standing model is then built from all of it instead of from a seven-day window that quietly drops everything older.
 func (r *Runner) undStage(ctx context.Context, night string) error {
 	current, err := r.store.DiaryEntry(ctx, "", "understanding")
 	if err != nil {
@@ -22,11 +22,15 @@ func (r *Runner) undStage(ctx context.Context, night string) error {
 	if err != nil {
 		return err
 	}
-	week, err := r.store.DiaryDays(ctx, nightMinus(night, 6), night)
+	days, err := r.store.DiaryDays(ctx, nightMinus(night, r.sweepBack(ctx, night)), night)
 	if err != nil {
 		return err
 	}
-	reply, err := r.ask(ctx, night, "understanding", understandingPrompt(current, strong, week))
+	past, err := r.pyramid(ctx, night)
+	if err != nil {
+		return err
+	}
+	reply, err := r.ask(ctx, night, "understanding", understandingPrompt(current, strong, past, days))
 	if err != nil {
 		return err
 	}
@@ -37,8 +41,39 @@ func (r *Runner) undStage(ctx context.Context, night string) error {
 	return r.store.CommitUnderstandingStage(ctx, night, reply)
 }
 
+// coarseTiers is how many of each coarse diary tier the standing understanding reads, newest first: every year, then a year of months, then two months of weeks. Beyond that the tier above already carries the period.
+var coarseTiers = []struct {
+	kind string
+	keep int
+}{{"year", 0}, {"month", 12}, {"week", 8}}
+
+// coarseEntry is one rolled-up diary entry with the tier it came from, since DiaryDay itself carries only the day and the content.
+type coarseEntry struct {
+	kind    string
+	day     string
+	content string
+}
+
+// pyramid reads the diary's coarse tiers for the understanding rewrite, coarsest first. Input: the night key, which bounds every tier to entries at or before it. Output: the entries in the order the prompt prints them — years, then months, then weeks — each tier trimmed to its newest coarseTiers.keep entries, 0 meaning all of them.
+func (r *Runner) pyramid(ctx context.Context, night string) ([]coarseEntry, error) {
+	var out []coarseEntry
+	for _, tier := range coarseTiers {
+		entries, err := r.store.DiaryEntriesThrough(ctx, tier.kind, night)
+		if err != nil {
+			return nil, err
+		}
+		if tier.keep > 0 && len(entries) > tier.keep {
+			entries = entries[len(entries)-tier.keep:]
+		}
+		for _, e := range entries {
+			out = append(out, coarseEntry{kind: tier.kind, day: e.Day, content: e.Content})
+		}
+	}
+	return out, nil
+}
+
 // compactReport is what the compaction stage hands the morning report: how many coarse entries each tier wrote.
-type compactReport struct{ weeks, months int }
+type compactReport struct{ weeks, months, years int }
 
 // compactStage collapses the diary's old fine entries into coarser ones: complete Mon-Sun weeks of dailies all older than compactAfterDays become one kind='week' entry on the Monday, and a month's worth of week entries all older than compactWeeksToMonth weeks becomes one kind='month' entry on the first. One brain call per coarse entry, one transaction per tier, and the 'compact' token commits with the month tier — so a preemption between tiers costs nothing: the committed week entries simply give the next wake's re-run less to do. A night with nothing to compact commits the token with zero diary writes.
 func (r *Runner) compactStage(ctx context.Context, night string) (compactReport, error) {
@@ -111,7 +146,35 @@ func (r *Runner) compactStage(ctx context.Context, night string) (compactReport,
 		monthComps = append(monthComps, db.DiaryCompaction{Day: month + "-01", Kind: "month", Content: entry, ConstituentKind: "week", ConstituentDays: dayKeys(byMonth[month])})
 	}
 	rep.months = len(monthComps)
-	return rep, r.store.CommitCompactStage(ctx, night, monthComps, true)
+	if len(monthComps) > 0 {
+		if err := r.store.CommitCompactStage(ctx, night, monthComps, false); err != nil {
+			return rep, err
+		}
+	}
+
+	// Year tier. A year is ready once all twelve of its months have month entries older than the horizon. It exists so the standing understanding has something to read about a year the user lived through, instead of that year surviving only as twelve month entries the rewrite has to re-read every night.
+	monthHorizon := nightMinus(night, 30*compactMonthsToYear)
+	months, err := r.store.DiaryEntriesThrough(ctx, "month", monthHorizon)
+	if err != nil {
+		return rep, err
+	}
+	byYear := map[string][]db.DiaryDay{}
+	for _, m := range months {
+		byYear[m.Day[:4]] = append(byYear[m.Day[:4]], m)
+	}
+	var yearComps []db.DiaryCompaction
+	for _, year := range slices.Sorted(maps.Keys(byYear)) {
+		if len(byYear[year]) != 12 {
+			continue
+		}
+		entry, err := r.compactEntry(ctx, night, "compact-year", fmt.Sprintf("The year %s.", year), byYear[year])
+		if err != nil {
+			return rep, err
+		}
+		yearComps = append(yearComps, db.DiaryCompaction{Day: year + "-01-01", Kind: "year", Content: entry, ConstituentKind: "month", ConstituentDays: dayKeys(byYear[year])})
+	}
+	rep.years = len(yearComps)
+	return rep, r.store.CommitCompactStage(ctx, night, yearComps, true)
 }
 
 // compactEntry makes one traced brain call to collapse a run of diary entries, refusing an empty reply.

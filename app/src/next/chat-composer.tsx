@@ -142,7 +142,7 @@ export function Composer({
       } catch {
         // What was typed exists nowhere else once the box has been cleared, so a write that did not go through gives it back rather than making the user write it again.
         dispatch(ui.asked({ conversationId: key, text: question }));
-        dispatch(ui.noticed("Could not send that answer"));
+        dispatch(ui.noticed({ text: "Could not send that answer", kind: "error" }));
       }
       return;
     }
@@ -158,7 +158,7 @@ export function Composer({
       } catch {
         dispatch(progress.jobFailed(key));
         dispatch(ui.asked({ conversationId: key, text: question }));
-        dispatch(ui.noticed("Could not start that job"));
+        dispatch(ui.noticed({ text: "Could not start that job", kind: "error" }));
       }
       return;
     }
@@ -169,7 +169,7 @@ export function Composer({
     else if (start) id = await start();
     else if (fresh) id = "";
     if (id === undefined) {
-      dispatch(ui.noticed("Could not open a chat for this"));
+      dispatch(ui.noticed({ text: "Could not open a chat for this", kind: "error" }));
       return;
     }
     dispatch(ui.asked({ conversationId: key, text: "" }));
@@ -192,7 +192,7 @@ export function Composer({
     } catch {
       dispatch(progress.askFailed());
       dispatch(ui.asked({ conversationId: key, text: question }));
-      dispatch(ui.noticed("Could not send that question"));
+      dispatch(ui.noticed({ text: "Could not send that question", kind: "error" }));
     }
   };
 

@@ -80,7 +80,9 @@ func TestExecuteTool_BranchFallsBackToARoutedWebAsk(t *testing.T) {
 // TestExecuteTool_BranchSurfacesFailureAsErrorString verifies that when both webSearch and the webAsk fallback fail, executeTool surfaces the usual "error: ..." string convention rather than a bare Go error reaching the model, matching resultSummary/ToolActivity.Err's strings.HasPrefix(result, "error") check.
 func TestExecuteTool_BranchSurfacesFailureAsErrorString(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	a.webSearch = func(ctx context.Context, task string) (string, error) { return "", errors.New("no search API configured") }
+	a.webSearch = func(ctx context.Context, task string) (string, error) {
+		return "", errors.New("no search API configured")
+	}
 	a.webAsk = func(ctx context.Context, task string) (string, error) { return "", fmt.Errorf("claude: not logged in") }
 
 	got := a.executeTool(context.Background(), "branch", map[string]any{"task": "catch me up"})

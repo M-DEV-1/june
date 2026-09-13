@@ -10,15 +10,20 @@ import (
 	"google.golang.org/genai"
 )
 
-// ToolRecord is one finished tool call. Args and Result are the short summaries the activity feed already renders, never the raw text: one screen listing is over a thousand tokens and keeping it twice buys nothing. Offered is every tool the model could have called on this round, which is what lets a reader tell a tool that was never shown from one that was shown and passed over.
+// ToolRecord is one finished tool call. Args and Result are the short summaries the activity feed already renders, never the raw text: one screen listing is over a thousand tokens and keeping it twice buys nothing. Output is the tool's actual result text, truncated to toolOutputCap bytes on a UTF-8 rune boundary, kept here because the summary alone cannot be replayed or debugged from later. TurnID ties every call made in the same model turn together. Offered is every tool the model could have called on this round, which is what lets a reader tell a tool that was never shown from one that was shown and passed over.
 type ToolRecord struct {
 	Name     string
 	Args     string
 	Outcome  string
 	Result   string
+	Output   string
+	TurnID   string
 	Duration time.Duration
 	Offered  []string
 }
+
+// toolOutputCap is how many bytes of a tool's real result ToolRecord.Output keeps. Two kilobytes carries the shape of a shell command's output or a note's content while still keeping the row small enough that a store with years of tool calls in it stays a store, not a dataset.
+const toolOutputCap = 2048
 
 // ToolRecorder is handed each finished tool call. Input: the record. Output: none — a recorder that cannot write must swallow its own error, because filing the record must never fail the tool.
 type ToolRecorder func(ToolRecord)
@@ -67,6 +72,19 @@ func declNames(decls []*genai.FunctionDeclaration) []string {
 func offeredFrom(ctx context.Context) []string {
 	names, _ := ctx.Value(offeredKey{}).([]string)
 	return names
+}
+
+type turnIDKey struct{}
+
+// WithTurnID attaches id to ctx as the id of the model turn every tool call under it belongs to. Input: the parent context and the id — the ask id on the ask path, a minted per-turn id on the voice path. Output: a context carrying it.
+func WithTurnID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, turnIDKey{}, id)
+}
+
+// turnIDFrom reads back the turn id attached to ctx. Output: the id, or "" when the path running this call has not set one.
+func turnIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(turnIDKey{}).(string)
+	return id
 }
 
 // The three outcome classes a call is filed under. They exist so a later pass can ask a question the raw result string cannot answer: "refused" is the harness saying no, "error" is the tool trying and failing, and telling them apart is the difference between "this tool does not work" and "this tool was not allowed".

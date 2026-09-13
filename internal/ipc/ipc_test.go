@@ -29,7 +29,7 @@ type fakeAsker struct {
 
 func (f *fakeAsker) AskText(ctx context.Context, question string) (agent.TurnTrace, error) {
 	for _, hop := range f.trace.ToolHops {
-		agent.ObserveTool(ctx, hop.Name, hop.Result)
+		agent.ObserveTool(ctx, hop.Name, hop.Result, strings.HasPrefix(hop.Result, "error"))
 	}
 	return f.trace, f.err
 }

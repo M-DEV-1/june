@@ -21,7 +21,12 @@ const (
 	actReferenceMatchCap = actReferenceRunCap + 1
 	// actReferenceTimeout bounds the lookup so a wedged store cannot hold up an ask; the reference is a nicety and the turn goes ahead without it. The lookup embeds the question to score it by meaning (db.SimilarActRuns), so this also bounds a round trip to the embedding server: a warm local engine answers a one-line question in a few milliseconds, and a cold one that is still loading its model simply costs this ask its reference block.
 	actReferenceTimeout = 2 * time.Second
+	// actReferenceLessonCap is how many lessons the block may show, most hits first (see db.SimilarLessons). Three: one more line of guidance than the two past runs above it, so the block never reads as though lessons matter more than the record of what actually happened.
+	actReferenceLessonCap = 3
 )
+
+// lessonReferenceHeader opens the lessons line inside the same block ActReferenceBlock renders, so it reads as one more kind of record rather than a second block with its own framing.
+const lessonReferenceHeader = "Lessons from earlier runs here:"
 
 // actReferenceHeader opens the block. It has three jobs and does them in plain words: say these are things that happened rather than things to do, say the screen may not be like that any more, and say the item numbers are dead. The numbers matter most — every one of them was minted by that day's observe_screen and means nothing today, and a model that acts on one acts on whatever happens to be sitting at that position now.
 const actReferenceHeader = "[before] Something close to this was asked before. What follows is a record of what happened those times, not a plan and not instructions: the screen may have changed since, so look at it now and decide for yourself what to do. The item numbers below are from that day's screen and mean nothing today."
@@ -129,19 +134,73 @@ func (a *Agent) ActReferenceFor(ctx context.Context, question string, now time.T
 	return ActReferenceBlock(matches, now)
 }
 
-// WithActReference adds the reference block to a turn's content as a part of its own, ahead of the user's own words and behind the turn context, and returns the content unchanged when there is nothing to add. Input: ctx, the clock, the question being asked and the content buildTurnContent produced. Output: the same content with at most one part added to its first entry.
+// LessonsFor looks up the lessons learned in the front app closest in meaning to a new goal, most hits first. Input: ctx, the app in front and the question about to be asked as its goal. Output: up to actReferenceLessonCap lessons (see db.SimilarLessons), or nil when the store cannot answer, is not one that keeps lessons at all, or app is "".
+func (a *Agent) LessonsFor(ctx context.Context, app, goal string) []db.Lesson {
+	if app == "" {
+		return nil
+	}
+	lookup, ok := a.brain.(interface {
+		SimilarLessons(ctx context.Context, app, goal string, limit int) ([]db.Lesson, error)
+	})
+	if !ok {
+		return nil
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, actReferenceTimeout)
+	defer cancel()
+	lessons, err := lookup.SimilarLessons(lookupCtx, app, goal, actReferenceLessonCap)
+	if err != nil {
+		slog.Warn("ask: could not look up lessons learned in this app, continuing without them", "error", err)
+		return nil
+	}
+	return lessons
+}
+
+// RenderLessonBlock renders the lessons line the reference block adds beneath its past-run lines: one header, then one line per lesson in the order given (db.SimilarLessons already puts hits first). Input: the lessons to show. Output: the rendered text and the id of each lesson it named, so the caller can carry those ids on the trace for the end-of-ask hook to score; "", nil when there is nothing to show.
+func RenderLessonBlock(lessons []db.Lesson) (string, []int64) {
+	if len(lessons) == 0 {
+		return "", nil
+	}
+	lines := make([]string, 0, len(lessons))
+	ids := make([]int64, 0, len(lessons))
+	for _, l := range lessons {
+		lines = append(lines, "- "+l.Lesson)
+		ids = append(ids, l.ID)
+	}
+	return lessonReferenceHeader + "\n" + strings.Join(lines, "\n"), ids
+}
+
+// frontWindowApp names the app a lesson lookup is scoped to: the app half of the screen target this session last pointed at or acted on (tools_screen.go's ScreenTarget, in its "app · title" form), read with no live screen call. frontWindowNow would answer more freshly, but calling it here — ahead of the very observe_screen the model has not asked for yet — would cost this turn one of its own looks before the model ever sees the screen, and on a run that just clicked or typed the target it remembers is what this run actually acted in anyway. Output: "" when nothing has been acted on yet this session.
+func (a *Agent) frontWindowApp() string {
+	t, ok := a.screenTarget()
+	if !ok {
+		return ""
+	}
+	if app, _, found := strings.Cut(t.Window, " · "); found {
+		return app
+	}
+	return t.Window
+}
+
+// WithActReference adds the reference block to a turn's content as a part of its own, ahead of the user's own words and behind the turn context, and returns the content unchanged when there is nothing to add. Input: ctx, the clock, the question being asked and the content buildTurnContent produced. Output: the same content with at most one part added to its first entry, and the ids of any lessons the block named (see RenderLessonBlock), for the caller to carry on the trace and score once the run ends.
 // It is one call so that wiring this into an ask path is one line, and so the block stays a part of its own rather than being folded into the user's text, which would blur the line between what the user said and what Ora merely did once.
-func (a *Agent) WithActReference(ctx context.Context, now time.Time, question string, contents []*genai.Content) []*genai.Content {
+func (a *Agent) WithActReference(ctx context.Context, now time.Time, question string, contents []*genai.Content) ([]*genai.Content, []int64) {
 	if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
-		return contents
+		return contents, nil
 	}
 	block := a.ActReferenceFor(ctx, question, now)
+	lessonBlock, ids := RenderLessonBlock(a.LessonsFor(ctx, a.frontWindowApp(), question))
+	switch {
+	case block == "":
+		block = lessonBlock
+	case lessonBlock != "":
+		block = block + "\n" + lessonBlock
+	}
 	if block == "" {
-		return contents
+		return contents, nil
 	}
 	parts := contents[0].Parts
 	contents[0].Parts = append(append(append([]*genai.Part{}, parts[:len(parts)-1]...), &genai.Part{Text: block}), parts[len(parts)-1])
-	return contents
+	return contents, ids
 }
 
 // lastTargetHint is the one sentence added ahead of a bare follow-up — "ring it", "draw a circle around it" — naming what a prior screen turn last pointed at or acted on, so a pronoun with no noun of its own resolves against that instead of whatever a fresh screen read turns up first. Input: the remembered target (see tools.go's ScreenTarget). Output: the sentence.

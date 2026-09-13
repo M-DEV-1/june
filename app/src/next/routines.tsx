@@ -45,7 +45,7 @@ function NewRoutine() {
       setText("");
       setSchedule("");
     } catch {
-      dispatch(ui.noticed("Could not add that routine"));
+      dispatch(ui.noticed({ text: "Could not add that routine", kind: "error" }));
     }
   };
 
@@ -105,9 +105,9 @@ function RoutineRow({ routine }: { routine: Routine }) {
     try {
       await runRoutine(routine.id).unwrap();
       // The daemon answers as soon as the run has started, not when it has finished; what the routine says arrives as a notice, the same as on its own schedule.
-      dispatch(ui.noticed("Running…"));
+      dispatch(ui.noticed({ text: "Running…", kind: "info" }));
     } catch {
-      dispatch(ui.noticed("Could not run that routine"));
+      dispatch(ui.noticed({ text: "Could not run that routine", kind: "error" }));
     }
   };
 
@@ -115,7 +115,7 @@ function RoutineRow({ routine }: { routine: Routine }) {
     try {
       await deleteRoutine(routine.id).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not remove that routine"));
+      dispatch(ui.noticed({ text: "Could not remove that routine", kind: "error" }));
     }
   };
 
@@ -168,7 +168,7 @@ function RoutineRow({ routine }: { routine: Routine }) {
 
 /** The Routines screen. Input: none. Output: the box to write a new one and the list of every routine with what it last said. */
 export function RoutinesScreen() {
-  const { data: routines = [], isError } = useRoutinesQuery();
+  const { data: routines = [], isError, isLoading } = useRoutinesQuery();
   const [wide, pane] = useWide();
 
   return (
@@ -183,6 +183,7 @@ export function RoutinesScreen() {
             {routines.length === 0 ? (
               <Nothing
                 up={!isError}
+                loading={isLoading}
                 empty="No routines yet. Write one above."
               />
             ) : (

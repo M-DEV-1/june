@@ -26,16 +26,30 @@ const summaryEvery = 5
 // stuckAfter is how many failed verifications on the same step turn into a question for the user.
 const stuckAfter = 3
 
-// decision is what the model is asked to reply with each round: at most one action, the change it should produce, or an end.
+// burstCap is how many actions one round may take. Eight, because the point of a burst is a sequence the model has seen work, and the longest of those in the recorded runs is a handful of taps; past that the screen has almost certainly moved somewhere the model was not predicting, and the one check at the end can no longer say which action was the one that went wrong.
+const burstCap = 8
+
+// action is one tool call inside a burst: the same shape as a decision's own tool and args, with no check of its own, because a burst is checked once at the end.
+type action struct {
+	Tool string         `json:"tool"`
+	Args map[string]any `json:"args"`
+}
+
+// decision is what the model is asked to reply with each round: one action, or a short burst of them when it already knows the sequence, the change they should produce, or an end.
 type decision struct {
-	Plan   string         `json:"plan"`
-	Next   string         `json:"next"`
-	Tool   string         `json:"tool"`
-	Args   map[string]any `json:"args"`
-	Expect act.Check      `json:"expect"`
-	Done   bool           `json:"done"`
-	Say    string         `json:"say"`
-	Ask    string         `json:"ask"`
+	Plan string         `json:"plan"`
+	Next string         `json:"next"`
+	Tool string         `json:"tool"`
+	Args map[string]any `json:"args"`
+	// Then is the rest of a burst, run in order straight after Tool with no model round trip between them, and checked once at the end by Expect.
+	// A round is what a job actually pays for: one prompt, one model call, one screen reading and one check. Taking five known taps as five rounds paid all four of those five times over for a sequence already known to work, which is why a job was no faster the second time it did something (see Job.Reference).
+	Then   []action  `json:"then"`
+	Expect act.Check `json:"expect"`
+	Done   bool      `json:"done"`
+	// Estimate is the model's own guess at how many steps the whole task needs, written on the first round alongside the plan. The job is given twice it (see budgetFromEstimate), so nobody has to pick a step limit before the task begins.
+	Estimate int    `json:"estimate"`
+	Say      string `json:"say"`
+	Ask      string `json:"ask"`
 }
 
 // parseDecision reads one round's reply. Input: whatever the model wrote, which in practice is bare JSON, JSON in a fenced block, or JSON with a sentence around it. Output: the decision, or an error when there is no JSON object in it at all or it says nothing to do.
@@ -55,8 +69,33 @@ func parseDecision(reply string) (decision, error) {
 	return d, nil
 }
 
+// burst is every action of one decision in the order they run, the first being the decision's own tool, cut to burstCap.
+// A read (look, observe_screen, point_at) is never part of a burst: the whole point of a burst is that nothing is observed between its actions, so a reading taken inside one would be thrown away unlooked at.
+func burst(d decision) []action {
+	actions := []action{{Tool: d.Tool, Args: d.Args}}
+	for _, a := range d.Then {
+		if a.Tool == "" || isRead(a.Tool) {
+			continue
+		}
+		actions = append(actions, a)
+		if len(actions) == burstCap {
+			break
+		}
+	}
+	return actions
+}
+
 // describeAction renders one decision as the line a hover shows while the step runs. The fallback for a decision that wrote no words for itself is the tool and its arguments, redacted as the checkpoint redacts them, so what the user dictated into type_text never goes out on the event stream either.
 func describeAction(d decision) string {
+	// A burst says how many actions it took whatever else the line holds: a user watching a job go past sees one line per round, and a line reading "click" where three taps landed is the trail lying about what happened on their screen.
+	if n := len(burst(d)); n > 1 {
+		return fmt.Sprintf("%s (%d actions in one go)", describeOneAction(d), n)
+	}
+	return describeOneAction(d)
+}
+
+// describeOneAction is the line for a single action: the model's own words for it, or the tool and its redacted arguments when it wrote none.
+func describeOneAction(d decision) string {
 	if d.Next != "" {
 		return d.Next
 	}
@@ -79,6 +118,39 @@ func overBudget(j Job) (bool, string) {
 		return true, fmt.Sprintf("the input-token budget of %d is spent (%d used)", j.Budget.InputTokens, j.Spend.Input)
 	}
 	return false, ""
+}
+
+// estimateRoom is how much of its own estimate a job is given: twice. Looking at the screen and switching windows are steps too, and a model guessing at a task it has not started will guess low, so the room to be wrong has to be built in rather than argued for later. Doubling is the room.
+const estimateRoom = 2
+
+// budgetFromEstimate is the step budget a job should hold once its model has said how big it thinks the task is. Input: the budget the job has now and the model's own estimate. Output: the step count to use.
+//
+// An estimate only ever adds room. A model that lowballs a task must not be able to talk its own budget down below what the caller gave it, or one bad guess on the first round becomes a task that cannot possibly finish. So this takes whichever is larger and never the estimate alone.
+func budgetFromEstimate(current Budget, estimate int) int {
+	if estimate <= 0 {
+		return current.Steps
+	}
+	return max(current.Steps, estimateRoom*estimate)
+}
+
+// outOfRoomQuestion is what a job asks when it has spent its steps without reaching the goal. Input: the job. Output: the question, saying what it guessed, what it has actually spent and what it was about to do, so the answer is an informed one rather than a blind yes.
+//
+// It asks rather than failing because there are only two honest ways for a task to end: it finishes, or it admits it cannot and asks for help. Running out of room is the second of those. A job that quietly files itself as failed has made the user's decision for them.
+func outOfRoomQuestion(j Job) string {
+	verified := 0
+	for _, s := range j.Steps {
+		if checkedOut(s) {
+			verified++
+		}
+	}
+	q := fmt.Sprintf("I have taken %d steps on %q, %d of which checked out, and I am not there yet.", len(j.Steps), j.Goal, verified)
+	if j.Estimate > 0 {
+		q += fmt.Sprintf(" I thought it would take about %d.", j.Estimate)
+	}
+	if j.Next != "" {
+		q += " Next would be: " + j.Next + "."
+	}
+	return q + " Shall I keep going?"
 }
 
 // summarise is what a job says when it ends without reaching the goal: how far it got, what it last did, and what it was about to do — never a claim that the goal was met. Input: the job and the plain reason it stopped. Output: the sentence.

@@ -58,14 +58,6 @@ func (e *TextEngine) Generate(ctx context.Context, prompt string) (string, error
 	return e.call(ctx, prompt)
 }
 
-// StopIfIdle kills the child now so its GPU memory can go to a heavier job, and reports whether the server is down when it returns. Not final: the next Generate spawns it again. Safe to call on a nil *TextEngine, which has nothing running and so reports true.
-func (e *TextEngine) StopIfIdle() bool {
-	if e == nil {
-		return true
-	}
-	return e.stopNow()
-}
-
 // Close kills the child for good and puts the TextEngine into a state where further generations fail rather than resurrecting it. Safe to call on a nil *TextEngine, which has nothing to kill.
 func (e *TextEngine) Close() error {
 	if e == nil {

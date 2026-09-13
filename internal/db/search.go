@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
+	"log/slog"
 	"math"
 	"ora/internal/obs"
 	"ora/internal/util"
@@ -513,6 +514,26 @@ func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int
 	return out, nil
 }
 
+// UnderstandingContextCap bounds how much of the standing understanding doc reaches a live session's context block, in runes. The nightly rewrite asks for about 300 words, roughly 1800 characters, so this is the guard against a night that ignored the instruction rather than the working size.
+const UnderstandingContextCap = 2000
+
+// leadWithUnderstanding puts the night's standing understanding of the user at the head of a context block. This is the only place the overnight run's conclusions reach a live session: the dream rewrites the doc while the user is away (internal/dream/diary.go), and without this line a session started the next morning knows nothing the night worked out. Input: the context lines as built. Output: the same lines with one "[understanding] ..." line in front, or unchanged when there is no doc yet or the read failed. Newlines are collapsed because the caller indents each line by two spaces, and the text is cut to UnderstandingContextCap runes.
+func (s *Store) leadWithUnderstanding(ctx context.Context, branch []string) []string {
+	doc, err := s.DiaryEntry(ctx, "", "understanding")
+	if err != nil {
+		slog.Warn("implicit context: reading the standing understanding failed", "error", err)
+		return branch
+	}
+	flat := strings.Join(strings.Fields(doc), " ")
+	if flat == "" {
+		return branch
+	}
+	if r := []rune(flat); len(r) > UnderstandingContextCap {
+		flat = string(r[:UnderstandingContextCap]) + "…"
+	}
+	return append([]string{"[understanding] " + flat}, branch...)
+}
+
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	// init tracer to db module
 	tracer := obs.GetTracer(ctx, "ora.db")
@@ -591,7 +612,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	}
 	if len(branch) > 0 {
 		span.SetAttributes(attribute.Int("db.node_count", len(branch)))
-		return branch, nil
+		return s.leadWithUnderstanding(ctx, branch), nil
 	}
 
 	// fallback (cold start, nothing synthesized yet): existing recursive summary walk.
@@ -622,5 +643,5 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	}
 
 	span.SetAttributes(attribute.Int("db.node_count", len(branch)))
-	return branch, nil
+	return s.leadWithUnderstanding(ctx, branch), nil
 }

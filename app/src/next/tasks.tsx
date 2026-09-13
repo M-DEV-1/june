@@ -19,7 +19,7 @@ export function TasksScreen() {
   const dispatch = useAppDispatch();
   const { taskId, query, taskChats } = useAppSelector((s) => s.ui);
   const run = useAppSelector((s) => s.progress.run);
-  const { data: tasks = [], isError } = useAllTasksQuery();
+  const { data: tasks = [], isError, isLoading } = useAllTasksQuery();
   const { data: brains = [] } = useBrainsQuery();
   const { data: meetings = [] } = useMeetingsQuery();
   const [createConversation] = useCreateConversationMutation();
@@ -68,11 +68,11 @@ export function TasksScreen() {
             <div className="flex flex-col gap-3">
               <NewTask />
               {tasks.length === 0 ? (
-                <Nothing up={!isError} empty="Nothing to do." />
+                <Nothing up={!isError} loading={isLoading} empty="Nothing to do." />
               ) : (
                 <>
                   {mineTasks.length === 0 ? (
-                    <Nothing up={!isError} empty={query.tasks ? `Nothing matches “${query.tasks}”.` : "Nothing of yours open."} />
+                    <Nothing up={!isError} loading={isLoading} empty={query.tasks ? `Nothing matches “${query.tasks}”.` : "Nothing of yours open."} />
                   ) : (
                     <ul ref={rows} role="list" aria-label="Tasks" className="-mx-2 flex flex-col">
                       {mineTasks.map((t) => (

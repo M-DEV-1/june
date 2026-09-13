@@ -27,6 +27,7 @@ import {
   groupConversations,
   groupDays,
   groupLabel,
+  greeting,
   groupMeetings,
   hhmm,
   hits,
@@ -37,6 +38,7 @@ import {
   meetingsShown,
   minutesLines,
   noticeActionMessage,
+  noticeAge,
   pageHeading,
   shortWhen,
   sourcedTurns,
@@ -706,5 +708,38 @@ describe("modelEffort", () => {
   it("leaves a model that carries no effort suffix whole", () => {
     expect(modelEffort("claude-opus-4-6-thinking")).toEqual({ model: "claude-opus-4-6-thinking", effort: "" });
     expect(modelEffort("sonnet")).toEqual({ model: "sonnet", effort: "" });
+  });
+});
+
+// The front door's greeting is read off the clock at render rather than stored, so a window left open past midnight does not still say good evening.
+describe("greeting", () => {
+  it("says which part of the day it is, on the ordinary English boundaries", () => {
+    const at = (h: number) => greeting(new Date(2026, 8, 12, h, 0, 0));
+    expect(at(3)).toBe("Good morning.");
+    expect(at(11)).toBe("Good morning.");
+    expect(at(12)).toBe("Good afternoon.");
+    expect(at(16)).toBe("Good afternoon.");
+    expect(at(17)).toBe("Good evening.");
+    expect(at(23)).toBe("Good evening.");
+  });
+});
+
+// The notice card says how long ago the notice landed, the way the design sheets of 2026-09-12 draw it: "now", then "5m ago", then "12m ago". A notice carries no time of its own from the daemon, so the card stamps its arrival and reads it against the clock; without this the card would either say nothing or keep saying "now" for an hour.
+describe("noticeAge", () => {
+  const at = new Date("2026-09-12T14:00:00").getTime();
+  it("says now for the minute it arrived", () => {
+    expect(noticeAge(at, new Date("2026-09-12T14:00:00"))).toBe("now");
+    expect(noticeAge(at, new Date("2026-09-12T14:00:59"))).toBe("now");
+  });
+  it("counts minutes, then hours", () => {
+    expect(noticeAge(at, new Date("2026-09-12T14:01:00"))).toBe("1m ago");
+    expect(noticeAge(at, new Date("2026-09-12T14:12:00"))).toBe("12m ago");
+    expect(noticeAge(at, new Date("2026-09-12T14:59:59"))).toBe("59m ago");
+    expect(noticeAge(at, new Date("2026-09-12T15:00:00"))).toBe("1h ago");
+    expect(noticeAge(at, new Date("2026-09-12T19:30:00"))).toBe("5h ago");
+  });
+  // A clock that has gone backwards — the machine resyncing, or a notice stamped a moment in the future — must not read "-1m ago".
+  it("says now when the stamp is ahead of the clock", () => {
+    expect(noticeAge(at, new Date("2026-09-12T13:59:00"))).toBe("now");
   });
 });

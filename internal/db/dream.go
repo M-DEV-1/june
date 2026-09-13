@@ -10,6 +10,15 @@ import (
 
 // This file is the overnight dreaming loop's storage: the per-night run bookkeeping and the hypotheses table. Both are private working state with no FTS mirror — a deliberate anti-pollution decision, so an unvetted guess can never be retrieved into a prompt. Each stage of a night commits through one method here, in one transaction that writes the stage's outputs and its stages_done token together, which is what makes a preempted stage leave nothing behind.
 
+// The stages_done tokens for the five dream stages, in the order a night runs them. internal/dream reads these same constants to decide which stages a night has already committed, so the token spelled here and the token checked there can never drift apart.
+const (
+	StageHyp        = "hyp"
+	StageUnd        = "und"
+	StageCompact    = "compact"
+	StageReplay     = "replay"
+	StageProcedures = "procedures"
+)
+
 // DreamRun is one night's bookkeeping row: which stages have committed, the one-line report, and whether the night finished.
 type DreamRun struct {
 	Night      string
@@ -205,7 +214,7 @@ func (s *Store) CommitHypothesisStage(ctx context.Context, night string, verdict
 				return err
 			}
 		}
-		return markStageDone(ctx, tx, night, "hyp")
+		return markStageDone(ctx, tx, night, StageHyp)
 	})
 }
 
@@ -219,7 +228,7 @@ func (s *Store) CommitUnderstandingStage(ctx context.Context, night, understandi
 		if err := upsertDiary(ctx, tx, "", "understanding", understanding); err != nil {
 			return err
 		}
-		return markStageDone(ctx, tx, night, "und")
+		return markStageDone(ctx, tx, night, StageUnd)
 	})
 }
 
@@ -257,7 +266,7 @@ func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []Di
 			}
 		}
 		if done {
-			return markStageDone(ctx, tx, night, "compact")
+			return markStageDone(ctx, tx, night, StageCompact)
 		}
 		return nil
 	})
@@ -270,7 +279,7 @@ func (s *Store) CommitReplayStage(ctx context.Context, night string) error {
 	defer span.End()
 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		return markStageDone(ctx, tx, night, "replay")
+		return markStageDone(ctx, tx, night, StageReplay)
 	})
 }
 
@@ -281,7 +290,7 @@ func (s *Store) CommitProceduresStage(ctx context.Context, night string) error {
 	defer span.End()
 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		return markStageDone(ctx, tx, night, "procedures")
+		return markStageDone(ctx, tx, night, StageProcedures)
 	})
 }
 

@@ -59,6 +59,12 @@ func (b *mockBrain) AddUserTask(ctx context.Context, title string, conversationI
 	return 0, nil
 }
 
+func (b *mockBrain) SetUserTaskTitle(ctx context.Context, id int64, title string) error { return nil }
+
+func (b *mockBrain) SetUserTaskDone(ctx context.Context, id int64, done bool) error { return nil }
+
+func (b *mockBrain) DeleteUserTask(ctx context.Context, id int64) error { return nil }
+
 func (b *mockBrain) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {
 	return nil, nil
 }

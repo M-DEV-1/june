@@ -38,6 +38,9 @@ func TestToolActivitySummary(t *testing.T) {
 		{"scroll_to", map[string]any{"n": float64(2)}, "element 2"},
 		{"point_at", map[string]any{"n": float64(4)}, "element 4"},
 		{"type_text", map[string]any{"text": "example.com"}, `"example.com"`},
+		{"click_at", map[string]any{"x": float64(120), "y": float64(340)}, "120,340"},
+		{"scroll_at", map[string]any{"x": float64(50), "y": float64(60), "dy": float64(3)}, "3 steps at 50,60"},
+		{"scroll_at", map[string]any{"x": float64(50), "y": float64(60)}, ""},
 		{"observe_screen", map[string]any{}, ""},
 		// A long argument is cut to a bounded length so one shell command or note body can't push the tool line off the status row.
 		{"shell_exec", map[string]any{"command": strings.Repeat("x", 200)}, `"` + strings.Repeat("x", toolArgSummaryRunes) + `…"`},
@@ -75,6 +78,9 @@ func TestResultSummary(t *testing.T) {
 		{"observe_screen", "brave · Inbox\n(nothing actionable is showing)", "brave · Inbox"},
 		{"click", `clicked [1] push button "Merge" via press; the window is now "PR #13 · GitHub"; check it matches what was asked, then call observe_screen if you need the list`, `window now "PR #13 · GitHub"`},
 		{"click", `clicked [1] push button "Merge" via press; call observe_screen to see the result`, "done"},
+		{"click_at", `clicked 120,340 on the screen; the point lands on [2] link "Docs"; look or call observe_screen to see what it did`, "clicked 120,340 on the screen"},
+		{"scroll_at", `scrolled 3 steps at 50,60; look or call observe_screen to see the page now`, "scrolled 3 steps at 50,60"},
+		{"click_at", "error: could not click 120,340: no display", "failed"},
 	}
 	for _, c := range cases {
 		got := resultSummary(c.name, c.result)

@@ -65,7 +65,7 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
         await setStatus({ id: task.id, status: next ? "done" : "open" }).unwrap();
       } catch {
         // A refused change never reaches the row, so nothing else will ever clear the circle: put it back here.
-        dispatch(ui.noticed("Could not change that task"));
+        dispatch(ui.noticed({ text: "Could not change that task", kind: "error" }));
         setPending(undefined);
         setSent(false);
       } finally {

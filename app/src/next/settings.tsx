@@ -20,7 +20,9 @@ import {
   useTrackerQuery,
   useUsageQuery,
   useVoicesQuery,
+  SEARCH_PROVIDERS,
   type LiveModel,
+  type ProviderLimits,
   type SettingsView,
   type Usage,
   type UsageWindow,
@@ -170,7 +172,7 @@ function VoiceSection() {
     try {
       await setVoice(voice.name).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not change the voice"));
+      dispatch(ui.noticed({ text: "Could not change the voice", kind: "error" }));
     }
   };
 
@@ -178,7 +180,7 @@ function VoiceSection() {
     try {
       await setLiveModel(model.name).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not change the voice model"));
+      dispatch(ui.noticed({ text: "Could not change the voice model", kind: "error" }));
     }
   };
 
@@ -188,7 +190,7 @@ function VoiceSection() {
       await previewVoice(current.name).unwrap();
     } catch (e) {
       // The daemon says exactly what went wrong — a spent daily allowance, a line the model refused, no speaker — and "Could not play that voice" threw all three away. It is shown as it came, with the generic line kept only for a failure that carried no words of its own.
-      dispatch(ui.noticed(errorStatus(e) === 503 ? "This machine has no speaker to play it through" : errorSentence(e) || "Could not play that voice"));
+      dispatch(ui.noticed({ text: errorStatus(e) === 503 ? "This machine has no speaker to play it through" : errorSentence(e) || "Could not play that voice", kind: "error" }));
     }
   };
 
@@ -322,6 +324,51 @@ function totals(w?: UsageWindow): { calls: number; tokens: number } {
   return (w?.providers ?? []).reduce((sum, p) => ({ calls: sum.calls + (p.calls || 0), tokens: sum.tokens + (p.total_tokens || 0) }), { calls: 0, tokens: 0 });
 }
 
+/** The web search providers' own plan allowances, one block per engine branch() can reach the web through. Input: the limits map GET /usage carries, keyed by provider id and holding brains alongside the search engines. Output: the section, or null when the daemon reported no search provider at all — which is what a machine with neither EXA_API_KEY nor TAVILY_API_KEY set answers, and also what one that simply has not searched this month answers.
+ *
+ * This exists because a search is the one call in the ledger that costs no tokens. It spends a request against a monthly plan, so the four token tables draw Exa and Tavily as rows of zeros and the count has nowhere else to appear. The daemon already works both figures out — Exa's from its own ledger, Tavily's off that provider's usage endpoint — and each one's source line says which, because the two numbers are not read the same way and a person comparing them should know that.
+ */
+function SearchSpend({ limits }: { limits?: Record<string, ProviderLimits> }) {
+  const found = SEARCH_PROVIDERS.map((id) => [id, limits?.[id]] as const).filter(([, p]) => p && p.limits.length > 0);
+  if (!found.length) return null;
+  return (
+    <div role="group" aria-label="Web search">
+      <h3 className="mb-2 text-ui font-medium">Web search</h3>
+      <div className="flex flex-col gap-4">
+        {found.map(([id, provider]) => (
+          <div key={id} className="flex flex-col gap-1">
+            <span className="text-ui">{id.charAt(0).toUpperCase() + id.slice(1)}</span>
+            {provider!.limits.map((l) => {
+              // used_fraction is 0 when no ceiling for this provider is known, which the daemon means as "there is no bar to draw" rather than "nothing was spent" — see exaProviderLimits in internal/ipc/usage.go. The source line below carries the call count either way, so that case loses no number.
+              const pct = Math.round(l.used_fraction * 100);
+              return (
+                <Fragment key={l.window}>
+                  {l.used_fraction > 0 ? (
+                    <div className="flex items-baseline justify-between gap-3 text-meta text-muted-foreground">
+                      <span>{l.window === "monthly" ? "Monthly" : l.window}</span>
+                      <span>{pct}%</span>
+                    </div>
+                  ) : null}
+                  {l.used_fraction > 0 ? (
+                    <div className="h-[3px] w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        data-testid={`search-bar-${id}-${l.window}`}
+                        className={`h-full rounded-full ${l.used_fraction >= 0.9 ? "bg-destructive" : "bg-primary"}`}
+                        style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                      />
+                    </div>
+                  ) : null}
+                  <p className="text-meta text-muted-foreground">{l.source}</p>
+                </Fragment>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** The token ledger: the figures saying what has been spent and what one question costs, the week as a bar a day, and then the tables and the call log behind them. Input: what GET /usage answered and whether it answered at all. Output: the section; a machine that has never called a provider gets one sentence rather than four empty tables.
  *
  * The daemon reports counts and never a price, so what a question costs is said in tokens rather than in money; putting a currency here would mean this window carrying its own price list for every provider, which would be wrong the day a provider changes one.
@@ -387,6 +434,7 @@ export function UsageLedger({ usage, up }: { usage?: Usage; up: boolean }) {
         <h3 className="mb-2 text-ui font-medium">Last seven days</h3>
         <UsageTable window={usage.week} empty="Nothing spent this week." />
       </div>
+      <SearchSpend limits={usage.limits} />
       <div>
         <h3 className="mb-2 text-ui font-medium">Recent calls</h3>
         {/* Each row is already one whole question, not one round of it: the daemon sums a turn's tokens over every round of its tool loop before it ever files a row (see TokenUsage in internal/agent/ask.go and recordTokenUse in internal/ipc/ipc.go), so In/Out/Total here are what that question cost end to end. What the daemon does not carry yet is how many rounds a question took — TurnTrace has no round counter, so that count is not drawn here rather than guessed from tool-call counts, which would undercount a round that called more than one tool. The bar behind Total is that row's share of the priciest row in this list, so an expensive question is the tall bar rather than a number a person has to read every row to compare. */}
@@ -472,7 +520,7 @@ export function SettingsScreen() {
     try {
       await setCapture(on).unwrap();
     } catch {
-      dispatch(ui.noticed(on ? "Could not start watching" : "Could not pause watching"));
+      dispatch(ui.noticed({ text: on ? "Could not start watching" : "Could not pause watching", kind: "error" }));
     }
   };
 
@@ -480,7 +528,7 @@ export function SettingsScreen() {
     try {
       await pickBrain({ brain, model }).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not change the model"));
+      dispatch(ui.noticed({ text: "Could not change the model", kind: "error" }));
     }
   };
 
@@ -488,7 +536,7 @@ export function SettingsScreen() {
     try {
       await setClaudeUsageFromLogin(on).unwrap();
     } catch {
-      dispatch(ui.noticed("Could not change that setting"));
+      dispatch(ui.noticed({ text: "Could not change that setting", kind: "error" }));
     }
   };
 

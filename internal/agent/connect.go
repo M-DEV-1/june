@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +13,7 @@ import (
 	"ora/internal/util"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +38,9 @@ func stripControlTokens(s string) string {
 
 // prefixPaddingMs is the required duration of sustained detected speech before the Live API commits to "user started speaking". Raised above the SDK's zero-value default as a mitigation for acoustic echo (Ora's own voice bleeding into the mic and getting misread as a barge-in) — confirmed in production logs as 5+ false interrupts in under a minute. This is a tradeoff, not a fix: it also delays recognizing a genuine interruption by the same margin, and it does nothing for echo that outlasts the padding window. The real fix is acoustic echo cancellation (e.g. PulseAudio module-echo-cancel) or mic ducking during playback; this is a same-day mitigation pending those.
 const prefixPaddingMs = 300
+
+// bargeInConfirmWindow is how long an Interrupted that arrived with no user transcript is held open, waiting for one. The Live server raises Interrupted the moment its voice detector fires, and the matching InputTranscription fragment lands a few hundred milliseconds later, so requiring the transcript to already be there rejected real interruptions: 35 of 93 in the machine's log, 8 of them after echo cancellation was in place and the mic had stopped hearing Ora at all.
+const bargeInConfirmWindow = 1200 * time.Millisecond
 
 // bargeInEchoAmplitude is the speaker level above which Ora counts as audibly speaking. The speaker reports RMS scaled to [0,1] (see the audio package), where an idle stream sits at ~0 and speech runs 0.2-0.6, so this sits just above silence. Used to reject an interrupt that arrived with no user transcript while Ora's own voice was still playing — the room hearing itself, not someone cutting in.
 const bargeInEchoAmplitude = 0.05
@@ -112,6 +118,36 @@ func (c *turnClock) firstSound(t time.Time) (time.Duration, bool) {
 }
 
 func (c *turnClock) turnDone() { c.reported = false; c.lastUser = time.Time{} }
+
+// ensureTurnID mints a fresh id for the voice session's current model turn if none is set yet, and returns it either way. Called at the first sign of a turn's content (receiveLoop's ModelTurn handling), so the first tool call and every one after it in the same turn share the same id. Input: none. Output: the turn's id.
+func (a *Agent) ensureTurnID() string {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	if a.turnID == "" {
+		var buf [8]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			// A turn id is a debugging aid, not a correctness requirement, so a failed read falls back to the clock rather than losing the tool calls' record entirely.
+			a.turnID = fmt.Sprintf("turn-%d", time.Now().UnixNano())
+		} else {
+			a.turnID = "turn-" + hex.EncodeToString(buf[:])
+		}
+	}
+	return a.turnID
+}
+
+// currentTurnID reads back the current voice turn's id without minting one. Output: the id, or "" between turns and before the first one.
+func (a *Agent) currentTurnID() string {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	return a.turnID
+}
+
+// endTurn clears the voice turn's id at TurnComplete/GenerationComplete, so the next turn's ensureTurnID mints a fresh one instead of reusing the last.
+func (a *Agent) endTurn() {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	a.turnID = ""
+}
 
 // inputTranscriptionConfig asks for the text of what the user says. It sends no language hint: the Gemini API (as opposed to Vertex) rejects the languageCodes field at the handshake, which took the whole voice loop down on 2026-09-04 until a screenshot attempt found it. The hint had been added because on 2026-09-03 the server wrote English sentences in Devanagari; that has to be handled in the prompt instead.
 func inputTranscriptionConfig() *genai.AudioTranscriptionConfig {
@@ -392,7 +428,11 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 
 // voiceScreenScope gives every tool call of the voice conversation the same screen state for as long as the agent lives, across reconnects. Input: the connection's context. Output: a context carrying the agent's own screen state.
 // It used to be liveScreenScope, one fresh state per Connect. Measured 2026-09-09: the server hung up mid conversation, Connect redialled and resumed the same conversation from the model's point of view, and the model's next click on item 25 answered "call observe_screen first" about a list it had just been given. The model treats a resumed session as one conversation, so the numbered list, the picture and the focused control have to survive the redial. The look allowance still comes back at every model turn (see endLiveTurn).
+// The allowance itself is voiceMaxLooksPerTurn rather than the smaller maxLooksPerAsk a typed ask gets: a spoken task ("scroll down and tell me what is there") legitimately needs a look after each action, where a typed ask is one question and one answer. Set here rather than once at agent construction because a.askScreen is a plain field with no constructor of its own; setting it on every call is idempotent and cheap.
 func (a *Agent) voiceScreenScope(ctx context.Context) context.Context {
+	a.askScreen.mu.Lock()
+	a.askScreen.maxLooks = voiceMaxLooksPerTurn
+	a.askScreen.mu.Unlock()
 	return context.WithValue(ctx, askLookStateKey{}, &a.askScreen)
 }
 
@@ -501,8 +541,11 @@ type liveSession interface {
 // sessionPictureSender is the road a look's picture takes on a live session. Input: the session. Output: a PictureSender that ships the capture as one realtime video frame.
 // It goes in the Video field, the way the microphone's audio goes in Audio. The Media field serialises to media_chunks, which the API deprecated: measured 2026-09-09 at 03:58:40 and 04:04:33, a picture sent that way closed the socket with "close 1007 realtime_input.media_chunks is deprecated. Use audio, video, or text instead" and took the branch subtask running under it down with the session.
 // It is realtime input rather than a tool result because the Live API takes a function response as text: the picture has to arrive on the same channel as the microphone's audio, and the tool result then only describes the frame it was taken in.
-func sessionPictureSender(session liveSession) PictureSender {
+// It takes a.writeMu around the send, the same as every other write to the session (audioSendLoop, textSendLoop, runToolWithNudge's own nudge below): gorilla/websocket allows only one writer at a time, and a picture pushed without the lock can land mid-frame of a concurrent audio write and panic the connection with "concurrent write to websocket connection".
+func (a *Agent) sessionPictureSender(session liveSession) PictureSender {
 	return func(_ context.Context, c tracker.Capture) error {
+		a.writeMu.Lock()
+		defer a.writeMu.Unlock()
 		return session.SendRealtimeInput(genai.LiveRealtimeInput{Video: &genai.Blob{Data: c.Data, MIMEType: c.Mime}})
 	}
 }
@@ -532,6 +575,9 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 
 	// outputTranscriptBuf accumulates OutputTranscription chunks — Ora's own reply — for the turn currently being spoken, mirroring inputTranscriptBuf. Session-scoped in the same way.
 	var outputTranscriptBuf strings.Builder
+
+	// pendingBargeIn is when an Interrupted arrived while Ora was speaking with nothing yet in the input transcript. Zero means none is waiting. A user transcript inside bargeInConfirmWindow turns it into a real barge-in; anything else lets it expire, which is what the room and the ceiling fan do.
+	var pendingBargeIn time.Time
 
 	// recentOraSpeech holds Ora's last few completed utterances, for telling the mic hearing her own voice apart from the user talking (see matchesRecentOraSpeech). Session-scoped in the same way as the buffers above.
 	var recentOraSpeech []oraUtterance
@@ -630,6 +676,21 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			inputTranscriptBuf.WriteString(it.Text)
 			if !isNonSpeechTranscript(it.Text) {
 				clock.userSpoke(time.Now())
+				// The late half of a barge-in: an Interrupted came in while Ora was talking and nothing had been transcribed yet, and this is that speech arriving. Cut her off now rather than letting her talk over the user for the rest of the sentence.
+				if waited := time.Since(pendingBargeIn); !pendingBargeIn.IsZero() && waited < bargeInConfirmWindow {
+					pendingBargeIn = time.Time{}
+					slog.Info("barge-in confirmed by a late transcript", "waited", waited)
+					flushOraSpeech()
+					a.speaker.Flush()
+					notice := "[ora stopped]"
+					if a.typedTurnActive.Load() {
+						notice = "[interrupted by voice input — the answer above is cut short]"
+					}
+					select {
+					case a.TextResponseChan <- ResponseChunk{Text: notice, Sender: SenderSystem}:
+					default:
+					}
+				}
 			}
 			if it.Finished {
 				flushInputTranscript()
@@ -671,11 +732,13 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 				slog.Debug("ignoring barge-in: mic is muted")
 				continue
 			}
-			// Nobody said anything and Ora's own speaker is audibly running: this is her voice or the room coming back through the mic. A ceiling fan produced 47 of these in 17 minutes, every one flushing the audio mid-sentence, and not one reply in that stretch finished. Leave the sentence alone.
+			// Nobody has said anything yet and Ora's own speaker is audibly running. This is either the room (a ceiling fan produced 47 of these in 17 minutes, every one flushing the audio mid-sentence) or a real interruption whose transcript has not landed yet — the server raises Interrupted on voice detection, and the words follow a few hundred milliseconds later. Hold it open instead of deciding now: the InputTranscription branch above cuts Ora off if speech arrives inside bargeInConfirmWindow, and nothing happens if it does not.
 			if !userSpoke && a.speaker.CurrentAmplitude() > bargeInEchoAmplitude {
-				slog.Debug("ignoring barge-in: no user transcript while ora is speaking, likely echo or room noise")
+				pendingBargeIn = time.Now()
+				slog.Debug("barge-in held open: no user transcript yet while ora is speaking")
 				continue
 			}
+			pendingBargeIn = time.Time{}
 			slog.Info("barge-in detected: server interrupted model generation", "user_spoke", userSpoke)
 			flushOraSpeech()
 			a.speaker.Flush()
@@ -698,6 +761,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 
 		// this has very interesting spanning logic
 		if msg.ServerContent != nil && msg.ServerContent.ModelTurn != nil {
+			a.ensureTurnID()
 			flushInputTranscript()
 			_, turnSpan := otelTracer.Start(recvCtx, "Agent.ModelTurn")
 
@@ -743,12 +807,14 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		if msg.ServerContent != nil && (msg.ServerContent.TurnComplete || msg.ServerContent.GenerationComplete) {
 			// The look allowance bounds one question, not a whole conversation, so it comes back here. What the looks left behind is kept: the model lists the screen, replies, and is then asked to draw around item 3.
 			endLiveTurn(recvCtx)
+			a.endTurn()
 			clock.turnDone()
 			flushInputTranscript()
 			flushOraSpeech()
 			flushTurnUsage()
-			// The typed turn (if this was one) is over — a later interruption belongs to whatever comes next.
+			// The typed turn (if this was one) is over — a later interruption belongs to whatever comes next. A barge-in still waiting for its transcript goes with it: the turn it would have cut off has already ended on its own.
 			a.typedTurnActive.Store(false)
+			pendingBargeIn = time.Time{}
 			select {
 			case a.TextResponseChan <- ResponseChunk{TurnBoundary: true}:
 			default:
@@ -765,9 +831,10 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			for _, fc := range calls {
 				slog.Info("tool call received", "tool", fc.Name, "args", fc.Args)
 			}
+			toolCtx := WithTurnID(recvCtx, a.currentTurnID())
 			go func() {
 				for _, fc := range calls {
-					a.runToolCall(recvCtx, otelTracer, session, fc)
+					a.runToolCall(toolCtx, otelTracer, session, fc)
 				}
 			}()
 		}
@@ -783,17 +850,27 @@ var quietTools = map[string]bool{
 	"open_url":  true,
 }
 
-// toolResponseScheduling picks when a NON_BLOCKING tool's result is folded back into the conversation.
-// INTERRUPT is the default because most tools here answer a question the user just asked out loud and is now waiting through silence for: query_memory, recall, branch, shell_exec, read_file, list_files, read_clipboard. Making those wait for an idle moment means the answer arrives late or, if the user keeps talking, not at all.
-// Input: the tool's name. Output: INTERRUPT for anything not in quietTools, WHEN_IDLE for the rest. An unknown name gets WHEN_IDLE — the conservative side, since an unrecognized tool is by definition not one the model was told to announce.
-func toolResponseScheduling(name string) genai.FunctionResponseScheduling {
+// scheduleFor picks when a NON_BLOCKING tool's result is folded back into the conversation.
+// A quiet or unrecognized tool always waits for an idle moment: quietTools produce their real effect outside the conversation, and an unrecognized name is by definition not one the model was told to announce.
+// Every other tool answers a question the user just asked out loud, so it wants INTERRUPT — but only when Ora has gone quiet. Sending INTERRUPT while she is still speaking would ask the Live server to cancel her current generation to fold the result in, which cuts her own sentence off mid-word; WHEN_IDLE there lets the sentence finish and folds the result in right after.
+// Input: the tool's name and whether Ora is audibly speaking right now. Output: the scheduling to send with that tool's FunctionResponse.
+func scheduleFor(name string, speaking bool) genai.FunctionResponseScheduling {
 	if _, known := knownToolNames[name]; !known {
 		return genai.FunctionResponseSchedulingWhenIdle
 	}
 	if quietTools[name] {
 		return genai.FunctionResponseSchedulingWhenIdle
 	}
+	if speaking {
+		return genai.FunctionResponseSchedulingWhenIdle
+	}
 	return genai.FunctionResponseSchedulingInterrupt
+}
+
+// isSpeaking reports whether Ora's own voice is audible right now, the same check receiveLoop's echo guard uses.
+// Input: none, reads a.speaker. Output: false when there is no speaker (e.g. in a test harness), otherwise whether the current amplitude is above bargeInEchoAmplitude.
+func (a *Agent) isSpeaking() bool {
+	return a.speaker != nil && a.speaker.CurrentAmplitude() > bargeInEchoAmplitude
 }
 
 // toolInterruptWindow is how long after an INTERRUPT-scheduled FunctionResponse send an Interrupted event is credited to that delivery instead of to the user. Production measured 72-80ms; a second is more than ten times that and still far shorter than a person deciding to cut in.
@@ -801,9 +878,10 @@ const toolInterruptWindow = time.Second
 
 // longRunNudgeDelay is how long a tool may run before Ora tells the user it's still on it. A var, not a const, only so tests can shrink it.
 // Sent as an interim FunctionResponse with WillContinue set — the generator form of a NON_BLOCKING call, and the only turn-safe way to inject anything into a tool exchange. A bare out-of-turn SendClientContent is not: one broke native-audio turn-taking for three minutes in a real session (see the InputTranscription comment in receiveLoop).
-var longRunNudgeDelay = 8 * time.Second
+// Five seconds, down from eight: at eight a 30-second open_app left two silences of nearly the length of a held breath before Ora said anything, and the user heard the tool as a hang rather than as work in progress. The gaps still double from here (see nudgeGap), so a genuinely long job does not become chatter.
+var longRunNudgeDelay = 5 * time.Second
 
-// knownToolNames is the set of names in toolDefinitions, built once so toolResponseScheduling can tell an unrecognized tool from a declared one.
+// knownToolNames is the set of names in toolDefinitions, built once so scheduleFor can tell an unrecognized tool from a declared one.
 var knownToolNames = func() map[string]struct{} {
 	names := map[string]struct{}{}
 	for _, tool := range toolDefinitions() {
@@ -815,8 +893,35 @@ var knownToolNames = func() map[string]struct{} {
 }()
 
 // runToolCall executes a single function call and sends its result back to the model.
-// Meant to run in its own goroutine (via receiveLoop) so a slow/blocking tool never stalls session.Receive().
+// Meant to run in its own goroutine (via receiveLoop) so a slow/blocking tool never stalls session.Receive(). A panic anywhere in the call is recovered, logged with its stack, reported to the model as a failed tool call, and closed out in the UI's activity feed, so one bad tool never takes the daemon down or leaves the transcript showing a call that is still "running".
 func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session liveSession, fc *genai.FunctionCall) {
+	// This runs on a bare goroutine spawned from receiveLoop, with nothing above it to catch a panic — a bad type assertion or a nil dereference in a tool handler would otherwise take the whole daemon down. Caught here, it is logged, reported to the model as a failed tool call rather than silence, and the UI's "running" entry for it is closed out instead of left stuck.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("tool call panicked", "tool", fc.Name, "panic", r, "stack", string(debug.Stack()))
+			a.sendToolActivity(ToolActivity{
+				ID:    fc.ID,
+				Name:  fc.Name,
+				Phase: ToolFinished,
+				Err:   true,
+			})
+			if ctx.Err() != nil {
+				return
+			}
+			a.writeMu.Lock()
+			if err := session.SendToolResponse(genai.LiveSendToolResponseParameters{
+				FunctionResponses: []*genai.FunctionResponse{{
+					ID:       fc.ID,
+					Name:     fc.Name,
+					Response: map[string]any{"output": "error: an internal failure interrupted this tool call; try again or take another route"},
+				}},
+			}); err != nil {
+				slog.Error("failed to send the panic tool response", "error", err)
+			}
+			a.writeMu.Unlock()
+		}
+	}()
+
 	_, toolSpan := tracer.Start(ctx, "Agent.ToolExecution")
 	defer toolSpan.End()
 	toolSpan.SetAttributes(attribute.String("tool.name", fc.Name))
@@ -832,7 +937,7 @@ func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session li
 		Started:     started,
 	})
 
-	scheduling := toolResponseScheduling(fc.Name)
+	scheduling := scheduleFor(fc.Name, a.isSpeaking())
 	toolStart := time.Now()
 	result := a.runToolWithNudge(ctx, session, fc, scheduling)
 
@@ -874,6 +979,9 @@ func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session li
 		return
 	}
 
+	// Recomputed here, not reused from before the tool ran: the tool may have taken seconds, and whether Ora is speaking now — not when the call started — is what decides whether an INTERRUPT would cut her off.
+	scheduling = scheduleFor(fc.Name, a.isSpeaking())
+
 	// Marked before the send, not after: the server's fold-in interrupt comes back within ~80ms, and receiveLoop must already see the record by then. See consumeToolDeliveryInterrupt.
 	if scheduling == genai.FunctionResponseSchedulingInterrupt {
 		a.markToolResponseSent(time.Now())
@@ -897,12 +1005,55 @@ func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session li
 	}
 }
 
-// runToolWithNudge runs the tool and, if it is still going after longRunNudgeDelay, sends one interim FunctionResponse telling the model the call hasn't finished — so it can say "still digging" out loud instead of leaving the user in silence through a long operation.
+// nudgeLines are what a mid-tool nudge tells the model, in order, one per longRunNudgeDelay the tool overruns by. The model speaks its own words from these, so they are states rather than lines to read out: the point is that the second nudge does not say what the first said. A single repeated sentence reads as a stuck loop, which is worse than silence.
+//
+// They also carry roughly how long it has been, because the model has no clock of its own mid-call and "a while now" is the difference between "still going" and "this has hung". The last line stands for every nudge after it: past a minute there is nothing new to say, and the honest thing is to keep saying it rather than escalate to a promise the tool may not keep.
+var nudgeLines = []string{
+	"still running, no result yet",
+	"still running, a good few seconds in now — say so, differently from last time",
+	"still running, about half a minute in — worth telling them it is taking longer than usual",
+	"still running, over a minute in — tell them plainly that it is slow and let them decide whether to wait",
+}
+
+// nudgeLine is what the nth nudge for one tool call says, counting from 1. Input: which nudge this is. Output: that line, or the last one for every nudge past the end of nudgeLines.
+func nudgeLine(n int) string {
+	if n < 1 {
+		n = 1
+	}
+	if n > len(nudgeLines) {
+		n = len(nudgeLines)
+	}
+	return nudgeLines[n-1]
+}
+
+// nudgeBackoffCap is the widest gap between two nudges. Half a minute: past that a person waiting has stopped expecting a running commentary, and a check-in every thirty seconds still says the thing has not been forgotten.
+const nudgeBackoffCap = 30 * time.Second
+
+// nudgeGap is how long to wait before the nth nudge, counting from 1. Input: which nudge this is. Output: longRunNudgeDelay for the first, then double the gap each time, held at nudgeBackoffCap.
+//
+// The gaps widen because a fixed interval turns into nagging. At a flat eight seconds a tool stuck for five minutes speaks thirty-seven times, which reads as a loop rather than as patience. Doubling gives eight seconds, then sixteen, then thirty, and about eleven check-ins over those five minutes — which is what someone half-listening actually wants: quick reassurance early, while it still might finish, then the occasional reminder that it has not been dropped.
+func nudgeGap(n int) time.Duration {
+	gap := longRunNudgeDelay
+	for i := 1; i < n; i++ {
+		gap *= 2
+		if gap >= nudgeBackoffCap {
+			return nudgeBackoffCap
+		}
+	}
+	if gap > nudgeBackoffCap {
+		return nudgeBackoffCap
+	}
+	return gap
+}
+
+// runToolWithNudge runs the tool and, for as long as it keeps running, sends an interim FunctionResponse every longRunNudgeDelay telling the model the call hasn't finished — so it can keep saying "still on it" out loud instead of leaving the user in silence through a long operation.
+//
+// It nudges repeatedly, not once. One nudge and then silence is what made the 30-second open_app on 2026-09-12 feel like being dropped: Ora said "that one's still going", then said nothing for the remaining 22 seconds while the user asked "can you hear me?". Each nudge carries a different line (see nudgeLines) so the model has something new to say each time.
 // Only INTERRUPT-scheduled tools get a nudge: a WHEN_IDLE result (saving a note, opening a URL) is not something the user is waiting through silence for.
 // Input: the tool call and the scheduling its result will carry. Output: the tool's result string, exactly as executeTool returned it.
 func (a *Agent) runToolWithNudge(ctx context.Context, session liveSession, fc *genai.FunctionCall, scheduling genai.FunctionResponseScheduling) string {
 	// The tool gets a road for a picture here, where the session is in hand: look pushes its capture down it rather than trying to return it, which a function response cannot carry.
-	ctx = WithPictureSender(ctx, sessionPictureSender(session))
+	ctx = WithPictureSender(ctx, a.sessionPictureSender(session))
 	if scheduling != genai.FunctionResponseSchedulingInterrupt {
 		return a.executeTool(ctx, fc.Name, fc.Args)
 	}
@@ -910,32 +1061,44 @@ func (a *Agent) runToolWithNudge(ctx context.Context, session liveSession, fc *g
 	done := make(chan string, 1)
 	go func() { done <- a.executeTool(ctx, fc.Name, fc.Args) }()
 
-	timer := time.NewTimer(longRunNudgeDelay)
+	sent := 0
+	timer := time.NewTimer(nudgeGap(1))
 	defer timer.Stop()
-	select {
-	case result := <-done:
-		return result
-	case <-timer.C:
+	for {
+		select {
+		case result := <-done:
+			return result
+		case <-ctx.Done():
+			// The session is going away. Wait for the tool rather than leaking the goroutine holding it; the caller is tearing down anyway and nothing will read another nudge.
+			return <-done
+		case <-timer.C:
+		}
+		sent++
+		timer.Reset(nudgeGap(sent + 1))
+		line := nudgeLine(sent)
+		// Recomputed at each nudge, not reused from the caller: time has passed, so whether Ora is speaking now is what decides whether INTERRUPT would cut her off.
+		nudgeScheduling := scheduleFor(fc.Name, a.isSpeaking())
+		slog.Info("tool still running, sending a progress nudge", "tool", fc.Name, "nudge", sent, "after", time.Duration(sent)*longRunNudgeDelay)
+		if nudgeScheduling == genai.FunctionResponseSchedulingInterrupt {
+			a.markToolResponseSent(time.Now())
+		}
+		a.writeMu.Lock()
+		err := session.SendToolResponse(genai.LiveSendToolResponseParameters{
+			FunctionResponses: []*genai.FunctionResponse{{
+				ID:           fc.ID,
+				Name:         fc.Name,
+				Scheduling:   nudgeScheduling,
+				WillContinue: genai.Ptr(true),
+				Response:     map[string]any{"output": line},
+			}},
+		})
+		a.writeMu.Unlock()
+		if err != nil {
+			// A send that failed is a session that has most likely gone. Stop nudging into it and just wait for the tool, rather than failing the same write every longRunNudgeDelay until it finishes.
+			slog.Warn("failed to send the mid-tool progress nudge, not sending more", "tool", fc.Name, "nudge", sent, "error", err)
+			return <-done
+		}
 	}
-
-	slog.Info("tool still running, sending a progress nudge", "tool", fc.Name, "after", longRunNudgeDelay)
-	a.markToolResponseSent(time.Now())
-	a.writeMu.Lock()
-	err := session.SendToolResponse(genai.LiveSendToolResponseParameters{
-		FunctionResponses: []*genai.FunctionResponse{{
-			ID:           fc.ID,
-			Name:         fc.Name,
-			Scheduling:   scheduling,
-			WillContinue: genai.Ptr(true),
-			Response:     map[string]any{"output": "still running, no result yet"},
-		}},
-	})
-	a.writeMu.Unlock()
-	if err != nil {
-		slog.Warn("failed to send the mid-tool progress nudge", "tool", fc.Name, "error", err)
-	}
-
-	return <-done
 }
 
 // sendToolActivity is a non-blocking send, same drop-on-full pattern as every other Agent channel (TextResponseChan, ErrorChan) — a UI that isn't draining ToolActivityChan must never be able to stall a real tool call.

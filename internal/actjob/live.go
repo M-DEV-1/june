@@ -68,11 +68,16 @@ func (l *live) endWait() {
 	}
 }
 
-// wallGuard ends a job once the time it has spent actually working reaches its wall budget. It does that instead of a deadline on the job's own context because the time a job spends stuck on a question or held paused is the user's, not the job's, and a job must not be timed out for how long someone took to answer it. Input: the live job and the whole wall budget, what earlier runs of the job spent included. Output: none; it returns when the job's context is done.
+// wallGuard ends a job once the time it has spent actually working reaches its wall budget. It does that instead of a deadline on the job's own context because the time a job spends stuck on a question or held paused is the user's, not the job's, and a job must not be timed out for how long someone took to answer it. Input: the live job and the wall budget it starts with, what earlier runs of the job spent included. Output: none; it returns when the job's context is done.
+//
+// The budget is re-read from the job on every tick, and the argument is only the value to use until the job carries one of its own. A job's budget can be raised while it runs, by a Resume or by the room it is given after asking (see outOfRoomQuestion), and a guard holding the value it was born with would go on killing that job on the old clock — the one case where more steps were granted and the job still died at five minutes.
 func wallGuard(l *live, wall time.Duration) {
 	t := time.NewTicker(wallTick)
 	defer t.Stop()
 	for {
+		if current := l.snapshot().Budget.Wall; current > 0 {
+			wall = current
+		}
 		if l.waitingSince.Load() != 0 {
 			// The job is waiting on the user, so elapsed() is frozen and no amount of ticking can bring it nearer the budget: sleep until the wait ends or the job does, rather than waking ten times a second for as long as the question goes unanswered.
 			select {

@@ -9,6 +9,7 @@ import (
 	"ora/internal/config"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -279,4 +280,40 @@ func hasArgPair(args []string, flag, val string) bool {
 		}
 	}
 	return false
+}
+
+// A transcription holding the GPU outranks client presence, both ways: the engine yields the card when asked, and stays off it until the decode lets go.
+// Client presence is refreshed by every authenticated IPC request, and the desktop window polls the daemon continuously, so sinceLastClient is almost never outside the presence window while Ora is open. That made StopIfIdle a no-op in practice: whisper asked for the card, was refused, waited, and eventually decoded anyway on a 4 GB laptop card already holding 2.5 GB of Ora's own models. It died out of device memory 37 times in the six days to 2026-09-12, each one costing a full CPU re-decode of a meeting.
+func TestEngineYieldsTheGPUToATranscriptionEvenWithAClientPresent(t *testing.T) {
+	e := newTestEngine(t, time.Hour, time.Hour)
+	var busy atomic.Bool
+	e.SetGPUGate(busy.Load)
+
+	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err != nil {
+		t.Fatalf("first Embed: %v", err)
+	}
+	e.MarkClientPresence(context.Background())
+	if e.StopIfIdle() {
+		t.Fatal("with no transcription running, a pinned engine must still refuse to stop")
+	}
+
+	busy.Store(true)
+	if !e.StopIfIdle() {
+		t.Fatal("the engine kept the card while a transcription was waiting for it")
+	}
+	waitFor(t, 5*time.Second, "the child to be gone", func() bool { return !e.running() })
+
+	// The decode is now running. Nothing may put the model back on the card under it — not a warm-up from the window's next poll, and not an embed.
+	e.MarkClientPresence(context.Background())
+	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "during the decode"); err == nil {
+		t.Error("an embed climbed back onto the card while a transcription held it")
+	}
+	if e.running() {
+		t.Error("the embedding server restarted while a transcription held the card")
+	}
+
+	busy.Store(false)
+	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "after the decode"); err != nil {
+		t.Fatalf("Embed once the decode let go: %v", err)
+	}
 }

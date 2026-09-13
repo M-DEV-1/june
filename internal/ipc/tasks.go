@@ -214,6 +214,10 @@ func (s *Server) TaskDone(w http.ResponseWriter, r *http.Request) {
 
 // TaskOwner handles PATCH /tasks/{id} with body {"owner":"me"|"them"|"unclear"}: the user saying by hand whose task this really is, overriding whatever the meeting's minutes read as. Only a noticed task carries an owner to correct — a task the user typed in is always his by definition, so a "task-N" id is 400. A bad owner value is 400, and an id that names no action item is 404.
 func (s *Server) TaskOwner(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		s.taskDelete(w, r)
+		return
+	}
 	if r.Method != http.MethodPatch {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -244,4 +248,25 @@ func (s *Server) TaskOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// taskDelete serves DELETE /tasks/{id}: it takes one of the user's own tasks off the list for good.
+// Only a task the user typed in, or Ora put there for them, can be deleted. A noticed item is a note in memory carrying a "[state/priority]" prefix, and deleting it would take a line out of a meeting's minutes rather than off a list; dropping it is what that is for, through POST /tasks/{id}/done with status "dropped".
+// Input: the id from the path, in the "task-N" form GET /tasks hands out. Output: 204 and no body; 400 for a noticed item, 404 for an id that names no task of the user's own.
+func (s *Server) taskDelete(w http.ResponseWriter, r *http.Request) {
+	rest, ok := strings.CutPrefix(r.PathValue("id"), userTaskPrefix)
+	if !ok {
+		http.Error(w, "an item Ora noticed is dropped rather than deleted", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil {
+		http.Error(w, "no such task", http.StatusNotFound)
+		return
+	}
+	if err := s.store.DeleteUserTask(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

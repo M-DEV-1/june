@@ -3,6 +3,7 @@ package ipc
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -201,16 +202,23 @@ func turnViews(turns []db.Turn) []TurnView {
 	return out
 }
 
-// errorReason turns a failed turn's stored error text into one plain sentence for the window's transcript. Input: the turn's text, exactly as it was stored when the ask failed (see run in ipc.go, which stores err.Error() verbatim under kind "error"). Output: one of four sentences, chosen by the first fragment the text carries — the day's quota being spent, the model being overloaded, the call timing out, or an unexplained failure.
+// errorReason turns a failed turn's stored error text into one plain sentence for the window's transcript. Input: the turn's text, exactly as it was stored when the ask failed (see run in ipc.go, which stores err.Error() verbatim under kind "error"). Output: one of four sentences, chosen by the same classification askSentence (askerror.go) uses for a live ask failure, so a transcript read back later and a failure shown at the moment it happened never disagree about what kind of error it was. There is no error value here, only the text that was stored, so askSentence is given a plain errors.New(text) — the context.DeadlineExceeded/context.Canceled cases it also checks never match that, which is fine because the text-based timeout/cancellation checks further down cover the same ground.
 func errorReason(text string) string {
+	switch askSentence(errors.New(text), text) {
+	case askQuotaSpent, askTooFast:
+		return "The model's quota is spent (429)."
+	case askOverloaded:
+		return "The model was overloaded (503)."
+	case askTooLong:
+		return "The model took too long."
+	}
+	// askSentence only reads these two out of a status code, but a stored error can carry the provider's status word with no numeric code beside it (the transcript keeps whatever text the failed call returned, unlike a live call's typed API error), so they are still checked directly here.
 	lower := strings.ToLower(text)
 	switch {
-	case strings.Contains(lower, "429") || strings.Contains(lower, "resource_exhausted"):
+	case strings.Contains(lower, "resource_exhausted"):
 		return "The model's quota is spent (429)."
-	case strings.Contains(lower, "503") || strings.Contains(lower, "unavailable"):
+	case strings.Contains(lower, "unavailable"):
 		return "The model was overloaded (503)."
-	case strings.Contains(lower, "timed out"):
-		return "The model took too long."
 	default:
 		return "The model could not answer."
 	}

@@ -333,3 +333,44 @@ func TestTasksOwnerFilter(t *testing.T) {
 		t.Fatalf("GET /tasks?owner=all = %d tasks, want 3", len(all.Tasks))
 	}
 }
+
+// A ticked task stayed on the list for ever, struck through, and the only thing its menu offered was Reopen. Nothing anywhere removed one: GET /tasks answers with every user_tasks row whatever its done flag says, the screen filters on the search box alone, and there was no delete in the UI or in the store. Asked on 2026-09-12 why three finished tasks would not go away, the answer was that nothing had ever been written to make them.
+func TestTaskDelete(t *testing.T) {
+	store := dbtest.Open(t)
+	ctx := context.Background()
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
+		t.Fatalf("seed action item: %v", err)
+	}
+	_, srv := newWindowServer(t, &fakeAsker{}, store)
+
+	var created struct{ ID string }
+	postJSON(t, srv, "/tasks", `{"title":"book the flight"}`, &created)
+
+	var list struct{ Tasks []Task }
+	getJSON(t, srv, "/tasks", &list)
+	var noticedID string
+	for _, task := range list.Tasks {
+		if task.Source == "noticed" {
+			noticedID = task.ID
+		}
+	}
+
+	if code := deleteRequest(t, srv, "/tasks/"+created.ID); code != http.StatusNoContent {
+		t.Fatalf("DELETE /tasks/%s status = %d, want 204", created.ID, code)
+	}
+	getJSON(t, srv, "/tasks", &list)
+	for _, task := range list.Tasks {
+		if task.ID == created.ID {
+			t.Errorf("task %q is still listed after being deleted", task.ID)
+		}
+	}
+
+	// A noticed item is a note in memory, not a row of the user's own list, and deleting it here would quietly delete a piece of a meeting's minutes. Dropping it is what that is for, through /done.
+	if code := deleteRequest(t, srv, "/tasks/"+noticedID); code != http.StatusBadRequest {
+		t.Errorf("DELETE /tasks/%s status = %d, want 400 — a noticed item is dropped, not deleted", noticedID, code)
+	}
+
+	if code := deleteRequest(t, srv, "/tasks/task-9999"); code != http.StatusNotFound {
+		t.Errorf("DELETE of a task that does not exist = %d, want 404", code)
+	}
+}

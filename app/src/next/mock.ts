@@ -124,6 +124,13 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
       else tasks = tasks.map((t) => (t.id === id ? { ...t, done: status === "done" } : t));
       return { status: 200, body: null };
     }
+    if (method === "DELETE" && ownerPatch) {
+      // Mirrors internal/ipc.taskDelete: only a task the user typed in goes, and a noticed item is refused.
+      const id = decodeURIComponent(ownerPatch[1]);
+      if (!id.startsWith("task-")) return { status: 400, body: null };
+      tasks = tasks.filter((t) => t.id !== id);
+      return { status: 204, body: null };
+    }
     if (method === "PATCH" && ownerPatch) {
       // Mirrors internal/ipc.TaskOwner: writes the owner the user just picked onto that row, so the next GET /tasks reads it back the same way the daemon would.
       const owner = typeof body === "object" && body !== null && "owner" in body ? String((body as { owner: unknown }).owner) : "";

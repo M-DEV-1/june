@@ -29,6 +29,43 @@ func TestClaudeArgs_KeepsWebSearch(t *testing.T) {
 	}
 }
 
+// TestStripSourcesBlock_WithSourcesBlock checks that a trailing "Sources:" block — what Claude's built-in WebSearch tool appends, since it runs outside Ora's own MCP server and so leaves no source tag in the tool hops evidenceFromToolHops reads — is removed from the answer text and turned into one Evidence entry per link, in the order they appeared.
+func TestStripSourcesBlock_WithSourcesBlock(t *testing.T) {
+	answer := "The RTX 3050 is the laptop GPU in that model.\n\nSources:\n- [GPU specs](https://example.com/gpu)\n- [Laptop review](https://example.com/review)"
+
+	got, evidence := stripSourcesBlock(answer)
+
+	if got != "The RTX 3050 is the laptop GPU in that model." {
+		t.Errorf("stripSourcesBlock text = %q, want the Sources block and the blank line before it removed", got)
+	}
+	if strings.Contains(got, "Sources:") {
+		t.Errorf("stripSourcesBlock text = %q, want no trace of the Sources block", got)
+	}
+	if len(evidence) != 2 {
+		t.Fatalf("evidence = %+v, want one entry per link", evidence)
+	}
+	if evidence[0].Kind != "web" || evidence[0].Title != "GPU specs" || evidence[0].Excerpt != "https://example.com/gpu" {
+		t.Errorf("evidence[0] = %+v, want kind web, the link's title, and its url as the excerpt", evidence[0])
+	}
+	if evidence[1].Title != "Laptop review" || evidence[1].Excerpt != "https://example.com/review" {
+		t.Errorf("evidence[1] = %+v, want the second link", evidence[1])
+	}
+}
+
+// TestStripSourcesBlock_WithoutSourcesBlock checks that an ordinary answer — no WebSearch call, so no Sources block — is returned exactly as it came, with no evidence manufactured from nothing.
+func TestStripSourcesBlock_WithoutSourcesBlock(t *testing.T) {
+	answer := "The meeting moved to 3pm; nothing else on the calendar changed."
+
+	got, evidence := stripSourcesBlock(answer)
+
+	if got != answer {
+		t.Errorf("stripSourcesBlock text = %q, want the answer unchanged", got)
+	}
+	if evidence != nil {
+		t.Errorf("evidence = %+v, want nil when there was no Sources block", evidence)
+	}
+}
+
 // flagValue returns the argument following name.
 func flagValue(t *testing.T, args []string, name string) string {
 	t.Helper()

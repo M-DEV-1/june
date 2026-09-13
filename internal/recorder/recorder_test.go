@@ -936,7 +936,7 @@ func TestOnACPower(t *testing.T) {
 	}
 }
 
-// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Deepak" because a GitHub commit list said "deepak-acmee". Personal context is the one store that says who the user is with certainty, so it is what names the [me] speaker — and an empty store must not leave a heading in the prompt with nothing under it.
+// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Deepak" because a GitHub commit list said "deepak-acme". Personal context is the one store that says who the user is with certainty, so it is what names the [me] speaker — and an empty store must not leave a heading in the prompt with nothing under it.
 func TestBuildPrompt_PersonalContext(t *testing.T) {
 	cases := []struct {
 		name  string

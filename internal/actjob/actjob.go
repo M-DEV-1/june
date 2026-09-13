@@ -137,6 +137,9 @@ type Step struct {
 	Why string `json:"why"`
 	// HeldBefore is what the same check said when it was taken once before the action ran. True means the screen already satisfied it, so the reading taken afterwards says nothing about what the action did.
 	HeldBefore bool `json:"held_before,omitempty"`
+	// Burst is every action this step took, in order, when the round took more than one. Tool and Args above are the first of them, so a reader that knows nothing about bursts still reads the step correctly.
+	// Recorded because the checkpoint is the only thing a restarted daemon knows: a job that died mid-burst and came back believing one click had happened would take the rest again on the user's real screen. Arguments are redacted the same way Args is.
+	Burst []action `json:"burst,omitempty"`
 }
 
 // Job is the whole checkpoint: everything a fresh Runner needs to carry on where the last one stopped. It is stored as JSON in the act_runs row's job_json column and is the only place the full trail lives — the prompt sent each round carries a small part of it (see BuildPrompt).
@@ -163,6 +166,10 @@ type Job struct {
 	ElapsedMS    int64     `json:"elapsed_ms"`
 	// FailsInARow counts failed verifications since the last one that passed; three of them is what makes a job stuck.
 	FailsInARow int `json:"fails_in_a_row"`
+	// Estimate is what the model guessed the whole task would take, in steps, on the round it first said so. Kept on the job because the question it asks when it runs out names the guess against what it actually spent, and because a job resumed from a checkpoint should not re-guess.
+	Estimate int `json:"estimate"`
+	// Reference is what this machine did the last few times it was asked something like this goal, and the lessons drawn from those runs, rendered by whoever supplied it (see Referencer). Looked up once, when the run starts, because it is about the goal and the goal does not change; carried on the job so a resumed run reads the same history rather than searching again.
+	Reference string `json:"reference,omitempty"`
 }
 
 // Event is one line of a job's progress, broadcast as it happens so the hover can show a running task without a window of its own. Kind is "started", "step", "verified", "question", "answered", "paused", "resumed" or "done"; the last of those carries Spend.
@@ -201,6 +208,12 @@ type ScreenScope interface {
 	NewScreenScope(ctx context.Context) context.Context
 	// EndScreenRound gives the round's look allowance back, keeping the picture; the runner calls it at the start of every round.
 	EndScreenRound(ctx context.Context)
+}
+
+// Referencer supplies what this machine did the last few times it was asked something like this goal. Optional: when the executor implements it, it is called once per run and the block goes in every round's prompt.
+// The one caller of this block used to be the ask path (agent/ask.go), so a one-shot screen question planned against its own history and a forty-step job planned against nothing. A task done yesterday was re-derived from scratch today, which is the whole of why a known task was no faster the second time.
+type Referencer interface {
+	ActReferenceFor(ctx context.Context, goal string, now time.Time) string
 }
 
 // PreChecker tests whether an expected change already holds on the screen before the action runs, off a single reading. Optional: when missing, HeldBefore stays false.
@@ -482,6 +495,12 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 	if scoped, ok := r.exec.(ScreenScope); ok {
 		ctx = scoped.NewScreenScope(ctx)
 	}
+	// Once per run, before the first round: a resumed job keeps the history it already had rather than searching again on a goal that has not changed.
+	if ref, ok := r.exec.(Referencer); ok && l.snapshot().Reference == "" {
+		if block := ref.ActReferenceFor(ctx, l.snapshot().Goal, time.Now()); block != "" {
+			r.save(l, l.set(func(j *Job) { j.Reference = block }))
+		}
+	}
 	// A job resumed while it was stuck asks its question again: the answer it was waiting for never came, and the checkpoint is the only place that question survived.
 	if job := l.snapshot(); job.State == Stuck && job.Question != "" {
 		if !r.askUser(ctx, l, job.Question) {
@@ -501,8 +520,21 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		}
 		if over, why := overBudget(l.snapshot()); over {
 			job := l.snapshot()
-			r.end(l, Failed, why, summarise(job, why))
-			return
+			// The token and wall budgets are what a runaway job actually costs, so those still end it. Running out of STEPS is different: steps are only a guess at how big the task was, and a job that has spent them has not failed so much as found out it guessed low. That one asks.
+			if !strings.HasPrefix(why, "the step budget") {
+				r.end(l, Failed, why, summarise(job, why))
+				return
+			}
+			if !r.askUser(ctx, l, outOfRoomQuestion(job)) {
+				r.endedWaiting(ctx, l)
+				return
+			}
+			// A yes has to buy real room, or the very next round is over budget again and it asks forever. Another estimate's worth is what it asked for in the first place.
+			job = l.set(func(j *Job) {
+				j.Budget.Steps += max(j.Estimate, len(j.Steps))
+			})
+			slog.Info("job given more room after asking", "job", job.ID, "steps", job.Budget.Steps, "taken", len(job.Steps))
+			r.save(l, job)
 		}
 
 		// Observe first, every round: the screen is the only thing that says what the last action actually did.
@@ -535,15 +567,27 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			r.save(l, l.snapshot())
 			continue
 		}
+		planned := false
 		job = l.set(func(j *Job) {
 			// The plan is written once, on the first round that offers one, and left alone after: a plan rewritten every round is not a plan, and a job resumed from a checkpoint would lose the one it was already working to.
 			if j.Plan == "" && d.Plan != "" {
 				j.Plan = d.Plan
+				planned = true
 			}
 			if d.Next != "" {
 				j.Next = d.Next
 			}
+			// Written once, like the plan: the model's guess at the size of the task, and twice it as the room to get there. A later round re-guessing would move the goalposts mid-task.
+			if j.Estimate == 0 && d.Estimate > 0 {
+				j.Estimate = d.Estimate
+				j.Budget.Steps = budgetFromEstimate(j.Budget, d.Estimate)
+			}
 		})
+
+		// Said out loud the once, in the same round it was written, so the steps that follow arrive against a stated intent rather than on their own. Until 2026-09-12 the plan lived only in the job's own prompt: the stream opened with the goal, which is the user's words handed back, and went straight to "Step 1". The estimate rides along because it was written in the same breath and is what makes "step 9" mean anything.
+		if planned {
+			r.emit(Event{Job: job.ID, Kind: "plan", State: job.State, Step: job.Estimate, Text: job.Plan})
+		}
 
 		if d.Done {
 			// The goal is only reached once something checked that it was: a model may end a job on the step it just watched come true, never on its own say-so before anything has been verified.
@@ -579,6 +623,11 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		}
 		storedExpect := redactedExpect(d.Tool, d.Expect)
 		step := Step{N: len(job.Steps) + 1, Tool: d.Tool, Args: db.StorableArgs(d.Tool, d.Args), Expect: storedExpect}
+		if actions := burst(d); len(actions) > 1 {
+			for _, a := range actions {
+				step.Burst = append(step.Burst, action{Tool: a.Tool, Args: db.StorableArgs(a.Tool, a.Args)})
+			}
+		}
 
 		// A stop or a pause decided while the model was still thinking takes effect here, before the mouse or the keyboard is touched: the input drivers take no context, so a click or a keystroke started after the stop really lands on the user's screen, and the checks after the tool call would only notice it afterwards.
 		if r.ended(ctx, l) {
@@ -598,7 +647,21 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			return
 		}
 
-		result := r.exec.ExecuteAskTool(ctx, d.Tool, d.Args)
+		// Every action of the burst in order, with no round trip and no reading between them. The first failure ends the burst: the actions after it were predicted against a screen that is now somewhere else, and taking them anyway is how a wrong guess turns into several wrong guesses on the user's real screen.
+		actions := burst(d)
+		var result string
+		for i, a := range actions {
+			result = r.exec.ExecuteAskTool(ctx, a.Tool, a.Args)
+			if strings.HasPrefix(result, stopLineRefusal) || strings.HasPrefix(result, "error") {
+				if i > 0 {
+					slog.Info("burst stopped early", "job", job.ID, "action", i+1, "of", len(actions), "tool", a.Tool, "result", result)
+				}
+				break
+			}
+			if r.ended(ctx, l) {
+				return
+			}
+		}
 		step.Result = capRunes(result, resultCap)
 		step.Why = "the action ran, and the check had not answered yet"
 
@@ -733,5 +796,12 @@ func (r *Runner) end(l *live, state State, errText, say string) {
 
 // isRead reports whether a tool only reads the screen. Input: the tool's name. Output: true for look, observe_screen and point_at.
 func isRead(tool string) bool {
-	return tool == "look" || tool == "observe_screen" || tool == "point_at"
+	switch tool {
+	case "look", "observe_screen", "point_at":
+		return true
+	// A lookup changes nothing on the screen, so there is nothing for wait_for to wait for. Without this, every search a job ran would be checked against a screen change that was never coming, three in a row would trip the stuck counter, and the job would stop to ask the user why its own research had not moved the page.
+	case "branch", "query_memory", "recall":
+		return true
+	}
+	return false
 }

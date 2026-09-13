@@ -29,9 +29,6 @@ func TestNilTextEngineIsSafe(t *testing.T) {
 	if _, err := e.Generate(context.Background(), "hello"); err == nil {
 		t.Fatal("Generate on a nil TextEngine should return an error, not resurrect a server")
 	}
-	if !e.StopIfIdle() {
-		t.Fatal("StopIfIdle on a nil TextEngine should report the server down")
-	}
 	if err := e.Close(); err != nil {
 		t.Fatalf("Close on a nil TextEngine should be a no-op, got %v", err)
 	}

@@ -118,29 +118,35 @@ func TestBuildHandshakeContext_EmptyBuffer_SkipsSearchMemory(t *testing.T) {
 	}
 }
 
-// TestToolResponseScheduling covers the scheduling table for NON_BLOCKING tool results: a result the user is sitting there waiting for interrupts whatever the model is currently saying, everything else waits for a natural gap so it never talks over the user.
-func TestToolResponseScheduling(t *testing.T) {
+// TestScheduleFor covers the scheduling table for NON_BLOCKING tool results: a result the user is sitting there waiting for interrupts Ora's generation when she is silent, but waits for a natural gap instead — WHEN_IDLE — whenever she is currently speaking, so her own sentence never gets cut off. Quiet and unrecognized tools always wait for the gap, regardless of speaking state.
+func TestScheduleFor(t *testing.T) {
 	for _, tc := range []struct {
-		tool string
-		want genai.FunctionResponseScheduling
+		name     string
+		tool     string
+		speaking bool
+		want     genai.FunctionResponseScheduling
 	}{
-		{"query_memory", genai.FunctionResponseSchedulingInterrupt},
-		{"recall", genai.FunctionResponseSchedulingInterrupt},
-		{"branch", genai.FunctionResponseSchedulingInterrupt},
-		{"shell_exec", genai.FunctionResponseSchedulingInterrupt},
-		{"read_file", genai.FunctionResponseSchedulingInterrupt},
-		{"save_note", genai.FunctionResponseSchedulingWhenIdle},
-		{"revise", genai.FunctionResponseSchedulingWhenIdle},
-		{"open_url", genai.FunctionResponseSchedulingWhenIdle},
-		{"totally_unknown_tool", genai.FunctionResponseSchedulingWhenIdle},
+		{"known tool, silent, interrupts", "query_memory", false, genai.FunctionResponseSchedulingInterrupt},
+		{"known tool, speaking, waits", "query_memory", true, genai.FunctionResponseSchedulingWhenIdle},
+		{"recall, silent, interrupts", "recall", false, genai.FunctionResponseSchedulingInterrupt},
+		{"branch, silent, interrupts", "branch", false, genai.FunctionResponseSchedulingInterrupt},
+		{"branch, speaking, waits", "branch", true, genai.FunctionResponseSchedulingWhenIdle},
+		{"quiet tool, silent, still waits", "save_note", false, genai.FunctionResponseSchedulingWhenIdle},
+		{"quiet tool, speaking, waits", "save_note", true, genai.FunctionResponseSchedulingWhenIdle},
+		{"quiet tool revise, silent, waits", "revise", false, genai.FunctionResponseSchedulingWhenIdle},
+		{"quiet tool open_url, silent, waits", "open_url", false, genai.FunctionResponseSchedulingWhenIdle},
+		{"unknown tool, silent, waits", "totally_unknown_tool", false, genai.FunctionResponseSchedulingWhenIdle},
+		{"unknown tool, speaking, waits", "totally_unknown_tool", true, genai.FunctionResponseSchedulingWhenIdle},
 	} {
-		if got := toolResponseScheduling(tc.tool); got != tc.want {
-			t.Errorf("toolResponseScheduling(%q) = %q, want %q", tc.tool, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scheduleFor(tc.tool, tc.speaking); got != tc.want {
+				t.Errorf("scheduleFor(%q, speaking=%v) = %q, want %q", tc.tool, tc.speaking, got, tc.want)
+			}
+		})
 	}
 }
 
-// TestRunToolCall_SendsScheduling proves the scheduling table is actually attached to the FunctionResponse that goes back over the wire, not just computed. Without it the Live API defaults every NON_BLOCKING result to WHEN_IDLE, so an answer the user asked for waits for a gap that may never come.
+// TestRunToolCall_SendsScheduling proves the scheduling table is actually attached to the FunctionResponse that goes back over the wire, not just computed. Without it the Live API defaults every NON_BLOCKING result to WHEN_IDLE, so an answer the user asked for waits for a gap that may never come. No speaker is set here, so isSpeaking() is false and the tool is expected to interrupt.
 func TestRunToolCall_SendsScheduling(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	fs := &fakeLiveSession{
@@ -166,6 +172,48 @@ func TestRunToolCall_SendsScheduling(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the tool response")
+	}
+}
+
+// TestRunToolCall_SchedulingFollowsSpeakingState proves the scheduling actually sent over the wire tracks a.speaker's amplitude at send time, not a fixed table. High amplitude (Ora audibly speaking) must produce WHEN_IDLE so her sentence isn't cut off; near-zero amplitude (she's quiet) must produce INTERRUPT so the waiting user hears the answer right away.
+func TestRunToolCall_SchedulingFollowsSpeakingState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		amplitude float64
+		want      genai.FunctionResponseScheduling
+	}{
+		{"speaking loudly, waits for a gap", 0.4, genai.FunctionResponseSchedulingWhenIdle},
+		{"silent, interrupts immediately", 0.0, genai.FunctionResponseSchedulingInterrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			speaker := &fakeSpeaker{}
+			speaker.setAmplitude(tc.amplitude)
+			a := NewAgent(nil, speaker, &toolTestBrain{}, nil, "")
+			fs := &fakeLiveSession{
+				msgCh:     make(chan *genai.LiveServerMessage, 2),
+				responses: make(chan genai.LiveSendToolResponseParameters, 2),
+				closeErr:  errors.New("fake session closed"),
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+			fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+				FunctionCalls: []*genai.FunctionCall{
+					{ID: "call-1", Name: "query_memory", Args: map[string]any{"query": "riddler"}},
+				},
+			}}
+
+			select {
+			case resp := <-fs.responses:
+				fr := resp.FunctionResponses[0]
+				if fr.Scheduling != tc.want {
+					t.Errorf("expected scheduling %q at amplitude %v, got %q", tc.want, tc.amplitude, fr.Scheduling)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for the tool response")
+			}
+		})
 	}
 }
 
@@ -777,6 +825,82 @@ func TestRunToolCall_SessionEndsBeforeApproval_GoroutineExitsInsteadOfLeaking(t 
 	case resp := <-fs.responses:
 		t.Fatalf("expected no response delivered for a session that ended before approval, got: %+v", resp)
 	default:
+	}
+}
+
+// panickingNoteBrain is a toolTestBrain whose LogNote panics instead of writing, standing in for the class of bug runToolCall's recover() guards against: a bad type assertion or a nil dereference reachable from inside a tool handler.
+type panickingNoteBrain struct {
+	toolTestBrain
+}
+
+func (b *panickingNoteBrain) LogNote(ctx context.Context, content, kind string) (int64, error) {
+	panic("simulated tool panic: LogNote")
+}
+
+// A panic inside a tool call used to have nothing above it on runToolCall's bare goroutine, so it took the whole daemon down. save_note is WHEN_IDLE-scheduled (see quietTools), so runToolWithNudge calls executeTool synchronously on runToolCall's own goroutine, which is what lets a plain recover() at the top of runToolCall catch it. The receive loop must keep running afterward, the model must get back a tool response whose output says it failed, and the UI's activity feed must see the call closed out rather than left "running".
+func TestRunToolCall_PanicIsRecoveredAndReportedAsAFailedToolCall(t *testing.T) {
+	a := NewAgent(nil, nil, &panickingNoteBrain{}, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 2),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-panic", Name: "save_note", Args: map[string]any{"content": "this will panic"}},
+		},
+	}}
+
+	var finished ToolActivity
+	sawFinished := false
+	deadline := time.After(2 * time.Second)
+	for !sawFinished {
+		select {
+		case ev := <-a.ToolActivityChan:
+			if ev.Phase == ToolFinished {
+				finished = ev
+				sawFinished = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the ToolFinished activity after the panic")
+		}
+	}
+	if !finished.Err {
+		t.Errorf("ToolFinished.Err = false, want true after a panic")
+	}
+
+	select {
+	case resp := <-fs.responses:
+		fr := resp.FunctionResponses[0]
+		if fr.ID != "call-panic" {
+			t.Errorf("response ID = %q, want call-panic", fr.ID)
+		}
+		out, _ := fr.Response["output"].(string)
+		if !strings.HasPrefix(out, "error: ") {
+			t.Errorf("output = %q, want it to start with \"error: \"", out)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a tool response after the panic")
+	}
+
+	// The receive loop must have survived: a second, ordinary tool call still gets a normal response.
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-after", Name: "save_note", Args: map[string]any{"content": "still alive"}},
+		},
+	}}
+	select {
+	case resp := <-fs.responses:
+		fr := resp.FunctionResponses[0]
+		if fr.ID != "call-after" {
+			t.Errorf("response ID = %q, want call-after", fr.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("receiveLoop did not survive the panic: no response for the call after it")
 	}
 }
 
@@ -1744,6 +1868,21 @@ func TestSystemInstruction_DoesNotAskPermissionForWhatCostsNothing(t *testing.T)
 	}
 }
 
+// On 2026-09-12 at 16:20:06 Ora called revise and said "I've updated the research task on your list with those details and the links" in the same instant; the call came back an error ten milliseconds later and the user was left believing a write that never happened. The rule that an action counts only once its result says so was already in the prompt, but it sat in the screen paragraph among clicks and window switches, so it read as being about the screen. Every write has the same shape: the tools are non-blocking, so nothing but the prompt stops the model narrating a result it has not seen.
+func TestSystemInstruction_WaitsForAWriteToLandBeforeSayingItDid(t *testing.T) {
+	prompt := SystemInstruction(time.Date(2026, 9, 12, 16, 20, 0, 0, time.UTC), "", "some context")
+	tools, _, ok := strings.Cut(prompt, "</tools_and_capabilities>")
+	if !ok {
+		t.Fatal("the live prompt has no tools paragraph")
+	}
+	_, tools, _ = strings.Cut(tools, "<tools_and_capabilities>")
+	for _, want := range []string{"add_task", "revise", "only after"} {
+		if !strings.Contains(tools, want) {
+			t.Errorf("the tools paragraph does not mention %q, so the wait-for-the-write rule is not where the write tools are", want)
+		}
+	}
+}
+
 // TestReceiveLoop_ToolCallsOfOneMessageRunInOrder covers the calls of a single ToolCall message racing each other. Measured 2026-09-09: the model sent click(tab) with press_key Ctrl+W and the key landed 62 ms in while the click landed at 666 ms, so the wrong tab closed; click(search box) with type_text went the same way three times and the box stayed empty. The calls of one message must now run one after another in the order the model gave them.
 // The first call here is a shell_exec awaiting HITL approval, so it genuinely blocks; the second is a fast list_files. Under the old goroutine-per-call code the fast one answered first.
 func TestReceiveLoop_ToolCallsOfOneMessageRunInOrder(t *testing.T) {
@@ -1798,7 +1937,7 @@ func TestReceiveLoop_ToolCallsOfOneMessageRunInOrder(t *testing.T) {
 func TestSessionPictureSender_UsesVideoNotDeprecatedMediaChunks(t *testing.T) {
 	fs := &fakeLiveSession{sentRealtime: make(chan genai.LiveRealtimeInput, 1)}
 
-	if err := sessionPictureSender(fs)(context.Background(), tracker.Capture{Data: []byte("png"), Mime: "image/png"}); err != nil {
+	if err := (&Agent{}).sessionPictureSender(fs)(context.Background(), tracker.Capture{Data: []byte("png"), Mime: "image/png"}); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
 
@@ -1888,5 +2027,90 @@ func TestVoiceScreenScope_SurvivesAReconnect(t *testing.T) {
 	items := lookStateFrom(second).items
 	if len(items) != 1 || items[0].Ref != "ref-25" {
 		t.Fatalf("expected the second connect to see the first's numbered list, got %+v", items)
+	}
+}
+
+// A single nudge is what made the 30-second open_app on 2026-09-12 feel like being abandoned: Ora said "that one's still going" once and then went quiet for the remaining 22 seconds. A tool that keeps running has to keep saying so, and each nudge has to read differently from the last, or the same sentence twice reads as a stuck loop rather than as progress.
+func TestRunToolCall_SlowTool_KeepsNudgingWithChangingWords(t *testing.T) {
+	orig := longRunNudgeDelay
+	longRunNudgeDelay = 30 * time.Millisecond
+	defer func() { longRunNudgeDelay = orig }()
+	SetToolApprovals(true)
+	t.Cleanup(func() { SetToolApprovals(false) })
+
+	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 16),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
+		FunctionCalls: []*genai.FunctionCall{
+			{ID: "call-1", Name: "shell_exec", Args: map[string]any{"command": "sleep 60"}},
+		},
+	}}
+
+	var said []string
+	deadline := time.After(3 * time.Second)
+	for len(said) < 3 {
+		select {
+		case resp := <-fs.responses:
+			fr := resp.FunctionResponses[0]
+			if fr.WillContinue == nil || !*fr.WillContinue {
+				t.Fatalf("nudge %d was not interim: %+v", len(said)+1, fr)
+			}
+			if fr.ID != "call-1" {
+				t.Errorf("nudge %d carried ID %q, want the original call ID", len(said)+1, fr.ID)
+			}
+			out, _ := fr.Response["output"].(string)
+			said = append(said, out)
+		case <-deadline:
+			t.Fatalf("only %d nudges arrived in 3s, want at least 3: %q", len(said), said)
+		}
+	}
+
+	// Each one has to be its own sentence. Repeating one line is what makes a wait sound like a hang.
+	for i, a := range said {
+		for j, b := range said {
+			if i != j && a == b {
+				t.Errorf("nudges %d and %d say the same thing (%q); each nudge must read differently", i+1, j+1, a)
+			}
+		}
+	}
+}
+
+// The gaps between nudges have to widen. At a flat longRunNudgeDelay a tool stuck for five minutes speaks about thirty-seven times, which reads as a stuck loop rather than as patience, and it is the opposite of the natural-conversation feel the nudges exist for.
+func TestNudgeGap_WidensThenHoldsAtTheCap(t *testing.T) {
+	orig := longRunNudgeDelay
+	longRunNudgeDelay = 8 * time.Second
+	defer func() { longRunNudgeDelay = orig }()
+
+	if got := nudgeGap(1); got != 8*time.Second {
+		t.Errorf("nudgeGap(1) = %v, want the first nudge at longRunNudgeDelay", got)
+	}
+	for n := 2; n <= 8; n++ {
+		prev, got := nudgeGap(n-1), nudgeGap(n)
+		if got < prev {
+			t.Errorf("nudgeGap(%d) = %v, shorter than nudgeGap(%d) = %v; gaps must never narrow", n, got, n-1, prev)
+		}
+		if got > nudgeBackoffCap {
+			t.Errorf("nudgeGap(%d) = %v, past the cap of %v", n, got, nudgeBackoffCap)
+		}
+	}
+	if got := nudgeGap(20); got != nudgeBackoffCap {
+		t.Errorf("nudgeGap(20) = %v, want it held at the cap of %v", got, nudgeBackoffCap)
+	}
+	// A five-minute hang should cost a handful of check-ins, not dozens.
+	spoken, elapsed := 0, time.Duration(0)
+	for elapsed < 5*time.Minute {
+		spoken++
+		elapsed += nudgeGap(spoken)
+	}
+	if spoken > 15 {
+		t.Errorf("a five-minute wait would speak %d times, want a handful", spoken)
 	}
 }

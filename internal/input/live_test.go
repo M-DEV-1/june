@@ -33,5 +33,5 @@ func TestLivePortalShiftTap(t *testing.T) {
 		t.Fatalf("PressKey(Shift): %v", err)
 	}
 
-	t.Logf("live portal session opened; had saved token before this run: %v; stream node id: %d", hadToken, sess.stream)
+	t.Logf("live portal session opened; had saved token before this run: %v; monitors covered: %d", hadToken, sess.Monitors())
 }

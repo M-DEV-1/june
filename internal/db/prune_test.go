@@ -509,3 +509,56 @@ func TestPruneActRunsTakesAFinishedJobsCheckpoint(t *testing.T) {
 		t.Errorf("the live job's checkpoint was pruned; kept %v", left)
 	}
 }
+
+// TestPruneToolCallsRemovesOnlyRowsOlderThanTheWindow writes one old and one fresh tool call and checks the pass takes only the old one, and that a non-positive window prunes nothing at all.
+func TestPruneToolCallsRemovesOnlyRowsOlderThanTheWindow(t *testing.T) {
+	store := newFileStore(t)
+	ctx := context.Background()
+
+	oldID, err := store.AddToolCall(ctx, ToolCall{Path: "ask", Name: "look", Outcome: "ok"})
+	if err != nil {
+		t.Fatalf("AddToolCall: %v", err)
+	}
+	if _, err := store.db.Exec(`UPDATE tool_calls SET created_at = ? WHERE id = ?`, sqliteUTC(time.Now().Add(-60*24*time.Hour)), oldID); err != nil {
+		t.Fatalf("backdate tool call: %v", err)
+	}
+	freshID, err := store.AddToolCall(ctx, ToolCall{Path: "ask", Name: "look", Outcome: "ok"})
+	if err != nil {
+		t.Fatalf("AddToolCall: %v", err)
+	}
+
+	removed, err := store.PruneToolCalls(ctx, 0)
+	if err != nil {
+		t.Fatalf("PruneToolCalls(0): %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("PruneToolCalls with a non-positive window removed %d rows, want 0", removed)
+	}
+
+	removed, err = store.PruneToolCalls(ctx, testFailedGrace)
+	if err != nil {
+		t.Fatalf("PruneToolCalls: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("PruneToolCalls removed %d rows, want 1", removed)
+	}
+
+	rows, err := store.ToolCallsSince(ctx, time.Now().Add(-365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("ToolCallsSince: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != freshID {
+		t.Errorf("tool calls left after pruning = %+v, want only the fresh row %d", rows, freshID)
+	}
+}
+
+// TestFinishedActJobStatesSQLCoversEveryState checks that the IN-list PruneActRuns builds from finishedActJobStates names every state in that slice, so the two cannot drift the way a hand-typed SQL literal and a Go slice once could.
+func TestFinishedActJobStatesSQLCoversEveryState(t *testing.T) {
+	sql := finishedActJobStatesSQL()
+	for _, s := range finishedActJobStates {
+		want := "'" + s.(string) + "'"
+		if !strings.Contains(sql, want) {
+			t.Errorf("finishedActJobStatesSQL() = %q, missing %q", sql, want)
+		}
+	}
+}
