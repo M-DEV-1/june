@@ -9,10 +9,21 @@ icons="$HOME/.local/share/icons/hicolor"
 units="$HOME/.config/systemd/user"
 extdir="$HOME/.local/share/gnome-shell/extensions/ora@ora.local"
 
+# The window is a Tauri binary linked against the system WebKitGTK stack, which a fresh desktop often does not have. Checked before anything is installed, so a missing library reads as a message here instead of as a window that never opens.
+missing="$(ldd "$here/ora-window" 2>/dev/null | awk '/not found/ {print $1}' || true)"
+if [ -n "$missing" ]; then
+	echo "Ora's window needs shared libraries this machine does not have:" >&2
+	echo "$missing" | sed 's/^/  /' >&2
+	echo "On Debian or Ubuntu: sudo apt install libwebkit2gtk-4.1-0 libgtk-3-0 libsoup-3.0-0" >&2
+	exit 1
+fi
+
 mkdir -p "$bin" "$apps" "$units" "$extdir"
 install -m 0755 "$here/ora" "$bin/ora"
 install -m 0755 "$here/ora-window" "$bin/ora-window"
-install -m 0644 "$here/ora.desktop" "$apps/ora.desktop"
+# Exec= is rewritten to the absolute path of the installed binary. The entry ships saying `Exec=ora`, and a desktop launching it that way finds nothing: ~/.local/bin only joins PATH when ~/.profile runs at login and the directory already exists, which on a machine installing Ora for the first time it did not.
+sed "s|^Exec=ora$|Exec=$bin/ora|" "$here/ora.desktop" > "$apps/ora.desktop"
+chmod 0644 "$apps/ora.desktop"
 install -m 0644 "$here/ora.service" "$units/ora.service"
 install -m 0644 "$here/gnome-extension/ora@ora.local/metadata.json" "$extdir/metadata.json"
 install -m 0644 "$here/gnome-extension/ora@ora.local/extension.js" "$extdir/extension.js"
