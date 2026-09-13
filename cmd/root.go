@@ -12,6 +12,7 @@ import (
 	"ora/internal/obs"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -74,10 +75,15 @@ func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 		return
 	}
 
-	if err := godotenv.Load(); err != nil {
-		slog.Info("No .env file found, read from sys env")
+	// Two places, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way ora is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
+	// Without the second, the key had exactly one source and it was relative to the process's working directory: start ora from anywhere but the checkout and GEMINI_API_KEY was empty, which is voice failing completely with nothing in the log to say why. The first-run panel has been telling the user to put the key in this file all along, and nothing read it.
+	cwdEnv := godotenv.Load()
+	dataEnv := godotenv.Load(filepath.Join(config.DataDir(), "env"))
+	if cwdEnv != nil && dataEnv != nil {
+		slog.Info("no .env file found, reading the environment as it is", "looked_in", []string{".env", filepath.Join(config.DataDir(), "env")})
 	}
 	secureEnvFile(".env")
+	secureEnvFile(filepath.Join(config.DataDir(), "env"))
 	// global context that listens for sigint
 	// SIGTERM as well as SIGINT: kill, a logout and a system shutdown all send SIGTERM, and catching only SIGINT meant every one of those killed the process outright with no cleanup — abandoning a meeting recording mid-call.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -238,13 +244,19 @@ func formatHotkey(raw string) string {
 // Returns true only if the daemon responds 200 OK.
 var daemonPingClient = &http.Client{Timeout: 300 * time.Millisecond}
 
+// One miss is not an answer. A single 300ms GET is easily outlived by a GC pause or a busy log flush in a perfectly healthy daemon, and a false "not running" makes the caller spawn a second one, which then fails to bind the port and exits loudly — seven times in the log, every one against a daemon that was demonstrably alive and serving. Three tries costs at most 900ms on the genuine cold-start path, where a spawn is about to happen anyway.
 func pingDaemon() bool {
-	resp, err := daemonPingClient.Get("http://127.0.0.1:" + DaemonPort + "/ping")
-	if err != nil {
-		return false
+	for i := 0; ; i++ {
+		resp, err := daemonPingClient.Get("http://127.0.0.1:" + DaemonPort + "/ping")
+		if err == nil {
+			resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		}
+		if i == 2 {
+			return false
+		}
+		time.Sleep(150 * time.Millisecond)
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
 }
 
 // checkDaemonBuildMismatch GETs url (the daemon's /ping) and compares its build identity against this process's own buildIdentity. A daemon and a freshly-launched client always read the same executable path, so the only way they'd disagree is a daemon process that's been running since before the file on disk was last overwritten — i.e. a rebuild happened and the daemon is still running the old code. Returns "" (no warning) on any failure or an empty/matching body — this is a diagnostic, never a reason to block startup.

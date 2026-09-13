@@ -110,7 +110,7 @@ func (s *QuotaState) save(counts dayCounts) {
 func (s *QuotaState) take(model string, cap int) (refused bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	today := time.Now().Format("2006-01-02")
+	today := QuotaDay()
 	counts := s.load()
 	if counts[today] == nil {
 		counts[today] = map[string]int{}
@@ -127,7 +127,7 @@ func (s *QuotaState) take(model string, cap int) (refused bool) {
 func (s *QuotaState) refund(model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	today := time.Now().Format("2006-01-02")
+	today := QuotaDay()
 	counts := s.load()
 	if counts[today][model] <= 0 {
 		return
@@ -187,4 +187,17 @@ func Metered(cfg config.BrainConfig, apiKey string, state *QuotaState, forAsks b
 		return WithDailyQuota(state, model, forAsks, opts, primary)
 	}
 	return primary
+}
+
+// quotaResetZone is the clock Google's free-tier daily quota rolls over on. The count has to be kept on the provider's day, not the machine's: this user is on IST, which reaches midnight about eleven and a half hours before Pacific does, so a local day key handed out a fresh allowance every morning while Google was still counting the previous day and refused the calls anyway.
+// Pacific is a reasonable reading of an undocumented reset, and it is the conservative one from here — later than local midnight, so the counter is never more permissive than the provider.
+const quotaResetZone = "America/Los_Angeles"
+
+// QuotaDay is the date the day's counts are keyed on, in the provider's own zone. Input: none. Output: the date as YYYY-MM-DD, falling back to UTC when the zone database is not installed, which is still closer to the provider's day than the machine's local time.
+func QuotaDay() string {
+	loc, err := time.LoadLocation(quotaResetZone)
+	if err != nil {
+		return time.Now().UTC().Format("2006-01-02")
+	}
+	return time.Now().In(loc).Format("2006-01-02")
 }

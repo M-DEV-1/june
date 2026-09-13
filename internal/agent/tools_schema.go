@@ -48,7 +48,7 @@ func drawParameters() *genai.Schema {
 }
 
 // toolDefinitions returns ORA's own function declarations for the Live API.
-// Every declaration is NON_BLOCKING. An unset Behavior means BLOCKING, which tells the Live API to freeze the conversation for the whole duration of a tool call — the model stops speaking and stops listening until the result lands, so a two-second memory lookup becomes two seconds of dead air on a voice call. NON_BLOCKING keeps the model talking and listening while the call runs; the result is folded back in later, at the moment picked by toolResponseScheduling in connect.go. Ora's own tool execution was already off the receive loop (see runToolCall), so this changes nothing about the transport — only the model-level contract.
+// Every declaration is NON_BLOCKING. An unset Behavior means BLOCKING, which tells the Live API to freeze the conversation for the whole duration of a tool call — the model stops speaking and stops listening until the result lands, so a two-second memory lookup becomes two seconds of dead air on a voice call. NON_BLOCKING keeps the model talking and listening while the call runs; the result is folded back in later, at the moment picked by scheduleFor in connect.go. Ora's own tool execution was already off the receive loop (see runToolCall), so this changes nothing about the transport — only the model-level contract.
 func toolDefinitions() []*genai.Tool {
 	return []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
@@ -106,7 +106,7 @@ func toolDefinitions() []*genai.Tool {
 			{
 				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "look",
-				Description: "See the screen as a picture, for what observe_screen cannot list: video, photos, games, drawings, maps, charts. The result gives the picture's size and place; read points off it in its own coordinates. Two looks per turn.",
+				Description: "See the window in front as a picture, for what observe_screen cannot list: video, photos, games, drawings, maps, charts, or a frame-only window. It photographs that window's frame, not the whole screen, so the size changes when the front window changes. The result gives the picture's size and place; read points off it in its own coordinates, and only points inside it.",
 				Parameters:  &genai.Schema{Type: genai.TypeObject},
 			},
 			{
@@ -137,13 +137,26 @@ func toolDefinitions() []*genai.Tool {
 			{
 				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "click",
-				Description: "Press the numbered element from the latest observe_screen list through its own accessibility action, so no pointer moves. Call observe_screen after every action and read what changed. Never click anything that sends, pays, deletes or submits unless the user said go.",
+				Description: "Press something. n presses a numbered element from the latest observe_screen list through its own accessibility action, no pointer moves. x,y off the last look's picture clicks a bare point, for what the list has no element or action for. then is further taps fired at once, only for UI that closes before another round can see it: a menu or a toast. Call observe_screen after. Never click anything that sends, pays, deletes or submits unless the user said go.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
 						"n": {Type: genai.TypeNumber, Description: "Element number"},
+						"x": {Type: genai.TypeNumber, Description: "x in the look's picture"},
+						"y": {Type: genai.TypeNumber, Description: "y in the look's picture"},
+						"then": {
+							Type:        genai.TypeArray,
+							Description: "Further taps, each {n} or {x,y}",
+							Items: &genai.Schema{
+								Type: genai.TypeObject,
+								Properties: map[string]*genai.Schema{
+									"n": {Type: genai.TypeNumber},
+									"x": {Type: genai.TypeNumber},
+									"y": {Type: genai.TypeNumber},
+								},
+							},
+						},
 					},
-					Required: []string{"n"},
 				},
 			},
 			{
@@ -193,22 +206,9 @@ func toolDefinitions() []*genai.Tool {
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
-						"keys": {Type: genai.TypeString, Description: "Enter, Escape, Tab, Space, Up, Down, Left, Right, Backspace, Delete, or a chord like Ctrl+L"},
+						"keys": {Type: genai.TypeString, Description: "One key, or one chord. Enter, Escape, Tab, Space, Up, Down, Left, Right, Backspace, Delete, Home, End, PageUp, PageDown, Insert, Print, F1 to F12, a digit, a letter, a punctuation mark, or a chord like Ctrl+L. One press per call: \"Tab Tab\" is not a key, call press_key twice."},
 					},
 					Required: []string{"keys"},
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "click_at",
-				Description: "Click a point with the pointer, for what the list has no element or no working action for. Coordinates come only off the picture the last look delivered; without one it is refused. Prefer click when the thing is listed.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"x": {Type: genai.TypeNumber, Description: "x in the look's picture"},
-						"y": {Type: genai.TypeNumber, Description: "y in the look's picture"},
-					},
-					Required: []string{"x", "y"},
 				},
 			},
 			{
@@ -223,18 +223,6 @@ func toolDefinitions() []*genai.Tool {
 						"dy": {Type: genai.TypeNumber, Description: "steps to scroll, positive is down"},
 					},
 					Required: []string{"x", "y", "dy"},
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "switch_window",
-				Description: "Bring another application's window to the front and read back which came forward. Only when the request names that application; the task otherwise stays in the window it started in.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"app": {Type: genai.TypeString, Description: "The application to bring to the front"},
-					},
-					Required: []string{"app"},
 				},
 			},
 			{
@@ -299,6 +287,7 @@ func toolDefinitions() []*genai.Tool {
 					"Meetings are NOT episodes: an episode is a screen capture, so searching episodes for an app called Teams or Zoom finds the window and never the meeting. A meeting's minutes are a note with kind='meeting'. " +
 					"An action note carries its state as a [state/priority] prefix at the start of content, so the things still owed are kind='action' AND content LIKE '[open/%'. " +
 					"episodes_fts and memory_fts are full-text indexes: use \"episodes_fts MATCH 'word'\" and join its rowid to episodes.id, or \"memory_fts MATCH 'word'\" where source names the table ref_id points into. " +
+					"There is no table called \"memory\", and none called \"tasks\". Facts are in notes, captures in episodes, conversations in threads; memory_fts is only the full-text shadow of notes. The schema below is the whole of it, read from the store itself — nothing outside it exists. " +
 					"Schema, read from the store itself. A column listed as \"is one of\" holds only those values:\n" + storeSchemaBlock(),
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
@@ -327,6 +316,22 @@ func toolDefinitions() []*genai.Tool {
 			},
 			{
 				Behavior: genai.BehaviorNonBlocking,
+				Name:     "do",
+				Description: "Carry out a job of several actions on the user's machine: it plans the whole thing first, takes one step at a time, checks after each step that the change it expected actually happened, and reads what this machine did the last few times it was asked something similar. " +
+					"Use it the moment a request needs more than about three actions, or spans more than one application — \"open Spotify and play this, then open Teams and message Priya, then see if anyone's replied\", \"open a terminal, start Claude and paste this prompt in\" — and for anything you would otherwise drive by calling observe_screen and click over and over. " +
+					"Pass the whole job as one goal in the user's own words, with everything the job needs inside it: a message to send, a prompt to type, a song to play, all of it, because the job cannot hear the conversation it came from. " +
+					"It runs beside you and takes minutes, so carry on talking while it does; the outcome arrives as this call's result and that is when to say how it went. " +
+					"For one action on the window already in front, use the screen tools directly instead. For a question about the world, use branch.",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"goal": {Type: genai.TypeString, Description: "The whole job in one sentence or two, in the user's own words, carrying every detail the job needs."},
+					},
+					Required: []string{"goal"},
+				},
+			},
+			{
+				Behavior: genai.BehaviorNonBlocking,
 				Name:     "branch",
 				Description: "Resolve one open-ended question or research task that needs cross-referencing " +
 					"several searches to build a complete answer (e.g. \"catch me up on everything about the " +
@@ -334,6 +339,7 @@ func toolDefinitions() []*genai.Tool {
 					"query_memory/recall repeatedly yourself. THIS IS ALSO THE ONLY WAY TO REACH THE WEB: it is the one tool with live search, " +
 					"so anything outside the user's own life, news, prices, documentation, a fact you are not certain of, goes here. " +
 					"Never open a browser to answer a question; opening a page shows it to the user and tells you nothing. " +
+					"Each result comes back with its page's URL, so when the user asks to see one, pass that URL straight to open_url; never type out a URL you did not get from a result, since a guessed one lands the user on a missing page. " +
 					"Runs an internal multi-step search in the " +
 					"background and returns only the final synthesized answer; you will not see, and must not " +
 					"need, its intermediate steps. Prefer query_memory/recall directly for a single simple lookup.",
@@ -354,7 +360,7 @@ func toolDefinitions() []*genai.Tool {
 					"Tasks: if the user asked for a todo and you called save_note, you did not do what they asked. " +
 					"Write the title as the work itself, in the user's own words, short enough to read in a list: " +
 					"\"add source pdfs to the excel files and link to the exact pages\", not \"the user wants to...\". " +
-					"Only say it is on their list once this has come back saying it was added.",
+					"Only say it is on their list once this has come back saying it was added. It comes back with the task's ref, \"task#N\", which revise takes if they correct or drop it a moment later.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
@@ -399,17 +405,17 @@ func toolDefinitions() []*genai.Tool {
 			{
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "revise",
-				Description: "Fix or remove something Ora remembered wrong, a note, an action item, or a thread. " +
-					"Look it up first with query_memory or recall to get its ref, the \"[note#N]\" or \"[thread#N]\" a result showed you, then call this. " +
+				Description: "Fix or remove something Ora remembered wrong, or something on the task list: a note, an action item, a thread, or a task. " +
+					"Look it up first with query_memory or recall to get its ref, the \"[note#N]\" or \"[thread#N]\" a result showed you, then call this. A task's ref is the \"task#N\" add_task handed back, or its id in user_tasks. " +
 					"Pass content to correct the text. For an action item, pass state (open, done, or dropped) instead, never leave a task the user says is done still open, and priority (high, normal, or low) when they say how much it matters. " +
-					"Pass remove to delete a note entirely (a thread cannot be removed, only corrected). " +
-					"Use this instead of just apologizing out loud and leaving the wrong fact in memory.",
+					"Pass remove to delete a note or a task entirely (a thread cannot be removed, only corrected). A task the user says to drop is deleted, since the list has nowhere to keep a dropped one. " +
+					"Use this instead of just apologizing out loud and leaving the wrong fact in memory, and never say you cannot change something on the list.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
-						"ref":      {Type: genai.TypeString, Description: "The reference exactly as a result showed it: \"note#12\" or \"thread#3\", brackets optional."},
+						"ref":      {Type: genai.TypeString, Description: "The reference exactly as a result showed it: \"note#12\", \"thread#3\" or \"task#5\", brackets optional."},
 						"content":  {Type: genai.TypeString, Description: "Optional. The corrected text. Omit to leave it unchanged."},
-						"state":    {Type: genai.TypeString, Description: "Optional. For an action item only: open, done, or dropped."},
+						"state":    {Type: genai.TypeString, Description: "Optional. For an action item or a task: open, done, or dropped."},
 						"priority": {Type: genai.TypeString, Description: "Optional. For an action item only: high, normal, or low. Everything starts normal, so set this only when the user says how much something matters."},
 						"remove":   {Type: genai.TypeBoolean, Description: "Optional. Delete the row entirely, cannot be combined with content, state, or priority."},
 					},

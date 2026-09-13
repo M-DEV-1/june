@@ -193,7 +193,9 @@ func TestOverlayMethods_BroadcastFieldMapping(t *testing.T) {
 				t.Errorf("overlay = %+v, want a line labelled here through %v", got, points)
 			}
 		}},
-		{"Path", func(s *Server) error { return s.Draw("", "path", [][2]int{{1, 2}, {3, 4}, {5, 6}}, 0, 0, 0, 0, "route") }, func(t *testing.T, ev Event, got OverlayRequest) {
+		{"Path", func(s *Server) error {
+			return s.Draw("", "path", [][2]int{{1, 2}, {3, 4}, {5, 6}}, 0, 0, 0, 0, "route")
+		}, func(t *testing.T, ev Event, got OverlayRequest) {
 			if got.Kind != "path" || len(got.Points) != 3 {
 				t.Errorf("path overlay = %+v, want kind path through 3 points", got)
 			}
@@ -357,9 +359,9 @@ func TestDraw_SaysWhenTheDrawingReachedNoWindow(t *testing.T) {
 	s := New(&fakeAsker{}, nil, nil, nil)
 
 	calls := map[string]func() error{
-		"Ring":   func() error { return s.Ring("", 1, 2, 3, 4, "here") },
-		"Marks":  func() error { return s.Marks("", []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}}) },
-		"Draw":   func() error { return s.Draw("", "box", nil, 1, 2, 3, 4, "go") },
+		"Ring":  func() error { return s.Ring("", 1, 2, 3, 4, "here") },
+		"Marks": func() error { return s.Marks("", []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}}) },
+		"Draw":  func() error { return s.Draw("", "box", nil, 1, 2, 3, 4, "go") },
 	}
 	for name, call := range calls {
 		if err := call(); !errors.Is(err, ErrNoOverlayWindow) {

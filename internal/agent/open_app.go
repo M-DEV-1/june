@@ -177,9 +177,13 @@ func (a *Agent) openApp(ctx context.Context, app string) string {
 		return toolError("open_app needs the application to open")
 	}
 	before := a.frontWindowNow(ctx)
+	// A task that began in one application stays there: a request about the window in front must not be answered by bringing some other application forward, whatever the model thought it needed. Carried over from switch_window, which is what this tool now also does.
+	if frontApp, _, _ := strings.Cut(before, windowSep); frontApp != "" && !namesApp(questionFrom(ctx), app) && namesApp(questionFrom(ctx), frontApp) {
+		return toolError(fmt.Sprintf("I won't switch to %q: what was asked is about %q, and this task stays in the window it started in", app, frontApp))
+	}
 	entries := a.desktopEntries()
 	entry := pickDesktopEntry(entries, app)
-	if namesApp(before, app) {
+	if frontIsApp(before, app) {
 		return fmt.Sprintf("%q is already the window in front; nothing was started", before) + a.treelessNote(entry, a.pidOf(ctx, app))
 	}
 	if ok, how := a.raiseWindow(ctx, app); ok {
@@ -187,6 +191,13 @@ func (a *Agent) openApp(ctx context.Context, app string) string {
 	}
 	if entry == "" {
 		return toolError(fmt.Sprintf("no installed application is named %q; %s; if it is a website, open_url is the way to it", app, nearEntries(entries, app)))
+	}
+	if a.launchApp == nil {
+		return toolError(fmt.Sprintf("%q is not running and this session has no way to start applications", app))
+	}
+	// A window of it is open but would not come forward. Starting a second copy is the wrong answer and a visible one: a browser already running answers a second invocation by opening another window, which is where the tabs nobody asked for came from.
+	if a.windowOpenFor(ctx, app) {
+		return toolError(fmt.Sprintf("%q already open but its window would not come forward; nothing was started, so no second copy and no new window", app))
 	}
 	// The windows on screen before the launch, by pid: the launched application's window is whichever appears after, since its class and title need not carry the word the user used ("Files" is org.gnome.Nautilus with a window called "Home").
 	known := a.windowPids(ctx)
@@ -260,11 +271,17 @@ func nearEntries(entries map[string]string, app string) string {
 			words[w] = true
 		}
 	}
+	// One application can ship two desktop entries — a snap puts one in /var/lib/snapd/desktop/applications and Ora patches a copy into ~/.local/share/applications — and the entries are keyed by path, so both survive. Suggesting the same name twice ("Brave Web Browser, Brave Web Browser") reads as two different applications to pick between.
+	seen := map[string]bool{}
 	var near []string
 	for _, name := range entries {
+		if seen[name] {
+			continue
+		}
 		for _, w := range strings.Fields(strings.ToLower(name)) {
 			if words[strings.Trim(w, ".,()")] {
 				near = append(near, name)
+				seen[name] = true
 				break
 			}
 		}
@@ -277,6 +294,25 @@ func nearEntries(entries map[string]string, app string) string {
 		return fmt.Sprintf("none of the %d installed applications shares a word with it", len(entries))
 	}
 	return "installed applications with a word in common: " + strings.Join(near, ", ")
+}
+
+// windowOpenFor reports whether the shell extension can see a window belonging to the named application, judged on WM_CLASS, which is the application itself rather than whatever the window happens to be showing. Input: a context and the application name. Output: false whenever there is no extension or the list cannot be read, so a store of no information never blocks a launch.
+func (a *Agent) windowOpenFor(ctx context.Context, app string) bool {
+	if a.raiser == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, raiserTimeout)
+	defer cancel()
+	windows, err := a.raiser.List(ctx)
+	if err != nil {
+		return false
+	}
+	for _, w := range windows {
+		if namesApp(w.WmClass, app) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowPids is the set of pids owning a window right now, or nil when the shell cannot be asked. Input: the call's context. Output: the set.

@@ -43,7 +43,7 @@ func (a *Agent) beforePress(ctx context.Context) func() tracker.Capture {
 	return func() tracker.Capture { return <-done }
 }
 
-// pressCheck compares the screen around a pressed point before and after the press. Input: a context, the waiter beforePress handed out, and the point in screen pixels. Output: "" as soon as a picture shows the screen changed there, or when nothing can say (no camera, a picture that will not decode, a point outside both pictures); a tool error naming the point when pressSettle passes with every picture matching, which is a press that landed on nothing.
+// pressCheck compares the screen around a pressed point before and after the press. Input: a context, the waiter beforePress handed out, and the point in screen pixels. Output: "" as soon as a picture shows the screen changed there, or when nothing can say (no camera, no picture to start from, a picture that will not decode, a point outside both pictures); a tool error naming the point when pressSettle passes with every picture matching, which is a press that landed on nothing; a different tool error saying the check could not be verified when pressSettle passes without ever taking a single picture of the screen after the press, since a run of failed screenshots must never be reported as a successful press.
 // This is the one check in the loop that does not share a sensor with the aim: the target came off the accessibility bus or the model's own reading of a picture, and the confirmation comes off the pixels.
 func (a *Agent) pressCheck(ctx context.Context, before func() tracker.Capture, x, y int) string {
 	if a.capture == nil {
@@ -57,13 +57,21 @@ func (a *Agent) pressCheck(ctx context.Context, before func() tracker.Capture, x
 	for {
 		after, err := a.capture(ctx)
 		if err != nil {
-			return ""
+			if !time.Now().Before(deadline) {
+				return toolError(fmt.Sprintf("could not verify the press around %d,%d: the screen could not be photographed afterward, so nothing could be compared; look to see what happened", x, y))
+			}
+			time.Sleep(pressPoll)
+			continue
 		}
 		changed, known := changedAround(first, after, x, y)
 		if !known || changed {
 			return ""
 		}
 		if !time.Now().Before(deadline) {
+			// The box is 120 pixels wide, so it only sees what happens beside the button: a row highlighting, a menu dropping open. A link that navigates, a tab that switches, a button that opens a panel on the far side of the window all leave it identical and change the rest of the screen, and calling that a miss sent the loop back to look at a press that had worked.
+			if wide, known := screenChanged(first, after); known && wide {
+				return ""
+			}
 			return toolError(fmt.Sprintf("nothing on the screen changed around %d,%d after the press, so it landed on nothing; look, then aim again or take another route", x, y))
 		}
 		time.Sleep(pressPoll)

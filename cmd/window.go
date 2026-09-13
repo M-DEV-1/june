@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"ora/internal/config"
@@ -144,7 +146,8 @@ func superviseWindow(ctx context.Context, path string, start func(context.Contex
 			slog.Info("the desktop window closed itself, leaving it stopped", "path", path, "ran_for", ranFor.Round(time.Millisecond))
 			return
 		}
-		slog.Warn("the desktop window exited, starting it again", "ran_for", ranFor.Round(time.Millisecond), "wait", wait, "failures", failures, "error", waitErr)
+		// "exit status 1" on its own says nothing, and this fired 28 times in a week. What the window actually printed is in window.log, and in every one of those cases it was the same Rust panic: tao could not initialise GTK because the process had no X11 authorisation. The reason travels with the restart line now, so the next person reading ora.log does not have to know window.log exists.
+		slog.Warn("the desktop window exited, starting it again", "ran_for", ranFor.Round(time.Millisecond), "wait", wait, "failures", failures, "error", waitErr, "said", lastWindowWords(config.DataDir()))
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():
@@ -187,4 +190,39 @@ func runWindow(ctx context.Context, want bool) {
 		return
 	}
 	go superviseWindow(ctx, path, startWindow)
+}
+
+// windowLogTail is how much of the end of window.log is read looking for the reason a run died. A panic and its message land well inside this; reading more would pull in the overlay's ordinary event-stream chatter.
+const windowLogTail = 4096
+
+// lastWindowWords returns the most useful line the window printed before it exited, for the restart log line. Input: the data directory window.log sits in. Output: the last line that looks like a failure, else the last non-empty line, else "" when the file cannot be read.
+func lastWindowWords(dir string) string {
+	f, err := os.Open(filepath.Join(dir, "window.log"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return ""
+	}
+	start := max(size-windowLogTail, 0)
+	buf := make([]byte, size-start)
+	if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+		return ""
+	}
+	lines := strings.Split(string(buf), "\n")
+	last := ""
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		last = line
+		// A panic names the cause; the lines after it are the backtrace and say less.
+		if strings.Contains(line, "panicked at") || strings.Contains(line, "Failed to initialize") || strings.Contains(line, "Authorization required") {
+			return line
+		}
+	}
+	return last
 }

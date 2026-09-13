@@ -103,7 +103,8 @@ func Filter(nodes []Node) []Item {
 	return items
 }
 
-// Format renders the list one item per line as `[n] role "label" (cx,cy)`, the centre being the point a ring or a click is aimed at. Input: the filtered items. Output: the lines joined with newlines, or "" for none.
+// Format renders the list one item per line as `[n] role "label"`. Input: the filtered items. Output: the lines joined with newlines, or "" for none.
+// The number is the only handle the list hands out, because it is the only one every tool on this list takes. The centre used to be printed beside it, in desktop screen pixels, which no tool accepts at all: click, point_at and scroll_to take the number, click_at and scroll_at take pixels of the last picture. A model given two numbers uses both, so the centres were read as picture points and refused for being outside the picture — the item's rectangle is still on Item for whatever aims the pointer, it is just not published to the model.
 func Format(items []Item) string {
 	lines := make([]string, len(items))
 	for i, it := range items {
@@ -111,7 +112,7 @@ func Format(items []Item) string {
 		if len(label) > labelRunes {
 			label = append(label[:labelRunes-1], '…')
 		}
-		lines[i] = fmt.Sprintf("[%d] %s %q (%d,%d)", it.N, it.Role, string(label), it.X+it.W/2, it.Y+it.H/2)
+		lines[i] = fmt.Sprintf("[%d] %s %q", it.N, it.Role, string(label))
 	}
 	return strings.Join(lines, "\n")
 }

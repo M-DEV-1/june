@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -108,6 +109,14 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 		}
 		vec, err := emb.Embed(ctx, "RETRIEVAL_DOCUMENT", c.content)
 		if err != nil {
+			// One bad document is skipped, but an engine that has gone away refuses every candidate, and refuses in microseconds with no I/O. Carrying on through the rest of the list then costs one ERROR line per candidate at several thousand a second: on shutdown, when the root context is cancelled and the engine closed while a sweep started at boot is still running, that was 29,763 of the log's 29,941 error lines in eight days. Nothing is lost by stopping — the next sweep re-derives whatever still has no vector.
+			if engineGone(ctx, err) {
+				slog.Warn("reconcile: backfill stopped, the embedding engine is gone", "backfilled", report.Backfilled, "error", err)
+				if hasBatch {
+					flushBatch()
+				}
+				return report, err
+			}
 			slog.Error("reconcile: backfill embed failed", "id", c.id, "error", err)
 			continue
 		}
@@ -338,4 +347,14 @@ func (s *Store) liveVectorRefs(ctx context.Context, source string, refs []int64)
 		rows.Close()
 	}
 	return live
+}
+
+// engineGone reports whether an embed failure means the engine itself has stopped answering, as against one document it could not embed. Input: the sweep's context and the error the embedder returned. Output: true when carrying on would only repeat the same failure for every remaining candidate.
+// The shapes are the ways the engine stops answering every caller at once: a shutdown cancels the root context first, so calls fail on the way out to the server, and closes the engine a few steps later, after which it refuses in memory; a whisper decode takes the GPU for its whole run, and the engine refuses in memory for that whole time too. All three refuse instantly, which is what turns "keep going" into thousands of log lines a second.
+func engineGone(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, ": closed") || strings.Contains(msg, "the GPU is held")
 }

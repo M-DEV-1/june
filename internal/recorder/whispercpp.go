@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ora/internal/config"
@@ -59,6 +60,9 @@ func whisperCPPArgs(bin string) []string {
 // RunWhisper runs one whisper-cli command and, when that run dies for want of GPU memory, runs the same command once more with the GPU switched off rather than losing the recording. Input: the context, the whisper-cli binary and the arguments of the GPU run. Output: the stdout, stderr and error of whichever run answered — the CPU one whenever there was a retry.
 // Both attempts happen inside the caller's GPU turn: transcribeWAV and internal/ipc's Dictation.finish each hold GPURun across their whole decode, so the retry cannot race the embedding server or the other stream any more than the first attempt could. The audio file is the caller's too, and it deletes it only once this returns.
 func RunWhisper(ctx context.Context, bin string, args []string) (stdout, stderr string, err error) {
+	// Held across both attempts: the CPU retry is what the first attempt's crash cost us, and letting the embedder back on the card halfway would only set up the next crash.
+	gpuHeld.Store(true)
+	defer gpuHeld.Store(false)
 	out, errOut, err := run(ctx, bin, args)
 	if !gpuOutOfMemory(ctx, err, out+errOut) {
 		return out, errOut, err
@@ -102,6 +106,12 @@ func whisperGPUDevice() string {
 // GPURun serializes whisper.cpp runs against each other. whisper-medium takes about 2.2 GB of GPU memory, and this machine's card has 4 GB with a share of it already spoken for, so the two streams of a call cannot be decoded at the same time — the second would fail to allocate. Running them one after the other costs nothing, because on the GPU the card is the bottleneck rather than the number of streams.
 // Exported because a dictation runs its own whisper-cli outside this package (internal/ipc.Dictation) and has to queue behind a meeting's decode rather than race it: three of the four dictations on 2026-09-05 died with ErrorOutOfDeviceMemory while a meeting was being transcribed.
 var GPURun sync.Mutex
+
+// gpuHeld is raised for the whole of a whisper run, so the card's other tenant knows not to climb back onto it. Asking the embedding server to yield once, before the decode, was not enough: client presence is refreshed by every authenticated IPC request and the desktop window polls continuously, so the server was respawned seconds into a decode — 12 of the 37 out-of-memory crashes in the six days to 2026-09-12 had an embedding server start within the minute before them, several within two seconds.
+var gpuHeld atomic.Bool
+
+// GPUBusy reports whether a whisper decode owns the GPU right now. The daemon hands this to the embedding engine, which then stays off the card until the decode lets go. Input: none. Output: true while any whisper run is in flight.
+func GPUBusy() bool { return gpuHeld.Load() }
 
 // gpuReleaser asks the GPU's other tenant to leave before a whisper run — the daemon points it at the embedding server's StopIfIdle. It reports whether the tenant is actually gone; false means someone is mid-conversation and their embeds win. Nil means there is nothing sharing the card.
 var gpuReleaser func() bool

@@ -83,18 +83,18 @@ func checkArgs(args map[string]any, valid ...string) string {
 }
 
 // parseRef splits a "[note#12]" or "note#12" style reference — the shape query_memory, recall and action_items hand back — into its kind and numeric id, so revise can dispatch on it without the model having to know which table backs a result.
-// Input: the ref as a result showed it, brackets optional. Output: the kind ("note" or "thread") and the id, or an error naming the shape a ref must have.
+// Input: the ref as a result showed it, brackets optional. Output: the kind ("note", "thread" or "task") and the id, or an error naming the shape a ref must have.
 func parseRef(ref string) (string, int64, error) {
 	ref = strings.TrimSpace(ref)
 	ref = strings.TrimPrefix(ref, "[")
 	ref = strings.TrimSuffix(ref, "]")
 	kind, idStr, ok := strings.Cut(ref, "#")
 	if !ok {
-		return "", 0, fmt.Errorf(`ref must look like "note#12" or "thread#3"`)
+		return "", 0, fmt.Errorf(`ref must look like "note#12", "thread#3" or "task#5"`)
 	}
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		return "", 0, fmt.Errorf(`ref must look like "note#12" or "thread#3"`)
+		return "", 0, fmt.Errorf(`ref must look like "note#12", "thread#3" or "task#5"`)
 	}
 	return kind, id, nil
 }
@@ -275,6 +275,8 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			Args:     toolActivitySummary(name, args),
 			Outcome:  toolOutcome(result),
 			Result:   resultSummary(name, result),
+			Output:   util.UTF8Bytes(result, toolOutputCap),
+			TurnID:   turnIDFrom(ctx),
 			Duration: time.Since(start),
 			Offered:  offeredFrom(ctx),
 		})
@@ -378,7 +380,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		previous := a.lastScreen(ctx)
 		if len(items) == 0 {
 			a.rememberScreen(ctx, items, screenSnapshot{app: app, title: title})
-			return app + " · " + title + "\n(nothing actionable is showing)"
+			return app + " · " + title + "\n(nothing actionable is showing)" + frameOnlyHint
 		}
 		lines := strings.Split(act.Format(items), "\n")
 		a.rememberScreen(ctx, items, screenSnapshot{app: app, title: title, lines: lines})
@@ -389,7 +391,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 			return toolError("this session cannot see the screen")
 		}
 		if !looksLeft(ctx) {
-			return toolError(fmt.Sprintf("I have already looked at the screen %d times this turn; answer from what those pictures showed", maxLooksPerAsk))
+			return toolError(fmt.Sprintf("I have already looked at the screen %d times this turn; answer from what those pictures showed", looksCap(ctx)))
 		}
 		shot, err := a.capture(ctx)
 		if err != nil {
@@ -409,7 +411,8 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if a.Point == nil {
 			return toolError("this session cannot draw on the screen")
 		}
-		if errText := a.stillThere(ctx, it); errText != "" {
+		it, errText = a.stillThere(ctx, it)
+		if errText != "" {
 			return errText
 		}
 		x, y, w, h, errText := a.freshRect(ctx, it)
@@ -529,50 +532,11 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		}
 
 	case "click":
-		it, errText := a.seenItem(ctx, args)
-		if errText != "" {
-			return errText
-		}
-		if errText := a.frontWindowChanged(ctx); errText != "" {
-			return errText
-		}
-		if errText := a.stillThere(ctx, it); errText != "" {
-			return errText
-		}
-		window := a.currentWindow(ctx)
-		if irreversible(it, window, false) && !consented(questionFrom(ctx), matchedVerb(it, window)) && !goAllowed(ctx) {
-			return a.stopBeforeClick(ctx, it, window)
-		}
-		action, err := a.doAction(ctx, it.Ref)
-		if err != nil {
-			// An element with no accessibility action to fire is clicked where it sits instead: the real pointer moves to the centre of its rectangle, which is in the same picture pixels click_at uses.
-			if it.W <= 0 || it.H <= 0 {
-				return toolError(fmt.Sprintf("could not click [%d] %s %q: %v", it.N, it.Role, it.Label, err))
-			}
-			dev, errText := a.inputDevice(ctx)
-			if errText != "" {
-				return toolError(fmt.Sprintf("could not click [%d] %s %q: %v; %s", it.N, it.Role, it.Label, err, errText))
-			}
-			px, py := it.X+it.W/2, it.Y+it.H/2
-			before := a.beforePress(ctx)
-			a.tapAt(px, py, it.Label)
-			if perr := dev.ClickAt(float64(px), float64(py)); perr != nil {
-				return toolError(fmt.Sprintf("could not click [%d] %s %q: %v; pointer: %v", it.N, it.Role, it.Label, err, perr))
-			}
-			if missed := a.pressCheck(ctx, before, px, py); missed != "" {
-				return missed
-			}
-			action = "pointer"
-		}
-		a.rememberClick(ctx, it)
-		a.rememberTarget(ScreenTarget{Label: it.Label, Role: it.Role, Window: window})
-		clicked := fmt.Sprintf("clicked [%d] %s %q via %s", it.N, it.Role, it.Label, action)
-		// Read the front window's title fresh, the same call observe_screen opens with, so the result says what the click actually did rather than what the stale pre-click list said. A click can resume, play or navigate to something other than what was asked, and the title is where that shows up first.
-		_, title, _, err := a.observe(ctx)
-		if err != nil || title == "" {
-			return clicked + "; call observe_screen to see the result"
-		}
-		return fmt.Sprintf("%s; the window is now %q; check it matches what was asked, then call observe_screen if you need the list", clicked, title)
+		return a.click(ctx, args)
+
+	// click_at is no longer declared to the model — click itself takes a bare point now — but it is still answered, so a live session holding the older tool list does not find one of its tools missing mid-task.
+	case "click_at":
+		return a.clickPoint(ctx, args)
 
 	case "wait_for":
 		kind, _ := args["kind"].(string)
@@ -585,7 +549,8 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 			return errText
 		}
 		// The number came off a list that may be several rounds old, so the element behind it is checked to still be the one the list named, exactly as click and point_at do: a toolkit that has recycled the object path would otherwise have this scroll reported as a scroll to something it never touched.
-		if errText := a.stillThere(ctx, it); errText != "" {
+		it, errText = a.stillThere(ctx, it)
+		if errText != "" {
 			return errText
 		}
 		if err := a.scrollTo(ctx, it.Ref); err != nil {
@@ -676,41 +641,6 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		}
 		return fmt.Sprintf("pressed %s; call observe_screen to see what it did", keys)
 
-	case "click_at":
-		x, y, errText := a.picturePoint(ctx, args)
-		if errText != "" {
-			return errText
-		}
-		window := a.frontWindow(ctx)
-		// A point does have a name when the last observe_screen listed something covering it, and then the click is checked exactly as a numbered click on that item would be. Only a point no listed rectangle covers falls back to the window's own title.
-		lands := ""
-		if it, ok := itemAt(a.seen(ctx), x, y); ok {
-			lands = fmt.Sprintf("; the point lands on [%d] %s %q", it.N, it.Role, it.Label)
-			if secretField(it, window) {
-				return fmt.Sprintf("Stopped before clicking %d,%d, the point lands on %s %q in %q, which holds a password or another secret. Click it yourself if you want it focused.", x, y, it.Role, it.Label, window)
-			}
-			if irreversible(it, window, false) && !consented(questionFrom(ctx), matchedVerb(it, window)) && !goAllowed(ctx) {
-				return fmt.Sprintf("Stopped before clicking %d,%d, the point lands on [%d] %s %q in %q. %s", x, y, it.N, it.Role, it.Label, window, consentPrompt(matchedVerb(it, window)))
-			}
-		} else if verb := matchedVerb(act.Item{}, window); verb != "" && !consented(questionFrom(ctx), verb) && !goAllowed(ctx) {
-			return fmt.Sprintf("Stopped before clicking %d,%d in %q. A point on the screen carries no label, so the window's own title is all I have to go on, and it names a %s. %s", x, y, window, verb, consentPrompt(verb))
-		}
-		dev, errText := a.inputDevice(ctx)
-		if errText != "" {
-			return errText
-		}
-		before := a.beforePress(ctx)
-		a.tapAt(x, y, strings.TrimPrefix(lands, "; the point lands on "))
-		if err := dev.ClickAt(float64(x), float64(y)); err != nil {
-			return toolError(fmt.Sprintf("could not click %d,%d: %v", x, y, err))
-		}
-		if missed := a.pressCheck(ctx, before, x, y); missed != "" {
-			return missed
-		}
-		// The pointer has moved the keyboard somewhere this session cannot name, whatever was under the point, so type_text and a focused key press refuse until a fresh observe_screen or a numbered click says where the keyboard is again.
-		a.focusLost(ctx)
-		return fmt.Sprintf("clicked %d,%d on the screen%s; look or call observe_screen to see what it did", x, y, lands)
-
 	case "scroll_at":
 		x, y, errText := a.picturePoint(ctx, args)
 		if errText != "" {
@@ -724,8 +654,9 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if errText != "" {
 			return errText
 		}
-		before := a.beforePress(ctx)
+		// Same order as clickPoint: the tap indicator is drawn at the point the camera is about to photograph, so it must land before the camera starts rather than racing it.
 		a.tapAt(x, y, "")
+		before := a.beforePress(ctx)
 		if err := dev.ScrollAt(float64(x), float64(y), int32(dy)); err != nil {
 			return toolError(fmt.Sprintf("could not scroll at %d,%d: %v", x, y, err))
 		}
@@ -734,11 +665,8 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		}
 		return fmt.Sprintf("scrolled %d steps at %d,%d; look or call observe_screen to see the page now", int(dy), x, y)
 
-	case "switch_window":
-		app, _ := args["app"].(string)
-		return a.switchWindow(ctx, strings.TrimSpace(app))
-
-	case "open_app":
+	// switch_window is no longer declared: open_app raises an already-running window before it starts anything, so it was open_app minus the working launch. Still answered, so a live session holding the older tool list is not left with a tool that returns nothing.
+	case "switch_window", "open_app":
 		app, _ := args["app"].(string)
 		return a.openApp(ctx, strings.TrimSpace(app))
 
@@ -840,7 +768,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 				lines = append(lines, db.FormatHitWithSource(h, 0))
 			}
 		}
-		return strings.Join(lines, "\n")
+		return withReviseHint(strings.Join(lines, "\n"))
 
 	case "query_store":
 		if msg := checkArgs(args, "query"); msg != "" {
@@ -884,7 +812,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 			if len(ignored) > 0 {
 				lines = append(lines, fmt.Sprintf("(note: subject recall ignores %s)", strings.Join(ignored, " and ")))
 			}
-			return strings.Join(lines, "\n")
+			return withReviseHint(strings.Join(lines, "\n"))
 		}
 
 		sinceStr, sinceErr := stringArg(args, "since")
@@ -931,6 +859,9 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if !ok || strings.TrimSpace(task) == "" {
 			return toolError("branch needs the question to work on")
 		}
+		if !takeBranch(ctx) {
+			return toolError(fmt.Sprintf("I have already run %d background searches for this; answer from what they found, or use query_memory or recall", maxBranchesPerAsk))
+		}
 		// webSearch calls a real search engine directly (Exa, falling back to Tavily) — the cheapest and fastest path. When neither is configured or both fail, the task goes to whichever brain the router says has a web search of its own, the same way a typed ask does, instead of telling the model the web is out of reach.
 		result, err := a.webSearch(ctx, task)
 		if err != nil {
@@ -943,6 +874,23 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		}
 		return result
 
+	case "do":
+		goal, _ := args["goal"].(string)
+		goal = strings.TrimSpace(goal)
+		if goal == "" {
+			return toolError("do needs the whole job in one goal, in the user's own words")
+		}
+		if a.RunJob == nil {
+			return toolError("this session cannot start a job, so work the screen a step at a time instead")
+		}
+		slog.Info("do: handing a chain of work to the job runner", "goal", goal)
+		said, err := a.RunJob(ctx, goal)
+		if err != nil {
+			slog.Warn("do: the job runner would not take it", "goal", goal, "error", err)
+			return toolError(fmt.Sprintf("that job did not start: %v", err))
+		}
+		return said
+
 	case "add_task":
 		title, _ := args["title"].(string)
 		title = strings.TrimSpace(title)
@@ -954,11 +902,13 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if err != nil {
 			slog.Warn("add_task: could not open a conversation for the task, filing it without one", "error", err)
 		}
-		if _, err := a.brain.AddUserTask(ctx, title, convID); err != nil {
+		id, err := a.brain.AddUserTask(ctx, title, convID)
+		if err != nil {
 			slog.Error("add_task: write failed", "error", err)
 			return toolError("that task didn't save, tell the user it is not on their list")
 		}
-		return "added to the task list: " + title
+		// The ref goes back with the title so that a correction in the next breath has something to aim at: revise takes "task#N", and without the N the model has to guess, which on 2026-09-12 it did, at a note belonging to something else.
+		return fmt.Sprintf("added to the task list as task#%d: %s", id, title)
 
 	case "save_note":
 		content, ok := args["content"].(string)
@@ -1021,7 +971,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		}
 		ref, ok := args["ref"].(string)
 		if !ok || strings.TrimSpace(ref) == "" {
-			return toolError("revise needs a ref, the \"note#N\" or \"thread#N\" a result showed you")
+			return toolError("revise needs a ref, the \"note#N\", \"thread#N\" or \"task#N\" a result showed you")
 		}
 		kind, id, err := parseRef(ref)
 		if err != nil {
@@ -1099,8 +1049,37 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 				return toolError("nothing was fixed, look the thread up again with query_memory and use the id it shows")
 			}
 			return "fixed"
+		case "task":
+			// A row on the Tasks screen is either there or not: user_tasks has a done flag and nothing else to set, so "dropped" means the same thing as remove, and there is no priority to write.
+			if hasPriority {
+				return toolError("a task on the list has no priority, that only applies to an action item")
+			}
+			if remove || strings.TrimSpace(state) == "dropped" {
+				if err := a.brain.DeleteUserTask(ctx, id); err != nil {
+					slog.Error("revise: task delete failed", "id", id, "error", err)
+					return toolError("nothing was there to delete, read user_tasks with query_store and use the id it shows")
+				}
+				return "deleted"
+			}
+			if hasState {
+				s := strings.TrimSpace(state)
+				if s != "done" && s != "open" {
+					return toolError("a task on the list is done, open, or dropped")
+				}
+				if err := a.brain.SetUserTaskDone(ctx, id, s == "done"); err != nil {
+					slog.Error("revise: task state write failed", "id", id, "error", err)
+					return toolError("nothing was updated, read user_tasks with query_store and use the id it shows")
+				}
+			}
+			if hasContent {
+				if err := a.brain.SetUserTaskTitle(ctx, id, content); err != nil {
+					slog.Error("revise: task content write failed", "id", id, "error", err)
+					return toolError("nothing was updated, read user_tasks with query_store and use the id it shows")
+				}
+			}
+			return "updated"
 		default:
-			return toolError(fmt.Sprintf("revise only handles note and thread refs, not %q", kind))
+			return toolError(fmt.Sprintf("revise only handles note, thread and task refs, not %q", kind))
 		}
 
 	case "action_items":
@@ -1197,6 +1176,10 @@ func toolActivitySummary(name string, args map[string]any) string {
 		if task, ok := args["task"].(string); ok {
 			return quoteArg(task)
 		}
+	case "do":
+		if goal, ok := args["goal"].(string); ok {
+			return quoteArg(goal)
+		}
 	case "query_store":
 		if query, ok := args["query"].(string); ok {
 			return quoteArg(query)
@@ -1212,6 +1195,19 @@ func toolActivitySummary(name string, args map[string]any) string {
 	case "type_text":
 		if text, ok := args["text"].(string); ok {
 			return quoteArg(text)
+		}
+	case "click_at":
+		x, xok := args["x"].(float64)
+		y, yok := args["y"].(float64)
+		if xok && yok {
+			return fmt.Sprintf("%d,%d", int(x), int(y))
+		}
+	case "scroll_at":
+		x, xok := args["x"].(float64)
+		y, yok := args["y"].(float64)
+		dy, dyok := args["dy"].(float64)
+		if xok && yok && dyok {
+			return fmt.Sprintf("%d steps at %d,%d", int(dy), int(x), int(y))
 		}
 	}
 	return ""
@@ -1249,6 +1245,11 @@ func resultSummary(name, result string) string {
 			if title, _, ok := strings.Cut(rest, `"`); ok {
 				return fmt.Sprintf("window now %q", title)
 			}
+		}
+	}
+	if name == "click_at" || name == "scroll_at" {
+		if line, _, ok := strings.Cut(result, ";"); ok {
+			return line
 		}
 	}
 	if name == "draw" {
@@ -1310,11 +1311,18 @@ func filterHitsByApp(hits []db.MemoryHit, app string) []db.MemoryHit {
 // maxMeetingNotesListed caps how many meetings query_memory kind=meeting lists in one answer; the rest are counted, and a narrower window or a real query reaches them.
 const maxMeetingNotesListed = 30
 
+// latestMeetingNotesListed is how many meetings are listed when no window was given. A question with no window is "the latest meeting", and listing thirty sets of minutes for it cost one round 178k input tokens on 2026-09-10; the count line says how many older ones a window would reach.
+const latestMeetingNotesListed = 3
+
 func (a *Agent) listMeetingNotes(ctx context.Context, since, until time.Time) string {
 	notes, err := a.brain.NotesOfKindSince(ctx, "meeting", since)
 	if err != nil {
 		slog.Error("query_memory: reading meeting notes failed", "error", err)
 		return toolError(storeUnavailable)
+	}
+	limit := maxMeetingNotesListed
+	if since.IsZero() && until.IsZero() {
+		limit = latestMeetingNotesListed
 	}
 	var lines []string
 	left := 0
@@ -1322,7 +1330,7 @@ func (a *Agent) listMeetingNotes(ctx context.Context, since, until time.Time) st
 		if !until.IsZero() && n.CreatedAt.After(until) {
 			continue
 		}
-		if len(lines) == maxMeetingNotesListed {
+		if len(lines) == limit {
 			left++
 			continue
 		}

@@ -1769,7 +1769,6 @@ func TestRenderInput(t *testing.T) {
 	}
 }
 
-
 // noBackgroundCode matches any RGB background-setting SGR sequence (lipgloss's Background() always encodes as 48;2;R;G;B in a forced true-color profile).
 var noBackgroundCode = regexp.MustCompile(`48;2;`)
 
@@ -2192,4 +2191,3 @@ func TestRenderStatusLine_ShowsElapsedSeconds(t *testing.T) {
 		t.Errorf("expected the tool label in the status line, got %q", got)
 	}
 }
-
