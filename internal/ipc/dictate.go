@@ -339,7 +339,7 @@ const (
 
 // whisperText runs the machine's whisper.cpp build over one WAV and returns what was said as a single line. Input: the WAV's path and the priming prompt, which biases whisper's spelling towards the words in it (pass "" for none). Output: the text with whisper's non-speech markers dropped and its lines joined by spaces.
 // The caller holds recorder.GPURun for the whole run (see finish), so this never allocates on the card beside a meeting's decode.
-// ponytail: it still does not wait for the embedding server to yield the way a meeting transcription does, because a dictation is something the user is waiting on and recorder's releaser polls for half a minute at a time. If a dictation ever fails to allocate with nothing but embeds on the card, that releaser is the next thing to export.
+// recorder.RunWhisper now asks the embedding server off the card before its first attempt, so a dictation no longer walks onto a card the embedder still holds. It asks once rather than polling the way a meeting transcription does, because somebody is waiting on a dictation.
 func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 	bin := filepath.Join(config.DataDir(), "whispercpp", whisperCPPBinaryName)
 	if p := os.Getenv("ORA_WHISPER_CPP"); p != "" {

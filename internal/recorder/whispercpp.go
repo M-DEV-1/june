@@ -63,6 +63,8 @@ func RunWhisper(ctx context.Context, bin string, args []string) (stdout, stderr 
 	// Held across both attempts: the CPU retry is what the first attempt's crash cost us, and letting the embedder back on the card halfway would only set up the next crash.
 	gpuHeld.Store(true)
 	defer gpuHeld.Store(false)
+	// Claim the card first, then ask its other tenant to leave: gpuHeld is what stops the embedding server climbing straight back on, so raising it before the ask is what makes the ask stick.
+	releaseTheCard()
 	out, errOut, err := run(ctx, bin, args)
 	if !gpuOutOfMemory(ctx, err, out+errOut) {
 		return out, errOut, err
@@ -70,6 +72,15 @@ func RunWhisper(ctx context.Context, bin string, args []string) (stdout, stderr 
 	slog.Warn("whisper died on the GPU, transcribing the same audio again on the CPU", "device", whisperGPUDevice(), "error", err, "stderr", strings.TrimSpace(errOut))
 	// -ng is whisper-cli's own switch for decoding without a GPU, and it goes on the end so it wins whatever the first attempt was given.
 	return run(ctx, bin, append(append([]string{}, args...), "-ng"))
+}
+
+// releaseTheCard asks the GPU's other tenant to yield before a whisper run, and reports whether it went. It asks once and does not poll, because this runs on the dictation path too and somebody is waiting on that: a tenant that will not move immediately costs the run a CPU retry, which is slow, rather than an unbounded wait, which looks like a hang. waitForGPU is the polling version, for a meeting transcription nobody is watching.
+// Only the meeting path used to ask at all. Five of the eleven dictations in the six days to 2026-09-13 walked onto a card the embedding server still held, died with ErrorOutOfDeviceMemory, and were redone on the CPU at 12.9 to 20.7 seconds each.
+func releaseTheCard() bool {
+	if gpuReleaser == nil {
+		return true
+	}
+	return gpuReleaser()
 }
 
 // gpuFailureMarks are what whisper.cpp's Vulkan backend prints as it runs out of card memory, and the crash that follows it, matched case-insensitively against everything the child printed.
