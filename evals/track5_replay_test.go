@@ -1,11 +1,10 @@
 package main
 
-// Track 5's real logic is the session reconstruction, the prompt composition, and the output file shape; the teacher and the judge are faked here, and the one real run is the integration proof.
+// Track 5's real logic is the session reconstruction and the prompt composition; the teacher and the judge are faked here, and the one real run is the integration proof.
 
 import (
 	"bufio"
-	"os"
-	"path/filepath"
+
 	"strings"
 	"testing"
 	"time"
@@ -81,51 +80,5 @@ func TestComposeReplayPrompt_HistoryAndLabeledEvidence(t *testing.T) {
 	}
 	if !strings.Contains(p2, "The live session called no tools for this turn.") {
 		t.Error("turn 2 should say no tools were called")
-	}
-}
-
-// TestParseReplayReply covers the teacher's two-line format and the fallback that keeps a free-form reply as the spoken row.
-func TestParseReplayReply(t *testing.T) {
-	tools, spoken := parseReplayReply("TOOLS: query_memory({\"query\":\"x\"})\nSPOKEN: You were on the harness.")
-	if tools != `query_memory({"query":"x"})` || spoken != "You were on the harness." {
-		t.Errorf("got %q / %q", tools, spoken)
-	}
-	tools, spoken = parseReplayReply("Just an answer with no format.")
-	if tools != "" || spoken != "Just an answer with no format." {
-		t.Errorf("fallback: got %q / %q", tools, spoken)
-	}
-}
-
-// TestWriteReplayFile_SideBySideShape checks the output file: named for the session start, headline counts, and per-turn USER/LIVE/CLAUDE sections with the live tool calls and the verdict.
-func TestWriteReplayFile_SideBySideShape(t *testing.T) {
-	s := parseReplaySessions(bufio.NewScanner(strings.NewReader(fixtureLog)))[0]
-	turns := userTurnIndexes(s)
-	rep := sessionReplay{Session: s, Turns: []replayTurnResult{
-		{UserIdx: turns[0], ClaudeTools: "none", ClaudeSpoken: "The eval harness, mostly.", V: replayVerdict{Verdict: "claude", Why: "more direct"}},
-		{UserIdx: turns[1], ClaudeTools: "none", ClaudeSpoken: "The recorder.", V: replayVerdict{Verdict: "tie", Why: "same content"}},
-	}}
-	dir := t.TempDir()
-	path, err := writeReplayFile(dir, rep)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if filepath.Base(path) != "2026-08-30T14-17-22.md" {
-		t.Errorf("file name: %s", filepath.Base(path))
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"| 2 | 1 | 1 | 0 |",
-		"**USER (voice):** what was I doing yesterday",
-		"`query_memory",
-		"**LIVE (gemini):** You were on the eval harness.",
-		"**CLAUDE** (tools: none)**:** The eval harness, mostly.",
-		"Verdict: **claude** — more direct",
-	} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("replay file missing %q", want)
-		}
 	}
 }

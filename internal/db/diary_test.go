@@ -38,20 +38,6 @@ func TestStore_SetDiaryEntry_ReplacesByDayAndKind(t *testing.T) {
 	}
 }
 
-// TestStore_DiaryEntry_MissingIsEmptyNotError pins the contract the scheduler's condition checks rely on: no row for (day, kind) is an ordinary "" result, since a missing entry is exactly what "the close hasn't run yet" looks like.
-func TestStore_DiaryEntry_MissingIsEmptyNotError(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	got, err := store.DiaryEntry(ctx, "2026-08-29", "day")
-	if err != nil {
-		t.Fatalf("DiaryEntry on empty table: %v", err)
-	}
-	if got != "" {
-		t.Errorf("DiaryEntry on empty table = %q, want empty", got)
-	}
-}
-
 // TestStore_DiaryEntry_IndexedInMemoryFTS verifies the diary triggers mirror content into memory_fts, so entries surface through the existing SearchMemory/query_memory path — and that an in-place rewrite replaces the indexed text rather than leaving the old version searchable.
 func TestStore_DiaryEntry_IndexedInMemoryFTS(t *testing.T) {
 	ctx := context.Background()

@@ -43,9 +43,9 @@ func TestMentionCount(t *testing.T) {
 	ctx := context.Background()
 
 	for _, n := range []struct{ content, kind string }{
-		{"Vexil Quorin leads the value chain work", "fact"},
+		{"Vexil Quorin leads the route planning work", "fact"},
 		{"# Sync\nVexil Quorin walked through the demo", "meeting"},
-		{"Sorrek owns the PFP task", "fact"},
+		{"Sorrek owns the TDL task", "fact"},
 	} {
 		if _, err := store.LogNote(ctx, n.content, n.kind); err != nil {
 			t.Fatalf("seed note: %v", err)

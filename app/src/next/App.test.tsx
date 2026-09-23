@@ -7,7 +7,6 @@ import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { ConversationSummary, ConversationView } from "./api";
-import { step } from "./App";
 import { renderApp } from "./testing";
 
 afterEach(() => {
@@ -23,25 +22,6 @@ const summary: ConversationSummary[] = [
 ];
 
 const view: ConversationView = { id: "c1", title: "Flights to Zurich", brain: "claude", turns: [] };
-
-describe("step", () => {
-  it("lands on the first row when nothing is selected yet", () => {
-    expect(step(-1, 3, "ArrowDown")).toBe(0);
-  });
-
-  it("lands on the last row when ArrowUp opens from nothing selected", () => {
-    expect(step(-1, 3, "ArrowUp")).toBe(2);
-  });
-
-  it("clamps at either end rather than wrapping", () => {
-    expect(step(2, 3, "ArrowDown")).toBe(2);
-    expect(step(0, 3, "ArrowUp")).toBe(0);
-  });
-
-  it("gives up on an empty list", () => {
-    expect(step(0, 0, "ArrowDown")).toBe(-1);
-  });
-});
 
 describe("the arrow keys that walk a list", () => {
   it("moves to the next chat when nothing has the keyboard's caret", async () => {

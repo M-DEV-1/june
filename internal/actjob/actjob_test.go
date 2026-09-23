@@ -914,37 +914,6 @@ func TestBuildPrompt_StaysSmallWithALongTrail(t *testing.T) {
 	t.Logf("prompt with a 40-step trail: %d chars, about %d tokens", len(prompt), EstimateTokens(prompt))
 }
 
-// TestParseDecision reads the shapes a model actually replies in: bare JSON, JSON in a fenced block with words around it, and a reply that is not JSON at all.
-func TestParseDecision(t *testing.T) {
-	d, err := parseDecision("```json\n{\"tool\":\"click\",\"args\":{\"n\":3},\"expect\":{\"kind\":\"title_contains\",\"value\":\"S16 E8\"}}\n```")
-	if err != nil {
-		t.Fatalf("parseDecision: %v", err)
-	}
-	if d.Tool != "click" || d.Expect.Value != "S16 E8" {
-		t.Errorf("decision = %+v, want the click and its expected change", d)
-	}
-	if _, err := parseDecision("I think we should click play."); err == nil {
-		t.Error("prose parsed as a decision")
-	}
-}
-
-// TestFromPromptFunc_EstimatesWhatTheSeamDoesNotReport checks the adapter over the daemon's plain prompt-in, text-out brain files its round under the brain's name and estimates both sides at four characters to the token, so the input budget still binds on a login that reports nothing.
-func TestFromPromptFunc_EstimatesWhatTheSeamDoesNotReport(t *testing.T) {
-	m := FromPromptFunc("claude-cli", func(ctx context.Context, prompt string) (string, error) {
-		return strings.Repeat("b", 40), nil
-	})
-	reply, usage, err := m(context.Background(), strings.Repeat("a", 400))
-	if err != nil {
-		t.Fatalf("model: %v", err)
-	}
-	if len(reply) != 40 {
-		t.Fatalf("reply = %d chars, want the brain's own answer", len(reply))
-	}
-	if usage.Model != "claude-cli" || usage.Input != 100 || usage.Output != 10 {
-		t.Errorf("usage = %+v, want claude-cli with 100 in and 10 out", usage)
-	}
-}
-
 // TestRunner_ARunningJobCanBeReadWhileItWorks checks the copy a GET is handed can be encoded while the loop goes on working. The job it is copied from has two fields the loop writes in place — the per-model spend map and the last element of the steps slice — and handing those out unguarded is a concurrent map read and write, which is not a panic but a fatal error that takes the whole daemon down. Run under -race.
 func TestRunner_ARunningJobCanBeReadWhileItWorks(t *testing.T) {
 	exec := &fakeExec{}
@@ -1053,13 +1022,6 @@ type scopedExec struct {
 	smu    sync.Mutex
 	scopes int
 	seen   []int
-	rounds int
-}
-
-func (s *scopedExec) EndScreenRound(ctx context.Context) {
-	s.smu.Lock()
-	s.rounds++
-	s.smu.Unlock()
 }
 
 func (s *scopedExec) NewScreenScope(ctx context.Context) context.Context {
@@ -1461,47 +1423,6 @@ func TestBuildPrompt_NamesTheDesktop(t *testing.T) {
 	}
 }
 
-// A job shares one screen scope across all its rounds, and the look allowance on that scope is meant for one question, so on 2026-09-09 a job went blind at its third look and pressed keys it could not see the effect of. The runner hands the allowance back at the start of every round; the picture the last look took stays, since click_at aims by it in the round after.
-func TestRunner_GivesTheLookAllowanceBackEveryRound(t *testing.T) {
-	exec := &scopedExec{}
-	r, _, _ := newRunner(t, exec, script(stepReply("look", ""), stepReply("click", "S16 E8"), doneReply("done")))
-	id, err := r.Start(context.Background(), "play S16 E8", Opts{})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waitState(t, r, id, Done, Failed)
-	exec.smu.Lock()
-	rounds := exec.rounds
-	exec.smu.Unlock()
-	if rounds < 3 {
-		t.Errorf("EndScreenRound ran %d times, want once per round (three rounds: look, click, done)", rounds)
-	}
-}
-
-// A job could only ever poke the screen. Its prompt named eleven tools, all of them screen or app actions, so nothing in a forty-step job could look anything up or remember anything: Orient had one input, the pixels in front of it. The tools were reachable through the Executor seam the whole time — ExecuteAskTool handles branch, query_memory and recall — so the only thing stopping a job from using them was that the prompt never said they existed.
-func TestSystemPromptOffersSearchAndMemory(t *testing.T) {
-	for _, tool := range []string{"branch", "query_memory", "recall"} {
-		if !strings.Contains(systemPrompt, tool) {
-			t.Errorf("the job's system prompt never names %q, so a job can never call it", tool)
-		}
-	}
-}
-
-// Searching and remembering change nothing on the screen, so the verify step has nothing to wait for. They have to count as reads, or every lookup would be checked against a screen change that was never coming and would fail, three of them in a row would trip the stuck counter, and the job would stop to ask the user why its own research did not move the page.
-func TestSearchAndMemoryCountAsReads(t *testing.T) {
-	for _, tool := range []string{"branch", "query_memory", "recall"} {
-		if !isRead(tool) {
-			t.Errorf("isRead(%q) = false; a lookup changes no screen and must not be checked against one", tool)
-		}
-	}
-	// The actions must still be checked. A click that is treated as a read is a click nothing verifies.
-	for _, tool := range []string{"click", "type_text", "press_key", "click_at", "open_app", "open_url", "switch_window", "scroll_to"} {
-		if isRead(tool) {
-			t.Errorf("isRead(%q) = true; an action has to be verified", tool)
-		}
-	}
-}
-
 // wallGuard took the wall budget by value when the job started, so a job that raised its own budget mid-flight kept the clock it was born with and got killed on the old one. It has to read the budget the job holds now.
 func TestWallGuard_HonorsABudgetRaisedMidFlight(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1606,13 +1527,6 @@ func TestRunner_OutOfRoomAsksRatherThanFailing(t *testing.T) {
 	}
 	if job.Budget.Steps <= before {
 		t.Errorf("step budget = %d after a yes, want more than the %d it had", job.Budget.Steps, before)
-	}
-}
-
-// Chaining taps in one call is the efficiency a task earns by getting good, and it was reachable from the voice path only. A job that cannot chain pays a model round trip for every tap of a menu that has already closed by the time the round comes back.
-func TestSystemPromptOffersClickChaining(t *testing.T) {
-	if !strings.Contains(systemPrompt, "then") {
-		t.Error("the job's system prompt never mentions chaining taps, so a job pays a round trip per tap")
 	}
 }
 

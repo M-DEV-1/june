@@ -6,6 +6,7 @@ import { Provider } from "react-redux";
 import { vi } from "vitest";
 
 import App from "./App";
+import type { events } from "./api";
 import { daemonFetch, type Call, type Canned } from "./mock";
 import { makeStore, type AppStore, type Place } from "./store";
 
@@ -69,14 +70,14 @@ export function widePane(width = 1672): void {
   };
 }
 
-/** Renders the whole window against a fake daemon. Input: what the daemon holds, the place to open on, and whether the pane should be wide enough for the rail beside the document. Output: the render, the store, and the calls the window made. */
+/** Renders the whole window against a fake daemon. Input: what the daemon holds, the place to open on, whether the pane should be wide enough for the rail beside the document, and what opens the event stream, for a test that plays the stream itself. Output: the render, the store, and the calls the window made. */
 export function renderApp(
   canned: Canned = {},
-  opened: { place?: Place; conversationId?: string; wide?: boolean } = {},
+  opened: { place?: Place; conversationId?: string; wide?: boolean; open?: typeof events } = {},
 ): RenderResult & { store: AppStore; calls: Call[] } {
   stubBrowser();
   if (opened.wide) widePane();
   const calls = mockDaemon(canned);
-  const store = makeStore({ ui: { place: opened.place ?? "chats", conversationId: opened.conversationId } });
+  const store = makeStore({ ui: { place: opened.place ?? "chats", conversationId: opened.conversationId } }, opened.open);
   return { ...render(<Provider store={store}>{<App />}</Provider>), store, calls };
 }

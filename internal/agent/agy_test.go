@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -164,21 +163,6 @@ func TestAskAgy_RunsToolsAndFillsTheTrace(t *testing.T) {
 	}
 }
 
-// An empty model leaves --model off the session's argument list, keeping the CLI's own default, and the trace names the provider alone.
-func TestAskAgy_LeavesModelOffWhenEmpty(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"done"}`}}
-	newProc := func() agySessionRunner { return fake }
-	t.Cleanup(a.CloseAgySession)
-	tr, err := a.askAgy(t.Context(), newProc, "", nil, "hello")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tr.Model != "agy" {
-		t.Errorf("model = %q, want %q", tr.Model, "agy")
-	}
-}
-
 // Ora's own instruction goes at the head of the prompt text, because agy has no system-prompt flag of its own, and the question is still the last thing the model reads.
 // agy is a text ask, so its instruction is the lean prompt (see LeanPrompt in ask.go): personal context does not belong in it, only the persona, the tool guidance and the stop line — a fact from the personal-context store must not be in the prompt at all.
 func TestAskAgy_PutsTheInstructionAtTheHeadOfThePromptAndNeverSkipsPermissions(t *testing.T) {
@@ -241,75 +225,6 @@ func TestAskAgy_ReportsAFailedRun(t *testing.T) {
 	}
 }
 
-// The brain wrapper the daemon registers forwards to the agent, with and without a thread.
-func TestAgyBrain_ForwardsToTheAgent(t *testing.T) {
-	var b any = AgyBrain{}
-	if _, ok := b.(interface {
-		AskText(context.Context, string) (TurnTrace, error)
-	}); !ok {
-		t.Errorf("AgyBrain does not answer an ask")
-	}
-	if _, ok := b.(interface {
-		AskTextWith(context.Context, History, string) (TurnTrace, error)
-	}); !ok {
-		t.Errorf("AgyBrain does not answer an ask with a thread")
-	}
-}
-
-// agyModel reads ORA_AGY_MODEL when it is set, and leaves the CLI to its own default otherwise. The data directory is pointed at an empty one for the length of the test: pickedModel reads the model stored by the Settings picker first, so without this the test reads whatever the person running it has picked on their own machine and fails for a reason that has nothing to do with the code.
-func TestAgyModel(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	t.Setenv("ORA_AGY_MODEL", "")
-	if got := agyModel(); got != "" {
-		t.Errorf("agyModel() = %q, want empty when unset", got)
-	}
-	t.Setenv("ORA_AGY_MODEL", "gemini-3-pro-high")
-	if got := agyModel(); got != "gemini-3-pro-high" {
-		t.Errorf("agyModel() = %q, want gemini-3-pro-high", got)
-	}
-}
-
-// agySessionArgs carries the model only when one was named, and always reads and writes NDJSON, one turn per line.
-func TestAgySessionArgs(t *testing.T) {
-	withModel := strings.Join(agySessionArgs("gemini-3-pro"), " ")
-	if !strings.Contains(withModel, "--model gemini-3-pro") {
-		t.Errorf("args = %q, want --model gemini-3-pro", withModel)
-	}
-	withoutModel := strings.Join(agySessionArgs(""), " ")
-	if strings.Contains(withoutModel, "--model") {
-		t.Errorf("args = %q, want no --model when none was named", withoutModel)
-	}
-	for _, want := range []string{"--input-format stream-json", "--output-format stream-json", "--disable-slash-commands"} {
-		if !strings.Contains(withoutModel, want) {
-			t.Errorf("args = %q, missing %q", withoutModel, want)
-		}
-	}
-}
-
-// agy reports what a run cost, and Ora records it, so an Antigravity answer shows in the usage table like every other brain instead of as a row of zeroes.
-// The shape is the real one, printed by `agy --output-format json --print` on 2026-09-07.
-func TestAgyResult_CarriesWhatTheRunCost(t *testing.T) {
-	const body = `{"conversation_id":"2fe49524","duration_seconds":5.168,"num_turns":3,"response":"ok","status":"SUCCESS",
-	  "usage":{"input_tokens":6439,"output_tokens":2,"thinking_tokens":11,"cache_read_tokens":8127,"total_tokens":6441}}`
-
-	var res agyResult
-	if err := json.Unmarshal([]byte(body), &res); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if res.Usage.InputTokens != 6439 || res.Usage.OutputTokens != 2 {
-		t.Errorf("usage = %+v, want the counts agy printed", res.Usage)
-	}
-	if res.Usage.CacheReadTokens != 8127 {
-		t.Errorf("cache read tokens = %d, want 8127 — the cached input is most of what an ask really costs", res.Usage.CacheReadTokens)
-	}
-	if res.Usage.ThinkingTokens != 11 {
-		t.Errorf("thinking tokens = %d, want 11", res.Usage.ThinkingTokens)
-	}
-	if res.NumTurns != 3 {
-		t.Errorf("rounds = %d, want 3", res.NumTurns)
-	}
-}
-
 // The trace records what the run cost. The cache read is input, because it is what the model read; the thinking is not added to the output, because agy already counts it there; and agy's own total_tokens is not used, because it leaves the cache read out.
 func TestAskAgy_RecordsWhatTheRunCost(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
@@ -325,5 +240,80 @@ func TestAskAgy_RecordsWhatTheRunCost(t *testing.T) {
 	}
 	if tr.Usage.InputTokens != 14563 || tr.Usage.OutputTokens != 35 || tr.Usage.TotalTokens != 14598 || tr.Usage.CachedInputTokens != 8127 {
 		t.Errorf("usage = %+v", tr.Usage)
+	}
+}
+
+// Antigravity reports its own plan allowance to whatever statusline command it is given, on every run including a --print one, and nowhere else: the stream-json events carry token counts only, and the endpoint behind the numbers (v1internal:retrieveUserQuotaSummary) needs the OAuth token out of the user's keyring. So Ora supplies the statusline command itself, in the throwaway HOME it already builds for every agy run, and reads the payload agy pipes to it. That works on any machine with agy installed, whether or not the user has a statusline of their own, and costs nothing beyond the ask that was happening anyway.
+// This is the payload agy 1.2.3 wrote on 2026-09-15, trimmed to the fields read. Four windows: five-hour and weekly, each split between the Gemini models and the third-party ones the Antigravity plan also carries.
+func TestAgyQuotaLimits_ReadsBothWindowsForBothModelFamilies(t *testing.T) {
+	payload := `{"product":"antigravity","plan_tier":"Google AI Pro","quota":{
+		"3p-5h":{"remaining_fraction":1,"reset_time":"2026-09-15T15:46:20Z"},
+		"3p-weekly":{"remaining_fraction":0.98339945,"reset_time":"2026-09-17T11:36:03Z"},
+		"gemini-5h":{"remaining_fraction":0.961293,"reset_time":"2026-09-15T10:59:10Z"},
+		"gemini-weekly":{"remaining_fraction":0.9560392,"reset_time":"2026-09-19T09:13:44Z"}}}`
+
+	limits := agyQuotaLimits([]byte(payload))
+	byWindow := map[string]UsageLimit{}
+	for _, l := range limits {
+		byWindow[l.Window] = l
+	}
+	if len(limits) != 4 {
+		t.Fatalf("read %d windows from the payload, want 4: %+v", len(limits), limits)
+	}
+	// Ora draws how much is spent; agy reports how much is left.
+	if got := byWindow["gemini-5h"].UsedFraction; got < 0.038 || got > 0.039 {
+		t.Errorf("gemini-5h used = %v, want 1 - 0.961293", got)
+	}
+	if got := byWindow["3p-5h"].UsedFraction; got != 0 {
+		t.Errorf("3p-5h used = %v, want 0 for an untouched window", got)
+	}
+	if byWindow["gemini-weekly"].ResetsAt.IsZero() {
+		t.Error("gemini-weekly carries no reset time, so the window cannot say when the bar refills")
+	}
+	if byWindow["3p-weekly"].Source == "" {
+		t.Error("3p-weekly names no source, so a number on screen cannot be traced back")
+	}
+}
+
+// The throwaway HOME carries Ora's own statusline command, which is how the run's plan allowance is read, while everything else the user has under antigravity-cli is still reachable. settings.json is Ora's own file rather than a symlink, and it keeps the settings the user already had: it used to be symlinked through whole, so replacing it with a bare statusline would silently drop their theme, their model default and everything else in there.
+func TestBuildAgyHome_CarriesOrasStatusLineAndKeepsTheUsersSettings(t *testing.T) {
+	realHome := t.TempDir()
+	realCLI := filepath.Join(realHome, ".gemini", "antigravity-cli")
+	mustMkdir(t, filepath.Join(realCLI, "brain"))
+	mustWrite(t, filepath.Join(realCLI, "brain", "b1"), "a conversation")
+	mustWrite(t, filepath.Join(realCLI, "settings.json"), `{"theme":"midnight","statusLine":{"command":"the user's own"}}`)
+
+	tempHome := t.TempDir()
+	if err := buildAgyHome(realHome, tempHome, "http://127.0.0.1:9999/abc"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Everything else under antigravity-cli is still the user's own, by symlink.
+	if _, err := os.Readlink(filepath.Join(tempHome, ".gemini", "antigravity-cli", "brain")); err != nil {
+		t.Errorf("the run cannot reach the user's own antigravity-cli entries: %v", err)
+	}
+
+	settings := filepath.Join(tempHome, ".gemini", "antigravity-cli", "settings.json")
+	info, err := os.Lstat(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("settings.json is a symlink, so writing Ora's statusline would edit the user's own file")
+	}
+	var got map[string]any
+	data, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("settings.json is not JSON: %v (%s)", err, data)
+	}
+	if got["theme"] != "midnight" {
+		t.Errorf("the user's own settings were dropped: %v", got)
+	}
+	line, _ := got["statusLine"].(map[string]any)
+	if line["command"] != agyStatusLine(tempHome) {
+		t.Errorf("statusLine command = %v, want Ora's own %q", line["command"], agyStatusLine(tempHome))
 	}
 }

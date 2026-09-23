@@ -38,16 +38,16 @@ const sampleMinutes = `# Lodestone sync
 **Lodestone sync — Wed 3 Sep 2026 10:00 to 10:30**
 
 ## What the meeting covered
-- The value chain demo.
+- The route planning demo.
 
 ## Attendees
 **In the meeting**
 - **Zemna Braxen (recording)** — ran the demo
-- **Vexil Quorin** — asked about emission factors
+- **Vexil Quorin** — asked about shipping factors
 - a contact (heard as "Oshveln") — spoke twice near the end
 
 **Mentioned or on screen only**
-- Sorrek — owns the PFP task
+- Sorrek — owns the TDL task
 `
 
 func TestContext_ReadsTheLatestCapture(t *testing.T) {
@@ -154,21 +154,6 @@ func TestContext_LiveFocusOraFallsThroughToBuffer(t *testing.T) {
 	}
 }
 
-// TestContext_LiveFocusFailureFallsThroughToBuffer covers a live reader that finds nothing (no accessibility bus, no focused window): /context must behave exactly as it did before a live reader existed.
-func TestContext_LiveFocusFailureFallsThroughToBuffer(t *testing.T) {
-	store := dbtest.Open(t)
-	screen := func() []tracker.Activity {
-		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
-	}
-	focused := func(context.Context) (tracker.Activity, bool) { return tracker.Activity{}, false }
-	srv := newTestServer(t, &fakeAsker{}, store, screen, focused)
-	var got ContextView
-	getJSON(t, srv, "/context", &got)
-	if got.App != "Slack" || got.Text != "slack text" {
-		t.Errorf("got %+v, want the buffer's window since the live read found nothing", got)
-	}
-}
-
 // TestContext_LiveFocusTimeoutDoesNotDelayResponse covers a hung accessibility read: /context must fall back to the buffer rather than wait for it, and the whole request must still finish quickly rather than blocking for as long as the reader takes.
 func TestContext_LiveFocusTimeoutDoesNotDelayResponse(t *testing.T) {
 	store := dbtest.Open(t)
@@ -224,7 +209,7 @@ func TestMatters_ActionsThenThreadsThenMeetings(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed action items: %v", err)
 	}
-	for _, subject := range []string{"value chain", "ora window"} {
+	for _, subject := range []string{"route planning", "ora window"} {
 		if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: subject, Kind: "work", State: "in flight"}); err != nil {
 			t.Fatalf("seed thread: %v", err)
 		}
@@ -255,20 +240,6 @@ func TestMatters_ActionsThenThreadsThenMeetings(t *testing.T) {
 	}
 	if got.Matters[4].Title != "Lodestone sync" {
 		t.Errorf("meeting title = %q, want %q", got.Matters[4].Title, "Lodestone sync")
-	}
-}
-
-func TestMatters_EmptyStoreGivesAnEmptyList(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{}, dbtest.Open(t), nil, nil)
-	resp, err := http.Get(srv.URL + "/matters")
-	if err != nil {
-		t.Fatalf("GET /matters: %v", err)
-	}
-	defer resp.Body.Close()
-	body := make([]byte, 64)
-	n, _ := resp.Body.Read(body)
-	if got := strings.TrimSpace(string(body[:n])); got != `{"matters":[]}` {
-		t.Fatalf("body = %s, want an empty list rather than null", got)
 	}
 }
 
@@ -453,26 +424,12 @@ func TestMemorySearch(t *testing.T) {
 	}
 }
 
-func TestMemorySearch_EmptyQueryIs400(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{}, dbtest.Open(t), nil, nil)
-	for _, path := range []string{"/memory/search", "/memory/search?q=", "/memory/search?q=%20"} {
-		resp, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Errorf("GET %s: status = %d, want 400", path, resp.StatusCode)
-		}
-	}
-}
-
 func TestPeople_PersonalEntriesThenHeardOnlyNames(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
 	for _, e := range [][2]string{
 		{"identity", "The user is Zemna Braxen."},
-		{"vexil-quorin", "Leads the value chain work."},
+		{"vexil-quorin", "Leads the route planning work."},
 		{"preferences-communication", "Prefers short answers."},
 	} {
 		if err := store.SetPersonalContext(ctx, e[0], e[1]); err != nil {

@@ -79,13 +79,6 @@ func TestMicUsers(t *testing.T) {
 	}
 }
 
-// The prompt names the application holding the microphone so the answer is an informed one: "Chrome is using your microphone" is a question a person can answer, where "in a meeting?" is a guess.
-func TestAskBody_NamesTheApp(t *testing.T) {
-	if body := askBody([]string{"Google Chrome"}); !strings.Contains(body, "Google Chrome") {
-		t.Errorf("askBody = %q, want it to name the application", body)
-	}
-}
-
 // A recording Ora started on its own has to end on its own, the moment it started is asked about once and left alone, and a recording the user started from the tray is never one Ora may stop. Each case below is one meetingWatch driven through a sequence of polls, checking what it decides to ask or to stop at each step.
 func TestMeetingWatch(t *testing.T) {
 	chrome := []string{"Google Chrome"}

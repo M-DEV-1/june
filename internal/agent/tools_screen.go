@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -69,6 +70,11 @@ func targetMismatchNote(question string, remembered *ScreenTarget, gotLabel stri
 
 // unchangedScreenMarker opens the answer a repeat look gets. It is matched, not just printed: sameScreenAgain in ask.go reads it to know that a look which returned this text saw the screen it had already seen, so a round spent on it does not spend a step.
 const unchangedScreenMarker = "(unchanged since the last look"
+
+// sameTreeHint is appended to the answer a repeat observe_screen gets when nothing in the listing changed. What did not change is the accessibility tree, which is all observe_screen reads; a window that draws its own controls publishes none of them, so it reads identical whether the last action worked or not.
+//
+// On 2026-09-20 a GNOME Clocks run was told "(unchanged since the last look" six times while setting a timer. The timer's digits are drawn by the app and are in no tree, so every click on them came back looking like a click that did nothing, and the model clicked the same coordinate four times and typed "15" twice. The listing was telling the truth about the tree and the model read it as the truth about the screen.
+const sameTreeHint = "\n(this is the accessibility tree, which is all observe_screen reads — a window that draws its own controls looks identical here whether or not it changed, so call look to see whether the last action landed)"
 
 // frameOnlyHint is appended to an observe_screen result when the window published nothing but its own frame buttons, so the model knows to fall back to look instead of reporting an empty screen.
 const frameOnlyHint = "\n(this window publishes none of its content to the accessibility tree; call look to see the page as a picture, and click_at with points from that picture)"
@@ -156,35 +162,30 @@ func observeResult(app, title string, lines []string, previous screenSnapshot) s
 	}
 	switch {
 	case len(changed) == 0:
-		return fmt.Sprintf("%s\n%s the same %d items, and their numbers still stand)", window, unchangedScreenMarker, len(lines))
+		return fmt.Sprintf("%s\n%s the same %d items, and their numbers still stand)%s", window, unchangedScreenMarker, len(lines), sameTreeHint)
 	case len(changed) <= maxChangedLines:
 		return fmt.Sprintf("%s\n(the same %d items as the last look, with these changed:)\n%s", window, len(lines), strings.Join(changed, "\n"))
 	}
 	return full
 }
 
-// maxLooksPerAsk is how many pictures of the screen one typed ask may send. A picture is by far the most expensive thing a turn can carry — roughly 1,200 tokens for a 1280-wide screenful, against about 1,300 for a whole observe_screen listing — and two is what the question this was built for needs: one look at what is playing, and one more after something has moved. It is the default an askLookState is given when nothing sets maxLooks explicitly.
-const maxLooksPerAsk = 2
-
-// voiceMaxLooksPerTurn is how many pictures one turn of the voice conversation may send. A spoken task such as "scroll down and tell me what is there" legitimately needs a look after each action it takes, so the voice scope is given a larger budget than a typed ask's single question-and-answer (see voiceScreenScope in connect.go). The allowance comes back at the end of every model turn (see endLiveTurn), so this bounds one turn, not the whole session.
-const voiceMaxLooksPerTurn = 6
+// unchangedLookMarker opens what look answers when the screen is the very picture the model already has, so the model is told there is nothing new to see instead of being sent the same picture again.
+const unchangedLookMarker = "the screen has not changed since your last look"
 
 // lookTokenCost estimates what an image of this size costs the model to read. Input: the picture's width and height in pixels. Output: the token count, at one token per 750 pixels, which is what Anthropic documents and close to what the other two charge. No provider reports its input broken down by part, so this is an estimate on purpose — it is here so a turn that sent two screenfuls does not look, in the ledger, exactly like one that sent none.
 func lookTokenCost(w, h int) int {
 	return w * h / 750
 }
 
-// askLookState is what one ask's looks and screen tools leave behind: the newest picture, taken so draw can map coordinates the model reads off it back onto the screen; whether that picture has been handed to the model yet; how many pictures the ask has taken and what they are estimated to have cost; the list the last observe_screen produced and the answer it gave; and which control the last click focused. It is carried on the ask's own context (see withAskLookState), not on the shared Agent, so two asks running at once — a routine and a typed question — never share or clobber one screenshot, one numbered list, or one stop-line check.
+// askLookState is what one ask's looks and screen tools leave behind: the newest picture, taken so draw can map coordinates the model reads off it back onto the screen; whether that picture has been handed to the model yet; what the pictures are estimated to have cost; the list the last observe_screen produced and the answer it gave; and which control the last click focused. It is carried on the ask's own context (see withAskLookState), not on the shared Agent, so two asks running at once — a routine and a typed question — never share or clobber one screenshot, one numbered list, or one stop-line check.
 type askLookState struct {
 	mu sync.Mutex
 	// look is the newest picture this ask took.
 	look *tracker.Capture
 	// lookUndelivered is true between a look being taken and the picture being handed to the model, so each picture is sent exactly once, with the tool result that produced it.
 	lookUndelivered bool
-	// looks is how many pictures this ask has taken and lookTokens what they are estimated to have cost. maxLooks is how many it may take before looksLeft refuses another; zero means the state was built without setting it explicitly, and cap() falls back to maxLooksPerAsk.
-	looks      int
+	// lookTokens is what this ask's pictures are estimated to have cost.
 	lookTokens int
-	maxLooks   int
 	// items is the []act.Item the last observe_screen listed, which a number from the model resolves against, and snap is the answer that look produced, so a repeat look can say what changed instead of sending the whole list again.
 	items []act.Item
 	snap  screenSnapshot
@@ -193,7 +194,7 @@ type askLookState struct {
 	focusUnknown bool
 	// beforeShot is the picture a screen_changed check keeps before the action, for wait_for to compare against (see CheckHolds and waitFor).
 	beforeShot tracker.Capture
-	// branches is how many background searches this ask has run. Unlike looks it is not given back at a round boundary: a search costs a call against a monthly search allowance, not this turn's tokens.
+	// branches is how many background searches this ask has run: a search costs a call against a monthly search allowance, not this turn's tokens.
 	branches int
 }
 
@@ -253,12 +254,12 @@ func drawGroupFor(ctx context.Context) string {
 // askLookStateKey is the unexported context key withAskLookState stores the per-ask look state under.
 type askLookStateKey struct{}
 
-// withAskLookState attaches a fresh, empty look state to ctx, one per ask, so the look allowance, the picture draw maps coordinates against and what it cost all belong to the ask now starting rather than to whatever ask ran before it. Input: the ask's own context. Output: a context carrying the new state, to use for every tool call the ask makes.
+// withAskLookState attaches a fresh, empty look state to ctx, one per ask, so the picture draw maps coordinates against and what the pictures cost belong to the ask now starting rather than to whatever ask ran before it. Input: the ask's own context. Output: a context carrying the new state, to use for every tool call the ask makes.
 func withAskLookState(ctx context.Context) context.Context {
-	return context.WithValue(ctx, askLookStateKey{}, &askLookState{maxLooks: maxLooksPerAsk})
+	return context.WithValue(ctx, askLookStateKey{}, &askLookState{})
 }
 
-// NewScreenScope gives one caller its own screen state — the numbered list observe_screen produced, the picture look took, how many looks it has taken and what they cost, and which control the last click focused — in place of the agent-wide state a directly driven tool call would otherwise read and write. A long-running computer-use job (internal/actjob) calls it once and makes every tool call of that job with the context it returns, so two jobs never resolve a number against each other's window and a job's screenshots count against its own look allowance. Input: the job's own context. Output: a context carrying fresh screen state.
+// NewScreenScope gives one caller its own screen state — the numbered list observe_screen produced, the picture look took and what the pictures cost, and which control the last click focused — in place of the agent-wide state a directly driven tool call would otherwise read and write. A long-running computer-use job (internal/actjob) calls it once and makes every tool call of that job with the context it returns, so two jobs never resolve a number against each other's window or each other's pictures. Input: the job's own context. Output: a context carrying fresh screen state.
 func (a *Agent) NewScreenScope(ctx context.Context) context.Context {
 	return withAskLookState(ctx)
 }
@@ -342,14 +343,17 @@ func (a *Agent) focusLost(ctx context.Context) {
 	s.clicked, s.focusUnknown = act.Item{}, true
 }
 
-// recordLook stores the picture a look just took: it becomes the one draw maps coordinates against, it is queued to be handed to the model, and it is counted against the ask's allowance and its cost. Input: the ask's context and the capture. Output: none.
-func recordLook(ctx context.Context, c tracker.Capture) {
+// recordLook stores the picture a look just took: it becomes the one draw maps coordinates against, it is queued to be handed to the model, and its cost is added to the ask's. Input: the ask's context and the capture. Output: false, recording nothing, when this is the exact picture the last look took — the screen has not changed since, so there is nothing new to send, and a picture not yet handed over still goes out once with the result that took it.
+func recordLook(ctx context.Context, c tracker.Capture) bool {
 	s := lookStateFrom(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.look != nil && bytes.Equal(s.look.Data, c.Data) {
+		return false
+	}
 	s.look, s.lookUndelivered = &c, true
-	s.looks++
 	s.lookTokens += lookTokenCost(c.W, c.H)
+	return true
 }
 
 // markLookDelivered records that the model has been shown the newest picture, for a channel that had to push it out of band rather than return it with the tool result (see deliverPicture). Input: the ask's context. Output: none.
@@ -358,37 +362,6 @@ func markLookDelivered(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lookUndelivered = false
-}
-
-// lookCap reports the most pictures this ask's state may take before looksLeft refuses another: maxLooks when the state set one, maxLooksPerAsk otherwise (a state built by lookStateFrom's throwaway fallback, or one from before withAskLookState started setting it). Must be called with s.mu held.
-func (s *askLookState) lookCap() int {
-	if s.maxLooks > 0 {
-		return s.maxLooks
-	}
-	return maxLooksPerAsk
-}
-
-// looksLeft reports whether this ask may take another picture.
-func looksLeft(ctx context.Context) bool {
-	s := lookStateFrom(ctx)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.looks < s.lookCap()
-}
-
-// looksCap reports the look allowance in effect for this ask's state, for the refusal message to quote back the actual cap rather than a hardcoded number.
-func looksCap(ctx context.Context) int {
-	s := lookStateFrom(ctx)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lookCap()
-}
-
-// resetLooks gives this state's look allowance back, at a model turn boundary. Input: none. Output: none.
-func (s *askLookState) resetLooks() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.looks = 0
 }
 
 // takeLook hands the newest picture to whichever brain is assembling the request, once. Output: the capture and true the first time it is called after a look, false every other time — the picture goes to the model with the tool result that produced it and never again.
@@ -478,6 +451,7 @@ type InputDevice interface {
 	PressKey(name string) error
 	TypeText(text string) error
 	ClickAt(x, y float64) error
+	RightClickAt(x, y float64) error
 	ScrollAt(x, y float64, dy int32) error
 }
 
@@ -559,6 +533,10 @@ func (b *boundInput) TypeText(text string) error {
 
 func (b *boundInput) ClickAt(x, y float64) error {
 	return b.r.do(b.ctx, func(d InputDevice) error { return d.ClickAt(x, y) })
+}
+
+func (b *boundInput) RightClickAt(x, y float64) error {
+	return b.r.do(b.ctx, func(d InputDevice) error { return d.RightClickAt(x, y) })
 }
 
 func (b *boundInput) ScrollAt(x, y float64, dy int32) error {
@@ -1151,12 +1129,3 @@ func (a *Agent) frontWindowChanged(ctx context.Context) string {
 func liveScreenScope(ctx context.Context) context.Context {
 	return withAskLookState(ctx)
 }
-
-// endLiveTurn gives the session's look allowance back at a model turn boundary. Input: the session's context. Output: none.
-// The allowance is the state's own maxLooks (see askLookState), and this is meant to bound one turn rather than a conversation: without this a session that used up its looks in its first minute could never look again however long it ran. What the looks left behind — the newest picture and the numbered list observe_screen produced — is deliberately kept, because the model lists the screen, replies, and is then asked to draw around item 3.
-func endLiveTurn(ctx context.Context) {
-	lookStateFrom(ctx).resetLooks()
-}
-
-// EndScreenRound gives the look allowance back at a round boundary of a long job, the way endLiveTurn does at a model turn of a live session, and keeps the picture the last look took. Input: the job's screen scope context. Output: none.
-func (a *Agent) EndScreenRound(ctx context.Context) { endLiveTurn(ctx) }

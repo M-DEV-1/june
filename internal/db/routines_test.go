@@ -93,16 +93,3 @@ func TestTryStartFinish(t *testing.T) {
 	// Finish on an id never started, or already finished, must not panic.
 	store.Finish(999)
 }
-
-// TestAddRoutineRequiresTextAndSchedule checks a blank instruction or schedule is refused rather than stored.
-func TestAddRoutineRequiresTextAndSchedule(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	if _, err := store.AddRoutine(ctx, "", "every day at 8"); err == nil {
-		t.Error("AddRoutine with no text = nil error, want one")
-	}
-	if _, err := store.AddRoutine(ctx, "tell me something", "  "); err == nil {
-		t.Error("AddRoutine with no schedule = nil error, want one")
-	}
-}

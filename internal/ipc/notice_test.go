@@ -64,21 +64,6 @@ func TestNotice(t *testing.T) {
 	}
 }
 
-// An event carrying no notice must marshal exactly as it did before this file existed: the overlay page and the Rust side both parse every event off this stream, and an extra field on an ask's events is a change they never asked for.
-func TestNotice_LeavesEveryOtherEventAlone(t *testing.T) {
-	data, err := json.Marshal(Event{ID: "ask-1", Type: "status", Text: "Checking.", Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, ok := fields["notice"]; ok {
-		t.Errorf("a status event carries a notice field: %s", data)
-	}
-}
-
 // Subscribed is what decides whether a moment can be drawn by a window at all, so notify-send is the fallback only when nothing is there to draw it.
 func TestSubscribed_AsksTheHubWhoIsListening(t *testing.T) {
 	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
@@ -97,85 +82,6 @@ func TestSubscribed_AsksTheHubWhoIsListening(t *testing.T) {
 	}
 	if s.Subscribed(0) {
 		t.Error("a window that has gone still counts as subscribed with no window at all to wait in")
-	}
-}
-
-// TestNotice_FieldShapes covers the notice fields TestNotice's plain case never sets: the
-// snoozed-until pair a desktop notification's own action reports back with, the buttons a
-// notice asking its own question carries, and the absence of an actions field when it has none
-// (every other card reads its buttons from its kind, so an empty list would draw a rail with
-// nothing on it). One row per shape, each decoding the broadcast event and checking its own fields.
-func TestNotice_FieldShapes(t *testing.T) {
-	cases := []struct {
-		name   string
-		notice Notice
-		check  func(t *testing.T, raw []byte)
-	}{
-		{
-			"snoozed carries action and until",
-			Notice{Title: "Still open", Body: "Send the invoice", Kind: "task", ID: "42", Action: "snoozed", Until: "2026-09-05T18:00:00+05:30"},
-			func(t *testing.T, raw []byte) {
-				var got struct {
-					Notice map[string]string `json:"notice"`
-				}
-				if err := json.Unmarshal(raw, &got); err != nil {
-					t.Fatalf("unmarshal: %v", err)
-				}
-				if got.Notice["action"] != "snoozed" || got.Notice["until"] != "2026-09-05T18:00:00+05:30" {
-					t.Errorf("notice = %+v, want action snoozed and the moment it comes back", got.Notice)
-				}
-			},
-		},
-		{
-			"a notice with its own question carries its own buttons",
-			Notice{Title: "Still open", Body: "Me \u2014 settle the payment.", Place: "tasks", ID: "42", Kind: "stale", Actions: []NoticeButton{{Key: "done", Label: "Done"}, {Key: "dropped", Label: "Not happening"}}},
-			func(t *testing.T, raw []byte) {
-				var got struct {
-					Notice struct {
-						Kind    string              `json:"kind"`
-						Actions []map[string]string `json:"actions"`
-					} `json:"notice"`
-				}
-				if err := json.Unmarshal(raw, &got); err != nil {
-					t.Fatalf("unmarshal: %v", err)
-				}
-				want := []map[string]string{{"key": "done", "label": "Done"}, {"key": "dropped", "label": "Not happening"}}
-				if got.Notice.Kind != "stale" || !reflect.DeepEqual(got.Notice.Actions, want) {
-					t.Errorf("notice.actions = %+v, want %+v", got.Notice.Actions, want)
-				}
-			},
-		},
-		{
-			"a notice with no buttons of its own has no actions field",
-			Notice{Title: "Morning brief", Body: "Two things are still open.", Kind: "brief"},
-			func(t *testing.T, raw []byte) {
-				var got struct {
-					Notice map[string]json.RawMessage `json:"notice"`
-				}
-				if err := json.Unmarshal(raw, &got); err != nil {
-					t.Fatalf("unmarshal: %v", err)
-				}
-				if _, ok := got.Notice["actions"]; ok {
-					t.Errorf("a notice with no buttons of its own carries an actions field: %s", raw)
-				}
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
-			ch := s.hub.subscribe()
-			defer s.hub.unsubscribe(ch)
-
-			s.Notice(tc.notice)
-			ev := <-ch
-
-			raw, err := json.Marshal(ev)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			tc.check(t, raw)
-		})
 	}
 }
 

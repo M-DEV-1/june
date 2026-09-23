@@ -306,6 +306,8 @@ func (a *Agent) runAgyTurn(ctx context.Context, newProc func() agySessionRunner,
 		line = agyPromptLine(true, instruction, history, start, injected, reference, question)
 		res, err = sendAgyTurnLocked(ctx, sess, line)
 	}
+	// agy writes its plan allowance to Ora's statusline command during the run, so the payload is there to read by the time the turn is over, win or lose.
+	recordAgyQuota(sess.tempHome)
 	hops := sess.server.Hops()
 	capped := sess.server.Capped()
 	if err != nil {

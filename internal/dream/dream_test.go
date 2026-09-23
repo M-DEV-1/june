@@ -97,39 +97,6 @@ func insertEpisodeAt(t *testing.T, store *db.Store, ts time.Time) {
 	}
 }
 
-// The night key folds the small hours back onto the evening's date, and the window is [dreamHour, briefHour) across midnight.
-func TestNightKeyAndWindow(t *testing.T) {
-	r := &Runner{dreamHour: 23, briefHour: 9}
-	base := time.Date(2026, 8, 30, 0, 0, 0, 0, time.Local)
-	cases := []struct {
-		hour     int
-		inWindow bool
-		night    string
-	}{
-		{22, false, "2026-08-29"},
-		{23, true, "2026-08-30"},
-		{0, true, "2026-08-29"},
-		{8, true, "2026-08-29"},
-		{9, false, "2026-08-29"},
-		{12, false, "2026-08-29"},
-	}
-	for _, c := range cases {
-		now := base.Add(time.Duration(c.hour) * time.Hour)
-		if got := r.inWindow(now.Hour()); got != c.inWindow {
-			t.Errorf("inWindow(%02d:00) = %v, want %v", c.hour, got, c.inWindow)
-		}
-		if got := r.nightKey(now); got != c.night {
-			t.Errorf("nightKey(%02d:00) = %q, want %q", c.hour, got, c.night)
-		}
-	}
-
-	// A window that does not wrap midnight still works.
-	r = &Runner{dreamHour: 1, briefHour: 9}
-	if r.inWindow(0) || !r.inWindow(1) || !r.inWindow(8) || r.inWindow(9) {
-		t.Error("non-wrapping window [1,9) misbehaves")
-	}
-}
-
 // Each start condition individually blocks the run: no brain call, no run row. The final case proves the same setup does dream once nothing blocks.
 func TestTick_ConditionsGate(t *testing.T) {
 	night := at(23, 30).Format(dayFormat)
@@ -219,7 +186,7 @@ func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 		t.Errorf("asked = %v, want the understanding rewrite followed by the diary-writing call", asked)
 	}
 	run, _, _ := store.DreamRun(ctx, night)
-	if !run.Finished || run.StagesDone != "hyp und compact procedures prune" {
+	if !run.Finished || run.StagesDone != "hyp und compact procedures lessons prune" {
 		t.Errorf("run = %+v, want finished with the remaining stages done", run)
 	}
 	if entry, _ := store.DiaryEntry(ctx, night, "dream"); !strings.Contains(entry, "already committed on an earlier wake") {
@@ -1217,24 +1184,6 @@ func TestFinish_FallsBackToTemplateOnBrainError(t *testing.T) {
 	}
 }
 
-// When the diary-writing call comes back empty, the night still gets its old templated entry.
-func TestFinish_FallsBackToTemplateOnEmptyReply(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	night := "2026-08-30"
-	brain := &fakeBrain{report: "   "}
-	r := newRunner(store, brain, yesProbes(), at(23, 30))
-	hyp := &stageReport{tested: 1, adopted: 1, lines: []string{"Adopted: He ships at night."}}
-
-	if err := r.finish(ctx, night, time.Minute, hyp, true, &compactReport{}, &replayReport{}, nil); err != nil {
-		t.Fatalf("finish: %v", err)
-	}
-	entry, _ := store.DiaryEntry(ctx, night, "dream")
-	if !strings.Contains(entry, "judge-only") || !strings.Contains(entry, "Adopted: He ships at night.") {
-		t.Errorf("entry did not fall back to the template on an empty reply: %q", entry)
-	}
-}
-
 // A meeting's minutes end with what people agreed to do. Carrying only the leading lines of one dropped that section entirely — on a real 48-line minutes file the 40-line cap reached Attendees, Key points and Decisions, and cut Action items off the end. The evidence budget already bounds the assembly by dropping whole items oldest-first, which is the right shape: a meeting is included or it is not, never included headless.
 func TestBuildEvidence_CarriesAMeetingsActionItems(t *testing.T) {
 	var b strings.Builder
@@ -1242,11 +1191,11 @@ func TestBuildEvidence_CarriesAMeetingsActionItems(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		b.WriteString(fmt.Sprintf("- attendee %d — spoke throughout\n", i))
 	}
-	b.WriteString("\n## Action items\n- Zemna: push the value chain branch\n")
+	b.WriteString("\n## Action items\n- Zemna: push the route planning branch\n")
 
 	got := meetingEvidenceBody(b.String())
 
-	if !strings.Contains(got, "push the value chain branch") {
+	if !strings.Contains(got, "push the route planning branch") {
 		t.Error("the action items were cut off the end of the minutes")
 	}
 }

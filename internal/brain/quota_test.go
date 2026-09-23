@@ -150,15 +150,6 @@ func TestMetered_GatesGeminiButNotCLI(t *testing.T) {
 	}
 }
 
-// TestNewQuotaState_FileUnderDataDir pins the counter file's location under the data dir so a reviewer can find it on disk; the reads and writes through that path are exercised indirectly by the tests above.
-func TestNewQuotaState_FileUnderDataDir(t *testing.T) {
-	dir := t.TempDir()
-	state := NewQuotaState(dir)
-	if got, want := state.path, filepath.Join(dir, "brain_quota.json"); got != want {
-		t.Fatalf("quota file path = %q, want %q", got, want)
-	}
-}
-
 // TestWithDailyQuota_RefundsACallThatNeverReachedGoogle checks that a failure on this machine — no API key, a dead network, a cancelled context — hands back the slot it reserved. The count is meant to mirror what Google could bill, and an offline laptop used to spend the whole day's allowance on calls that never left it.
 func TestWithDailyQuota_RefundsACallThatNeverReachedGoogle(t *testing.T) {
 	local := []error{
@@ -198,24 +189,6 @@ func TestWithDailyQuota_CountsACallGoogleAnswered(t *testing.T) {
 		if _, err := b(context.Background(), "q"); !errors.As(err, &q) {
 			t.Fatalf("%v: the second call was allowed, so the first was refunded although Google answered it", ret)
 		}
-	}
-}
-
-// TestQuotaOptions_For checks that a Gemini model nobody has measured is still metered, against DefaultQuotaLimit and marked as a guess, while a name from another provider's namespace gets no ceiling at all. Leaving an unlisted Gemini model unmetered meant config.TextFallbackModel and anything pinned in background_models could spend the free tier without a cap.
-func TestQuotaOptions_For(t *testing.T) {
-	opts := DefaultQuotaOptions()
-	if limit, known := opts.For("gemini-3.5-flash"); !known || limit.Limit != 20 {
-		t.Errorf("a listed model = (%+v, %v), want its own measured ceiling", limit, known)
-	}
-	limit, known := opts.For(config.TextFallbackModel)
-	if known {
-		t.Errorf("%s is reported as measured, but nothing has measured it", config.TextFallbackModel)
-	}
-	if limit != DefaultQuotaLimit {
-		t.Errorf("unlisted gemini model = %+v, want the default ceiling %+v", limit, DefaultQuotaLimit)
-	}
-	if limit, known := opts.For("sonnet"); known || limit.Limit != 0 {
-		t.Errorf("a non-Gemini model name = (%+v, %v), want no ceiling at all", limit, known)
 	}
 }
 

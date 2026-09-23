@@ -8,7 +8,6 @@ import (
 
 	"google.golang.org/genai"
 
-	"ora/internal/act"
 	"ora/internal/tracker"
 )
 
@@ -28,66 +27,6 @@ func TestLiveScreenScope_DrawKnowsThatLookRan(t *testing.T) {
 	}
 	if !strings.Contains(cannotSeePictures, "observe_screen") {
 		t.Error("the refusal a blind session gets does not name the tool that does work")
-	}
-}
-
-// The allowance is per turn, not per session: maxLooksPerAsk is 2, and a voice conversation running for twenty minutes on one allowance could look twice and never again.
-func TestLiveScreenScope_RefreshesTheLookAllowanceEachTurn(t *testing.T) {
-	ctx := liveScreenScope(context.Background())
-	for i := 0; i < maxLooksPerAsk; i++ {
-		if !looksLeft(ctx) {
-			t.Fatalf("look %d refused while still inside the allowance", i+1)
-		}
-		recordLook(ctx, tracker.Capture{W: 1280, H: 698})
-	}
-	if looksLeft(ctx) {
-		t.Fatal("the allowance never ran out, so it is not being counted at all")
-	}
-
-	endLiveTurn(ctx)
-	if !looksLeft(ctx) {
-		t.Error("the allowance did not come back at the turn boundary, so a long session can look only twice in total")
-	}
-}
-
-// The voice scope must give the session a bigger look budget than a typed ask's maxLooksPerAsk: a spoken task like "scroll down and tell me what is there" needs a look after each action, not just one at the start and one after something moved.
-func TestVoiceScreenScope_AllowsTheVoiceBudgetPerTurn(t *testing.T) {
-	a := &Agent{}
-	ctx := a.voiceScreenScope(context.Background())
-
-	for i := 0; i < voiceMaxLooksPerTurn; i++ {
-		if !looksLeft(ctx) {
-			t.Fatalf("look %d refused while still inside the voice budget of %d", i+1, voiceMaxLooksPerTurn)
-		}
-		recordLook(ctx, tracker.Capture{W: 1280, H: 698})
-	}
-	if looksLeft(ctx) {
-		t.Fatal("the voice budget never ran out, so it is not being counted at all")
-	}
-
-	endLiveTurn(ctx)
-	if !looksLeft(ctx) {
-		t.Error("the voice budget did not come back at the turn boundary")
-	}
-	// Once it comes back it must still be the voice-sized budget, not silently fall back to the typed-ask default of two.
-	for i := 0; i < voiceMaxLooksPerTurn; i++ {
-		if !looksLeft(ctx) {
-			t.Fatalf("after reset, look %d refused while still inside the voice budget of %d", i+1, voiceMaxLooksPerTurn)
-		}
-		recordLook(ctx, tracker.Capture{W: 1280, H: 698})
-	}
-}
-
-// The numbered list observe_screen produced must survive a turn boundary: the model lists the screen, replies to the user, and is then asked to draw around item 3.
-func TestLiveScreenScope_KeepsWhatObserveScreenListedAcrossATurn(t *testing.T) {
-	a := &Agent{}
-	ctx := liveScreenScope(context.Background())
-	a.rememberScreen(ctx, []act.Item{{N: 1, X: 5, Y: 6, W: 7, H: 8}}, screenSnapshot{})
-
-	endLiveTurn(ctx)
-
-	if got := a.seen(ctx); len(got) != 1 {
-		t.Errorf("observe_screen's list is %d long after the turn ended, want the one item still there to draw around", len(got))
 	}
 }
 

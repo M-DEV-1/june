@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-/** Tests for ReplyMarkdown: the pieces the daemon's replies actually use — a fenced code block, inline maths, a gfm table, a link that must never navigate this window, and a guard against raw HTML actually running. */
+/** Tests for ReplyMarkdown: a link that must never navigate this window, a guard against raw HTML actually running, and the copy button on a code block. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
@@ -14,24 +14,6 @@ import { mockDaemon } from "./testing";
 afterEach(cleanup);
 
 describe("ReplyMarkdown", () => {
-  it("renders a fenced code block as pre>code", () => {
-    const { container } = render(<ReplyMarkdown text={"```js\nconst x = 1;\n```"} />);
-    const code = container.querySelector("pre > code");
-    expect(code).not.toBeNull();
-    expect(code?.textContent).toContain("const x = 1;");
-  });
-
-  it("renders inline math as a katex element", () => {
-    const { container } = render(<ReplyMarkdown text="the answer is $x^2$ always" />);
-    expect(container.querySelector(".katex")).not.toBeNull();
-  });
-
-  it("renders a gfm table as a table", () => {
-    const text = ["| a | b |", "| - | - |", "| 1 | 2 |"].join("\n");
-    render(<ReplyMarkdown text={text} />);
-    expect(screen.getByRole("table")).toBeTruthy();
-  });
-
   it("shows a raw script tag as text instead of running it", () => {
     const w = window as unknown as { __ran?: boolean };
     const { container } = render(

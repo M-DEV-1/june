@@ -4,6 +4,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -51,8 +52,8 @@ type Event struct {
 	Notice *Notice `json:"notice,omitempty"`
 }
 
-// askTimeout bounds one /ask's model call so a hung call ends with an error event instead of holding its goroutine for ever; a variable so tests can shorten it. Five minutes because a screen task is observe, act, observe again, several rounds over, and a reasoning model can spend close to a minute on one round; this is the deadline every brain inherits, so a shorter value here would cut a Codex turn short whatever that path allows itself.
-var askTimeout = 5 * time.Minute
+// askTimeout bounds one /ask's model call so a hung call ends with an error event instead of holding its goroutine for ever; a variable so tests can shorten it. It matches the twelve minutes each brain allows itself (askWallClock, claudeAskTimeout, codexAskTimeout, agyAskTimeout): this is the deadline every brain inherits, so a shorter value here cut a screen task off with "took too long" before it reached its step checkpoint, and lost the report of where it got to.
+var askTimeout = 12 * time.Minute
 
 // storeTurnTimeout bounds the write that files a finished answer as a turn, so a wedged store cannot hold the ask goroutine open for ever.
 const storeTurnTimeout = 10 * time.Second
@@ -468,6 +469,13 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 	} else {
 		trace, err = asker.AskText(ctx, q)
 	}
+	outcome, errMsg := "ok", ""
+	// Running out of steps is where the work got to, not a failure to answer: it is filed as Ora's answer so a "continue" after it has the task in its history (error turns are left out of history), while the act run still records it as a run that did not finish.
+	var capped *agent.StepCapError
+	if errors.As(err, &capped) {
+		trace.Answer = capped.Msg
+		outcome, errMsg, err = "error", capped.Msg, nil
+	}
 	if err != nil {
 		s.recordActRun(trace, question, "error", err.Error())
 		s.recordTokenUse(trace, question, "text")
@@ -486,9 +494,9 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 		return
 	}
 
-	s.recordActRun(trace, question, "ok", "")
+	s.recordActRun(trace, question, outcome, errMsg)
 	s.recordTokenUse(trace, question, "text")
-	s.afterScreenRun(asker, trace, "ok")
+	s.afterScreenRun(asker, trace, outcome)
 	// The tool events themselves already went out live, via the ToolObserver wired onto ctx above — this only rebuilds the list of names for storage, not for broadcast, so they are not shown twice.
 	tools := make([]string, 0, len(trace.ToolHops))
 	for _, hop := range trace.ToolHops {

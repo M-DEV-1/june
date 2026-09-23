@@ -44,8 +44,11 @@ type UiState = {
   notice?: { text: string; kind: "info" | "error" };
   /** The most recent notice to reach the window with no action yet — the live one the rail line offers Done/1h/Evening/Tomorrow buttons for. Cleared the moment the daemon's answer comes back as the same notice with its action set (see reactToNotice), which is what the buttons are replaced by. */
   /** at is when the notice reached this window, stamped here because the daemon sends none: the card reads it against the clock to say "now", then "5m ago" (see noticeAge). */
-  liveNotice?: Pick<Notice, "kind" | "id" | "title" | "body" | "actions"> & { at: number };
+  liveNotice?: LiveNotice;
 };
+
+/** The notice the sidebar's card is showing. at is when it reached this window, stamped by the window because the daemon sends none: the card reads it against the clock to say "now", then "5m ago" (see noticeAge). */
+export type LiveNotice = Pick<Notice, "kind" | "id" | "title" | "body" | "actions" | "expires"> & { at: number };
 
 /** What Escape does, dispatched once and answered by whichever slices have something to give up. */
 export const escaped = createAction("escaped");
@@ -217,8 +220,8 @@ const settingsSlice = createSlice({
   },
 });
 
-/** One tool the agent called while answering: the tool's name and the one line it reported about what it did. */
-export type Step = { name: string; detail: string; failed?: boolean };
+/** One tool the agent called while answering: the tool's name and the one line it reported about what it did. n is the step's number, given when it arrives and never recomputed, so a step keeps it however the list is later filtered — the same numbering a job's steps carry (JobStepRow below). */
+export type Step = { n: number; name: string; detail: string; failed?: boolean };
 
 /** The question in flight: which conversation it was asked in, what was asked, the last working line, the answer as far as it has arrived, the tools called so far, and what the answer was drawn from. The window waits on one question at a time, exactly as the current window does, so a message on the stream that belongs to something else — a question asked in the hover window, a voice session — changes nothing here. */
 export type Run = {
@@ -411,7 +414,7 @@ const progressSlice = createSlice({
           run.status = ev.text ?? "";
           break;
         case "tool":
-          run.steps.push({ name: ev.text ?? "", detail: ev.detail ?? "", failed: ev.failed });
+          run.steps.push({ n: run.steps.length + 1, name: ev.text ?? "", detail: ev.detail ?? "", failed: ev.failed });
           run.status = ev.detail || ev.text || "";
           break;
         case "answer":
@@ -441,7 +444,7 @@ export const progress = progressSlice.actions;
 /** What a "notice" event does outside the progress slice. One arriving fresh, with no action yet, becomes the sidebar's liveNotice — the rail line's own Done/1h/Evening/Tomorrow buttons, wired through useActOnNoticeMutation in sidebar.tsx. Once its action is set — the daemon's answer to one of those buttons, or to the desktop notification's own — it says so on the rail line instead (the one surface every notice already reaches, alongside the routine run result "Could not add that routine" and the rest of ui.notice's callers), clears liveNotice so the buttons are gone, and, for a task notice pressed Done, tells the Tasks screen's cache to read the list again, since the daemon closed that task through its own task-done path (see internal/proactive/notify.go's markDone) without this window's POST /tasks/{id}/done ever running to invalidate it. */
 function reactToNotice(n: Notice, api: { dispatch: AppDispatch }): void {
   if (!n.action) {
-    api.dispatch(uiSlice.actions.liveNoticeSet({ kind: n.kind, id: n.id, title: n.title, body: n.body, actions: n.actions, at: Date.now() }));
+    api.dispatch(uiSlice.actions.liveNoticeSet({ kind: n.kind, id: n.id, title: n.title, body: n.body, actions: n.actions, expires: n.expires, at: Date.now() }));
     return;
   }
   api.dispatch(uiSlice.actions.liveNoticeSet(undefined));
@@ -486,8 +489,11 @@ export function streamMiddleware(open: typeof events = events) {
           // The list is named by its own id rather than by the bare type: the type alone matches every open conversation as well, including the one finishRun has just read, which would read it a second time for nothing.
           api.dispatch(oraApi.util.invalidateTags([{ type: "Conversation", id: "LIST" }, "Task", "Usage"]));
         },
-        () => {
+        async () => {
           // The stream opening again is this window's one signal that the daemon it had lost is answering, so everything that failed while it was gone is read once more. Without it a window left open across a daemon restart keeps showing "Nothing is answering" until something happens to focus it.
+          // A question in flight across the drop is given up the way a finished one is: a restarted daemon will never send its "done", and the composer holds Send disabled until one arrives.
+          const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
+          if (typed.getState().progress.run) await finishRun(typed);
           api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]));
         },
       );
@@ -518,10 +524,11 @@ export function streamMiddleware(open: typeof events = events) {
       const before = api.getOriginalState().progress.jobs;
       api.dispatch(
         oraApi.util.updateQueryData("conversations", undefined, (draft) => {
+          const rows = new Map(draft.map((c) => [c.id, c]));
           for (const job of jobs) {
             // A job that has ended writes its last word once, on the event that ended it, and never again: what the row says after that is the daemon's, and rewriting it on every later event of every other chat put long-finished words back over whatever GET /conversations last said.
             if (!isJobLive(job.state) && before[job.conversationId]?.state === job.state) continue;
-            const row = draft.find((c) => c.id === job.conversationId);
+            const row = rows.get(job.conversationId);
             if (row) row.last = jobStateWord(job.state);
           }
         }),

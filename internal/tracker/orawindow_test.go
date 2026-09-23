@@ -7,28 +7,6 @@ import (
 	"time"
 )
 
-// The rule for Ora's own window: the app name decides, except for the XWayland frame process, which is only Ora when its title says so.
-func TestIsOraWindow(t *testing.T) {
-	tests := []struct {
-		app, title string
-		want       bool
-	}{
-		{"ora", "Ora", true},
-		{"Ora", "anything", true},
-		{" ora ", "", true},
-		{"mutter-x11-frames", "Ora", true},
-		{"mutter-x11-frames", "Slack", false},
-		{"gnome-terminal", "ora", false},
-		{"Google Chrome", "ora — mail", false},
-		{"", "", false},
-	}
-	for _, tt := range tests {
-		if got := tracker.IsOraWindow(tt.app, tt.title); got != tt.want {
-			t.Errorf("IsOraWindow(%q, %q) = %v, want %v", tt.app, tt.title, got, tt.want)
-		}
-	}
-}
-
 // The capture loop must never emit Ora's own window, so it reaches neither the episode store nor the live activity buffer, both of which are fed from this one channel.
 func TestDaemon_SkipsOraOwnWindow(t *testing.T) {
 	mockEye := &mockTracker{

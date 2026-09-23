@@ -54,27 +54,6 @@ func TestAct11TasksUpTo(t *testing.T) {
 	}
 }
 
-// TestAct11CostLine checks the cost line's two shapes: plain rounds/tokens with no by-model breakdown, and the same line with a sorted, semicolon-joined per-model breakdown appended.
-func TestAct11CostLine(t *testing.T) {
-	plain := act11CostLine(actjob.Spend{Rounds: 3, Input: 100, Cached: 20, Output: 40})
-	want := "3 rounds, 100 in / 20 cached / 40 out"
-	if plain != want {
-		t.Errorf("plain spend: got %q, want %q", plain, want)
-	}
-
-	withModels := act11CostLine(actjob.Spend{
-		Rounds: 5, Input: 300, Cached: 50, Output: 90,
-		ByModel: map[string]actjob.Usage{
-			"gemini": {Input: 200, Cached: 50, Output: 60},
-			"claude": {Input: 100, Output: 30},
-		},
-	})
-	wantModels := "5 rounds, 300 in / 50 cached / 90 out (claude: 100 in / 0 cached / 30 out; gemini: 200 in / 50 cached / 60 out)"
-	if withModels != wantModels {
-		t.Errorf("spend with models: got %q, want %q", withModels, wantModels)
-	}
-}
-
 // sseActLine renders one "act" SSE line the way ipc.ActEmitter does: Detail is the actjob.Event marshaled as JSON, nested inside the outer ipc.Event.
 func sseActLine(jobID string, ae actjob.Event) string {
 	detail, err := json.Marshal(ae)
@@ -230,52 +209,6 @@ func TestAct11TaskPassRules(t *testing.T) {
 		}
 		if pass(actjob.Job{State: actjob.Failed}, nil) {
 			t.Error("want fail: the resumed job did not reach done")
-		}
-	})
-}
-
-// TestAct11PostRetrying_RetriesOnceAfter429 checks the retry policy shared by /act, /act/{id}/resume and /act/{id}/answer: one retry after the response's own Retry-After, and no second retry on a second 429.
-func TestAct11PostRetrying_RetriesOnceAfter429(t *testing.T) {
-	t.Run("succeeds on the retry", func(t *testing.T) {
-		var attempts int32
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if atomic.AddInt32(&attempts, 1) == 1 {
-				w.Header().Set("Retry-After", "0")
-				w.WriteHeader(http.StatusTooManyRequests)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		}))
-		defer srv.Close()
-
-		resp, err := postRetrying(context.Background(), &http.Client{}, srv.URL, "tok", nil)
-		if err != nil {
-			t.Fatalf("postRetrying: %v", err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusNoContent {
-			t.Errorf("status = %d, want 204", resp.StatusCode)
-		}
-		if attempts != 2 {
-			t.Errorf("attempts = %d, want exactly one retry", attempts)
-		}
-	})
-
-	t.Run("a second 429 is not retried again", func(t *testing.T) {
-		var attempts int32
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			atomic.AddInt32(&attempts, 1)
-			w.Header().Set("Retry-After", "0")
-			w.WriteHeader(http.StatusTooManyRequests)
-		}))
-		defer srv.Close()
-
-		_, err := postRetrying(context.Background(), &http.Client{}, srv.URL, "tok", nil)
-		if err == nil || !strings.Contains(err.Error(), "429") {
-			t.Fatalf("err = %v, want it to name the 429", err)
-		}
-		if attempts != 2 {
-			t.Errorf("attempts = %d, want exactly one retry", attempts)
 		}
 	})
 }

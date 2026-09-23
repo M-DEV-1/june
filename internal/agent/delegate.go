@@ -20,7 +20,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// Delegation is one request to hand a goal to another agent. To names the target — "claude" is the only one this version runs. Brief is the goal in the user's own words. CWD is the project directory to run the delegate in, so it works in a real repo rather than Ora's own sandbox; empty means the daemon's own working directory. Wait says whether the caller blocks for the result; this version always waits, but the field is here so a later fire-and-forget version does not change the shape callers already build.
+// Delegation is one request to hand a goal to another agent. To names the target — "claude" is the only one this version runs. Brief is the goal in the user's own words. CWD is the directory to run the delegate in; empty means the user's home directory. Wait says whether the caller blocks for the result; this version always waits, but the field is here so a later fire-and-forget version does not change the shape callers already build.
 type Delegation struct {
 	To    string
 	Brief string
@@ -36,15 +36,17 @@ type Runner interface {
 // claudeCodeBinary is the Claude Code command line, found on PATH — the same binary claude.go's ask path runs.
 const claudeCodeBinary = "claude"
 
-// ClaudeCodeRunner runs a delegate session through `claude -p` in the caller's own project directory, under the CLI's normal default permission mode — not the --restricted, no-tools sandbox AskClaude uses for its own asks, because a delegate call is a real hand-off to a collaborator working in a real project. --bare is never passed (it would bill the API key instead of the subscription, the same reason claude.go never passes it) and --dangerously-skip-permissions is never passed: in this headless `-p` run there is nobody to answer a permission prompt, so under --permission-mode default an approval-gated tool is simply denied rather than run unsupervised — that denial, plus the "do not send, publish, pay for or delete" line BuildBrief writes into every brief, is the actual guard, not a live approval gate.
+// ClaudeCodeRunner runs a delegate session through `claude -p` in the caller's project directory (the home directory when none is named), under auto permission mode — not the --restricted, no-tools sandbox AskClaude uses for its own asks, because a delegate call is a real hand-off to a collaborator. Auto mode has Claude Code's own classifier approve routine commands and block risky ones; the old default mode denied every approval-gated command, since a headless run has nobody to answer a prompt, so a delegate could not even list ~/Downloads. --bare is never passed (it would bill the API key instead of the subscription, the same reason claude.go never passes it), nor is --dangerously-skip-permissions. The classifier plus the "do not send, publish, pay for or delete" line BuildBrief writes into every brief are the guard.
 type ClaudeCodeRunner struct{}
 
-// newDelegateCmd builds (without starting) the `claude -p` command for one delegate run. Input: the context whose deadline bounds the run, the working directory (cwd, "" for the caller's own), and the path of the system-prompt file already written to disk. Output: the exec.Cmd, not yet given stdin/stdout/stderr — a test can inspect its process-group and cancel wiring without ever starting the real claude binary. The child runs in its own process group (SysProcAttr.Setpgid) and Cancel kills the whole group, not just the direct child, so a `npm run dev` or watcher the delegate started does not outlive the ten-minute wall or the caller's own context — killing only the direct process leaves such grandchildren running with nobody to stop them. WaitDelay still bounds how long Run waits for stdout to close once Cancel has fired.
+// newDelegateCmd builds (without starting) the `claude -p` command for one delegate run. Input: the context whose deadline bounds the run, the working directory (cwd, "" for the home directory), and the path of the system-prompt file already written to disk. Output: the exec.Cmd, not yet given stdin/stdout/stderr — a test can inspect its process-group and cancel wiring without ever starting the real claude binary. The child runs in its own process group (SysProcAttr.Setpgid) and Cancel kills the whole group, not just the direct child, so a `npm run dev` or watcher the delegate started does not outlive the ten-minute wall or the caller's own context — killing only the direct process leaves such grandchildren running with nobody to stop them. WaitDelay still bounds how long Run waits for stdout to close once Cancel has fired.
 func newDelegateCmd(ctx context.Context, cwd, promptPath string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, claudeCodeBinary, "-p", "--output-format", "text", "--system-prompt-file", promptPath, "--permission-mode", "default")
-	if cwd != "" {
-		cmd.Dir = cwd
+	cmd := exec.CommandContext(ctx, claudeCodeBinary, "-p", "--output-format", "text", "--system-prompt-file", promptPath, "--permission-mode", "auto")
+	// Claude Code only reads under its cwd, and the daemon's own cwd is wherever it was started, so a delegate given no directory runs in the home directory, where the user's files and clones are.
+	if cwd == "" {
+		cwd, _ = os.UserHomeDir()
 	}
+	cmd.Dir = cwd
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 2 * time.Second
@@ -225,7 +227,7 @@ var delegateTool = &genai.FunctionDeclaration{
 		Properties: map[string]*genai.Schema{
 			"to":    {Type: genai.TypeString, Description: "Who to hand the work to. Only \"claude\" is supported today."},
 			"brief": {Type: genai.TypeString, Description: "The goal to hand over, in plain language — what the delegate should do and how to know it is done."},
-			"cwd":   {Type: genai.TypeString, Description: "The project directory to run the delegate in. Defaults to Ora's own working directory when left out."},
+			"cwd":   {Type: genai.TypeString, Description: "The directory to run the delegate in; it can read and work only under this directory. Defaults to the user's home directory when left out."},
 		},
 		Required: []string{"brief"},
 	},

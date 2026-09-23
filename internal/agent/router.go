@@ -15,6 +15,7 @@ import (
 	"ora/internal/config"
 	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,8 +26,8 @@ type Need struct {
 	Web bool
 }
 
-// breakerWindow is how long a provider is skipped after it fails in a way that will repeat. An hour: a spent daily allowance will not come back sooner, and a rate limit usually clears well within it, so this trades one wasted call an hour for never wasting one on a provider that is certainly going to refuse.
-const breakerWindow = time.Hour
+// BreakerWindow is how long a provider is skipped after it fails in a way that will repeat. An hour: a spent daily allowance will not come back sooner, and a rate limit usually clears well within it, so this trades one wasted call an hour for never wasting one on a provider that is certainly going to refuse.
+const BreakerWindow = time.Hour
 
 // card is what the router knows about one provider.
 type card struct {
@@ -36,16 +37,28 @@ type card struct {
 	web bool
 	// rank orders the providers a question could go to, lowest first.
 	rank int
+	// asks is whether an ask can be routed here, which needs a tool-calling asker in askRouted's switch. False means the provider answers duties only: internal/brain can build it a one-shot backend, but a question routed to it would fall through that switch to Gemini and be answered, and billed, under this provider's name.
+	asks bool
 	// ready reports whether this machine can run the provider at all — a CLI that is installed and logged into. It is a func because the answer can change while the daemon runs.
 	ready func() bool
 }
 
 // cards is every provider an ask can be routed to, in rank order.
 var cards = []card{
-	{id: ProviderGemini, web: false, rank: 0, ready: func() bool { return true }},
-	{id: ProviderCodex, web: false, rank: 1, ready: codexLoggedIn},
-	{id: ProviderAgy, web: false, rank: 2, ready: agyReady},
-	{id: ProviderClaude, web: true, rank: 3, ready: claudeLoggedIn},
+	{id: ProviderGemini, web: false, rank: 0, asks: true, ready: func() bool { return true }},
+	{id: ProviderCodex, web: false, rank: 1, asks: true, ready: codexLoggedIn},
+	{id: ProviderAgy, web: false, rank: 2, asks: true, ready: agyReady},
+	{id: ProviderGrok, web: false, rank: 3, asks: false, ready: grokReady},
+	{id: ProviderClaude, web: true, rank: 4, asks: true, ready: claudeLoggedIn},
+}
+
+// ProviderGrok is the Grok command line. It answers duties through internal/brain and has no asker here, so no ask is ever routed to it.
+const ProviderGrok = "grok"
+
+// grokReady reports whether the Grok command line is on this machine. Like agyReady this only says the CLI is installed; a run under a login that no longer works fails and opens the breaker.
+func grokReady() bool {
+	_, err := exec.LookPath("grok")
+	return err == nil
 }
 
 // agyReady reports whether the Antigravity command line is on this machine. There is no credential file at a stable path to check the way claudeLoggedIn does, so this only says the CLI is installed; a run that turns out not to be logged in fails and opens the provider's breaker like any other failure.
@@ -72,6 +85,9 @@ func SetPreferredProvider(provider string) {
 	routerState.preferred = providerCard(provider)
 }
 
+// RouterID is providerCard for callers outside this package: internal/brain needs it to put a duty's own configured provider at the front of the order.
+func RouterID(provider string) string { return providerCard(provider) }
+
 // providerCard maps a config provider name to the router's own id for it. Input: the config spelling. Output: the card id, or "" when the router has no card for that provider.
 func providerCard(provider string) string {
 	switch provider {
@@ -83,6 +99,25 @@ func providerCard(provider string) string {
 		return ProviderAgy
 	case config.BrainClaudeCLI:
 		return ProviderClaude
+	case config.BrainGrokCLI:
+		return ProviderGrok
+	}
+	return ""
+}
+
+// ConfigProvider is providerCard's inverse: the config spelling of a router provider id, which is what internal/brain builds a backend from. Input: a router id. Output: the config.Brain* name, or "" when the router has no such id.
+func ConfigProvider(id string) string {
+	switch id {
+	case ProviderGemini:
+		return config.BrainGeminiAPI
+	case ProviderCodex:
+		return config.BrainCodex
+	case ProviderAgy:
+		return config.BrainAgyCLI
+	case ProviderClaude:
+		return config.BrainClaudeCLI
+	case ProviderGrok:
+		return config.BrainGrokCLI
 	}
 	return ""
 }
@@ -97,7 +132,7 @@ func SetProviderReady(id string, ready bool) {
 	routerState.readyOverride[id] = ready
 }
 
-// ProviderFailed records that a provider failed in a way that will repeat, so the router skips it until the window passes. Input: the provider id and how long to skip it — breakerWindow for a spent allowance or a rate limit. Output: none.
+// ProviderFailed records that a provider failed in a way that will repeat, so the router skips it until the window passes. Input: the provider id and how long to skip it — BreakerWindow for a spent allowance or a rate limit. Output: none.
 func ProviderFailed(id string, window time.Duration) {
 	routerState.mu.Lock()
 	defer routerState.mu.Unlock()
@@ -117,7 +152,13 @@ func ResetRouter() {
 }
 
 // Route returns the providers that can answer a question needing need, best first. Input: what the question requires. Output: the provider ids to try in order, empty when none of them can serve it — which is a real answer, not an error: it means every provider is either unusable on this machine or known to be refusing.
-func Route(need Need) []string {
+func Route(need Need) []string { return route(need, true) }
+
+// RouteDuty is Route for an unattended duty — meeting minutes, the memory jobs — which needs a prompt answered rather than a question asked. It offers the same providers in the same order plus the ones that have a one-shot backend in internal/brain but no asker here. Input: what the duty requires. Output: the provider ids to try in order.
+func RouteDuty(need Need) []string { return route(need, false) }
+
+// route is the body of both. onlyAsks drops the providers no ask can be routed to.
+func route(need Need, onlyAsks bool) []string {
 	routerState.mu.Lock()
 	defer routerState.mu.Unlock()
 
@@ -135,6 +176,9 @@ func Route(need Need) []string {
 		return 0
 	})
 	for _, c := range ordered {
+		if onlyAsks && !c.asks {
+			continue
+		}
 		if need.Web && !c.web {
 			continue
 		}
@@ -153,10 +197,27 @@ func Route(need Need) []string {
 	return out
 }
 
-// providerSpent reports whether err is the kind of failure another provider can fix rather than repeat: Gemini overloaded or out of its daily allowance, or an HTTP 429 from one of the command-line backends whose subscription allowance is spent. Input: the error from one provider's ask, possibly wrapped. Output: true only for those, since any other failure — a rejected prompt, a broken tool call — would fail the same way everywhere and asking on is three more costs for the same answer.
-func providerSpent(err error) bool {
+// ErrLoggedOut is what a command-line backend's ask returns when that CLI's own login is no longer valid. It is the second kind of failure another provider can fix, alongside a spent allowance: the credential has expired and no retry on this brain will work, while the next brain's login is untouched. On 2026-09-15 an expired Antigravity token failed three asks in a row with Claude signed in and never asked, because a 401 was neither a 429 nor a Gemini exhaustion and askInOrder stopped on it.
+var ErrLoggedOut = errors.New("the login is no longer valid")
+
+// loggedOut reports whether a CLI's own failure message says its login has expired rather than something about this particular question.
+//
+// Input: the reason the CLI gave, which is free text and differs per CLI. Output: true only when it is an authentication failure.
+//
+// A true here costs a brain for an hour, so the markers have to be ones that cannot appear in an ordinary refusal. The one message measured so far is agy 1.2.3 on 2026-09-15: "Eligibility check failed: UNAUTHENTICATED (code 401): Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential."
+func loggedOut(reason string) bool {
+	// Both markers come from the one message measured. UNAUTHENTICATED is a gRPC status code rather than prose, so it does not appear in a model's own refusal; the phrase is the backend's wording for the same thing. A bare "401" is not matched: it appears inside URLs and inside text a model wrote.
+	lower := strings.ToLower(reason)
+	return strings.Contains(reason, "UNAUTHENTICATED") || strings.Contains(lower, "invalid authentication credentials")
+}
+
+// ProviderSpent reports whether err is the kind of failure another provider can fix rather than repeat: an expired login on a command-line backend, Gemini overloaded or out of its daily allowance, or an HTTP 429 from one of the command-line backends whose subscription allowance is spent. Input: the error from one provider's ask, possibly wrapped. Output: true only for those, since any other failure — a rejected prompt, a broken tool call — would fail the same way everywhere and asking on is three more costs for the same answer.
+func ProviderSpent(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, ErrLoggedOut) {
+		return true
 	}
 	if geminiCannotAnswer(err) {
 		return true
@@ -181,11 +242,11 @@ func askInOrder(order []string, ask func(id string) (TurnTrace, error)) (TurnTra
 		if err == nil {
 			return tr, nil
 		}
-		if !providerSpent(err) {
+		if !ProviderSpent(err) {
 			return tr, err
 		}
 		slog.Warn("ask: provider out of allowance, handing the question on", "provider", id, "error", err)
-		ProviderFailed(id, breakerWindow)
+		ProviderFailed(id, BreakerWindow)
 	}
 	if err == nil {
 		return tr, errNoProvider

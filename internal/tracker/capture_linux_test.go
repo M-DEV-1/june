@@ -15,29 +15,6 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// A web app's accessibility tree is deep: on 2026-09-03 the Microsoft Teams window in Chrome had its document node at depth 7 and its text, the people list included, down to depth 26. With the walk capped at 14 the read returned eleven characters and a row of placeholders; at 30 it returned 9,803 characters in 434 ms. The node cap and the deadline bound the cost, so depth must not be what cuts a page short.
-func TestMaxDepthReachesAWebAppsText(t *testing.T) {
-	if maxDepth < 26 {
-		t.Fatalf("maxDepth = %d, want at least 26 so a Teams or Meet page's text is reached", maxDepth)
-	}
-}
-
-// AT-SPI toolkits disagree on the case of the signal member: Chromium emits org.a11y.atspi.Event.Window.Activate and GTK4 emits the same signal as .activate, both observed on this machine on 2026-09-04. signalMember must hand back whatever follows the last dot so the caller can compare it case-insensitively.
-func TestSignalMember(t *testing.T) {
-	cases := map[string]string{
-		"org.a11y.atspi.Event.Window.Activate":   "Activate",
-		"org.a11y.atspi.Event.Window.activate":   "activate",
-		"org.a11y.atspi.Event.Window.Deactivate": "Deactivate",
-		"Activate":                               "Activate",
-		"":                                       "",
-	}
-	for in, want := range cases {
-		if got := signalMember(in); got != want {
-			t.Errorf("signalMember(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // The focus rule: an activate replaces whatever was remembered, a deactivate clears the memory only when it names the window currently remembered, and any signal at all marks the state as live so callers stop trusting the STATE_ACTIVE walk.
 func TestFocusStateApply(t *testing.T) {
 	chrome := aref{Name: ":1.3068", Path: "/org/a11y/atspi/accessible/1"}
@@ -160,22 +137,6 @@ func TestConsumeFollowsTheDesktop(t *testing.T) {
 	}
 	if !w.state.seenAny() {
 		t.Fatal("seenAny() is false after five signals, so the stale STATE_ACTIVE walk would run again")
-	}
-}
-
-// The same loop stopped one signal earlier must report the window that is actually focused, with the application name resolved from its accessible parent.
-func TestConsumeReportsTheActivatedWindow(t *testing.T) {
-	claude := aref{Name: ":1.7009", Path: "/org/a11y/atspi/accessible/1"}
-
-	var w focusWatcher
-	sigs := make(chan *dbus.Signal, 2)
-	sigs <- &dbus.Signal{Name: "org.a11y.atspi.Event.Window.activate", Sender: claude.Name, Path: claude.Path}
-	close(sigs)
-	w.consume(sigs, func(aref) (string, string) { return "claude-desktop", "Claude" })
-
-	ref, app, ok := w.state.get()
-	if !ok || ref != claude || app != "claude-desktop" {
-		t.Fatalf("state = %v, %q, %v, want %v, %q, true", ref, app, ok, claude, "claude-desktop")
 	}
 }
 

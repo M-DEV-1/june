@@ -288,24 +288,35 @@ func TestAskAgy_IdleTimeoutKillsTheProcess(t *testing.T) {
 	}
 }
 
-// Tool calls made mid-turn still get recorded, through the session's own long-lived tool server, exactly as they were on the one-shot path.
-func TestAskAgy_RunsToolsThroughTheLiveSession(t *testing.T) {
+// The result agy 1.2.3 prints when its own login has expired, measured on this machine on 2026-09-15: the reason is in "error" and "response" is empty. A run that reads only "response" reports "agy: the run failed (ERROR):" with nothing after the colon, which is what three asks in a row showed in the window that day. Two things have to hold. The reason has to reach the message, or nobody can tell an expired login from a crash. And the router has to treat it as a provider to hand on from, or a machine with a working Claude login sitting at 31% of its window answers nothing at all.
+func TestAskAgy_AnExpiredLoginNamesTheReasonAndHandsOn(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	fake := &fakeAgySession{
-		responses: []string{`{"status":"SUCCESS","response":"Brave is in front."}`},
-		toolCalls: map[int][]string{0: {"observe_screen"}},
-	}
-	newProc := func() agySessionRunner { return fake }
+	fake := &fakeAgySession{responses: []string{`{"status":"ERROR","response":"","error":"Eligibility check failed: UNAUTHENTICATED (code 401): Request had invalid authentication credentials."}`}}
 	t.Cleanup(a.CloseAgySession)
 
-	tr, err := a.askAgy(t.Context(), newProc, "gemini-3-pro", nil, "what window is in front")
-	if err != nil {
-		t.Fatal(err)
+	_, err := a.askAgy(t.Context(), func() agySessionRunner { return fake }, "", nil, "hello")
+	if err == nil {
+		t.Fatal("an expired login answered")
 	}
-	if tr.Answer != "Brave is in front." || tr.Model != "agy/gemini-3-pro" {
-		t.Errorf("trace = %+v", tr)
+	if !strings.Contains(err.Error(), "UNAUTHENTICATED") {
+		t.Errorf("the failure does not name the reason: %q", err)
 	}
-	if len(tr.ToolHops) != 1 || tr.ToolHops[0].Name != "observe_screen" {
-		t.Errorf("hops = %+v", tr.ToolHops)
+	if !ProviderSpent(err) {
+		t.Errorf("an expired login stops the chain rather than handing on: %q", err)
+	}
+}
+
+// A run that fails for a reason every brain would repeat still stops the chain. Asking Claude the same broken question costs a second answer for the same failure.
+func TestAskAgy_AnOrdinaryFailureStillStopsTheChain(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	fake := &fakeAgySession{responses: []string{`{"status":"ERROR","response":"","error":"the prompt was rejected"}`}}
+	t.Cleanup(a.CloseAgySession)
+
+	_, err := a.askAgy(t.Context(), func() agySessionRunner { return fake }, "", nil, "hello")
+	if err == nil {
+		t.Fatal("a rejected prompt answered")
+	}
+	if ProviderSpent(err) {
+		t.Errorf("a rejected prompt was handed on to the next brain: %q", err)
 	}
 }

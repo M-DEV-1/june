@@ -163,8 +163,6 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	})
 
 	meetingRecorder = recorder.New(ctx, config.DataDir(), store, apiKey)
-	// A meeting write-up that hits a spent daily allowance is finished by Codex instead of being dropped.
-	meetingRecorder.SetMinutesFallback(backgroundFallbackBrain())
 
 	// Ora watches the microphone rather than the meeting apps: a call is the one thing that always takes it, and watching it needs no list of which applications count as a meeting.
 	if appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord {
@@ -212,16 +210,16 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	textEngine := embed.NewTextEngine(appConfig)
 	if textEngine == nil {
 		slog.Warn("no local text model configured (local_text.model_path / dream.model_path), the working-state derive stays on the metered API")
-	} else if summarizer != nil {
-		// This is what takes the five-minute working-state job off the user's free-tier daily request allowance entirely. A background_brains entry for the same job overrides it below, because naming a provider in the config is the more deliberate act.
-		summarizer.SetJobBackend(config.JobWorkingState, textEngine.Generate)
 	}
 
+	// The text server yields to a whisper decode and does not climb back on until it is done. The embedding server stays: measured on this card, it holds 662 MiB of 4096 against whisper-medium's ~2.2 GB, so the two fit together with room over, and evicting it only cost every embed that arrived during a decode — hybrid search fell back to lexical and the reconcile sweep dropped its work. The text server is the one that does not fit: 1851 MiB, which with whisper on the card leaves nothing for the embedder.
+	// A decode that still runs out of memory is redone on the CPU by RunWhisper, so keeping the embedder resident costs a slow transcription at worst, never a lost one.
+	recorder.SetGPUReleaser(func() bool {
+		return textEngine.StopIfIdle()
+	})
+	textEngine.SetGPUGate(recorder.GPUBusy)
+
 	if embedEngine != nil {
-		// A whisper GPU decode and the embedding server share one small card; when the card is short, the recorder may evict an idle embedding server (it respawns on the next embed).
-		recorder.SetGPUReleaser(embedEngine.StopIfIdle)
-		// The eviction above only asks once, before the decode. This is what keeps the server off the card for the whole of it, whatever the window's polling does to client presence in the meantime.
-		embedEngine.SetGPUGate(recorder.GPUBusy)
 		// 10000 = the deck's agreed pruning cap for the vector index.
 		index, err := vector.NewChromemIndex(filepath.Join(config.DataDir(), "vectors"), config.LocalEmbedDim, 10000)
 		if err != nil {
@@ -380,15 +378,34 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
 	// These duties are unattended, so they run on the background model like every other one: config.TextModel's free tier allows 20 requests a day against DefaultBackgroundModel's 500, and dreaming alone ticks every five minutes all night. No Job* name exists for the proactive duties yet, and BackgroundModel degrades a name it does not know to DefaultBackgroundModel, which is the model wanted here — naming it "proactive" means a later entry in background_models pins it without another change here.
-	// The hand-over is what makes a Codex- or Ollama-configured machine keep working now that FromConfig fails those with ErrNoBackend instead of quietly answering on Gemini; it is the same hand-over the meeting minutes and the dream brain already get.
-	// meteredJobBrain builds the brain object every unattended job on this daemon shares: cfg's provider, on the background model config.BackgroundBrainConfig picks for job, metered against the shared Gemini quota, with a Codex hand-over for a config FromConfig cannot answer on directly. Input: the job's own brain config and its background-model job name. Output: the wrapped, quota-tallied brain.
+	// askAgent answers /ask questions the same way the CLI's text-eval path does: no mic/speaker (text only), the daemon's own store as the ContextReader, no compiler (buffer context isn't needed here).
+	askAgent := agent.NewAgent(nil, nil, store, nil, apiKey)
+	// The window's asks and the live voice session spend the interactive share of the same daily Gemini count the nightly jobs are held to, so the reserve is real.
+	askAgent.SetRequestGate(&geminiRequestGate{state: geminiQuota, opts: geminiQuotaOpts, forAsks: true})
+	// meteredJobBrain builds the brain one unattended duty answers through: the router's providers in order, cfg's own provider first, each on the background model config.BackgroundBrainConfig picks for job and metered against the shared Gemini quota. Codex answers through the ask agent's own ChatGPT login, which is the only way it can answer a prompt. Input: the duty's brain config and its background-model job name. Output: the routed, tallied brain.
+	codexAsker := agent.CodexBrain{Agent: askAgent}
 	meteredJobBrain := func(cfg config.BrainConfig, job string) brain.Brain {
-		return tally.Wrap(brainProviderName(cfg), brain.WithCodexFallback(brain.Metered(config.BackgroundBrainConfig(cfg, job), apiKey, geminiQuota, false, geminiQuotaOpts), backgroundFallbackBrain()), store)
+		build := func(provider string) brain.Brain {
+			c := cfg
+			if provider != cfg.Provider {
+				// A model and a binary pinned for the configured provider belong to that provider's namespace; handing a Gemini model name to the Claude CLI names nothing it has. The provider being handed on to uses its own default instead.
+				c.Model, c.Binary = "", ""
+			}
+			c.Provider = provider
+			// The tally is inside the routing rather than around it, so a duty that was handed on is counted against the provider that actually answered it and not against the one that refused.
+			return tally.Wrap(brainProviderName(c), brain.Metered(config.BackgroundBrainConfig(c, job), apiKey, geminiQuota, false, geminiQuotaOpts, codexAsker), store)
+		}
+		// cfg.Provider is asked first: a background_brains entry pins a duty to a plan on purpose, and the router's global order must not answer it somewhere the user did not choose.
+		return brain.RoutedFor(cfg.Provider, build)
 	}
 	mainBrain := meteredJobBrain(appConfig.Brain, "proactive")
 	// Every memory duty the config names a provider for is pointed at it here; a duty named nowhere stays on the Gemini API. StripFence is applied because three of these duties parse the answer as JSON and a CLI login wraps JSON in a markdown fence where the SDK could simply be told to answer in JSON, and this is the one place that knows a CLI is involved.
 	// JobScreenSight is not offered: it sends a screenshot rather than a prompt, and a text seam cannot carry an image.
 	if summarizer != nil {
+		if textEngine != nil {
+			// This is what takes the five-minute working-state job off the user's free-tier daily request allowance. A derive the local model cannot answer — the card is held by a whisper decode, or the server would not start — goes through the router instead of being lost. A background_brains entry for the same job overrides both, because naming a provider in the config is the more deliberate act.
+			summarizer.SetJobBackend(config.JobWorkingState, memory.TextBackend(fallThrough(textEngine.Generate, meteredJobBrain(appConfig.Brain, config.JobWorkingState))))
+		}
 		for job, cfg := range appConfig.BackgroundBrains {
 			if job == config.JobScreenSight {
 				slog.Warn("background_brains names screen_sight, which sends an image and cannot run on a text brain; leaving it on Gemini")
@@ -403,7 +420,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 	}
 	// Meeting minutes previously built their own unmetered brain per meeting; pinning to the meeting-minutes job's own model (as defaultBrain did unmetered) and metering it against the same shared quota means an unattended write-up spends the day's allowance in the same place it always spent it, just counted now.
-	meetingRecorder.SetBrain(tally.Wrap(brainProviderName(appConfig.Brain), brain.Metered(config.BackgroundBrainConfig(appConfig.Brain, config.JobMeetingMinutes), apiKey, geminiQuota, false, geminiQuotaOpts), store))
+	// Minutes go through the router like every other duty. They used to be one brain with a Codex-only hand-over behind them, which caught nothing once Codex itself was at its monthly limit: on 2026-09-15 a broken Antigravity login lost every write-up while Grok and Claude sat signed in on the same machine.
+	meetingRecorder.SetBrain(meteredJobBrain(appConfig.Brain, config.JobMeetingMinutes))
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
 	// The evening close makes two brain calls, so its deadline is sized from the limit this machine's config puts on one of them rather than from a fixed number.
 	scheduler.SetBrainTimeout(appConfig.Brain.Timeout())
@@ -458,7 +476,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
 	dreamBriefHour, _ := appConfig.Proactive.Hours()
-	// The dream brain gets the dream job's own background model and the same Codex hand-over the configured-dream-brain branch below gets, since a night of stages left on config.TextModel spends the next day's 20 requests before the morning brief runs.
+	// The dream brain gets the dream job's own background model and the same routing the configured-dream-brain branch below gets, since a night of stages left on config.TextModel spends the next day's 20 requests before the morning brief runs.
 	dreamer := dream.New(store, meteredJobBrain(appConfig.Brain, config.JobDream), dream.Probes{
 		OnAC:              recorder.OnACPower,
 		SessionLocked:     tracker.SessionLocked,
@@ -471,7 +489,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	dreamer.DataDir = config.DataDir()
 	// A dream brain of its own (grok, agy) frees the night from the Claude window curfew, since it spends none of the user's Claude usage.
 	if p := appConfig.Dream.Brain.Provider; p != "" {
-		// On the Gemini API the night runs on the model config.BackgroundModel names for the dream job, and a quota or overload failure hands the stage to Codex.
+		// On the Gemini API the night runs on the model config.BackgroundModel names for the dream job, and a provider that is spent or signed out hands the stage on to the next one the router offers.
 		dreamer.SetBrain(meteredJobBrain(appConfig.Dream.Brain, config.JobDream))
 		dreamer.CurfewExempt = p != config.BrainClaudeCLI
 	}
@@ -530,10 +548,6 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		})
 	}
 
-	// askAgent answers /ask questions the same way the CLI's text-eval path does: no mic/speaker (text only), the daemon's own store as the ContextReader, no compiler (buffer context isn't needed here).
-	askAgent := agent.NewAgent(nil, nil, store, nil, apiKey)
-	// The window's asks and the live voice session spend the interactive share of the same daily Gemini count the nightly jobs are held to, so the reserve is real.
-	askAgent.SetRequestGate(&geminiRequestGate{state: geminiQuota, opts: geminiQuotaOpts, forAsks: true})
 	// The window's read routes draw on the same store the daemon writes, on the compiler's live activity buffer — the one /buffer already serves — for what is on screen this second, and on the tracker's own active-window read for what has focus right now: the buffer only updates on the tracker's sampling interval, so a hotkey pressed between samples would otherwise name a window the user has already left.
 	// The brain picked in Settings answers first; the router otherwise ranks by cost and left the pick last.
 	agent.SetPreferredProvider(appConfig.Brain.Provider)
@@ -654,6 +668,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// A long computer-use goal runs as a job in the daemon rather than inside one HTTP request (see internal/actjob): it plans, takes one checked step at a time, and can be stopped, paused, answered and resumed. Its rounds go to a plain prompt-in, text-out brain, never through an ask — an ask would run a second tool loop inside the job's own — and its steps go through the ask's own gated tool path, so the tool gate and the stop line have one copy.
 	// The default is the daemon's own configured brain, metered and tallied like every other call it makes; the CLI logins are offered by name so the same goal can be run on each and the cost compared. No API-key path is ever picked by default.
 	// The default job brain is the configured chain with the Claude CLI behind it, so a spent Codex allowance moves a job to Claude the way an ask already moves.
+	// mainBrain is routed, so a spent or signed-out brain is handed on from inside it. The Claude tail stays on top of that, because a job the user is watching hands over on any failure at all and not only on the two the router acts on — see fallThrough, and the three jobs that died in a row on 2026-09-08.
 	claudeJobBrain := brain.FromConfig(config.BrainConfig{Provider: config.BrainClaudeCLI}, apiKey)
 	actModels := map[string]actjob.Model{"default": actjob.FromPromptFunc(brainProviderName(appConfig.Brain), fallThrough(mainBrain, claudeJobBrain))}
 	for _, provider := range []string{config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI} {
@@ -670,7 +685,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 	}
 
-	// The unattended jobs were wired with a late-bound hand-over brain before the ask agent existed; publishing it here is what makes their 429 and 503 fallbacks live. It hands on again from Codex to Claude when Codex's own allowance is spent, so one spent subscription does not lose the day's summaries and minutes.
+	// The summarizer's own direct Gemini calls were wired with a late-bound hand-over brain before this point; publishing it here is what makes their 429 and 503 fallback live. It hands on again from Codex to Claude when Codex's own allowance is spent.
 	publishCodexFallback(brain.FromAsker(agent.CodexThenClaude{Agent: askAgent}))
 
 	// A routine asks through the same tool-calling path the window's /ask uses, so "when Vexil replies about the venue" can look at the screen and the store rather than answer from a bare prompt.

@@ -158,6 +158,10 @@ func (c *codexClient) round(ctx context.Context, instructions string, input []an
 	if resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
 		if err := c.refresh(ctx, sent.AccessToken); err != nil {
+			// A refresh the endpoint refused is the moment a Codex login is known to be dead. Codex has no cheap pre-flight probe — its allowance rides the headers of real calls, and the only proof the login works is a refresh round-trip that spends and rotates the token — so this is the earliest anything can say so.
+			if errors.Is(err, ErrLoggedOut) {
+				recordSignedOut(ProviderCodex, "the Codex login was refused: run codex login to sign in again")
+			}
 			return codexRound{}, err
 		}
 		if resp, err = c.send(ctx, payload, session); err != nil {
@@ -306,7 +310,8 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	historyItems := codexHistoryItems(history)
 	// The thread goes in ahead of this turn, oldest first, so the question the user is asking now is the last thing the model reads. The reference to a close past run sits between the two, with the turn rather than in the instruction: it is built from this question and the store, so it differs on every ask, and anything after it in the prompt could not be cached.
 	turnParts := []map[string]any{{"type": "input_text", "text": turnContext(start, injected)}}
-	if reference := a.ActReferenceFor(ctx, question, start); reference != "" {
+	reference, shownLessons := a.actReference(ctx, question, start)
+	if reference != "" {
 		turnParts = append(turnParts, map[string]any{"type": "input_text", "text": reference})
 	}
 	turnParts = append(turnParts, map[string]any{"type": "input_text", "text": question})
@@ -322,6 +327,8 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 		Handshake: handshake,
 		Injected:  injected,
 		Usage:     TokenUsage{Provider: ProviderCodex},
+		// Carried so the end-of-ask hook scores the lessons this run was shown.
+		LessonsShown: shownLessons,
 	}
 
 	// A prompt cache matches a prefix, so every round of an ask that opens on different bytes than the round before it starts from nothing. Both of the pieces a screen round shrinks are therefore settled here, once, rather than rebuilt each round: the thread it keeps, and the instruction it sends. screenPrompt is left empty until the first round that actually needs it and then never changes, so a question whose own words already name a screen task (isScreenTask with no hops) has the same instruction on round 0 as on round 5, and a question that turns into a screen task partway through has the same one from that round on. The personal context it carries is trimmed against the first screen the ask saw, not against each round's own.
@@ -503,6 +510,8 @@ type UsageLimit struct {
 // UsageRecorder keeps the newest usage reading for one provider. internal/brain.UsageStore is the implementation, and the daemon hands one in at startup. Input to Record: the provider id ("codex", "claude"), and its windows; a call with no windows must leave the last good reading alone.
 type UsageRecorder interface {
 	Record(provider string, limits []UsageLimit)
+	// RecordSignedOut marks a provider whose credential the provider itself refused, with the sentence saying what to do about it. It is the only reliable sign-out signal these CLIs have: each one holds a refresh token, so an expired access token in the login file is ordinary and says nothing.
+	RecordSignedOut(provider, note string)
 }
 
 // usageRecorder is where every response's usage reading goes, guarded because asks run concurrently with the startup that sets it. Nil means nothing is recorded, which is what a test or a daemon that never called SetUsageRecorder gets.
@@ -516,6 +525,16 @@ func SetUsageRecorder(r UsageRecorder) {
 	usageRecorder.Lock()
 	defer usageRecorder.Unlock()
 	usageRecorder.to = r
+}
+
+// recordSignedOut tells the recorder a provider refused the login, so the picker can grey the row out before a question dies on it. Input: the provider id and the sentence saying what to do. Output: none.
+func recordSignedOut(provider, note string) {
+	usageRecorder.Lock()
+	to := usageRecorder.to
+	usageRecorder.Unlock()
+	if to != nil {
+		to.RecordSignedOut(provider, note)
+	}
 }
 
 // recordUsage hands one provider's windows to the recorder, and does nothing when there is no recorder or no window to record. Input: the provider id and its windows. Output: none.
@@ -546,6 +565,10 @@ func codexRateLimits(h http.Header, now time.Time) []UsageLimit {
 			resets = time.Unix(at, 0).UTC()
 		} else if after, err := strconv.ParseInt(strings.TrimSpace(h.Get("x-codex-"+prefix+"-reset-after-seconds")), 10, 64); err == nil && after > 0 {
 			resets = now.Add(time.Duration(after) * time.Second)
+		}
+		// A window the headers give neither a length nor a reset for cannot be drawn honestly: its label falls back to "primary"/"secondary", which names no allowance, and its reset renders as the year 1. This backend sends exactly that for secondary. Nothing is better than a bar that reads as a real untouched allowance.
+		if minutes <= 0 && resets.IsZero() {
+			continue
 		}
 		limits = append(limits, UsageLimit{
 			Window:       codexWindowName(minutes, prefix),

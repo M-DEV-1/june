@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -55,6 +56,9 @@ func (s *Store) QueryStore(ctx context.Context, query string, rowCap int) (strin
 
 	rows, err := roDB.QueryContext(ctx, stmt)
 	if err != nil {
+		if strings.Contains(err.Error(), "no such column") {
+			return "", fmt.Errorf("%w; %s", err, columnsOf(ctx, roDB, stmt))
+		}
 		return "", err
 	}
 	defer rows.Close()
@@ -121,4 +125,36 @@ func renderQueryStoreRow(values []any) string {
 		}
 	}
 	return strings.Join(parts, "\t")
+}
+
+// tableNames finds the tables a statement reads: every name after FROM or JOIN.
+var tableNames = regexp.MustCompile(`(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*)`)
+
+// columnsOf lists the real columns of every table a statement reads, for the error a guessed column gets, so the next try can use a name that exists. Input: the read-only handle and the statement. Output: one "table has: a, b, c" clause per table, joined by "; ", or "" when none could be read.
+func columnsOf(ctx context.Context, db *sql.DB, stmt string) string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range tableNames.FindAllStringSubmatch(stmt, -1) {
+		table := strings.ToLower(m[1])
+		if seen[table] {
+			continue
+		}
+		seen[table] = true
+		rows, err := db.QueryContext(ctx, "SELECT name FROM pragma_table_info(?)", table)
+		if err != nil {
+			continue
+		}
+		var cols []string
+		for rows.Next() {
+			var name string
+			if rows.Scan(&name) == nil {
+				cols = append(cols, name)
+			}
+		}
+		rows.Close()
+		if len(cols) > 0 {
+			out = append(out, table+" has: "+strings.Join(cols, ", "))
+		}
+	}
+	return strings.Join(out, "; ")
 }

@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -224,7 +226,7 @@ func (c *codexClient) refresh(ctx context.Context, stale string) error {
 		return nil
 	}
 	if tok.RefreshToken == "" {
-		return errors.New("codex login: the token expired and there is no refresh token; run `codex login` again")
+		return fmt.Errorf("%w: codex login: the token expired and there is no refresh token; run `codex login` again", ErrLoggedOut)
 	}
 	body, _ := json.Marshal(map[string]string{"client_id": codexClientID, "grant_type": "refresh_token", "refresh_token": tok.RefreshToken})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.TokenURL, bytes.NewReader(body))
@@ -237,8 +239,12 @@ func (c *codexClient) refresh(ctx context.Context, stale string) error {
 		return fmt.Errorf("codex login refresh: %w", err)
 	}
 	defer resp.Body.Close()
+	// A 4xx is the endpoint refusing this refresh token, which no retry fixes: the login is dead. A 5xx is the endpoint itself being down, which says nothing about the login and must not grey the row out.
+	if resp.StatusCode/100 == 4 {
+		return fmt.Errorf("%w: codex login refresh: HTTP %d; run `codex login` again", ErrLoggedOut, resp.StatusCode)
+	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("codex login refresh: HTTP %d; run `codex login` again", resp.StatusCode)
+		return fmt.Errorf("codex login refresh: HTTP %d", resp.StatusCode)
 	}
 	var fresh struct {
 		IDToken      string `json:"id_token"`
@@ -265,3 +271,78 @@ func (c *codexClient) refresh(ctx context.Context, stale string) error {
 	}
 	return nil
 }
+
+// codexProfileURL is the account profile the Codex CLI's own /usage card reads (codex-rs/backend-client: `{base}/wham/profiles/me` on the ChatGPT path style). It answers a plain GET with the login's bearer token and account id, spends no model tokens and rotates nothing, so unlike a token refresh it can be called whenever the picker renders. It carries lifetime and daily token stats and no rate-limit windows: those stay in the headers of real calls.
+const codexProfileURL = "https://chatgpt.com/backend-api/wham/profiles/me"
+
+// codexLoginCheck asks the backend whether this login still works. Input: a context, the HTTP client, the profile endpoint and the CLI's auth file. Output: nil when the login answers, an error wrapping ErrLoggedOut when the backend refuses it, and a plain error when the request could not be made or the backend itself is down — which says nothing about the login and must not grey the row out.
+func codexLoginCheck(ctx context.Context, client *http.Client, url, authPath string) error {
+	tok, err := loadCodexAuth(authPath)
+	if err != nil {
+		return fmt.Errorf("%w: codex login: %v", ErrLoggedOut, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.Tokens.AccessToken)
+	req.Header.Set("ChatGPT-Account-Id", tok.Tokens.accountID())
+	req.Header.Set("User-Agent", fmt.Sprintf("%s/%s (%s; %s)", codexOriginator, codexClientVersion, runtime.GOOS, runtime.GOARCH))
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("codex login check: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: codex login check: HTTP %d; run `codex login` again", ErrLoggedOut, resp.StatusCode)
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("codex login check: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// codexLoginChecked is when the profile endpoint was last asked, so RefreshCodexLogin holds itself to one check every codexLoginPoll however often the picker asks.
+var codexLoginChecked struct {
+	sync.Mutex
+	at time.Time
+}
+
+// codexLoginPoll matches the other providers' usage polls: the picker is the only caller, so the endpoint is touched only while someone is looking at it.
+const codexLoginPoll = 10 * time.Minute
+
+// RefreshCodexLogin checks the Codex login, at most once every ten minutes, and marks the row signed out when the backend refuses it or signed in again when it answers. GET /brains calls it. Input: a context. Output: none — a check that could not be made leaves the row alone.
+func RefreshCodexLogin(ctx context.Context) {
+	usageRecorder.Lock()
+	to := usageRecorder.to
+	usageRecorder.Unlock()
+	if to == nil {
+		return
+	}
+	codexLoginChecked.Lock()
+	if time.Since(codexLoginChecked.at) < codexLoginPoll {
+		codexLoginChecked.Unlock()
+		return
+	}
+	codexLoginChecked.at = time.Now()
+	codexLoginChecked.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, codexLoginCheckTimeout)
+	defer cancel()
+	err := codexLoginCheck(ctx, http.DefaultClient, codexProfileURL, codexAuthPath())
+	if errors.Is(err, ErrLoggedOut) {
+		to.RecordSignedOut(ProviderCodex, "the Codex login was refused: run codex login to sign in again")
+		return
+	}
+	if err != nil {
+		slog.Debug("codex: could not check the login", "error", err)
+		return
+	}
+	// The login answered, which clears a signed-out mark an earlier refusal left; the check carries no windows, so the last ones read stay as they were.
+	to.Record(ProviderCodex, nil)
+}
+
+// codexLoginCheckTimeout bounds the profile request.
+const codexLoginCheckTimeout = 10 * time.Second

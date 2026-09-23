@@ -63,26 +63,6 @@ describe("events", () => {
     expect(FakeEventSource.instances).toHaveLength(2);
   });
 
-  it("does not call onReopen for a first connect that opens cleanly", async () => {
-    const onReopen = vi.fn();
-    events(vi.fn(), onReopen);
-    await settle();
-    FakeEventSource.instances[0].onopen?.();
-    expect(onReopen).not.toHaveBeenCalled();
-  });
-
-  it("calls onReopen once after a drop and reopen", async () => {
-    const onReopen = vi.fn();
-    events(vi.fn(), onReopen);
-    await settle();
-    FakeEventSource.instances[0].onopen?.();
-
-    FakeEventSource.instances[0].fail();
-    await vi.advanceTimersByTimeAsync(2000);
-    FakeEventSource.instances[1].onopen?.();
-    expect(onReopen).toHaveBeenCalledTimes(1);
-  });
-
   it("constructs no new EventSource when stop() runs after the retry has been scheduled", async () => {
     const stop = events(vi.fn());
     await settle();

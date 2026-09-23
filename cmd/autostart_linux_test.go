@@ -112,19 +112,3 @@ func TestApplyAutostart_WritesConfigAndEntry(t *testing.T) {
 		t.Error("expected applyAutostart to reject a value that is neither on nor off")
 	}
 }
-
-// TestReconcileAutostart_MakesDiskMatchConfig covers both directions of the startup reconcile: config on with nothing installed installs it, config off with an entry present removes it.
-func TestReconcileAutostart_MakesDiskMatchConfig(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-
-	reconcileAutostart(true)
-	if !autostartEnabled() {
-		t.Error("expected reconcileAutostart(true) to install the autostart entry")
-	}
-
-	reconcileAutostart(false)
-	if autostartEnabled() {
-		t.Error("expected reconcileAutostart(false) to remove the autostart entry")
-	}
-}

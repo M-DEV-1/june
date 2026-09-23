@@ -258,7 +258,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, appConfig.ExaMonthlyRequests, brainLimits)))
 }
 
-// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the config accessor (for the Gemini model those requests are metered under, and for whether the Claude read is turned on, both read under its lock since POST /settings writes that flag from another request goroutine) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker (skipped entirely when config.OraConfig.ClaudeUsageFromLogin is off), Codex's whatever its last response's headers said, and nothing at all for Grok and Ollama, which expose no allowance to read.
+// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the config accessor (for the Gemini model those requests are metered under, and for whether the Claude read is turned on, both read under its lock since POST /settings writes that flag from another request goroutine) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker (skipped entirely when config.OraConfig.ClaudeUsageFromLogin is off), Grok's read from its billing endpoint at most every ten minutes, Codex's whatever its last response's headers said after a login check at most every ten minutes, and nothing at all for Antigravity and Ollama, which expose no allowance to read.
 func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *ipc.LiveConfig, opts brain.QuotaOptions) ipc.BrainLimits {
 	return func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
 		switch id {
@@ -272,6 +272,11 @@ func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *ipc.
 			if cfg.ClaudeUsageEnabled() {
 				agent.RefreshClaudeUsage(ctx)
 			}
+		case "grok":
+			agent.RefreshGrokUsage(ctx)
+		case "codex":
+			// Codex's allowance windows ride the headers of real calls, but whether the login still works has its own free check — the profile endpoint the Codex CLI's own /usage card reads. It spends nothing and rotates nothing, so the row can say the login is dead before a question is asked of it.
+			agent.RefreshCodexLogin(ctx)
 		}
 		return usage.Get(id)
 	}

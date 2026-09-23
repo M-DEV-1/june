@@ -65,19 +65,37 @@ export function FirstRunPanel() {
   const { data: daemon, refetch, isFetching } = useSettingsQuery();
   const steps = daemon?.first_run?.steps ?? [];
   if (!steps.length) return null;
+  return <SetUpCard lead="Ora needs a model before it can answer." ways={steps.map(codeSpans)} checking={isFetching} onCheck={() => void refetch()} />;
+}
+
+/** The chat page's card while GET /brains lists no brain signed in: every way Ora can be given one, since it works with whichever the user already has. Input: the daemon's data directory, whose env file is the one every ora command reads (loadEnvFiles in cmd/root.go). Output: the card. "Check again" re-reads /brains; a key added to the env file is only read when the daemon starts, which is why that line says to restart Ora. */
+export function NoBrainPanel({ dataDir }: { dataDir: string }) {
+  const { refetch, isFetching } = useBrainsQuery();
+  const ways = [
+    <>Claude Code: run <code>claude</code>, then type <code>/login</code>.</>,
+    <>Codex: run <code>codex login</code>.</>,
+    <>Antigravity: run <code>agy</code> and sign in.</>,
+    <>Grok: run <code>grok</code> and sign in.</>,
+    <>Gemini: put <code>GEMINI_API_KEY=your-key</code> in <code>{`${dataDir}/env`}</code>, then restart Ora.</>,
+  ];
+  return <SetUpCard lead="No brain is signed in on this machine." ways={ways} checking={isFetching} onCheck={() => void refetch()} />;
+}
+
+/** The card both set-up panels draw. Input: the sentence under the heading, the ways to fix it, whether a re-read is in flight, and what "Check again" does. Output: the card. */
+function SetUpCard({ lead, ways, checking, onCheck }: { lead: string; ways: React.ReactNode[]; checking: boolean; onCheck: () => void }) {
   return (
     <Group>
       <div className="px-4 py-3.5">
         <h2 className="text-doc text-foreground">Ora cannot answer yet</h2>
-        <p className="mt-1.5 text-read text-muted-foreground">Ora needs a model before it can answer. Any one of these will do.</p>
-        <ul className="mt-3 list-disc pl-5 text-read marker:text-muted-foreground">
-          {steps.map((s) => (
-            <li key={s} className="mt-1.5">
-              {codeSpans(s)}
+        <p className="mt-1.5 text-read text-muted-foreground">{lead} Any one of these will do.</p>
+        <ul className="mt-3 list-disc pl-5 text-read marker:text-muted-foreground [&_code]:font-mono [&_code]:text-[0.92em]">
+          {ways.map((w, i) => (
+            <li key={i} className="mt-1.5">
+              {w}
             </li>
           ))}
         </ul>
-        <Button size="sm" className="mt-4" disabled={isFetching} onClick={() => void refetch()}>
+        <Button size="sm" className="mt-4" disabled={checking} onClick={onCheck}>
           <RotateCcw /> Check again
         </Button>
       </div>
@@ -208,7 +226,7 @@ function VoiceSection() {
                   <ChevronDown className="opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
-              {/* Two models only, so nothing here scrolls. Each trait is a full sentence about the trade — latency against tone — so it sits on its own line under the label rather than crowding beside it the way a voice's one-word trait does. */}
+              {/* A handful of models, so nothing here scrolls. Each trait is a full sentence about the trade — latency against tone — so it sits on its own line under the label rather than crowding beside it the way a voice's one-word trait does. */}
               <DropdownMenuContent align="end" className="w-72">
                 {models.map((m) => (
                   <DropdownMenuItem key={m.name} onClick={() => void pickModel(m)} className="items-start gap-2 whitespace-nowrap">
@@ -526,7 +544,8 @@ export function SettingsScreen() {
 
   const pickModel = async (brain: string, model: string) => {
     try {
-      await pickBrain({ brain, model }).unwrap();
+      // default false: choosing a brain's model remembers it for that brain and leaves which brain answers alone.
+      await pickBrain({ brain, model, default: false }).unwrap();
     } catch {
       dispatch(ui.noticed({ text: "Could not change the model", kind: "error" }));
     }

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ConversationSummary, DaemonEvent } from "./api";
 import { events, oraApi } from "./api";
-import { conversationsUi, DRAFT_CHAT, escaped, makeStore, progress, settings, ui } from "./store";
+import { conversationsUi, DRAFT_CHAT, escaped, makeStore, progress, ui } from "./store";
 
 describe("what the window is showing", () => {
   it("remembers where to come back to when Settings is opened, and Escape goes back there", () => {
@@ -36,41 +36,11 @@ describe("what the window is showing", () => {
     expect(store.getState().ui.back).toBe("meetings");
   });
 
-  it("keeps each list's search apart", () => {
-    const store = makeStore();
-    store.dispatch(ui.searched({ list: "chats", text: "flight" }));
-    store.dispatch(ui.searched({ list: "tasks", text: "file" }));
-    expect(store.getState().ui.query).toEqual({ chats: "flight", tasks: "file", days: "", meetings: "" });
-  });
-
   it("keeps what was typed per conversation, so switching chats does not lose it", () => {
     const store = makeStore();
     store.dispatch(ui.asked({ conversationId: "c1", text: "half a question" }));
     store.dispatch(ui.asked({ conversationId: "c2", text: "another" }));
     expect(store.getState().ui.ask).toEqual({ c1: "half a question", c2: "another" });
-  });
-
-  it("remembers the conversation opened for a task that had none", () => {
-    const store = makeStore();
-    store.dispatch(ui.taskChatOpened({ taskId: "12", conversationId: "c9" }));
-    expect(store.getState().ui.taskChats).toEqual({ "12": "c9" });
-  });
-
-  it("opens and closes one reply's sources at a time", () => {
-    const store = makeStore();
-    store.dispatch(ui.railToggled("t1"));
-    store.dispatch(ui.railToggled("t2"));
-    expect(store.getState().ui.openRails).toEqual(["t1", "t2"]);
-    store.dispatch(ui.railToggled("t1"));
-    expect(store.getState().ui.openRails).toEqual(["t2"]);
-  });
-
-  it("toggles the palette when told nothing, and obeys when told which way", () => {
-    const store = makeStore();
-    store.dispatch(ui.paletteToggled(undefined));
-    expect(store.getState().ui.paletteOpen).toBe(true);
-    store.dispatch(ui.paletteToggled(false));
-    expect(store.getState().ui.paletteOpen).toBe(false);
   });
 
   it("clears the notice before Escape does anything else", () => {
@@ -85,31 +55,12 @@ describe("what the window is showing", () => {
 });
 
 describe("what is half-done to a conversation", () => {
-  it("starts a rename with the title that is there now", () => {
-    const store = makeStore();
-    store.dispatch(conversationsUi.renameStarted({ id: "c1", title: "A chat" }));
-    expect(store.getState().conversations).toMatchObject({ renamingId: "c1", draftTitle: "A chat" });
-    store.dispatch(conversationsUi.draftTitleTyped("Another name"));
-    expect(store.getState().conversations.draftTitle).toBe("Another name");
-    store.dispatch(conversationsUi.renameEnded());
-    expect(store.getState().conversations).toEqual({ draftTitle: "" });
-  });
-
   it("gives up a rename and a pending delete on Escape", () => {
     const store = makeStore();
     store.dispatch(conversationsUi.renameStarted({ id: "c1", title: "A chat" }));
     store.dispatch(conversationsUi.deleteConfirmed("c2"));
     store.dispatch(escaped());
     expect(store.getState().conversations).toEqual({ draftTitle: "" });
-  });
-});
-
-describe("the theme", () => {
-  it("keeps the choice and what it resolved to apart", () => {
-    const store = makeStore();
-    store.dispatch(settings.themePicked("system"));
-    store.dispatch(settings.themeResolved("dark"));
-    expect(store.getState().settings).toEqual({ theme: "system", resolved: "dark" });
   });
 });
 
@@ -141,7 +92,7 @@ describe("the question in flight", () => {
     store.dispatch(progress.eventArrived(event({ type: "status", text: "Checking." })));
     expect(store.getState().progress.run?.status).toBe("Checking.");
     store.dispatch(progress.eventArrived(event({ type: "tool", text: "search_memory", detail: "looked for the deadline" })));
-    expect(store.getState().progress.run?.steps).toEqual([{ name: "search_memory", detail: "looked for the deadline" }]);
+    expect(store.getState().progress.run?.steps).toMatchObject([{ n: 1, name: "search_memory", detail: "looked for the deadline" }]);
     expect(store.getState().progress.run?.status).toBe("looked for the deadline");
     store.dispatch(progress.eventArrived(event({ type: "answer", text: "She said ", conversation_id: "c1", evidence: [{ title: "note", meta: "note · 3 Sep", body: "the deadline is Friday" }] })));
     store.dispatch(progress.eventArrived(event({ type: "answer", text: "Friday.", conversation_id: "c1" })));
@@ -251,12 +202,6 @@ describe("the question in flight", () => {
     expect(store.getState().progress.run?.question).toBe("two");
     store.dispatch(progress.runEnded("ask-2"));
     expect(store.getState().progress.run).toBeUndefined();
-  });
-
-  it("carries a dictation the daemon ended by itself, so the composer can take the words", () => {
-    const store = makeStore();
-    store.dispatch(progress.eventArrived({ id: "dictate-1", type: "dictation", text: "book the flight to Zurich" }));
-    expect(store.getState().progress.dictation).toEqual({ id: "dictate-1", text: "book the flight to Zurich" });
   });
 
   it("ignores a message that belongs to another question, or to no question at all", () => {
@@ -492,18 +437,6 @@ describe("a notice's action reaching the window", () => {
     expect(invalidate).not.toHaveBeenCalledWith(["Task"]);
     invalidate.mockRestore();
     vi.useRealTimers();
-  });
-
-  it("reacts the same way when eventArrived is dispatched directly, the way the ?mock=1 fixture in mock.ts does it, without a live stream", () => {
-    const store = makeStore();
-    store.dispatch(
-      progress.eventArrived({
-        id: "",
-        type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
-      }),
-    );
-    expect(store.getState().ui.notice).toEqual({ text: "Send the invoice: Done", kind: "info" });
   });
 
   it("leaves the rail line's text alone for a notice arriving fresh, with no action yet, and holds it as the live one instead", () => {

@@ -14,7 +14,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// ErrNoBackend is what every call to a brain built for a provider this package has no code for comes back with. It exists because the alternative — quietly answering on the Gemini API instead — spends the metered free tier the user picked another brain to avoid and sends the prompt to a provider they did not choose. WithCodexFallback treats it as a reason to hand the prompt over, so a daemon that has published a real Codex brain still answers its duties.
+// ErrNoBackend is what every call to a brain built for a provider this package has no code for comes back with. It exists because the alternative — quietly answering on the Gemini API instead — spends the metered free tier the user picked another brain to avoid and sends the prompt to a provider they did not choose. RoutedFor treats it as a reason to hand the prompt on to the next provider without marking this one as refusing, so a caller that cannot build Codex still gets its duty answered.
 var ErrNoBackend = errors.New("this brain has no backend on this machine")
 
 // ErrLocalFailure marks a failure that happened on this machine before a request could have reached the provider, so the daily quota counter knows to hand back the slot it reserved. It is only ever wrapped into another error and matched with errors.Is.
@@ -38,7 +38,7 @@ type Brain func(ctx context.Context, prompt string) (string, error)
 
 // FromConfig returns the backend cfg names, given the Gemini API key for the default path.
 // An empty or unrecognised provider is the Gemini API, so a config file written before this block existed — or one with a typo in it — keeps working exactly as it did.
-// asker is optional and only ever read for config.BrainCodex: it is how a caller that already holds an *agent.Agent (the daemon, wrapping it as agent.CodexBrain) lets this provider answer through the user's ChatGPT login instead of falling back to Gemini; a caller with no asker to give, such as the meeting-minutes recorder, simply omits it.
+// asker is optional and only ever read for config.BrainCodex: it is how a caller that already holds an *agent.Agent (the daemon, wrapping it as agent.CodexBrain) lets this provider answer through the user's ChatGPT login; a caller with no asker to give, such as the meeting-minutes recorder, omits it and gets a brain that fails with ErrNoBackend.
 func FromConfig(cfg config.BrainConfig, apiKey string, asker ...CodexAsker) Brain {
 	timeout := cfg.TimeoutSeconds
 	if timeout <= 0 {
@@ -68,7 +68,7 @@ func FromConfig(cfg config.BrainConfig, apiKey string, asker ...CodexAsker) Brai
 }
 
 // geminiModel is the model name the Gemini API is actually called with for cfg. Input: the brain block. Output: cfg.Model when cfg is a Gemini config, and config.TextModel otherwise — because a model name means something only to the provider it was written for, and every path here that is not a Gemini config is a fallback from some other provider.
-// The 2026-09-05 config named provider "codex-direct" with model "gpt-5.5". FromConfig's Codex case falls back to Gemini when its caller supplies no asker, which the meeting summariser does not, and the model name rode along into the SDK: every hourly retry of that day's stuck recording failed with "models/gpt-5.5 is not found for API version v1beta".
+// The 2026-09-05 config named provider "codex-direct" with model "gpt-5.5". FromConfig's Codex case then fell back to Gemini when its caller supplied no asker, which the meeting summariser did not, and the model name rode along into the SDK: every hourly retry of that day's stuck recording failed with "models/gpt-5.5 is not found for API version v1beta".
 func geminiModel(cfg config.BrainConfig) string {
 	if cfg.Provider != "" && cfg.Provider != config.BrainGeminiAPI {
 		return config.TextModel

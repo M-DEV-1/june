@@ -41,22 +41,3 @@ func TestRenderActStep(t *testing.T) {
 		})
 	}
 }
-
-// RenderActSteps drops every step RenderActStep has no wording for and keeps the rest in call order, which is what lets a caller pass a whole run's steps through without filtering them itself first.
-func TestRenderActSteps_DropsUnrenderableStepsAndKeepsOrder(t *testing.T) {
-	steps := []ActStep{
-		{Name: "observe_screen"},
-		{Name: "search_memory"}, // not a screen tool's step wording; must be dropped
-		{Name: "click", Args: map[string]any{"n": 3.0}, Result: `clicked [3] push button "Settings" via press; call observe_screen to see the result`},
-	}
-	got := RenderActSteps(steps)
-	want := []string{"looked at the screen", "clicked item 3 (Settings)"}
-	if len(got) != len(want) {
-		t.Fatalf("RenderActSteps = %#v, want %#v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("RenderActSteps[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-}

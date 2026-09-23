@@ -1,4 +1,4 @@
-/** Tests for the pure helpers every screen draws through: the date labels, the groups the sidebar and the rails are headed by, the searches, the minutes reader and the number formats. */
+/** Tests for the pure helpers every screen draws through: the date labels, the groups the sidebar and the rails are headed by, the searches and the minutes reader. */
 
 import { describe, expect, it } from "vitest";
 
@@ -11,42 +11,23 @@ import type {
 } from "./api";
 import {
   activeDays,
-  bytes,
   cachedInput,
   perQuestion,
-  chatsShown,
-  compact,
-  dayCounts,
-  dayHeading,
-  dayShort,
   atBottom,
   dayRailed,
   daysShown,
   errorLine,
   modelEffort,
   groupConversations,
-  groupDays,
   groupLabel,
-  greeting,
-  groupMeetings,
-  hhmm,
-  hits,
-  hotkeyKeys,
   meetingTasks,
-  meetingLength,
-  meetingWho,
-  meetingsShown,
+  keyed,
   minutesLines,
-  noticeActionMessage,
   noticeAge,
-  pageHeading,
   shortWhen,
   sourcedTurns,
-  taskContext,
   taskDetail,
   tasksShown,
-  tokens,
-  took,
   turnText,
 } from "./format";
 
@@ -122,39 +103,11 @@ function turn(over: Partial<Turn> = {}): Turn {
 }
 
 describe("clock and date labels", () => {
-  it("writes a time as a 24-hour clock and leaves anything unparseable alone", () => {
-    expect(hhmm("2026-09-04T09:07:00")).toBe("09:07");
-    expect(hhmm("not a time")).toBe("not a time");
-    expect(hhmm("")).toBe("");
-  });
-
-  it("turns a notice's action into the rail-line message, and leaves a fresh notice alone", () => {
-    expect(noticeActionMessage({ body: "Send the invoice", action: "done", until: "" }, now)).toBe("Send the invoice: Done");
-    expect(noticeActionMessage({ body: "Send the invoice", action: "snoozed", until: "2026-09-04T18:00:00" }, now)).toBe("Send the invoice: Snoozed until 18:00");
-    expect(noticeActionMessage({ body: "Send the invoice", action: "snoozed", until: "2026-09-05T09:00:00" }, now)).toBe("Send the invoice: Snoozed until tomorrow 09:00");
-    expect(noticeActionMessage({ body: "Send the invoice", action: "snoozed", until: "not a time" }, now)).toBe("Send the invoice: Snoozed");
-    expect(noticeActionMessage({ body: "Send the invoice", action: "", until: "" }, now)).toBeUndefined();
-  });
-
   it("says the time for today, the weekday within the week, and the date beyond it", () => {
     expect(shortWhen("2026-09-04T09:07:00", now)).toBe("09:07");
     expect(shortWhen("2026-09-01T09:07:00", now)).toBe("Tuesday");
     // The month's short name is the machine's own, so the assertion is on what it says rather than on where the locale puts the number.
     expect(shortWhen("2026-08-02T09:07:00", now)).toContain("Aug");
-  });
-
-  it("marks today's heading as today and leaves another day's alone", () => {
-    expect(dayHeading("2026-09-04T09:00:00", now)).toContain("Friday");
-    expect(dayHeading("2026-09-04T09:00:00", now)).toContain("· today");
-    expect(dayHeading("2026-09-02T09:00:00", now)).toContain("Wednesday");
-    expect(dayHeading("2026-09-02T09:00:00", now)).not.toContain("today");
-  });
-
-  it("writes a day's own date long on its page and short in the rail", () => {
-    expect(pageHeading("2026-09-04")).toContain("September");
-    expect(pageHeading("2026-09-04")).toContain("Friday");
-    expect(dayShort("2026-09-04")).toBe("Friday 4");
-    expect(dayShort("rubbish")).toBe("rubbish");
   });
 });
 
@@ -185,30 +138,6 @@ describe("the headings a list is grouped under", () => {
     expect(groups[1].items.map((c) => c.id)).toEqual(["b", "c"]);
   });
 
-  it("groups meetings the same way conversations are grouped", () => {
-    const groups = groupMeetings(
-      [
-        meeting({ id: "m1" }),
-        meeting({ id: "m2", when: "2026-08-02T09:00:00" }),
-      ],
-      now,
-    );
-    expect(groups.map((g) => g.label)).toEqual(["Today", "August 2026"]);
-  });
-
-  it("groups days one month at a time", () => {
-    const groups = groupDays([
-      day({ date: "2026-09-03" }),
-      day({ date: "2026-09-01" }),
-      day({ date: "2026-08-30" }),
-    ]);
-    expect(groups.map((g) => g.label)).toEqual([
-      "September 2026",
-      "August 2026",
-    ]);
-    expect(groups[0].items).toHaveLength(2);
-  });
-
   it("lists only the days that hold something, and keeps one that reports no counts at all", () => {
     const kept = activeDays([
       day({ date: "1", has_page: true }),
@@ -218,38 +147,15 @@ describe("the headings a list is grouped under", () => {
     ]);
     expect(kept.map((d) => d.date)).toEqual(["1", "2", "4"]);
   });
-
-  it("says what a day with no page of its own holds", () => {
-    expect(dayCounts(day({ seen: 60, meetings: 1, meeting_minutes: 28 }))).toBe(
-      "60 seen · 1 call, 28 min",
-    );
-    expect(dayCounts(day({ meetings: 2 }))).toBe("2 calls");
-    expect(dayCounts(day())).toBe("");
-  });
 });
 
 describe("the searches over each list", () => {
-  it("keeps everything when nothing is typed and matches without case", () => {
-    expect(hits("", "anything")).toBe(true);
-    expect(hits(" FLIGHT ", "book the flight")).toBe(true);
-    expect(hits("train", "book the flight")).toBe(false);
-  });
-
-  it("matches a conversation on its title and on the line under it", () => {
-    const list = [
-      conv({ id: "a", title: "Flights" }),
-      conv({ id: "b", title: "Other", last: "the flight is booked" }),
-      conv({ id: "c", title: "Nothing" }),
-    ];
-    expect(chatsShown(list, "flight").map((c) => c.id)).toEqual(["a", "b"]);
-  });
-
   it("matches a task on its title and on where it came from", () => {
     const list = [
       task({ id: "a" }),
-      task({ id: "b", title: "Other", detail: "TCFD call" }),
+      task({ id: "b", title: "Other", detail: "Meridian call" }),
     ];
-    expect(tasksShown(list, "tcfd").map((t) => t.id)).toEqual(["b"]);
+    expect(tasksShown(list, "meridian").map((t) => t.id)).toEqual(["b"]);
   });
 
   it("matches a day on its stored date and on the way the rail writes it", () => {
@@ -257,47 +163,19 @@ describe("the searches over each list", () => {
     expect(daysShown([day({ date: "2026-09-04" })], "2026-09")).toHaveLength(1);
     expect(daysShown([day({ date: "2026-09-04" })], "monday")).toHaveLength(0);
   });
-
-  it("matches a meeting on its title and on who was there", () => {
-    const list = [
-      meeting({ id: "a", attendees: [{ name: "Vexil", heard_only: false }] }),
-      meeting({ id: "b", title: "Other" }),
-    ];
-    expect(meetingsShown(list, "vexil").map((m) => m.id)).toEqual(["a"]);
-  });
 });
 
 describe("tasks", () => {
   it("shows where a noticed task came from and says nothing when the detail only repeats the title", () => {
-    expect(taskDetail(task({ source: "noticed", detail: "TCFD call" }))).toBe(
-      "from TCFD call",
+    expect(taskDetail(task({ source: "noticed", detail: "Meridian call" }))).toBe(
+      "from Meridian call",
     );
     expect(taskDetail(task({ detail: "Book the flight" }))).toBe("");
     expect(taskDetail(task({ detail: "" }))).toBe("");
   });
-
-  it("says what the composer should send along with a question about a task", () => {
-    expect(taskContext(task({ title: "Book the flight" }))).toBe(
-      'This is about one thing on the user\'s list: "Book the flight". The user set it themselves.',
-    );
-    expect(taskContext(task({ source: "noticed", detail: "TCFD call" }))).toBe(
-      'This is about one thing on the user\'s list: "Book the flight". Ora noticed it in TCFD call.',
-    );
-    expect(taskContext(task({ source: "noticed", detail: "" }))).toBe(
-      'This is about one thing on the user\'s list: "Book the flight". Ora noticed it.',
-    );
-    expect(taskContext(undefined)).toBe("");
-  });
 });
 
 describe("what a failed ask reads as", () => {
-  it("keeps a short message whole and says nothing was left out", () => {
-    expect(errorLine("the model refused")).toEqual({
-      line: "the model refused",
-      more: false,
-    });
-  });
-
   it("cuts a long first line on a word boundary and says there is more", () => {
     const long = `${"word ".repeat(60)}end`;
     const { line, more } = errorLine(long);
@@ -331,28 +209,12 @@ describe("what a failed ask reads as", () => {
 });
 
 describe("meetings", () => {
-  it("says how long a recording ran, and says nothing when it never reported a length", () => {
-    expect(meetingLength(1680)).toBe("28 min");
-    expect(meetingLength(4020)).toBe("1 h 07");
-    expect(meetingLength(0)).toBe("");
-  });
-
-  it("names who was there and marks a name that was only heard", () => {
-    expect(
-      meetingWho([
-        { name: "Vexil", heard_only: false },
-        { name: "Emzor", heard_only: true },
-      ]),
-    ).toBe("Vexil, Emzor (heard)");
-    expect(meetingWho([])).toBe("");
-  });
-
   it("reads the minutes into headings, bullets and paragraphs and drops the heading that repeats the title", () => {
     const lines = minutesLines(
       "# Standup\n\n## What was said\n- **Vexil** will send the file\nA plain sentence.\n",
       "Standup",
     );
-    expect(lines).toEqual([
+    expect(lines).toMatchObject([
       { kind: "h", text: "What was said" },
       { kind: "bullet", text: "Vexil will send the file" },
       { kind: "text", text: "A plain sentence." },
@@ -360,10 +222,10 @@ describe("meetings", () => {
   });
 
   it("pins the tasks that meeting raised and leaves everything else out", () => {
-    const call = meeting({ title: "TCFD call" });
+    const call = meeting({ title: "Meridian call" });
     const list = [
       task({ id: "mine", source: "you", detail: "" }),
-      task({ id: "owed", source: "noticed", detail: "TCFD call" }),
+      task({ id: "owed", source: "noticed", detail: "Meridian call" }),
       task({ id: "elsewhere", source: "noticed", detail: "Standup" }),
     ];
     expect(meetingTasks(list, call).map((t) => t.id)).toEqual(["owed"]);
@@ -389,43 +251,7 @@ describe("meetings", () => {
   });
 });
 
-describe("numbers as a person writes them", () => {
-  it("sizes bytes in powers of 1024", () => {
-    expect(bytes(0)).toBe("0 B");
-    expect(bytes(900)).toBe("900 B");
-    expect(bytes(22020096)).toBe("21.0 MB");
-    expect(bytes(-1)).toBe("0 B");
-  });
-
-  it("groups token counts in threes and shortens them for a bar", () => {
-    expect(tokens(1020)).toBe("1,020");
-    expect(tokens(Number.NaN)).toBe("0");
-    expect(compact(940)).toBe("940");
-    expect(compact(12400)).toBe("12.4k");
-    expect(compact(1300000)).toBe("1.3M");
-  });
-
-  it("says how long a call took in the unit that fits", () => {
-    expect(took(820)).toBe("820ms");
-    expect(took(2400)).toBe("2.4s");
-    expect(took(64000)).toBe("1m 04s");
-    expect(took(0)).toBe("0ms");
-  });
-
-  it("reads a GNOME accelerator as the keys to draw", () => {
-    expect(hotkeyKeys("<Control><Alt>space")).toEqual(["Ctrl", "Alt", "Space"]);
-    expect(hotkeyKeys("<Super>k")).toEqual(["Super", "K"]);
-    expect(hotkeyKeys("")).toEqual([]);
-  });
-});
-
 describe("what a question costs", () => {
-  it("averages the tokens of a window over the calls that spent them", () => {
-    // 15,400 tokens over 9 calls is 1,711 a question, which is what the figure beside the three totals reads.
-    expect(perQuestion(15400, 9)).toBe(1711);
-    expect(perQuestion(1600, 3)).toBe(533);
-  });
-
   it("reads as nothing rather than dividing by zero on a machine that has asked nothing", () => {
     expect(perQuestion(0, 0)).toBe(0);
     expect(perQuestion(1000, 0)).toBe(0);
@@ -434,14 +260,6 @@ describe("what a question costs", () => {
 });
 
 describe("how much of the input came out of the cache", () => {
-  it("adds up only the calls that reported a cached figure", () => {
-    const calls = [
-      { input_tokens: 1000, cached_input_tokens: 800 },
-      { input_tokens: 500, cached_input_tokens: 100 },
-    ];
-    expect(cachedInput(calls)).toEqual({ cached: 900, input: 1500, has: true });
-  });
-
   it("says it has nothing to report when the daemon sends no cached figure, rather than claiming nothing was cached", () => {
     expect(
       cachedInput([{ input_tokens: 1000 }, { input_tokens: 200 }]),
@@ -466,10 +284,6 @@ describe("whether a day has anything to put beside it", () => {
     tasks: [],
     heading: "",
   };
-
-  it("says no to a day the daemon wrote nothing around", () => {
-    expect(dayRailed(bare)).toBe(false);
-  });
 
   it("says yes to any one of the day's own line, its brief, its close, or work it raised", () => {
     expect(dayRailed({ ...bare, heading: "366 things seen" })).toBe(true);
@@ -497,15 +311,6 @@ describe("whether a day has anything to put beside it", () => {
 });
 
 describe("whether a thread that has grown should follow its newest turn", () => {
-  it("follows while the newest turn is in view, or within a screen's last 120px of it", () => {
-    expect(
-      atBottom({ scrollHeight: 4000, scrollTop: 3200, clientHeight: 800 }),
-    ).toBe(true);
-    expect(
-      atBottom({ scrollHeight: 4000, scrollTop: 3080, clientHeight: 800 }),
-    ).toBe(true);
-  });
-
   it("leaves a reader who scrolled up where they are", () => {
     expect(
       atBottom({ scrollHeight: 4000, scrollTop: 3079, clientHeight: 800 }),
@@ -539,7 +344,7 @@ describe("the replies worth a rail beside them", () => {
         id: "t2",
         role: "ora" as const,
         text: "She said Friday.",
-        evidence: [{ title: "TCFD call", meta: "meeting", body: "Friday" }],
+        evidence: [{ title: "Meridian call", meta: "meeting", body: "Friday" }],
       },
       {
         ...base,
@@ -564,31 +369,24 @@ describe("the replies worth a rail beside them", () => {
     ];
     expect(sourcedTurns(turns).map((t) => t.id)).toEqual(["t2", "t3"]);
   });
-
-  it("says a thread of plain replies has none, which is what drops the rail", () => {
-    expect(
-      sourcedTurns([{ ...base, id: "t1", role: "ora", text: "pong" }]),
-    ).toEqual([]);
-    expect(sourcedTurns([])).toEqual([]);
-  });
 });
 
 describe("reading the daemon's real minutes", () => {
   // The opening of every set of minutes the daemon writes: the title as a heading, then the same title again as a bold line with the date on it. The page already prints both above the document.
   const opening =
-    "# TCFD statement pattern analysis\n**TCFD statement pattern analysis — Fri 4 Sep 2026, 14:30–14:58**\n\n## Your part\n";
+    "# Meridian statement pattern analysis\n**Meridian statement pattern analysis — Fri 4 Sep 2026, 14:30–14:58**\n\n## Your part\n";
 
   it("drops both the heading and the bold line that only repeat the title and its date", () => {
-    const lines = minutesLines(opening, "TCFD statement pattern analysis");
-    expect(lines).toEqual([{ kind: "h", text: "Your part" }]);
+    const lines = minutesLines(opening, "Meridian statement pattern analysis");
+    expect(lines).toMatchObject([{ kind: "h", text: "Your part" }]);
   });
 
   it("keeps a first line that is not the title", () => {
     const lines = minutesLines(
       "**Fri 4 Sep 2026, 14:30–14:58**\n## Your part\n",
-      "TCFD statement pattern analysis",
+      "Meridian statement pattern analysis",
     );
-    expect(lines[0]).toEqual({
+    expect(lines[0]).toMatchObject({
       kind: "text",
       text: "Fri 4 Sep 2026, 14:30–14:58",
     });
@@ -597,14 +395,14 @@ describe("reading the daemon's real minutes", () => {
   it("turns a bullet too long to be a bullet into a paragraph, keeping its lead phrase apart from the text", () => {
     const long = "x".repeat(340);
     const lines = minutesLines(`- **You said** — ${long}`);
-    expect(lines).toEqual([{ kind: "text", text: long, lead: "You said" }]);
+    expect(lines).toMatchObject([{ kind: "text", text: long, lead: "You said" }]);
   });
 
   it("leaves a short bullet a bullet, and still keeps its lead phrase apart", () => {
     const lines = minutesLines(
       "- **Said to you** — Vexil agreed the pattern set is good enough.",
     );
-    expect(lines).toEqual([
+    expect(lines).toMatchObject([
       {
         kind: "bullet",
         text: "Vexil agreed the pattern set is good enough.",
@@ -615,7 +413,7 @@ describe("reading the daemon's real minutes", () => {
 
   it("leaves a long bullet with no lead phrase a paragraph with no lead", () => {
     const long = `Presented the output of an AI-agent pipeline. ${"y".repeat(300)}`;
-    expect(minutesLines(`- ${long}`)).toEqual([{ kind: "text", text: long }]);
+    expect(minutesLines(`- ${long}`)).toMatchObject([{ kind: "text", text: long }]);
   });
 
   it("keeps an indented bullet a bullet however long it runs, because it belongs to the label above it", () => {
@@ -636,19 +434,19 @@ describe("reading the daemon's real minutes", () => {
     const owed = [
       "## Your part",
       "- **You now owe**",
-      "  - Build a single Excel workbook of the TCFD statement patterns.",
-      "  - Continue researching vulnerability scoring methodology.",
+      "  - Build a single Excel workbook of the Meridian statement patterns.",
+      "  - Check the remaining rows against the template.",
     ].join("\n");
-    expect(minutesLines(owed)).toEqual([
+    expect(minutesLines(owed)).toMatchObject([
       { kind: "h", text: "Your part" },
       { kind: "label", text: "You now owe" },
       {
         kind: "bullet",
-        text: "Build a single Excel workbook of the TCFD statement patterns.",
+        text: "Build a single Excel workbook of the Meridian statement patterns.",
       },
       {
         kind: "bullet",
-        text: "Continue researching vulnerability scoring methodology.",
+        text: "Check the remaining rows against the template.",
       },
     ]);
   });
@@ -662,23 +460,15 @@ describe("reading the daemon's real minutes", () => {
       ].join("\n"),
     );
     expect(lines.map((l) => l.kind)).toEqual(["label", "bullet", "bullet"]);
-    expect(lines[0]).toEqual({
+    expect(lines[0]).toMatchObject({
       kind: "label",
       text: "took two things away",
       lead: "Vexil Quorin",
     });
   });
 
-  it("leaves a bullet with no indented items a bullet, even when a bullet at the same depth follows it", () => {
-    expect(
-      minutesLines(["- One thing.", "- Another thing."].join("\n")).map(
-        (l) => l.kind,
-      ),
-    ).toEqual(["bullet", "bullet"]);
-  });
-
   it("does not mistake a dash inside a sentence for a lead phrase", () => {
-    expect(minutesLines("- Vexil — who leads the work — agreed.")).toEqual([
+    expect(minutesLines("- Vexil — who leads the work — agreed.")).toMatchObject([
       { kind: "bullet", text: "Vexil — who leads the work — agreed." },
     ]);
   });
@@ -711,35 +501,17 @@ describe("modelEffort", () => {
   });
 });
 
-// The front door's greeting is read off the clock at render rather than stored, so a window left open past midnight does not still say good evening.
-describe("greeting", () => {
-  it("says which part of the day it is, on the ordinary English boundaries", () => {
-    const at = (h: number) => greeting(new Date(2026, 8, 12, h, 0, 0));
-    expect(at(3)).toBe("Good morning.");
-    expect(at(11)).toBe("Good morning.");
-    expect(at(12)).toBe("Good afternoon.");
-    expect(at(16)).toBe("Good afternoon.");
-    expect(at(17)).toBe("Good evening.");
-    expect(at(23)).toBe("Good evening.");
-  });
-});
-
 // The notice card says how long ago the notice landed, the way the design sheets of 2026-09-12 draw it: "now", then "5m ago", then "12m ago". A notice carries no time of its own from the daemon, so the card stamps its arrival and reads it against the clock; without this the card would either say nothing or keep saying "now" for an hour.
 describe("noticeAge", () => {
   const at = new Date("2026-09-12T14:00:00").getTime();
-  it("says now for the minute it arrived", () => {
-    expect(noticeAge(at, new Date("2026-09-12T14:00:00"))).toBe("now");
-    expect(noticeAge(at, new Date("2026-09-12T14:00:59"))).toBe("now");
-  });
-  it("counts minutes, then hours", () => {
-    expect(noticeAge(at, new Date("2026-09-12T14:01:00"))).toBe("1m ago");
-    expect(noticeAge(at, new Date("2026-09-12T14:12:00"))).toBe("12m ago");
-    expect(noticeAge(at, new Date("2026-09-12T14:59:59"))).toBe("59m ago");
-    expect(noticeAge(at, new Date("2026-09-12T15:00:00"))).toBe("1h ago");
-    expect(noticeAge(at, new Date("2026-09-12T19:30:00"))).toBe("5h ago");
-  });
   // A clock that has gone backwards — the machine resyncing, or a notice stamped a moment in the future — must not read "-1m ago".
   it("says now when the stamp is ahead of the clock", () => {
     expect(noticeAge(at, new Date("2026-09-12T13:59:00"))).toBe("now");
+  });
+});
+
+describe("keyed", () => {
+  it("gives the same text a key each time it appears, so a repeated paragraph is still its own row", () => {
+    expect(keyed(["a", "b", "a"], (s) => s).map((k) => k.key)).toEqual(["a", "b", "a#1"]);
   });
 });

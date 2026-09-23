@@ -277,7 +277,7 @@ func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Tim
 // errSinceAfterUntil is a sentinel so callers can distinguish "the range is backwards" from "the timestamp didn't parse" — leading a reversed-range error with the ISO-8601 format hint would be misleading when the format was fine.
 var errSinceAfterUntil = errors.New("since must not be after until")
 
-// parseInstant parses a full RFC3339 timestamp, a zoneless datetime (2006-01-02T15:04:05, read in now's zone), a bare calendar date (2006-01-02), or the words "today" and "yesterday" resolved against now.
+// parseInstant parses a full RFC3339 timestamp, a zoneless datetime (2006-01-02T15:04:05, read in now's zone), a bare calendar date (2006-01-02), or the words "now", "today" and "yesterday" resolved against now.
 // A bare date or word anchors to the start of that day, or its end (23:59:59) when endOfDay is set — so a bare until date is inclusive of the whole day rather than a zero-width midnight instant.
 // The words are here because the user says them out loud and the model passes them straight through; without them the call errors, or worse, the word reaches the search as a search term and matches things like "India Today".
 func parseInstant(s string, now time.Time, endOfDay bool) (time.Time, error) {
@@ -293,6 +293,8 @@ func parseInstant(s string, now time.Time, endOfDay bool) (time.Time, error) {
 	d, err := time.ParseInLocation("2006-01-02", s, loc)
 	if err != nil {
 		switch strings.ToLower(s) {
+		case "now":
+			return now, nil
 		case "today":
 			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 		case "yesterday":
@@ -326,4 +328,4 @@ func parseDaysAgo(s string) (int, bool) {
 }
 
 // dateHint is the one phrasing for a since/until the tool could not read, shared by recall and query_memory so the model gets the same list of forms that work wherever it passes a date.
-const dateHint = "I can only search by a real date — try 'today', 'yesterday', or a date like 2026-07-05"
+const dateHint = "I can only search by a real date — try 'now', 'today', 'yesterday', '3 days ago', or a date like 2026-07-05"

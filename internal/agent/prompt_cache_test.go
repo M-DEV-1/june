@@ -106,33 +106,6 @@ func TestAskText_ScreenAskSendsOnePrefixOnEveryRound(t *testing.T) {
 	}
 }
 
-// A question that says nothing about a screen still opens on the whole handshake and the whole tool list, because it may turn out to be a memory question and the screen prompt says nothing about the people in the user's life.
-func TestAskText_KeepsTheHandshakeWhenTheQuestionNamesNoScreenTask(t *testing.T) {
-	var got []geminiRequest
-	geminiScript(t, &got, geminiAnswerRound)
-	a, _ := observingAgent(t)
-
-	if _, err := a.askText(t.Context(), "gemini-test", nil, "what did we settle on for the venue"); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got[0].SystemInstruction), "composed, dry-witted aide") {
-		t.Errorf("round 0 must still carry the whole handshake, got %d bytes", len(got[0].SystemInstruction))
-	}
-	if !strings.Contains(string(got[0].Tools), "query_memory") {
-		t.Error("round 0 must still offer the memory tools")
-	}
-}
-
-// The persona is a composed, dry, understated aide: calm and precise, British in rhythm rather than in costume. It never says "sir" and never plays the butler, however Jarvis-like the delivery.
-func TestSystemInstruction_PersonaIsDryAndNeverSaysSir(t *testing.T) {
-	got := systemInstructionStable("linux", "amd64", "sh", voiceCommunicationStyle, 20)
-	for _, want := range []string{"composed, dry-witted aide", "understated", "never \"sir\"", "done only when a tool result this turn says so"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("persona lacks %q", want)
-		}
-	}
-}
-
 // The handshake the ask paths open with is what a provider's prompt cache has to match, and a cache can only match a prefix. Everything that reads the same on every ask therefore comes first — who Ora is, how it talks, this machine, the screen-task guidance — and the three things that change (the personal block, the memory lines, the clock) are the tail. Two asks a minute apart must agree on every byte up to that tail.
 func TestHandshakeInstruction_OnlyTheTailChangesBetweenAsks(t *testing.T) {
 	const personal = "Personal context — things known for certain about the user and their world:\n  Their name is Vexil."

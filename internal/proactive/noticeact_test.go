@@ -2,7 +2,7 @@ package proactive
 
 import (
 	"context"
-	"errors"
+
 	"testing"
 )
 
@@ -19,18 +19,6 @@ func TestAct_RunsTheNoticesOwnActionWithNoOneWaiting(t *testing.T) {
 	}
 	if !started {
 		t.Error("the press did not start the recording, which is the only thing that button is for")
-	}
-}
-
-// The action's own failure reaches the user rather than being reported as a bad button.
-func TestAct_ReportsWhatTheActionFailedWith(t *testing.T) {
-	SetNoticeAction("meeting", "record", func() error { return errors.New("no microphone") })
-	t.Cleanup(func() { SetNoticeAction("meeting", "record", nil) })
-
-	s := &Scheduler{}
-	err := s.Act(context.Background(), "meeting", "", "In a meeting?", "", "record")
-	if err == nil || errors.Is(err, ErrBadNoticeAction) {
-		t.Errorf("Act = %v, want the reason the recording would not start", err)
 	}
 }
 
@@ -56,10 +44,31 @@ func TestAct_PrefersTheWaitingGoroutine(t *testing.T) {
 	}
 }
 
-// A word no notice registered is still refused, so a stray press cannot reach anything.
-func TestAct_StillRefusesAnActionNobodyRegistered(t *testing.T) {
+// Every button that took tells the window so, whichever of Act's paths applied it: the window's card only drops its buttons when the notice comes back with its action set.
+// Until 2026-09-23 only Done and the snoozes sent that event, so "Not happening" on the stale-item question and "Start recording" on the meeting offer left their buttons up, and a second press ran the action again.
+func TestAct_TellsTheWindowTheCardIsDealtWith(t *testing.T) {
+	SetNoticeAction("meeting", "record", func() error { return nil })
+	t.Cleanup(func() { SetNoticeAction("meeting", "record", nil) })
+	var sent []Notice
+	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
+	t.Cleanup(func() { SetNoticeSender(nil) })
+
+	n := Notice{Title: "Still open", Kind: staleNoticeKind, ID: "7"}
+	answered, release := awaitAnswer(noticeKey(n), []string{"dropped"})
+	defer release()
+
 	s := &Scheduler{}
-	if err := s.Act(context.Background(), "meeting", "", "In a meeting?", "", "juggle"); !errors.Is(err, ErrBadNoticeAction) {
-		t.Errorf("Act = %v, want it refused", err)
+	for _, press := range []struct{ kind, id, title, action string }{
+		{staleNoticeKind, "7", "Still open", "dropped"},
+		{"meeting", "", "In a meeting?", "record"},
+	} {
+		sent = nil
+		if err := s.Act(context.Background(), press.kind, press.id, press.title, "", press.action); err != nil {
+			t.Fatalf("Act %s: %v", press.action, err)
+		}
+		if len(sent) != 1 || sent[0].Kind != press.kind || sent[0].Action != press.action {
+			t.Errorf("%s pressed: window was sent %+v, want one %s notice with action %q", press.action, sent, press.kind, press.action)
+		}
 	}
+	<-answered
 }

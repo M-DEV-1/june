@@ -164,7 +164,7 @@ export function startMockNotice(params: URLSearchParams): void {
   void import("./main").then(({ dispatch }) => {
     dispatch({
       kind: "notice",
-      notice: mode === "ask" ? askNotice : { title: "New task from Daily AI Sprint Standup", body: "Continue the TCFD-style formatting research for the generated statements and bring a first draft on Monday.", place: "tasks", id: "42", kind: "task" },
+      notice: mode === "ask" ? askNotice : { title: "New task from Daily standup", body: "Carry on with the Meridian formatting work and bring a first draft on Monday.", place: "tasks", id: "42", kind: "task" },
       hoverOpen: mode === "stack",
     });
   });

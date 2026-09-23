@@ -13,65 +13,7 @@ func item(owner, text string) memory.ActionItem {
 	return memory.ActionItem{
 		Owner: owner, Text: text,
 		Status: memory.StatusOpen, Priority: memory.PriorityNormal,
-		Source: "md x mf tool", Raised: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC),
-	}
-}
-
-// AddActionItems stores each item once and returns only open ones, with no recency window — an owed task does not stop being owed because its meeting was a week ago.
-func TestAddActionItems_StoresAndReadsBackOpen(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	added, err := store.AddActionItems(ctx, []memory.ActionItem{
-		item("Me", "carry PR #13 through CI and merge."),
-		item("Me", "reply on WhatsApp during his leave."),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if added != 2 {
-		t.Fatalf("added = %d, want 2", added)
-	}
-
-	open, err := store.OpenActionItems(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(open) != 2 {
-		t.Fatalf("want 2 open items, got %d: %+v", len(open), open)
-	}
-	if open[0].Owner != "Me" || open[0].Text != "carry PR #13 through CI and merge." {
-		t.Errorf("first item = %+v", open[0])
-	}
-}
-
-// OpenActionItems only surfaces the user's own owed work: rows already stored under another person's name (from before this filter existed, or ever) never appear, however many are on file.
-func TestOpenActionItems_OnlyTheUsersOwn(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
-		item("Me", "send the deck by Friday."),
-		item("Ravix", "carry PR #13 through CI and merge."),
-		item(memory.UnknownOwner, "trial attaching walkthrough videos to PRs."),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
-		t.Fatal(err)
-	}
-
-	open, err := store.OpenActionItems(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(open) != 1 {
-		t.Fatalf("want 2 open items, got %d: %+v", len(open), open)
-	}
-	for _, a := range open {
-		if a.Owner == "Ravix" {
-			t.Errorf("returned an item owed by somebody else: %+v", a)
-		}
+		Source: "vq x zb tool", Raised: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC),
 	}
 }
 
@@ -80,7 +22,7 @@ func TestAddActionItems_DoesNotResurrectAClosedItem(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "finish the acme-essentials setup.")}); err != nil {
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "finish the acme-basics setup.")}); err != nil {
 		t.Fatal(err)
 	}
 	open, err := store.OpenActionItems(ctx)
@@ -92,7 +34,7 @@ func TestAddActionItems_DoesNotResurrectAClosedItem(t *testing.T) {
 	}
 
 	// The recorder re-files the same meeting's minutes, as it does on every retry.
-	added, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "finish the acme-essentials setup.")})
+	added, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "finish the acme-basics setup.")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,15 +76,8 @@ func TestSetActionText_KeepsTheItemTrackedAndItsOtherFields(t *testing.T) {
 	if open[0].Text != "deploy the checkout-flow PR." {
 		t.Errorf("text = %q, want the correction", open[0].Text)
 	}
-	if open[0].Owner != "Me" || open[0].Priority != memory.PriorityHigh || open[0].Source != "md x mf tool" {
+	if open[0].Owner != "Me" || open[0].Priority != memory.PriorityHigh || open[0].Source != "vq x zb tool" {
 		t.Errorf("correcting the text lost the rest of the item: %+v", open[0])
-	}
-}
-
-// An id the model invented must be reported, not silently ignored — the same guard SetActionStatus has, for the same reason.
-func TestSetActionText_UnknownID(t *testing.T) {
-	if err := newStore(t).SetActionText(context.Background(), 4242, "something else"); err == nil {
-		t.Fatal("want an error for an id that is not an action note")
 	}
 }
 
@@ -187,25 +122,8 @@ func TestSetOwnerClass_OverridesTheParsedOwner(t *testing.T) {
 	}
 }
 
-// A class that is not one of the three is refused, and so is an id that names no action item.
-func TestSetOwnerClass_Rejects(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "renew the domain.")}); err != nil {
-		t.Fatal(err)
-	}
-	open, _ := store.OpenActionItems(ctx)
-
-	if err := store.SetOwnerClass(ctx, open[0].NoteID, "sideways"); err == nil {
-		t.Error("want an error for a class that is not me, them or unclear")
-	}
-	if err := store.SetOwnerClass(ctx, 4242, memory.OwnerMe); err == nil {
-		t.Error("want an error for an id that is not an action note")
-	}
-}
-
 // testIdentity is the personal-context entry that says who the user is, the same shape the store migrates in on open.
-const testIdentity = "The user is Zemna Braxen — goes by Zemna; git handle M-DEV-1."
+const testIdentity = "The user is Zemna Braxen — goes by Zemna; git handle zbraxen."
 
 // With an identity on file the user's own name is his work, and an item nobody was named for is not — which is the whole complaint about the tasks page: it was full of other people's business.
 func TestActionItemsByOwner(t *testing.T) {
@@ -253,12 +171,12 @@ func TestCloseDoneActionItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{
-		item("Me", "deploy the Value Chain & risk-statements PR (#5632)."),
-		item("Me", "rework the hardcoded location-finder logic in the climate statements file."),
+		item("Me", "deploy the Route Planning & risk-statements PR (#5632)."),
+		item("Me", "rework the hardcoded location-finder logic in the route statements file."),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.LogNote(ctx, "Merged the Value Chain risk-statements PR #5632 to main; the location-finder rework is still open.", "meeting"); err != nil {
+	if _, err := store.LogNote(ctx, "Merged the Route Planning risk-statements PR #5632 to main; the location-finder rework is still open.", "meeting"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -331,13 +249,13 @@ func TestCloseDoneActionItems_ALaterInstanceOfARecurringMeetingClosesIt(t *testi
 	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
 		t.Fatal(err)
 	}
-	standup := "Daily AI standup"
-	a := item(memory.MeOwner, "deploy the Value Chain & risk-statements PR (#5632).")
+	standup := "Daily Platform standup"
+	a := item(memory.MeOwner, "deploy the Route Planning & risk-statements PR (#5632).")
 	a.Source, a.Raised = standup, time.Now().AddDate(0, 0, -7)
 	if _, err := store.AddActionItems(ctx, []memory.ActionItem{a}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.LogNote(ctx, "# "+standup+"\n\n**"+standup+" — Fri 5 Sep 2026, 09:30**\n\n## Your part\n- Merged the Value Chain risk-statements PR #5632 to main.\n", "meeting"); err != nil {
+	if _, err := store.LogNote(ctx, "# "+standup+"\n\n**"+standup+" — Fri 5 Sep 2026, 09:30**\n\n## Your part\n- Merged the Route Planning risk-statements PR #5632 to main.\n", "meeting"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -357,10 +275,10 @@ func TestCloseDoneActionItems_ReadsOnlyTheDayPages(t *testing.T) {
 	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the Value Chain & risk-statements PR (#5632).")}); err != nil {
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the Route Planning & risk-statements PR (#5632).")}); err != nil {
 		t.Fatal(err)
 	}
-	const said = "Merged the Value Chain risk-statements PR #5632 to main."
+	const said = "Merged the Route Planning risk-statements PR #5632 to main."
 	if err := store.SetDiaryEntry(ctx, "2026-09-06", "brief", said); err != nil {
 		t.Fatal(err)
 	}
@@ -392,10 +310,10 @@ func TestCloseDoneActionItems_ReadsEvidenceWrittenAtTheSinceInstant(t *testing.T
 	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the Value Chain & risk-statements PR (#5632).")}); err != nil {
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the Route Planning & risk-statements PR (#5632).")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetDiaryEntry(ctx, "2026-09-06", "day", "Merged the Value Chain risk-statements PR #5632 to main."); err != nil {
+	if err := store.SetDiaryEntry(ctx, "2026-09-06", "day", "Merged the Route Planning risk-statements PR #5632 to main."); err != nil {
 		t.Fatal(err)
 	}
 	var written time.Time

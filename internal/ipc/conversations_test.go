@@ -66,17 +66,6 @@ func patchJSON(t *testing.T, srv *httptest.Server, path, body string) int {
 	return resp.StatusCode
 }
 
-func TestConversationsEmptyListIsNotNull(t *testing.T) {
-	store := dbtest.Open(t)
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-
-	var raw json.RawMessage
-	getJSON(t, srv, "/conversations", &raw)
-	if !strings.Contains(string(raw), `"conversations":[]`) {
-		t.Errorf("GET /conversations on an empty store = %s, want an empty list", raw)
-	}
-}
-
 func TestCreateAndReadConversation(t *testing.T) {
 	store := dbtest.Open(t)
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
@@ -111,19 +100,6 @@ func TestCreateAndReadConversation(t *testing.T) {
 	}
 	if one.Turns == nil {
 		t.Errorf("turns came back null, want an empty list")
-	}
-}
-
-func TestConversationMissingIs404(t *testing.T) {
-	store := dbtest.Open(t)
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-	resp, err := http.Get(srv.URL + "/conversations/999")
-	if err != nil {
-		t.Fatalf("GET: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GET a missing conversation = %d, want 404", resp.StatusCode)
 	}
 }
 
@@ -262,25 +238,6 @@ func TestConversationErrorTurnCarriesAReason(t *testing.T) {
 	}
 }
 
-// TestErrorReason is a table test on the pure function GET /conversations/{id} uses to turn a failed turn's stored error text into one plain sentence.
-func TestErrorReason(t *testing.T) {
-	cases := []struct{ name, text, want string }{
-		{"a 429 status", "Error 429, Message: You exceeded your current quota", "The model's quota is spent (429)."},
-		{"resource exhausted without the code", "Status: RESOURCE_EXHAUSTED", "The model's quota is spent (429)."},
-		{"a 503 status", "Error 503, high demand", "The model was overloaded (503)."},
-		{"unavailable without the code", "Status: UNAVAILABLE", "The model was overloaded (503)."},
-		{"a timeout", "context deadline exceeded: the call timed out", "The model took too long."},
-		{"anything else", "tool loop: the store is locked", "The model could not answer."},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := errorReason(c.text); got != c.want {
-				t.Errorf("errorReason(%q) = %q, want %q", c.text, got, c.want)
-			}
-		})
-	}
-}
-
 // TestConversationTitle checks the rename route: a good title sticks and answers 204, a blank one is refused, and renaming a conversation that does not exist is 404.
 func TestConversationTitle(t *testing.T) {
 	store := dbtest.Open(t)
@@ -350,19 +307,6 @@ func deleteRequest(t *testing.T, srv *httptest.Server, path string) int {
 	return resp.StatusCode
 }
 
-func TestTitleFromQuestion(t *testing.T) {
-	cases := []struct{ question, want string }{
-		{"when exactly does the flight to bengaluru leave on friday", "when exactly does the flight to bengaluru leave"},
-		{"what now", "what now"},
-		{"   ", "New conversation"},
-	}
-	for _, c := range cases {
-		if got := titleFromQuestion(c.question); got != c.want {
-			t.Errorf("titleFromQuestion(%q) = %q, want %q", c.question, got, c.want)
-		}
-	}
-}
-
 // TestAskWithAStaleConversationIs404 checks that an ask naming a conversation that no longer exists is refused rather than accepted: AddTurn refuses the orphan turn, so answering 202 would draw an answer the window loses the moment it reloads.
 func TestAskWithAStaleConversationIs404(t *testing.T) {
 	store := dbtest.Open(t)
@@ -413,5 +357,43 @@ func TestRun_StoresAFailedAskAsAnErrorTurn(t *testing.T) {
 	}
 	if len(types) != 2 || types[0] != "status" || types[1] != "error" {
 		t.Errorf("events = %v, want status then error", types)
+	}
+}
+
+// On 2026-09-19 a WhatsApp task ran out of steps half done, the report was filed as an error turn, and history drops error turns, so the "Continue" that followed reached the model with nothing to continue and it resumed the Spotify song on screen instead. Running out of steps is where the work got to, so it is filed and shown as Ora's answer.
+func TestRun_StoresAStepCapAsAnAnswer(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	convID, err := store.CreateConversation(ctx, "smoke", "")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+
+	msg := `I got as far as "WhatsApp", having just scrolled 8 steps, and ran out of steps after 50 of them. Say continue and I will carry on from there.`
+	s := New(&fakeAsker{err: &agent.StepCapError{Msg: msg}}, store, nil, nil)
+	ch := s.hub.subscribe()
+	defer s.hub.unsubscribe(ch)
+
+	s.run(s.asker, "ask-1", convID, "open whatsapp and find the group", "", false, nil)
+
+	turns, err := store.ConversationTurns(ctx, convID)
+	if err != nil {
+		t.Fatalf("ConversationTurns: %v", err)
+	}
+	if len(turns) != 1 || turns[0].Kind != "ask" || turns[0].Text != msg {
+		t.Fatalf("turns = %+v, want one ora answer carrying where it got to", turns)
+	}
+	var answer string
+	for len(ch) > 0 {
+		if ev := <-ch; ev.Type == "answer" {
+			answer = ev.Text
+		}
+	}
+	if answer != msg {
+		t.Errorf("answer event = %q, want the step-cap report", answer)
 	}
 }

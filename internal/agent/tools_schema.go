@@ -141,9 +141,10 @@ func toolDefinitions() []*genai.Tool {
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
-						"n": {Type: genai.TypeNumber, Description: "Element number"},
-						"x": {Type: genai.TypeNumber, Description: "x in the look's picture"},
-						"y": {Type: genai.TypeNumber, Description: "y in the look's picture"},
+						"n":      {Type: genai.TypeNumber, Description: "Element number"},
+						"x":      {Type: genai.TypeNumber, Description: "x in the look's picture"},
+						"y":      {Type: genai.TypeNumber, Description: "y in the look's picture"},
+						"button": {Type: genai.TypeString, Description: "right for the context menu; left by default"},
 						"then": {
 							Type:        genai.TypeArray,
 							Description: "Further taps, each {n} or {x,y}",
@@ -452,6 +453,7 @@ func liveToolsFor(model string) []*genai.Tool {
 	if !HasApprover() {
 		tools = dropApprovalGated(tools)
 	}
+	// Flip point for gemini-3.8-live: its docs list Google Search grounding as supported (read 2026-09-17), so once someone dials a real session with grounding sent beside the function tools and it survives past the first word, exempt config.Live38Model from this branch the way thinkingConfigFor already does. Until that probe it stays off, because a 429 closes the whole voice session a quarter second after connect while a missing web search only degrades it.
 	if strings.HasPrefix(model, "gemini-3") {
 		return tools
 	}

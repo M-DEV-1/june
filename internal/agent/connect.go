@@ -64,9 +64,13 @@ func thinkingConfig() *genai.ThinkingConfig {
 }
 
 // thinkingConfigFor builds the thinking config the given Live model accepts. The Gemini 3 Live models take a thinking level and reject a token budget; the 2.5 model is the reverse. Low is the level that keeps first-word latency close to the 256-token budget the 2.5 model ran with, which on 2026-08-28 measured under two seconds for a lookup-and-answer turn.
+// gemini-3.8-live is the exception on both counts: its reasoning is interleaved and it takes neither field, so it gets IncludeThoughts alone. Documented at ai.google.dev/gemini-api/docs/models/gemini-3.8-live on 2026-09-17, not probed — but sending a field the setup rejects is what takes the whole handshake down, so the safe reading of the doc is the one that sends less.
 func thinkingConfigFor(model string) *genai.ThinkingConfig {
 	cfg := &genai.ThinkingConfig{
 		IncludeThoughts: true, // receiveLoop already routes Thought:true parts correctly (ResponseChunk.IsThought) — surfacing them costs nothing and helps diagnose exactly this class of issue.
+	}
+	if model == config.Live38Model {
+		return cfg
 	}
 	if strings.HasPrefix(model, "gemini-3") {
 		cfg.ThinkingLevel = genai.ThinkingLevelLow
@@ -158,7 +162,8 @@ func proactivityConfig(enabled bool) *genai.ProactivityConfig {
 	return proactivityConfigFor(config.VoiceModel(), enabled)
 }
 
-// proactivityConfigFor is proactivityConfig for a named Live model. The Gemini 3 Live models do not support proactive audio as of 2026-09-02, so for them the field stays off the wire whatever the config file says — which also means the mic hears the room and the model answers it; see the trial note on config.VoiceModel().
+// proactivityConfigFor is proactivityConfig for a named Live model. The 3.1 Live model does not support proactive audio as of 2026-09-02, so for it the field stays off the wire whatever the config file says — which also means the mic hears the room and the model answers it; see the trial note on config.VoiceModel().
+// nil means the opposite thing for gemini-3.8-live: proactive audio is permanently enabled there and has no field to set, so the model always decides whether audio was aimed at it and the config file's switch cannot turn that off. Documented at ai.google.dev/gemini-api/docs/models/gemini-3.8-live on 2026-09-17, not probed.
 func proactivityConfigFor(model string, enabled bool) *genai.ProactivityConfig {
 	// The field is only accepted under API version v1alpha, which the live client sets; a probe on 2026-09-03 without it got `Unknown name "proactivity" at 'setup'`, so a client change here must keep v1alpha.
 	if !enabled || strings.HasPrefix(model, "gemini-3") {
@@ -427,12 +432,8 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 }
 
 // voiceScreenScope gives every tool call of the voice conversation the same screen state for as long as the agent lives, across reconnects. Input: the connection's context. Output: a context carrying the agent's own screen state.
-// It used to be liveScreenScope, one fresh state per Connect. Measured 2026-09-09: the server hung up mid conversation, Connect redialled and resumed the same conversation from the model's point of view, and the model's next click on item 25 answered "call observe_screen first" about a list it had just been given. The model treats a resumed session as one conversation, so the numbered list, the picture and the focused control have to survive the redial. The look allowance still comes back at every model turn (see endLiveTurn).
-// The allowance itself is voiceMaxLooksPerTurn rather than the smaller maxLooksPerAsk a typed ask gets: a spoken task ("scroll down and tell me what is there") legitimately needs a look after each action, where a typed ask is one question and one answer. Set here rather than once at agent construction because a.askScreen is a plain field with no constructor of its own; setting it on every call is idempotent and cheap.
+// It used to be liveScreenScope, one fresh state per Connect. Measured 2026-09-09: the server hung up mid conversation, Connect redialled and resumed the same conversation from the model's point of view, and the model's next click on item 25 answered "call observe_screen first" about a list it had just been given. The model treats a resumed session as one conversation, so the numbered list, the picture and the focused control have to survive the redial.
 func (a *Agent) voiceScreenScope(ctx context.Context) context.Context {
-	a.askScreen.mu.Lock()
-	a.askScreen.maxLooks = voiceMaxLooksPerTurn
-	a.askScreen.mu.Unlock()
 	return context.WithValue(ctx, askLookStateKey{}, &a.askScreen)
 }
 
@@ -805,8 +806,6 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 
 		// TurnComplete/GenerationComplete mark the end of one model turn — the boundary the UI needs so it stops merging this turn's ora chunks into whatever arrives for the NEXT turn (see streamLine's TurnBoundary handling). The SDK can signal either depending on realtime-playback timing, so both are checked; Interrupted (handled above) already breaks the merge chain on its own since it emits a system-sender chunk.
 		if msg.ServerContent != nil && (msg.ServerContent.TurnComplete || msg.ServerContent.GenerationComplete) {
-			// The look allowance bounds one question, not a whole conversation, so it comes back here. What the looks left behind is kept: the model lists the screen, replies, and is then asked to draw around item 3.
-			endLiveTurn(recvCtx)
 			a.endTurn()
 			clock.turnDone()
 			flushInputTranscript()

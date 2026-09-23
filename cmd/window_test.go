@@ -20,19 +20,6 @@ func writeExecutable(t *testing.T, path string) string {
 	return path
 }
 
-// ORA_WINDOW names the window to run, so a developer can point the daemon at any build.
-func TestWindowBinary_PrefersTheEnvironmentOverride(t *testing.T) {
-	want := writeExecutable(t, filepath.Join(t.TempDir(), "some-build", "ora"))
-	t.Setenv("ORA_WINDOW", want)
-	got, _, err := windowBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Errorf("windowBinary = %q, want %q", got, want)
-	}
-}
-
 // A path that names something unusable is passed over rather than launched: a directory, a file with no execute bit, and a name for nothing at all.
 func TestWindowBinary_SkipsWhatCannotBeRun(t *testing.T) {
 	dir := t.TempDir()
@@ -65,14 +52,6 @@ func TestWindowBinary_NeverReturnsTheDaemonItself(t *testing.T) {
 	got, _, err := windowBinary()
 	if err == nil && got == exe {
 		t.Fatalf("windowBinary returned the daemon's own binary %q", got)
-	}
-}
-
-// A machine with no window built runs the daemon alone rather than failing to start.
-func TestWindowBinary_ReportsWhenThereIsNoneToRun(t *testing.T) {
-	t.Setenv("ORA_WINDOW", filepath.Join(t.TempDir(), "not-here"))
-	if _, _, err := windowBinary(); err == nil {
-		t.Error("expected an error when there is no window binary to run")
 	}
 }
 

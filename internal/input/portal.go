@@ -44,8 +44,11 @@ const (
 // axisVertical is NotifyPointerAxisDiscrete's axis value for vertical scrolling.
 const axisVertical uint32 = 0
 
-// btnLeft is BTN_LEFT from linux/input-event-codes.h, the evdev button code NotifyPointerButton expects.
-const btnLeft int32 = 0x110
+// btnLeft and btnRight are BTN_LEFT and BTN_RIGHT from linux/input-event-codes.h, the evdev button codes NotifyPointerButton expects. The right button is what opens a context menu.
+const (
+	btnLeft  int32 = 0x110
+	btnRight int32 = 0x111
+)
 
 var reqSeq atomic.Uint64
 
@@ -357,7 +360,13 @@ func (s *Session) coordinateForStream(x, y float64) (float64, float64, uint32, e
 }
 
 // ClickAt moves the pointer to (x, y), in whole-desktop coordinates, and clicks the left button. The point is mapped into whichever granted stream covers it first, since that is what the portal's absolute motion takes.
-func (s *Session) ClickAt(x, y float64) error {
+func (s *Session) ClickAt(x, y float64) error { return s.clickButton(x, y, btnLeft) }
+
+// RightClickAt moves the pointer to (x, y), in whole-desktop coordinates, and clicks the right button, which is what opens a context menu. Input: the point in whole-desktop logical pixels. Output: the portal's error, or a CoordinateError when the point is on none of the monitors this session was granted.
+func (s *Session) RightClickAt(x, y float64) error { return s.clickButton(x, y, btnRight) }
+
+// clickButton moves the pointer to a whole-desktop point and presses and releases one evdev button there. Input: the point in whole-desktop logical pixels and the button code (btnLeft or btnRight). Output: the first error from the mapping, the motion, or either half of the press.
+func (s *Session) clickButton(x, y float64, button int32) error {
 	x, y, node, err := s.coordinateForStream(x, y)
 	if err != nil {
 		return err
@@ -371,10 +380,10 @@ func (s *Session) ClickAt(x, y float64) error {
 	if err := s.notifyMotion(handle, node, x, y); err != nil {
 		return err
 	}
-	if err := s.notifyButton(handle, btnLeft, keyStatePressed); err != nil {
+	if err := s.notifyButton(handle, button, keyStatePressed); err != nil {
 		return err
 	}
-	return s.notifyButton(handle, btnLeft, keyStateReleased)
+	return s.notifyButton(handle, button, keyStateReleased)
 }
 
 // ScrollAt moves the pointer to (x, y), in whole-desktop coordinates, and scrolls dy discrete vertical steps (positive is down).

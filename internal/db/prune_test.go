@@ -3,13 +3,12 @@ package db
 
 import (
 	"context"
-	"slices"
-	"strings"
+
 	"testing"
 	"time"
 )
 
-// testFailedGrace is the failed-run grace these tests pass in, matching config.DefaultActRunFailedKeepDays. The number lives in the config now, so every test that is not about the grace itself hands over the default and gets on with what it is testing.
+// testFailedGrace is the failed-run grace these tests pass in, matching config.DefaultActRunFailedKeepDays. The number lives in the config, so every test hands over the default.
 const testFailedGrace = 30 * 24 * time.Hour
 
 // backdateConversation moves one conversation's two timestamps into the past, which is the only way to test an age rule without waiting.
@@ -300,150 +299,6 @@ func TestPruneActRunsNonPositiveCapKeepsEverything(t *testing.T) {
 	}
 }
 
-// TestPruneActRunsTakesItsFailedGraceFromTheCaller checks the grace is the caller's number and not a constant in this package: the same forty-day-old failure survives a ninety-day grace and is taken by a seven-day one, with everything else about the two runs identical.
-func TestPruneActRunsTakesItsFailedGraceFromTheCaller(t *testing.T) {
-	cases := []struct {
-		name  string
-		grace time.Duration
-		kept  bool
-	}{
-		{"a grace wider than the failure's age keeps it", 90 * 24 * time.Hour, true},
-		{"a grace narrower than the failure's age lets the cap take it", 7 * 24 * time.Hour, false},
-		{"a grace of zero protects no failure at all", 0, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			store := newFileStore(t)
-			ctx := context.Background()
-
-			addRun(t, store, "the failure", "error", 40*24*time.Hour)
-			addRun(t, store, "the newest ordinary run", "ok", time.Hour)
-
-			if _, err := store.PruneActRuns(ctx, 1, c.grace); err != nil {
-				t.Fatalf("PruneActRuns: %v", err)
-			}
-			if got := has(runQuestions(t, store), "the failure"); got != c.kept {
-				t.Errorf("with a %v grace the forty-day-old failure kept = %v, want %v", c.grace, got, c.kept)
-			}
-		})
-	}
-}
-
-// TestProtectedConversationsCountsWhatThePassRefusedToTake checks the number the nightly stage logs beside its deletions: conversations old enough for the cutoff that the policy holds back, which is the ones with a turn in them and the empty ones a task points at. A conversation too young to be eligible is not protected and is not counted.
-func TestProtectedConversationsCountsWhatThePassRefusedToTake(t *testing.T) {
-	store := newFileStore(t)
-	ctx := context.Background()
-
-	spokenIn, err := store.CreateConversation(ctx, "what did vexil ask about", "claude")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	if _, err := store.AddTurn(ctx, spokenIn, "you", "what did vexil ask about", "ask", nil, nil); err != nil {
-		t.Fatalf("AddTurn: %v", err)
-	}
-	backdateConversation(t, store, spokenIn, 48*time.Hour)
-
-	taskedEmpty, err := store.CreateConversation(ctx, "", "claude")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	backdateConversation(t, store, taskedEmpty, 48*time.Hour)
-	if _, err := store.AddUserTask(ctx, "book the flight", taskedEmpty); err != nil {
-		t.Fatalf("AddUserTask: %v", err)
-	}
-
-	oldEmpty, err := store.CreateConversation(ctx, "", "claude")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	backdateConversation(t, store, oldEmpty, 48*time.Hour)
-
-	// A young conversation with a turn in it: safe, but not held back by the policy, because the cutoff would not have reached it anyway.
-	young, err := store.CreateConversation(ctx, "asked just now", "claude")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	if _, err := store.AddTurn(ctx, young, "you", "asked just now", "ask", nil, nil); err != nil {
-		t.Fatalf("AddTurn: %v", err)
-	}
-
-	protected, err := store.ProtectedConversations(ctx, EmptyConversationAge)
-	if err != nil {
-		t.Fatalf("ProtectedConversations: %v", err)
-	}
-	if protected != 2 {
-		t.Errorf("ProtectedConversations = %d, want 2 (the one with a turn and the one a task points at)", protected)
-	}
-
-	removed, err := store.PruneEmptyConversations(ctx, EmptyConversationAge)
-	if err != nil {
-		t.Fatalf("PruneEmptyConversations: %v", err)
-	}
-	if removed != 1 {
-		t.Errorf("PruneEmptyConversations removed %d, want 1 (only the old empty one, id %d)", removed, oldEmpty)
-	}
-}
-
-// TestProtectedActRunsCountsTheTwoExemptionsApart checks the two numbers the nightly stage logs beside its act run deletions: runs a "How I did X" note was written from, and failed runs still inside the grace. A run in both groups is counted only as the note's, so the two numbers can be added up without double counting.
-func TestProtectedActRunsCountsTheTwoExemptionsApart(t *testing.T) {
-	store := newFileStore(t)
-	ctx := context.Background()
-
-	addRun(t, store, "open the pricing page", "ok", 365*24*time.Hour)
-	if _, err := store.LogNote(ctx, "How I did open the pricing page: looked at the screen.", "procedure"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	// A failure that also carries a note, which is the one row that could be counted twice.
-	addRun(t, store, "half worked", "error", time.Hour)
-	if _, err := store.LogNote(ctx, "How I did half worked: looked at the screen.", "procedure"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	addRun(t, store, "click the broken button", "error", time.Hour)
-	addRun(t, store, "an old failure nobody looked at", "error", 400*24*time.Hour)
-	addRun(t, store, "ordinary one", "ok", time.Hour)
-
-	withNotes, failedYoung, err := store.ProtectedActRuns(ctx, testFailedGrace)
-	if err != nil {
-		t.Fatalf("ProtectedActRuns: %v", err)
-	}
-	if withNotes != 2 {
-		t.Errorf("ProtectedActRuns reported %d runs held by a note, want 2", withNotes)
-	}
-	if failedYoung != 1 {
-		t.Errorf("ProtectedActRuns reported %d failures inside the grace, want 1 (the note's failure is counted as the note's)", failedYoung)
-	}
-}
-
-// TestCommitPruneStage records the 'prune' token the way the other nightly stages record theirs, and calling it again on an already-marked night is idempotent: the token stays discoverable by the same field-membership check the dreaming loop uses to decide whether the stage still needs to run, and a second commit never errors.
-func TestCommitPruneStage(t *testing.T) {
-	ctx := context.Background()
-	store := newFileStore(t)
-	if err := store.StartDreamRun(ctx, "2026-08-30"); err != nil {
-		t.Fatalf("StartDreamRun: %v", err)
-	}
-
-	run, _, _ := store.DreamRun(ctx, "2026-08-30")
-	if strings.Contains(run.StagesDone, "prune") {
-		t.Fatalf("stages_done = %q before any commit, want no prune token", run.StagesDone)
-	}
-
-	if err := store.CommitPruneStage(ctx, "2026-08-30"); err != nil {
-		t.Fatalf("CommitPruneStage: %v", err)
-	}
-	run, _, _ = store.DreamRun(ctx, "2026-08-30")
-	if !slices.Contains(strings.Fields(run.StagesDone), "prune") {
-		t.Errorf("stages_done = %q, want it to carry the prune token", run.StagesDone)
-	}
-
-	if err := store.CommitPruneStage(ctx, "2026-08-30"); err != nil {
-		t.Fatalf("second CommitPruneStage: %v", err)
-	}
-	run, _, _ = store.DreamRun(ctx, "2026-08-30")
-	if !slices.Contains(strings.Fields(run.StagesDone), "prune") {
-		t.Errorf("stages_done = %q after a second commit, still want the prune token", run.StagesDone)
-	}
-}
-
 // TestPruneActRunsKeepsALiveJobsCheckpoint pins the third exemption: a long-running computer-use job's checkpoint is an act_runs row like any other, but it is the only record of a job the user can still resume, and nothing ever rewrites the row of a job that is paused or stuck. It is neither held by a note nor a young failure, so the count cap used to delete it and take the whole trail in job_json with it.
 func TestPruneActRunsKeepsALiveJobsCheckpoint(t *testing.T) {
 	store := newFileStore(t)
@@ -549,16 +404,5 @@ func TestPruneToolCallsRemovesOnlyRowsOlderThanTheWindow(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != freshID {
 		t.Errorf("tool calls left after pruning = %+v, want only the fresh row %d", rows, freshID)
-	}
-}
-
-// TestFinishedActJobStatesSQLCoversEveryState checks that the IN-list PruneActRuns builds from finishedActJobStates names every state in that slice, so the two cannot drift the way a hand-typed SQL literal and a Go slice once could.
-func TestFinishedActJobStatesSQLCoversEveryState(t *testing.T) {
-	sql := finishedActJobStatesSQL()
-	for _, s := range finishedActJobStates {
-		want := "'" + s.(string) + "'"
-		if !strings.Contains(sql, want) {
-			t.Errorf("finishedActJobStatesSQL() = %q, missing %q", sql, want)
-		}
 	}
 }

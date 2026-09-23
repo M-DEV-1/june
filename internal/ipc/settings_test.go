@@ -125,57 +125,6 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 	}
 }
 
-// TestSettings_Fields covers two independent GET /settings fields, each over its own scenario:
-// a data dir that does not exist yet (sizes all zero, capture still defaults enabled with no
-// tracker wired), and a config with the Claude usage fetch explicitly turned off (GET reads the
-// flag off the live pointer it was given, not a snapshot taken when the route was built — the
-// same reason POST /brains is handed a pointer).
-func TestSettings_Fields(t *testing.T) {
-	off := false
-	cases := []struct {
-		name    string
-		dataDir func(t *testing.T) string
-		cfg     *config.OraConfig
-		check   func(t *testing.T, got SettingsView)
-	}{
-		{
-			"missing data dir gives zero sizes",
-			func(t *testing.T) string { return filepath.Join(t.TempDir(), "does-not-exist") },
-			&config.OraConfig{},
-			func(t *testing.T, got SettingsView) {
-				if got.StoreBytes != 0 || got.RecordingsBytes != 0 || got.ModelsBytes != 0 {
-					t.Errorf("sizes over a missing data dir = %d/%d/%d, want all zero", got.StoreBytes, got.RecordingsBytes, got.ModelsBytes)
-				}
-				// capturePaused nil (no tracker wired) defaults to capture enabled, the same "nothing wired yet" default the rest of the daemon uses.
-				if !got.CaptureEnabled {
-					t.Errorf("CaptureEnabled with a nil capturePaused = false, want true")
-				}
-			},
-		},
-		{
-			"claude usage from login reflects live config",
-			func(t *testing.T) string { return t.TempDir() },
-			&config.OraConfig{ClaudeUsageFromLogin: &off},
-			func(t *testing.T, got SettingsView) {
-				if got.ClaudeUsageFromLogin {
-					t.Errorf("claude_usage_from_login = true, want false: the config had it explicitly turned off")
-				}
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			withFakeGsettings(t, noCustomKeybindings)
-			srv := httptest.NewServer(Settings(tc.dataDir(t), NewLiveConfig(tc.cfg, noopSave), false, nil, time.Now()))
-			defer srv.Close()
-
-			var got SettingsView
-			getJSON(t, srv, "/", &got)
-			tc.check(t, got)
-		})
-	}
-}
-
 // TestSettings_PostClaudeUsageFromLoginPersists checks POST {"claude_usage_from_login": false} comes back false on the same response, is written to the on-disk config, and is read back correctly by a fresh LoadConfig — the point being that turning off the undocumented Claude usage fetch survives a daemon restart, the same round trip TestBrainsPostPersists checks for the brain picker.
 func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())

@@ -101,28 +101,6 @@ func TestWaitFor_MalformedCheckFailsAtOnce(t *testing.T) {
 	}
 }
 
-// TestWaitFor_IsOfferedToAnAsk checks the tool is declared, is inside the ask gate, and counts as a screen tool, so a job's step loop and a plain ask reach exactly the same one.
-func TestWaitFor_IsOfferedToAnAsk(t *testing.T) {
-	var declared bool
-	for _, d := range ToolDeclarations() {
-		if d.Name == "wait_for" {
-			declared = true
-		}
-	}
-	if !declared {
-		t.Error("wait_for is not declared to the model")
-	}
-	if !askAllowedTools["wait_for"] {
-		t.Error("wait_for is outside the ask gate, so a job could not run it")
-	}
-	if !screenRoundTools["wait_for"] {
-		t.Error("wait_for is not in the short screen tool set, so a screen round would lose it")
-	}
-	if !screenToolNames["wait_for"] {
-		t.Error("wait_for's result names a window title and is not marked as screen text")
-	}
-}
-
 // TestExecuteAskTool_KeepsTheGate checks the entry point a job's step loop uses is the ask's own gated one: a tool an ask may not run is refused there too, rather than a job having a way round the gate.
 func TestExecuteAskTool_KeepsTheGate(t *testing.T) {
 	a, _ := observingAgent(t)

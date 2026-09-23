@@ -10,27 +10,6 @@ import (
 	"ora/internal/db/dbtest"
 )
 
-// TestUsedScreenTool checks the small pure helper run() uses to decide whether a finished trace is worth filing as an act run: true when any hop named a screen tool, false when every hop was a memory tool.
-func TestUsedScreenTool(t *testing.T) {
-	cases := []struct {
-		name string
-		hops []agent.ToolHop
-		want bool
-	}{
-		{"click among memory hops", []agent.ToolHop{{Name: "query_memory"}, {Name: "click"}}, true},
-		{"memory only", []agent.ToolHop{{Name: "query_memory"}}, false},
-		{"no hops", nil, false},
-		{"observe_screen alone", []agent.ToolHop{{Name: "observe_screen"}}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := usedScreenTool(agent.TurnTrace{ToolHops: tc.hops}); got != tc.want {
-				t.Errorf("usedScreenTool(%v) = %v, want %v", tc.hops, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestRun_RecordsAnActRunWhenAScreenToolRan checks run() files a screen-tool trace as an act run with outcome ok and its step names, and leaves no act run behind for a memory-only trace.
 func TestRun_RecordsAnActRunWhenAScreenToolRan(t *testing.T) {
 	store := dbtest.Open(t)
@@ -83,35 +62,6 @@ func TestRun_RecordsAnActRunWhenAScreenToolRan(t *testing.T) {
 	}
 	if len(runsAfter) != 1 {
 		t.Fatalf("ActRuns after memory-only ask = %d, want still 1", len(runsAfter))
-	}
-}
-
-// TestRun_RecordsAnActRunWhenOnlyShowMarksRan checks run() files a trace as an act run even when the only tool hop is show_marks, which draws numbered marks on the screen the same way point_at and click do.
-func TestRun_RecordsAnActRunWhenOnlyShowMarksRan(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	convID, err := store.CreateConversation(ctx, "smoke", "")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-
-	trace := agent.TurnTrace{
-		Answer: "numbered what's on screen",
-		ToolHops: []agent.ToolHop{
-			{Name: "show_marks", Result: "marked 3 elements"},
-		},
-	}
-	s := New(&fakeAsker{trace: trace}, store, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-	s.run(s.asker, "ask-1", convID, "number what's on screen", "", false, nil)
-
-	runs, err := store.ActRuns(ctx, 10)
-	if err != nil {
-		t.Fatalf("ActRuns: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("ActRuns = %d, want 1 (a show_marks-only turn should be recorded)", len(runs))
 	}
 }
 

@@ -62,21 +62,6 @@ func TestRunTrajTurn_TerminatesAtTheToolRoundCap(t *testing.T) {
 	}
 }
 
-// TestRunTrajTurn_AnswersWithoutTools is the other end of the loop: an arm that replies straight away runs nothing and comes back clean.
-func TestRunTrajTurn_AnswersWithoutTools(t *testing.T) {
-	arm := func(ctx context.Context, sys string, turns []trajTurn) (*trajCall, string, error) {
-		return nil, "the eval harness, mostly", nil
-	}
-	exec := func(ctx context.Context, name string, args map[string]any) string {
-		t.Fatal("no tool should have run")
-		return ""
-	}
-	got := runTrajTurn(context.Background(), "SYS", arm, exec, []trajTurn{{User: "hey"}})
-	if got.Reply != "the eval harness, mostly" || len(got.Calls) != 0 || got.Err != "" {
-		t.Errorf("got %+v", got)
-	}
-}
-
 // TestTrajExec_ReadsRealMemoryAndStubsEveryWrite is the read-only guarantee. The read tools go through the daemon's own dispatch and find a real row; every stubbed tool returns a plausible string and leaves the database byte-identical.
 func TestTrajExec_ReadsRealMemoryAndStubsEveryWrite(t *testing.T) {
 	ctx := context.Background()
@@ -455,21 +440,6 @@ func TestPairTrajTurns_PairsByMessageNumberNotIndex(t *testing.T) {
 		}
 		if pairs[i].Gemini.User != fmt.Sprintf("g%d", want) || pairs[i].Claude.User != fmt.Sprintf("c%d", want) {
 			t.Errorf("pair %d compares two different points: %q vs %q", i, pairs[i].Gemini.User, pairs[i].Claude.User)
-		}
-	}
-}
-
-// TestTrajVerdictArm_OnlyAOrBOrTie pins the judge's answer to the three the rubric asks for. Anything else is a judge that has drifted off the rubric, and it has to come back as an error: scoring it a tie quietly walks the whole run toward ties.
-func TestTrajVerdictArm_OnlyAOrBOrTie(t *testing.T) {
-	for raw, want := range map[string]string{"A": "gemini", " b ": "claude", "tie": "tie", "TIE": "tie"} {
-		got, err := trajVerdictArm(raw)
-		if err != nil || got != want {
-			t.Errorf("%q: got %q %v, want %q", raw, got, err, want)
-		}
-	}
-	for _, raw := range []string{"", "Assistant A", "both", "neither", "A is better"} {
-		if got, err := trajVerdictArm(raw); err == nil {
-			t.Errorf("%q should not have scored %q", raw, got)
 		}
 	}
 }

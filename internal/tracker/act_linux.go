@@ -447,7 +447,8 @@ func (e *Relabelled) Error() string {
 // VerifyAgainst compares what an element is now with what observe_screen recorded for it. Input: the role and label read from the element just now, then the role and label the numbered list showed. Output: nil when they still describe the same element, a *Relabelled when only the name changed, or an error naming what else changed; an empty label in the list means the list held none, and a content role's label is not compared at all.
 // Exported so an end-to-end test can put a fake accessibility read through the same decision the bus-backed one makes, rather than a second copy of the rule that can drift from it.
 func VerifyAgainst(nowRole, nowLabel string, role, label string) error {
-	if nowRole == "" {
+	// AT-SPI reports a node whose widget was destroyed as role "invalid", which is the element gone, not a new role.
+	if nowRole == "" || nowRole == "invalid" {
 		return errors.New("the element has gone")
 	}
 	if nowRole != role {

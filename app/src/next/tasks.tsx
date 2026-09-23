@@ -1,6 +1,6 @@
 /** The Tasks screen, laid out as list and detail: everything owed in one column on the left, and on the right the picked task — its title, where it came from, the conversation about it, and the composer at the foot. Picking a row swaps the detail; there is no header picker and no split to drag, and the sidebar stays for chats. A task the user typed in can be ticked done and unticked open again; one Ora noticed in a meeting can also be dropped, which is the third state the store holds and the daemon takes on POST /tasks/{id}/done. */
 
-import { useRef } from "react";
+import { useRef, type RefObject } from "react";
 
 import { useAllTasksQuery, useBrainsQuery, useConversationQuery, useCreateConversationMutation, useMeetingsQuery } from "./api";
 import { taskContext, taskMeeting, tasksShown } from "./format";
@@ -14,22 +14,45 @@ import { TheirsSection } from "./task-theirs";
 
 export { TaskTick } from "./task-tick";
 
+/** The list column: everything the user owes, and under it what a meeting raised for somebody else. Input: which row is picked, the moment the dates are read against, and the list element itself, which the arrow keys move the focus inside. Output: the column. It reads the tasks and the search box from the store rather than taking them as props — useAllTasksQuery is the same cached read the screen above makes, so this costs no second fetch. */
+function TaskList({ selectedId, now, rows }: { selectedId?: string; now: Date; rows: RefObject<HTMLUListElement | null> }) {
+  const query = useAppSelector((s) => s.ui.query.tasks);
+  const { data: tasks = [], isError, isLoading } = useAllTasksQuery();
+  const shown = tasksShown(tasks, query);
+  // Mine is the default view; Theirs holds what a meeting raised for someone else or for nobody named, which is watched rather than assumed onto the user's own list. theirsTotal ignores the search box, since whether the section exists at all should not flicker with what is typed into it.
+  const mineTasks = shown.filter((t) => t.owner === "me");
+  const theirs = shown.filter((t) => t.owner !== "me");
+  const theirsTotal = tasks.filter((t) => t.owner !== "me").length;
+
+  if (tasks.length === 0) return <Nothing up={!isError} loading={isLoading} empty="Nothing to do." />;
+  return (
+    <>
+      {mineTasks.length === 0 ? (
+        <Nothing up={!isError} loading={isLoading} empty={query ? `Nothing matches “${query}”.` : "Nothing of yours open."} />
+      ) : (
+        <ul ref={rows} role="list" aria-label="Tasks" className="-mx-2 flex flex-col">
+          {mineTasks.map((t) => (
+            <TaskRow key={t.id} task={t} selected={t.id === selectedId} now={now} />
+          ))}
+        </ul>
+      )}
+      <TheirsSection tasks={theirs} total={theirsTotal} selectedId={selectedId} now={now} />
+    </>
+  );
+}
+
 /** The Tasks screen. Input: none. Output: the list on the left and the picked task's detail on the right, whose composer sends the task itself along with every question so the answer is about that task rather than about nothing. */
 export function TasksScreen() {
   const dispatch = useAppDispatch();
   const { taskId, query, taskChats } = useAppSelector((s) => s.ui);
   const run = useAppSelector((s) => s.progress.run);
-  const { data: tasks = [], isError, isLoading } = useAllTasksQuery();
+  const { data: tasks = [], isError } = useAllTasksQuery();
   const { data: brains = [] } = useBrainsQuery();
   const { data: meetings = [] } = useMeetingsQuery();
   const [createConversation] = useCreateConversationMutation();
   const rows = useRef<HTMLUListElement>(null);
 
   const shown = tasksShown(tasks, query.tasks);
-  // Mine is the default view; Theirs holds what a meeting raised for someone else or for nobody named, which is watched rather than assumed onto the user's own list. theirsTotal ignores the search box, since whether the section exists at all should not flicker with what is typed into it.
-  const mineTasks = shown.filter((t) => t.owner === "me");
-  const theirs = shown.filter((t) => t.owner !== "me");
-  const theirsTotal = tasks.filter((t) => t.owner !== "me").length;
   const selected = tasks.find((t) => t.id === taskId) ?? shown[0];
   useFollowSelection(rows, selected?.id);
   // A task the app opened owns its conversation; one Ora noticed has none until it is asked about, and the one opened for it then is remembered here for the rest of the session.
@@ -67,22 +90,7 @@ export function TasksScreen() {
           <Scroller bodyClassName={`${HEAD} ${TAIL} px-6`}>
             <div className="flex flex-col gap-3">
               <NewTask />
-              {tasks.length === 0 ? (
-                <Nothing up={!isError} loading={isLoading} empty="Nothing to do." />
-              ) : (
-                <>
-                  {mineTasks.length === 0 ? (
-                    <Nothing up={!isError} loading={isLoading} empty={query.tasks ? `Nothing matches “${query.tasks}”.` : "Nothing of yours open."} />
-                  ) : (
-                    <ul ref={rows} role="list" aria-label="Tasks" className="-mx-2 flex flex-col">
-                      {mineTasks.map((t) => (
-                        <TaskRow key={t.id} task={t} selected={t.id === selected?.id} now={now} />
-                      ))}
-                    </ul>
-                  )}
-                  <TheirsSection tasks={theirs} total={theirsTotal} selectedId={selected?.id} now={now} />
-                </>
-              )}
+              <TaskList selectedId={selected?.id} now={now} rows={rows} />
             </div>
           </Scroller>
         </div>

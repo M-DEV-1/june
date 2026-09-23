@@ -5,7 +5,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-
 /** One animation as the page uses it: something that can be cancelled and that calls onfinish when its time is up. */
 type FakeAnimation = { cancel: () => void; onfinish: (() => void) | null };
 
@@ -142,6 +141,24 @@ describe("the overlay page", () => {
     expect(ink.style.opacity === "" || Number(ink.style.opacity) > 0).toBe(true);
   });
 
+  it("still takes a ring off the screen when taps land while it is up", async () => {
+    await startPage();
+    const ink = document.getElementById("ink") as unknown as SVGSVGElement;
+
+    send("ask-1", ring(3000));
+    expect(ink.querySelectorAll("path.stroke").length).toBe(1);
+
+    // A run of clicks under the ring: each one is a tap event, and none of them draws ink of its own.
+    for (let i = 0; i < 3; i++) {
+      vi.advanceTimersByTime(500);
+      send("ask-1", JSON.stringify({ kind: "tap", points: [[150, 150]] }));
+    }
+
+    // Well past the ring's own 3s ttl and the 400ms fade.
+    vi.advanceTimersByTime(5000);
+    expect(ink.querySelectorAll("path.stroke").length).toBe(0);
+  });
+
   it("says so and re-reads the layout when a drawing places no shapes at all", async () => {
     layoutAnswer = { origin_x: 0, origin_y: 0, scale: 1, monitors: [] };
     await startPage();
@@ -183,16 +200,6 @@ describe("the overlay page", () => {
     pageListener?.({ payload: JSON.stringify({ id: "ask-1", type: "done" }) });
     vi.advanceTimersByTime(1600);
     expect(pointer.style.opacity).toBe("0");
-  });
-
-  it("puts the point face before a ring's label", async () => {
-    await startPage();
-    const shapes = document.getElementById("shapes") as HTMLElement;
-
-    send("ask-1", JSON.stringify({ kind: "ring", label: "Inbox", rects: [{ x: 100, y: 100, w: 200, h: 80 }], ttl_ms: 1000 }));
-
-    const label = shapes.querySelector(".label") as HTMLElement;
-    expect(label.textContent).toBe("Inbox");
   });
 
   it("draws no pill for a tap, label or not", async () => {

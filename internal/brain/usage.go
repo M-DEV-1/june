@@ -22,6 +22,8 @@ type UsageLimit = agent.UsageLimit
 type UsageSnapshot struct {
 	Limits []UsageLimit `json:"limits"`
 	At     time.Time    `json:"at"`
+	// SignedOut says the provider refused the credential when this reading was attempted, which is the one thing a usage fetch can tell about a login that a file on disk cannot: every one of these CLIs holds a refresh token, so an expired access token is ordinary and only the provider can say the login is actually dead. Note carries what to do about it.
+	SignedOut bool `json:"signed_out,omitempty"`
 	// Note is a sentence about the reading itself rather than the allowance — today only that a ceiling is a default rather than an observed one — which GET /brains carries into the row's limits_note. Empty for a reading that needs no caveat.
 	Note string `json:"note,omitempty"`
 }
@@ -47,14 +49,35 @@ func NewUsageStore(dataDir string) *UsageStore {
 	return s
 }
 
-// Record stores one provider's newest windows and writes the file. Input: the provider id ("codex", "claude") and its windows. Output: none. A call with no windows is ignored, because a response that carried no rate-limit headers says nothing about the allowance and would otherwise blank out a real bar.
+// Record stores one provider's newest windows and writes the file. Input: the provider id ("codex", "claude") and its windows. Output: none.
+// A reading that arrives is proof the credential works, so it clears any signed-out mark an earlier refusal left. A call with no windows does only that and keeps the last windows, because a response that carried no rate-limit headers says nothing about the allowance and would otherwise blank out a real bar.
 func (s *UsageStore) Record(provider string, limits []UsageLimit) {
-	if len(limits) == 0 {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.snaps[provider] = UsageSnapshot{Limits: limits, At: time.Now()}
+	snap := s.snaps[provider]
+	if len(limits) > 0 {
+		snap = UsageSnapshot{Limits: limits, At: time.Now()}
+	} else if snap.SignedOut {
+		snap.SignedOut, snap.Note = false, ""
+	} else {
+		return
+	}
+	s.snaps[provider] = snap
+	s.save()
+}
+
+// RecordSignedOut marks a provider's login as refused, keeping whatever windows were last read, and the time they were read, so the picker can still say what the allowance was when it last worked. Input: the provider id and the sentence saying what to do about it. Output: none.
+func (s *UsageStore) RecordSignedOut(provider, note string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap := s.snaps[provider]
+	snap.SignedOut, snap.Note = true, note
+	s.snaps[provider] = snap
+	s.save()
+}
+
+// save writes every reading to the file. The caller holds s.mu. A failure is logged, not returned: the readings in memory are still right, and the next write tries again.
+func (s *UsageStore) save() {
 	data, err := json.Marshal(s.snaps)
 	if err != nil {
 		slog.Warn("brain: could not encode the usage readings", "error", err)
@@ -84,10 +107,11 @@ func GeminiDaily(state *QuotaState, model string, opts QuotaOptions, now time.Ti
 	if !known {
 		note = "nobody has measured " + model + "'s free-tier ceiling, so this bar is drawn against the default of " + strconv.Itoa(limit.Limit) + " requests a day"
 	}
+	// The provider's day, not the machine's: the counter writes under QuotaDay and Google's free tier rolls over on Pacific midnight, so a local date reads a day nothing was ever written under. On IST that is every morning from midnight until about half past twelve, which drew an empty allowance over a spent one.
 	state.mu.Lock()
-	used := state.load()[now.Format("2006-01-02")][model]
+	used := state.load()[quotaDayAt(now)][model]
 	state.mu.Unlock()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, 1)
+	midnight := quotaResetMidnight(now)
 	return UsageSnapshot{
 		At:   now,
 		Note: note,
@@ -98,9 +122,4 @@ func GeminiDaily(state *QuotaState, model string, opts QuotaOptions, now time.Ti
 			Source:       "brain_quota.json " + model,
 		}},
 	}, true
-}
-
-// GrokNote is the sentence GET /brains and GET /usage carry as the Grok row's limits_note, so the picker's empty bar reads as a checked fact rather than a gap nobody looked at.
-func GrokNote() string {
-	return "grok exposes no usage data: its CLI, config, logs, and session files carry no quota, usage, or rate-limit reading, and it has no command that reports one"
 }

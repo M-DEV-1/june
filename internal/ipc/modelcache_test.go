@@ -16,14 +16,14 @@ func TestModelCache_AnswersWithoutWaitingForTheCommand(t *testing.T) {
 	}
 
 	// The first call must come back at once, before the read it started has finished.
-	if got := c.get(slow); len(got) != 0 {
+	if got, _ := c.get(slow); len(got) != 0 {
 		t.Errorf("first call = %v, want nothing yet rather than a wait for the command", got)
 	}
 	close(done)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got := c.get(slow); len(got) == 1 && got[0] == "gemini-3.8-flash-high" {
+		if got, _ := c.get(slow); len(got) == 1 && got[0] == "gemini-3.8-flash-high" {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -67,7 +67,7 @@ func TestModelCache_ServesWhatItHasWithoutReadingAgain(t *testing.T) {
 	reads := 0
 	read := func() []string { reads++; return []string{"other"} }
 
-	got := c.get(read)
+	got, _ := c.get(read)
 	if len(got) != 1 || got[0] != "sonnet" {
 		t.Errorf("served %v, want the cached roster", got)
 	}

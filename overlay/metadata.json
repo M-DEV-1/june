@@ -1,7 +1,0 @@
-{
-  "uuid": "ora@local",
-  "name": "Ora accessories",
-  "description": "Shows Ora's state as a word beside the clock, and draws rings and numbered marks where the Ora daemon asks.",
-  "shell-version": ["45", "46", "47"],
-  "url": "https://github.com/M-DEV-1/ora"
-}

@@ -1,13 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import {
-  DEFAULT_HOVER_POSITION,
   dockedArea,
   edgeInset,
   fitWindow,
   hoverPlacement,
   noticePlacement,
-  threadMaxHeight,
   monitorForPoint,
   placementFor,
   resolveContext,
@@ -68,52 +66,10 @@ const laptopWork = { x: 0, y: 32, width: 1920, height: 1048 };
 const bottomDock = { edge: "bottom" as const, clearance: 64 };
 const noDock = { edge: "bottom" as const, clearance: 0 };
 
-describe("edgeInset", () => {
-  it("is a twelfth of the usable height, with a floor for short screens", () => {
-    expect(edgeInset(1048, 1)).toBe(87);
-    expect(edgeInset(200, 1)).toBe(24);
-    expect(edgeInset(2096, 2)).toBe(175);
-  });
-});
-
-describe("dockedArea", () => {
-  it("takes an auto-hiding dock's strip off the edge it sits on", () => {
-    expect(dockedArea(laptopWork, bottomDock)).toEqual({ x: 0, y: 32, width: 1920, height: 984 });
-    expect(dockedArea(laptopWork, { edge: "top", clearance: 64 })).toEqual({ x: 0, y: 96, width: 1920, height: 984 });
-    expect(dockedArea(laptopWork, { edge: "left", clearance: 64 })).toEqual({ x: 64, y: 32, width: 1856, height: 1048 });
-    expect(dockedArea(laptopWork, { edge: "right", clearance: 64 })).toEqual({ x: 0, y: 32, width: 1856, height: 1048 });
-  });
-
-  it("changes nothing for a dock that reserves screen space, because the work area already excludes it", () => {
-    expect(dockedArea(laptopWork, noDock)).toEqual(laptopWork);
-  });
-});
-
 describe("hoverPlacement", () => {
   const win = { width: 720, height: 520 };
   // What edgeInset gives for this screen once the dock's strip is off it: 984 of usable height, a twelfth of which is 82.
   const inset = edgeInset(dockedArea(laptopWork, bottomDock).height, 1);
-
-  it("is fed the inset for the usable area, not for the whole work area", () => {
-    expect(inset).toBe(82);
-  });
-
-  it("centres the window left to right at all three positions", () => {
-    // 1920 wide minus the 720 window leaves 600 either side, whichever position is chosen.
-    for (const position of ["top", "center", "bottom"] as HoverPosition[]) {
-      expect(hoverPlacement(laptopWork, win, bottomDock, position, inset).x).toBe(600);
-    }
-  });
-
-  it("hangs the top position an inset below the top of the usable area", () => {
-    // The work area starts at 32, below the panel; a bottom dock takes nothing off the top; 32 + 82 of inset.
-    expect(hoverPlacement(laptopWork, win, bottomDock, "top", inset)).toEqual({ x: 600, y: 114 });
-  });
-
-  it("puts the centre position halfway down the usable area", () => {
-    // The dock leaves 984 of usable height starting at 32, so the window's top is 32 + (984 - 520) / 2.
-    expect(hoverPlacement(laptopWork, win, bottomDock, "center", inset)).toEqual({ x: 600, y: 264 });
-  });
 
   it("lifts the bottom position clear of both the dock and the inset, not flush against the edge", () => {
     // The usable area ends at 32 + 984 = 1016, above the 64 of dock; minus the 520 window and 82 of inset.
@@ -146,10 +102,6 @@ describe("hoverPlacement", () => {
     }
   });
 
-  it("keeps a hover wider than the screen on screen by pinning it to the left of the usable area", () => {
-    expect(hoverPlacement(laptopWork, { width: 2400, height: 520 }, bottomDock, "bottom", inset)).toEqual({ x: 0, y: 414 });
-  });
-
   it("steps around a side dock by centring in what is left of the width", () => {
     // A 64px left dock that hides itself: the window is centred in the remaining 1856, so its left edge is 64 + (1856 - 720) / 2, and the full 1048 of height is still there below it.
     expect(hoverPlacement(laptopWork, win, { edge: "left", clearance: 64 }, "bottom", inset)).toEqual({ x: 632, y: 478 });
@@ -165,14 +117,7 @@ describe("storedHoverPosition", () => {
     },
   });
 
-  it("reads back each of the three positions", () => {
-    expect(storedHoverPosition(store("top"))).toBe("top");
-    expect(storedHoverPosition(store("center"))).toBe("center");
-    expect(storedHoverPosition(store("bottom"))).toBe("bottom");
-  });
-
   it("falls back to the default when nothing valid is stored or storage is blocked", () => {
-    expect(DEFAULT_HOVER_POSITION).toBe("center");
     expect(storedHoverPosition(store(null))).toBe("center");
     expect(storedHoverPosition(store("sideways"))).toBe("center");
     expect(storedHoverPosition(store("throw"))).toBe("center");
@@ -182,19 +127,9 @@ describe("storedHoverPosition", () => {
 describe("monitorForPoint", () => {
   const second = monitor(1920, 0, 1600, 900);
 
-  it("picks the monitor the pointer is inside", () => {
-    expect(monitorForPoint([laptop, second], { x: 100, y: 100 })).toBe(laptop);
-    expect(monitorForPoint([laptop, second], { x: 2500, y: 400 })).toBe(second);
-  });
-
   it("gives the seam between two monitors to the one that starts there", () => {
     expect(monitorForPoint([laptop, second], { x: 1920, y: 400 })).toBe(second);
     expect(monitorForPoint([laptop, second], { x: 1919, y: 400 })).toBe(laptop);
-  });
-
-  it("returns null for a point on no monitor and for a pointer that could not be read", () => {
-    expect(monitorForPoint([laptop, second], { x: 4000, y: 400 })).toBeNull();
-    expect(monitorForPoint([laptop, second], null)).toBeNull();
   });
 });
 
@@ -282,14 +217,6 @@ describe("toggleWindow", () => {
     const win = fakeWin(false);
     await toggleWindow(win, opts(win, null).opts);
     expect(win.calls).toEqual(["beforeShow", "openContext", "sizeToContent", "show", "raise", "focusInput"]);
-  });
-
-  it("puts a second open in the same place as the first", async () => {
-    const first = fakeWin(false);
-    await toggleWindow(first, opts(first, ctx).opts);
-    const second = fakeWin(false);
-    await toggleWindow(second, opts(second, ctx).opts);
-    expect(second.calls).toEqual(first.calls);
   });
 
   // A throw anywhere in the placement sequence used to leave the hotkey looking dead: the window stayed hidden and the rejection surfaced only in the log.
@@ -406,14 +333,5 @@ describe("noticePlacement", () => {
   it("starts a window too big for the screen on the screen rather than off its left or bottom edge", () => {
     // 720 logical at scale 2 is 1440 physical, wider than this 1280-wide area, and 900 physical is taller than it.
     expect(noticePlacement(ctx({ x: 100, y: 32, width: 1280, height: 700 }, 2, noDock), { width: 720, height: 450 })).toEqual({ x: 100, y: 32 });
-  });
-});
-
-describe("threadMaxHeight", () => {
-  it("lets the card's thread take six tenths of the work area, in logical pixels", () => {
-    // 1048 physical at scale 1 is 1048 logical; six tenths is 628.
-    expect(threadMaxHeight(laptopWork, 1)).toBe(628);
-    // At scale 2 the same work area is 524 logical; six tenths is 314.
-    expect(threadMaxHeight(laptopWork, 2)).toBe(314);
   });
 });

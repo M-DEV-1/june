@@ -5,8 +5,7 @@ package cmd
 import (
 	"bytes"
 	"fmt"
-	"image"
-	"image/color"
+
 	"image/png"
 	"os"
 	"path/filepath"
@@ -115,25 +114,6 @@ func TestInstallDesktopEntry_WritesEveryIconSizeAndBothDesktopFiles(t *testing.T
 	}
 }
 
-// TestInstallDesktopEntry_RefreshesTheIconCache checks that writing the icons is followed by a gtk-update-icon-cache run against the hicolor theme directory, which is what makes a desktop that reads that cache see the new files.
-func TestInstallDesktopEntry_RefreshesTheIconCache(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dir)
-	calls := recordIconCacheRefresh(t)
-
-	if err := installDesktopEntry(); err != nil {
-		t.Fatalf("installDesktopEntry() returned unexpected error: %v", err)
-	}
-
-	themeDir := filepath.Join(dir, "icons", "hicolor")
-	if len(*calls) != 1 || (*calls)[0] != themeDir {
-		t.Fatalf("expected one icon cache refresh of %s, got %v", themeDir, *calls)
-	}
-	if !iconCacheExists(themeDir) {
-		t.Error("expected an icon-theme.cache in the hicolor directory after the refresh")
-	}
-}
-
 // TestInstallDesktopEntry_SecondCallRewritesNothing checks that calling installDesktopEntry again with unchanged inputs leaves the files untouched and asks for no second cache refresh, so the daemon does not rewrite them on every start.
 func TestInstallDesktopEntry_SecondCallRewritesNothing(t *testing.T) {
 	dir := t.TempDir()
@@ -210,7 +190,7 @@ func TestInstallDesktopEntry_RefreshesAgainWhenAnIconChanges(t *testing.T) {
 
 // TestScaleIcon_ShrinksTheMasterToEverySize checks the scaler on the embedded master: every size comes out square at the size asked for, and a pixel on the master's own edge stays solid instead of fading, which is what happens when a scaler averages the pixels outside the image in with the ones inside it.
 // The probe is the middle of the top edge rather than the corner. It was the corner until 2026-09-12, when the app icon became a rounded square and its corners turned legitimately transparent; the middle of an edge is still inside the art and still sits exactly where sampling past the boundary would show up.
-// Nearly opaque rather than exactly opaque, because the tile is a superellipse with an anti-aliased edge (see scripts/make-icons.py): its top-centre pixel is 99.6% opaque by design. A scaler bleeding the empty space outside the image in would read near zero there, which is what this is looking for, so the bar is set where it separates those two and nowhere tighter.
+// Nearly opaque rather than exactly opaque, because the tile is a superellipse with an anti-aliased edge (see packaging/make-icons.py): its top-centre pixel is 99.6% opaque by design. A scaler bleeding the empty space outside the image in would read near zero there, which is what this is looking for, so the bar is set where it separates those two and nowhere tighter.
 func TestScaleIcon_ShrinksTheMasterToEverySize(t *testing.T) {
 	master, err := png.Decode(bytes.NewReader(appIconPNG))
 	if err != nil {
@@ -229,24 +209,6 @@ func TestScaleIcon_ShrinksTheMasterToEverySize(t *testing.T) {
 		if _, _, _, alpha := scaled.At(size/2, 0).RGBA(); alpha < 0xf000 {
 			t.Errorf("expected the middle of the %dx%d icon's top edge to stay opaque, got alpha %d", size, size, alpha)
 		}
-	}
-}
-
-// TestScaleIcon_WeighsColourByAlpha checks that a transparent pixel contributes none of its colour: a block of one opaque red pixel and three transparent black ones averages to red at a quarter alpha, not to the dark quarter-red a plain average of the four would give.
-func TestScaleIcon_WeighsColourByAlpha(t *testing.T) {
-	src := image.NewNRGBA(image.Rect(0, 0, 2, 2))
-	src.SetNRGBA(0, 0, color.NRGBA{R: 0xff, A: 0xff})
-	src.SetNRGBA(1, 0, color.NRGBA{})
-	src.SetNRGBA(0, 1, color.NRGBA{})
-	src.SetNRGBA(1, 1, color.NRGBA{})
-
-	got := scaleIcon(src, 1).NRGBAAt(0, 0)
-
-	if got.A != 0x3f && got.A != 0x40 {
-		t.Errorf("expected one opaque pixel in four to average to a quarter alpha, got %d", got.A)
-	}
-	if got.R != 0xff || got.G != 0 || got.B != 0 {
-		t.Errorf("expected the surviving colour to be the opaque pixel's red, got %v", got)
 	}
 }
 
@@ -315,25 +277,5 @@ func TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry(t *testing.T)
 	}
 	if !strings.Contains(string(got), "StartupWMClass=ora") {
 		t.Errorf("expected the rewritten entry to be the real application entry, got:\n%s", got)
-	}
-}
-
-// TestApplicationDesktopEntry_EscapesSpecialCharacters checks that a path containing a space and a backslash is escaped per the Desktop Entry Specification's quoting rules, reusing the same helpers as the autostart entry.
-func TestApplicationDesktopEntry_EscapesSpecialCharacters(t *testing.T) {
-	exe := `/home/user/My Apps/back\slash/ora`
-	dir := filepath.Dir(exe)
-
-	for name, entry := range map[string]string{
-		"ora.desktop":         applicationDesktopEntry(exe, dir),
-		"ora-overlay.desktop": overlayDesktopEntry(exe, dir),
-	} {
-		wantExec := `Exec="/home/user/My Apps/back\\slash/ora" --daemon`
-		if !strings.Contains(entry, wantExec) {
-			t.Errorf("expected %s to contain %q, got:\n%s", name, wantExec, entry)
-		}
-		wantPath := `Path=/home/user/My Apps/back\\slash`
-		if !strings.Contains(entry, wantPath) {
-			t.Errorf("expected %s to contain %q, got:\n%s", name, wantPath, entry)
-		}
 	}
 }

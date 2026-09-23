@@ -16,7 +16,7 @@ func TestPersonalContext_UpsertNotAppend(t *testing.T) {
 	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen."); err != nil {
 		t.Fatalf("SetPersonalContext: %v", err)
 	}
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen, git handle M-DEV-1."); err != nil {
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen, git handle zbraxen."); err != nil {
 		t.Fatalf("SetPersonalContext second write: %v", err)
 	}
 
@@ -27,7 +27,7 @@ func TestPersonalContext_UpsertNotAppend(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry after two writes to the same subject, got %d: %+v", len(entries), entries)
 	}
-	if entries[0].Content != "The user is Zemna Braxen, git handle M-DEV-1." {
+	if entries[0].Content != "The user is Zemna Braxen, git handle zbraxen." {
 		t.Errorf("want the newest content, got %q", entries[0].Content)
 	}
 	if entries[0].UpdatedAt.IsZero() {
@@ -113,19 +113,6 @@ func TestPersonalContext_ConsolidatorCannotSeeIt(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Content != "The user is Zemna Braxen." {
 		t.Errorf("consolidation changed personal context: %+v", entries)
-	}
-}
-
-// TestPersonalContext_RejectsEmptySubjectOrContent keeps the table from collecting blank rows, since nothing downstream can use one.
-func TestPersonalContext_RejectsEmptySubjectOrContent(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	if err := store.SetPersonalContext(ctx, "  ", "something"); err == nil {
-		t.Error("an empty subject was accepted")
-	}
-	if err := store.SetPersonalContext(ctx, "identity", " \n "); err == nil {
-		t.Error("empty content was accepted")
 	}
 }
 

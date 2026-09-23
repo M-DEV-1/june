@@ -19,126 +19,42 @@ import {
 } from "./api";
 import { isJobLive, jobGoal } from "./format";
 import { Reading } from "./parts";
-import { progress, ui, useAppDispatch, useAppSelector } from "./store";
+import { progress, ui, useAppDispatch, useAppSelector, type JobRun } from "./store";
 
-/** The composer at the foot of a thread, on Chats and on Tasks alike: a card that floats over the page rather than a bar ruled off from it, and one that follows the reading column above it rather than the width of the window. It is a text area, not a single line, so Enter sends and Shift+Enter starts a new line, and it grows with what is typed up to a third of the window before it scrolls on its own.
- *
- * Input: the conversation the question belongs to, which is undefined when nothing is open; the key what is half-typed is kept under, which is the conversation when there is one and the task when there is not yet; the brain that conversation names; the placeholder; the passage to send alongside the question, which is how the Tasks page says which task is being talked about; and the function that opens a conversation on the first question about something that has none, which the Tasks page hands over and Chats does not. Output: the composer. What is typed lives in the store per key, so switching away and back does not lose it.
- */
-export function Composer({
+/** Everything that happens when the box is sent, which is three different things wearing one button: answering the question a stuck job is waiting on, starting a "do:" job, and asking an ordinary question. Input: the conversation the draft belongs to, the conversation it would be sent to, the brain and context to send alongside it, the way to open a conversation for a task that has none, whether this composer may let the daemon open one of its own, the draft itself, and the job in flight for this conversation. Output: the send, and whether there is anywhere to send to at all. */
+function useSend({
+  key,
   conversationId,
-  draftKey,
   brain,
-  placeholder = "Ask Ora, or give it something to do",
   context,
   start,
-  wide = false,
-  railed = false,
-  fresh = false,
+  fresh,
+  draft,
+  job,
 }: {
+  key?: string;
   conversationId?: string;
-  draftKey?: string;
   brain?: string;
-  placeholder?: string;
   context?: string;
   start?: () => Promise<string | undefined>;
-  wide?: boolean;
-  /** Whether the thread above this composer has a rail beside it. When it has, the composer reserves the same width so it sits under the words rather than under the middle of the pane; when it has not, it is the same single centred column the thread is. */
-  railed?: boolean;
-  /** Whether this composer may open a conversation of its own on the first message it sends, naming none to the daemon and letting it open one — a fresh chat draft, which Chats opens on "New chat" instead of creating the conversation up front. Tasks never sets this: its own `start` is what opens a conversation there, named after the task. */
-  fresh?: boolean;
+  fresh: boolean;
+  draft: string;
+  job?: JobRun;
 }) {
   const dispatch = useAppDispatch();
-  const key = draftKey ?? conversationId;
-  const draft = useAppSelector((s) => (key ? (s.ui.ask[key] ?? "") : ""));
-  const mineJob = useAppSelector((s) => (key ? s.progress.jobs[key] : undefined));
-  const dictation = useAppSelector((s) => s.progress.dictation);
-  const running =
-    useAppSelector((s) => Boolean(s.progress.run)) || Boolean(mineJob && isJobLive(mineJob.state) && !mineJob.question);
   const [ask] = useAskMutation();
   const [startJob] = useStartJobMutation();
   const [answerJob] = useAnswerJobMutation();
-  const [startDictation] = useStartDictationMutation();
-  const [stopDictation] = useStopDictationMutation();
   const ready = Boolean(conversationId || start || fresh);
-  const box = useRef<HTMLTextAreaElement>(null);
-
-  // The box is as tall as what is in it, up to a third of the window, after which it scrolls. WebKitGTK has no field-sizing, so the height is measured rather than declared: reset to nothing first, or a line that was deleted would leave the box tall.
-  useEffect(() => {
-    const el = box.current;
-    if (!el) return;
-    el.style.height = "0px";
-    el.style.height = `${Math.min(el.scrollHeight, Math.round(window.innerHeight / 3))}px`;
-  }, [draft]);
-
-  // The id of the recording open on the daemon, undefined while nothing is being dictated. A daemon error on start or stop is said on the composer's own placeholder for a few seconds rather than as a toast, since the box is exactly where the words were meant to land.
-  const [dictating, setDictating] = useState<string | undefined>(undefined);
-  const [dictateNotice, setDictateNotice] = useState<string | undefined>(undefined);
-  const noticeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(noticeTimer.current), []);
-  const flashNotice = (text: string) => {
-    clearTimeout(noticeTimer.current);
-    setDictateNotice(text);
-    noticeTimer.current = setTimeout(() => setDictateNotice(undefined), 4000);
-  };
-
-  /** Puts a finished dictation's words into the box. Input: the transcript, which is "" when the daemon heard nothing. Output: nothing; what is already half-typed keeps its place and the words are added after it. */
-  const takeWords = (text: string) => {
-    if (text && key) dispatch(ui.asked({ conversationId: key, text: draft ? `${draft} ${text}` : text }));
-  };
-
-  const toggleDictate = async () => {
-    if (dictating) {
-      const id = dictating;
-      setDictating(undefined);
-      try {
-        takeWords((await stopDictation(id).unwrap()).text);
-      } catch {
-        // A daemon that had already closed the recording itself is not a failure and never reaches here: stopDictation answers that 404 with no words rather than an error, since the words are already arriving on the stream.
-        flashNotice("Could not finish dictation");
-      }
-      return;
-    }
-    try {
-      const { id } = await startDictation().unwrap();
-      setDictating(id);
-    } catch {
-      flashNotice("Could not start dictation");
-    }
-  };
-
-  // The daemon closes a recording itself once it has heard enough silence, or at the two-minute cap, and broadcasts the transcript as a "dictation" event; the stop route then has nothing left to answer with. Whichever of the two arrives first is the one applied: clearing `dictating` here is what keeps the stop reply from adding the same words a second time, since that path only runs while a recording is still open. The hover window matches this, at finishDictation in src/main.ts.
-  useEffect(() => {
-    if (!dictation || dictation.id !== dictating) return;
-    setDictating(undefined);
-    takeWords(dictation.text);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dictation, dictating]);
-
-  // Escape stops a dictation from anywhere, not only from inside the box, because the box does not have to be focused for one to be running. Read off a ref rather than closed over: the listener is only rebuilt when `dictating` changes, so a conversation switched to in between would otherwise have Escape write the words under the conversation that was open when the dictation started.
-  const latestToggle = useRef(toggleDictate);
-  latestToggle.current = toggleDictate;
-  useEffect(() => {
-    if (!dictating) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        void latestToggle.current();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [dictating]);
-
   const send = async () => {
     const question = draft.trim();
     if (!question || !key || !ready) return;
 
     // A stuck job's one question is answered by whatever the composer sends next, not asked as a fresh question of the daemon's own model.
-    if (mineJob?.id && isJobLive(mineJob.state) && mineJob.question) {
+    if (job?.id && isJobLive(job.state) && job.question) {
       dispatch(ui.asked({ conversationId: key, text: "" }));
       try {
-        await answerJob({ id: mineJob.id, text: question }).unwrap();
+        await answerJob({ id: job.id, text: question }).unwrap();
       } catch {
         // What was typed exists nowhere else once the box has been cleared, so a write that did not go through gives it back rather than making the user write it again.
         dispatch(ui.asked({ conversationId: key, text: question }));
@@ -195,6 +111,124 @@ export function Composer({
       dispatch(ui.noticed({ text: "Could not send that question", kind: "error" }));
     }
   };
+  return { send, ready };
+}
+
+/** Everything the microphone does for the composer, kept apart from sending: opening a recording on the daemon, closing it, and putting what was heard into the box. Input: the conversation the words belong to and what is already typed there. Output: whether a recording is open now, the line to say on the placeholder when one could not be started or finished, and the toggle the mic button and Escape both call. */
+function useDictation(key: string | undefined, draft: string) {
+  const dispatch = useAppDispatch();
+  const dictation = useAppSelector((s) => s.progress.dictation);
+  const [startDictation] = useStartDictationMutation();
+  const [stopDictation] = useStopDictationMutation();
+  // The id of the recording open on the daemon, undefined while nothing is being dictated. A daemon error on start or stop is said on the composer's own placeholder for a few seconds rather than as a toast, since the box is exactly where the words were meant to land.
+  const [dictating, setDictating] = useState<string | undefined>(undefined);
+  const [dictateNotice, setDictateNotice] = useState<string | undefined>(undefined);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(noticeTimer.current), []);
+  const flashNotice = (text: string) => {
+    clearTimeout(noticeTimer.current);
+    setDictateNotice(text);
+    noticeTimer.current = setTimeout(() => setDictateNotice(undefined), 4000);
+  };
+
+  /** Puts a finished dictation's words into the box. Input: the transcript, which is "" when the daemon heard nothing. Output: nothing; what is already half-typed keeps its place and the words are added after it. */
+  const takeWords = (text: string) => {
+    if (text && key) dispatch(ui.asked({ conversationId: key, text: draft ? `${draft} ${text}` : text }));
+  };
+
+  const toggleDictate = async () => {
+    if (dictating) {
+      const id = dictating;
+      setDictating(undefined);
+      try {
+        takeWords((await stopDictation(id).unwrap()).text);
+      } catch {
+        // A daemon that had already closed the recording itself is not a failure and never reaches here: stopDictation answers that 404 with no words rather than an error, since the words are already arriving on the stream.
+        flashNotice("Could not finish dictation");
+      }
+      return;
+    }
+    try {
+      const { id } = await startDictation().unwrap();
+      setDictating(id);
+    } catch {
+      flashNotice("Could not start dictation");
+    }
+  };
+
+  // The daemon closes a recording itself once it has heard enough silence, or at the two-minute cap, and broadcasts the transcript as a "dictation" event; the stop route then has nothing left to answer with. Whichever of the two arrives first is the one applied: clearing `dictating` here is what keeps the stop reply from adding the same words a second time, since that path only runs while a recording is still open. The hover window matches this, at finishDictation in src/main.ts.
+  useEffect(() => {
+    if (!dictation || dictation.id !== dictating) return;
+    setDictating(undefined);
+    takeWords(dictation.text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dictation, dictating]);
+
+  // Escape stops a dictation from anywhere, not only from inside the box, because the box does not have to be focused for one to be running. Read off a ref rather than closed over: the listener is only rebuilt when `dictating` changes, so a conversation switched to in between would otherwise have Escape write the words under the conversation that was open when the dictation started.
+  const latestToggle = useRef(toggleDictate);
+  // Written in an effect rather than during render: a render React throws away must not leave its version of the handler behind, and every keypress happens after a commit, so the ref is never read before this has run.
+  useEffect(() => {
+    latestToggle.current = toggleDictate;
+  });
+  useEffect(() => {
+    if (!dictating) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        void latestToggle.current();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [dictating]);
+
+  return { dictating: Boolean(dictating), notice: dictateNotice, toggle: toggleDictate };
+}
+
+/** The composer at the foot of a thread, on Chats and on Tasks alike: a card that floats over the page rather than a bar ruled off from it, and one that follows the reading column above it rather than the width of the window. It is a text area, not a single line, so Enter sends and Shift+Enter starts a new line, and it grows with what is typed up to a third of the window before it scrolls on its own.
+ *
+ * Input: the conversation the question belongs to, which is undefined when nothing is open; the key what is half-typed is kept under, which is the conversation when there is one and the task when there is not yet; the brain that conversation names; the placeholder; the passage to send alongside the question, which is how the Tasks page says which task is being talked about; and the function that opens a conversation on the first question about something that has none, which the Tasks page hands over and Chats does not. Output: the composer. What is typed lives in the store per key, so switching away and back does not lose it.
+ */
+export function Composer({
+  conversationId,
+  draftKey,
+  brain,
+  placeholder = "Ask Ora, or give it something to do",
+  context,
+  start,
+  wide = false,
+  railed = false,
+  fresh = false,
+}: {
+  conversationId?: string;
+  draftKey?: string;
+  brain?: string;
+  placeholder?: string;
+  context?: string;
+  start?: () => Promise<string | undefined>;
+  wide?: boolean;
+  /** Whether the thread above this composer has a rail beside it. When it has, the composer reserves the same width so it sits under the words rather than under the middle of the pane; when it has not, it is the same single centred column the thread is. */
+  railed?: boolean;
+  /** Whether this composer may open a conversation of its own on the first message it sends, naming none to the daemon and letting it open one — a fresh chat draft, which Chats opens on "New chat" instead of creating the conversation up front. Tasks never sets this: its own `start` is what opens a conversation there, named after the task. */
+  fresh?: boolean;
+}) {
+  const dispatch = useAppDispatch();
+  const key = draftKey ?? conversationId;
+  const draft = useAppSelector((s) => (key ? (s.ui.ask[key] ?? "") : ""));
+  const mineJob = useAppSelector((s) => (key ? s.progress.jobs[key] : undefined));
+  const running =
+    useAppSelector((s) => Boolean(s.progress.run)) || Boolean(mineJob && isJobLive(mineJob.state) && !mineJob.question);
+  const { send, ready } = useSend({ key, conversationId, brain, context, start, fresh, draft, job: mineJob });
+  const box = useRef<HTMLTextAreaElement>(null);
+  const { dictating, notice: dictateNotice, toggle: toggleDictate } = useDictation(key, draft);
+
+  // The box is as tall as what is in it, up to a third of the window, after which it scrolls. WebKitGTK has no field-sizing, so the height is measured rather than declared: reset to nothing first, or a line that was deleted would leave the box tall.
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.min(el.scrollHeight, Math.round(window.innerHeight / 3))}px`;
+  }, [draft]);
 
   return (
     <div className="shrink-0 pb-6">

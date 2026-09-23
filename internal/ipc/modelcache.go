@@ -20,16 +20,16 @@ type modelCache struct {
 	reading bool
 }
 
-// get returns the cached roster, starting a background refresh when it is stale or has never been read. Input: how to read the roster, which runs on its own goroutine and must not be called by the caller. Output: the newest roster already in hand, which is empty only until the first read finishes.
+// get returns the cached roster, starting a background refresh when it is stale or has never been read. Input: how to read the roster, which runs on its own goroutine and must not be called by the caller. Output: the newest roster already in hand, and whether any read has ever finished. The second value is what separates "this command lists nothing" from "nobody has asked it yet": an empty roster means the first only once a read has come back.
 // It never blocks: a request that arrives before the first read gets an empty list and the one a second later gets the real thing, which is the right trade when the alternative is holding the settings screen for three and a half seconds.
-func (c *modelCache) get(read func() []string) []string {
+func (c *modelCache) get(read func() []string) (models []string, everRead bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.reading && time.Since(c.readAt) > modelCacheTTL {
 		c.reading = true
 		go c.refresh(read)
 	}
-	return append([]string(nil), c.models...)
+	return append([]string(nil), c.models...), !c.readAt.IsZero()
 }
 
 // refresh reads the roster and stores it. A read that comes back empty is stored too: a CLI the user has signed out of has no models, and holding the old list would report models it can no longer call.

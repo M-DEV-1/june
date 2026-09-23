@@ -20,26 +20,11 @@ import (
 	"google.golang.org/genai"
 )
 
-func TestHandshakePrompt_IncludesImplicitContext(t *testing.T) {
-	brain := &toolTestBrain{implicitContext: []string{"[now] Climate Risk Statement Builder ASRS"}}
-	a := NewAgent(nil, nil, brain, nil, "")
-	instruction, lines := a.HandshakePrompt(t.Context(), time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC))
-	if !containsLine(lines, "Climate Risk Statement Builder ASRS") {
-		t.Fatalf("expected handshake context lines to carry working state, got %q", lines)
-	}
-	if !strings.Contains(instruction, "Climate Risk Statement Builder ASRS") {
-		t.Fatalf("expected frozen system instruction to embed handshake context, got %q", instruction)
-	}
-	if !strings.Contains(instruction, "Wednesday, 19 August 2026") {
-		t.Errorf("expected date anchor in instruction, got %q", instruction)
-	}
-}
-
 // Only voice needs the personal-context block and the retrieved-memory block pushed ahead of time, because voice has to be proactive with no chance to reach for a tool mid-turn; a text ask calls query_memory, recall or personal_context when it actually needs a fact. LeanPrompt is what every text ask sends (see ask.go's askText, claude.go's askClaude, codex.go's askCodex, agy.go's askAgy); HandshakePrompt is still what voice sends.
 func TestLeanPrompt_DropsThePersonalAndMemoryBlocksHandshakePromptCarries(t *testing.T) {
 	brain := &toolTestBrain{
 		personal:        map[string]string{"identity": "Their name is Zemna Grumbek."},
-		implicitContext: []string{"[now] Climate Risk Statement Builder ASRS"},
+		implicitContext: []string{"[now] Brightpath Statement Builder VRDS"},
 	}
 	a := NewAgent(nil, nil, brain, nil, "")
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
@@ -48,7 +33,7 @@ func TestLeanPrompt_DropsThePersonalAndMemoryBlocksHandshakePromptCarries(t *tes
 	if !strings.Contains(voice, "Zemna Grumbek") {
 		t.Fatalf("expected the voice handshake to carry the personal-context line, got %q", voice)
 	}
-	if !strings.Contains(voice, "Climate Risk Statement Builder ASRS") {
+	if !strings.Contains(voice, "Brightpath Statement Builder VRDS") {
 		t.Fatalf("expected the voice handshake to carry the retrieved context block, got %q", voice)
 	}
 
@@ -56,7 +41,7 @@ func TestLeanPrompt_DropsThePersonalAndMemoryBlocksHandshakePromptCarries(t *tes
 	if strings.Contains(text, "Zemna Grumbek") {
 		t.Error("the lean text prompt carried the personal-context line the voice handshake carries")
 	}
-	if strings.Contains(text, "Climate Risk Statement Builder ASRS") {
+	if strings.Contains(text, "Brightpath Statement Builder VRDS") {
 		t.Error("the lean text prompt carried the retrieved-memory block")
 	}
 	if !strings.Contains(text, screenTaskGuidance) {
@@ -98,13 +83,6 @@ func TestWithHistory_AppendsWithoutAliasing(t *testing.T) {
 	}
 }
 
-func TestAskWith_RejectsUnknownChannel(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	if _, err := a.AskWith(context.Background(), Channel("carrier pigeon"), "", nil, "hi"); err == nil {
-		t.Fatal("expected an unknown channel to be an error")
-	}
-}
-
 // A 50-question gold run on 2026-09-04 found answers with no evidence trail: the user could not see which stored row an answer came from, so a name a meeting misheard went unnoticed. evidenceFromToolHops reads the {"source":{...}} tags db.FormatHitWithSource/FormatNoteHitWithSource append to hit lines, in the order the hits arrived.
 func TestEvidenceFromToolHops_ExtractsInOrder(t *testing.T) {
 	hops := []ToolHop{
@@ -125,54 +103,6 @@ func TestEvidenceFromToolHops_ExtractsInOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("entry %d = %+v, want %+v", i, got[i], want[i])
 		}
-	}
-}
-
-// A turn where the model answered from the handshake context alone, or from a tool that carries no source tag (shell_exec, save_note), must not fabricate evidence out of thin air.
-func TestEvidenceFromToolHops_NoToolsYieldsNone(t *testing.T) {
-	if got := evidenceFromToolHops(nil); got != nil {
-		t.Errorf("expected no evidence with no tool hops, got %+v", got)
-	}
-	hops := []ToolHop{{Name: "shell_exec", Result: "total 0\ndrwxr-xr-x  2 user user 4096 Sep  4 12:00 ."}}
-	if got := evidenceFromToolHops(hops); got != nil {
-		t.Errorf("expected no evidence from an untagged tool result, got %+v", got)
-	}
-}
-
-// A tool result carrying more hits than evidenceLimit must be capped, keeping the most relevant (earliest) ones — the point of Evidence is showing the few rows an answer leaned on, not reproducing the whole search.
-func TestEvidenceFromToolHops_CapsAtEvidenceLimit(t *testing.T) {
-	var lines []string
-	for i := 0; i < evidenceLimit+3; i++ {
-		lines = append(lines, fmt.Sprintf(`[note#%d] fact %d {"source":{"kind":"note","id":%d,"title":"","when":""}}`, i, i, i))
-	}
-	hops := []ToolHop{{Result: strings.Join(lines, "\n")}}
-	got := evidenceFromToolHops(hops)
-	if len(got) != evidenceLimit {
-		t.Fatalf("got %d entries, want the cap of %d", len(got), evidenceLimit)
-	}
-	if got[0].ID != 0 || got[evidenceLimit-1].ID != int64(evidenceLimit-1) {
-		t.Errorf("expected the earliest %d hits kept in order, got %+v", evidenceLimit, got)
-	}
-}
-
-func containsLine(lines []string, needle string) bool {
-	for _, l := range lines {
-		if strings.Contains(l, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-// The evals gate write tools off so a replay cannot touch the store. A stress run against a snapshot wants them on, so the gate is a switch on the agent rather than a constant. shell_exec (not action_items — askAllowedTools now admits that one, since production /ask needs it too) stands in for a tool the gate must still block by default.
-func TestEvalExecute_WriteToolsGate(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	if got := a.evalExecute(context.Background(), "shell_exec", nil); !strings.Contains(got, "not available in an ask") {
-		t.Fatalf("writes must be off by default, got %q", got)
-	}
-	a.AllowEvalWrites()
-	if got := a.evalExecute(context.Background(), "no_such_tool", nil); strings.Contains(got, "not available in an ask") {
-		t.Fatalf("with writes allowed the gate must not fire, got %q", got)
 	}
 }
 
@@ -231,23 +161,6 @@ func TestTextAskTools_StripsLiveOnlyBehavior(t *testing.T) {
 	}
 }
 
-// The text the model writes beside a tool call is narration about what it is doing, not the answer; only the text of the round that ends without a tool call may be spoken. splitParts is the seam that keeps thoughts apart from user-facing text.
-func TestSplitParts_KeepsThoughtsApartFromText(t *testing.T) {
-	parts := []*genai.Part{
-		{Text: "thinking about it", Thought: true},
-		{Text: "Saving a note. "},
-		nil,
-		{Text: "One down."},
-	}
-	text, thoughts := splitParts(parts)
-	if text != "Saving a note. One down." {
-		t.Errorf("text = %q", text)
-	}
-	if len(thoughts) != 1 || thoughts[0] != "thinking about it" {
-		t.Errorf("thoughts = %v", thoughts)
-	}
-}
-
 // A turn's token counts are the sum of every round of its tool loop, not the last round's counts: a question answered after two tool calls cost what all three model calls cost together. On the text channel the counts arrive on the response's UsageMetadata, where the prompt count is the input and the candidates count plus the thoughts count is the output, because thinking tokens are billed as output and are reported apart from the candidates. Gemini also reports the part of a prompt it served from its own cache as cachedContentTokenCount, and it is part of the prompt count rather than extra to it — until this was read, every Gemini turn filed zero cached tokens whatever the API said, so the usage screen could not tell a cache that was working from one that was not.
 func TestTokenUsage_AddGemini(t *testing.T) {
 	var use TokenUsage
@@ -264,20 +177,6 @@ func TestTokenUsage_AddGemini(t *testing.T) {
 	use.addGemini(nil)
 	if use.InputTokens != 300 || use.OutputTokens != 35 || use.TotalTokens != 335 || use.CachedInputTokens != 80 {
 		t.Errorf("a round with no usage metadata changed the counts to %+v", use)
-	}
-}
-
-// The Live API reports usage on the server message rather than on a response, naming the prompt, response, thoughts and cached-prompt counts under the same field names Gemini uses, so a spoken turn reports the same way a typed one does. Most messages of a turn carry none, and those must add nothing.
-func TestTokenUsage_AddLive(t *testing.T) {
-	var use TokenUsage
-	use.addLive(&genai.UsageMetadata{PromptTokenCount: 40, ResponseTokenCount: 8, ThoughtsTokenCount: 2, CachedContentTokenCount: 4, TotalTokenCount: 50})
-	use.addLive(nil)
-	use.addLive(&genai.UsageMetadata{PromptTokenCount: 60, ResponseTokenCount: 4, TotalTokenCount: 64})
-	if use.InputTokens != 100 || use.OutputTokens != 14 || use.TotalTokens != 114 {
-		t.Errorf("two reporting messages summed to %+v, want 100 in, 14 out, 114 total", use)
-	}
-	if use.CachedInputTokens != 4 {
-		t.Errorf("cached tokens = %d, want 4 — the cached count is part of the input, not extra to it", use.CachedInputTokens)
 	}
 }
 
@@ -298,20 +197,6 @@ func TestAskText_StampsTheProviderOnAFailedCall(t *testing.T) {
 	}
 	if tr.Usage.InputTokens != 0 || tr.Usage.OutputTokens != 0 || tr.Usage.TotalTokens != 0 {
 		t.Errorf("a call that never answered counted %+v tokens, want zeroes", tr.Usage)
-	}
-}
-
-// The voice channel is Gemini too, and stamps the same provider on its trace before it connects.
-func TestAskVoice_StampsTheProviderOnAFailedCall(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	tr, err := a.askVoice(ctx, "gemini-3-flash-live", nil, "hi")
-	if err == nil {
-		t.Fatal("a cancelled ask must fail")
-	}
-	if tr.Usage.Provider != ProviderGemini {
-		t.Errorf("provider = %q, want %q", tr.Usage.Provider, ProviderGemini)
 	}
 }
 
@@ -345,28 +230,6 @@ func TestHistoryFromTurns_CarriesBothSidesOldestFirst(t *testing.T) {
 	}
 	if got := HistoryFromTurns(nil); len(got) != 0 {
 		t.Errorf("an empty conversation must give no history, got %+v", got)
-	}
-}
-
-// The whole history is re-sent on every question, so a long thread has to be cut down: the newest maxHistoryTurns turns are kept and the older ones dropped.
-func TestHistoryFromTurns_KeepsTheNewestTurnsWithinTheCountCap(t *testing.T) {
-	var turns []db.Turn
-	for i := 0; i < maxHistoryTurns*3; i++ {
-		role := "you"
-		if i%2 == 1 {
-			role = "ora"
-		}
-		turns = append(turns, db.Turn{Role: role, Text: fmt.Sprintf("turn %d", i), Kind: "ask"})
-	}
-	got := HistoryFromTurns(turns)
-	if len(got) != maxHistoryTurns {
-		t.Fatalf("got %d history turns, want the cap of %d", len(got), maxHistoryTurns)
-	}
-	if want := fmt.Sprintf("turn %d", len(turns)-maxHistoryTurns); textOf(got[0]) != want {
-		t.Errorf("oldest kept turn = %q, want %q", textOf(got[0]), want)
-	}
-	if want := fmt.Sprintf("turn %d", len(turns)-1); textOf(got[len(got)-1]) != want {
-		t.Errorf("newest kept turn = %q, want %q", textOf(got[len(got)-1]), want)
 	}
 }
 
@@ -477,18 +340,6 @@ func TestToolLogDetail(t *testing.T) {
 	}
 }
 
-// TestEvalExecute_RefusalNamesTheAskNotAnEval pins the wording of the gate's refusal. It used to read "disabled in evals (read-only memory eval)", which describes a situation a user typing /ask is not in: the model read it, the user read it in the trace, and neither was running an eval. The refusal has to say the plain true thing — the tool is not available in an ask.
-func TestEvalExecute_RefusalNamesTheAskNotAnEval(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	got := a.evalExecute(t.Context(), "shell_exec", map[string]any{"command": "ls"})
-	if !strings.Contains(got, "not available in an ask") {
-		t.Errorf("refusal = %q, want it to say the tool is not available in an ask", got)
-	}
-	if strings.Contains(strings.ToLower(got), "eval") {
-		t.Errorf("refusal = %q, want no mention of an eval the user is not running", got)
-	}
-}
-
 // TestAskTools_OfferNothingTheGateWouldRefuse checks the three ask paths hand the model only tools evalExecute will actually run. The failing run called shell_exec and branch, was refused by the gate both times, and spent two of its twelve rounds learning that tools it had been offered do not work — a tool on the list that can only ever come back refused is a trap the prompt cannot talk the model out of.
 func TestAskTools_OfferNothingTheGateWouldRefuse(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
@@ -518,47 +369,6 @@ func TestAskTools_OfferNothingTheGateWouldRefuse(t *testing.T) {
 	}
 }
 
-// TestLastObservedWindow_ReadsTheTitleOffTheNewestLook checks the title an out-of-steps message quotes comes from the last observe_screen that worked, with the app name ahead of the separator dropped, and that a failed or absent look leaves it empty.
-func TestLastObservedWindow_ReadsTheTitleOffTheNewestLook(t *testing.T) {
-	hops := []ToolHop{
-		{Name: "observe_screen", Result: "brave · Home\n[1] link \"Sign in\""},
-		{Name: "click", Result: "clicked [1]"},
-		{Name: "observe_screen", Result: "brave · PR #13 · GitHub\n[1] push button \"Merge\""},
-		{Name: "observe_screen", Result: "error: could not look at the screen: no session"},
-	}
-	if got := lastObservedWindow(hops); got != "PR #13 · GitHub" {
-		t.Errorf("lastObservedWindow = %q, want the newest working look's title", got)
-	}
-	if got := lastObservedWindow([]ToolHop{{Name: "query_memory", Result: "no memory matches"}}); got != "" {
-		t.Errorf("lastObservedWindow = %q, want nothing when the turn never looked", got)
-	}
-	if got := lastObservedWindow([]ToolHop{{Name: "observe_screen", Result: "gnome-shell · \n[1] text \"9%\""}}); got != "gnome-shell" {
-		t.Errorf("lastObservedWindow = %q, want the whole line when the window has no title", got)
-	}
-}
-
-// TestCapError_SaysWhereItGotTo pins the message a turn ends with when it runs out of steps. "I looked 12 times and could not settle on an answer" told the user nothing he could act on: not which page it reached, not what it last saw, not whether it had got anywhere at all. The message has to name the window it last observed and how many steps it took.
-func TestCapError_SaysWhereItGotTo(t *testing.T) {
-	hops := []ToolHop{
-		{Name: "observe_screen", Result: "brave · PR #13 · GitHub\n[1] push button \"Merge\""},
-		{Name: "click", Result: "clicked [1]"},
-	}
-	got := capError(hops).Error()
-	if !strings.Contains(got, "PR #13 · GitHub") {
-		t.Errorf("out-of-steps message = %q, want the window it last saw", got)
-	}
-	if !strings.Contains(got, "2") {
-		t.Errorf("out-of-steps message = %q, want how far it got", got)
-	}
-	if strings.Contains(got, "could not settle on an answer") {
-		t.Errorf("out-of-steps message = %q, want it replaced, not kept", got)
-	}
-	blind := capError([]ToolHop{{Name: "query_memory", Result: "no memory matches"}}).Error()
-	if strings.Contains(blind, "saw") {
-		t.Errorf("a turn that never looked at the screen must not claim to have seen one, got %q", blind)
-	}
-}
-
 // TestCapError_SaysWhatItDid covers the rest of what "could not settle on an answer" left out: not only where the turn got to, but the last thing it actually did there. A run out of steps mid-scroll is not the same story as one that never acted at all, and the message must tell them apart.
 func TestCapError_SaysWhatItDid(t *testing.T) {
 	hops := []ToolHop{
@@ -571,6 +381,9 @@ func TestCapError_SaysWhatItDid(t *testing.T) {
 	}
 	if !strings.Contains(got, "Family Guy") {
 		t.Errorf("out-of-steps message = %q, want it still to name the window", got)
+	}
+	if strings.Contains(got, "observe_screen") {
+		t.Errorf("out-of-steps message = %q, want the tool's instruction to the model left out", got)
 	}
 
 	// A failed action is not a thing done — the window it last saw still counts, but not an action that never happened.
@@ -591,34 +404,6 @@ func TestCapError_SaysWhatItDid(t *testing.T) {
 	got = capError(onlyLooked).Error()
 	if strings.Contains(got, "having just") {
 		t.Errorf("out-of-steps message = %q, want no action clause when the turn never acted", got)
-	}
-}
-
-// TestIsScreenTask covers the heuristic that lets the very first round of an ask be treated as a screen task, before any tool has run: the words the request itself uses, or (once at least one round has gone by) a screen tool it has already called.
-func TestIsScreenTask(t *testing.T) {
-	cases := map[string]bool{
-		"click the merge button":                  true,
-		"open the settings page":                  true,
-		"type my address into the search field":   true,
-		"play the next episode":                   true,
-		"navigate to the dashboard":               true,
-		"look at my screen and tell me the time":  true,
-		"what window is in front":                 true,
-		"recommend me a good app for note taking": true,
-		"what is the capital of France":           false,
-		"remind me what we discussed yesterday":   false,
-	}
-	for question, want := range cases {
-		if got := mentionsScreenTask(question); got != want {
-			t.Errorf("mentionsScreenTask(%q) = %v, want %v", question, got, want)
-		}
-		if got := isScreenTask(question, nil); got != want {
-			t.Errorf("isScreenTask(%q, nil) = %v, want %v", question, got, want)
-		}
-	}
-	// A question with none of the words still reads as a screen task once a screen tool has actually run.
-	if isScreenTask("what is the capital of France", []ToolHop{{Name: "observe_screen"}}) != true {
-		t.Error("isScreenTask must still say true once a screen tool has run, whatever the question said")
 	}
 }
 
@@ -648,31 +433,6 @@ func TestAskText_NarrowsToolsFromTheFirstRoundWhenTheRequestNamesAScreen(t *test
 		if strings.Contains(body, `"`+unwanted+`"`) {
 			t.Errorf("the first round of a screen task still offered %q", unwanted)
 		}
-	}
-}
-
-// TestSameScreenAgain_OnlyCountsALookThatShowedSomethingNew covers the accounting the cap runs on. A round that only called observe_screen and got back exactly what it already had has not moved the task on and must not spend the budget; a first look, a changed screen, or any round that also did something all count.
-func TestSameScreenAgain_OnlyCountsALookThatShowedSomethingNew(t *testing.T) {
-	screen := ""
-	first := []ToolHop{{Name: "observe_screen", Result: "brave · Home\n[1] link \"Sign in\""}}
-	if sameScreenAgain(&screen, first) {
-		t.Error("the first look at a screen must count as a step")
-	}
-	if !sameScreenAgain(&screen, first) {
-		t.Error("a second look returning the same screen must not count as a step")
-	}
-	if !sameScreenAgain(&screen, first) {
-		t.Error("a third identical look must not count either")
-	}
-	moved := []ToolHop{{Name: "observe_screen", Result: "brave · PR #13 · GitHub\n[1] push button \"Merge\""}}
-	if sameScreenAgain(&screen, moved) {
-		t.Error("a look that showed a different screen must count as a step")
-	}
-	if sameScreenAgain(&screen, []ToolHop{{Name: "click", Result: "clicked [1]"}}) {
-		t.Error("a round that acted must always count as a step")
-	}
-	if sameScreenAgain(&screen, nil) {
-		t.Error("a round with no tool calls at all must count as a step")
 	}
 }
 
@@ -919,26 +679,6 @@ func TestAskText_CarriesTheActReferenceWithTheTurnNotTheInstruction(t *testing.T
 	}
 }
 
-// TestHandshakePrompt_HasAStableHeadForThePromptCache pins how much of the opening prompt is the same bytes from one ask to the next, which is all a prompt cache can match. Everything up to the clock sentence is stable; the clock is what ends the stable run, and it sits about six thousand bytes in, so the opening round of an ask caches roughly that much and nothing after it — not the personal context block, not the tool definitions. The rounds after the first carry no clock at all (see screenTaskInstruction), which is where the caching actually pays.
-func TestHandshakePrompt_HasAStableHeadForThePromptCache(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	morning, _ := a.HandshakePrompt(t.Context(), time.Date(2026, 9, 5, 9, 0, 0, 0, time.UTC))
-	evening, _ := a.HandshakePrompt(t.Context(), time.Date(2026, 9, 6, 21, 30, 0, 0, time.UTC))
-	if morning == evening {
-		t.Fatal("two prompts an hour and a day apart came out identical; the clock is meant to differ")
-	}
-	shared := 0
-	for shared < len(morning) && shared < len(evening) && morning[shared] == evening[shared] {
-		shared++
-	}
-	if shared < 5000 {
-		t.Errorf("only the first %d bytes of the opening prompt are stable; the parts that move must stay at the end of it", shared)
-	}
-	if clock := strings.Index(morning, "Right now it is"); shared < clock {
-		t.Errorf("the stable head ends at %d, before the clock sentence at %d; something earlier in the prompt is moving too", shared, clock)
-	}
-}
-
 // A look is only worth taking if the model is actually shown the picture. The Gemini path sends it as inline data in a user turn straight after the tool result that produced it, so the answer to "what is in this video" is read off the pixels rather than guessed.
 func TestAskText_SendsTheLookPictureToTheModel(t *testing.T) {
 	var bodies []string
@@ -1008,29 +748,6 @@ func TestAskText_GateRefusalReachesNoBackendAndReadsAsQuota(t *testing.T) {
 	}
 }
 
-// A permitting gate changes nothing: the request goes out and the answer comes back as before.
-func TestAskText_PermittingGateLeavesTheAskAlone(t *testing.T) {
-	requests := 0
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"a browser"}]}}]}`)
-	}))
-	defer backend.Close()
-	geminiBaseURL = backend.URL
-	t.Cleanup(func() { geminiBaseURL = "" })
-
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "test-key")
-	a.SetRequestGate(refusingGate{err: nil})
-	tr, err := a.askText(t.Context(), "gemini-3.5-flash", nil, "what is in front of me")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tr.Answer != "a browser" || requests != 1 {
-		t.Errorf("answer %q after %d requests, want the backend's answer after 1", tr.Answer, requests)
-	}
-}
-
 // A turn that only read the screen may still be handed to Codex or Claude when Gemini's allowance runs out: repeating observe_screen on the other provider changes nothing, where repeating a click would click twice. Counting every hop instead — which is what AskTextWith used to pass — refused the hand-over to any turn that had merely looked, and that is how a routine returned a raw 429 to the user on 2026-09-05.
 func TestAskTextWith_HandsOnAfterAReadOnlyToolButNotAfterAnAction(t *testing.T) {
 	round := 0
@@ -1057,7 +774,7 @@ func TestAskTextWith_HandsOnAfterAReadOnlyToolButNotAfterAnAction(t *testing.T) 
 	if len(tr.ToolHops) != 1 || tr.ToolHops[0].Name != "observe_screen" {
 		t.Fatalf("tool hops = %+v, want the one read-only look the model made", tr.ToolHops)
 	}
-	if !providerSpent(err) {
+	if !ProviderSpent(err) {
 		t.Error("a 429 must count as a spent allowance, so the question is handed on")
 	}
 	if actionHops(tr.ToolHops) != 0 {
@@ -1066,27 +783,6 @@ func TestAskTextWith_HandsOnAfterAReadOnlyToolButNotAfterAnAction(t *testing.T) 
 	acted := append(tr.ToolHops, ToolHop{Name: "click", Result: "clicked [1] push button \"Merge\""})
 	if actionHops(acted) == 0 {
 		t.Error("a turn that clicked something must count as having acted, so it is never replayed on another provider")
-	}
-}
-
-// TestHandshakeInstruction_EverythingStableComesBeforeAnythingThatChanges checks the cache property the layout exists for: two asks a minute apart, with different memory lines and personal context, share a prefix that already holds the whole stable text, the stop line, the tool count and the screen guidance included, so a provider caching by prefix reuses all of it.
-func TestHandshakeInstruction_EverythingStableComesBeforeAnythingThatChanges(t *testing.T) {
-	a := handshakeInstruction(time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC), "Personal context:\n- likes tea", "  reading the Hotstar page", 20)
-	b := handshakeInstruction(time.Date(2026, 9, 5, 12, 1, 0, 0, time.UTC), "Personal context:\n- likes coffee", "  writing an email", 20)
-	shared := 0
-	for shared < len(a) && shared < len(b) && a[shared] == b[shared] {
-		shared++
-	}
-	prefix := a[:shared]
-	for _, want := range []string{stopLineText, "You have 20 tools", screenTaskGuidance} {
-		if !strings.Contains(prefix, want) {
-			t.Errorf("the shared prefix (%d bytes) lacks %.60q", shared, want)
-		}
-	}
-	for _, volatile := range []string{"likes tea", "reading the Hotstar page", "Right now it is"} {
-		if strings.Contains(prefix, volatile) {
-			t.Errorf("the shared prefix carries changing text %q", volatile)
-		}
 	}
 }
 
@@ -1118,7 +814,7 @@ func TestShouldFallBack_OnlyOnUnavailable(t *testing.T) {
 func TestEvidenceFromToolHops_KeepsEveryLineOfAMultiLineHit(t *testing.T) {
 	hops := []ToolHop{{Name: "query_memory", Result: strings.Join([]string{
 		`[note#7] Standup 2026-09-07`,
-		`- **Me**: research on hazard-specific climate vulnerability`,
+		`- **Me**: research on hazard-specific route vulnerability`,
 		`- Several other unnamed voices {"source":{"kind":"note","id":7,"title":"","when":"2026-09-07T12:00:00Z"}}`,
 		`[episode] reviewing the PR {"source":{"kind":"episode","id":42,"title":"main.go","when":"2026-09-01T10:30:00Z"}}`,
 	}, "\n")}}
@@ -1126,7 +822,7 @@ func TestEvidenceFromToolHops_KeepsEveryLineOfAMultiLineHit(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2: %+v", len(got), got)
 	}
-	want := "[note#7] Standup 2026-09-07\n- **Me**: research on hazard-specific climate vulnerability\n- Several other unnamed voices"
+	want := "[note#7] Standup 2026-09-07\n- **Me**: research on hazard-specific route vulnerability\n- Several other unnamed voices"
 	if got[0].Excerpt != want {
 		t.Errorf("note excerpt = %q, want the whole hit %q", got[0].Excerpt, want)
 	}

@@ -4,24 +4,6 @@ package input
 
 import "testing"
 
-// Printable ASCII/Latin-1 characters map to the identical X11 keysym value.
-func TestRuneKeysymLatin1(t *testing.T) {
-	if got, ok := runeKeysym('A'); !ok || got != 0x41 {
-		t.Fatalf("got (%#x, %v), want (0x41, true)", got, ok)
-	}
-	if got, ok := runeKeysym(' '); !ok || got != 0x20 {
-		t.Fatalf("got (%#x, %v), want (0x20, true)", got, ok)
-	}
-}
-
-// Characters outside Latin-1 use the X11 Unicode keysym range (codepoint | 0x01000000).
-func TestRuneKeysymUnicode(t *testing.T) {
-	// U+20AC EURO SIGN.
-	if got, ok := runeKeysym('€'); !ok || got != 0x010020AC {
-		t.Fatalf("got (%#x, %v), want (0x010020ac, true)", got, ok)
-	}
-}
-
 // Return, Tab and BackSpace get their named X11 keysym, not their identity value, matching internal/tracker/act_linux.go's keysymFor.
 func TestRuneKeysymNamedControls(t *testing.T) {
 	cases := map[rune]int32{

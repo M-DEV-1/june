@@ -148,6 +148,8 @@ type Agent struct {
 	turnID string
 	// askScreen is the screen state a tool call driven directly rather than through an ask reads and writes, since only an ask attaches one to its context. See askState in tools.go.
 	askScreen askLookState
+	// screen is which task is driving the screen right now; see claimScreen.
+	screen screenHold
 	// capture takes the picture the look tool sends the model: tracker.CaptureFront in production, a fake in tests. nil means this session cannot see the screen, and look says so.
 	// What one ask's looks leave behind — the newest picture, whether it has been handed to the model, how many it has taken and what they cost — lives on an askLookState carried on the ask's own context (see withAskLookState in tools.go), not here, so two asks running at once never share one screenshot.
 	capture func(ctx context.Context) (tracker.Capture, error)

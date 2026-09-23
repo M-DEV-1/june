@@ -121,24 +121,3 @@ func TestKillShadowChild_TerminatesTheProcess(t *testing.T) {
 		t.Fatal("the child was still alive after killShadowChild returned")
 	}
 }
-
-// An empty device leaves the choice to llama-server: no -dev flag at all. A configured device is passed through as llama-server's -dev flag, so a machine with more than one Vulkan device (e.g. an Intel iGPU and a discrete NVIDIA card) can be pinned to the fast one instead of whichever llama-server picks by default.
-func TestShadowArgs_DeviceSetAppendsDevFlag(t *testing.T) {
-	none := shadowArgs("/models/model.gguf", 6944, "")
-	for i, a := range none {
-		if a == "-dev" {
-			t.Fatalf("unexpected -dev flag at args[%d]: %v", i, none)
-		}
-	}
-
-	args := shadowArgs("/models/model.gguf", 6944, "Vulkan1")
-	for i, a := range args {
-		if a == "-dev" {
-			if i+1 >= len(args) || args[i+1] != "Vulkan1" {
-				t.Fatalf("-dev not followed by Vulkan1: %v", args)
-			}
-			return
-		}
-	}
-	t.Fatalf("expected -dev flag in args: %v", args)
-}

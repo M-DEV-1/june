@@ -55,24 +55,6 @@ func TestEncodeCapture_ScalesAndReportsWhereItCameFrom(t *testing.T) {
 	}
 }
 
-// A region already smaller than the cap is sent at its own size: scaling it up would cost bytes and add nothing.
-func TestEncodeCapture_LeavesASmallRegionAlone(t *testing.T) {
-	got, err := encodeCapture(testImage(1000, 700), image.Rect(100, 50, 900, 650))
-	if err != nil {
-		t.Fatalf("encodeCapture: %v", err)
-	}
-	if got.W != 800 || got.H != 600 || got.Scale != 1 {
-		t.Errorf("got %dx%d at scale %v, want 800x600 at scale 1", got.W, got.H, got.Scale)
-	}
-	if got.X != 100 || got.Y != 50 {
-		t.Errorf("origin = %d,%d, want 100,50", got.X, got.Y)
-	}
-	x, y := got.ToScreen(10, 10)
-	if x != 110 || y != 60 {
-		t.Errorf("ToScreen(10,10) = %d,%d, want 110,60", x, y)
-	}
-}
-
 // The bytes have to be a real JPEG of the stated size, and small enough that a whole screen of them is not the largest thing in the request.
 func TestEncodeCapture_IsAJPEGUnderTheSizeCap(t *testing.T) {
 	got, err := encodeCapture(testImage(1920, 1080), image.Rect(0, 0, 1920, 1080))

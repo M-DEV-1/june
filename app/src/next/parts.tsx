@@ -10,7 +10,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { usePickBrainMutation, type Brain, type UsageLimit } from "./api";
-import { atBottom, hhmm } from "./format";
+import { atBottom, hhmm, windowLabel } from "./format";
 import { Face } from "./face";
 import { ui, useAppDispatch, useAppSelector, type Queries } from "./store";
 import { DAEMON_HOST_PORT } from "./daemon-url";
@@ -95,7 +95,7 @@ export function useFollowSelection(container: RefObject<HTMLElement | null>, id?
     const root = container.current;
     if (!root || !root.contains(document.activeElement)) return;
     root.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(id)}"]`)?.focus();
-  }, [id]);
+  }, [container, id]);
 }
 
 /** What an empty list says where there is room for one short line, with Ora's own face above it — the hero of the empty state, sized a step up from the page's own heading rather than left at the sidebar chip's size. Input: whether the daemon answered, the sentence for an answer with nothing in it, and whether the list is still on its first fetch. While loading, the real empty sentence is held back and a "thinking" face shows instead, so "Nothing to do." never flashes before the data it describes has actually arrived. Output: the block. */
@@ -358,18 +358,6 @@ export function Picker({
       </PopoverContent>
     </Popover>
   );
-}
-
-/** What a limit's own window reads as in sentence case: "5-hour" for the ones Codex reports in hours, "Daily", "Weekly" and "Monthly" for the named ones, and whatever the provider called it, capitalised, for anything else. Input: the window as the daemon sent it ("5h", "daily", "weekly", "monthly", or a provider's own name). Output: the label. */
-function windowLabel(window: string): string {
-  if (!window) return "Limit";
-  const hours = /^(\d+)h$/i.exec(window);
-  if (hours) return `${hours[1]}-hour`;
-  if (window === "daily") return "Daily";
-  if (window === "weekly") return "Weekly";
-  if (window === "monthly") return "Monthly";
-  const word = window.replace(/_/g, " ");
-  return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
 /** "Resets in 3 hr 3 min" for a window that turns over within a day, rounded to the minute; "Resets Mon 18:33" past that, naming the weekday it falls on since a person is not tracking which day it is by then. Input: the limit's own resets_at (RFC3339) and the moment to measure it from. Output: the phrase, or "" when resets_at does not parse. */

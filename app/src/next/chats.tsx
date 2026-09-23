@@ -15,7 +15,7 @@ import {
   BrainPicker,
   useWide,
 } from "./parts";
-import { FirstRunPanel } from "./settings";
+import { NoBrainPanel } from "./settings";
 import { DRAFT_CHAT, useAppSelector } from "./store";
 import { Composer } from "./chat-composer";
 import { Thread } from "./chat-turn";
@@ -42,11 +42,11 @@ export function ChatsScreen() {
     skip: !shownId,
   });
   const { data: brains = [] } = useBrainsQuery();
+  // Nothing typed can be answered while no brain is signed in, so the pane says so instead of showing the thread. An empty list is a daemon that said nothing, not one that has no brain: a real one always lists every brain it knows.
+  const noBrain = brains.length > 0 && !brains.some((b) => b.signed_in);
   const { data: daemon } = useSettingsQuery();
   const [wide, pane] = useWide();
 
-  // Nothing a person types can be answered until one of the four ways of answering text is set up, so while the daemon still lists steps the pane says so instead of showing an empty thread.
-  const setUp = !daemon?.first_run?.steps?.length;
   const current = convs.find((c) => c.id === shownId);
   // In a wide pane the rail's track is always reserved, filled or not, so the header, the thread and the composer sit at the same place in every chat: a column that moved left the moment a reply called a tool, and back when the next chat had none, read as the page jumping about (2026-09-05).
   const railed = wide;
@@ -68,7 +68,7 @@ export function ChatsScreen() {
           />
         </div>
       </PageHeader>
-      {setUp ? (
+      {!noBrain ? (
         <Thread
           view={view}
           up={!isError}
@@ -89,7 +89,7 @@ export function ChatsScreen() {
       ) : (
         <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
           <div className={MEASURE}>
-            <FirstRunPanel />
+            <NoBrainPanel dataDir={daemon?.data_dir ?? "~/.local/share/ora"} />
           </div>
         </Scroller>
       )}

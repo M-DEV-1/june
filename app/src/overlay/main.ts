@@ -1,6 +1,6 @@
 /** The drawing layer over the whole desktop. It is one transparent, click-through, always-on-top window that shows nothing until the daemon sends an "overlay" event, then flies a small triangle to where the drawing starts and draws it: an underline or a dashed spotlight on a target ("ring"), a dashed rectangle ("box"), a dashed circle ("circle"), a stroke along a run of points ("path" and "line") with a solid head on the end of an "arrow", numbers on several rectangles ("marks"), or an erase ("clear"). The ink appears from one end to the other as the triangle travels along it, so the drawing looks drawn. Everything fades again after the event's ttl_ms, and a kind this page does not know is ignored.
  *
- * This replaces the GNOME Shell extension in overlay/extension.js, which drew the same shapes but could not be reloaded on a Wayland session without logging out, so a shell holding a stale copy in memory drew nothing at all.
+ * This replaces the drawing half of the GNOME Shell extension, which drew the same shapes but could not be reloaded on a Wayland session without logging out, so a shell holding a stale copy in memory drew nothing at all.
  *
  * The page does not talk to the daemon itself. Rust holds the connection to its event stream and hands each event over as a Tauri event, because this app's WebKit delivers a slow HTTP stream in held-back scraps: measured on 2026-09-04, a ring the daemon flushed in nine milliseconds had still not reached the page thirteen seconds later. See src-tauri/src/overlay.rs.
  */
@@ -308,10 +308,10 @@ function fadeOut(): void {
 async function draw(text: string, askID: string): Promise<void> {
   const spec = parseSpec(text);
   if (!spec) return;
-  if (clearTimer !== undefined) clearTimeout(clearTimer);
   if (pointerTimer !== undefined) clearTimeout(pointerTimer);
 
   if (spec.kind === "clear") {
+    if (clearTimer !== undefined) clearTimeout(clearTimer);
     setMood("done");
     fadeOut();
     return;
@@ -329,8 +329,13 @@ async function draw(text: string, askID: string): Promise<void> {
     ripple(at, rippleSize({ x: px, y: py, w: 0, h: TAP_RIPPLE_H }, layout), arrival);
     // A tap is the pointer alone, whatever label came with it: a task is a run of taps, and a pill on each one turned a Spotify window into nine pills on 2026-09-11. Labels belong to rings, arrows and marks, where the model chose to name something.
     holdPointer(arrival + POINTER_IDLE_MS);
+    // A tap leaves the standing fade alone as well as the ink: it draws nothing of its own, so cancelling the timer that takes a ring off would leave that ring on the screen for ever. That is how "Remove Status; Active Filter" sat on the desktop for 23 minutes on 2026-09-23, under the run of clicks that followed it.
     return;
   }
+
+  // This drawing will arm a fade of its own below, so whatever fade is standing over the ink already on the layer goes now. A tap has returned by here: it draws nothing, so it must leave a standing fade alone.
+  if (clearTimer !== undefined) clearTimeout(clearTimer);
+
   let shapes = shapesFor(spec, layout);
   if (shapes.length === 0) {
     // Every shape was filtered out, which for a drawing that is not a clear means the layout this page is holding does not match the desk the rectangles came from — the commonest cause being a layout read before the window was mapped, when no monitor could be enumerated. So it is read again and the shapes are placed a second time.

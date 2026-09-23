@@ -7,18 +7,9 @@ import { Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useStopJobMutation } from "./api";
-import { isJobLive } from "./format";
+import { isJobLive, stepLine } from "./format";
 import { Face } from "./face";
 import { ui, useAppDispatch, useAppSelector, type JobRun } from "./store";
-
-/** How far through a job is, in the two numbers the model itself supplied. Input: the job. Output: "step 3 of about 6", or "step 3" before a plan arrived with an estimate on it, or "" before the first step.
- * Read against the estimate rather than against the step budget, because the budget is twice the estimate and nobody chose either as a limit: the job asks whether to carry on when it runs out (see actjob's outOfRoomQuestion), so a number the user reads as a countdown to failure would be a lie.
- */
-export function stepLine(job: JobRun): string {
-  if (job.steps.length === 0) return "";
-  const step = `step ${job.steps.length}`;
-  return job.estimate ? `${step} of about ${job.estimate}` : step;
-}
 
 /** One running job's row: the face, what it is, where it has got to, and Stop. */
 function RunningJob({ job }: { job: JobRun }) {
@@ -49,7 +40,7 @@ function RunningJob({ job }: { job: JobRun }) {
         <div className="min-w-0 flex-1">{lines}</div>
       )}
       {job.id ? (
-        <Button variant="ghost" size="icon-xs" aria-label={`Stop ${job.goal}`} className="shrink-0 text-muted-foreground" onClick={() => void stopJob(job.id!)}>
+        <Button variant="ghost" size="icon-xs" aria-label={`Stop ${job.goal}`} className="shrink-0 text-muted-foreground" onClick={() => stopJob(job.id!).unwrap().catch(() => dispatch(ui.noticed({ text: "Could not stop that job", kind: "error" })))}>
           <Square />
         </Button>
       ) : null}

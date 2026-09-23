@@ -17,6 +17,7 @@ const (
 	StageCompact    = "compact"
 	StageReplay     = "replay"
 	StageProcedures = "procedures"
+	StageLessons    = "lessons"
 )
 
 // DreamRun is one night's bookkeeping row: which stages have committed, the one-line report, and whether the night finished.

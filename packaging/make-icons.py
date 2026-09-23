@@ -11,7 +11,7 @@ Two treatments, because the two places an icon goes want opposite things:
   app   a superellipse tile in the palest lavender, top to bottom, with the face in dark ink, which is what the sheets show and what a launcher grid wants
   tray  the bare face on transparency in one mid-violet, because a shell top bar may be light or dark and an opaque tile of either colour is wrong on one of them
 
-Run: python3 scripts/make-icons.py
+Run: python3 packaging/make-icons.py
 Needs: Pillow and numpy, and JetBrains Mono installed (FONT_PATH).
 """
 
@@ -49,7 +49,7 @@ TRAY_SIZES = [16, 22, 24, 32, 44, 48]
 # The superellipse exponent for the tile. A rounded rectangle joins its straight edge to its corner arc at a visible kink; |x|^n + |y|^n = 1 does not, which is the shape a launcher grid and the sheets both draw.
 SQUIRCLE_N = 4.2
 
-# Where each PNG goes and which treatment it gets. The tray is not here: its sizes are written into cmd/tray/, which cmd/tray_linux.go embeds whole. app/src-tauri/icons/icon.png is what scripts/release.sh resizes the installed hicolor icons from, and the three beside it are the ones tauri.conf.json names.
+# Where each PNG goes and which treatment it gets. The tray is not here: its sizes are written into cmd/tray/, which cmd/tray_linux.go embeds whole. app/src-tauri/icons/icon.png is what packaging/release.sh resizes the installed hicolor icons from, and the three beside it are the ones tauri.conf.json names.
 TARGETS = {
     "cmd/app_icon_linux.png": (512, "app"),
     "app/src/assets/ora.png": (128, "app"),
@@ -60,8 +60,8 @@ TARGETS = {
     "app/src-tauri/icons/32x32.png": (32, "app"),
 }
 
-# The .ico files carry the sizes Windows picks between for a tray and a title bar.
-ICO_TARGETS = {"cmd/tray_icon.ico": "tray", "app/src-tauri/icons/icon.ico": "app"}
+# The .ico file carries the sizes Windows picks between for a title bar.
+ICO_TARGETS = {"app/src-tauri/icons/icon.ico": "app"}
 ICO_SIZES = [16, 32, 48, 128, 256]
 
 # Drawn four times up and scaled down, which is how the glyph edges and the tile's corners come out smooth without any blur pass of their own.

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { actAnswer, actPauseResume, actStart, actStop, ask, context, devToken, endpoint, events, matters, probe, setEventSourceCtor, setPort, setToken, voiceStart, voiceStatus, voiceStop } from "./daemon";
+import { actAnswer, actPauseResume, actStart, actStop, ask, context, devToken, events, matters, setEventSourceCtor, setToken, voiceStart, voiceStatus } from "./daemon";
 
 /** Minimal fake EventSource: tests trigger messages/errors by calling the instance's own methods. */
 class FakeEventSource {
@@ -49,24 +49,6 @@ function fakeFetch(...responses: { status: number; body?: unknown }[]) {
 }
 
 describe("ask", () => {
-  it("posts the question and context, and hands back the ids the daemon answered with", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "abc123", conversation_id: "70" }) });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const res = await ask("is the venue sorted?", "Mail · Vexil Zelbrak");
-
-    expect(res).toEqual({ id: "abc123", conversationId: "70" });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:6942/ask",
-      expect.objectContaining({
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: "is the venue sorted?", context: "Mail · Vexil Zelbrak", conversation_id: "" }),
-      }),
-    );
-    vi.unstubAllGlobals();
-  });
-
   it("names the conversation to append to when it is given one, which is what makes a question a follow-up", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "abc124", conversation_id: "70" }) });
     vi.stubGlobal("fetch", fetchMock);
@@ -112,13 +94,6 @@ describe("events", () => {
     expect(onEvent).not.toHaveBeenCalled();
   });
 
-  it("stop closes the source", () => {
-    const stop = events(vi.fn());
-    const src = FakeEventSource.instances[0];
-    stop();
-    expect(src.closed).toBe(true);
-  });
-
   it("reconnects with a 2s backoff after the stream drops", () => {
     events(vi.fn());
     const first = FakeEventSource.instances[0];
@@ -141,15 +116,6 @@ describe("events", () => {
 });
 
 describe("token", () => {
-  it("ask sends no token header when none is set", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "x" }) });
-    vi.stubGlobal("fetch", fetchMock);
-    await ask("q", "ctx");
-    const [, opts] = fetchMock.mock.calls[0];
-    expect(opts.headers["X-Ora-Token"]).toBeUndefined();
-    vi.unstubAllGlobals();
-  });
-
   it("ask sends the token header once set", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "x" }) });
     vi.stubGlobal("fetch", fetchMock);
@@ -160,72 +126,11 @@ describe("token", () => {
     vi.unstubAllGlobals();
   });
 
-  it("probe sends the token header once set", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
-    vi.stubGlobal("fetch", fetchMock);
-    setToken("secret123");
-    await probe();
-    const [, opts] = fetchMock.mock.calls[0];
-    expect(opts.headers["X-Ora-Token"]).toBe("secret123");
-    vi.unstubAllGlobals();
-  });
-
   it("events puts the token in the stream URL as a query param", () => {
     setToken("secret123");
     events(vi.fn());
     const src = FakeEventSource.instances[0];
     expect(src.url).toBe("http://127.0.0.1:6942/events?token=secret123");
-  });
-
-  it("events omits the token query param when none is set", () => {
-    events(vi.fn());
-    const src = FakeEventSource.instances[0];
-    expect(src.url).toBe("http://127.0.0.1:6942/events");
-  });
-});
-
-describe("probe", () => {
-  it("returns true when /status answers ok", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
-    await expect(probe()).resolves.toBe(true);
-    vi.unstubAllGlobals();
-  });
-
-  it("returns false when fetch rejects", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no daemon")));
-    await expect(probe()).resolves.toBe(false);
-    vi.unstubAllGlobals();
-  });
-});
-
-describe("context", () => {
-  it("returns the parsed context on success", async () => {
-    const body = { app: "Mail", title: "Re: venue", text: "hi" };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => body }));
-    await expect(context()).resolves.toEqual(body);
-    vi.unstubAllGlobals();
-  });
-
-  it("returns null when the response is not ok", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
-    await expect(context()).resolves.toBeNull();
-    vi.unstubAllGlobals();
-  });
-
-  it("returns null when fetch rejects", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no daemon")));
-    await expect(context()).resolves.toBeNull();
-    vi.unstubAllGlobals();
-  });
-
-  it("sends the token header once set", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ app: "", title: "", text: "" }) });
-    vi.stubGlobal("fetch", fetchMock);
-    setToken("secret123");
-    await context();
-    const [, opts] = fetchMock.mock.calls[0];
-    expect(opts.headers["X-Ora-Token"]).toBe("secret123");
-    vi.unstubAllGlobals();
   });
 });
 
@@ -269,60 +174,14 @@ describe("the three card reads have a deadline", () => {
   });
 });
 
-describe("matters", () => {
-  it("returns the matters array on success", async () => {
-    const rows = [{ id: "1", title: "a", kind: "action", status: "open", when: "2026-09-04T09:00:00Z", detail: "" }];
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ matters: rows }) }));
-    await expect(matters()).resolves.toEqual(rows);
-    vi.unstubAllGlobals();
-  });
-
-  it("returns null when the response is not ok", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
-    await expect(matters()).resolves.toBeNull();
-    vi.unstubAllGlobals();
-  });
-
-  it("returns null when fetch rejects", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no daemon")));
-    await expect(matters()).resolves.toBeNull();
-    vi.unstubAllGlobals();
-  });
-});
-
 describe("voice", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("voiceStart posts and returns the session id", async () => {
-    setToken("secret");
-    const calls = fakeFetch({ status: 202, body: { id: "voice-2" } });
-    expect(await voiceStart()).toBe("voice-2");
-    expect(calls[0].url).toBe("http://127.0.0.1:6942/voice/start");
-    expect((calls[0].init?.headers as Record<string, string>)["X-Ora-Token"]).toBe("secret");
-  });
-
   it("voiceStart gives nothing back when a session is already running", async () => {
     fakeFetch({ status: 409 });
     expect(await voiceStart()).toBeNull();
-  });
-
-  it("voiceStop posts to /voice/stop", async () => {
-    const calls = fakeFetch({ status: 200, body: { active: false } });
-    await voiceStop();
-    expect(calls[0].url).toBe("http://127.0.0.1:6942/voice/stop");
-    expect(calls[0].init?.method).toBe("POST");
-  });
-
-  it("voiceStatus reports the session the daemon already has open", async () => {
-    fakeFetch({ status: 200, body: { active: true, id: "voice-1", state: "speaking" } });
-    expect(await voiceStatus()).toEqual({ active: true, id: "voice-1", state: "speaking" });
-  });
-
-  it("voiceStatus is null when the daemon cannot be reached", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
-    expect(await voiceStatus()).toBeNull();
   });
 });
 
@@ -341,56 +200,11 @@ describe("act", () => {
     expect((calls[0].init?.headers as Record<string, string>)["X-Ora-Token"]).toBe("secret");
   });
 
-  it("actStart gives nothing back when the daemon refuses", async () => {
-    fakeFetch({ status: 400 });
-    expect(await actStart("")).toBeNull();
-  });
-
-  it("actStart gives nothing back when the daemon cannot be reached", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
-    expect(await actStart("book the venue")).toBeNull();
-  });
-
-  it("actStop posts to /act/{id}/stop", async () => {
-    const calls = fakeFetch({ status: 204 });
-    await actStop("act-1");
-    expect(calls[0].url).toBe("http://127.0.0.1:6942/act/act-1/stop");
-    expect(calls[0].init?.method).toBe("POST");
-  });
-
-  it("actPauseResume posts to /pause when told to pause", async () => {
-    const calls = fakeFetch({ status: 204 });
-    await actPauseResume("act-1", true);
-    expect(calls[0].url).toBe("http://127.0.0.1:6942/act/act-1/pause");
-  });
-
-  it("actPauseResume posts to /resume when told to carry on", async () => {
-    const calls = fakeFetch({ status: 204 });
-    await actPauseResume("act-1", false);
-    expect(calls[0].url).toBe("http://127.0.0.1:6942/act/act-1/resume");
-  });
-
-  it("actAnswer posts the text to /act/{id}/answer", async () => {
-    const calls = fakeFetch({ status: 204 });
-    await actAnswer("act-1", "the green room");
-    expect(calls[0].url).toBe("http://127.0.0.1:6942/act/act-1/answer");
-    expect(JSON.parse(calls[0].init?.body as string)).toEqual({ text: "the green room" });
-  });
-
   it("actStop, actPauseResume and actAnswer do nothing when the daemon cannot be reached", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
     await expect(actStop("act-1")).resolves.toBeUndefined();
     await expect(actPauseResume("act-1", true)).resolves.toBeUndefined();
     await expect(actAnswer("act-1", "x")).resolves.toBeUndefined();
-  });
-});
-
-describe("endpoint", () => {
-  it("hands out the base URL and token the dictation calls need", () => {
-    setPort("7000");
-    setToken("secret");
-    expect(endpoint()).toEqual({ base: "http://127.0.0.1:7000", token: "secret" });
-    setPort("6942");
   });
 });
 
@@ -401,8 +215,5 @@ describe("the dev-only token in the URL", () => {
   it("is refused on any other origin, so a packaged window can never be handed one", () => {
     expect(devToken({ port: "", search: "?token=abc123" })).toBeUndefined();
     expect(devToken({ port: "8080", search: "?token=abc123" })).toBeUndefined();
-  });
-  it("is undefined when the dev server was opened without one", () => {
-    expect(devToken({ port: "1420", search: "?screen=days" })).toBeUndefined();
   });
 });

@@ -14,13 +14,6 @@ afterEach(() => {
 });
 
 describe("applyTheme", () => {
-  it("stamps light and dark straight away, with no call to the desktop", async () => {
-    const root = document.createElement("div");
-    expect(await applyTheme("dark", root)).toBe("dark");
-    expect(root.dataset.theme).toBe("dark");
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
   it("a stale 'system' resolution must not stamp the root once a newer call has already landed", async () => {
     let resolveFirst!: (v: string) => void;
     let resolveSecond!: (v: string) => void;

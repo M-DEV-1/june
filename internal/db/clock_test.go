@@ -40,7 +40,7 @@ func TestLatestMemoryTime_UsesNewestRowNotWallClock(t *testing.T) {
 		t.Fatalf("empty store should have zero clock, got %v", got)
 	}
 
-	if _, err := store.LogEpisode(ctx, "Brave", "Opal", "climate risk"); err != nil {
+	if _, err := store.LogEpisode(ctx, "Brave", "Opal", "route planning"); err != nil {
 		t.Fatal(err)
 	}
 	got, err = store.LatestMemoryTime(ctx)
@@ -71,7 +71,7 @@ func TestMemoryAsOf_NoteThreadEpisodeWorkingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetWorkingState(ctx, "Climate Risk Statement Builder ASRS"); err != nil {
+	if err := store.SetWorkingState(ctx, "Brightpath Statement Builder VRDS"); err != nil {
 		t.Fatal(err)
 	}
 

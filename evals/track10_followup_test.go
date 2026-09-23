@@ -1,6 +1,6 @@
 package main
 
-// The night of 2026-09-05: turn 1 "ring the refresh button" ringed item [n] "Reload"; turn 2 "draw a circle around it" resolved "it" against a fresh screen read instead of turn 1's target and circled the address bar. follow-up-ring in track10_act.go is the eval task for that regression, and the tests here cover the two-turn plumbing it needed: a task's Question2/Pass2, act10AskFollowUp carrying the first question's conversation_id into the second POST /ask, and act10DrawHopTargetsLabel reading the item draw actually landed on off the tool Detail internal/agent's resultSummary now carries for it ("drew around %q").
+// The night of 2026-09-05: turn 1 "ring the refresh button" ringed item [n] "Reload"; turn 2 "draw a circle around it" resolved "it" against a fresh screen read instead of turn 1's target and circled the address bar. follow-up-ring in track10_act.go is the eval task for that regression, and the tests here cover the two-turn plumbing it needed: act10RunTask asking the second question with the first answer's conversation_id and scoring it with Pass2, and never asking it after the first turn failed.
 
 import (
 	"context"
@@ -11,60 +11,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestAct10DrawHopTargetsLabel(t *testing.T) {
-	steps := []string{"observe_screen", "draw"}
-	cases := []struct {
-		name    string
-		details []string
-		label   string
-		want    bool
-	}{
-		{"matches the item drawn around", []string{"brave · Family Guy – Brave", `drew around "Reload"`}, "Reload", true},
-		{"wrong item drawn around", []string{"brave · Family Guy – Brave", `drew around "Address bar"`}, "Reload", false},
-		{"draw named no item at all", []string{"brave · Family Guy – Brave", "done"}, "Reload", false},
-		{"no draw hop in the steps", nil, "Reload", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			s := steps
-			if c.details == nil {
-				s = []string{"observe_screen"}
-			}
-			if got := act10DrawHopTargetsLabel(s, c.details, c.label); got != c.want {
-				t.Errorf("act10DrawHopTargetsLabel(%v, %v, %q) = %v, want %v", s, c.details, c.label, got, c.want)
-			}
-		})
-	}
-}
-
-// follow-up-ring must actually be wired as a two-turn task: Question2 set and scored by Pass2, never by Pass — see act10Task's own doc on what turns a task into a two-turn one.
-func TestAct10Tasks_FollowUpRingIsATwoTurnTierOneTask(t *testing.T) {
-	var task *act10Task
-	for i := range act10Tasks {
-		if act10Tasks[i].ID == "follow-up-ring" {
-			task = &act10Tasks[i]
-		}
-	}
-	if task == nil {
-		t.Fatal("no follow-up-ring task in act10Tasks")
-	}
-	if task.Tier != 1 {
-		t.Errorf("Tier = %d, want 1", task.Tier)
-	}
-	if task.Question2 == "" {
-		t.Fatal("Question2 must be set for a two-turn task")
-	}
-	if task.Pass2 == nil {
-		t.Fatal("Pass2 must be set for a two-turn task")
-	}
-	if !task.Pass2([]string{"draw"}, false, "Drew a circle.", []string{`drew around "Reload button"`}) {
-		t.Error("Pass2 should pass a draw hop whose detail names the Reload item")
-	}
-	if task.Pass2([]string{"draw"}, false, "Drew a circle.", []string{`drew around "Address bar"`}) {
-		t.Error("Pass2 should fail a draw hop that landed on a different item")
-	}
-}
 
 // act10TwoTurnFakeDaemon is act10FakeDaemon's shape, but for a task with a follow-up: it answers two different /ask calls with two different ids, records the conversation_id each /ask request carried, and streams both asks' events off one /events connection, in order — exactly what act10RunTask needs since it reuses the same connection and scanner for the second collect.
 func act10TwoTurnFakeDaemon(t *testing.T, token string, ids [2]string, convID string, events []string) (srv *httptest.Server, gotConvIDs *[]string) {

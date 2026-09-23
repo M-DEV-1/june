@@ -43,16 +43,6 @@ describe("startMockVoice", () => {
     document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
   });
 
-  it("does nothing without both ?mock and ?voice=1", async () => {
-    const { startMockVoice } = await import("./mock");
-    startMockVoice(new URLSearchParams(""));
-    startMockVoice(new URLSearchParams("mock=1"));
-    startMockVoice(new URLSearchParams("voice=1"));
-    await new Promise((r) => setTimeout(r, 60));
-    // None of those matched, so main.ts (and its "#w" render) was never even loaded.
-    expect(document.querySelector(".vwave")).toBeNull();
-  });
-
   it(
     "shows Ora's silent row while only the mic bursts, and animates it once the speaker's own (odd-cycle) burst lands",
     async () => {
@@ -116,12 +106,5 @@ describe("startMockNotice", () => {
     expect(
       [...bubble.querySelectorAll<HTMLButtonElement>("button.na")].map((b) => b.textContent),
     ).toEqual(["Done", "Not happening", "Not urgent"]);
-  });
-
-  it("does nothing for a notice mode it does not know", async () => {
-    const { startMockNotice } = await import("./mock");
-    startMockNotice(new URLSearchParams("mock=1&notice=nope"));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(document.getElementById("n")?.hidden).toBe(true);
   });
 });

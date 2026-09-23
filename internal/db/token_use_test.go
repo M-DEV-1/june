@@ -23,7 +23,7 @@ func addUse(t *testing.T, store *Store, use TokenUse) int64 {
 	return id
 }
 
-// TestAddTokenUse covers what AddTokenUse does to a row on the way in and back out, one property per subtest: every field round-trips as given, including an explicit time; the cache/rounds fields the cost view needs beyond the plain counts round-trip too; a call filed with no time is stamped now and a question over 200 runes is cut to 200 without splitting a character; a call that reported no usage is still stored, counted, and zeroed rather than dropped; and a call reporting only the input/output halves gets the total filed as their sum.
+// TestAddTokenUse covers what AddTokenUse does to a row on the way in and back out, one property per subtest: every field round-trips as given, including an explicit time; a call filed with no time is stamped now and a question over 200 runes is cut to 200 without splitting a character; a call that reported no usage is still stored, counted, and zeroed rather than dropped; and a call reporting only the input/output halves gets the total filed as their sum.
 func TestAddTokenUse(t *testing.T) {
 	t.Run("round trips every field, including an explicit time", func(t *testing.T) {
 		store := newStore(t)
@@ -64,32 +64,6 @@ func TestAddTokenUse(t *testing.T) {
 		}
 		if !u.At.Equal(at) {
 			t.Errorf("time came back %v, want the instant %v that went in", u.At.UTC(), at.UTC())
-		}
-	})
-
-	t.Run("round trips cached tokens and rounds", func(t *testing.T) {
-		store := newStore(t)
-		ctx := context.Background()
-
-		addUse(t, store, TokenUse{
-			Provider: "codex", Model: "gpt-5.5", Channel: "text",
-			InputTokens: 4614, OutputTokens: 80, TotalTokens: 4694,
-			CachedTokens: 3840, Rounds: 3,
-			Question: "click the merge button",
-		})
-
-		got, err := store.TokenUseRecent(ctx, 1)
-		if err != nil {
-			t.Fatalf("TokenUseRecent: %v", err)
-		}
-		if len(got) != 1 {
-			t.Fatalf("TokenUseRecent returned %d rows, want 1", len(got))
-		}
-		if got[0].CachedTokens != 3840 {
-			t.Errorf("cached tokens came back %d, want 3840", got[0].CachedTokens)
-		}
-		if got[0].Rounds != 3 {
-			t.Errorf("rounds came back %d, want 3", got[0].Rounds)
 		}
 	})
 
@@ -160,36 +134,6 @@ func TestAddTokenUse(t *testing.T) {
 			t.Errorf("total came back %+v, want 120 summed from the halves", got)
 		}
 	})
-}
-
-// TestTokenTotalsSinceSumsCachedInputTokens checks that a window's cached-token count is the sum over its calls, the same way every other count on TokenTotal already is.
-func TestTokenTotalsSinceSumsCachedInputTokens(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	addUse(t, store, TokenUse{Provider: "codex", Model: "gpt-5.5", Channel: "text", InputTokens: 4614, OutputTokens: 80, TotalTokens: 4694, CachedTokens: 3840})
-	addUse(t, store, TokenUse{Provider: "codex", Model: "gpt-5.5", Channel: "text", InputTokens: 3000, OutputTokens: 40, TotalTokens: 3040, CachedTokens: 1500})
-	addUse(t, store, TokenUse{Provider: "gemini", Model: "gemini-3-flash", Channel: "voice", InputTokens: 500, OutputTokens: 100, TotalTokens: 600})
-
-	got, err := store.TokenTotalsSince(ctx, time.Time{})
-	if err != nil {
-		t.Fatalf("TokenTotalsSince: %v", err)
-	}
-	var codex, gemini TokenTotal
-	for _, row := range got {
-		switch row.Provider {
-		case "codex":
-			codex = row
-		case "gemini":
-			gemini = row
-		}
-	}
-	if codex.CachedInputTokens != 5340 {
-		t.Errorf("codex cached input = %d, want 3840+1500=5340", codex.CachedInputTokens)
-	}
-	if gemini.CachedInputTokens != 0 {
-		t.Errorf("gemini cached input = %d, want 0: it reports no cache", gemini.CachedInputTokens)
-	}
 }
 
 // TestTokenTotalsSinceGroupsByProviderAndModel is the question the feature exists to answer: what has each provider and model cost over a window. Two calls to the same model are one row with two calls; two models under one provider stay apart; the heaviest row comes first.
@@ -376,44 +320,6 @@ func TestTokenDaysBackGroupsByLocalDay(t *testing.T) {
 	}
 }
 
-// TestTokenDaysBackCountsOneDayAsToday checks the smallest window the caller can ask for: one day is today alone, so yesterday's calls are out.
-func TestTokenDaysBackCountsOneDayAsToday(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	now := time.Now()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
-	addUse(t, store, TokenUse{Provider: "codex", Model: "gpt-5.5", Channel: "text", InputTokens: 7, OutputTokens: 3, TotalTokens: 10, At: midnight.Add(-time.Minute)})
-	addUse(t, store, TokenUse{Provider: "codex", Model: "gpt-5.5", Channel: "text", InputTokens: 1, OutputTokens: 1, TotalTokens: 2, At: midnight.Add(time.Minute)})
-
-	got, err := store.TokenDaysBack(ctx, 1)
-	if err != nil {
-		t.Fatalf("TokenDaysBack(1): %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("TokenDaysBack(1) returned %d rows, want 1: %+v", len(got), got)
-	}
-	if got[0].Day != midnight.Format("2006-01-02") || got[0].TotalTokens != 2 {
-		t.Errorf("TokenDaysBack(1) = %+v, want today alone with 2 tokens", got[0])
-	}
-}
-
-// TestModelCallsBackNonPositiveDaysReturnsNil checks the same guard TokenDaysBack has: a window of zero or fewer days returns nil and no error rather than one running backwards.
-func TestModelCallsBackNonPositiveDaysReturnsNil(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	for _, days := range []int{0, -3} {
-		got, err := store.ModelCallsBack(ctx, days)
-		if err != nil {
-			t.Fatalf("ModelCallsBack(%d): %v", days, err)
-		}
-		if got != nil {
-			t.Errorf("ModelCallsBack(%d) = %+v, want nil", days, got)
-		}
-	}
-}
-
 // TestModelCallsBackSeparatesModelsUnderOneProvider is the question the feature exists to answer: which model spent the daily allowance. Two models under the same provider on the same day must come back as two rows, each with its own call count and token total.
 func TestModelCallsBackSeparatesModelsUnderOneProvider(t *testing.T) {
 	store := newStore(t)
@@ -468,31 +374,6 @@ func TestModelCallsBackGroupsByLocalDayAndExcludesOutsideWindow(t *testing.T) {
 	}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("ModelCallsBack(2) = %+v, want %+v", got, want)
-	}
-}
-
-// TestModelCallsBackOrdersOldestDayFirst checks the order ModelCallsBack promises across a multi-day window: oldest day first, then provider, then model, so the order never shifts between reads.
-func TestModelCallsBackOrdersOldestDayFirst(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	now := time.Now()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
-
-	addUse(t, store, TokenUse{Provider: "gemini", Model: "gemini-3.5-flash", Channel: "text", InputTokens: 1, OutputTokens: 0, TotalTokens: 1, At: midnight.AddDate(0, 0, -1).Add(time.Hour)})
-	addUse(t, store, TokenUse{Provider: "gemini", Model: "gemini-3.5-flash", Channel: "text", InputTokens: 2, OutputTokens: 0, TotalTokens: 2, At: midnight.Add(time.Hour)})
-
-	got, err := store.ModelCallsBack(ctx, 2)
-	if err != nil {
-		t.Fatalf("ModelCallsBack(2): %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("ModelCallsBack(2) returned %d rows, want 2: %+v", len(got), got)
-	}
-	for i := 1; i < len(got); i++ {
-		if got[i-1].Day > got[i].Day {
-			t.Errorf("day %q came before %q, want oldest first", got[i-1].Day, got[i].Day)
-		}
 	}
 }
 

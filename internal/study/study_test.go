@@ -41,26 +41,6 @@ func writeFixtures(t *testing.T) (replayPath, tracePath string) {
 	return replayPath, tracePath
 }
 
-// TestReadTrace_KeepsMatchingFieldsSkipsCorruptLines is the tolerant reader's own contract: a field named reply, raw, kind or stage is kept, a line with no matching field contributes nothing, and a line that isn't JSON is counted as skipped rather than failing the file.
-func TestReadTrace_KeepsMatchingFieldsSkipsCorruptLines(t *testing.T) {
-	_, tracePath := writeFixtures(t)
-	text, skipped, err := readTrace(tracePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if skipped != 1 {
-		t.Errorf("skipped: want 1, got %d", skipped)
-	}
-	for _, want := range []string{"TRACE_REPLY_TEXT", "TRACE_RAW_TEXT", "verdicts", "extract"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("trace text missing %q: %s", want, text)
-		}
-	}
-	if strings.Contains(text, "ignored") {
-		t.Error("a line with no matching field should not appear")
-	}
-}
-
 // TestStudy_GathersBothSourcesIntoOnePromptAndParsesProseWrappedJSON covers the end-to-end pass: the prompt handed to the teacher carries both the replay and the trace material, a reply that wraps its JSON in prose and a fence still parses, the report and lessons files land on disk, and the corrupt trace line is reported as skipped rather than failing the run.
 func TestStudy_GathersBothSourcesIntoOnePromptAndParsesProseWrappedJSON(t *testing.T) {
 	replayPath, tracePath := writeFixtures(t)

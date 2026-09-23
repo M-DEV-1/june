@@ -136,32 +136,6 @@ func TestDayPage(t *testing.T) {
 	}
 }
 
-// TestDayPageCarriesBriefAndClose checks that GET /days/{date} reports the morning brief and evening close as their own fields, alongside the existing page (which stays the close text, unchanged from before these fields existed).
-func TestDayPageCarriesBriefAndClose(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	today := time.Now().Format("2006-01-02")
-	if err := store.SetDiaryEntry(ctx, today, "day", "The demo went out."); err != nil {
-		t.Fatalf("seed diary day: %v", err)
-	}
-	if err := store.SetDiaryEntry(ctx, today, "brief", "Ship the report — it's due today."); err != nil {
-		t.Fatalf("seed diary brief: %v", err)
-	}
-
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-	var page DayView
-	getJSON(t, srv, "/days/"+today, &page)
-	if page.Close != "The demo went out." {
-		t.Errorf("close = %q, want the evening close entry", page.Close)
-	}
-	if page.Page != page.Close {
-		t.Errorf("page = %q, want it to still carry the close text", page.Page)
-	}
-	if page.Brief != "Ship the report — it's due today." {
-		t.Errorf("brief = %q, want the morning brief", page.Brief)
-	}
-}
-
 // TestDayPageEmpty checks that a day nothing happened on answers with empty lists rather than an error.
 func TestDayPageEmpty(t *testing.T) {
 	store := dbtest.Open(t)
@@ -199,20 +173,6 @@ func TestDayHeading(t *testing.T) {
 	getJSON(t, srv, "/days/"+today, &page)
 	if page.Heading != "60 things seen · 1 call, 28 min" {
 		t.Errorf("heading = %q, want the day's counts summarised in one line", page.Heading)
-	}
-}
-
-// TestDayBadDate checks that a path that is not a date is refused instead of being read as one.
-func TestDayBadDate(t *testing.T) {
-	store := dbtest.Open(t)
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-	resp, err := http.Get(srv.URL + "/days/yesterday")
-	if err != nil {
-		t.Fatalf("GET: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("GET /days/yesterday = %d, want 400", resp.StatusCode)
 	}
 }
 

@@ -105,6 +105,12 @@ type Store interface {
 	ActRuns(ctx context.Context, limit int) ([]db.ActRun, error)
 	LogNote(ctx context.Context, content, kind string) (int64, error)
 
+	// The lessons the screen runs wrote, which the lessons stage merges and drops.
+	Lessons(ctx context.Context) ([]db.Lesson, error)
+	MergeLessons(ctx context.Context, from []int64, lesson string) (int64, error)
+	DropLessons(ctx context.Context, ids []int64) error
+	CommitLessonsStage(ctx context.Context, night string) error
+
 	// CloseDoneActionItems closes the open tasks that a meeting, a day's page or a compiled note says are finished, and reports how many moved.
 	CloseDoneActionItems(ctx context.Context, since time.Time) (int, error)
 
@@ -427,6 +433,18 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 			}
 			if err := r.store.CommitProceduresStage(ctx, night); err != nil {
 				slog.Warn("dreaming: procedures stage did not commit its token", "night", night, "error", err)
+			}
+		}
+	}
+
+	// Soft like the procedures stage: lessons left unconsolidated for a night are still shown, so a failure here must not cost the night its morning report.
+	if !slices.Contains(done, db.StageLessons) {
+		if rep, err := r.lessonsStage(ctx, night); err != nil {
+			slog.Warn("dreaming: lessons stage failed", "night", night, "error", err)
+		} else {
+			slog.Info("dreaming: lessons stage finished", "night", night, "apps", rep.apps, "merged", rep.merged, "dropped", rep.dropped)
+			if err := r.store.CommitLessonsStage(ctx, night); err != nil {
+				slog.Warn("dreaming: lessons stage did not commit its token", "night", night, "error", err)
 			}
 		}
 	}

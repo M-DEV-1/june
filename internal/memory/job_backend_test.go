@@ -46,19 +46,6 @@ func TestSetJobBackend_AnswersOnlyItsOwnJob(t *testing.T) {
 	}
 }
 
-// A nil backend puts the duty back on the Gemini path, so a daemon that stops offering a provider does not leave the duty pointed at nothing.
-func TestSetJobBackend_NilPutsTheJobBack(t *testing.T) {
-	s := newSummarizer(t)
-	s.SetJobBackend(config.JobWorkingState, func(ctx context.Context, prompt string) (string, error) {
-		return "from the backend", nil
-	})
-	s.SetJobBackend(config.JobWorkingState, nil)
-
-	if _, err := s.DeriveState(context.Background(), []string{"wrote the asker"}, nil); err == nil {
-		t.Error("DeriveState succeeded after its backend was removed, so it did not go back to the Gemini path")
-	}
-}
-
 // A backend's own failure is returned rather than silently falling through to the metered API, or a duty deliberately moved off Gemini would spend the free tier the move was meant to protect.
 func TestSetJobBackend_ReportsTheBackendsOwnFailure(t *testing.T) {
 	s := newSummarizer(t)

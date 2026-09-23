@@ -300,8 +300,8 @@ func (s *Scheduler) chose(ctx context.Context, n Notice, key string) {
 	}
 }
 
-// snooze puts a notice away until later and tells the window it has gone. Input: the notice and the pressed snooze button's key. Output: the store's error when the snooze could not be written, so the route that asked answers with a failure instead of a 200 that snoozed nothing; nil once it is stored.
-func (s *Scheduler) snooze(ctx context.Context, n Notice, key string) error {
+// snooze puts a notice away until later. Input: the notice and the pressed snooze button's key. Output: the store's error when the snooze could not be written, so the route that asked answers with a failure instead of a 200 that snoozed nothing; nil once it is stored, with n's Action set to "snoozed" and its Until to the moment it comes back, for Act to tell the window.
+func (s *Scheduler) snooze(ctx context.Context, n *Notice, key string) error {
 	due := snoozeUntil(s.now(), key)
 	if _, err := s.store.AddSnooze(ctx, n.Kind, n.ID, n.Title, n.Body, due); err != nil {
 		slog.Warn("could not snooze a notice", "kind", n.Kind, "id", n.ID, "error", err)
@@ -309,7 +309,6 @@ func (s *Scheduler) snooze(ctx context.Context, n Notice, key string) error {
 	}
 	n.Action = "snoozed"
 	n.Until = due.Format(time.RFC3339)
-	sendNotice(n)
 	return nil
 }
 
@@ -324,8 +323,6 @@ func (s *Scheduler) markDone(ctx context.Context, n Notice) error {
 		slog.Warn("could not cancel a done notice's pending snooze", "kind", n.Kind, "id", n.ID, "error", err)
 	}
 	slog.Info("notice cleared from its notification", "kind", n.Kind, "id", n.ID)
-	n.Action = "done"
-	sendNotice(n)
 	return nil
 }
 
@@ -381,32 +378,41 @@ var ErrTaskGone = errors.New("the task this notice named no longer exists")
 
 // Act applies one notice button exactly as pressing it on the desktop notification would. POST /notices/{kind}/{id}/action calls this directly, and chose (a D-Bus press) calls it too, for Done and the three snooze buttons — the one path both surfaces answer through, so a task closed or snoozed from either takes the same code. Input: kind and id name the notice ("" for one with no task or place behind it, such as a brief), title and body are what a snooze needs to re-fire the notice later, and action is "done", "hour", "evening" or "tomorrow". Output: ErrBadNoticeAction for any other action string, whatever markDone returned (ErrTaskGone included) for "done", the store's error when a snooze could not be written, else nil.
 // Once the action is applied, this also closes the notice's own desktop banner, if any: without it, a done or snoozed task answered from the window would leave its notification sitting on screen asking the same question a second time. A D-Bus press closing its own already-closing banner a second time this way is harmless — Close is a no-op once the key is gone.
+// A press that took is also sent back to the window as the same notice with its action set, which is what takes the buttons off the window's card and the hover's. Every path sends it here, once: until 2026-09-23 only Done and the snoozes did, so an answer to a question or a meeting's Start recording left its buttons up, and a second press ran the action again.
 func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action string) error {
 	n := Notice{Title: title, Body: body, Kind: kind, ID: id}
-	// A notice that asked a question of its own is answered by the goroutine waiting on it, whatever its button was called: that is what carries "dropped" and "low", neither of them one of the four this switch knows, back to the stale-item question. Nothing else changes — a key that notice never offered falls through to the switch and is refused there, and there is no banner to close, since a waiter is only registered when a window took the notice.
-	if deliverAnswer(noticeKey(n), action) {
-		s.closeBanner(n)
+	err := s.apply(ctx, &n, action)
+	if errors.Is(err, ErrBadNoticeAction) {
+		return err
+	}
+	s.closeBanner(n)
+	if err == nil {
+		sendNotice(n)
+	}
+	return err
+}
+
+// apply runs one pressed button for Act. Input: the notice, whose Action is set to the pressed key ("snoozed" and Until for a snooze) for Act to send on, and the key. Output: ErrBadNoticeAction for a key nothing answers, otherwise whatever running the button returned.
+func (s *Scheduler) apply(ctx context.Context, n *Notice, action string) error {
+	n.Action = action
+	// A notice that asked a question of its own is answered by the goroutine waiting on it, whatever its button was called: that is what carries "dropped" and "low", neither of them one of the four this switch knows, back to the stale-item question. A key that notice never offered falls through to the switch and is refused there.
+	if deliverAnswer(noticeKey(*n), action) {
 		return nil
 	}
 	// Nobody was waiting, which happens whenever the question's goroutine has already given up, the daemon has restarted since the card was drawn, or the card was drawn on a second surface. The button still has to work, so the notice's own registered action runs instead.
-	if do := noticeActionFor(kind, id, action); do != nil {
-		slog.Info("notice: no goroutine was waiting, doing what the button asks for directly", "kind", kind, "action", action)
-		err := do()
-		s.closeBanner(n)
-		return err
+	if do := noticeActionFor(n.Kind, n.ID, action); do != nil {
+		slog.Info("notice: no goroutine was waiting, doing what the button asks for directly", "kind", n.Kind, "action", action)
+		return do()
 	}
-	slog.Debug("notice: no goroutine is waiting on this press and nothing is registered for it", "key", noticeKey(n), "action", action, "waiting", waitingKeys())
-	var err error
+	slog.Debug("notice: no goroutine is waiting on this press and nothing is registered for it", "key", noticeKey(*n), "action", action, "waiting", waitingKeys())
 	switch action {
 	case actionDone:
-		err = s.markDone(ctx, n)
+		return s.markDone(ctx, *n)
 	case actionHour, actionEvening, actionTomorrow:
-		err = s.snooze(ctx, n, action)
+		return s.snooze(ctx, n, action)
 	default:
 		return ErrBadNoticeAction
 	}
-	s.closeBanner(n)
-	return err
 }
 
 // closeBanner dismisses one notice's own desktop banner once its button has been applied, so a question answered on one surface stops asking itself on the other. Input: the notice. Output: none; a failure is logged and nothing else, since the press it would be reported on has already been dealt with.

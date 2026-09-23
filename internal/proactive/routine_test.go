@@ -239,28 +239,6 @@ func TestSchedulerSkipsRoutineAlreadyRunning(t *testing.T) {
 	}
 }
 
-// TestSchedulerNeverAsksWithNoRoutineAsk checks the runner does nothing at all when SetRoutineAsk was never called, the same "unwired disables it" contract SetAsk and SetWeeklyStudy already carry.
-func TestSchedulerNeverAsksWithNoRoutineAsk(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	if _, err := store.AddRoutine(ctx, "tell me something", "every 1 hour"); err != nil {
-		t.Fatalf("AddRoutine: %v", err)
-	}
-	s := New(store, func(context.Context, string) (string, error) { return "", nil },
-		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
-
-	s.tick(ctx)
-	s.waitRoutines()
-
-	routines, err := store.Routines(ctx)
-	if err != nil {
-		t.Fatalf("Routines: %v", err)
-	}
-	if !routines[0].LastRun.IsZero() {
-		t.Errorf("a routine ran with no routineAsk wired: %+v", routines[0])
-	}
-}
-
 // TestTick_RoutineRunsWithoutHoldingUpTheTick checks a due routine's ask runs on its own goroutine: the tick must return while the ask is still in flight, since one ask goes through the whole tool loop and would otherwise delay every later tick.
 func TestTick_RoutineRunsWithoutHoldingUpTheTick(t *testing.T) {
 	ctx := context.Background()

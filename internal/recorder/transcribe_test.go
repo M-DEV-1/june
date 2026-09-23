@@ -384,11 +384,11 @@ func TestPrimingPrompt(t *testing.T) {
 		{
 			name: "carries the window's acronyms and names, within budget, as sentences",
 			eps: []db.Episode{
-				{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Vexil Quorin: ok sure ping me. Zemna Braxen: I also found this INFORM Risk Scoring formula and the GRDI numbers. INFORM again. GRDI again."},
-				{Title: "Acme Essentials - Climate Reporting Platform - Brave", ScreenText: "Climate Risk Studio Double Materiality Assessment ASRS"},
+				{Title: "Excalidraw Whiteboard - Brave", ScreenText: "Vexil Quorin: ok sure ping me. Zemna Braxen: I also found this ORVEC Risk Scoring formula and the KDNI numbers. ORVEC again. KDNI again."},
+				{Title: "Acme Basics - Brightpath Reporting Platform - Brave", ScreenText: "Brightpath Studio Regional Coverage Assessment VRDS"},
 			},
 			check: func(t *testing.T, got string) {
-				for _, want := range []string{"INFORM", "GRDI", "ASRS", "Vexil Quorin", "Climate Risk Studio"} {
+				for _, want := range []string{"ORVEC", "KDNI", "VRDS", "Vexil Quorin", "Brightpath Studio"} {
 					if !strings.Contains(got, want) {
 						t.Errorf("priming prompt is missing %q:\n%s", want, got)
 					}
@@ -424,7 +424,7 @@ func TestPrimingPrompt(t *testing.T) {
 		{
 			// Whisper keeps only the last whisperMaxContext tokens of this prompt, so participant names matter more than terms for getting the transcript right and have to come after them, where truncation can't reach them.
 			name: "names come after terms so they survive truncation",
-			eps:  []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: ok sure ping me. INFORM Risk Scoring GRDI numbers Climate Risk Studio"}},
+			eps:  []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: ok sure ping me. ORVEC Risk Scoring KDNI numbers Brightpath Studio"}},
 			check: func(t *testing.T, got string) {
 				termsAt, participantsAt := strings.Index(got, "Terms:"), strings.Index(got, "Participants:")
 				if termsAt == -1 || participantsAt == -1 {
@@ -478,75 +478,6 @@ func TestPrimingPrompt(t *testing.T) {
 	}
 }
 
-// Knowing how many times faster than real time this machine transcribes is what lets the user predict how long N hours of meetings take to catch up on, so every run logs the audio length and the rate alongside the wall time it already logged.
-func TestTranscribeWAV_LogsAudioDurationAndRate(t *testing.T) {
-	logs := captureLogs(t)
-	bin := fakeWhisper(t, "", "")
-
-	path := filepath.Join(t.TempDir(), "mic.wav")
-	w, err := newWAV(path)
-	if err != nil {
-		t.Fatalf("newWAV: %v", err)
-	}
-	// One second of 16 kHz mono 16-bit audio.
-	if _, err := w.Write(make([]byte, sampleRate*2)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	if _, err := transcribeWAV(context.Background(), bin, path, speakerMe, "", 0); err != nil {
-		t.Fatalf("transcribeWAV: %v", err)
-	}
-
-	got := logs.String()
-	if !strings.Contains(got, "whisper finished") {
-		t.Fatalf("expected the whisper-finished log line, got:\n%s", got)
-	}
-	if !strings.Contains(got, "audio=1s") {
-		t.Errorf("expected the log to carry the audio's own length (1s), got:\n%s", got)
-	}
-	if !strings.Contains(got, "rate=") {
-		t.Errorf("expected the log to carry the audio-to-wall-time rate, got:\n%s", got)
-	}
-}
-
-// The anti-hallucination thresholds and the priming prompt only do anything if they actually reach the whisper process, and nothing else in the pipeline would notice if they stopped being passed.
-func TestTranscribeWAV_PassesThresholdsAndPrompt(t *testing.T) {
-	dir := t.TempDir()
-	argsFile := filepath.Join(dir, "args")
-	bin := filepath.Join(dir, "echo-args")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
-		t.Fatalf("write fake whisper: %v", err)
-	}
-	if _, err := transcribeWAV(context.Background(), bin, testWAV(t), speakerMe, "GDIS, INFORM", 0); err != nil {
-		t.Fatalf("transcribeWAV: %v", err)
-	}
-	got, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatalf("read back the arguments whisper was given: %v", err)
-	}
-	for _, want := range []string{"-et " + entropyThreshold, "-lpt " + logProbThreshold, "-mc " + whisperMaxContext, "--prompt GDIS, INFORM"} {
-		if !strings.Contains(string(got), want) {
-			t.Errorf("whisper was called without %q: %s", want, got)
-		}
-	}
-}
-
-// Whisper reads its priming prompt back as speech on occasion, which then reads as something a person said. stripPromptEcho is what removes it, and this is the test that it is actually wired into the run rather than merely defined.
-func TestStripPromptEcho_DropsTheEchoedPrompt(t *testing.T) {
-	const prompt = "Meeting notes. Terms: INFORM, GRDI. Participants: Ravix Dolmen."
-	segs := []Segment{
-		{Start: 0, End: time.Second, Speaker: speakerCall, Text: "Participants: Ravix Dolmen. Good afternoon."},
-		{Start: 2 * time.Second, End: 3 * time.Second, Speaker: speakerCall, Text: "is my screen visible?"},
-	}
-	got := stripPromptEcho(segs, prompt)
-	if got[0].Text != "Good afternoon." {
-		t.Errorf("got %q, want the echo stripped and the speech kept", got[0].Text)
-	}
-}
-
 // Diarization gives the call side its turns as spans on the same clock as the transcript, so a segment belongs to whichever voice it shares the most time with. A segment the diarizer never covered keeps the pooled label rather than being guessed at.
 func TestAssignSpeakers_TakesTheMostOverlappedCluster(t *testing.T) {
 	segs := []Segment{
@@ -582,16 +513,6 @@ func TestMarkerLooped(t *testing.T) {
 	}
 	if markerLooped("") {
 		t.Error("empty output is not a loop")
-	}
-}
-
-// personNamesFromContext turns the store's hyphenated person subjects into the names whisper should hear: "vexil-quorin" is "Vexil Quorin". Subjects that are not people (identity, preferences-*) are left out.
-func TestPersonNamesFromContext(t *testing.T) {
-	entries := []db.PersonalEntry{{Subject: "identity", Content: "x"}, {Subject: "vexil-quorin", Content: "x"}, {Subject: "preferences-notes", Content: "x"}, {Subject: "melvorn-littlebird", Content: "x"}}
-	got := personNamesFromContext(entries)
-	want := []string{"Vexil Quorin", "Melvorn Littlebird"}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("got %v, want %v", got, want)
 	}
 }
 

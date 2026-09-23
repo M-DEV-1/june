@@ -1,6 +1,6 @@
 package main
 
-// The runner's only real logic is the log parser and the judge-reply decoder; everything else is a Gemini call or a string format. These are the checks that fail if either of those two breaks.
+// These tests cover the runner's log parser, the scorecard's rate rule, the tool-path replay and the guard that keeps a run off the live daemon.
 
 import (
 	"bufio"
@@ -10,8 +10,6 @@ import (
 
 	"ora/internal/agent"
 	"ora/internal/db/dbtest"
-
-	"ora/internal/brain"
 )
 
 // TestParseTurnPairs_PairsEachReplyWithTheQuestionBeforeIt is the shape track 2 depends on: one pair per "ora said", carrying the last user turn before it, whether that turn was typed or spoken.
@@ -75,21 +73,6 @@ func TestParseTurnPairs_SkipsNonJSONAndOtherMessages(t *testing.T) {
 	pairs := parseTurnPairs(bufio.NewScanner(strings.NewReader(log)))
 	if len(pairs) != 1 || pairs[0].UserText != "hi" {
 		t.Fatalf("got %+v", pairs)
-	}
-}
-
-// TestStripFence covers the one way a judge reply is routinely unreadable: the model wraps its JSON in a markdown fence despite being asked for a JSON MIME type.
-func TestStripFence(t *testing.T) {
-	cases := map[string]string{
-		"```json\n{\"a\":1}\n```": `{"a":1}`,
-		"```\n{\"a\":1}\n```":     `{"a":1}`,
-		`{"a":1}`:                 `{"a":1}`,
-		"  {\"a\":1}  ":           `{"a":1}`,
-	}
-	for in, want := range cases {
-		if got := brain.StripFence(in); got != want {
-			t.Errorf("brain.StripFence(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 

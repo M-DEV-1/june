@@ -270,7 +270,7 @@ func TestTick_ReplayRunsLastAfterCompact(t *testing.T) {
 	if !ok || !run.Finished {
 		t.Fatalf("run not finished: %+v ok=%v", run, ok)
 	}
-	if run.StagesDone != "hyp und compact replay procedures prune" {
+	if run.StagesDone != "hyp und compact replay procedures lessons prune" {
 		t.Errorf("stages_done = %q, want replay after compact and the pruning stage last", run.StagesDone)
 	}
 	entry, _ := store.DiaryEntry(ctx, night, "dream")

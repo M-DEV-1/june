@@ -134,7 +134,7 @@ func namesSomebodyElse(text string) bool {
 	return false
 }
 
-// capitalisedName reports whether a word could be somebody's name: at least two letters, all of them letters, and the first one upper case. An acronym in caps ("PR", "TCFD") is left in, since the check that matters is the verb that follows it.
+// capitalisedName reports whether a word could be somebody's name: at least two letters, all of them letters, and the first one upper case. An acronym in caps ("PR", "NDA") is left in, since the check that matters is the verb that follows it.
 func capitalisedName(word string) bool {
 	if len([]rune(word)) < 2 {
 		return false
@@ -215,7 +215,7 @@ func splitBullet(bullet string) (owner, text string, ok bool) {
 	return owner, text, true
 }
 
-// doneVia separates an action note's priority from the evidence that closed it, as in "[done/normal via Daily AI Sprint Standup 2026-09-04]". A phrase rather than a symbol so a hand-edited line still reads as a sentence.
+// doneVia separates an action note's priority from the evidence that closed it, as in "[done/normal via Daily Platform Sprint Standup 2026-09-04]". A phrase rather than a symbol so a hand-edited line still reads as a sentence.
 const doneVia = " via "
 
 // raisedFormat is how an action note carries the date its meeting happened — the same local calendar-day key the diary and the dreaming loop use.

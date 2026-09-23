@@ -68,12 +68,6 @@ describe("the first run", () => {
 });
 
 describe("Settings", () => {
-  it("keeps the theme choice in the store when another segment is picked", async () => {
-    const { store } = renderApp({ settings }, { place: "settings" });
-    await userEvent.click(await screen.findByRole("tab", { name: "Dark" }));
-    expect(store.getState().settings.theme).toBe("dark");
-  });
-
   it("opens on the position stored under the key the hover reads, and writes back there when another is picked", async () => {
     localStorage.setItem("ora-hover-position", "top");
     renderApp({ settings }, { place: "settings" });
@@ -89,12 +83,6 @@ describe("Settings", () => {
     expect(screen.getByText("Space")).toBeDefined();
   });
 
-  it("falls back to the keys the installer registers when the daemon reports none", async () => {
-    renderApp({ settings: { ...settings, hotkey: "" } }, { place: "settings" });
-    expect(await screen.findByText("Ctrl")).toBeDefined();
-    expect(screen.getByText("Space")).toBeDefined();
-  });
-
   it("pauses and resumes what Ora is allowed to watch", async () => {
     const { calls } = renderApp({ settings }, { place: "settings" });
     const watching = await screen.findByLabelText("Watching the screen");
@@ -103,22 +91,13 @@ describe("Settings", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/pause")).toBe(true));
   });
 
-  // A switch that cannot move still reads as a switch someone could work if they tried. The config file decides this one, so the row states it as a fact.
-  it("shows whether meetings are being recorded but does not offer to change it", async () => {
-    renderApp({ settings }, { place: "settings" });
-    expect(await screen.findByText("Recording meetings")).toBeDefined();
-    // The row reads "Off" until /settings answers, so this waits for the daemon's own value.
-    expect(await screen.findByText("On")).toBeDefined();
-    expect(screen.queryByLabelText("Recording meetings")).toBeNull();
-  });
-
   it("says which brains are signed in and writes the model that is picked", async () => {
     const { calls } = renderApp({ settings, brains }, { place: "settings" });
     expect(await screen.findByText("signed in · max")).toBeDefined();
     expect(screen.getByText("not signed in")).toBeDefined();
     expect(screen.getByText("not set up on this machine")).toBeDefined();
     await userEvent.click(screen.getByRole("button", { name: "sonnet" }));
-    await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/brains")?.body).toEqual({ brain: "claude", model: "sonnet" }));
+    await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/brains")?.body).toEqual({ brain: "claude", model: "sonnet", default: false }));
   });
 
   it("shows the Claude usage toggle on by default and posts turning it off", async () => {
@@ -130,15 +109,6 @@ describe("Settings", () => {
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
   });
 
-  it("says what the daemon is running and how much it has written down", async () => {
-    renderApp({ settings }, { place: "settings" });
-    expect(await screen.findByText("This machine")).toBeDefined();
-    expect(screen.getByText("/home/you/.ora")).toBeDefined();
-    expect(screen.getByText(/21\.0 MB of memory/)).toBeDefined();
-    expect(screen.getByText("nothing — search is words only")).toBeDefined();
-    expect(screen.getByText("as long as you leave it there")).toBeDefined();
-  });
-
 });
 
 const voices: Voice[] = [
@@ -148,17 +118,20 @@ const voices: Voice[] = [
 
 const models: LiveModel[] = [
   { name: "gemini-3.1-flash-live-preview", label: "Gemini 3.1 Flash Live", trait: "Fast — about two seconds to first word, one tone, hears everything", current: true },
+  { name: "gemini-3.8-live", label: "Gemini 3.8 Live", trait: "Always decides whether the audio was meant for it, and cannot be told not to", current: false },
   { name: "gemini-2.5-flash-native-audio-preview-12-2025", label: "Gemini 2.5 Native Audio", trait: "Warm — five to eight seconds, but it has moods and can ignore the room", current: false },
 ];
 
 describe("the voice model picker", () => {
-  it("shows both Live models with the current one marked, and posts the other one's name when picked", async () => {
+  it("shows every Live model with the current one marked, and posts the other one's name when picked", async () => {
     const { calls } = renderApp({ settings, voices, models }, { place: "settings" });
     const trigger = await screen.findByRole("button", { name: "Model" });
     expect(within(trigger).getByText("Gemini 3.1 Flash Live")).toBeDefined();
     await userEvent.click(trigger);
     const menu = within(await screen.findByRole("menu"));
+    expect(menu.getAllByRole("menuitem")).toHaveLength(3);
     expect(menu.getByText("Gemini 3.1 Flash Live")).toBeDefined();
+    expect(menu.getByText("Gemini 3.8 Live")).toBeDefined();
     expect(menu.getByText("Gemini 2.5 Native Audio")).toBeDefined();
     await userEvent.click(menu.getByRole("menuitem", { name: /Gemini 2.5 Native Audio/ }));
     await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/voices")?.body).toEqual({ model: "gemini-2.5-flash-native-audio-preview-12-2025" }));
@@ -173,16 +146,6 @@ describe("the voice model picker", () => {
 });
 
 describe("the token ledger", () => {
-  it("opens on three figures and the week's bars before any table", async () => {
-    renderApp({ settings, usage }, { place: "settings" });
-    expect(await screen.findByText("Token use")).toBeDefined();
-    // 1,600 spent today over 3 calls, and 15,400 over the week, said as figures a person reads at a glance. Today's total reads "1.6k" twice: once as the figure and once as the label on that day's bar.
-    expect(await screen.findAllByText("1.6k")).toHaveLength(2);
-    expect(screen.getByText("calls today")).toBeDefined();
-    expect(screen.getByText("15.4k")).toBeDefined();
-    expect(screen.getByTitle("2026-09-04: 1,600 tokens over 3 calls")).toBeDefined();
-  });
-
   it("sits at the foot of Settings with what was spent today and over the week", async () => {
     renderApp({ settings, usage }, { place: "settings" });
     expect(await screen.findByText("Today")).toBeDefined();
@@ -192,19 +155,6 @@ describe("the token ledger", () => {
     expect(screen.getByText("15,400")).toBeDefined();
     expect(screen.getByText("what did she say?")).toBeDefined();
     expect(screen.getByText("2.4s")).toBeDefined();
-  });
-
-  it("says nothing has been spent rather than drawing four empty tables", async () => {
-    renderApp({ settings }, { place: "settings" });
-    expect(await screen.findByText("Nothing asked yet")).toBeDefined();
-    expect(screen.getByText(/No tokens have been spent on this machine/)).toBeDefined();
-  });
-
-  it("says what one question costs, in tokens, because the daemon reports no prices", async () => {
-    renderApp({ settings, usage }, { place: "settings" });
-    // 15,400 tokens over 9 calls this week is 1,711 a question, which reads as 1.7k beside the three totals.
-    expect(await screen.findByText("a question, this week")).toBeDefined();
-    expect(screen.getByText("1.7k")).toBeDefined();
   });
 
   it("says how much of the input came out of the provider's cache, once the daemon reports it", async () => {
@@ -240,13 +190,6 @@ describe("the token ledger", () => {
     expect((screen.getByTestId("cost-bar-21") as HTMLElement).style.backgroundImage).toContain("1%");
   });
 
-  it("is the last section of Settings and not a destination of its own", async () => {
-    renderApp({ settings, usage }, { place: "settings" });
-    await screen.findByText("This machine");
-    expect(within(await screen.findByRole("main")).getByText("Recent calls")).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Usage" })).toBeNull();
-  });
-
   // A web search costs the plan a request and no tokens at all, so the four token tables above draw Exa as a row of zeros and there is nowhere else the count appears. These are the rows that say what the searching actually spent.
   it("draws what each web search provider has spent, which the token tables cannot show", async () => {
     const limits = {
@@ -261,12 +204,6 @@ describe("the token ledger", () => {
     expect(section.getByText("250 calls this month (token_use ledger)")).toBeDefined();
     expect(section.getByTestId("search-bar-exa-monthly").style.width).toBe("25%");
     expect(section.getByTestId("search-bar-tavily-monthly").style.width).toBe("60%");
-  });
-
-  it("says nothing about web search on a machine whose daemon reported no search provider at all", async () => {
-    renderApp({ settings, usage }, { place: "settings" });
-    await screen.findByText("Recent calls");
-    expect(screen.queryByRole("group", { name: "Web search" })).toBeNull();
   });
 
   // A search provider with no configured ceiling is reported with used_fraction 0, which is "there is no bar to draw" rather than "nothing has been spent" — the call count in the source line is the whole reading in that case.

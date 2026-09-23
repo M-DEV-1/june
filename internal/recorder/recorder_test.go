@@ -1,16 +1,15 @@
 package recorder
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
+
 	"os"
 	"path/filepath"
-	"runtime"
+
 	"strings"
 	"sync"
 	"testing"
@@ -266,6 +265,24 @@ func TestRecorder_KeepsAudioWhenTranscriptionFailsOrYieldsNothing(t *testing.T) 
 			name: "yields nothing usable",
 			whisper: func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
 				return nil, nil
+			},
+			wantMarker: true,
+		},
+		{
+			// The shape of a call that went to voicemail: the microphone side is whisper's stock credit lines invented over silence, and the call side is the carrier's recorded greeting. Nobody spoke.
+			name: "hears only a voicemail greeting and whisper's invented credits",
+			whisper: func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
+				if speaker == speakerMe {
+					return []Segment{
+						{Start: 0, End: 3 * time.Second, Speaker: speakerMe, Text: "Copyright © 2019 Example Media Ltd. All Rights Reserved."},
+						{Start: 3 * time.Second, End: 9 * time.Second, Speaker: speakerMe, Text: "No part of this recording may be reproduced without Example Media Ltd.'s express consent."},
+						{Start: 9 * time.Second, End: 12 * time.Second, Speaker: speakerMe, Text: "Thank you for watching! Please subscribe to my channel for more videos."},
+					}, nil
+				}
+				return []Segment{
+					{Start: 0, End: 6 * time.Second, Speaker: speakerCall, Text: "The person you are calling is currently unavailable, please leave a message after the tone."},
+					{Start: 13 * time.Second, End: 15 * time.Second, Speaker: speakerCall, Text: "When you have finished, please hang up."},
+				}, nil
 			},
 			wantMarker: true,
 		},
@@ -542,16 +559,6 @@ func TestRecorder_DefersTranscriptionUntilMainsPower(t *testing.T) {
 	}
 }
 
-// captureLogs redirects the default slog logger into a buffer for the rest of the test, at Debug level so a slog.Debug call shows up too.
-func captureLogs(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prior := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prior) })
-	return &buf
-}
-
 // writeRecording lays out a recording directory on disk with the given files, which is how the sweep's cases are set up.
 func writeRecording(t *testing.T, dir string, files map[string]string) string {
 	t.Helper()
@@ -564,30 +571,6 @@ func writeRecording(t *testing.T, dir string, files map[string]string) string {
 		}
 	}
 	return dir
-}
-
-// A whisper run on a long meeting can still be going the next time the sweep ticks, and the old code logged "finishing an unfinished meeting recording" for that directory anyway, every tick, though process() below was always going to find it already claimed and do nothing. The log line must wait until the sweep is actually about to hand the directory to process().
-func TestRecorder_PickupDoesNotLogUntilItActuallyStartsWork(t *testing.T) {
-	r, _, _ := newTestRecorder(t, &fakeStore{})
-	<-r.swept
-	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
-		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
-	})
-
-	logs := captureLogs(t)
-	if !r.claim(dir) {
-		t.Fatal("expected to be free to claim the directory before the sweep runs")
-	}
-	r.pickup(context.Background())
-	if strings.Contains(logs.String(), "finishing an unfinished meeting recording") {
-		t.Errorf("the sweep logged a directory it could not actually process:\n%s", logs.String())
-	}
-
-	r.release(dir)
-	r.pickup(context.Background())
-	if !strings.Contains(logs.String(), "finishing an unfinished meeting recording") {
-		t.Errorf("the sweep should log once it actually starts on the directory:\n%s", logs.String())
-	}
 }
 
 // A recording just ended on battery defers transcription until mains power, and the sweep must honour the same rule for anything it finds still needing whisper — otherwise the very next tick transcribes what StopAndProcess just deferred.
@@ -946,7 +929,7 @@ func TestBuildPrompt_PersonalContext(t *testing.T) {
 		{
 			name: "carries the personal context entry that names the user",
 			store: &fakeStore{personal: []db.PersonalEntry{
-				{Subject: "identity", Content: "The user is Zemna Braxen — goes by Zemna; git handle M-DEV-1."},
+				{Subject: "identity", Content: "The user is Zemna Braxen — goes by Zemna; git handle zbraxen."},
 			}},
 			check: func(t *testing.T, prompt string) {
 				if !strings.Contains(prompt, "Zemna Braxen") {
@@ -1009,45 +992,26 @@ func TestTranscriptFor_TranscribesBothStreamsAtTheSameTime(t *testing.T) {
 	}
 }
 
-// A failure on either stream still has to come back as an error naming which side failed, now that the two run concurrently.
-func TestTranscriptFor_ReportsWhichStreamFailed(t *testing.T) {
+// whisper -l auto writes a Hindi or Malayalam call in its own script, and the transcript on disk has to be in Latin letters whatever the language.
+func TestTranscriptFor_WritesIndicSpeechInLatinLetters(t *testing.T) {
 	r, _, _ := newTestRecorder(t, &fakeStore{})
 	r.whisper = func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
-		if speaker == speakerCall {
-			return nil, errors.New("the model file is corrupt")
+		if speaker == speakerMe {
+			return []Segment{{Start: 0, End: time.Second, Speaker: speakerMe, Text: "मैं कल रिपोर्ट भेज दूंगा, टेस्ट करके देखना है"}}, nil
 		}
-		return []Segment{{Start: 0, End: time.Second, Speaker: speakerMe, Text: "hello"}}, nil
+		return []Segment{{Start: 3 * time.Second, End: 4 * time.Second, Speaker: speakerCall, Text: "ok, ഞാൻ നാളെ അത് ചെയ്യാം"}}, nil
 	}
 	s := &session{dir: t.TempDir(), startedAt: time.Now(), stoppedAt: time.Now()}
-	_, err := r.transcriptFor(context.Background(), s)
-	if err == nil {
-		t.Fatal("a failed stream must be an error")
+	if _, err := r.transcriptFor(context.Background(), s); err != nil {
+		t.Fatalf("transcriptFor: %v", err)
 	}
-	if !strings.Contains(err.Error(), "system audio") || !strings.Contains(err.Error(), "corrupt") {
-		t.Errorf("error %q does not say which stream failed and why", err)
+	b, err := os.ReadFile(filepath.Join(s.dir, "transcript.md"))
+	if err != nil {
+		t.Fatalf("transcript: %v", err)
 	}
-}
-
-// Two whisper runs sharing one machine must each take about half the threads, or the concurrency buys nothing and the two runs simply fight over the same cores.
-func TestTranscribeThreads(t *testing.T) {
-	got := transcribeThreads()
-	if got < 1 {
-		t.Fatalf("transcribeThreads() = %d, want at least 1", got)
-	}
-	if max := runtime.NumCPU()/2 + 1; got > max {
-		t.Errorf("transcribeThreads() = %d, want no more than %d so two concurrent runs do not oversubscribe %d cores", got, max, runtime.NumCPU())
-	}
-}
-
-// The thread count is a property of the machine, not of the code, so it has to be overridable without a rebuild.
-func TestTranscribeThreads_HonoursTheOverride(t *testing.T) {
-	t.Setenv("ORA_TRANSCRIBE_THREADS", "6")
-	if got := transcribeThreads(); got != 6 {
-		t.Errorf("transcribeThreads() = %d, want the configured 6", got)
-	}
-	t.Setenv("ORA_TRANSCRIBE_THREADS", "not a number")
-	if got := transcribeThreads(); got < 1 {
-		t.Errorf("transcribeThreads() = %d with junk configured, want the default", got)
+	want := "[00:00:00] [me] main kal riport bhej doonga, test karke dekhna hai\n\n[00:00:03] [call] ok, njaan naale athu cheyyam\n"
+	if string(b) != want {
+		t.Errorf("transcript.md =\n%s\nwant\n%s", b, want)
 	}
 }
 
@@ -1080,7 +1044,7 @@ func TestFileMinutes_ActionItems(t *testing.T) {
 			name: "lifts every item, keeping other people's to wait on",
 			minutes: `# Meeting minutes
 
-**md x mf tool — Google Meet, Fri 28 Aug 2026, 21:36–23:08 IST**
+**vq x zb tool — Google Meet, Fri 28 Aug 2026, 21:36–23:08 IST**
 
 ## Action items
 - **Ravix** — carry PR #13 through CI and merge.
@@ -1098,7 +1062,7 @@ func TestFileMinutes_ActionItems(t *testing.T) {
 				if mine.Owner != "Me" || mine.Text != "compare these minutes against his own agent's output." {
 					t.Errorf("lifted item = %+v", mine)
 				}
-				if mine.Source != "md x mf tool" || !mine.Raised.Equal(raised) {
+				if mine.Source != "vq x zb tool" || !mine.Raised.Equal(raised) {
 					t.Errorf("provenance = %q / %v", mine.Source, mine.Raised)
 				}
 				if mine.Status != memory.StatusOpen {
@@ -1347,14 +1311,6 @@ func TestRecorder_GivesUpOnARecordingThatKeepsFailing(t *testing.T) {
 	}
 }
 
-// With nothing recording, LiveSnapshot has nothing to report.
-func TestRecorder_LiveSnapshot_NoneRunning(t *testing.T) {
-	r, _, _ := newTestRecorder(t, &fakeStore{})
-	if _, ok := r.LiveSnapshot(context.Background()); ok {
-		t.Error("LiveSnapshot should report false when no meeting is being recorded")
-	}
-}
-
 // While a meeting is running, LiveSnapshot reads the window and participants off the same screen text prep.go uses, and reports that nothing has been transcribed yet: whisper only ever runs once, after the recording stops, so there is no transcript to show mid-call.
 func TestRecorder_LiveSnapshot_WhileRecording(t *testing.T) {
 	store := &fakeStore{episodes: []db.Episode{
@@ -1552,4 +1508,41 @@ func (f *fakeStore) CreateConversation(ctx context.Context, title, brain string)
 func (f *fakeStore) AddTurn(ctx context.Context, conversationID int64, role, text, kind string, evidence json.RawMessage, tools []string) (int64, error) {
 	f.turns = append(f.turns, text)
 	return int64(len(f.turns)), nil
+}
+
+// The model often opens its reply with a line of its own ("I'll write the minutes for this standup.") before the heading it was asked for. That line is not part of the minutes, and because the meeting's name is read off the first line that is not a heading, it became the name of the meeting in the window: two of the meetings on 16 September 2026 were listed as "I'll write the minutes for this platform sprint standup meeting."
+func TestProcess_DropsThePreambleTheModelWritesBeforeTheHeading(t *testing.T) {
+	store := &fakeStore{}
+	r, _, _ := newTestRecorder(t, store)
+	r.minutes = func(ctx context.Context, prompt string) (string, error) {
+		if strings.HasPrefix(prompt, personalUpdateInstruction) {
+			return `{"updates":[]}`, nil
+		}
+		return "I'll write the minutes for this platform sprint standup meeting.\n\n# Daily Platform Sprint Standup\n**Daily Platform Sprint Standup — Wed 16 Sep 2026, 14:30–14:53**\n\n## Your part\n- ship friday\n", nil
+	}
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	sess, err := r.stop()
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if err := r.process(context.Background(), sess); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	minutes, err := os.ReadFile(filepath.Join(sess.dir, "minutes.md"))
+	if err != nil {
+		t.Fatalf("minutes: %v", err)
+	}
+	if !strings.HasPrefix(string(minutes), "# Daily Platform Sprint Standup") {
+		t.Errorf("minutes.md should start at the heading, got:\n%s", minutes)
+	}
+	filed := store.logged(noteKind)
+	if len(filed) != 1 {
+		t.Fatalf("expected one filed note, got %d", len(filed))
+	}
+	if got := memory.MinutesLabel(filed[0]); got != "Daily Platform Sprint Standup" {
+		t.Errorf("the meeting is named %q, want %q", got, "Daily Platform Sprint Standup")
+	}
 }

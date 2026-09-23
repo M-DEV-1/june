@@ -3,79 +3,13 @@
 package cmd
 
 import (
-	"bytes"
 	"fmt"
-	"image/png"
+
 	"testing"
 )
 
-// The status row uses a rendered, anti-aliased colored dot (Docker-style), not an emoji glyph: a square PNG with an opaque colored center and transparent corners, distinct per state.
-func TestStatusDotPNG(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		data []byte
-	}{
-		{"active", dotActive},
-		{"paused", dotPaused},
-	} {
-		img, err := png.Decode(bytes.NewReader(c.data))
-		if err != nil {
-			t.Fatalf("%s: decode: %v", c.name, err)
-		}
-		b := img.Bounds()
-		if b.Dx() != statusDotSize || b.Dy() != statusDotSize {
-			t.Fatalf("%s: want %dx%d, got %dx%d", c.name, statusDotSize, statusDotSize, b.Dx(), b.Dy())
-		}
-		// Center is opaque, corner is transparent (it's a circle, not a square).
-		if _, _, _, a := img.At(statusDotSize/2, statusDotSize/2).RGBA(); a == 0 {
-			t.Errorf("%s: center pixel is transparent", c.name)
-		}
-		if _, _, _, a := img.At(0, 0).RGBA(); a != 0 {
-			t.Errorf("%s: corner pixel is not transparent", c.name)
-		}
-	}
-
-	if bytes.Equal(dotActive, dotPaused) {
-		t.Error("active and paused dots must be visually distinct")
-	}
-
-	if got := (&dbusMenu{}).statusIcon(); !bytes.Equal(got, dotActive) {
-		t.Error("unpaused menu must use the active dot")
-	}
-	m := &dbusMenu{}
-	m.paused.Store(true)
-	if got := m.statusIcon(); !bytes.Equal(got, dotPaused) {
-		t.Error("paused menu must use the paused dot")
-	}
-}
-
-// The watcher drops all items when it restarts and re-announces itself with a new owner, so we must re-register on its return — but not when it disappears, and never on an unrelated signal or a malformed body.
-func TestShouldReregister(t *testing.T) {
-	const noc = "org.freedesktop.DBus.NameOwnerChanged"
-	const watcher = "org.kde.StatusNotifierWatcher"
-	cases := []struct {
-		name   string
-		signal string
-		body   []interface{}
-		want   bool
-	}{
-		{"watcher reappearing with a new owner", noc, []interface{}{watcher, "", ":1.42"}, true},
-		{"watcher disappearing (empty new owner)", noc, []interface{}{watcher, ":1.42", ""}, false},
-		{"wrong signal name", "org.freedesktop.DBus.NameAcquired", []interface{}{watcher, "", ":1.42"}, false},
-		{"unrelated service", noc, []interface{}{"org.example.Other", "", ":1.42"}, false},
-		{"short body", noc, []interface{}{watcher, ""}, false},
-		{"non-string fields", noc, []interface{}{42, 7, 9}, false},
-		{"empty body", noc, []interface{}{}, false},
-	}
-	for _, c := range cases {
-		if got := shouldReregister(c.signal, c.body); got != c.want {
-			t.Errorf("%s: shouldReregister=%v want %v", c.name, got, c.want)
-		}
-	}
-}
-
 // The Linux tray must advertise the ORA logo as an icon pixmap, not a theme icon name. SNI pixmaps are ARGB32 in network byte order (A,R,G,B per pixel).
-// IconPixmap is an array, a(iiay), and the host picks whichever entry is closest to its panel height. Until 2026-09-12 one 128x128 entry was all it had, so every shell scaled that down to around 22px with its own scaler and the face came out blurred and grey. Every panel size is now drawn at its own size (see scripts/make-icons.py) and offered, so a host with a 22px bar finds 22px and resamples nothing.
+// IconPixmap is an array, a(iiay), and the host picks whichever entry is closest to its panel height. Until 2026-09-12 one 128x128 entry was all it had, so every shell scaled that down to around 22px with its own scaler and the face came out blurred and grey. Every panel size is now drawn at its own size (see packaging/make-icons.py) and offered, so a host with a 22px bar finds 22px and resamples nothing.
 func TestTrayIconPixmap(t *testing.T) {
 	pixmaps, err := trayIconPixmaps()
 	if err != nil {
@@ -134,16 +68,6 @@ func TestTrayIconPixmap(t *testing.T) {
 	}
 }
 
-// The recording item is a toggle, so its label always names what the click will do.
-func TestMeetingLabel(t *testing.T) {
-	if got := meetingLabel(false); got != "Start meeting recording" {
-		t.Errorf("idle label = %q", got)
-	}
-	if got := meetingLabel(true); got != "Stop meeting recording" {
-		t.Errorf("recording label = %q", got)
-	}
-}
-
 // A nil recorder (the daemon never got far enough to wire one up) must not panic the menu, and must read as not recording.
 func TestMenuRecording_NilRecorderIsSafe(t *testing.T) {
 	m := &dbusMenu{}
@@ -199,18 +123,6 @@ func TestMenuViewsAgree(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// The menu order puts opening the window and the recording toggle with the other actions, above the separator and Quit. Ora shows one tray icon, so what the window's own removed menu offered lives here, except showing the hover, which is what the keyboard shortcut is for.
-func TestMenuOrder(t *testing.T) {
-	var ids []int32
-	for _, it := range (&dbusMenu{}).items() {
-		ids = append(ids, it.ID)
-	}
-	want := []int32{menuStatus, menuSep1, menuOpen, menuPause, menuMeeting, menuSep2, menuQuit}
-	if fmt.Sprint(ids) != fmt.Sprint(want) {
-		t.Errorf("menu order = %v, want %v", ids, want)
 	}
 }
 

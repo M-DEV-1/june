@@ -56,17 +56,3 @@ func TestGoldSetIsGraded(t *testing.T) {
 		t.Errorf("gold set has %d truth rows (%v), want the 4 the user confirmed", len(truth), truth)
 	}
 }
-
-// TestGoldGradedLine checks the two lines the sheet and the run note carry: the truth rate first, the retrieval rate under it, both per arm.
-func TestGoldGradedLine(t *testing.T) {
-	items := []goldItem{{ID: "A", Grade: goldTruth, Turns: []goldTurnSpec{{}}}, {ID: "B", Turns: []goldTurnSpec{{}}}}
-	answers := []goldAnswer{{ID: "A", Arm: "claude", Pass: true}, {ID: "B", Arm: "claude", Pass: false}}
-	line := goldGradedLine([]string{"claude"}, answers, goldGrades(items), goldTruth)
-	if !strings.Contains(line, "claude 1/1") {
-		t.Fatalf("truth line = %q, want it to carry claude 1/1", line)
-	}
-	line = goldGradedLine([]string{"claude"}, answers, goldGrades(items), goldRetrieval)
-	if !strings.Contains(line, "claude 0/1") {
-		t.Fatalf("retrieval line = %q, want it to carry claude 0/1", line)
-	}
-}

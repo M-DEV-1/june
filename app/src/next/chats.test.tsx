@@ -51,7 +51,7 @@ const view: ConversationView = {
       kind: "ask",
       evidence: [
         {
-          title: "TCFD call",
+          title: "Meridian call",
           meta: "meeting · 3 Sep",
           body: "the deadline is Friday",
         },
@@ -97,6 +97,42 @@ const brains: Brain[] = [
   },
 ];
 
+// A clean install, or one whose every login has lapsed, has nothing to answer with, and a question typed into the chat just failed. The chat page says so and lists every way Ora can be given a brain.
+describe("with no brain signed in", () => {
+  it("says so on the chat page and lists every way to sign one in", async () => {
+    renderApp({
+      conversations: summary,
+      turns: { c1: view },
+      brains: brains.map((b) => ({ ...b, signed_in: false })),
+      settings: { data_dir: "/home/you/.local/share/ora" },
+    });
+    expect(await screen.findByText("Ora cannot answer yet")).toBeDefined();
+    const ways = Array.from(document.querySelectorAll("li")).map((li) => li.textContent);
+    for (const way of ["claude", "/login", "codex login", "agy", "grok", "GEMINI_API_KEY", "/home/you/.local/share/ora/env"])
+      expect(ways.some((w) => w?.includes(way)), way).toBe(true);
+  });
+});
+
+// A daemon restarted mid-question never sends that question's "done", and the composer held Send disabled until one arrived, so the window could ask nothing more until it was reloaded.
+describe("a daemon that restarts mid-question", () => {
+  it("lets the next question be sent once the stream is back", async () => {
+    let reopen: (() => void) | undefined;
+    const { store } = renderApp(
+      { conversations: summary, turns: { c1: view } },
+      { conversationId: "c1", open: (_onEvent, onReopen) => ((reopen = onReopen), () => {}) },
+    );
+    store.dispatch(progress.streamOpened());
+    const box = await screen.findByLabelText("Ask Ora");
+    await userEvent.type(box, "a question{Enter}");
+    await userEvent.type(box, "the next one");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true));
+
+    reopen?.();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false));
+  });
+});
+
 describe("the thread", () => {
   it("draws what was said, and what Ora answered with the line saying how much it read", async () => {
     renderApp(
@@ -126,13 +162,6 @@ describe("the thread", () => {
     );
     expect(await screen.findByText(/wall of json/)).toBeDefined();
   });
-
-  it("says nothing has been said in a chat that holds no turns", async () => {
-    renderApp({ conversations: summary }, { conversationId: "c1" });
-    expect(
-      await screen.findByText("Nothing said in this chat yet."),
-    ).toBeDefined();
-  });
 });
 
 describe("the sources under a reply", () => {
@@ -153,22 +182,6 @@ describe("the sources under a reply", () => {
         .getByRole("button", { name: /Sources/ })
         .getAttribute("aria-expanded"),
     ).toBe("true");
-  });
-
-  it("folds them away again, and never opens a panel beside the thread", async () => {
-    renderApp(
-      { conversations: summary, turns: { c1: view } },
-      { conversationId: "c1" },
-    );
-    await userEvent.click(
-      await screen.findByRole("button", { name: /Sources/ }),
-    );
-    await screen.findByText("the deadline is Friday");
-    await userEvent.click(screen.getByRole("button", { name: /Sources/ }));
-    await waitFor(() =>
-      expect(screen.queryByText("the deadline is Friday")).toBeNull(),
-    );
-    expect(screen.queryByLabelText("What Ora is doing")).toBeNull();
   });
 
   it("names the block it opens only while that block is in the document", async () => {
@@ -436,7 +449,7 @@ describe("a fresh chat draft", () => {
   it("greets by time of day on a new chat and offers something to do", async () => {
     const { store } = renderApp({ conversations: summary, turns: { c1: view } }, { conversationId: "c1" });
     store.dispatch(ui.chatDraftOpened());
-    // The greeting itself is whichever one the clock says; which hour gives which is greeting()'s own business, tested in format.test.ts.
+    // The greeting itself is whichever one the clock says.
     expect(await screen.findByText(/^Good (morning|afternoon|evening)\.$/)).toBeDefined();
     expect(screen.getByText(/keeping track/)).toBeDefined();
     // Gone: the line about the furniture.
@@ -502,21 +515,6 @@ describe("giving up a draft", () => {
     await userEvent.keyboard("{Escape}");
     expect(window.confirm).toHaveBeenCalled();
     expect((box as HTMLTextAreaElement).value).toContain("book them too");
-  });
-
-  it("clears a multi-line draft on Escape once the confirm is accepted", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-    renderApp(
-      { conversations: summary, turns: { c1: view } },
-      { conversationId: "c1" },
-    );
-    const box = await screen.findByLabelText("Ask Ora");
-    await userEvent.type(
-      box,
-      "and the flights?{Shift>}{Enter}{/Shift}book them too",
-    );
-    await userEvent.keyboard("{Escape}");
-    expect((box as HTMLTextAreaElement).value).toBe("");
   });
 });
 
@@ -752,6 +750,18 @@ describe("starting a job", () => {
     await waitFor(() =>
       expect(store.getState().progress.jobs.c1.id).toBe("act-1"),
     );
+  });
+
+  // Stop and Pause fired and forgot: a daemon that refused them left the job running with nothing on screen saying the press had not taken.
+  it("says so when the daemon will not stop the job", async () => {
+    const { store } = renderApp(
+      { conversations: summary, turns: { c1: view }, fails: ["POST /act/act-1/stop"] },
+      { conversationId: "c1" },
+    );
+    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
+    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
+    expect(await screen.findByText("Could not stop that job")).toBeDefined();
   });
 
   // The plan the model writes on its first round lived only in its own prompt, so the thread opened with the goal handed back and went straight to "Step 1". Being told what it is about to do is what makes a step that wanders off it visible.

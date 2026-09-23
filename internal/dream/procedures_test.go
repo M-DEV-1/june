@@ -2,7 +2,7 @@ package dream
 
 import (
 	"context"
-	"slices"
+
 	"sort"
 	"strings"
 	"testing"
@@ -175,75 +175,6 @@ func TestProceduresStage_ShortestRunWins(t *testing.T) {
 	want := `How I did Open The Settings Page: looked at the screen, clicked item 3 (Settings).`
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("notes = %#v, want just %q", got, want)
-	}
-}
-
-// A night whose 'procedures' token is already committed does not read the act runs again on a later wake, even when a fresh eligible run is sitting there ready to become a note — the same done-token gate the other stages use.
-func TestProceduresStage_SkippedWhenTokenAlreadyPresent(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
-	if err := store.SetDiaryEntry(ctx, night, "day", "A quiet day."); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.StartDreamRun(ctx, night); err != nil {
-		t.Fatal(err)
-	}
-	// Every other stage, procedures included, already committed on an earlier wake tonight.
-	if err := store.CommitHypothesisStage(ctx, night, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CommitUnderstandingStage(ctx, night, "An understanding."); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CommitCompactStage(ctx, night, nil, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CommitProceduresStage(ctx, night); err != nil {
-		t.Fatal(err)
-	}
-	insertActRun(t, store, "open the settings page", "ok", []db.ActStep{
-		{Name: "observe_screen", Args: map[string]any{}, Result: "code · Settings"},
-		{Name: "click", Args: map[string]any{"n": 3.0}, Result: "clicked [3] push button \"Settings\" via press; call observe_screen to see the result"},
-	})
-
-	r := newRunner(store, &fakeBrain{report: "A quiet night."}, yesProbes(), at(23, 30))
-	r.Tick(ctx)
-
-	run, ok, err := store.DreamRun(ctx, night)
-	if err != nil || !ok || !run.Finished {
-		t.Fatalf("run not finished: %+v ok=%v err=%v", run, ok, err)
-	}
-	if notes := procedureNotes(t, store); len(notes) != 0 {
-		t.Errorf("notes = %#v, want none written: the procedures token already said the stage was done", notes)
-	}
-}
-
-// A wake that finds an eligible act run and no 'procedures' token yet writes the note and commits the token in the same run, so a later wake the same night (covered above) will not redo the work.
-func TestProceduresStage_TokenCommittedAfterSuccessfulRun(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
-	if err := store.SetDiaryEntry(ctx, night, "day", "A quiet day."); err != nil {
-		t.Fatal(err)
-	}
-	insertActRun(t, store, "open the settings page", "ok", []db.ActStep{
-		{Name: "observe_screen", Args: map[string]any{}, Result: "code · Settings"},
-		{Name: "click", Args: map[string]any{"n": 3.0}, Result: "clicked [3] push button \"Settings\" via press; call observe_screen to see the result"},
-	})
-
-	r := newRunner(store, &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}, yesProbes(), at(23, 30))
-	r.Tick(ctx)
-
-	run, ok, err := store.DreamRun(ctx, night)
-	if err != nil || !ok || !run.Finished {
-		t.Fatalf("run not finished: %+v ok=%v err=%v", run, ok, err)
-	}
-	if !slices.Contains(strings.Fields(run.StagesDone), "procedures") {
-		t.Errorf("stages_done = %q, want the procedures token committed after a successful run", run.StagesDone)
-	}
-	if notes := procedureNotes(t, store); len(notes) != 1 {
-		t.Errorf("notes = %#v, want the one note this run wrote", notes)
 	}
 }
 

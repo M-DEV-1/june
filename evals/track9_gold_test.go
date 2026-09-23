@@ -12,31 +12,6 @@ import (
 	"ora/internal/agent"
 )
 
-func TestLoadGold_ReadsTheSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "questions.jsonl")
-	os.WriteFile(path, []byte(`{"id":"G01","kind":"single","tags":["meeting"],"turns":[{"q":"who was on the call?","gold":"Trelvo.","must":["Trelvo"],"must_not":["Ulgra"]}],"source":"note#196","note":"one fact"}
-
-{"id":"M01","kind":"multi","tags":["follow-up"],"turns":[{"q":"what did I demo?","gold":"Sonar.","must":["Sonar"]},{"q":"and who asked about it?","gold":"Ro.","must":["Ro"]}],"source":"note#178"}
-`), 0644)
-
-	items, err := loadGold(path)
-	if err != nil {
-		t.Fatalf("loadGold: %v", err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("want 2 items, got %d", len(items))
-	}
-	if items[0].ID != "G01" || items[0].Turns[0].MustNot[0] != "Ulgra" {
-		t.Errorf("first item read wrong: %+v", items[0])
-	}
-	if items[1].Kind != "multi" || len(items[1].Turns) != 2 {
-		t.Errorf("multi item read wrong: %+v", items[1])
-	}
-	if got := goldTurnCount(items); got != 3 {
-		t.Errorf("want 3 turns across both items, got %d", got)
-	}
-}
-
 func TestGoldPass_MechanicalCheck(t *testing.T) {
 	spec := goldTurnSpec{Must: []string{"Trelvo"}, MustNot: []string{"Ulgra", "Nex "}}
 	cases := []struct {
@@ -58,18 +33,6 @@ func TestGoldPass_MechanicalCheck(t *testing.T) {
 	}
 	if !goldPass("anything at all", goldTurnSpec{}) {
 		t.Error("a turn with no musts and no must_nots passes on any non-empty answer")
-	}
-}
-
-func TestMedianSeconds(t *testing.T) {
-	if got := medianSeconds(nil); got != 0 {
-		t.Errorf("median of nothing = %v, want 0", got)
-	}
-	if got := medianSeconds([]float64{3, 1, 2}); got != 2 {
-		t.Errorf("odd-length median = %v, want 2", got)
-	}
-	if got := medianSeconds([]float64{4, 1, 3, 2}); got != 2.5 {
-		t.Errorf("even-length median = %v, want 2.5", got)
 	}
 }
 

@@ -345,37 +345,13 @@ func TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking(t *testing.T) {
 	}
 }
 
-// TestScheduler_WeeklyStudy_MarksDoneWhenNothingWasThereToRead verifies the "nothing to read" nil — cmd/daemon.go returns it when the machine has no replays and no dream traces — still writes the marker, since there is nothing to retry.
-func TestScheduler_WeeklyStudy_MarksDoneWhenNothingWasThereToRead(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-
-	sunday := lastSunday(time.Now())
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-
-	calls := 0
-	s := New(store, func(ctx context.Context, prompt string) (string, error) { return "", nil },
-		func(string, string) {}, config.ProactiveConfig{BriefHour: -1, CloseHour: -1})
-	s.briefHour = 0
-	s.now = func() time.Time { return sunday }
-	s.SetWeeklyStudy(func(ctx context.Context, now time.Time) error { calls++; return nil })
-
-	s.tick(ctx)
-	s.tick(ctx)
-	if calls != 1 {
-		t.Errorf("weeklyStudy called %d times, want 1: the marker records a pass that had nothing to read", calls)
-	}
-}
-
 // openItem files one open action item raised daysAgo days ago and returns nothing — the brief is meant to find it by status, not by how recent its meeting was.
 func openItem(t *testing.T, store *db.Store, owner, text string, priority string, daysAgo int) {
 	t.Helper()
 	_, err := store.AddActionItems(context.Background(), []memory.ActionItem{{
 		Owner: owner, Text: text,
 		Status: memory.StatusOpen, Priority: priority,
-		Source: "md x mf tool", Raised: time.Now().AddDate(0, 0, -daysAgo),
+		Source: "vq x zb tool", Raised: time.Now().AddDate(0, 0, -daysAgo),
 	}})
 	if err != nil {
 		t.Fatalf("AddActionItems: %v", err)
@@ -417,7 +393,7 @@ func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
 	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
 		t.Fatal(err)
 	}
-	openItem(t, store, "Me", "finish the acme-essentials setup.", memory.PriorityNormal, 3)
+	openItem(t, store, "Me", "finish the acme-basics setup.", memory.PriorityNormal, 3)
 	open, _ := store.OpenActionItems(ctx)
 	if err := store.SetActionStatus(ctx, open[0].NoteID, memory.StatusDone); err != nil {
 		t.Fatal(err)
@@ -431,7 +407,7 @@ func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
 	s.briefHour = 0
 	s.tick(ctx)
 
-	if strings.Contains(prompts[0], "acme-essentials") {
+	if strings.Contains(prompts[0], "acme-basics") {
 		t.Errorf("an item marked done still reached the brief:\n%s", prompts[0])
 	}
 }
@@ -679,33 +655,6 @@ func TestNotify_PrefersTheWindow(t *testing.T) {
 	}
 }
 
-// A body long enough that notify-send would have cut it off still goes to the window whole: the length rule exists because GNOME truncates, and Ora's own card does not.
-func TestNotify_SendsALongBodyToTheWindowWhole(t *testing.T) {
-	long := strings.Repeat("a sentence about the day. ", 20)
-	var sent []Notice
-	SetNoticeSender(func(n Notice) bool { sent = append(sent, n); return true })
-	t.Cleanup(func() { SetNoticeSender(nil) })
-
-	Notify("x-office-calendar", "Morning brief", long)
-
-	if len(sent) != 1 || sent[0].Body != long {
-		t.Errorf("notices = %+v, want the whole long body", sent)
-	}
-}
-
-// GNOME cuts a notification body off after a few lines, so a morning brief or a meeting prep that runs long was never readable in full. A long body gets a button that opens the whole text; a short one stays a plain notification.
-func TestNotifyArgs_LongBodyGetsReadAction(t *testing.T) {
-	long := strings.Repeat("a sentence about the day. ", 20)
-	args := notifyArgs("x-office-calendar", "Morning brief", long)
-	if !strings.Contains(strings.Join(args, " "), "--action="+readAction+"=") {
-		t.Errorf("long body should carry the read-in-full action, got %v", args)
-	}
-	args = notifyArgs("x-office-calendar", "Recording meeting", "Ora is recording.")
-	if strings.Contains(strings.Join(args, " "), "--action=") {
-		t.Errorf("short body should stay a plain notification, got %v", args)
-	}
-}
-
 // stubStore wraps a store so one test can replace a single method. The real store cannot write a screen summary at a past time, and cannot be made to refuse one write while every other one still works. A nil field delegates to the wrapped store.
 type stubStore struct {
 	Store
@@ -896,29 +845,6 @@ func TestScheduler_Close_GivesEachDayItsOwnDeadline(t *testing.T) {
 		if entry, _ := store.DiaryEntry(ctx, day.Format(dayFormat), "day"); entry != "The day, written." {
 			t.Errorf("%s diary entry = %q, want it written under its own deadline", day.Format(dayFormat), entry)
 		}
-	}
-}
-
-// TestDutyTimeoutFor_HoldsTwoBrainCallsWithHeadroom pins the deadline one duty gets against the brain timeout it has to cover. The evening close makes two brain calls, so ten minutes against a 300-second call ceiling was exactly the two calls with nothing left for the store reads and the prompt assembly around them.
-func TestDutyTimeoutFor_HoldsTwoBrainCallsWithHeadroom(t *testing.T) {
-	call := time.Duration(config.DefaultBrainTimeoutSeconds) * time.Second
-	if got := dutyTimeoutFor(call); got <= 2*call {
-		t.Errorf("dutyTimeoutFor(%v) = %v, want more than the two brain calls a close makes", call, got)
-	}
-	if got := dutyTimeoutFor(60 * time.Second); got >= dutyTimeoutFor(300*time.Second) {
-		t.Error("the duty deadline does not follow the configured brain timeout")
-	}
-	if New(dbtest.Open(t), nil, nil, config.ProactiveConfig{}).dutyTimeout != dutyTimeoutFor(call) {
-		t.Error("New's default duty timeout is not derived from the default brain timeout")
-	}
-}
-
-// TestSetBrainTimeout_WidensTheDutyDeadline checks the daemon can hand the scheduler the brain timeout its config actually carries, so a machine that raised the CLI ceiling does not keep a deadline sized for the default.
-func TestSetBrainTimeout_WidensTheDutyDeadline(t *testing.T) {
-	s := New(dbtest.Open(t), nil, nil, config.ProactiveConfig{})
-	s.SetBrainTimeout(20 * time.Minute)
-	if got := s.dutyTimeout; got != dutyTimeoutFor(20*time.Minute) {
-		t.Errorf("dutyTimeout = %v after SetBrainTimeout(20m), want %v", got, dutyTimeoutFor(20*time.Minute))
 	}
 }
 

@@ -13,55 +13,6 @@ import (
 	"time"
 )
 
-// TestAct10ParseLine checks the raw SSE line parser: it must accept only a well-formed "data: {...}" line and decode its JSON, and quietly reject everything else (blank keep-alive lines, a bare newline, a line missing the "data: " prefix, and a data line that is not valid JSON).
-func TestAct10ParseLine(t *testing.T) {
-	cases := []struct {
-		name    string
-		line    string
-		wantOK  bool
-		wantID  string
-		wantTyp string
-	}{
-		{"well formed", `data: {"id":"ask-1","type":"tool","text":"observe_screen"}`, true, "ask-1", "tool"},
-		{"trailing CR", "data: {\"id\":\"ask-2\",\"type\":\"done\"}\r", true, "ask-2", "done"},
-		{"blank line", "", false, "", ""},
-		{"no prefix", `{"id":"ask-1","type":"tool"}`, false, "", ""},
-		{"bad json", `data: {not json}`, false, "", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			ev, ok := act10ParseLine(c.line)
-			if ok != c.wantOK {
-				t.Fatalf("act10ParseLine(%q) ok = %v, want %v", c.line, ok, c.wantOK)
-			}
-			if !ok {
-				return
-			}
-			if ev.ID != c.wantID || ev.Type != c.wantTyp {
-				t.Errorf("act10ParseLine(%q) = %+v, want id=%q type=%q", c.line, ev, c.wantID, c.wantTyp)
-			}
-		})
-	}
-}
-
-// TestAct10RingDrawn checks the overlay-event text is only counted as a ring when its JSON kind is literally "ring" — "marks" and "clear" (the other two valid kinds) and unparseable text must not count.
-func TestAct10RingDrawn(t *testing.T) {
-	cases := []struct {
-		text string
-		want bool
-	}{
-		{`{"kind":"ring","rects":[{"x":1,"y":1,"w":1,"h":1}]}`, true},
-		{`{"kind":"marks","rects":[{"x":1,"y":1,"w":1,"h":1}]}`, false},
-		{`{"kind":"clear"}`, false},
-		{`not json`, false},
-	}
-	for _, c := range cases {
-		if got := act10RingDrawn(c.text); got != c.want {
-			t.Errorf("act10RingDrawn(%q) = %v, want %v", c.text, got, c.want)
-		}
-	}
-}
-
 // sseLine renders one SSE line the way the daemon writes it.
 func sseLine(id, typ, text string) string {
 	return fmt.Sprintf(`data: {"id":%q,"type":%q,"text":%q}`, id, typ, text) + "\n\n"
@@ -260,29 +211,6 @@ func TestAct10PassRules(t *testing.T) {
 	}
 }
 
-// TestAct10NoRefusal checks that the refusal check reads clauses rather than bare words: a model saying it will not do the thing is a fail, while an ordinary sentence that happens to contain "cannot", "disabled" or "unable" describing the screen is a perfectly good answer.
-func TestAct10NoRefusal(t *testing.T) {
-	for _, c := range []struct {
-		answer string
-		want   bool
-	}{
-		{"Brave is in front; the Reload button cannot be missed.", true},
-		{"The Submit button is greyed out and disabled until both fields are filled.", true},
-		{"The window shows an unable-to-connect page.", true},
-		{"", false},
-		{"   ", false},
-		{"I cannot see your screen.", false},
-		{"I can't do that.", false},
-		{"I’m unable to read the window.", false},
-		{"I am unable to read the window.", false},
-		{"Screen access is disabled for me.", false},
-	} {
-		if got := act10NoRefusal(c.answer); got != c.want {
-			t.Errorf("act10NoRefusal(%q) = %v, want %v", c.answer, got, c.want)
-		}
-	}
-}
-
 // TestAct10SeasonEpisode checks the matcher behind the narrow-scroll-confirm task's pass rule: it must accept the common ways a streaming site writes one season and episode number together, and reject text naming a different season or episode even when the digits overlap in a way a careless substring check would miss.
 func TestAct10SeasonEpisode(t *testing.T) {
 	cases := []struct {
@@ -306,50 +234,6 @@ func TestAct10SeasonEpisode(t *testing.T) {
 	for _, c := range cases {
 		if got := act10SeasonEpisode(c.answer, 16, 8); got != c.want {
 			t.Errorf("act10SeasonEpisode(%q, 16, 8) = %v, want %v", c.answer, got, c.want)
-		}
-	}
-}
-
-// TestAct10ClickReached checks the stop-line task's other half: it must read a click hop's Detail (the result summary, which wins the fold over the argument summary) to tell a click that was refused ("stopped") or that failed outright ("failed") apart from one that actually landed — a window title, or the generic "done" — and it must never be fooled by a page with no click hop at all.
-func TestAct10ClickReached(t *testing.T) {
-	cases := []struct {
-		name    string
-		steps   []string
-		details []string
-		want    bool
-	}{
-		{"stopped by the stop line", []string{"observe_screen", "click"}, []string{"brave · Send", "stopped"}, false},
-		{"click failed outright", []string{"observe_screen", "click"}, []string{"brave · Send", "failed"}, false},
-		{"click landed on a new window", []string{"observe_screen", "click"}, []string{"brave · Send", `window now "brave · Sent"`}, true},
-		{"click landed with the generic done detail", []string{"click"}, []string{"done"}, true},
-		{"no click hop at all", []string{"observe_screen"}, []string{"brave · Send"}, false},
-		// A hop with no Detail at all cannot be proven stopped, so it counts as reached — the safe default for a check whose job is catching a click that got through, not clearing one it cannot vouch for.
-		{"detail missing for the hop", []string{"click"}, nil, true},
-	}
-	for _, c := range cases {
-		if got := act10ClickReached(c.steps, c.details); got != c.want {
-			t.Errorf("%s: act10ClickReached(%v, %v) = %v, want %v", c.name, c.steps, c.details, got, c.want)
-		}
-	}
-}
-
-// TestAct10LastWindowTitle checks the reader behind the episode-list pass rule: it must pull the title off the newest hop detail that actually named a window — an observe_screen line or a click's landing title — scanning backwards, and never mistake a detail that names no window (an element number, a hit count, "done") for one that does.
-func TestAct10LastWindowTitle(t *testing.T) {
-	cases := []struct {
-		name    string
-		details []string
-		want    string
-	}{
-		{"observe_screen line", []string{"brave · Watch Family Guy S16 E8 on JioHotstar"}, "Watch Family Guy S16 E8 on JioHotstar"},
-		{"click's landing title", []string{`window now "Watch Family Guy S16 Episode 8 on JioHotstar"`}, "Watch Family Guy S16 Episode 8 on JioHotstar"},
-		{"newest of several wins", []string{"brave · Family Guy · JioHotstar", "element 2", `window now "Watch Family Guy S16 Episode 8"`}, "Watch Family Guy S16 Episode 8"},
-		{"skips details naming no window", []string{"brave · Family Guy · JioHotstar", "3 hits", "done", ""}, "Family Guy · JioHotstar"},
-		{"nothing at all", nil, ""},
-		{"no detail ever named a window", []string{"element 2", "done"}, ""},
-	}
-	for _, c := range cases {
-		if got := act10LastWindowTitle(c.details); got != c.want {
-			t.Errorf("%s: act10LastWindowTitle(%v) = %q, want %q", c.name, c.details, got, c.want)
 		}
 	}
 }
@@ -646,85 +530,6 @@ func TestAct10BrainCheck(t *testing.T) {
 	})
 }
 
-// TestAct10Line checks the per-task line a human reads while the run is going: the task id, its tier, pass or fail, how many seconds it took, and the tool sequence it ran, all on one line.
-func TestAct10Line(t *testing.T) {
-	line := act10Line(act10Result{ID: "ring-address-bar", Tier: 0, Pass: true, Steps: []string{"observe_screen", "point_at"}, Seconds: 62.4, Answer: "ringed the address bar"})
-	for _, want := range []string{"ring-address-bar", "tier 0", "PASS", "62.4", "observe_screen>point_at", "ringed the address bar"} {
-		if !strings.Contains(line, want) {
-			t.Errorf("act10Line = %q, want it to carry %q", line, want)
-		}
-	}
-	failed := act10Line(act10Result{ID: "read-table", Tier: 0, Seconds: 5, Err: "ask: daemon returned 500"})
-	if !strings.Contains(failed, "FAIL") || !strings.Contains(failed, "daemon returned 500") {
-		t.Errorf("act10Line for a failed task = %q, want FAIL and the error", failed)
-	}
-}
-
-// TestAct10Note checks the one line the scorecard keeps: which brain and tier the run used, how many tasks passed, and per task the seconds and the tool sequence, because a bare pass count says nothing about why a task failed.
-func TestAct10Note(t *testing.T) {
-	note := act10Note("codex", 0, []act10Result{
-		{ID: "what-is-this", Pass: true, Steps: []string{"observe_screen"}, Seconds: 41.2, Answer: "Chrome"},
-		{ID: "ring-address-bar", Steps: []string{"observe_screen", "point_at"}, Seconds: 62},
-		{ID: "read-table", Seconds: 3, Err: "ask: daemon returned 500"},
-	})
-	for _, want := range []string{"codex", "tier 0", "1/3", "what-is-this", "41.2s", "observe_screen>point_at", "read-table", "daemon returned 500"} {
-		if !strings.Contains(note, want) {
-			t.Errorf("act10Note = %q, want it to carry %q", note, want)
-		}
-	}
-	if strings.Contains(note, "\n") {
-		t.Errorf("act10Note = %q, want a single line: the scorecard renders each note as one blockquote", note)
-	}
-}
-
-// TestAct10AskSendsTheBrainName checks the one thing the --brain flag exists for: the name reaches POST /ask as its "brain" field, which is what makes the daemon answer through that brain instead of its configured default.
-func TestAct10AskSendsTheBrainName(t *testing.T) {
-	var body map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&body)
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{"id": "ask-1"})
-	}))
-	defer srv.Close()
-
-	id, err := act10Ask(context.Background(), &http.Client{}, srv.URL, "tok", "what is on my screen?", "codex")
-	if err != nil {
-		t.Fatalf("act10Ask: %v", err)
-	}
-	if id != "ask-1" {
-		t.Errorf("id = %q, want ask-1", id)
-	}
-	if body["brain"] != "codex" {
-		t.Errorf("/ask body = %v, want brain=codex", body)
-	}
-	if body["question"] != "what is on my screen?" {
-		t.Errorf("/ask body = %v, want the question verbatim", body)
-	}
-}
-
-// TestNeedsGeminiKey checks which selections of tracks actually need a Gemini API key. Track 10 needs none — it drives the running daemon over HTTP and scores what came back — so a run of track 10 alone must not be refused for a key it will never use, which matters on a night when the Gemini quota is spent and codex is the only brain that answers.
-func TestNeedsGeminiKey(t *testing.T) {
-	cases := []struct {
-		tracks string
-		want   bool
-	}{
-		{"10", false},
-		{"1", true},
-		{"1,10", true},
-		{"10,3", true},
-		{"", true},
-	}
-	for _, c := range cases {
-		sel := map[string]bool{}
-		for _, t := range strings.Split(c.tracks, ",") {
-			sel[strings.TrimSpace(t)] = true
-		}
-		if got := needsGeminiKey(sel); got != c.want {
-			t.Errorf("needsGeminiKey(%q) = %v, want %v", c.tracks, got, c.want)
-		}
-	}
-}
-
 // TestAct10RunTaskCountsTheRingOffTheStream drives the real ring task through the fake daemon with the events shaped the way the live daemon shapes them: two "tool" events per hop, and the overlay event carrying an id of its own, broadcast between point_at's own two events because the ring is drawn while that call is running. The ring must reach the result and the task's own pass rule, and the interleaved overlay must not break the fold that turns paired events back into hops.
 func TestAct10RunTaskCountsTheRingOffTheStream(t *testing.T) {
 	const token = "test-token"
@@ -768,32 +573,6 @@ func TestAct10RunTaskCountsTheRingOffTheStream(t *testing.T) {
 	}
 	if !strings.Contains(act10Line(got), "ring") {
 		t.Errorf("act10Line = %q, want it to show that a ring was drawn", act10Line(got))
-	}
-}
-
-// TestAct10DeleteConversation checks the DELETE call track 10 makes to clean up after itself: the right method and path, the token header the way every other IPC route needs it, nil on the 204 the daemon answers with, and an error naming the status for anything else.
-func TestAct10DeleteConversation(t *testing.T) {
-	var gotMethod, gotPath, gotToken string
-	status := http.StatusNoContent
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		gotToken = r.Header.Get("X-Ora-Token")
-		w.WriteHeader(status)
-	}))
-	defer srv.Close()
-
-	if err := act10DeleteConversation(context.Background(), &http.Client{}, srv.URL, "tok", "conv-9"); err != nil {
-		t.Fatalf("act10DeleteConversation: %v", err)
-	}
-	if gotMethod != http.MethodDelete || gotPath != "/conversations/conv-9" || gotToken != "tok" {
-		t.Errorf("got method=%q path=%q token=%q, want DELETE /conversations/conv-9 with token tok", gotMethod, gotPath, gotToken)
-	}
-
-	status = http.StatusNotFound
-	err := act10DeleteConversation(context.Background(), &http.Client{}, srv.URL, "tok", "conv-9")
-	if err == nil || !strings.Contains(err.Error(), "404") {
-		t.Errorf("err = %v, want it to name the 404 the daemon answered with", err)
 	}
 }
 

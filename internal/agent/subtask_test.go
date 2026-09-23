@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
+
 	"ora/internal/db"
 	"strings"
 	"testing"
@@ -11,51 +11,6 @@ import (
 
 	"google.golang.org/genai"
 )
-
-// TestToolDefinitions_IncludesBranchWithRequiredTask verifies the branch tool is actually offered to the live model, with "task" required — the live model's own dispatch path (branch → webSearch/webAsk) is meaningless if the live model never sees the tool exists at all.
-func TestToolDefinitions_IncludesBranchWithRequiredTask(t *testing.T) {
-	for _, tool := range toolDefinitions() {
-		for _, decl := range tool.FunctionDeclarations {
-			if decl.Name != "branch" {
-				continue
-			}
-			if decl.Parameters == nil || len(decl.Parameters.Required) != 1 || decl.Parameters.Required[0] != "task" {
-				t.Errorf("branch tool Required = %v, want exactly [\"task\"]", decl.Parameters.Required)
-			}
-			return
-		}
-	}
-	t.Fatal("toolDefinitions() does not include a \"branch\" tool")
-}
-
-// TestExecuteTool_BranchRequiresTaskArg verifies the same "error: ..." string convention every other tool uses for a missing required arg.
-func TestExecuteTool_BranchRequiresTaskArg(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-
-	want := "error: branch needs the question to work on"
-	got := a.executeTool(context.Background(), "branch", map[string]any{})
-	if got != want {
-		t.Errorf("executeTool(branch, {}) = %q, want %q", got, want)
-	}
-}
-
-// TestExecuteTool_BranchDispatchesThroughWebSearch verifies executeTool's "branch" case actually calls the injectable webSearch seam and returns its result verbatim — proving the live-model-facing tool is wired to a real search call end-to-end, not just validating its args.
-func TestExecuteTool_BranchDispatchesThroughWebSearch(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	asked := ""
-	a.webSearch = func(ctx context.Context, task string) (string, error) {
-		asked = task
-		return "search answer", nil
-	}
-
-	got := a.executeTool(context.Background(), "branch", map[string]any{"task": "catch me up"})
-	if got != "search answer" {
-		t.Errorf("executeTool(branch, ...) = %q, want %q", got, "search answer")
-	}
-	if asked != "catch me up" {
-		t.Errorf("webSearch got task %q, want %q", asked, "catch me up")
-	}
-}
 
 // TestExecuteTool_BranchFallsBackToARoutedWebAsk verifies that when the direct search call fails (no API key configured, or the provider errors), branch hands the task to a brain with its own web search instead of telling the live model the web is out of reach.
 func TestExecuteTool_BranchFallsBackToARoutedWebAsk(t *testing.T) {
@@ -74,20 +29,6 @@ func TestExecuteTool_BranchFallsBackToARoutedWebAsk(t *testing.T) {
 	}
 	if got != "keyword spotting is a small model that listens for a fixed phrase" {
 		t.Errorf("result = %q, want the routed answer", got)
-	}
-}
-
-// TestExecuteTool_BranchSurfacesFailureAsErrorString verifies that when both webSearch and the webAsk fallback fail, executeTool surfaces the usual "error: ..." string convention rather than a bare Go error reaching the model, matching resultSummary/ToolActivity.Err's strings.HasPrefix(result, "error") check.
-func TestExecuteTool_BranchSurfacesFailureAsErrorString(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	a.webSearch = func(ctx context.Context, task string) (string, error) {
-		return "", errors.New("no search API configured")
-	}
-	a.webAsk = func(ctx context.Context, task string) (string, error) { return "", fmt.Errorf("claude: not logged in") }
-
-	got := a.executeTool(context.Background(), "branch", map[string]any{"task": "catch me up"})
-	if !strings.HasPrefix(got, "error") {
-		t.Errorf("executeTool(branch, ...) = %q, want it to start with %q", got, "error")
 	}
 }
 

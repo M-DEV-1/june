@@ -1,6 +1,7 @@
 /** The window itself: the rail on the left, whichever screen is showing beside it, and the three things that sit above every screen — the jump-to-a-chat palette, the rename box and the confirmation in front of a delete. The keys the whole window answers to are bound here as well: Ctrl+K opens the palette, Escape gives up whatever is half-done, and the arrows walk the list the screen showing has on its left. */
 
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect } from "react";
+import { useStore } from "react-redux";
 import { Calendar, ListTodo, MessageSquare, Repeat, Settings as SettingsIcon, Video } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -29,7 +30,7 @@ import {
   useRenameConversationMutation,
   useTasksQuery,
 } from "./api";
-import { activeDays, chatsShown, daysShown, meetingsShown, shortWhen, tasksShown } from "./format";
+import { activeDays, chatsShown, daysShown, meetingsShown, shortWhen, step, tasksShown } from "./format";
 import { useOpenAtOnShow } from "./openAt";
 import { ChatsScreen } from "./chats";
 import { TasksScreen } from "./tasks";
@@ -39,16 +40,7 @@ import { RoutinesScreen } from "./routines";
 import { SettingsScreen } from "./settings";
 import { AppSidebar } from "./sidebar";
 import { applyTheme } from "./theme";
-import { conversationsUi, escaped, settings, ui, useAppDispatch, useAppSelector, type Place } from "./store";
-
-/** Where an arrow key lands in a list. Input: the index selected now (-1 when nothing is), how many rows there are, and the key. Output: the new index, clamped to the list; an empty list stays at -1. */
-export function step(current: number, length: number, key: string): number {
-  if (length === 0) return -1;
-  const delta = key === "ArrowDown" ? 1 : key === "ArrowUp" ? -1 : 0;
-  if (delta === 0) return current;
-  if (current < 0) return delta > 0 ? 0 : length - 1;
-  return Math.min(length - 1, Math.max(0, current + delta));
-}
+import { conversationsUi, escaped, settings, ui, useAppDispatch, useAppSelector, type Place, type RootState } from "./store";
 
 // What the palette offers besides the chats: the five screens, so Ctrl+K reaches a page and not only a conversation. Module scope so it is not rebuilt on every render — it closes over nothing.
 const PAGES: { place: Place; label: string; icon: typeof ListTodo }[] = [
@@ -82,7 +74,14 @@ function Screen() {
 /** The whole window. Input: none. Output: the rail, the screen showing, and the three overlays. */
 export default function App() {
   const dispatch = useAppDispatch();
-  const { place, conversationId, taskId, date, meetingId, query, paletteOpen } = useAppSelector((s) => s.ui);
+  // One field at a time rather than the whole ui slice, and never the search text: the whole window re-rendered on every letter typed into a search field, which made typing the slowest thing in it.
+  const place = useAppSelector((s) => s.ui.place);
+  const conversationId = useAppSelector((s) => s.ui.conversationId);
+  const taskId = useAppSelector((s) => s.ui.taskId);
+  const date = useAppSelector((s) => s.ui.date);
+  const meetingId = useAppSelector((s) => s.ui.meetingId);
+  const paletteOpen = useAppSelector((s) => s.ui.paletteOpen);
+  const store = useStore<RootState>();
   const { renamingId, draftTitle, confirmingDeleteId } = useAppSelector((s) => s.conversations);
   const theme = useAppSelector((s) => s.settings.theme);
   useOpenAtOnShow();
@@ -120,8 +119,8 @@ export default function App() {
     });
   }, [theme, dispatch]);
 
-  // What the arrows walk on the screen showing, in the order the rows appear, so the keys move through exactly what a search has left and skip what it hid. On Tasks that is the list on the page; on Meetings and Days it is what the header's picker offers, so the arrows step from one day or one recording to the next without opening the picker at all.
-  const walk = useMemo(() => {
+  // What the arrows walk on the screen showing, in the order the rows appear, so the keys move through exactly what a search has left and skip what it hid. On Tasks that is the list on the page; on Meetings and Days it is what the header's picker offers, so the arrows step from one day or one recording to the next without opening the picker at all. Input: the search text, read off the store at the keypress. Output: the ids, the selected one, and the action that opens one.
+  const walkOf = useCallback((query: RootState["ui"]["query"]) => {
     switch (place) {
       case "chats":
         return { ids: chatsShown(convs, query.chats).map((c) => c.id), selected: conversationId, open: (id: string) => ui.conversationOpened(id) };
@@ -134,7 +133,7 @@ export default function App() {
       default:
         return { ids: [] as string[], selected: undefined, open: (id: string) => ui.conversationOpened(id) };
     }
-  }, [place, convs, tasks, days, meetings, query, conversationId, taskId, date, meetingId]);
+  }, [place, convs, tasks, days, meetings, conversationId, taskId, date, meetingId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -152,6 +151,7 @@ export default function App() {
       const active = document.activeElement as HTMLElement | null;
       if (active?.tagName === "TEXTAREA" || active?.isContentEditable) return;
       if (active?.tagName === "INPUT" && (active as HTMLInputElement).type !== "search") return;
+      const walk = walkOf(store.getState().ui.query);
       const at = step(walk.ids.indexOf(walk.selected ?? ""), walk.ids.length, e.key);
       if (at < 0) return;
       e.preventDefault();
@@ -159,7 +159,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [dispatch, walk]);
+  }, [dispatch, walkOf, store]);
 
   const renaming = convs.find((c) => c.id === renamingId);
   const deleting = convs.find((c) => c.id === confirmingDeleteId);

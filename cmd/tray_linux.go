@@ -75,7 +75,7 @@ var (
 
 // trayIconPixmaps decodes every embedded size of the ORA logo into one SNI icon pixmap each.
 // SNI pixmaps are ARGB32 in network byte order: A,R,G,B per pixel.
-// One entry per size because IconPixmap is an array and the host picks the one closest to its own panel height: handed a single large pixmap it scales that down itself, which is what left the face blurred. The files are drawn at these exact sizes rather than resampled from one master (see scripts/make-icons.py).
+// One entry per size because IconPixmap is an array and the host picks the one closest to its own panel height: handed a single large pixmap it scales that down itself, which is what left the face blurred. The files are drawn at these exact sizes rather than resampled from one master (see packaging/make-icons.py).
 // Output: the pixmaps, smallest first, or an error if the embedded directory cannot be read or holds something that is not an image.
 func trayIconPixmaps() ([]sniPixmap, error) {
 	entries, err := trayIcons.ReadDir("tray")

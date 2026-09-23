@@ -86,7 +86,7 @@ export type TaskOwner = "me" | "them" | "unclear";
 /** What POST /tasks/{id}/done may set a task to. "dropped" is only for a task Ora noticed: the daemon answers 400 for a dropped task of the user's own, because user_tasks has no third state to hold it in. */
 export type TaskStatus = "open" | "done" | "dropped";
 
-/** One thing to do on GET /tasks. Mirrors ipc.Task; source is "you" for a task the user typed in and "noticed" for an action item a meeting raised. detail is where it came from: the meeting it was raised in and the date, for example "TCFD statement pattern analysis, 2026-09-01", or "you said" for one the user typed in. GET /tasks itself takes ?owner=me|them|unclear|all (default "me"), so which of these a given fetch returns depends on how it was called, not on anything in the row itself. */
+/** One thing to do on GET /tasks. Mirrors ipc.Task; source is "you" for a task the user typed in and "noticed" for an action item a meeting raised. detail is where it came from: the meeting it was raised in and the date, for example "Meridian statement pattern analysis, 2026-09-01", or "you said" for one the user typed in. GET /tasks itself takes ?owner=me|them|unclear|all (default "me"), so which of these a given fetch returns depends on how it was called, not on anything in the row itself. */
 export type Task = {
   id: string;
   title: string;
@@ -241,10 +241,10 @@ export type TrackerStatus = { paused: boolean };
 /** One of Gemini Live's thirty prebuilt voices, on GET or POST /voices. Mirrors ipc.VoiceView. trait is Google's own one-word description of how it sounds ("Bright", "Gravelly"), shown beside the name because thirty star names say nothing on their own about how any of them sounds. current marks the one a live session dials with next; exactly one row carries it. */
 export type Voice = { name: string; trait: string; current: boolean };
 
-/** One of the two Live models on GET or POST /voices. Mirrors ipc.LiveModelView. trait is the trade choosing it costs and buys, in one line — latency against tone. current marks the one a live session dials with next; exactly one row carries it. */
+/** One of the Live models on GET or POST /voices. Mirrors ipc.LiveModelView. trait is the trade choosing it costs and buys, in one line — latency against tone, and whether the model decides for itself that audio was aimed at it. current marks the one a live session dials with next; exactly one row carries it. */
 export type LiveModel = { name: string; label: string; trait: string; current: boolean };
 
-/** GET /voices' whole body: the voice roster and the two Live models beside it. */
+/** GET /voices' whole body: the voice roster and the Live models beside it. */
 export type Voices = { voices: Voice[]; models: LiveModel[] };
 
 /** One tool call's step inside a computer-use job. Mirrors actjob.Step; outcome is "pass", "fail", or "" before wait_for has checked it, and expect is the change the step was written down to produce. */
@@ -445,13 +445,13 @@ export const oraApi = createApi({
       transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
       providesTags: ["Brain"],
     }),
-    /** Makes one brain the default and remembers the model to call it with; the daemon writes both to its config and answers with the whole list again. */
-    pickBrain: build.mutation<Brain[], { brain: string; model: string }>({
+    /** Makes one brain the default and remembers the model to call it with; the daemon writes both to its config and answers with the whole list again. default false stores the model for that brain without making it the default, which is what a model chip in Settings sends. */
+    pickBrain: build.mutation<Brain[], { brain: string; model: string; default?: boolean }>({
       query: (body) => ({ url: "/brains", method: "POST", body }),
       transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
       invalidatesTags: ["Brain", "Settings"],
     }),
-    /** The whole voice roster and the two Live models beside it: all thirty of Gemini Live's prebuilt voices, one carrying current true, and the two models Ora can speak through, one of which also carries current true. */
+    /** The whole voice roster and the Live models beside it: all thirty of Gemini Live's prebuilt voices, one carrying current true, and the models Ora can speak through, one of which also carries current true. */
     voices: build.query<Voices, void>({
       query: () => "/voices",
       transformResponse: (r: Partial<Voices>) => ({ voices: r.voices ?? [], models: r.models ?? [] }),
@@ -585,6 +585,8 @@ export type Notice = {
   until?: string;
   /** The buttons this notice can answer, named by the daemon rather than guessed by the window: a task and the stale-task question carry their own, and anything with nothing to complete carries only Open (see openOnlyActions and noticeActions in internal/proactive). Key is what goes back to POST /notices/{kind}/{id}/action. */
   actions?: { key: string; label: string }[];
+  /** The RFC 3339 moment a question stops being answerable, set only on a notice that asked one. Past it the daemon has stopped waiting and the buttons would answer "Could not do that", so the card takes itself down then, as the hover card does. */
+  expires?: string;
 };
 
 /** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, "act" is one line of a computer-use job's progress, "overlay" and "window" are the daemon telling the on-screen accessories and the window itself what to do, and "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way. This window draws none of the last five, but they do arrive on the same stream, so they are named here rather than left to widen the type at the point of use. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */
@@ -634,6 +636,7 @@ export function events(onEvent: (ev: DaemonEvent) => void, onReopen?: () => void
       source?.close();
       dropped = true;
       // A dropped stream is also how a restarted daemon shows itself, so the token is read again on the way back in. Up to a second of jitter is added because every open window drops at the same instant when the daemon dies, and without it they all reconnect and refetch on the same tick for as long as it flaps.
+      // react-doctor-disable-next-line insecure-crypto-risk -- the random number spreads reconnects over a second so every window does not retry on the same tick; nothing here is a secret, a token or an id.
       if (!stopped) setTimeout(() => void refreshToken().then(connect), RETRY_MS + Math.random() * RETRY_JITTER_MS);
     };
   }
