@@ -1,42 +1,4 @@
-import { TOKEN_HEADER } from "./daemon";
-/** Dictation: one key press opens the daemon's microphone, and a second one — or the daemon's own silence gate — closes it and gives back what was said. HTTP and key handling only, no DOM state of its own. */
-
-function headers(token: string | undefined): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) h[TOKEN_HEADER] = token;
-  return h;
-}
-
-/** Opens the microphone on the daemon. Input: the daemon's base URL and the IPC token. Output: the id of the recording, which stopDictation and the "dictation" event both carry. Throws if the daemon would not start one. */
-export async function startDictation(
-  base: string,
-  token: string | undefined,
-): Promise<string> {
-  const res = await fetch(`${base}/dictate/start`, {
-    method: "POST",
-    headers: headers(token),
-  });
-  if (!res.ok) throw new Error(`dictation did not start: ${res.status}`);
-  const body = (await res.json()) as { id: string };
-  return body.id;
-}
-
-/** Closes the microphone and waits for the transcript. Input: the daemon's base URL, the IPC token, and the id startDictation returned. Output: what was said, trimmed; an empty string when the daemon has no such recording open any more (the silence gate or the two-minute limit already ended it and sent the text on the event stream instead, or a later dictation replaced it). Throws if whisper failed. */
-export async function stopDictation(
-  base: string,
-  token: string | undefined,
-  id: string,
-): Promise<string> {
-  const res = await fetch(`${base}/dictate/stop`, {
-    method: "POST",
-    headers: headers(token),
-    body: JSON.stringify({ id }),
-  });
-  if (res.status === 404) return "";
-  if (!res.ok) throw new Error(`dictation failed: ${res.status}`);
-  const body = (await res.json()) as { text: string };
-  return (body.text ?? "").trim();
-}
+/** Dictation keys: one key press opens the daemon's microphone, and a second one, or the daemon's own silence gate, closes it and gives back what was said. The two HTTP calls are startDictation and stopDictation in daemon.ts; this file only decides what a key means. */
 
 /** The part of a keyboard event that decides what a key means for dictation. */
 export type DictationKeyEvent = {

@@ -154,16 +154,11 @@ func agyFailure(res agyResult) error {
 	if reason == "" {
 		reason = res.Response
 	}
-	err := fmt.Errorf("agy: the run failed (%s): %s", res.Status, agyHead(reason))
+	err := fmt.Errorf("agy: the run failed (%s): %s", res.Status, util.LogHead(reason))
 	if loggedOut(reason) {
 		return fmt.Errorf("%w: %w", ErrLoggedOut, err)
 	}
 	return err
-}
-
-// agyHead is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line.
-func agyHead(s string) string {
-	return util.RunesEllipsis(util.OneLine(s), 300)
 }
 
 // AskAgy answers a question through the Antigravity command line on the user's own plan, running Ora's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "agy/<model>" (or "agy" when no model was named), or the trace so far and an error.

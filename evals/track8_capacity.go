@@ -5,6 +5,7 @@ package main
 // The arms are whole model families rather than one vendor's ladder. A gap between a small and a large model from one lab is confounded by that lab being weak at this shape of question; three families failing the same rows is not.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -304,7 +305,7 @@ func writeTrack8Section(b *strings.Builder, rs []track8Result, arms []arm) {
 	}
 	b.WriteString("\n")
 	for _, r := range rs {
-		fmt.Fprintf(b, "| %s | %s | %s | %d | %s |", r.ID, r.Question, orDash(r.Expect), len(r.Hits), r.Sufficient.Verdict)
+		fmt.Fprintf(b, "| %s | %s | %s | %d | %s |", r.ID, r.Question, cmp.Or(r.Expect, "—"), len(r.Hits), r.Sufficient.Verdict)
 		for _, a := range arms {
 			ans := r.Answers[a.Name]
 			mark := ans.V.Verdict
@@ -315,12 +316,4 @@ func writeTrack8Section(b *strings.Builder, rs []track8Result, arms []arm) {
 		}
 		b.WriteString("\n")
 	}
-}
-
-// orDash renders an empty expectation as a dash, for a question set that does not carry one.
-func orDash(s string) string {
-	if s == "" {
-		return "—"
-	}
-	return s
 }

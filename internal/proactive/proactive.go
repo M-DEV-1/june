@@ -22,9 +22,6 @@ const activityWindow = 10 * time.Minute
 // briefMinutesWindow is how far back the brief looks for meeting minutes whose action items may still be open.
 const briefMinutesWindow = 3 * 24 * time.Hour
 
-// dayFormat is the local calendar-day key used for diary rows.
-const dayFormat = "2006-01-02"
-
 // dutyTimeoutFor is how long one duty may take, given the hard limit on a single brain call. Input: the configured brain timeout. Output: room for the two calls the evening close makes plus two minutes for the store reads and the prompt assembly around them.
 // A duty needs a deadline at all because a call that dies silently — a laptop suspend, a Wi-Fi drop mid-TLS — used to leave the close blocked forever and every duty after it never ran again until the daemon was restarted. The number is derived rather than fixed because a flat ten minutes was exactly two calls at the default 300-second ceiling with nothing left over, and said nothing at all about a machine that raised that ceiling.
 func dutyTimeoutFor(brainCall time.Duration) time.Duration {
@@ -242,7 +239,7 @@ func (s *Scheduler) maybeWeeklyStudy(ctx context.Context) {
 	if s.backedOff(weeklyStudyDuty, now) {
 		return
 	}
-	day := now.Format(dayFormat)
+	day := now.Format(time.DateOnly)
 	existing, err := s.store.DiaryEntry(ctx, day, "weekly-study")
 	if err != nil {
 		slog.Warn("weekly study: reading marker failed", "error", err)

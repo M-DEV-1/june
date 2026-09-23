@@ -101,14 +101,9 @@ func runTrack3(ctx context.Context, j *judge, dirs []string) []track3Result {
 	return results
 }
 
-// truncateRunes caps s to n runes, cutting on a rune boundary so a multi-byte transcript is never sliced mid-character.
-// truncateRunes cuts s to at most n runes, appending a "(truncated)" marker on its own line when it does.
+// truncateRunes cuts s to at most n runes, with a "…(truncated)" line after it when it cut anything.
 func truncateRunes(s string, n int) string {
-	cut := util.Runes(s, n)
-	if cut == s {
-		return s
-	}
-	return cut + "\n…(truncated)"
+	return util.RunesNote(s, n, "…(truncated)")
 }
 
 // failedMinutes lists the criteria this minutes file failed.

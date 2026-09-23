@@ -210,7 +210,7 @@ func TestPruneStageReportsWhatItRemovedAndKept(t *testing.T) {
 // The stage runs once a night: a finished night carries the 'prune' token, and a night that already carries it never touches the store's retention passes again on a later wake.
 func TestPruneStageRunsOnceANight(t *testing.T) {
 	ctx := context.Background()
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 
 	t.Run("a night that has not pruned yet does, and commits the token", func(t *testing.T) {
 		store := &countingStore{Store: dbtest.Open(t)}
@@ -272,7 +272,7 @@ func TestPruneStageRunsOnceANight(t *testing.T) {
 // A stage that cannot reach the store leaves the token uncommitted, so the next wake tries again rather than the night being remembered as pruned.
 func TestPruneStageLeavesTheTokenOffWhenItFails(t *testing.T) {
 	ctx := context.Background()
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	store := &countingStore{Store: dbtest.Open(t)}
 	store.pruneConversationsErr = errors.New("database is locked")
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {

@@ -17,6 +17,7 @@ import (
 
 	"ora/internal/db"
 	"ora/internal/memory"
+	"ora/internal/util"
 )
 
 type fakeCapture struct{ stopped bool }
@@ -631,7 +632,7 @@ func TestRecorder_EmptyMinutesIsTreatedAsAFailure(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sess.dir, "minutes.md")); !os.IsNotExist(err) {
 		t.Error("an empty brain reply must never be written as minutes.md")
 	}
-	if !exists(filepath.Join(sess.dir, failedMarker)) {
+	if !util.Exists(filepath.Join(sess.dir, failedMarker)) {
 		t.Error("an empty brain reply must leave a failure marker so the sweep retries it later")
 	}
 }
@@ -660,7 +661,7 @@ func TestRecorder_FailedProcessingWaitsBeforeBeingRetried(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("the sweep should have tried to summarise the recording once, it made %d calls", calls)
 	}
-	if !exists(marker) {
+	if !util.Exists(marker) {
 		t.Fatal("a recording whose summary failed left no failure marker behind")
 	}
 
@@ -679,7 +680,7 @@ func TestRecorder_FailedProcessingWaitsBeforeBeingRetried(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("an hour-old failure should have been retried, %d calls in total", calls)
 	}
-	if exists(marker) {
+	if util.Exists(marker) {
 		t.Error("the failure marker survived a run that succeeded")
 	}
 }
@@ -1286,7 +1287,7 @@ func TestRecorder_GivesUpOnARecordingThatKeepsFailing(t *testing.T) {
 	// Twice as many sweeps as the cap allows attempts, each one an hour after the last as far as the backoff can tell.
 	for i := 0; i < 2*maxProcessAttempts; i++ {
 		r.pickup(context.Background())
-		if exists(marker) {
+		if util.Exists(marker) {
 			old := time.Now().Add(-2 * failureRetryAfter)
 			if err := os.Chtimes(marker, old, old); err != nil {
 				t.Fatal(err)

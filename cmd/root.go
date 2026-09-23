@@ -7,9 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"ora/internal/config"
-	"ora/internal/ipctoken"
-	"ora/internal/obs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +15,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"ora/internal/config"
+	"ora/internal/ipctoken"
+	"ora/internal/obs"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -206,7 +207,7 @@ func fetchWindowHotkey() string {
 	if err != nil {
 		return ""
 	}
-	attachIPCToken(req, ipctoken.DefaultPath)
+	ipctoken.Attach(req, ipctoken.DefaultPath)
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Do(req)
 	if err != nil {

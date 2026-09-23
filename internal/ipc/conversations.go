@@ -73,7 +73,7 @@ func (s *Server) Conversations(w http.ResponseWriter, r *http.Request) {
 				Updated: rfc3339(c.Updated),
 			})
 		}
-		writeJSON(w, map[string]any{"conversations": out})
+		util.WriteJSON(w, map[string]any{"conversations": out})
 	case http.MethodPost:
 		var req struct {
 			Title string `json:"title"`
@@ -133,7 +133,7 @@ func (s *Server) getConversation(w http.ResponseWriter, r *http.Request, id int6
 		fail(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, ConversationView{
+	util.WriteJSON(w, ConversationView{
 		ID:    strconv.FormatInt(conv.ID, 10),
 		Title: conv.Title,
 		Brain: conv.Brain,

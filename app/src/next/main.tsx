@@ -8,7 +8,7 @@ import App from "./App";
 import { devToken } from "./api";
 import "./index.css";
 import { progress, settings, store, ui, type Place, type Theme } from "./store";
-import { applyTheme, readTheme, storeTheme } from "./theme";
+import { applyTheme, readTheme, storeTheme } from "../shared/theme";
 import { installMock } from "./mock";
 import { rememberWindow } from "./window";
 

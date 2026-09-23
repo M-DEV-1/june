@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"ora/internal/agent"
 	"ora/internal/config"
+	"ora/internal/util"
 )
 
 // noVersion is reported when the build carries no injected version string (see cmd/root.go's buildIdentity: there is no ldflags version injection in this repo).
@@ -57,8 +59,8 @@ type FirstRunView struct {
 func firstRun(cfg config.OraConfig, home string) FirstRunView {
 	v := FirstRunView{
 		GeminiKey:  os.Getenv("GEMINI_API_KEY") != "",
-		CodexLogin: exists(codexAuthPath(home)),
-		ClaudeCLI:  exists(claudeCredentialsPath(home)),
+		CodexLogin: util.Exists(agent.CodexAuthPath(home)),
+		ClaudeCLI:  util.Exists(agent.ClaudeCredentialsPath(home)),
 		LocalModel: cfg.LocalText.Enabled(cfg),
 	}
 	v.Steps = firstRunSteps(v)
@@ -145,7 +147,7 @@ func writeSettings(w http.ResponseWriter, dataDir string, cfg config.OraConfig, 
 		capture = !capturePaused()
 	}
 	home, _ := os.UserHomeDir()
-	writeJSON(w, SettingsView{
+	util.WriteJSON(w, SettingsView{
 		DataDir:              dataDir,
 		StoreBytes:           storeBytes(dataDir),
 		RecordingsBytes:      dirBytes(filepath.Join(dataDir, "recordings")),

@@ -5,7 +5,7 @@ import {
   getCurrentWindow,
 } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
-import { systemTheme } from "./shared/theme";
+import { applyTheme, readTheme, themeChoice } from "./shared/theme";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import {
@@ -13,7 +13,6 @@ import {
   dotLabel,
   voiceStateWord,
   conversationSeparator,
-  isJobLive,
   noticeActionLine,
   NOTICE_MS,
   placeholder,
@@ -26,20 +25,19 @@ import {
   stepSeconds,
   stepsCollapsed,
   stepsSummaryLine,
-  THEME_KEY,
-  themeChoice,
   themeFromStorage,
   type JobMeta,
   type Matter,
-  type Notice,
-  type Theme,
   type ToolStep,
   type View,
 } from "./state";
 // The key a clicked notice's target is left under is defined beside the code in the app window that reads it, so there is one spelling of it rather than two.
 import { OPEN_AT_KEY } from "./app/state";
+import { isJobLive } from "./shared/job";
+import { costLine } from "./next/format";
+import type { Notice } from "./shared/wire";
 import { FACE_TICK_MS, face } from "./shared/faces";
-import { markdown } from "./markdown";
+import { esc, markdown } from "./markdown";
 import { initialView, venueScript } from "./mock";
 import {
   actAnswer,
@@ -48,18 +46,19 @@ import {
   actStop,
   ask,
   context,
-  endpoint,
   events,
   matters,
   probe,
   setPort,
+  post,
   setToken,
-  TOKEN_HEADER,
+  startDictation,
+  stopDictation,
   voiceStart,
   voiceStatus,
   voiceStop,
 } from "./daemon";
-import { dictationKey, startDictation, stopDictation } from "./dictate";
+import { dictationKey } from "./dictate";
 import { Waveform, workingRow } from "./waveform";
 import {
   fitWindow as winplaceFitWindow,
@@ -254,15 +253,6 @@ async function loadFromDaemon(): Promise<void> {
   if (rows) dispatch({ kind: "mattersLoaded", rows });
 }
 
-/** Escapes text pulled into a template as plain text (questions, titles) so it can never be read as markup. The double quote is escaped along with the three, so the same call is also safe inside a double-quoted attribute (a notice's aria-label carries its title); a browser renders &quot; in a text node as the quote itself, so escaping it costs the text-node callers nothing. */
-function esc(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 /** Renders text that is allowed the two emphasis tags an answer or an evidence body may carry. Everything is escaped first and then only <b> and <mark> are put back, so nothing else in model output or in captured screen text can turn into markup. Input: the raw text. Output: HTML safe to assign. */
 function rich(s: string): string {
   return esc(s).replace(/&lt;(\/?)(b|mark)&gt;/g, "<$1$2>");
@@ -414,18 +404,9 @@ function noticeButtonsHtml(n: Notice): string {
 
 /** Sends one of the card's buttons to the daemon's notice route, the same one the desktop banner's buttons and the app window's rail line use. The card is still up while this runs (see the noticeAct case in state.ts), so a refusal has somewhere to be said: the daemon answers 500 when it could not write the snooze or the done (see internal/ipc/notices.go), and a press that goes nowhere must not look like it took. Input: the notice and the button pressed ("done", "hour", "evening" or "tomorrow"). Output: nothing; the daemon's own follow-up "notice" event is what replaces the card with its one-line confirmation when the press did take. */
 function actOnNotice(n: Notice, act: string): void {
-  const { base, token } = endpoint();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers[TOKEN_HEADER] = token;
-  void fetch(`${base}/notices/${encodeURIComponent(n.kind)}/${encodeURIComponent(n.id || "-")}/action`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ title: n.title, body: n.body, action: act }),
-  })
-    .then((r) => {
-      if (!r.ok) noticeFailed();
-    })
-    .catch(noticeFailed);
+  void post(`/notices/${encodeURIComponent(n.kind)}/${encodeURIComponent(n.id || "-")}/action`, { title: n.title, body: n.body, action: act }).then((r) => {
+    if (!r?.ok) noticeFailed();
+  });
 }
 
 /** Puts one muted line at the bottom of the notice card saying the button did not take, for a daemon that answered with an error or could not be reached at all. Input: none. Output: nothing; the line is appended to the card, once however many presses fail, and goes when the card is next redrawn for a different notice (see renderNotice). */
@@ -475,14 +456,8 @@ function openNotice(place: string, id: string): void {
   } catch {
     /* storage blocked */
   }
-  const { base, token } = endpoint();
-  const headers: Record<string, string> = {};
-  if (token) headers[TOKEN_HEADER] = token;
-  void fetch(`${base}/window?action=open`, { method: "POST", headers }).catch(
-    () => {
-      /* the daemon is gone, so there is nothing to open the window */
-    },
-  );
+  // A daemon that cannot be reached leaves nothing to open the window.
+  void post("/window?action=open");
 }
 
 /** Ticks the live step list's elapsed-seconds numbers up and advances its braille working grid while an ask is running; nothing else re-renders on its own between daemon events, so a slow tool call would otherwise sit on a stale number and a frozen grid until the next one arrives. It runs ten times a second because that is the rate the grid needs to read as motion; the seconds numbers, which only ever changed once a second, cost nothing extra for being written more often. Input: none. Output: nothing. */
@@ -821,11 +796,6 @@ function jobQuestionHtml(job: JobMeta): string {
   return `<div class="jobq">${esc(job.question)}</div>`;
 }
 
-/** The cost line a finished job's card ends on: how many rounds it took and what they cost in tokens. Input: the job's spend. Output: the line's HTML. */
-function spendLineHtml(spend: NonNullable<JobMeta["spend"]>): string {
-  return `<div class="spend">${spend.rounds} round${spend.rounds === 1 ? "" : "s"} · ${spend.input} in · ${spend.cached} cached · ${spend.output} out</div>`;
-}
-
 /** The quiet rule between two conversations in the thread, drawn just above the turn at index i when state.ts's conversationSeparator says one lapsed and the next began there. Input: the matter's turns and the index about to be drawn. Output: the rule's HTML, or "" when no break belongs above that turn. */
 function conversationSepHtml(turns: Matter["turns"], i: number): string {
   const label = conversationSeparator(turns, i);
@@ -857,7 +827,7 @@ function threadHtml(v: View, m: Matter): string {
       ${stepsBlock}
       ${last.job ? jobQuestionHtml(last.job) : ""}
       ${stillAsking ? "" : `<div class="a">${last.a ? markdown(last.a) : ""}</div>`}
-      ${last.job?.spend ? spendLineHtml(last.job.spend) : ""}
+      ${last.job?.spend ? `<div class="spend">${esc(costLine(last.job.spend))}</div>` : ""}
       ${
         evidence.length > 0
           ? `<div class="evd">
@@ -1044,11 +1014,10 @@ let dictateTaken = true;
 function beginDictation(): void {
   // Dictation and a live session would fight over the same microphone, and there is nothing to dictate into when the daemon is down.
   if (!daemonUp || view.voice || dictation) return;
-  const { base, token } = endpoint();
   dictateId = undefined;
   dictateTaken = false;
   dispatch({ kind: "dictating" });
-  dictation = startDictation(base, token);
+  dictation = startDictation();
   dictation
     .then((id) => {
       dictateId = id;
@@ -1064,9 +1033,8 @@ async function endDictation(): Promise<void> {
   const started = dictation;
   if (!started || dictateStopping) return;
   dictateStopping = true;
-  const { base, token } = endpoint();
   try {
-    finishDictation(await stopDictation(base, token, await started));
+    finishDictation(await stopDictation(await started));
   } catch {
     failDictation();
   } finally {
@@ -1372,35 +1340,14 @@ try {
   /* not inside Tauri */
 }
 
-// Which theme was asked for last, so an earlier "system" whose answer is still on its way from Rust cannot land on top of a later choice.
-let themeAsk = 0;
-
-/** Puts a theme choice on the page. Input: the choice. Output: nothing; "light" and "dark" are stamped on the root element straight away, and "system" is resolved by asking the desktop through the Rust system_theme command, which reads GNOME's own setting. It has to be asked, because WebKitGTK's prefers-color-scheme media query does not follow that setting; the media query is only the fallback, for a plain browser tab with no Tauri behind it. The app window resolves "system" the same way (see stampSystemTheme in src/app/main.ts), so the two windows never disagree about what it means. */
-function applyThemeChoice(choice: Theme): void {
-  const ask = ++themeAsk;
-  if (choice !== "system") {
-    document.documentElement.dataset.theme = choice;
-    return;
-  }
-  void systemTheme().then((t) => {
-    if (ask === themeAsk) document.documentElement.dataset.theme = t;
-  });
-}
-
 // Theme choice: the dev switch wins, then the setting the app window's Settings screen stored, and nothing stored leaves it to the desktop.
-let storedTheme: string | null = null;
-try {
-  storedTheme = localStorage.getItem(THEME_KEY);
-} catch {
-  /* storage blocked */
-}
-applyThemeChoice(themeChoice(devTheme ?? storedTheme));
+void applyTheme(devTheme ? themeChoice(devTheme) : readTheme());
 
 // The hover is shown and hidden rather than reloaded, so the choice read above would otherwise be the only one this page ever saw, and a theme picked in the app window afterwards would never reach it. The storage event fires here whenever the app window writes the key, which is what makes that change land while the hover is still up. A page opened with ?theme= is being held at one theme on purpose, so it does not follow.
 if (!devTheme) {
   window.addEventListener("storage", (e) => {
     const choice = themeFromStorage(e);
-    if (choice) applyThemeChoice(choice);
+    if (choice) void applyTheme(choice);
   });
 }
 

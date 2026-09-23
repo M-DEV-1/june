@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ora/internal/actjob"
+	"ora/internal/util"
 )
 
 // ActEventType is the Event.Type every job event carries, so a client can pick them out of the same stream that carries asks. Its Event.ID is the job's id, and Event.Detail is the whole actjob.Event as JSON — the step number, the state, the expected change, whether it checked out, and, on the last one, what the job cost.
@@ -172,8 +173,7 @@ func (j *ActJobs) Get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(job)
+	util.WriteJSON(w, job)
 }
 
 // Stop handles POST /act/{id}/stop: the job ends as soon as the tool it is in returns, and nothing further runs. Output: 204, or 404 when no job with that id is running.

@@ -2,6 +2,7 @@
  */
 
 import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, LiveModel, Meeting, Notice, Routine, SettingsView, Task, Usage, Voice } from "./api";
+import { isoDay } from "./format";
 
 /** What the fake daemon holds. Anything left out answers as an empty list or an empty object, which is what a daemon with nothing recorded would say. */
 export type Canned = {
@@ -220,7 +221,7 @@ function ago(days: number, hour = 9, minute = 0): string {
 function day(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return isoDay(d);
 }
 
 /** What ?mock=1 shows: enough of every screen to see the design working — a conversation with an answer, its sources and a failed ask; work of both kinds; a recording with real minutes; a day's page; brains signed in and not; and a week of token use. This is the only fixture the browser mode has, because its whole job is to make one page look at. */

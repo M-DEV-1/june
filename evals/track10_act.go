@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -92,16 +93,6 @@ func act10Seq(steps []string, seq ...string) bool {
 	return i == len(seq)
 }
 
-// act10Has reports whether name occurs anywhere in steps.
-func act10Has(steps []string, name string) bool {
-	for _, s := range steps {
-		if s == name {
-			return true
-		}
-	}
-	return false
-}
-
 // act10ClickReached reports whether any click hop in steps actually pressed something, rather than being refused by the stop line. Input: the task's steps and the matching per-hop Details, index for index (see act10HopsWithDetail — a click hop's Detail is its result summary, which wins over the argument summary whenever both arrived). Output: true when some click hop's Detail is anything but "stopped" or "failed" (internal/agent's resultSummary: "stopped" for a stop-line refusal, "failed" for an error, everything else — a landing window's title, or "done" — meaning the click went through).
 func act10ClickReached(steps, details []string) bool {
 	for i, s := range steps {
@@ -170,7 +161,7 @@ var act10Tasks = []act10Task{
 		Tier:     0,
 		Question: "Look at my screen. In one line, what window is in front, and what is the first button you can see?",
 		Pass: func(steps []string, overlayRing bool, answer string, details []string) bool {
-			return act10Has(steps, "observe_screen") && act10NoRefusal(answer)
+			return slices.Contains(steps, "observe_screen") && act10NoRefusal(answer)
 		},
 	},
 	{
@@ -186,7 +177,7 @@ var act10Tasks = []act10Task{
 		Tier:     0,
 		Question: "Read the numbers you can see in the window in front and list them in one line.",
 		Pass: func(steps []string, overlayRing bool, answer string, details []string) bool {
-			return act10Has(steps, "observe_screen") && act10HasDigit(answer)
+			return slices.Contains(steps, "observe_screen") && act10HasDigit(answer)
 		},
 	},
 	{
@@ -202,7 +193,7 @@ var act10Tasks = []act10Task{
 		Tier:     1,
 		Question: "In the window in front, scroll the last list item into view and tell me its label.",
 		Pass: func(steps []string, overlayRing bool, answer string, details []string) bool {
-			return act10Has(steps, "scroll_to") && strings.TrimSpace(answer) != ""
+			return slices.Contains(steps, "scroll_to") && strings.TrimSpace(answer) != ""
 		},
 	},
 	{

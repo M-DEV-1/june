@@ -9,6 +9,7 @@ package main
 // The pass/fail column is mechanical: every "must" substring present, no "must_not" substring present, case-insensitively. It is a first pass to sort the sheet, not a judgement — the sheet carries a tick column per arm for a person to disagree in.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -499,7 +500,7 @@ func runGoldItem(ctx context.Context, name string, fn goldArmFn, it goldItem, ha
 		out = append(out, ans)
 		prior = append(prior, trajTurn{User: spec.Q, Reply: reply})
 		fmt.Printf("  [%s %s.%d] %s %d tools %5.1fs %.60s\n", name, it.ID, i+1, goldVerdict(ans), len(ans.Hops), ans.Seconds,
-			strings.ReplaceAll(orText(orText(ans.Answer, ans.Err), "(nothing)"), "\n", " "))
+			strings.ReplaceAll(cmp.Or(ans.Answer, ans.Err, "(nothing)"), "\n", " "))
 	}
 	return out
 }
@@ -756,7 +757,7 @@ func goldMarkdown(r goldRun) string {
 				for _, h := range a.Hops {
 					calls = append(calls, "`"+goldCall(h)+"`")
 				}
-				body := cell(orText(a.Answer, "(nothing)"))
+				body := cell(cmp.Or(a.Answer, "(nothing)"))
 				if a.Err != "" {
 					body += "<br>**error:** " + cell(truncateRunes(a.Err, 300))
 				}
@@ -852,7 +853,7 @@ td.tick{width:34px;text-align:center}
 				default:
 					pill = "fail"
 				}
-				fmt.Fprintf(&b, "<td class=arm>%s", html.EscapeString(orText(a.Answer, "(nothing)")))
+				fmt.Fprintf(&b, "<td class=arm>%s", html.EscapeString(cmp.Or(a.Answer, "(nothing)")))
 				if a.Err != "" {
 					fmt.Fprintf(&b, "<div class=err>%s</div>", html.EscapeString(truncateRunes(a.Err, 400)))
 				}

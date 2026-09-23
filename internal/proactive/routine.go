@@ -131,7 +131,7 @@ func (sch Schedule) Due(now, lastRun time.Time) bool {
 
 // sameLocalDay reports whether a and b fall on the same local calendar day.
 func sameLocalDay(a, b time.Time) bool {
-	return a.Local().Format(dayFormat) == b.Local().Format(dayFormat)
+	return a.Local().Format(time.DateOnly) == b.Local().Format(time.DateOnly)
 }
 
 // SetRoutineAsk wires the daemon's own ask path — the same one POST /ask answers through, tools included — that a due routine's instruction is put to. Unset, routines are never checked; cmd/daemon.go is the only production caller, wired once the ask agent exists.

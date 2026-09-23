@@ -35,7 +35,7 @@ func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna."); err != nil {
 		t.Fatalf("SetPersonalContext: %v", err)
 	}
-	yesterday := time.Now().AddDate(0, 0, -1).Format(dayFormat)
+	yesterday := time.Now().AddDate(0, 0, -1).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, yesterday, "day", "Yesterday was quiet."); err != nil {
 		t.Fatalf("SetDiaryEntry(yesterday): %v", err)
 	}
@@ -58,7 +58,7 @@ func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 
 	s.tick(ctx)
 
-	today := time.Now().Format(dayFormat)
+	today := time.Now().Format(time.DateOnly)
 	entry, err := store.DiaryEntry(ctx, today, "day")
 	if err != nil || entry != "Today was about the diary seam.\n\nThe user built it all evening." {
 		t.Errorf("today's diary entry = %q, %v", entry, err)
@@ -125,7 +125,7 @@ func TestScheduler_Close_RequiresActivityToday(t *testing.T) {
 	if calls != 0 {
 		t.Errorf("brain called %d times with no activity today, want 0", calls)
 	}
-	if entry, _ := store.DiaryEntry(ctx, time.Now().Format(dayFormat), "day"); entry != "" {
+	if entry, _ := store.DiaryEntry(ctx, time.Now().Format(time.DateOnly), "day"); entry != "" {
 		t.Errorf("diary entry written for an empty day: %q", entry)
 	}
 }
@@ -150,7 +150,7 @@ func TestScheduler_Close_RetriesAfterBrainFailure(t *testing.T) {
 	base := time.Date(n.Year(), n.Month(), n.Day(), 12, 0, 0, 0, n.Location())
 	var offset time.Duration
 	s.now = func() time.Time { return base.Add(offset) }
-	today := base.Format(dayFormat)
+	today := base.Format(time.DateOnly)
 
 	s.tick(ctx)
 	if entry, _ := store.DiaryEntry(ctx, today, "day"); entry != "" {
@@ -176,7 +176,7 @@ func TestScheduler_Brief_DeliversOncePerDay(t *testing.T) {
 	if _, err := store.LogNote(ctx, "Minutes: Zemna to send the deck by Friday", "meeting"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
-	yesterday := time.Now().AddDate(0, 0, -1).Format(dayFormat)
+	yesterday := time.Now().AddDate(0, 0, -1).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, yesterday, "day", "Left the retrieval work half done."); err != nil {
 		t.Fatalf("SetDiaryEntry(yesterday): %v", err)
 	}
@@ -203,7 +203,7 @@ func TestScheduler_Brief_DeliversOncePerDay(t *testing.T) {
 			t.Errorf("brief prompt is missing %q", want)
 		}
 	}
-	if marker, _ := store.DiaryEntry(ctx, time.Now().Format(dayFormat), "brief"); marker == "" {
+	if marker, _ := store.DiaryEntry(ctx, time.Now().Format(time.DateOnly), "brief"); marker == "" {
 		t.Error("brief marker row was not written")
 	}
 
@@ -269,7 +269,7 @@ func TestScheduler_WeeklyStudy_FiresOnceOnSunday(t *testing.T) {
 	if !gotNow.Equal(sunday) {
 		t.Errorf("weeklyStudy called with now=%v, want %v", gotNow, sunday)
 	}
-	marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study")
+	marker, err := store.DiaryEntry(ctx, sunday.Format(time.DateOnly), "weekly-study")
 	if err != nil || marker == "" {
 		t.Errorf("weekly-study marker = %q, %v, want a non-empty marker written", marker, err)
 	}
@@ -328,7 +328,7 @@ func TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("weeklyStudy called %d times, want 1", calls)
 	}
-	if marker, err := store.DiaryEntry(ctx, sunday.Format(dayFormat), "weekly-study"); err != nil || marker != "" {
+	if marker, err := store.DiaryEntry(ctx, sunday.Format(time.DateOnly), "weekly-study"); err != nil || marker != "" {
 		t.Errorf("weekly-study marker = %q, %v, want none written for a study that failed", marker, err)
 	}
 
@@ -620,7 +620,7 @@ func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
 
 	s.tick(ctx)
 
-	want := Notice{Title: "Day's written down", Body: "Today was about the diary seam.", Place: "days", ID: time.Now().Format(dayFormat), Kind: "close", Actions: noticeActions}
+	want := Notice{Title: "Day's written down", Body: "Today was about the diary seam.", Place: "days", ID: time.Now().Format(time.DateOnly), Kind: "close", Actions: noticeActions}
 	if len(sent) != 1 || !reflect.DeepEqual(sent[0], want) {
 		t.Errorf("notices = %+v, want exactly %+v", sent, want)
 	}
@@ -707,7 +707,7 @@ func TestTick_HungDutyDoesNotStopTheNext(t *testing.T) {
 
 	s.tick(ctx)
 
-	if brief, _ := store.DiaryEntry(ctx, time.Now().Format(dayFormat), "brief"); brief != "Three things today." {
+	if brief, _ := store.DiaryEntry(ctx, time.Now().Format(time.DateOnly), "brief"); brief != "Three things today." {
 		t.Errorf("brief marker after a hung close = %q, want the brief delivered anyway", brief)
 	}
 }
@@ -803,10 +803,10 @@ func TestScheduler_Close_CatchesUpADaySleptThrough(t *testing.T) {
 
 	s.tick(ctx)
 
-	if entry, _ := store.DiaryEntry(ctx, today.AddDate(0, 0, -1).Format(dayFormat), "day"); entry != "Yesterday was the recorder." {
+	if entry, _ := store.DiaryEntry(ctx, today.AddDate(0, 0, -1).Format(time.DateOnly), "day"); entry != "Yesterday was the recorder." {
 		t.Errorf("yesterday's diary entry = %q, want it written from yesterday's own timeline", entry)
 	}
-	if entry, _ := store.DiaryEntry(ctx, today.Format(dayFormat), "day"); entry != "" {
+	if entry, _ := store.DiaryEntry(ctx, today.Format(time.DateOnly), "day"); entry != "" {
 		t.Errorf("today was closed with no activity recorded: %q", entry)
 	}
 	if len(prompts) == 0 || !strings.Contains(prompts[0], "wrote the recorder") {
@@ -842,8 +842,8 @@ func TestScheduler_Close_GivesEachDayItsOwnDeadline(t *testing.T) {
 	s.tick(ctx)
 
 	for _, day := range []time.Time{today.AddDate(0, 0, -1), today} {
-		if entry, _ := store.DiaryEntry(ctx, day.Format(dayFormat), "day"); entry != "The day, written." {
-			t.Errorf("%s diary entry = %q, want it written under its own deadline", day.Format(dayFormat), entry)
+		if entry, _ := store.DiaryEntry(ctx, day.Format(time.DateOnly), "day"); entry != "The day, written." {
+			t.Errorf("%s diary entry = %q, want it written under its own deadline", day.Format(time.DateOnly), entry)
 		}
 	}
 }

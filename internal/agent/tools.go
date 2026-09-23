@@ -182,16 +182,7 @@ func RunShellCommand(command string) string {
 		// The command's own output is the answer to why it failed and the model needs it; only Go's exit-status wrapper is dropped.
 		return toolError("that command didn't run cleanly") + "\noutput: " + string(output)
 	}
-	return capRunes(string(output), 2000, "... (truncated)")
-}
-
-// capRunes bounds a tool result, cutting on a rune boundary. Input: the result, the most runes to keep, and the line appended after a cut. Output: the result unchanged when it fits, else its first n runes with note on a line of its own. Cutting on bytes instead halves a multi-byte rune and puts an invalid string into a JSON tool response.
-func capRunes(s string, n int, note string) string {
-	capped := util.Runes(s, n)
-	if capped == s {
-		return s
-	}
-	return capped + "\n" + note
+	return util.RunesNote(string(output), 2000, "... (truncated)")
 }
 
 // openURLCommand builds the command that hands a url to the desktop's browser, per platform. A var so a test can swap it and never launch a real browser. Input: the url, already checked to be http or https. Output: the command, not yet started.
@@ -339,7 +330,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 				slog.Warn("read_file failed", "path", path, "error", err)
 				return toolError("I couldn't read that file, check the path")
 			}
-			return capRunes(string(data), 4000, "... (truncated, file too large)")
+			return util.RunesNote(string(data), 4000, "... (truncated, file too large)")
 		}
 		if !isSensitivePath(path) {
 			return execute()

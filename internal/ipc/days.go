@@ -19,7 +19,7 @@ import (
 // daysBack is how far the history goes: the last sixty days that have anything in them.
 const daysBack = 60
 
-// dayTitleCap trims a day's title to a line the sidebar can draw.
+// dayTitleCap is the most runes of a day's title, which is the first non-empty line of its page with any leading "#" dropped, so the sidebar can draw it on one line.
 const dayTitleCap = 80
 
 // diaryDayKind is the diary kind the evening close writes one row of per day (see internal/proactive), which is the day's page when there is one.
@@ -102,7 +102,7 @@ func (s *Server) Days(w http.ResponseWriter, r *http.Request) {
 	for _, date := range dates {
 		page, has := byDate[date]
 		summary := DaySummary{
-			Date: date, Title: firstLine(page), HasPage: has,
+			Date: date, Title: util.Runes(strings.TrimLeft(util.FirstLine(page), "# "), dayTitleCap), HasPage: has,
 			Seen:           seen[date],
 			Meetings:       meetingCount[date],
 			MeetingMinutes: roundToMinutes(meetingSeconds[date]),
@@ -113,7 +113,7 @@ func (s *Server) Days(w http.ResponseWriter, r *http.Request) {
 		}
 		days = append(days, summary)
 	}
-	writeJSON(w, map[string]any{"days": days})
+	util.WriteJSON(w, map[string]any{"days": days})
 }
 
 // Day handles GET /days/{date}, date as local 'YYYY-MM-DD'. Page is the diary entry Ora wrote that evening, or the day's digest when there is no entry, or empty. You are the user's own turns from that day's conversations, oldest first; Tasks are the action items the day raised, each with whether it is now closed. A date that does not parse is 400.
@@ -197,7 +197,7 @@ func (s *Server) Day(w http.ResponseWriter, r *http.Request) {
 		meetingSeconds += meetingDurationSeconds(n.Content)
 	}
 
-	writeJSON(w, DayView{
+	util.WriteJSON(w, DayView{
 		Date: date, Page: page, Brief: brief, Close: closeEntry, You: you, Tasks: tasks,
 		Heading: dayHeading(seen[date], meetingCount, roundToMinutes(meetingSeconds)),
 	})
@@ -261,16 +261,4 @@ func digestOfDay(ctx context.Context, store *db.Store, from, to time.Time) (stri
 		return rows[i].Content, nil
 	}
 	return "", nil
-}
-
-// firstLine is a day's title: the first non-empty line of its page, trimmed to a line the sidebar can draw, or "" when there is no page.
-func firstLine(page string) string {
-	for _, line := range strings.Split(page, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		return util.Runes(strings.TrimLeft(line, "# "), dayTitleCap)
-	}
-	return ""
 }

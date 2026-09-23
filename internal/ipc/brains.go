@@ -7,27 +7,18 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"ora/internal/agent"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"ora/internal/agent"
+	"ora/internal/util"
+
 	"ora/internal/brain"
 	"ora/internal/config"
 )
-
-// claudeCredentialsPath is where the Claude CLI writes its login, under the given home directory. Every place this daemon checks whether the user is signed in to Claude, or reads a field out of that login, goes through this so the path is typed once.
-func claudeCredentialsPath(home string) string {
-	return filepath.Join(home, ".claude", ".credentials.json")
-}
-
-// codexAuthPath is where the Codex CLI writes its login, under the given home directory. Every place this daemon checks whether the user is signed in to Codex, or reads a field out of that login, goes through this so the path is typed once.
-func codexAuthPath(home string) string {
-	return filepath.Join(home, ".codex", "auth.json")
-}
 
 // ollamaListTimeout bounds the `ollama list` call this route makes, so a wedged local server cannot hang the window's settings screen.
 const ollamaListTimeout = 3 * time.Second
@@ -125,7 +116,7 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 // writeBrains writes the brain rows for cfg as JSON, the body both GET and POST /brains answer with.
 func writeBrains(ctx context.Context, w http.ResponseWriter, cfg config.OraConfig, limitsFor BrainLimits) {
 	home, _ := os.UserHomeDir()
-	writeJSON(w, map[string]any{"brains": brainList(ctx, cfg, home, onPath, limitsFor)})
+	util.WriteJSON(w, map[string]any{"brains": brainList(ctx, cfg, home, onPath, limitsFor)})
 }
 
 // providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every id gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's has no backend at all, which is why brainList marks that row unavailable rather than letting a pick land on a provider that cannot answer. ok is false when id names none of the brains Ora knows about, and the caller must leave the config untouched in that case.
@@ -161,8 +152,8 @@ func onPath(name string) bool {
 // brainList builds the rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them, with signed_in false on any brain internal/brain cannot actually answer with and limits_note saying why.
 func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(string) bool, limitsFor BrainLimits) []BrainView {
 	def := defaultBrainID(cfg.Brain.Provider)
-	claudeAccount := plainField(claudeCredentialsPath(home), "claudeAiOauth", "subscriptionType")
-	codexAccount := plainField(codexAuthPath(home), "", "auth_mode")
+	claudeAccount := plainField(agent.ClaudeCredentialsPath(home), "claudeAiOauth", "subscriptionType")
+	codexAccount := plainField(agent.CodexAuthPath(home), "", "auth_mode")
 
 	// Both rosters come out of the cache rather than off the command line: `agy models` takes about three and a half seconds, and this route runs on every settings render and again after every pick.
 	ollamaModels := []string{}
@@ -199,7 +190,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		{
 			ID:       "codex",
 			Name:     "Codex",
-			SignedIn: exists(codexAuthPath(home)),
+			SignedIn: util.Exists(agent.CodexAuthPath(home)),
 			Account:  codexAccount,
 			Models:   []string{"gpt-5.5", "gpt-5.6-luna"},
 			Note:     "OpenAI endorses using a Codex login from open-source harnesses, so Ora may call it under the plan the user already pays for.",
@@ -221,7 +212,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		{
 			ID:       "claude",
 			Name:     "Claude",
-			SignedIn: exists(claudeCredentialsPath(home)),
+			SignedIn: util.Exists(agent.ClaudeCredentialsPath(home)),
 			Account:  claudeAccount,
 			Models:   []string{"haiku", "sonnet", "opus"},
 			Note:     "Ora runs Claude through Anthropic's own command line, because a third-party login is billed as extra usage on top of the subscription. It is drawn last because the same subscription is the user's own coding workhorse, so Ora spends it only when the others are out.",
@@ -303,12 +294,6 @@ func geminiModels(cfg config.BrainConfig) []string {
 		models = append([]string{cfg.Model}, models...)
 	}
 	return models
-}
-
-// exists reports whether a path is there at all, which is what "signed in" means for a login file.
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // plainField reads one plain string field out of a JSON login file, so the window can name the account without ever handling a credential. Input: the file, the object to look inside ("" for the top level), and the field. Output: the field's value, or "" when the file is missing, unreadable, not JSON, or the field is not a plain string. Nothing here is logged.

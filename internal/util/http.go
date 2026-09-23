@@ -1,6 +1,7 @@
 package util
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -34,4 +35,10 @@ func ParseRetryAfter(h http.Header, now time.Time) (time.Duration, bool) {
 		return d, true
 	}
 	return 0, true
+}
+
+// WriteJSON answers a request with v encoded as JSON and a JSON content type. Input: the response writer and the value to send. Output: none; an encoding error is dropped, since the status line has already gone out.
+func WriteJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
 }

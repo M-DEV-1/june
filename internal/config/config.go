@@ -448,18 +448,12 @@ func DataDir() string {
 		return dir
 	}
 
-	dir := os.Getenv("XDG_DATA_HOME")
+	dir := util.DataHome()
 	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			slog.Error("failed to determine home directory, falling back to relative ora-db", "error", err)
-			return "ora-db"
-		}
-		dir = filepath.Join(home, ".local", "share")
+		slog.Error("failed to determine home directory, falling back to relative ora-db")
+		return "ora-db"
 	}
-
-	target := filepath.Join(dir, "ora")
-	return target
+	return filepath.Join(dir, "ora")
 }
 
 // ConfigPath is the on-disk location of the persisted app config.

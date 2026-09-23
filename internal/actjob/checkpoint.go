@@ -12,6 +12,7 @@ import (
 
 	"ora/internal/act"
 	"ora/internal/db"
+	"ora/internal/util"
 )
 
 // saveTimeout bounds one checkpoint write so a wedged store cannot hold a job's own goroutine.
@@ -60,7 +61,7 @@ func digestedObservations(obs []string) []string {
 func storedSteps(steps []Step) []Step {
 	out := slices.Clone(steps)
 	for i := range out {
-		out[i].Result = capRunes(out[i].Result, storedResultCap)
+		out[i].Result = util.Runes(out[i].Result, storedResultCap)
 	}
 	return out
 }

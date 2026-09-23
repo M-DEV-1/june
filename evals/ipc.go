@@ -32,9 +32,7 @@ func (d daemonClient) post(ctx context.Context, path string, payload any, out an
 	if err != nil {
 		return fmt.Errorf("build %s request: %w", path, err)
 	}
-	if token, err := ipctoken.Read(ipctoken.DefaultPath); err == nil {
-		req.Header.Set(ipctoken.HeaderName, token)
-	}
+	ipctoken.Attach(req, ipctoken.DefaultPath)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)

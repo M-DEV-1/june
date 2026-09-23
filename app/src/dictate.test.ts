@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { dictationKey, stopDictation } from "./dictate";
+import { stopDictation } from "./daemon";
+import { dictationKey } from "./dictate";
 
 /** Records every fetch and answers with a queued response. Input: the responses to hand out in order. Output: the fake, with the calls it saw. */
 function fakeFetch(...responses: { status: number; body?: unknown }[]) {
@@ -25,7 +26,7 @@ afterEach(() => {
 describe("stopDictation", () => {
   it("throws when whisper failed", async () => {
     fakeFetch({ status: 500 });
-    await expect(stopDictation("http://d", "secret", "dictate-3")).rejects.toThrow(/500/);
+    await expect(stopDictation("dictate-3")).rejects.toThrow(/500/);
   });
 });
 

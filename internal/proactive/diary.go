@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/util"
 )
 
 // maybeClose writes the day's diary entry once the close hour has passed, provided the day has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
@@ -32,7 +33,7 @@ func (s *Scheduler) closeOneDay(ctx context.Context, duty string, at time.Time) 
 	if s.backedOff(duty, s.now()) {
 		return
 	}
-	day := at.Format(dayFormat)
+	day := at.Format(time.DateOnly)
 	existing, err := s.store.DiaryEntry(ctx, day, "day")
 	if err != nil {
 		slog.Warn("evening close: reading the day's diary entry failed", "day", day, "error", err)
@@ -55,7 +56,7 @@ func (s *Scheduler) closeOneDay(ctx context.Context, duty string, at time.Time) 
 // hadActivity reports whether the machine was in use on one local day — a day that sat powered off or idle has no day to write about. Input: a moment on that day. Output: true when the newest episode falls on it, or when the day recorded any screen summary at all. The newest episode only ever answers for the last day the machine was awake, so a day being caught up after a sleep is answered from its own timeline instead. Episodes are stored in UTC; the day comparison is local.
 func (s *Scheduler) hadActivity(ctx context.Context, at time.Time) bool {
 	last, err := s.store.MemoryAsOf(ctx, "episode:recent")
-	if err == nil && !last.IsZero() && last.Local().Format(dayFormat) == at.Format(dayFormat) {
+	if err == nil && !last.IsZero() && last.Local().Format(time.DateOnly) == at.Format(time.DateOnly) {
 		return true
 	}
 	summaries, err := s.store.SummaryTimeline(ctx, db.DayStart(at), at)
@@ -93,7 +94,7 @@ func (s *Scheduler) closeDay(ctx context.Context, now time.Time, day string) err
 	if err := s.store.SetDiaryEntry(ctx, day, "day", entry); err != nil {
 		return err
 	}
-	s.say(Notice{Title: "Day's written down", Body: firstLine(entry), Place: "days", ID: day, Kind: "close", Actions: noticeActions})
+	s.say(Notice{Title: "Day's written down", Body: util.FirstLine(entry), Place: "days", ID: day, Kind: "close", Actions: noticeActions})
 	return nil
 }
 
@@ -124,7 +125,7 @@ func (s *Scheduler) composeDiaryPrompt(ctx context.Context, now time.Time) (stri
 	if err != nil {
 		return "", err
 	}
-	yesterday, err := s.store.DiaryEntry(ctx, now.AddDate(0, 0, -1).Format(dayFormat), "day")
+	yesterday, err := s.store.DiaryEntry(ctx, now.AddDate(0, 0, -1).Format(time.DateOnly), "day")
 	if err != nil {
 		return "", err
 	}
@@ -205,13 +206,4 @@ func writeOrNone(b *strings.Builder, s string) {
 	}
 	b.WriteString(s)
 	b.WriteString("\n")
-}
-
-// firstLine returns the first non-empty line of s — the diary prompt asks for a standalone salient first sentence exactly so the close notification can be this.
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return s
 }

@@ -231,8 +231,7 @@ func (d *Dictation) Stop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"text": text})
+	util.WriteJSON(w, map[string]string{"text": text})
 }
 
 // halt stops the microphone and waits for every chunk it already handed over to be buffered.
@@ -353,7 +352,7 @@ func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 	// -nt drops the timestamps, which a dictation has no use for, so stdout is the words and nothing else.
 	args := []string{"-f", wavPath, "-np", "-nt", "-et", dictateEntropyThreshold, "-lpt", dictateLogProbThreshold}
 	// No model beside the binary means a stub, which is how a test's bare script gets run without flags it would not understand.
-	if model := filepath.Join(filepath.Dir(bin), whisperCPPModelName); fileExists(model) {
+	if model := filepath.Join(filepath.Dir(bin), whisperCPPModelName); util.Exists(model) {
 		// -l auto for the same reason internal/recorder passes it: whisper-cli defaults to -l en, and a dictation that is not in English comes back as [NON-ENGLISH SPEECH] rather than as words.
 		args = append(args, "-m", model, "-l", "auto")
 		if dev := config.LoadConfig().Transcribe.GPUDevice; dev > 0 {
@@ -379,11 +378,6 @@ func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 		words = append(words, line)
 	}
 	return strings.Join(words, " "), nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // dictationPromptBudget caps the priming prompt in characters, for the same reason internal/recorder caps its own: whisper keeps only the last few hundred tokens of what it is primed with, so a longer prompt has its front silently cut off.

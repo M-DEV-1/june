@@ -9,6 +9,7 @@ package main
 // What this eval does not measure, because the harness diverges from the live daemon here: there is no voice or ASR (both arms are text), no handshake "[working]" activity block or focus hits (the eval has no tracker buffer), no Gemini native web search (it has no declaration to give the Claude arm, so neither arm gets it), and the Gemini arm runs generateContent on a text model rather than the Live API's native-audio model, which cannot do text function calling.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -154,7 +155,7 @@ func runTrajConversations(ctx context.Context, sys string, arms []trajArm, exec 
 			last := len(turns) - 1
 			turns[last] = runTrajTurn(ctx, sys, a.Step, exec, turns)
 			convo[a.Name] = turns
-			fmt.Printf("    [%s turn %2d] %d tools  %.70s\n", a.Name, msgNo, len(turns[last].Calls), strings.ReplaceAll(orText(turns[last].Reply, "(nothing)"), "\n", " "))
+			fmt.Printf("    [%s turn %2d] %d tools  %.70s\n", a.Name, msgNo, len(turns[last].Calls), strings.ReplaceAll(cmp.Or(turns[last].Reply, "(nothing)"), "\n", " "))
 		}
 	}
 	return convo, notes
@@ -404,7 +405,7 @@ func nextUserMessage(ctx context.Context, b brain.Brain, grounding string, turns
 	}
 	for _, t := range turns {
 		fmt.Fprintf(&p, "YOU: %s\n", t.User)
-		fmt.Fprintf(&p, "ASSISTANT: %s\n", orText(t.Reply, "(said nothing)"))
+		fmt.Fprintf(&p, "ASSISTANT: %s\n", cmp.Or(t.Reply, "(said nothing)"))
 	}
 	fmt.Fprintf(&p, "\nThis is message %d of %d. %s\n\nWrite only your next message.", msgNo, total, roleplayNudge(msgNo, total))
 	out, err := b(ctx, p.String())
@@ -492,7 +493,7 @@ func renderTurnForJudge(t trajTurn) string {
 	for _, c := range t.Calls {
 		fmt.Fprintf(&b, "Tool %s %s -> %s\n", c.Name, argsJSON(c.Args), truncateRunes(c.Result, judgeTrajBudget))
 	}
-	fmt.Fprintf(&b, "Reply: %s\n", orText(t.Reply, "(said nothing)"))
+	fmt.Fprintf(&b, "Reply: %s\n", cmp.Or(t.Reply, "(said nothing)"))
 	return b.String()
 }
 
@@ -589,7 +590,7 @@ func writeTrajectoryFile(dir string, r trajRun) (string, error) {
 		turns []trajTurn
 	}{{"gemini", r.Gemini}, {"claude", r.Claude}} {
 		g := r.Grades[arm.name]
-		fmt.Fprintf(&b, "| %s | %d | %d | %s | %s |\n", arm.name, len(arm.turns), countCalls(arm.turns), orText(g.Grade, "?"), cell(orText(g.Why, g.Err)))
+		fmt.Fprintf(&b, "| %s | %d | %d | %s | %s |\n", arm.name, len(arm.turns), countCalls(arm.turns), cmp.Or(g.Grade, "?"), cell(cmp.Or(g.Why, g.Err)))
 	}
 	b.WriteString("\n")
 
@@ -624,7 +625,7 @@ func writeTrajArm(b *strings.Builder, label string, turns []trajTurn, msg int) {
 	if len(t.Calls) > 0 {
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(b, "**%s:** %s\n\n", label, orText(t.Reply, "(said nothing)"))
+	fmt.Fprintf(b, "**%s:** %s\n\n", label, cmp.Or(t.Reply, "(said nothing)"))
 	if t.Err != "" {
 		fmt.Fprintf(b, "Error: %s\n\n", t.Err)
 	}
@@ -729,7 +730,7 @@ func runTrack7(ctx context.Context, j *judge, apiKey, dataDir, model string, tur
 
 	for _, p := range pairTrajTurns(run.Gemini, run.Claude) {
 		v := judgeTrajPair(ctx, j, p.Msg, p.Gemini, p.Claude)
-		fmt.Printf("    [judge turn %2d] %s — %s\n", p.Msg, orText(v.Verdict, "error"), orText(v.Why, v.Err))
+		fmt.Printf("    [judge turn %2d] %s — %s\n", p.Msg, cmp.Or(v.Verdict, "error"), cmp.Or(v.Why, v.Err))
 		run.Pairs = append(run.Pairs, v)
 	}
 	run.Grades["gemini"] = judgeTrajOverall(ctx, j, run.Gemini)
@@ -744,7 +745,7 @@ func runTrack7(ctx context.Context, j *judge, apiKey, dataDir, model string, tur
 	gemini, tie, claude, errs := trajCounts(run.Pairs)
 	return fmt.Sprintf("trajectory: %d matched turns — gemini preferred %d, tie %d, claude preferred %d, judge errored %d; coherence gemini %s, claude %s",
 		len(run.Pairs), gemini, tie, claude, errs,
-		orText(run.Grades["gemini"].Grade, "?"), orText(run.Grades["claude"].Grade, "?")), nil
+		cmp.Or(run.Grades["gemini"].Grade, "?"), cmp.Or(run.Grades["claude"].Grade, "?")), nil
 }
 
 // pacedBrain wraps a Gemini brain so the roleplay user shares the same per-minute budget the Ora arm and the judge are spending.

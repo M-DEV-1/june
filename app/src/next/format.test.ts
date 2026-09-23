@@ -9,6 +9,7 @@ import type {
   Task,
   Turn,
 } from "./api";
+import { truncateAtWord } from "../shared/errorline";
 import {
   activeDays,
   cachedInput,
@@ -16,7 +17,6 @@ import {
   atBottom,
   dayRailed,
   daysShown,
-  errorLine,
   modelEffort,
   groupConversations,
   groupLabel,
@@ -178,14 +178,14 @@ describe("tasks", () => {
 describe("what a failed ask reads as", () => {
   it("cuts a long first line on a word boundary and says there is more", () => {
     const long = `${"word ".repeat(60)}end`;
-    const { line, more } = errorLine(long);
+    const { line, more } = truncateAtWord(long);
     expect(more).toBe(true);
     expect(line.endsWith("…")).toBe(true);
     expect(line.length).toBeLessThanOrEqual(151);
   });
 
   it("says there is more when only the first of several lines is shown", () => {
-    expect(errorLine("first line\nsecond line")).toEqual({
+    expect(truncateAtWord("first line\nsecond line")).toEqual({
       line: "first line",
       more: true,
     });

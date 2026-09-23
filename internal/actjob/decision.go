@@ -9,6 +9,7 @@ import (
 
 	"ora/internal/act"
 	"ora/internal/db"
+	"ora/internal/util"
 )
 
 // stopLineRefusal is what every stop-line refusal begins with (see agent's stopBeforeClick and the type_text and press_key stop lines): the action did not happen and the user has to say go before it can.
@@ -180,7 +181,7 @@ func stuckQuestion(j Job) string {
 	}
 	q += fmt.Sprintf(" The last thing I did was %s, expecting %s; %s.", last.Tool, last.Expect.Describe(), last.Why)
 	if last.Result != "" {
-		q += " It answered: " + capRunes(last.Result, 300) + "."
+		q += " It answered: " + util.Runes(last.Result, 300) + "."
 	}
 	return q + " What should I do instead?"
 }
@@ -226,7 +227,7 @@ func (r *Runner) rewriteSummary(ctx context.Context, l *live) {
 		return
 	}
 	l.set(func(j *Job) {
-		j.Summary = capRunes(strings.TrimSpace(text), summaryCap)
+		j.Summary = util.Runes(strings.TrimSpace(text), summaryCap)
 		j.Spend.add(usage, name)
 	})
 }

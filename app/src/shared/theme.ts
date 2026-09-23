@@ -22,3 +22,36 @@ export async function systemTheme(): Promise<"light" | "dark"> {
     return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
 }
+
+/** Reads the stored theme choice. Input: none. Output: the stored choice, or "system" when nothing valid is stored or storage is blocked. */
+export function readTheme(): Theme {
+  try {
+    return themeChoice(localStorage.getItem(THEME_KEY));
+  } catch {
+    return "system";
+  }
+}
+
+/** Stores the theme choice. Input: the choice. Output: nothing; a blocked storage is ignored, since the stamp below has already taken effect. */
+export function storeTheme(theme: Theme): void {
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+    /* storage blocked */
+  }
+}
+
+// Which call was made last, so an earlier "system" resolution still on its way back from Rust cannot land after a later theme choice and stamp the wrong colour on the root (System, then a fast second pick, while the first invoke("system_theme") is still in flight).
+let themeAsk = 0;
+
+/** Stamps a theme choice on the root element, which is what both windows' stylesheets switch every colour token on. Input: the choice and the element to stamp. Output: the light or dark actually stamped, or undefined when a later call to this function has started since — its own answer, not this one, is what the root should show. "system" is resolved by asking the desktop first, so the attribute is never left off and the page never falls back to a media query the webview gets wrong. */
+export async function applyTheme(
+  theme: Theme,
+  root: HTMLElement = document.documentElement,
+): Promise<"light" | "dark" | undefined> {
+  const ask = ++themeAsk;
+  const resolved = theme === "system" ? await systemTheme() : theme;
+  if (ask !== themeAsk) return undefined;
+  root.dataset.theme = resolved;
+  return resolved;
+}

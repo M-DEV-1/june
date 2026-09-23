@@ -15,6 +15,7 @@ import (
 
 	"ora/internal/act"
 	"ora/internal/db"
+	"ora/internal/util"
 )
 
 // State is where a job has got to. A job is planning until its first decision, stepping while it acts, verifying while it checks what its action did, and then reaches one of the four ends — or waits in paused or stuck for the user.
@@ -656,7 +657,7 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 				return
 			}
 		}
-		step.Result = capRunes(result, resultCap)
+		step.Result = util.Runes(result, resultCap)
 		step.Why = "the action ran, and the check had not answered yet"
 
 		// Nothing was clicked, typed or pressed, and no rewording of the same action gets past the stop line, so the refusal goes to the user as the job's one question rather than back to the model as a result to try around — which is what the ask loop does with the same sentinel (see ask.go).

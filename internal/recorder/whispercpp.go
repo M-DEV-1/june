@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ora/internal/config"
+	"ora/internal/util"
 )
 
 // The transcription engine is whisper-medium through a whisper.cpp build, which decodes on the GPU through its Vulkan backend and falls back to the CPU on its own when no GPU is there. It is installed into <data dir>/whispercpp: the whisper-cli binary and the ggml model beside it.
@@ -68,7 +69,7 @@ func whisperCPPArgs(bin string) []string {
 	}
 	// Voice activity detection, when its model is installed. Whisper decodes in 30-second windows and carries what it decoded into the next one, so a stream that is mostly quiet teaches it that this stream is not speech: on the 16 September 2026 standup it printed "[waves crashing]" for 23 minutes and never transcribed the 51 seconds of the user's own update sitting in the middle, and the minutes said he did not speak. Cutting the stream to the spans Silero calls speech recovered the whole update, and made the run 29 seconds instead of 83.
 	// The decoder thresholds and the priming prompt do not help here: the same file transcribes to nothing at 40x gain, with -sns, and unprimed, while the 60 seconds around the speech transcribe perfectly untouched. The silence around the speech is the problem, so the fix is to stop handing it over.
-	if vad := filepath.Join(filepath.Dir(bin), whisperVADModelName); exists(vad) {
+	if vad := filepath.Join(filepath.Dir(bin), whisperVADModelName); util.Exists(vad) {
 		args = append(args, "--vad", "-vm", vad)
 	}
 	return args

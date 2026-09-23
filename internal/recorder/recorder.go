@@ -20,6 +20,7 @@ import (
 	"ora/internal/config"
 	"ora/internal/db"
 	"ora/internal/memory"
+	"ora/internal/util"
 )
 
 // noteKind is the notes.kind written for a meeting, so minutes are distinguishable from the memory compiler's facts.
@@ -537,7 +538,7 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 		return fmt.Errorf("write minutes: %w", err)
 	}
 	// Whether this meeting has been filed before is read before fileMinutes files it, since that is the call that writes the note id.
-	filed := exists(filepath.Join(s.dir, noteIDFile))
+	filed := util.Exists(filepath.Join(s.dir, noteIDFile))
 	r.fileMinutes(ctx, s.dir, text, s.startedAt, s.stoppedAt)
 
 	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.

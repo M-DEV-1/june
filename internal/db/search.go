@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"go.opentelemetry.io/otel/attribute"
 	"log/slog"
 	"math"
-	"ora/internal/obs"
-	"ora/internal/util"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"ora/internal/obs"
+	"ora/internal/util"
 )
 
 // MemoryHit is one FTS5 row — either a summary or a note.
@@ -524,14 +526,11 @@ func (s *Store) leadWithUnderstanding(ctx context.Context, branch []string) []st
 		slog.Warn("implicit context: reading the standing understanding failed", "error", err)
 		return branch
 	}
-	flat := strings.Join(strings.Fields(doc), " ")
+	flat := util.OneLine(doc)
 	if flat == "" {
 		return branch
 	}
-	if r := []rune(flat); len(r) > UnderstandingContextCap {
-		flat = string(r[:UnderstandingContextCap]) + "…"
-	}
-	return append([]string{"[understanding] " + flat}, branch...)
+	return append([]string{"[understanding] " + util.RunesEllipsis(flat, UnderstandingContextCap)}, branch...)
 }
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ora/internal/proactive"
+	"ora/internal/util"
 )
 
 // noSpeechMarker is the file left in a recording directory whose transcription ran fine but produced no speech at all. It tells the user why the audio is still there, and it stops the startup sweep from transcribing that directory again on every daemon start.
@@ -102,7 +103,7 @@ func readTrimmed(path string) string {
 
 // unfinished reports whether dir holds a recording that still needs processing, and returns the session to run it as. There are two cases: both WAVs present with no transcript.md, which is a recording a crash or a battery deferral left mid-flight, and a transcript.md with no minutes.md, which is either a crash between those two writes or the user deleting minutes.md to ask for the summary again. A no-speech marker means the recording is done with either way.
 func unfinished(dir string) (*session, bool) {
-	if exists(filepath.Join(dir, noSpeechMarker)) {
+	if util.Exists(filepath.Join(dir, noSpeechMarker)) {
 		return nil, false
 	}
 	// A recording that has failed maxProcessAttempts times is not offered again: whatever is wrong with it is not the kind of thing another hour fixes, and the user has been told so in the meetings list. Deleting the marker is how they ask for another go.
@@ -113,15 +114,15 @@ func unfinished(dir string) (*session, bool) {
 	if t := modTime(filepath.Join(dir, failedMarker)); !t.IsZero() && time.Since(t) < failureRetryAfter {
 		return nil, false
 	}
-	if exists(filepath.Join(dir, "transcript.md")) {
-		if exists(filepath.Join(dir, "minutes.md")) {
+	if util.Exists(filepath.Join(dir, "transcript.md")) {
+		if util.Exists(filepath.Join(dir, "minutes.md")) {
 			return nil, false
 		}
 		s := pickupSession(dir)
 		s.fromTranscript = true
 		return s, true
 	}
-	if !exists(filepath.Join(dir, "mic.wav")) || !exists(filepath.Join(dir, "system.wav")) {
+	if !util.Exists(filepath.Join(dir, "mic.wav")) || !util.Exists(filepath.Join(dir, "system.wav")) {
 		return nil, false
 	}
 	return pickupSession(dir), true
@@ -191,12 +192,6 @@ func audioDuration(path string) time.Duration {
 	return time.Duration((info.Size()-wavHeaderSize)/2) * time.Second / sampleRate
 }
 
-// exists reports whether path is there at all.
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // modTime returns when path was last written, or the zero time if it cannot be read.
 func modTime(path string) time.Time {
 	info, err := os.Stat(path)
@@ -216,7 +211,7 @@ func markOutcome(dir string, err error) int {
 		return 0
 	}
 	// A recording with no speech in it already has its own marker saying so, and unfinished() stops on that one first.
-	if exists(filepath.Join(dir, noSpeechMarker)) {
+	if util.Exists(filepath.Join(dir, noSpeechMarker)) {
 		return 0
 	}
 	attempts := failedAttempts(dir) + 1

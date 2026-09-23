@@ -241,8 +241,7 @@ func writeClaudeRPC(w http.ResponseWriter, id json.RawMessage, result any, rpcEr
 	} else {
 		reply["result"] = result
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(reply)
+	util.WriteJSON(w, reply)
 }
 
 // claudeTools converts the agent's tool declarations into the MCP tool objects tools/list answers with, one per declaration in the same order. The argument schema is the same JSON Schema the Codex path sends.
@@ -337,15 +336,10 @@ func runClaudeCLI(binary string) claudeRunner {
 			if len(out.Bytes()) > 0 {
 				return out.Bytes(), nil
 			}
-			return nil, fmt.Errorf("claude: %w: %s", err, claudeHead(stderr.String()))
+			return nil, fmt.Errorf("claude: %w: %s", err, util.LogHead(stderr.String()))
 		}
 		return out.Bytes(), nil
 	}
-}
-
-// claudeHead is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line. Input: any string, including one that is not ASCII. Output: the flattened string, cut on a rune boundary with an ellipsis when it was longer than the cap.
-func claudeHead(s string) string {
-	return util.RunesEllipsis(util.OneLine(s), 300)
 }
 
 // claudeSourceLinkPattern matches one "[Title](url)" markdown link inside a Sources block.
@@ -503,7 +497,7 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	}
 	var res claudeResult
 	if err := json.Unmarshal(out, &res); err != nil {
-		return tr, fmt.Errorf("claude: could not parse what the command line printed: %w (%s)", err, claudeHead(string(out)))
+		return tr, fmt.Errorf("claude: could not parse what the command line printed: %w (%s)", err, util.LogHead(string(out)))
 	}
 	tr.Usage.Rounds = res.NumTurns
 	// The CLI reports the input in three parts: what it read afresh, what it wrote into its prompt cache, and what it answered out of that cache. All three are input the model read, so the whole input is their sum and the cached part is one of them, which is the same shape the Codex path records. Measured against the real command line on 2026-09-05: a two-round ask reported input_tokens 4, cache_creation 7,283 and cache_read 7,143, so counting input_tokens alone would put a 14,430-token ask on record as having cost four.
@@ -511,7 +505,7 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	tr.Usage.add(input, res.Usage.OutputTokens, input+res.Usage.OutputTokens)
 	tr.Usage.CachedInputTokens = res.Usage.CacheReadTokens
 	if res.IsError {
-		return tr, fmt.Errorf("claude: the run failed (%s): %s", res.Subtype, claudeHead(res.Result))
+		return tr, fmt.Errorf("claude: the run failed (%s): %s", res.Subtype, util.LogHead(res.Result))
 	}
 	answer, sources := stripSourcesBlock(strings.TrimSpace(res.Result))
 	tr.Answer = answer
@@ -568,12 +562,8 @@ const (
 	claudeUsageTimeout = 5 * time.Second
 )
 
-// claudeCredentialsPath is where Claude Code keeps the subscription login this file reads the access token out of, the same way codexAuthPath names Codex's.
-func claudeCredentialsPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
+// ClaudeCredentialsPath is where the Claude CLI writes its login under the home directory home. Every place that checks whether the user is signed in to Claude, or reads a field out of that login, goes through this so the path is typed once.
+func ClaudeCredentialsPath(home string) string {
 	return filepath.Join(home, ".claude", ".credentials.json")
 }
 
@@ -708,5 +698,9 @@ func RefreshClaudeUsage(ctx context.Context) {
 	if to == nil {
 		return
 	}
-	refreshClaudeUsage(ctx, http.DefaultClient, claudeUsageURL, claudeCredentialsPath(), to)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	refreshClaudeUsage(ctx, http.DefaultClient, claudeUsageURL, ClaudeCredentialsPath(home), to)
 }

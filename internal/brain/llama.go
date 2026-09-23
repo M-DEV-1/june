@@ -45,7 +45,7 @@ func LlamaServer(baseURL string, timeoutSeconds int) Brain {
 		defer resp.Body.Close()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return "", fmt.Errorf("llama-server: server returned %d: %s", resp.StatusCode, head(util.BodySnippet(resp.Body)))
+			return "", fmt.Errorf("llama-server: server returned %d: %s", resp.StatusCode, util.LogHead(util.BodySnippet(resp.Body)))
 		}
 
 		var parsed struct {

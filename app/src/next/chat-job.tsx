@@ -10,7 +10,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useSetJobPauseMutation, useStopJobMutation } from "./api";
-import { costLine, isJobLive, jobStateWord, took } from "./format";
+import { isJobLive } from "../shared/job";
+import { costLine, jobStateWord, took } from "./format";
 import { ui, useAppDispatch, type JobRun } from "./store";
 
 /** The elapsed time on a job's own heading, ticking on its own second by second so the step list under it does not re-render along with it. Input: when the job started, and whether it is still live. Output: "3.2s", "1m 04s" — took() reused from the token ledger. Stops ticking the moment it is handed live=false, which is also the render where the closing text and cost line take this line's place. */

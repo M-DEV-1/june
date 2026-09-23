@@ -1,15 +1,15 @@
 /** Pure state model for the window. No DOM here — main.ts renders View, this file only computes it. */
 
 import { truncateAtWord } from "./shared/errorline";
+import { clockTime } from "./shared/clock";
 import { noticeActionSuffix } from "./shared/notice";
 import {type OraState} from "./shared/faces";
+import { isJobLive, jobGoal, parseActDetail } from "./shared/job";
 import { THEME_KEY, themeChoice, type Theme } from "./shared/theme";
-import type { DaemonEvent, Notice as WireNotice } from "./daemon";
+import type { DaemonEvent, Evidence, Notice, Spend } from "./shared/wire";
+import type { ContextInfo, MatterRow } from "./daemon";
 import { renderLevelEvent, type LevelDetail } from "./waveform";
 
-export { THEME_KEY, themeChoice, type Theme };
-
-export type Evidence = { title: string; meta: string; body?: string };
 
 /** One tool call's row in the live step list. Opened by the "tool" event that starts it (name is the daemon's tool name, detail is that event's Detail — the argument summary, e.g. a quoted query) and closed by the next "tool" event, which sets finishedAt and nothing else: the finish event's own Detail is just a generic result word ("done", "3 hits") that the row's icon already conveys by turning into a check, so there is nothing worth overwriting the label with. error is set instead of finishedAt completing normally when the daemon's whole ask fails while this step was still open, so its spinner has something to turn into besides a check. */
 export type ToolStep = {
@@ -21,13 +21,13 @@ export type ToolStep = {
 };
 
 /** Turn.progress is the latest live "tool" event's Detail, the short summary of what the daemon is doing right now ("clicking Reload", "3 hits"). It is shown under the question while the answer is still empty, so a long multi-step screen task has something on screen instead of a bare "…", and it stops being read once the answer lands, since the answer then takes over the same line. Turn.detail is the whole of a failed ask's message when only one line of it went into the answer (see errorLine); it is what the fold under the answer opens on, and it is absent on every turn that did not fail. Turn.steps is the same tool activity as progress/tools, kept instead as a timeline for the live step-list card (see applyToolEvent) — progress and tools stay as they were for whatever still reads them; steps is what the card actually draws now. */
-/** A long computer-use job in flight, attached to the turn its goal opened (see the "do:" prefix in the submit case below). id is the daemon's job id ("act-1"), the one every "act" event on the stream carries as its own id. state is the job's own state word straight off the wire (see internal/actjob.State: "planning", "stepping", "verifying", "paused", "stuck", "done", "stopped" or "failed") — isJobLive below is what turns that into a yes/no. question is the one thing a stuck job is waiting on, set by a "question" event and cleared by "answered" or "done"; while it is set, the composer's Enter answers it instead of asking something new (see the submit case). spend is only set once, by "done": what the whole job cost, for the closing cost line. */
+/** A long computer-use job in flight, attached to the turn its goal opened (see the "do:" prefix in the submit case below). id is the daemon's job id ("act-1"), the one every "act" event on the stream carries as its own id. state is the job's own state word straight off the wire (see internal/actjob.State: "planning", "stepping", "verifying", "paused", "stuck", "done", "stopped" or "failed") — isJobLive in shared/job.ts is what turns that into a yes/no. question is the one thing a stuck job is waiting on, set by a "question" event and cleared by "answered" or "done"; while it is set, the composer's Enter answers it instead of asking something new (see the submit case). spend is only set once, by "done": what the whole job cost, for the closing cost line. */
 export type JobMeta = {
   id: string;
   state: string;
   startedAt: number;
   question?: string;
-  spend?: { rounds: number; input: number; cached: number; output: number };
+  spend?: Spend;
 };
 
 type Turn = {
@@ -43,14 +43,6 @@ type Turn = {
   /** When this turn was asked, set only by a typed submit (see the "submit" case below); a voice turn or one already sitting in a matter before this window ever read it carries none. This is what conversationSeparator compares against the turn before it to say whether a thread break belongs above this one. */
   at?: number;
 };
-/** One answer button a notice names for itself: key is what goes to the daemon's notice route as the action, label is what the button reads. The daily stale-task question ("Still open — any progress?") is the first notice to name its own, because Done / Not happening / Not urgent are not the Done / snooze / Open set every other notice takes. */
-export type NoticeAction = { key: string; label: string };
-
-// Notice and DaemonEvent are the daemon's wire shapes, not this window's own state, so daemon.ts (the module that actually talks to the wire) declares them once and this file only widens them — the point being that main.ts's events() callback and this reducer read the very same type instead of two same-named declarations that happened to agree by hand.
-/** The daemon's notice, plus the answers it may carry. A notice with actions gets exactly those buttons, in that order, in place of the default set; one without is drawn exactly as it always has been (see noticeButtonsHtml in main.ts). */
-export type Notice = WireNotice & { actions?: NoticeAction[] };
-export type { DaemonEvent };
-
 export type Matter = {
   id: string;
   title: string;
@@ -60,19 +52,6 @@ export type Matter = {
   status?: "open" | "done" | "watching";
   kind?: "action" | "thread" | "meeting";
 };
-
-/** One row from the daemon's GET /matters. */
-export type MatterRow = {
-  id: string;
-  title: string;
-  kind: "action" | "thread" | "meeting";
-  status: "open" | "done" | "watching";
-  when: string;
-  detail: string;
-};
-
-/** The daemon's GET /context, shape fixed by the Go side. */
-export type ContextInfo = { app: string; title: string; text: string };
 
 type ViewState = "empty" | "asking" | "answered";
 
@@ -160,14 +139,9 @@ export type Event =
 /** How long a notice stays on screen before it goes by itself, in milliseconds. Long enough to read three lines, short enough that a card the user is not interested in is gone before it becomes something to dismiss. The timer itself runs in main.ts; the pointer being over the card pauses it (see noticeHeld). */
 export const NOTICE_MS = 6000;
 
-/** The clock reading on a moment, 24-hour and to the minute ("18:00"), with no date on it. Shared by a snoozed notice's "until" line and the thread's own separator between two conversations, so the hover has one way of writing a time rather than one per place that needed one. Input: the moment. Output: the label. */
-function clockLabel(d: Date): string {
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-}
-
 /** The one-line text a notice whose action is set shows instead of its usual title and body: "Snoozed until 18:00" for one snoozed from its own desktop notification's buttons, "Snoozed until tomorrow 09:00" once the snooze crosses midnight, or "Done" for one dismissed outright. Input: the notice, and the current moment, used only to tell whether until falls on today. Output: the line, or undefined for a notice with no action, which draws exactly as it always has (see renderNotice in main.ts). */
 export function noticeActionLine(n: Notice, now: Date): string | undefined {
-  return noticeActionSuffix(n, now, clockLabel);
+  return noticeActionSuffix(n, now);
 }
 
 /** close hides the hover. openNotice opens the main app window at the screen and row the clicked notice named, which are empty when it named none and the window should just open. ask sends the question that has just gone on the card to the daemon, in the conversation named, or in a new one the daemon opens when none is named. */
@@ -207,7 +181,7 @@ export function conversationSeparator(
   const prev = turns[i - 1].at;
   const at = turns[i].at;
   if (prev === undefined || at === undefined) return undefined;
-  return at - prev > CONVERSATION_MS ? clockLabel(new Date(at)) : undefined;
+  return at - prev > CONVERSATION_MS ? clockTime(new Date(at)) : undefined;
 }
 
 /** What a storage event means for the theme. Input: the event's key and new value; a key of null is the whole store being cleared. Output: the choice to apply now, or undefined when the event was about some other key and the theme has not changed. */
@@ -580,45 +554,10 @@ export function stepsCollapsed(
   return !steps.some((s) => s.error);
 }
 
-/** The goal of a "do:" question, which is what starts a computer-use job instead of an ask. Input: the text typed into the composer. Output: the goal with the prefix and any leading space stripped, or undefined for a question that does not start with it (including "do:" with nothing after it, which has no goal to run). Case-insensitive, so "Do: reload the page" works the same as "do:". */
-export function jobGoal(text: string): string | undefined {
-  const m = /^do:\s*(.+)/is.exec(text.trim());
-  return m ? m[1].trim() || undefined : undefined;
-}
-
-/** Whether a job's own state word (see JobMeta) is one it may still take a step from. Input: the state. Output: false for "done", "stopped", "failed" and the empty string (no job attached yet), true for every other word this daemon sends. */
-export function isJobLive(state: string): boolean {
-  return (
-    state !== "" &&
-    state !== "done" &&
-    state !== "stopped" &&
-    state !== "failed"
-  );
-}
-
 /** The live job on the turn on screen, if there is one. Input: the view. Output: the job, or undefined when the current matter has no turns or its last turn opened no job. */
 function currentJob(view: View): JobMeta | undefined {
   const m = currentMatter(view);
   return m?.turns[m.turns.length - 1]?.job;
-}
-
-/** The shape of an "act" event's JSON detail (see internal/actjob.Event). kind is "started", "step", "verified", "question", "answered", "paused", "resumed" or "done". */
-type ActDetail = {
-  kind: string;
-  state: string;
-  text: string;
-  expect?: string;
-  outcome?: string;
-  spend?: JobMeta["spend"];
-};
-
-/** Decodes one "act" event's detail. Input: the detail text off the wire. Output: the parts, or every field empty when the text will not parse — which never happens against a daemon that sent it, but leaves nothing to throw on a malformed one. */
-function parseActDetail(detail: string | undefined): ActDetail {
-  try {
-    return JSON.parse(detail ?? "{}") as ActDetail;
-  } catch {
-    return { kind: "", state: "", text: "" };
-  }
 }
 
 // now defaults to the real clock so every existing call site (main.ts's dispatch) needs no change; tests pass it explicitly so a step's elapsed time is deterministic instead of racing the test's own wall clock.

@@ -1,5 +1,6 @@
 /** Seed data for the window: the venue matter's script, the CI-red matter already answered, and the lease stub. Also owns the ?mock=1&voice=1 switch, which fakes a live-voice session (see startMockVoice) so the voice-mode surface can be exercised and screenshotted with no daemon and no microphone. */
-import type { Evidence, Matter, Notice, View } from "./state";
+import type { Matter, View } from "./state";
+import type { Evidence, Notice } from "./shared/wire";
 
 /** The one email both venue turns read from. Turn one leaves it collapsed; turn two is the same source, expanded. */
 const venueEvidence: Evidence = {
@@ -32,7 +33,7 @@ function initialMatters(): Matter[] {
         {
           q: "CI red on main",
           a: "<b>test_upload</b> fails on the new size check: it expects 10 MB and the constant now says 8. Emzor lowered it in #412 yesterday.",
-          evidence: [{ title: "CI run 4471", meta: "GitHub · 08:12" }],
+          evidence: [{ title: "CI run 4471", meta: "GitHub · 08:12", body: "" }],
         },
       ],
     },

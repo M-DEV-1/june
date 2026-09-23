@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"ora/internal/util"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"ora/internal/util"
 )
 
 // ClaudeCLI answers by running `claude -p`, which uses whatever Claude Code login the machine already has — a subscription, billed as a subscription, not per-token API calls.
@@ -36,11 +37,11 @@ func ClaudeCLI(binary, model string, timeoutSeconds int) Brain {
 			Subtype string `json:"subtype"`
 		}
 		if err := json.Unmarshal(out, &res); err != nil {
-			slog.Debug("claude -p printed something that is not JSON", "output", head(string(out)))
+			slog.Debug("claude -p printed something that is not JSON", "output", util.LogHead(string(out)))
 			return "", fmt.Errorf("could not parse the output of claude -p: %w", err)
 		}
 		if res.IsError {
-			slog.Debug("claude -p reported a failure", "subtype", res.Subtype, "result", head(res.Result))
+			slog.Debug("claude -p reported a failure", "subtype", res.Subtype, "result", util.LogHead(res.Result))
 			return "", fmt.Errorf("claude -p failed (%s)", res.Subtype)
 		}
 		text := strings.TrimSpace(res.Result)
@@ -66,11 +67,11 @@ func AgyCLI(binary string, timeoutSeconds int, model ...string) Brain {
 			Response string `json:"response"`
 		}
 		if err := json.Unmarshal(out, &res); err != nil {
-			slog.Debug("agy --print printed something that is not JSON", "output", head(string(out)))
+			slog.Debug("agy --print printed something that is not JSON", "output", util.LogHead(string(out)))
 			return "", fmt.Errorf("could not parse the output of agy --print: %w", err)
 		}
 		if res.Status != "SUCCESS" {
-			slog.Debug("agy --print reported a failure", "status", res.Status, "response", head(res.Response))
+			slog.Debug("agy --print reported a failure", "status", res.Status, "response", util.LogHead(res.Response))
 			return "", fmt.Errorf("agy --print failed with status %s", res.Status)
 		}
 		text := strings.TrimSpace(res.Response)
@@ -95,7 +96,7 @@ func GrokCLI(binary string, timeoutSeconds int, model ...string) Brain {
 			StopReason string `json:"stopReason"`
 		}
 		if err := json.Unmarshal(out, &res); err != nil {
-			slog.Debug("grok -p printed something that is not JSON", "output", head(string(out)))
+			slog.Debug("grok -p printed something that is not JSON", "output", util.LogHead(string(out)))
 			return "", fmt.Errorf("could not parse the output of grok -p: %w", err)
 		}
 		text := strings.TrimSpace(res.Text)
@@ -134,6 +135,7 @@ func first(ss []string) string {
 
 // runCLI runs one child process under a hard timeout and returns its stdout. It returns as soon as stdout holds one complete JSON value, which is the whole answer for every CLI here, and does not wait for the child to exit: on 2026-09-08 a meeting's minutes were lost to "claude timed out after 5m0s" when the CLI had printed its result and then sat there. The child and everything it spawned are killed once the answer is in hand or the timeout passes.
 // Input: the binary, the timeout in seconds, the arguments, and what to feed the child on stdin. Output: stdout, or an error naming the timeout (with the head of the child's stderr, since a run that says nothing else is otherwise untraceable), the exit status, or the stderr the child died with.
+// The CLIs' own output is logged at debug rather than returned in the error, because these errors are logged at warn by callers such as the evening close (slog.Warn("evening close failed", "error", err)) and the output can carry part of the prompt — a day of the user's screen text — or a login error naming their account.
 func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []string, stdin string) ([]byte, error) {
 	timeout := time.Duration(timeoutSeconds) * time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -190,14 +192,14 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 		// The pipe closed without a whole answer: the child is done (or dying), and its exit status says how.
 		kill()
 		if err := cmd.Wait(); err != nil {
-			slog.Debug("a brain CLI exited with an error", "binary", name, "stderr", head(stderr.String()))
+			slog.Debug("a brain CLI exited with an error", "binary", name, "stderr", util.LogHead(stderr.String()))
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		return r.out, nil
 	case <-ctx.Done():
 		kill()
 		cmd.Wait()
-		return nil, fmt.Errorf("%s timed out after %s (stderr: %s)", name, timeout, head(stderr.String()))
+		return nil, fmt.Errorf("%s timed out after %s (stderr: %s)", name, timeout, util.LogHead(stderr.String()))
 	}
 }
 
@@ -205,11 +207,4 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 func completeJSON(b []byte) bool {
 	b = bytes.TrimSpace(b)
 	return len(b) > 0 && json.Valid(b)
-}
-
-// The CLIs' own output is logged at debug rather than returned in the error, because these errors are logged at warn by callers such as the evening close (slog.Warn("evening close failed", "error", err)) and the output can carry part of the prompt — a day of the user's screen text — or a login error naming their account.
-
-// head is the first 300 runes of s with the whitespace squeezed out, which is as much of a CLI's error output as belongs in one log line. Cutting on runes rather than bytes keeps the log line valid UTF-8 whatever the CLI printed.
-func head(s string) string {
-	return util.RunesEllipsis(util.OneLine(s), 300)
 }

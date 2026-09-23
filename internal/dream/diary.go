@@ -192,11 +192,11 @@ func (r *Runner) compactEntry(ctx context.Context, night, kind, period string, e
 
 // mondayOf returns the Monday of the local week a 'YYYY-MM-DD' day falls in, as the same kind of string.
 func mondayOf(day string) string {
-	d, err := time.ParseInLocation(dayFormat, day, time.Local)
+	d, err := time.ParseInLocation(time.DateOnly, day, time.Local)
 	if err != nil {
 		return day
 	}
-	return d.AddDate(0, 0, -int(d.Weekday()+6)%7).Format(dayFormat)
+	return d.AddDate(0, 0, -int(d.Weekday()+6)%7).Format(time.DateOnly)
 }
 
 // mondaysOf returns every Monday date inside a 'YYYY-MM' month, oldest first — the week entries a month must hold before it may compact.
@@ -208,7 +208,7 @@ func mondaysOf(month string) []string {
 	var out []string
 	for d := first; d.Format("2006-01") == month; d = d.AddDate(0, 0, 1) {
 		if d.Weekday() == time.Monday {
-			out = append(out, d.Format(dayFormat))
+			out = append(out, d.Format(time.DateOnly))
 		}
 	}
 	return out

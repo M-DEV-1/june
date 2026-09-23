@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"ora/internal/db"
+	"ora/internal/util"
 )
 
 // verdictInstruction heads the judging call. Principles and field contracts only — no worked examples, so the model judges the material instead of pattern-matching a sample.
@@ -100,7 +101,7 @@ func understandingPrompt(current string, strong []db.Hypothesis, past []coarseEn
 		b.WriteString("(none)\n")
 	}
 	for _, d := range week {
-		fmt.Fprintf(&b, "%s: %s\n", d.Day, firstLine(d.Content))
+		fmt.Fprintf(&b, "%s: %s\n", d.Day, util.FirstLine(d.Content))
 	}
 	return b.String()
 }
@@ -189,13 +190,4 @@ func diaryPrompt(hyp *stageReport, undRan bool, comp *compactReport, replay *rep
 		}
 	}
 	return b.String()
-}
-
-// firstLine returns the first non-empty line of s — the diary prompt makes each entry's first line its standalone salient sentence.
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return s
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/util"
 )
 
 // RoutineView is one routine on GET /routines. LastRun is "" until it has fired at least once.
@@ -62,7 +63,7 @@ func (s *Server) listRoutines(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		out = append(out, viewRoutine(row))
 	}
-	writeJSON(w, map[string]any{"routines": out})
+	util.WriteJSON(w, map[string]any{"routines": out})
 }
 
 // createRoutine answers POST /routines: a blank instruction or schedule is 400.

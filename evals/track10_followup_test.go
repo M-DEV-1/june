@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -73,7 +74,7 @@ func TestAct10RunTask_FollowUpQuestionReusesTheConversation(t *testing.T) {
 		Question:  "ring the reload button",
 		Question2: "draw a circle around it",
 		Pass2: func(steps []string, ring bool, answer string, details []string) bool {
-			return act10Has(steps, "draw")
+			return slices.Contains(steps, "draw")
 		},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

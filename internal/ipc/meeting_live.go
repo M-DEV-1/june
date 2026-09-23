@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ora/internal/recorder"
+	"ora/internal/util"
 )
 
 // LiveRecorder is the part of *recorder.Recorder this route needs, narrowed so a test can fake it.
@@ -61,6 +62,6 @@ func MeetingLive(rec LiveRecorder) http.HandlerFunc {
 		if !snap.TranscribedThrough.IsZero() {
 			view.TranscribedThrough = snap.TranscribedThrough.UTC().Format(time.RFC3339)
 		}
-		writeJSON(w, view)
+		util.WriteJSON(w, view)
 	}
 }

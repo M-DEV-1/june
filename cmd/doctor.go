@@ -15,6 +15,7 @@ import (
 
 	"ora/internal/config"
 	"ora/internal/recorder"
+	"ora/internal/util"
 	"ora/internal/window"
 )
 
@@ -157,7 +158,7 @@ func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []do
 	} else {
 		out = append(out, doctorCheck{Name: "meeting transcription", Detail: "whisper-cli at " + bin, OK: true})
 	}
-	if vad := recorder.WhisperVADModel(dataDir); !exists(vad) {
+	if vad := recorder.WhisperVADModel(dataDir); !util.Exists(vad) {
 		out = append(out, doctorCheck{Name: "voice activity model", Detail: "no Silero model at " + vad + "; voice activity detection is off, and a long, mostly quiet meeting transcribes badly without it", Fix: "put ggml-silero-v6.2.0.bin at " + vad})
 	} else {
 		out = append(out, doctorCheck{Name: "voice activity model", Detail: "installed at " + vad, OK: true})
@@ -171,7 +172,7 @@ func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []do
 	// Recording goes through PipeWire's pulse server, found the way github.com/jfreymuth/pulse finds it: $PULSE_SERVER when set, the socket under $XDG_RUNTIME_DIR otherwise.
 	if server := os.Getenv("PULSE_SERVER"); server != "" {
 		out = append(out, doctorCheck{Name: "audio server", Detail: "PULSE_SERVER is " + server, OK: true})
-	} else if sock := filepath.Join(runtimeDir, "pulse", "native"); !exists(sock) {
+	} else if sock := filepath.Join(runtimeDir, "pulse", "native"); !util.Exists(sock) {
 		out = append(out, doctorCheck{Name: "audio server", Detail: "no pulse socket at " + sock + "; meeting recording and voice input are off", Fix: "install and start PipeWire with its pulse server (pipewire-pulse)"})
 	} else {
 		out = append(out, doctorCheck{Name: "audio server", Detail: "pulse socket at " + sock, OK: true})
@@ -191,17 +192,11 @@ func embedCheck(embed config.EmbedConfig) doctorCheck {
 		return doctorCheck{Name: "local memory search", Detail: "embed.llama_server and embed.model_path are not both set in " + config.ConfigPath() + off, Fix: "set embed.llama_server to a llama.cpp llama-server and embed.model_path to the EmbeddingGemma GGUF in " + config.ConfigPath()}
 	}
 	for _, p := range []string{embed.LlamaServer, embed.ModelPath} {
-		if !exists(p) {
+		if !util.Exists(p) {
 			return doctorCheck{Name: "local memory search", Detail: "nothing at " + p + ", named in " + config.ConfigPath() + off, Fix: "put the file at " + p + " or correct the path in " + config.ConfigPath()}
 		}
 	}
 	return doctorCheck{Name: "local memory search", Detail: "llama-server at " + embed.LlamaServer + ", model at " + embed.ModelPath, OK: true}
-}
-
-// exists reports whether anything is at path.
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // brainCheck reports whether Ora has anything to think with. Everything else doctor checks is about the desk — the buses, the screen, the pointer — and a machine can pass all of it and still not answer a single question, which is exactly what a clean install does before a key or a login is in place. Input: the home directory the CLI login files live under, and the Gemini API key as the environment gives it. Output: the check, naming every brain it found, or saying how to give it one.

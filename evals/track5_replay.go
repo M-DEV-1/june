@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -310,8 +311,8 @@ func writeReplayFile(dir string, r sessionReplay) (string, error) {
 			}
 			b.WriteString("\n")
 		}
-		fmt.Fprintf(&b, "**LIVE (gemini):** %s\n\n", orText(liveReply(r.Session, t.UserIdx), "(no spoken reply logged)"))
-		fmt.Fprintf(&b, "**CLAUDE** (tools: %s)**:** %s\n\n", orText(t.ClaudeTools, "?"), orText(t.ClaudeSpoken, "(no reply)"))
+		fmt.Fprintf(&b, "**LIVE (gemini):** %s\n\n", cmp.Or(liveReply(r.Session, t.UserIdx), "(no spoken reply logged)"))
+		fmt.Fprintf(&b, "**CLAUDE** (tools: %s)**:** %s\n\n", cmp.Or(t.ClaudeTools, "?"), cmp.Or(t.ClaudeSpoken, "(no reply)"))
 		if t.V.Verdict != "" {
 			fmt.Fprintf(&b, "Verdict: **%s** — %s\n\n", t.V.Verdict, t.V.Why)
 		}
@@ -320,14 +321,6 @@ func writeReplayFile(dir string, r sessionReplay) (string, error) {
 		}
 	}
 	return path, os.WriteFile(path, []byte(b.String()), 0644)
-}
-
-// orText returns s, or fallback when s is empty.
-func orText(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
 }
 
 // replaySystemPrompt renders the system prompt for a session, anchored at the session's start. The handshake context block and personal context were never logged, so a placeholder names that gap to the teacher model instead of pretending an empty day.
@@ -372,7 +365,7 @@ func runTrack5(ctx context.Context, j *judge, teach brain.Brain, logPath, outDir
 			}
 			r.ClaudeTools, r.ClaudeSpoken = parseReplayReply(reply)
 			judgeReplayTurn(ctx, j, s, &r)
-			fmt.Printf("    [turn %2d] %-6s  %.60s\n", i+1, orText(r.V.Verdict, "unjudged"), strings.ReplaceAll(r.ClaudeSpoken, "\n", " "))
+			fmt.Printf("    [turn %2d] %-6s  %.60s\n", i+1, cmp.Or(r.V.Verdict, "unjudged"), strings.ReplaceAll(r.ClaudeSpoken, "\n", " "))
 			rep.Turns = append(rep.Turns, r)
 		}
 		path, err := writeReplayFile(outDir, rep)

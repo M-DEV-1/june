@@ -1,5 +1,5 @@
 import { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
-import { clamp as clampRaw } from "./shared/clamp";
+import { clamp } from "./shared/clamp";
 
 /**
  * The subset of a Tauri window's API this module touches, factored out so the show/hide,
@@ -81,11 +81,6 @@ export function edgeInset(areaHeight: number, scale: number): number {
   return Math.max(Math.round(24 * scale), Math.round(areaHeight / 12));
 }
 
-/** Clamps a value into a range and rounds it to a physical pixel, returning the low end when the range is inverted, which happens when the window is larger than the space it has to fit in. Input: the value and the inclusive bounds. Output: the clamped, rounded value. */
-function clamp(value: number, low: number, high: number): number {
-  return clampRaw(value, low, high, true);
-}
-
 /** Takes the dock's own strip off the work area. A dock that reserves screen space is already cut out of the work area and reports 0 clearance, so this changes nothing for it; an auto-hiding dock reserves nothing, so its thickness is subtracted here and the hover stays clear of the strip the dock slides into. Input: the work area and the dock, with clearance in physical pixels. Output: the rectangle the window may occupy. */
 export function dockedArea(work: Rect, dock: Dock): Rect {
   const gap = Math.max(0, dock.clearance);
@@ -113,8 +108,8 @@ export function hoverPlacement(work: Rect, win: { width: number; height: number 
     y = area.y + area.height - win.height - inset;
   }
   return {
-    x: clamp(x, area.x, area.x + area.width - win.width),
-    y: clamp(y, area.y, area.y + area.height - win.height),
+    x: clamp(x, area.x, area.x + area.width - win.width, true),
+    y: clamp(y, area.y, area.y + area.height - win.height, true),
   };
 }
 
@@ -179,8 +174,8 @@ export function noticePlacement(ctx: PlaceContext, logical: { width: number; hei
   const win = { width: logical.width * scale, height: logical.height * scale };
   const area = dockedArea(ctx.work, { edge: ctx.dock.edge, clearance: ctx.dock.clearance * scale });
   return {
-    x: clamp(area.x + area.width - win.width, area.x, area.x + area.width - win.width),
-    y: clamp(area.y + NOTICE_GAP * scale, area.y, area.y + area.height - win.height),
+    x: clamp(area.x + area.width - win.width, area.x, area.x + area.width - win.width, true),
+    y: clamp(area.y + NOTICE_GAP * scale, area.y, area.y + area.height - win.height, true),
   };
 }
 
