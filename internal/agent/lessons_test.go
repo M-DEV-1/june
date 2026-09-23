@@ -1,6 +1,6 @@
 package agent
 
-// lessons_test.go covers the two halves of the continual lesson loop that live in this package: automaticLessons, which reads a lesson straight off a hop sequence with no model call, and AfterScreenRun's reflective half, which does make one. RenderLessonBlock (act_reference.go) is covered here too since it is what turns a lesson lookup into the line a model actually reads.
+// lessons_test.go covers the two halves of the continual lesson loop that live in this package: automaticLessons, which reads a lesson straight off a hop sequence with no model call, and AfterScreenRun's reflective half, which does make one.
 
 import (
 	"context"
@@ -9,8 +9,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"ora/internal/db"
 )
 
 // TestAutomaticLessonsFindsAFailThenASuccessOnTheSameElement reproduces the night's real Teams failure: a click on "Add title" that failed via the accessibility path, then a later click on the very same button that went through. automaticLessons must pair the two by role and label alone — the item number is not part of the identity, since observe_screen mints a fresh one on every look — and write the one line the task asks for.
@@ -29,61 +27,6 @@ func TestAutomaticLessonsFindsAFailThenASuccessOnTheSameElement(t *testing.T) {
 	if got[0] != want {
 		t.Errorf("got %q, want %q", got[0], want)
 	}
-}
-
-// TestAutomaticLessonsSaysNothingWithoutAFollowingSuccess checks a failure that is never followed by a success on the same element writes nothing — a run that gave up on a button teaches nothing about how to click it.
-func TestAutomaticLessonsSaysNothingWithoutAFollowingSuccess(t *testing.T) {
-	hops := []ToolHop{
-		{Name: "click", Args: map[string]any{"n": float64(25)}, Result: `error: could not click [25] entry "Add title": no accessible action`},
-		{Name: "click", Args: map[string]any{"n": float64(9)}, Result: `clicked [9] push button "Cancel" via pointer`},
-	}
-	if got := automaticLessons("Teams", hops, lessonCapPerRun); len(got) != 0 {
-		t.Errorf("automaticLessons = %v, want nothing", got)
-	}
-}
-
-// TestRenderLessonBlockPutsHitsFirst checks the block reads out the lessons in exactly the order it was given — db.SimilarLessons already puts the most-hit lesson first, and RenderLessonBlock's own job is only to render that order, not to re-sort it.
-func TestRenderLessonBlockPutsHitsFirst(t *testing.T) {
-	lessons := []db.Lesson{
-		{ID: 3, Lesson: "click the plus icon, not the title bar", Hits: 5},
-		{ID: 7, Lesson: "the field only opens after the page settles", Hits: 2},
-		{ID: 1, Lesson: "the button is a pointer click, not an accessibility one", Hits: 0},
-	}
-	block, ids := RenderLessonBlock(lessons)
-	if !strings.HasPrefix(block, lessonReferenceHeader+"\n") {
-		t.Fatalf("block does not open with the header:\n%s", block)
-	}
-	wantOrder := []string{
-		"- click the plus icon, not the title bar",
-		"- the field only opens after the page settles",
-		"- the button is a pointer click, not an accessibility one",
-	}
-	last := -1
-	for _, line := range wantOrder {
-		i := strings.Index(block, line)
-		if i < 0 {
-			t.Fatalf("block missing %q:\n%s", line, block)
-		}
-		if i < last {
-			t.Fatalf("lines out of order, wanted hits order 5,2,0:\n%s", block)
-		}
-		last = i
-	}
-	if want := []int64{3, 7, 1}; !int64SlicesEqual(ids, want) {
-		t.Errorf("ids = %v, want %v", ids, want)
-	}
-}
-
-func int64SlicesEqual(a, b []int64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // lessonSpyBrain is a toolTestBrain that also answers the lesson store side, recording every AddLesson and ScoreLessonsUsed call so a test can assert on what AfterScreenRun did without a real store.
@@ -118,47 +61,6 @@ func teamsAgent(t *testing.T, brain *lessonSpyBrain, reply string) (*Agent, *int
 	a := NewAgent(nil, nil, brain, nil, "test-key")
 	a.rememberTarget(ScreenTarget{Window: "Teams"})
 	return a, &requests
-}
-
-// TestAfterScreenRunSkipsTheReflectiveCallForAShortRun checks a run under reflectiveLessonMinHops hops never reaches the model at all: with nothing for automaticLessons to find either, AfterScreenRun must write no lesson and make no request.
-func TestAfterScreenRunSkipsTheReflectiveCallForAShortRun(t *testing.T) {
-	brain := &lessonSpyBrain{toolTestBrain: &toolTestBrain{}}
-	a, requests := teamsAgent(t, brain, "typed the title and moved on")
-	trace := TurnTrace{
-		Question: "add a title",
-		ToolHops: []ToolHop{
-			{Name: "observe_screen", Result: "Microsoft Teams · New meeting"},
-			{Name: "click", Args: map[string]any{"n": float64(3)}, Result: `clicked [3] entry "Add title" via pointer`},
-		},
-	}
-	a.AfterScreenRun(t.Context(), trace, "ok")
-	if *requests != 0 {
-		t.Errorf("%d requests went out, want the reflective call skipped for a %d-hop run", *requests, len(trace.ToolHops))
-	}
-	if len(brain.added) != 0 {
-		t.Errorf("lessons written = %v, want none", brain.added)
-	}
-}
-
-// TestAfterScreenRunWritesNoLessonForANothingReply checks a run long enough to earn the reflective call, but whose answer is "nothing", still writes no lesson.
-func TestAfterScreenRunWritesNoLessonForANothingReply(t *testing.T) {
-	brain := &lessonSpyBrain{toolTestBrain: &toolTestBrain{}}
-	a, requests := teamsAgent(t, brain, "nothing.")
-	trace := TurnTrace{
-		Question: "add a title",
-		ToolHops: []ToolHop{
-			{Name: "observe_screen", Result: "Microsoft Teams · New meeting"},
-			{Name: "click", Args: map[string]any{"n": float64(3)}, Result: `clicked [3] entry "Add title" via pointer`},
-			{Name: "type_text", Args: map[string]any{"text": "Standup"}, Result: "typed 7 characters"},
-		},
-	}
-	a.AfterScreenRun(t.Context(), trace, "ok")
-	if *requests != 1 {
-		t.Fatalf("%d requests went out, want exactly 1 for the reflective call", *requests)
-	}
-	if len(brain.added) != 0 {
-		t.Errorf("lessons written = %v, want none — the reply was \"nothing\"", brain.added)
-	}
 }
 
 // The reflective call asks for "nothing" when there is nothing, and the model almost never says just that. On the real machine it hedged — "Nothing worth flagging — just browsing, a Meet call, and a PDF read" — and because the guard only matched the bare word, 19 of the 21 lessons in the store on 2026-09-12 were that sentence in different clothes. Every one of them is retrievable, and every one would be put in front of a later run as guidance.

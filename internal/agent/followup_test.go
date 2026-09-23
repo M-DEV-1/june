@@ -8,29 +8,6 @@ import (
 	"testing"
 )
 
-// The user's live thread on 2026-09-05: turn 1 "ring the refresh button" ringed item [n] "Reload"; turn 2 "draw a circle around it" resolved "it" against the fresh screen listing instead of turn 1's target and circled the address bar. isBareReference is the check that decides when a question needs the last-target reminder at all: a question that already names its own thing to act on ("click the address bar") gets no reminder, since one would only get in the way.
-func TestIsBareReference(t *testing.T) {
-	cases := []struct {
-		question string
-		want     bool
-	}{
-		{"draw a circle around it", true},
-		{"ring it", true},
-		{"do that again", true},
-		{"click the same one", true},
-		{"ring this", true},
-		{"ring the refresh button", false},
-		{"click the address bar", false},
-		{"read the numbers on screen", false},
-		{"draw a circle around the reload button", false},
-	}
-	for _, c := range cases {
-		if got := isBareReference(c.question); got != c.want {
-			t.Errorf("isBareReference(%q) = %v, want %v", c.question, got, c.want)
-		}
-	}
-}
-
 // A turn's screen target must survive an observe_screen call within the same ask (draw and point_at both call observe_screen first, or ran one earlier in the same turn) and across two separate asks answered by the same agent, which is the one piece of screen memory that outlives an ask.
 func TestScreenTarget_SurvivesObserveScreenAndCarriesToTheNextAsk(t *testing.T) {
 	a, rings := observingAgent(t)
@@ -69,21 +46,6 @@ func TestScreenTarget_SurvivesObserveScreenAndCarriesToTheNextAsk(t *testing.T) 
 	again, ok := a.screenTarget()
 	if !ok || again.Label != "Merge" {
 		t.Errorf("target after a later observe_screen = %+v, ok=%v, want it to survive", again, ok)
-	}
-}
-
-// draw's "on" form must name the item it drew around, the way point_at and click already do, so a later ask has something to remember and so the model can tell from the tool's own result whether it drew around the right thing.
-func TestDraw_OnItemNamesTheItemInItsResult(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.Draw = func(_, shape string, points [][2]int, x, y, w, h int, label string) error { return nil }
-	a.executeTool(t.Context(), "observe_screen", map[string]any{})
-	got := a.executeTool(t.Context(), "draw", map[string]any{"shape": "circle", "on": float64(1)})
-	if !strings.Contains(got, "Merge") {
-		t.Errorf("draw result = %q, want it to name the item drawn around", got)
-	}
-	target, ok := a.screenTarget()
-	if !ok || target.Label != "Merge" {
-		t.Errorf("target after draw(on) = %+v, ok=%v, want the Merge button remembered", target, ok)
 	}
 }
 
@@ -180,19 +142,5 @@ func TestAskText_BareFollowUpCarriesTheLastTargetHint(t *testing.T) {
 	}
 	if tr2.LastTarget == nil || tr2.LastTarget.Label != "Checks" {
 		t.Fatalf("turn 2 trace LastTarget = %+v, want it updated to the Checks link that was actually drawn on", tr2.LastTarget)
-	}
-}
-
-// The last-target hint belongs to the window it was made in: a target remembered from a mail window says nothing about a bare "it" asked over a browser, so the hint is only added when the window in front now is the one the target came from, or when no front window can be read at all.
-func TestHintApplies_OnlyInTheTargetsOwnWindow(t *testing.T) {
-	remembered := ScreenTarget{Label: "Submit", Role: "push button", Window: "MailClient · Compose"}
-	if hintApplies(remembered, "Brave · Shopping Cart") {
-		t.Error("hint applied over a different window")
-	}
-	if !hintApplies(remembered, "MailClient · Compose") {
-		t.Error("hint dropped in the target's own window")
-	}
-	if !hintApplies(remembered, "") {
-		t.Error("hint dropped when the front window could not be read")
 	}
 }

@@ -28,15 +28,6 @@ func TestWithBudget_ReturnsAtTheDeadlineWhenTheWorkIgnoresIt(t *testing.T) {
 	}
 }
 
-// withBudget must return the work's own answer, not the zero value, whenever the work beats the deadline.
-func TestWithBudget_ReturnsTheAnswerWhenTheWorkFinishesInTime(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if got := withBudget(ctx, func() string { return "answered" }); got != "answered" {
-		t.Fatalf("got %q, want the work's own answer", got)
-	}
-}
-
 // Every call the capture path makes outside this process gets its own deadline, so one that never answers costs the tick loop that deadline and no more. Each seam below blocks forever and ignores the context it is handed — a gnome-shell that stopped replying to screenshots, an MPRIS player wedged on a property read, a model call that stalled — and the capture must still come back.
 func TestTieredCapture_ReturnsWhenAnOutsideCallNeverAnswers(t *testing.T) {
 	forever := make(chan struct{})

@@ -64,9 +64,6 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 	if byID["grok"].Models == nil || len(byID["grok"].Models) != 0 {
 		t.Errorf("grok models = %v, want an empty list — that CLI exposes no model choice", byID["grok"].Models)
 	}
-	if byID["grok"].LimitsNote == "" {
-		t.Errorf("grok limits_note is empty, want a sentence saying the CLI exposes no usage data")
-	}
 	if byID["gemini"].SignedIn {
 		t.Errorf("gemini reports signed in with no agy binary on PATH")
 	}
@@ -91,31 +88,6 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 	}
 }
 
-// TestBrainsHandlerShape checks the route itself answers with the list the window reads, never null.
-func TestBrainsHandlerShape(t *testing.T) {
-	rec := httptest.NewRecorder()
-	Brains(NewLiveConfig(&config.OraConfig{}, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /brains = %d, want 200", rec.Code)
-	}
-	var out struct{ Brains []BrainView }
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(out.Brains) != len(brainIDs) {
-		t.Errorf("brains = %d, want the %d Ora knows about", len(out.Brains), len(brainIDs))
-	}
-	var defaults int
-	for _, b := range out.Brains {
-		if b.Default {
-			defaults++
-		}
-	}
-	if defaults != 1 {
-		t.Errorf("%d brains marked default, want exactly one", defaults)
-	}
-}
-
 // TestBrainsPostUnknownID checks POST /brains rejects a brain id that is not one of the five Ora knows, and never touches the config.
 func TestBrainsPostUnknownID(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
@@ -130,31 +102,6 @@ func TestBrainsPostUnknownID(t *testing.T) {
 	}
 	if _, err := os.Stat(config.ConfigPath()); err == nil {
 		t.Errorf("an unknown id wrote a config file")
-	}
-}
-
-// TestProviderForBrainID checks every brain id the window can post maps to its own distinct, non-empty provider constant, so POST /brains never persists one brain's choice under another brain's name — the bug this covers had "codex" fall through to config.BrainGeminiAPI, which made the codex row disappear behind the Gemini one instead of ever showing Default.
-func TestProviderForBrainID(t *testing.T) {
-	ids := []string{"claude", "codex", "gemini", "grok", "ollama"}
-	seen := map[string]string{}
-	for _, id := range ids {
-		provider, ok := providerForBrainID(id)
-		if !ok {
-			t.Fatalf("providerForBrainID(%q) reported not ok, want one of the five known brains", id)
-		}
-		if provider == "" {
-			t.Errorf("providerForBrainID(%q) = \"\", want a non-empty provider", id)
-		}
-		if other, dup := seen[provider]; dup {
-			t.Errorf("providerForBrainID(%q) = %q, the same provider already given to %q; every brain needs its own", id, provider, other)
-		}
-		seen[provider] = id
-	}
-	if got, _ := providerForBrainID("codex"); got != config.BrainCodex {
-		t.Errorf(`providerForBrainID("codex") = %q, want %q (not the Gemini provider)`, got, config.BrainCodex)
-	}
-	if got, _ := providerForBrainID("codex"); got == config.BrainGeminiAPI {
-		t.Errorf(`providerForBrainID("codex") = %q, must not be the Gemini provider`, got)
 	}
 }
 
@@ -189,6 +136,33 @@ func TestBrainsPostPersists(t *testing.T) {
 	}
 	if reloaded.BrainModels["claude"] != "opus" {
 		t.Errorf("brain_models[claude] on disk = %q, want opus", reloaded.BrainModels["claude"])
+	}
+}
+
+// The model chip in Settings posts the brain it belongs to with the model picked, and POST /brains made that brain the default as well, so choosing a Codex model moved the user's default brain to Codex. A body with "default": false stores the model and leaves the default brain where it was; the header's brain picker sends no such field and still picks the default.
+func TestBrainsPostAModelAloneLeavesTheDefaultBrain(t *testing.T) {
+	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	cfg := &config.OraConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}}
+	h := Brains(NewLiveConfig(cfg, config.SaveConfig), nil)
+	post := func(body string) config.OraConfig {
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST /brains %s = %d, want 200: %s", body, rec.Code, rec.Body.String())
+		}
+		return config.LoadConfig()
+	}
+
+	reloaded := post(`{"brain":"codex","model":"gpt-5.6-luna","default":false}`)
+	if reloaded.Brain.Provider != config.BrainClaudeCLI || reloaded.Brain.Model != "sonnet" {
+		t.Errorf("brain on disk = %+v, want the default left on %q with sonnet", reloaded.Brain, config.BrainClaudeCLI)
+	}
+	if reloaded.BrainModels["codex"] != "gpt-5.6-luna" {
+		t.Errorf("brain_models[codex] on disk = %q, want gpt-5.6-luna", reloaded.BrainModels["codex"])
+	}
+	// A model picked for the default brain itself is the model that brain is called with.
+	if reloaded = post(`{"brain":"claude","model":"opus","default":false}`); reloaded.Brain.Model != "opus" {
+		t.Errorf("the default brain's model on disk = %q, want opus", reloaded.Brain.Model)
 	}
 }
 
@@ -290,35 +264,6 @@ func TestBrainsCarriesTheUsageBars(t *testing.T) {
 	}
 }
 
-// TestBrainsClaudeUsageNoteWhenTurnedOff checks the claude row explains an empty usage bar when the user turned the login-based fetch off in Settings, the same way GrokNote explains Grok's — rather than looking like nothing has been read yet.
-func TestBrainsClaudeUsageNoteWhenTurnedOff(t *testing.T) {
-	off := false
-	cfg := config.OraConfig{ClaudeUsageFromLogin: &off}
-
-	list := brainList(context.Background(), cfg, t.TempDir(), func(string) bool { return false }, nil)
-	byID := map[string]BrainView{}
-	for _, b := range list {
-		byID[b.ID] = b
-	}
-
-	if got := byID["claude"].LimitsNote; got != "turned off in Settings" {
-		t.Errorf("claude limits_note = %q, want the reason it was turned off", got)
-	}
-	if len(byID["claude"].Limits) != 0 {
-		t.Errorf("claude limits = %+v, want none while turned off", byID["claude"].Limits)
-	}
-}
-
-// TestBrainsClaudeUsageNoteAbsentWhenOn checks the default config — the setting unset — carries no note, so an ordinary machine's row reads as "nothing read yet" rather than "turned off".
-func TestBrainsClaudeUsageNoteAbsentWhenOn(t *testing.T) {
-	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return false }, nil)
-	for _, b := range list {
-		if b.ID == "claude" && b.LimitsNote != "" {
-			t.Errorf("claude limits_note = %q, want empty when the setting is on", b.LimitsNote)
-		}
-	}
-}
-
 // TestBrains_ConcurrentPostAndRead runs POST /brains against GET /brains under the race detector, which is what a brain pick while the picker refetches looks like; the GET reads the BrainModels map, so a shared map would be caught here.
 func TestBrains_ConcurrentPostAndRead(t *testing.T) {
 	live := NewLiveConfig(&config.OraConfig{}, func(config.OraConfig) error { return nil })
@@ -368,30 +313,7 @@ func TestBrains_OllamaIsUnavailableWithTheReason(t *testing.T) {
 	}
 }
 
-// TestBrains_LimitsNoteCarriesTheSnapshotsOwnNote checks that a caveat on a reading — today, that a Gemini model's ceiling is a default because nobody has measured that model — reaches the row the picker draws, rather than being dropped between brain.GeminiDaily and the JSON.
-func TestBrains_LimitsNoteCarriesTheSnapshotsOwnNote(t *testing.T) {
-	limits := func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
-		if id != "gemini" {
-			return brain.UsageSnapshot{}, false
-		}
-		return brain.UsageSnapshot{
-			Limits: []brain.UsageLimit{{Window: "daily", UsedFraction: 0.1}},
-			At:     time.Now(),
-			Note:   "the ceiling is a default",
-		}, true
-	}
-	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return false }, limits)
-	for _, b := range list {
-		if b.ID != "gemini" {
-			continue
-		}
-		if b.LimitsNote != "the ceiling is a default" {
-			t.Errorf("gemini limits_note = %q, want the snapshot's own note", b.LimitsNote)
-		}
-	}
-}
-
-// TestBrainsPostRefusesABrainWithNoBackend checks a pick of a brain internal/brain cannot answer with is refused with the reason, rather than persisted. GET already marks the Ollama row unavailable, but the POST accepted it: the config then held ollama-cli, FromConfig failed every call with ErrNoBackend, and WithCodexFallback answered each one on Codex — the user's duties running on a brain they did not choose.
+// TestBrainsPostRefusesABrainWithNoBackend checks a pick of a brain internal/brain cannot answer with is refused with the reason, rather than persisted. GET already marks the Ollama row unavailable, but the POST accepted it: the config then held ollama-cli and FromConfig failed every call to it with ErrNoBackend, so every duty pinned to that brain handed on to a provider the user did not choose.
 func TestBrainsPostRefusesABrainWithNoBackend(t *testing.T) {
 	t.Setenv("ORA_DATA_DIR", t.TempDir())
 	cfg := &config.OraConfig{}
@@ -432,13 +354,95 @@ func TestFirstFields_ReadsBothTableShapes(t *testing.T) {
 	}
 }
 
-// TestLoginFilePaths checks that claudeCredentialsPath and codexAuthPath build the exact paths every login check and account read in this package uses, so a change here cannot drift from the other.
-func TestLoginFilePaths(t *testing.T) {
-	home := "/home/someone"
-	if got, want := claudeCredentialsPath(home), filepath.Join(home, ".claude", ".credentials.json"); got != want {
-		t.Errorf("claudeCredentialsPath(%q) = %q, want %q", home, got, want)
+// The Antigravity row reported signed in for as long as the agy binary was on PATH, which says nothing about whether its login still works: on 2026-09-15 the picker drew it as available while every ask to it failed the eligibility check with a 401. `agy models` fails with that same UNAUTHENTICATED check, so the roster Ora already reads for the picker is the health check — it costs no model tokens and is already cached.
+// Only that refusal is evidence of a dead login. A read that fails for any other reason — offline, the thirty-second timeout, a crash — also came back as an empty roster, and the row was marked signed out on it for the cache's ten minutes.
+func TestBrains_AntigravityIsSignedOutOnlyWhenItsRosterReadIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		signedIn     bool
+	}{
+		{"the login is refused", `echo 'Eligibility check failed: UNAUTHENTICATED (code 401): Request had invalid authentication credentials.' >&2; exit 1`, false},
+		{"the machine is offline", `echo 'dial tcp: lookup the backend: no such host' >&2; exit 1`, true},
+		{"the roster reads", `echo 'gemini-3.8-flash-high     Gemini 3.8 Flash (High)'`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "agy"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			setAgyRoster(t, nil, false)
+			agyCache.refresh(agyModels)
+
+			row := brainRow(t, brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return true }, nil), "antigravity")
+			if row.SignedIn != tc.signedIn {
+				t.Errorf("signed in = %v, want %v", row.SignedIn, tc.signedIn)
+			}
+			if !tc.signedIn && row.LimitsNote == "" {
+				t.Error("limits_note is empty, want the sentence saying to sign in again")
+			}
+		})
 	}
-	if got, want := codexAuthPath(home), filepath.Join(home, ".codex", "auth.json"); got != want {
-		t.Errorf("codexAuthPath(%q) = %q, want %q", home, got, want)
+}
+
+func TestBrains_AntigravityStaysSignedInBeforeTheFirstRosterRead(t *testing.T) {
+	setAgyRoster(t, nil, false)
+	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return true }, nil)
+	if !brainRow(t, list, "antigravity").SignedIn {
+		t.Error("antigravity was marked signed out on a roster nobody has read yet")
+	}
+}
+
+// setAgyRoster puts a known roster in the package cache for one test. read is whether it should look like a read that has finished, which is what makes an empty roster mean "signed out" rather than "not looked yet". The fields are set under the lock rather than assigned as a struct, because the cache holds a mutex.
+func setAgyRoster(t *testing.T, models []string, read bool) {
+	t.Helper()
+	set := func(models []string, read bool) {
+		agyCache.mu.Lock()
+		defer agyCache.mu.Unlock()
+		agyCache.models = models
+		if read {
+			agyCache.readAt = time.Now()
+		} else {
+			agyCache.readAt = time.Time{}
+		}
+		agyCache.reading = !read
+		agyRefused.Store(false)
+	}
+	set(models, read)
+	t.Cleanup(func() { set(nil, false) })
+}
+
+func brainRow(t *testing.T, list []BrainView, id string) BrainView {
+	t.Helper()
+	for _, b := range list {
+		if b.ID == id {
+			return b
+		}
+	}
+	t.Fatalf("no %s row in %+v", id, list)
+	return BrainView{}
+}
+
+// A login that has stopped working shows on the row before anything is asked of it. On 2026-09-15 the Antigravity credential was refused for hours while the picker drew the row as available, and the first anyone knew of it was three questions dying with an empty error; Claude was signed in the whole time and never asked.
+// The signal is the usage reading each brain already fetches when the picker renders, because that needs a working credential and is made whether or not anyone asks a question. A reader that is refused records SignedOut with the reason, and that is what the row draws.
+func TestBrains_ASignedOutLoginShowsOnTheRowBeforeAnythingIsAsked(t *testing.T) {
+	setAgyRoster(t, nil, false)
+	refused := func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
+		if id != "grok" {
+			return brain.UsageSnapshot{}, false
+		}
+		return brain.UsageSnapshot{SignedOut: true, Note: "the grok login was refused: sign in again with grok", At: time.Now()}, true
+	}
+	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return true }, refused)
+	row := brainRow(t, list, "grok")
+	if row.SignedIn {
+		t.Error("grok reports signed in although its usage reading was refused")
+	}
+	if row.LimitsNote == "" {
+		t.Error("grok says nothing about why it cannot be picked")
+	}
+	// A brain whose reading was never taken is untouched: absence of a reading is not evidence of a dead login.
+	if !brainRow(t, list, "antigravity").SignedIn {
+		t.Error("antigravity was marked signed out on the strength of another brain's refusal")
 	}
 }

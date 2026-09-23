@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"ora/internal/config"
+	"ora/internal/recorder"
 	"ora/internal/window"
 )
 
@@ -22,10 +24,10 @@ type doctorCheck struct {
 	OK                bool
 }
 
-// doctorCmd is "ora doctor": one report over everything computer use stands on, with the first blocker and its fix named at the end, so a desk where clicks do not land can be read in one go instead of from the log.
+// doctorCmd is "ora doctor": one report over everything computer use stands on and every piece Ora runs locally, with the first blocker and its fix named at the end, so a desk where clicks do not land or a meeting that never transcribes can be read in one go instead of from the log.
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Report whether this desk is ready for Ora to see and drive the screen",
+	Short: "Report whether this desk is ready for Ora to see and drive the screen, and which local pieces are missing",
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -102,14 +104,11 @@ func runDoctor(ctx context.Context) []doctorCheck {
 			out = append(out, doctorCheck{Name: "window frames", Detail: fmt.Sprintf("%d windows listed with frames", len(windows)), OK: true})
 		}
 	}
-	// Pointer: a saved restore token means the RemoteDesktop consent was given once and the session opens silently.
-	if _, err := os.Stat(filepath.Join(config.DataDir(), "portal-input-token")); err != nil {
-		out = append(out, doctorCheck{Name: "pointer and keyboard", Detail: "no saved consent", Fix: "the first press will show the portal's consent dialog once; allow it"})
-	} else {
-		out = append(out, doctorCheck{Name: "pointer and keyboard", Detail: "consent saved; how many monitors it covers is only known once the session opens", OK: true})
-	}
+	// Pointer: a saved restore token means the RemoteDesktop consent was given once and the session opens silently. What it does not say is how many monitors that grant covers, so the desk's live monitor count is read separately and handed alongside it.
+	out = append(out, pointerCheck(filepath.Join(config.DataDir(), "portal-input-token"), monitorCount(ctx, conn)))
 	home, _ := os.UserHomeDir()
 	out = append(out, brainCheck(home, os.Getenv("GEMINI_API_KEY")))
+	out = append(out, localPieceChecks(config.DataDir(), os.Getenv("XDG_RUNTIME_DIR"), config.LoadConfig().Embed)...)
 	// Daemon: everything above is driven by it.
 	if resp, err := http.Get("http://127.0.0.1:" + DaemonPort + "/ping"); err != nil {
 		out = append(out, doctorCheck{Name: "daemon", Detail: "not answering on " + DaemonPort, Fix: "run ora"})
@@ -118,6 +117,91 @@ func runDoctor(ctx context.Context) []doctorCheck {
 		out = append(out, doctorCheck{Name: "daemon", Detail: "answering", OK: true})
 	}
 	return out
+}
+
+// pointerCheck reports whether pointer and keyboard consent is saved, and, when it is, the desk's live monitor count next to the exact file a re-grant needs deleted. A restore token saved from an older, narrower grant keeps restoring that same grant forever — the portal never asks again on its own — so a click on a monitor the grant does not cover fails deep inside the coordinate mapping. Input: the saved token's path, and the desk's monitor count (-1 when it could not be read). Output: the check.
+func pointerCheck(tokenPath string, monitors int) doctorCheck {
+	if _, err := os.Stat(tokenPath); err != nil {
+		return doctorCheck{Name: "pointer and keyboard", Detail: "no saved consent", Fix: "the first press will show the portal's consent dialog once; allow it"}
+	}
+	if monitors < 0 {
+		return doctorCheck{Name: "pointer and keyboard", Detail: "consent saved; this desk's monitor count could not be read", OK: true}
+	}
+	return doctorCheck{
+		Name:   "pointer and keyboard",
+		Detail: fmt.Sprintf("consent saved; this desk has %d monitor(s). A grant saved with fewer keeps restoring that narrower one; if a click on another monitor fails, delete %s and the next press will ask again", monitors, tokenPath),
+		OK:     true,
+	}
+}
+
+// monitorCount asks GNOME's own display config for how many monitors this desk has right now, the same count a fresh RemoteDesktop consent would be granted across. Input: a context bounding the call, and the session bus doctor already opened. Output: the monitor count, or -1 when Mutter's DisplayConfig is not reachable (not GNOME, or no monitors attached).
+func monitorCount(ctx context.Context, conn *dbus.Conn) int {
+	var serial uint32
+	var monitors, logical []interface{}
+	var props map[string]dbus.Variant
+	err := conn.Object("org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig").
+		CallWithContext(ctx, "org.gnome.Mutter.DisplayConfig.GetCurrentState", 0).
+		Store(&serial, &monitors, &logical, &props)
+	if err != nil {
+		return -1
+	}
+	return len(monitors)
+}
+
+// localPieceChecks reports every piece Ora runs locally and a clean machine may not have: whisper-cli and its model, the Silero voice-activity model, the sherpa-onnx diarizer and its models, the embedding llama-server and its GGUF, the PipeWire pulse socket and pw-dump. Nothing downloads any of them. Each line names the exact path it was looked for at and the feature that is off without it.
+// Input: the data directory, $XDG_RUNTIME_DIR, and the embed block of the config. Output: one check per piece, in that order.
+func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []doctorCheck {
+	var out []doctorCheck
+	if bin, err := recorder.WhisperCPPBinary(dataDir); err != nil {
+		out = append(out, doctorCheck{Name: "meeting transcription", Detail: err.Error() + "; meeting transcription is off", Fix: "install whisper.cpp's whisper-cli with ggml-medium.bin beside it at the path above, or point ORA_WHISPER_CPP at one"})
+	} else {
+		out = append(out, doctorCheck{Name: "meeting transcription", Detail: "whisper-cli at " + bin, OK: true})
+	}
+	if vad := recorder.WhisperVADModel(dataDir); !exists(vad) {
+		out = append(out, doctorCheck{Name: "voice activity model", Detail: "no Silero model at " + vad + "; voice activity detection is off, and a long, mostly quiet meeting transcribes badly without it", Fix: "put ggml-silero-v6.2.0.bin at " + vad})
+	} else {
+		out = append(out, doctorCheck{Name: "voice activity model", Detail: "installed at " + vad, OK: true})
+	}
+	if bin, err := recorder.SherpaBinary(dataDir); err != nil {
+		out = append(out, doctorCheck{Name: "speaker diarization", Detail: err.Error() + "; splitting the call into speakers is off", Fix: "install sherpa-onnx's diarizer, its lib directory and both models at the paths above, or point ORA_SHERPA at one"})
+	} else {
+		out = append(out, doctorCheck{Name: "speaker diarization", Detail: "diarizer at " + bin, OK: true})
+	}
+	out = append(out, embedCheck(embed))
+	// Recording goes through PipeWire's pulse server, found the way github.com/jfreymuth/pulse finds it: $PULSE_SERVER when set, the socket under $XDG_RUNTIME_DIR otherwise.
+	if server := os.Getenv("PULSE_SERVER"); server != "" {
+		out = append(out, doctorCheck{Name: "audio server", Detail: "PULSE_SERVER is " + server, OK: true})
+	} else if sock := filepath.Join(runtimeDir, "pulse", "native"); !exists(sock) {
+		out = append(out, doctorCheck{Name: "audio server", Detail: "no pulse socket at " + sock + "; meeting recording and voice input are off", Fix: "install and start PipeWire with its pulse server (pipewire-pulse)"})
+	} else {
+		out = append(out, doctorCheck{Name: "audio server", Detail: "pulse socket at " + sock, OK: true})
+	}
+	if bin, err := exec.LookPath("pw-dump"); err != nil {
+		out = append(out, doctorCheck{Name: "call detection", Detail: "no pw-dump on PATH (" + os.Getenv("PATH") + "); noticing a call and offering to record it is off", Fix: "install PipeWire's command-line tools (pipewire-bin on Debian and Ubuntu)"})
+	} else {
+		out = append(out, doctorCheck{Name: "call detection", Detail: "pw-dump at " + bin, OK: true})
+	}
+	return out
+}
+
+// embedCheck reports whether the local embedding server and its model are where the config says. The daemon starts no embedder unless both paths are set, and then search matches words only. Input: the config's embed block. Output: the check, naming the config file or the missing path.
+func embedCheck(embed config.EmbedConfig) doctorCheck {
+	const off = "; local memory search is off and search matches words only"
+	if !embed.LocalEnabled() {
+		return doctorCheck{Name: "local memory search", Detail: "embed.llama_server and embed.model_path are not both set in " + config.ConfigPath() + off, Fix: "set embed.llama_server to a llama.cpp llama-server and embed.model_path to the EmbeddingGemma GGUF in " + config.ConfigPath()}
+	}
+	for _, p := range []string{embed.LlamaServer, embed.ModelPath} {
+		if !exists(p) {
+			return doctorCheck{Name: "local memory search", Detail: "nothing at " + p + ", named in " + config.ConfigPath() + off, Fix: "put the file at " + p + " or correct the path in " + config.ConfigPath()}
+		}
+	}
+	return doctorCheck{Name: "local memory search", Detail: "llama-server at " + embed.LlamaServer + ", model at " + embed.ModelPath, OK: true}
+}
+
+// exists reports whether anything is at path.
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // brainCheck reports whether Ora has anything to think with. Everything else doctor checks is about the desk — the buses, the screen, the pointer — and a machine can pass all of it and still not answer a single question, which is exactly what a clean install does before a key or a login is in place. Input: the home directory the CLI login files live under, and the Gemini API key as the environment gives it. Output: the check, naming every brain it found, or saying how to give it one.
@@ -165,7 +249,7 @@ func doctorReport(checks []doctorCheck) string {
 		fmt.Fprintf(&b, "%s  %-22s %s\n", mark, c.Name, c.Detail)
 	}
 	if len(blockers) == 0 {
-		b.WriteString("\nready: everything computer use needs is in place\n")
+		b.WriteString("\nready: everything Ora needs is in place\n")
 		return b.String()
 	}
 	names := make([]string, len(blockers))

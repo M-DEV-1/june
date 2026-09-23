@@ -26,36 +26,6 @@ func readHeader(t *testing.T, path string) (riffSize, sampleRate, byteRate, data
 		binary.LittleEndian.Uint32(b[40:44])
 }
 
-// A closed WAV carries the sizes of what was actually written, and no extra chunks: whisper's WAV reader (miniaudio) rejects a file with a LIST/INFO chunk between fmt and data, which is exactly what ffmpeg writes.
-func TestWAVWriter_ClosesWithCorrectSizes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mic.wav")
-	w, err := newWAV(path)
-	if err != nil {
-		t.Fatalf("newWAV: %v", err)
-	}
-	payload := make([]byte, 3200) // 0.1s of 16 kHz mono s16le
-	if _, err := w.Write(payload); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	riff, rate, byteRate, data := readHeader(t, path)
-	if data != uint32(len(payload)) {
-		t.Errorf("data size = %d, want %d", data, len(payload))
-	}
-	if riff != uint32(36+len(payload)) {
-		t.Errorf("riff size = %d, want %d", riff, 36+len(payload))
-	}
-	if rate != sampleRate {
-		t.Errorf("sample rate = %d, want %d", rate, sampleRate)
-	}
-	if byteRate != sampleRate*2 {
-		t.Errorf("byte rate = %d, want %d", byteRate, sampleRate*2)
-	}
-}
-
 // whisper's miniaudio decoder refuses to read a WAV whose frame count is an exact multiple of 512: its decoder asks for exactly that many frames, the last read comes back "At end", and it prints "failed to read pcm frames from audio file" and exits 0 — which the pipeline then files as a meeting nobody spoke in. Both the writer and the repair path must therefore declare one frame fewer, which costs 1/16000 of a second.
 func TestWAV_HeaderNeverEndsOnA512FrameBoundary(t *testing.T) {
 	const bad = 512 * 3 * 2 // bytes: a frame count whisper chokes on

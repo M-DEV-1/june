@@ -154,7 +154,7 @@ describe("the raw stream event needs no cast to reach the reducer", () => {
   });
 });
 
-// The waveform itself (buildVariation, the smoothing, the braille rows) is tested in waveform.test.ts. These check the voice-mode surface built around it (see voiceSurfaceHtml in main.ts): while a session runs it replaces the input and the thread entirely, the way Gemini Live and ChatGPT's own voice mode take over the screen.
+// The waveform itself (the smoothing and the braille rows) is tested in waveform.test.ts. These check the voice-mode surface built around it (see voiceSurfaceHtml in main.ts): while a session runs it replaces the input and the thread entirely, the way Gemini Live and ChatGPT's own voice mode take over the screen.
 describe("live voice mode", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -185,24 +185,6 @@ describe("live voice mode", () => {
     expect(voiceStop).toHaveBeenCalled();
     expect(document.querySelector(".voicebox")).toBeNull();
     expect(document.querySelector(".q")).toBeTruthy();
-  });
-
-  it("shows the state word the daemon's 'state' events report", async () => {
-    const { dispatch } = await import("./main");
-    await new Promise((r) => setTimeout(r, 0));
-
-    dispatch({ kind: "voiceOn", id: "voice-1" });
-    dispatch({
-      kind: "voiceEvent",
-      ev: { id: "voice-1", type: "state", text: "thinking" },
-    });
-    expect(document.querySelector(".vs-state")?.textContent).toBe("Thinking");
-
-    dispatch({
-      kind: "voiceEvent",
-      ev: { id: "voice-1", type: "state", text: "speaking" },
-    });
-    expect(document.querySelector(".vs-state")?.textContent).toBe("Speaking");
   });
 
   it("breathes gently while Ora is silent, and lets a real level take over once she speaks", async () => {
@@ -299,22 +281,25 @@ describe("a notice's action line replaces its title and body in the bubble", () 
     expect(bubble?.querySelector(".nt")?.textContent).toBe("Done");
     expect(bubble?.querySelector(".nb")).toBeNull();
   });
+});
 
-  it("shows the snooze time for a notice snoozed from its own notification", async () => {
+// An answer to a question, or a meeting's Start recording, comes back with its action set to the pressed key, which has no line of its own to show (see Act in internal/proactive/notify.go). It means the card is dealt with, so the card goes, rather than being drawn again as a fresh card with its title, body and an Open button.
+describe("a notice answered with a button of its own", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = `<div class="N" id="n" hidden></div><div class="W" id="w"></div>`;
+  });
+
+  it("takes the card down", async () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
+    const question = { title: "Still open", body: "Send the invoice", place: "tasks", id: "7", kind: "stale" };
+    dispatch({ kind: "notice", notice: { ...question, actions: [{ key: "dropped", label: "Not happening" }] }, hoverOpen: true });
+    expect(document.getElementById("n")?.hidden).toBe(false);
 
-    const until = new Date();
-    until.setHours(until.getHours() + 1, 0, 0, 0);
-    dispatch({
-      kind: "notice",
-      notice: { title: "Routine", body: "Vexil replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: until.toISOString() },
-      hoverOpen: true,
-    });
+    dispatch({ kind: "notice", notice: { ...question, action: "dropped", actions: [{ key: "default", label: "Open in Ora" }] }, hoverOpen: true });
 
-    const bubble = document.getElementById("n");
-    expect(bubble?.querySelector(".nt")?.textContent).toContain("Snoozed until");
-    expect(bubble?.querySelector(".nb")).toBeNull();
+    expect(document.getElementById("n")?.hidden).toBe(true);
   });
 });
 
@@ -1039,7 +1024,6 @@ describe("what a render does to the keyboard", () => {
     expect(after.selectionStart).toBe(7);
   });
 });
-
 
 // A question's card lives exactly as long as its answer window. The daemon stamps the moment the goroutine waiting on the answer gives up; past it the button 400s, so the card must be gone by then and must say how long is left while it is up.
 describe("a question's card counts down and goes when its answer window closes", () => {

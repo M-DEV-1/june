@@ -26,13 +26,17 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
   // Whether the pending change has already gone to the daemon. A click before that is an undo, since nothing was sent; a click after it is a fresh tick asking for the opposite, because the change it would undo has already happened.
   const [sent, setSent] = useState(false);
   useEffect(() => () => clearTimeout(timer.current), []);
-  // The pending circle is dropped only once the row underneath is showing the same thing, not when the daemon answers. On the Tasks screen setTaskStatus patches the tasks caches as the request goes out, so the two agree at once and this fires on the next render. On the Days page the row comes from day.tasks, which changes only when GET /days/{date} is read again, and clearing any earlier empties the circle for the whole of that read.
-  useEffect(() => {
+  // What the row said the last time this drew, so a change in it can be answered while rendering rather than in an effect. An effect runs after the paint, so the circle showed one frame of the value the row had already moved past; a state change made during render is finished before React paints anything at all.
+  const [lastDone, setLastDone] = useState(task.done);
+  if (task.done !== lastDone) {
+    setLastDone(task.done);
+    // The pending circle is dropped only once the row underneath is showing the same thing, not when the daemon answers. On the Tasks screen setTaskStatus patches the tasks caches as the request goes out, so the two agree at once and this runs on the next render. On the Days page the row comes from day.tasks, which changes only when GET /days/{date} is read again, and clearing any earlier empties the circle for the whole of that read.
     if (pending !== undefined && task.done === pending) {
       setPending(undefined);
       setSent(false);
     }
-  }, [task.done, pending]);
+    // A row that changed to anything else is stale news rather than a contradiction: done is one of two values, so it can only land on something the circle is not waiting for when the user has ticked twice, and what has arrived is then the daemon's answer to the first press, which the second one has already replaced. The circle keeps showing the newer press, and the wait for it restarts by itself — the second press clears `sent`, which is what the HOLD_MS timer below hangs off.
+  }
   // A row that never comes to agree would hold the circle for ever, so the wait is bounded and the circle then goes back to reading the row like any other.
   useEffect(() => {
     if (!sent) return;
@@ -75,6 +79,7 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
   };
 
   return (
+    // z-10 lifts the tick above the task row's full-row ::after, which comes later in the DOM and so paints over a positioned sibling with no z-index of its own; without it a pointer click on the circle opened the task instead of ticking it.
     <button
       type="button"
       role="checkbox"
@@ -82,11 +87,8 @@ export function TaskTick({ task }: { task: Pick<Task, "id" | "title" | "done"> }
       aria-disabled={sending}
       disabled={sending}
       aria-label={done ? `Reopen ${task.title}` : `Mark ${task.title} done`}
-      className="grid size-6 shrink-0 place-items-center rounded-sm outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring"
-      onClick={(e) => {
-        e.stopPropagation();
-        click();
-      }}
+      className="relative z-10 grid size-6 shrink-0 place-items-center rounded-sm outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={click}
     >
       <span
         className={`grid size-[15px] place-items-center rounded-full border transition-colors ${done ? "border-primary bg-primary text-primary-foreground" : "border-hairline-strong text-transparent"}`}

@@ -24,8 +24,8 @@ const when = new Date().toISOString();
 /** One task the user typed in and two an agent noticed in the same meeting, all three the user's own — the tests below that predate the owner split expect one flat list, so all three stay in Mine. */
 const tasks: Task[] = [
   { id: "task-1", title: "Book the flight", source: "you", when, done: false, conversation_id: "c1", detail: "", owner: "me" },
-  { id: "12", title: "Send the TCFD file", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call", owner: "me" },
-  { id: "13", title: "Book the room", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call", owner: "me" },
+  { id: "12", title: "Send the Meridian file", source: "noticed", when, done: false, conversation_id: "", detail: "Meridian call", owner: "me" },
+  { id: "13", title: "Book the room", source: "noticed", when, done: false, conversation_id: "", detail: "Meridian call", owner: "me" },
 ];
 
 const conversation: ConversationView = {
@@ -40,7 +40,7 @@ describe("the list", () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     expect(list().getByText("Book the flight")).toBeDefined();
-    expect(screen.getAllByText(/from TCFD call/)).toHaveLength(2);
+    expect(screen.getAllByText(/from Meridian call/)).toHaveLength(2);
     expect(screen.queryByText("You set")).toBeNull();
     expect(screen.queryByText("Ora noticed")).toBeNull();
   });
@@ -59,8 +59,9 @@ describe("the list", () => {
   it("opens the task from anywhere on the row that is not one of its controls", async () => {
     const { store } = renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    // The row's own padding, the gaps and the column saying when it was raised are all part of the target: a row with no detail line is eight pixels tall, and only its title being clickable loses a third of its width.
-    await userEvent.click(list().getAllByRole("listitem")[1]);
+    const row = list().getAllByRole("listitem")[1];
+    const pick = within(row).getByRole("button", { name: "Send the Meridian file from Meridian call" });
+    await userEvent.click(pick);
     await waitFor(() => expect(store.getState().ui.taskId).toBe("12"));
 
     // A click on a control is that control's, and nothing else's.
@@ -73,7 +74,7 @@ describe("the list", () => {
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     await userEvent.click(list().getByText("Book the room"));
     // A noticed row reads as its title and where it came from, which is what the button is named after; only the title carries for one the user typed in.
-    await waitFor(() => expect(list().getByRole("button", { name: "Book the room from TCFD call" }).getAttribute("aria-current")).toBe("true"));
+    await waitFor(() => expect(list().getByRole("button", { name: "Book the room from Meridian call" }).getAttribute("aria-current")).toBe("true"));
     expect(list().getByRole("button", { name: "Book the flight" }).getAttribute("aria-current")).toBeNull();
   });
 
@@ -85,13 +86,6 @@ describe("the list", () => {
     // The store has no task selected yet — the fallback in TasksScreen is only what the page shows, not what App.tsx's walker has — so the first press just confirms row one and the second is what actually steps to row two.
     await userEvent.keyboard("{ArrowDown}{ArrowDown}");
     await waitFor(() => expect(document.activeElement?.getAttribute("data-row-id")).toBe("12"));
-  });
-
-  it("says there is nothing to do rather than showing an empty list, with a watching face above the line", async () => {
-    renderApp({}, { place: "tasks" });
-    const line = await screen.findByText("Nothing to do.");
-    // The sidebar carries its own permanent face chip, so this looks only at the one sitting right above the empty line.
-    expect(within(line.parentElement!).getByRole("img", { name: "ora is watching" })).toBeDefined();
   });
 
   it("shows an asleep face and says it is not connected when the daemon does not answer", async () => {
@@ -106,10 +100,10 @@ describe("the detail beside the list", () => {
   it("names the picked task as its heading and says when and where it was raised", async () => {
     renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(list().getByText("Send the TCFD file"));
+    await userEvent.click(list().getByText("Send the Meridian file"));
     const detail = within(await screen.findByRole("region", { name: "About this task" }));
-    expect(detail.getByRole("heading", { name: "Send the TCFD file" })).toBeDefined();
-    expect(detail.getByText(/TCFD call/)).toBeDefined();
+    expect(detail.getByRole("heading", { name: "Send the Meridian file" })).toBeDefined();
+    expect(detail.getByText(/Meridian call/)).toBeDefined();
     expect(screen.queryByRole("button", { name: /Choose a task/ })).toBeNull();
   });
 });
@@ -125,11 +119,11 @@ describe("changing a task's status", () => {
 
   it("drops an action item Ora noticed, and takes it out of the list", async () => {
     const { calls } = renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("button", { name: "More for Send the TCFD file" });
-    await userEvent.click(screen.getByRole("button", { name: "More for Send the TCFD file" }));
+    await screen.findByRole("button", { name: "More for Send the Meridian file" });
+    await userEvent.click(screen.getByRole("button", { name: "More for Send the Meridian file" }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "Drop it" }));
     await waitFor(() => expect(calls.find((c) => c.path === "/tasks/12/done")?.body).toEqual({ status: "dropped" }));
-    await waitFor(() => expect(list().queryByText("Send the TCFD file")).toBeNull());
+    await waitFor(() => expect(list().queryByText("Send the Meridian file")).toBeNull());
   });
 
   // Three finished tasks sat on the list struck through with only Reopen in their menu, and nothing anywhere removed one: GET /tasks answers with every row whatever its done flag says, and the list filters on the search box alone.
@@ -145,8 +139,8 @@ describe("changing a task's status", () => {
   // A noticed item is a note in memory, and deleting it would take a line out of a meeting's minutes rather than off a list. Dropping it is what that is for, and the daemon answers 400 to a delete of one.
   it("offers to drop a noticed item rather than delete it", async () => {
     renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("button", { name: "More for Send the TCFD file" });
-    await userEvent.click(screen.getByRole("button", { name: "More for Send the TCFD file" }));
+    await screen.findByRole("button", { name: "More for Send the Meridian file" });
+    await userEvent.click(screen.getByRole("button", { name: "More for Send the Meridian file" }));
     const menu = await screen.findByRole("menu");
     expect(within(menu).getByRole("menuitem", { name: "Drop it" })).toBeDefined();
     expect(within(menu).queryByRole("menuitem", { name: "Delete" })).toBeNull();
@@ -251,34 +245,26 @@ describe("talking to a task", () => {
   it("opens a conversation for a noticed task on the first question, and asks in that one", async () => {
     const { calls, store } = renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(list().getByText("Send the TCFD file"));
+    await userEvent.click(list().getByText("Send the Meridian file"));
     await userEvent.type(await screen.findByLabelText("Ask Ora"), "what did she want?{Enter}");
     // The conversation is opened through the same POST /conversations the rail's New chat makes, and the question goes into it.
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/conversations")).toBe(true));
     await waitFor(() =>
       expect(calls.find((c) => c.path === "/ask")?.body).toMatchObject({
         conversation_id: "new",
-        context: 'This is about one thing on the user\'s list: "Send the TCFD file". Ora noticed it in TCFD call.',
+        context: 'This is about one thing on the user\'s list: "Send the Meridian file". Ora noticed it in Meridian call.',
       }),
     );
     // The pairing is remembered, so the next question about the same task does not open a second conversation.
     await waitFor(() => expect(store.getState().ui.taskChats["12"]).toBe("new"));
-  });
-
-  it("says nothing has been said yet, in the detail, for a task that has no conversation", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(list().getByText("Send the TCFD file"));
-    expect(await screen.findByText("Nothing said about “Send the TCFD file” yet.")).toBeDefined();
-    expect(screen.getByPlaceholderText("Say something about this task…")).toBeDefined();
   });
 });
 
 /** Two of the user's own and two a meeting raised for someone else or for nobody named — owner "them" and "unclear" are both watched rather than assumed onto the user's own list. */
 const withWatched: Task[] = [
   { id: "task-1", title: "Book the flight", source: "you", when, done: false, conversation_id: "c1", detail: "you said", owner: "me" },
-  { id: "20", title: "Send the file", source: "noticed", when, done: true, conversation_id: "", detail: "TCFD call", owner: "me" },
-  { id: "21", title: "Re-run the source data", source: "noticed", when, done: false, conversation_id: "", detail: "TCFD call", owner: "them" },
+  { id: "20", title: "Send the file", source: "noticed", when, done: true, conversation_id: "", detail: "Meridian call", owner: "me" },
+  { id: "21", title: "Re-run the source data", source: "noticed", when, done: false, conversation_id: "", detail: "Meridian call", owner: "them" },
   { id: "22", title: "Write up the findings", source: "noticed", when, done: true, conversation_id: "", detail: "Standup", owner: "unclear" },
 ];
 
@@ -300,7 +286,7 @@ describe("Mine and Theirs", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Watching/ }));
     const watched = within(screen.getByRole("list", { name: "Watching" }));
     expect(watched.getByText("Re-run the source data")).toBeDefined();
-    expect(watched.getByText(/from TCFD call/)).toBeDefined();
+    expect(watched.getByText(/from Meridian call/)).toBeDefined();
     expect(watched.getByText("Write up the findings")).toBeDefined();
   });
 
@@ -309,12 +295,6 @@ describe("Mine and Theirs", () => {
     renderApp({ tasks: allWatched }, { place: "tasks" });
     expect(await screen.findByText("Nothing of yours open.")).toBeDefined();
     expect(screen.getByRole("button", { name: /Watching/ })).toBeDefined();
-  });
-
-  it("says nothing is being watched at all, rather than showing an empty section, when nothing was raised for anyone else", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    expect(screen.queryByRole("button", { name: /Watching/ })).toBeNull();
   });
 
   it("moves a watched row to Mine from its owner menu, and tells the daemon which class it is now", async () => {

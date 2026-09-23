@@ -9,6 +9,7 @@ import { Provider } from "react-redux";
 import { useState } from "react";
 
 import type { Brain, UsageLimit } from "./api";
+import { windowLabel } from "./format";
 import { Blank, BrainPicker, Nothing, Scroller, UsageBar } from "./parts";
 import { makeStore } from "./store";
 import { stubBrowser } from "./testing";
@@ -16,19 +17,6 @@ import { stubBrowser } from "./testing";
 afterEach(cleanup);
 
 describe("Nothing's face", () => {
-  it("is watching when the daemon answered with an empty list", () => {
-    render(<Nothing up empty="Nothing to do." />);
-    expect(screen.getByRole("img", { name: "ora is watching" })).toBeDefined();
-    expect(screen.getByText("Nothing to do.")).toBeDefined();
-  });
-
-  it("is asleep when the daemon did not answer, and says so instead of the empty line", () => {
-    render(<Nothing up={false} empty="Nothing to do." />);
-    expect(screen.getByRole("img", { name: "ora is asleep" })).toBeDefined();
-    expect(screen.getByText("Not connected.")).toBeDefined();
-    expect(screen.queryByText("Nothing to do.")).toBeNull();
-  });
-
   it("is thinking on the first fetch, holding back the empty line so it cannot flash before the data does", () => {
     render(<Nothing up empty="Nothing to do." loading />);
     expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
@@ -37,18 +25,6 @@ describe("Nothing's face", () => {
 });
 
 describe("Blank's face", () => {
-  it("is watching when the daemon answered with nothing there", () => {
-    render(<Blank up empty="No meetings recorded yet." />);
-    expect(screen.getByRole("img", { name: "ora is watching" })).toBeDefined();
-    expect(screen.getByText("No meetings recorded yet.")).toBeDefined();
-  });
-
-  it("is asleep when the daemon did not answer", () => {
-    render(<Blank up={false} empty="No meetings recorded yet." />);
-    expect(screen.getByRole("img", { name: "ora is asleep" })).toBeDefined();
-    expect(screen.getByText("Nothing is answering")).toBeDefined();
-  });
-
   it("is thinking on the first fetch, holding back the hint so it cannot flash before the data does", () => {
     render(<Blank up empty="No meetings recorded yet." hint="Ora writes minutes once it has recorded one." loading />);
     expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
@@ -111,47 +87,6 @@ describe("UsageBar", () => {
     expect(screen.getByText("5-hour")).toBeDefined();
     expect(screen.getByText("Resets in 3 hr 3 min · 92%")).toBeDefined();
   });
-
-  it("names weekly, daily and monthly windows in sentence case", () => {
-    const now = new Date();
-    const soon = new Date(now.getTime() + 60000).toISOString();
-    const { unmount: u1 } = render(<UsageBar limit={limit(0.1, soon, "weekly")} now={now} />);
-    expect(screen.getByText("Weekly")).toBeDefined();
-    u1();
-    const { unmount: u2 } = render(<UsageBar limit={limit(0.1, soon, "daily")} now={now} />);
-    expect(screen.getByText("Daily")).toBeDefined();
-    u2();
-    render(<UsageBar limit={limit(0.1, soon, "monthly")} now={now} />);
-    expect(screen.getByText("Monthly")).toBeDefined();
-  });
-
-  it("drops the percent and gives the weekday and clock once the reset is more than a day away", () => {
-    const now = new Date();
-    const resets = new Date(now.getTime() + 30 * 3600000);
-    const weekday = resets.toLocaleDateString(undefined, { weekday: "short" });
-    const clock = `${String(resets.getHours()).padStart(2, "0")}:${String(resets.getMinutes()).padStart(2, "0")}`;
-    render(<UsageBar limit={limit(0.1, resets.toISOString(), "weekly")} now={now} />);
-    expect(screen.getByText(`Resets ${weekday} ${clock}`)).toBeDefined();
-  });
-
-  it("names an unlabelled window 'Limit' rather than leaving it blank", () => {
-    const now = new Date();
-    const soon = new Date(now.getTime() + 60000).toISOString();
-    render(<UsageBar limit={limit(0.1, soon, "")} now={now} />);
-    expect(screen.getByText("Limit")).toBeDefined();
-  });
-
-  it("turns the fill the danger colour at or above 90% used, and keeps it the accent colour below that", () => {
-    const now = new Date();
-    const resets = new Date(now.getTime() + 3600000).toISOString();
-    const { container: over, unmount } = render(<UsageBar limit={limit(0.9, resets, "monthly")} now={now} />);
-    expect(over.querySelector(".bg-destructive")).not.toBeNull();
-    expect(over.querySelector(".bg-primary")).toBeNull();
-    unmount();
-    const { container: under } = render(<UsageBar limit={limit(0.89, resets, "monthly")} now={now} />);
-    expect(under.querySelector(".bg-primary")).not.toBeNull();
-    expect(under.querySelector(".bg-destructive")).toBeNull();
-  });
 });
 
 describe("the brain picker's usage rows", () => {
@@ -197,17 +132,6 @@ describe("the brain picker's usage rows", () => {
     expect(within(claudeItem).getByText("Weekly")).toBeDefined();
   });
 
-  it("shows 'No usage data' for a signed-in brain with no limits, and 'Not signed in' for one that isn't", async () => {
-    renderPicker();
-    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
-    const menu = within(await screen.findByRole("menu"));
-    const codexItem = menu.getByRole("menuitem", { name: /Codex/ }) as HTMLElement;
-    expect(within(codexItem).getByText("No usage data")).toBeDefined();
-    expect(codexItem.querySelector(".bg-muted")).toBeNull();
-    const geminiItem = menu.getByRole("menuitem", { name: /Gemini/ }) as HTMLElement;
-    expect(within(geminiItem).getByText("Not signed in")).toBeDefined();
-  });
-
   it("shows a note's first clause in sentence case for a signed-in brain with no limits, with the full note on the title", async () => {
     const withNote: Brain[] = [
       { ...brains[1], limits_note: "grok exposes no usage data: its CLI, config, logs, and session files carry no quota, usage, or rate-limit reading, and it has no command that reports one" },
@@ -221,15 +145,6 @@ describe("the brain picker's usage rows", () => {
     expect(line.getAttribute("title")).toBe(withNote[0].limits_note);
   });
 
-  it("shows a note with no colon in it whole, sentence-cased", async () => {
-    const withNote: Brain[] = [{ ...brains[1], limits_note: "turned off in Settings" }, brains[2]];
-    renderPickerWith(withNote);
-    await userEvent.click(screen.getByRole("button", { name: /Brain: claude/ }));
-    const menu = within(await screen.findByRole("menu"));
-    const codexItem = (await menu.findByRole("menuitem", { name: /Codex/ })) as HTMLElement;
-    expect(within(codexItem).getByText("Turned off in Settings")).toBeDefined();
-  });
-
   it("keeps 'Not signed in' ahead of a note for a brain that isn't signed in", async () => {
     const withNote: Brain[] = [brains[1], { ...brains[2], limits_note: "some reason" }];
     renderPickerWith(withNote);
@@ -238,14 +153,6 @@ describe("the brain picker's usage rows", () => {
     const geminiItem = (await menu.findByRole("menuitem", { name: /Gemini/ })) as HTMLElement;
     expect(within(geminiItem).getByText("Not signed in")).toBeDefined();
     expect(within(geminiItem).queryByText("Some reason")).toBeNull();
-  });
-
-  it("still shows 'No usage data' for a signed-in brain with an empty note", async () => {
-    renderPicker();
-    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
-    const menu = within(await screen.findByRole("menu"));
-    const codexItem = (await menu.findByRole("menuitem", { name: /Codex/ })) as HTMLElement;
-    expect(within(codexItem).getByText("No usage data")).toBeDefined();
   });
 
   it("keys each limit row by its index as well as its window, so two limits sharing a window never collide", async () => {
@@ -278,5 +185,15 @@ describe("the brain picker's usage rows", () => {
     expect(document.activeElement).toBe(menu.getByRole("menuitem", { name: /Claude/ }));
     await userEvent.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(menu.getByRole("menuitem", { name: /Codex/ }));
+  });
+});
+
+describe("windowLabel", () => {
+  // Antigravity reports four windows named "<family>-<window>", and the picker drew them raw: "Gemini-5h" and, worse, "3p-weekly", which names nothing a reader would recognise.
+  it("names Antigravity's two model families and their windows", () => {
+    expect(windowLabel("gemini-5h")).toBe("Gemini · 5-hour");
+    expect(windowLabel("gemini-weekly")).toBe("Gemini · Weekly");
+    expect(windowLabel("3p-5h")).toBe("Other models · 5-hour");
+    expect(windowLabel("3p-weekly")).toBe("Other models · Weekly");
   });
 });

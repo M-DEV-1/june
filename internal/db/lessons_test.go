@@ -2,71 +2,9 @@ package db
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
-
-// TestLessonRoundTrips checks a lesson written by AddLesson and embedded comes back from SimilarLessons for a goal close enough in meaning, in the same app, carrying its own id, app, goal and text.
-func TestLessonRoundTrips(t *testing.T) {
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
-	emb := newActEmbedder()
-	ctx := context.Background()
-
-	id, err := store.AddLesson(ctx, "Teams", "add a title to the meeting", `Teams: entry "Add title": accessibility action failed; worked via pointer`)
-	if err != nil {
-		t.Fatalf("AddLesson: %v", err)
-	}
-	store.SetEmbedder(emb)
-	emb.register(lessonEmbedText("add a title to the meeting", `Teams: entry "Add title": accessibility action failed; worked via pointer`), 0)
-	if err := store.embedLesson(ctx, id, "add a title to the meeting", `Teams: entry "Add title": accessibility action failed; worked via pointer`); err != nil {
-		t.Fatalf("embedLesson: %v", err)
-	}
-	emb.register("add a title to today's meeting", 5) // 5 degrees off — well inside the floor
-
-	got, err := store.SimilarLessons(ctx, "Teams", "add a title to today's meeting", 3)
-	if err != nil {
-		t.Fatalf("SimilarLessons: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("SimilarLessons returned %d lessons, want 1", len(got))
-	}
-	if got[0].ID != id || got[0].App != "Teams" || got[0].Goal != "add a title to the meeting" {
-		t.Errorf("got %+v, want id %d, app Teams, goal preserved", got[0], id)
-	}
-}
-
-// TestSimilarLessonsOnlyOffersTheSameApp checks a lesson learned in one app never surfaces for a question about another, however close the wording.
-func TestSimilarLessonsOnlyOffersTheSameApp(t *testing.T) {
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
-	emb := newActEmbedder()
-	ctx := context.Background()
-
-	id, err := store.AddLesson(ctx, "Teams", "add a title", "Teams: worked via pointer")
-	if err != nil {
-		t.Fatalf("AddLesson: %v", err)
-	}
-	store.SetEmbedder(emb)
-	emb.register(lessonEmbedText("add a title", "Teams: worked via pointer"), 0)
-	if err := store.embedLesson(ctx, id, "add a title", "Teams: worked via pointer"); err != nil {
-		t.Fatalf("embedLesson: %v", err)
-	}
-	emb.register("add a title", 0)
-
-	got, err := store.SimilarLessons(ctx, "Slack", "add a title", 3)
-	if err != nil {
-		t.Fatalf("SimilarLessons: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("SimilarLessons(Slack) = %+v, want nothing — the lesson was learned in Teams", got)
-	}
-}
 
 // TestSimilarLessonsPutsHitsFirst checks that among lessons all close enough to be shown, the ones that have actually helped before (more hits) come ahead of ones that have not, whatever their exact closeness.
 func TestSimilarLessonsPutsHitsFirst(t *testing.T) {
@@ -107,7 +45,7 @@ func TestSimilarLessonsPutsHitsFirst(t *testing.T) {
 	}
 	emb.register("add a title", 0)
 
-	got, err := store.SimilarLessons(ctx, "Teams", "add a title", 3)
+	got, err := store.SimilarLessons(ctx, "add a title", 3)
 	if err != nil {
 		t.Fatalf("SimilarLessons: %v", err)
 	}
@@ -188,11 +126,59 @@ func TestHedgedNonAnswersNeverBecomeLessons(t *testing.T) {
 	}
 	emb.register("add a title", 0)
 
-	got, err := store.SimilarLessons(ctx, "Teams", "add a title", 3)
+	got, err := store.SimilarLessons(ctx, "add a title", 3)
 	if err != nil {
 		t.Fatalf("SimilarLessons: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("SimilarLessons offered %+v, want nothing — the only row is a non-answer", got)
+	}
+}
+
+// A prompt usually asks for several things in several apps at once, and one embedding of the whole of it sits between its tasks and near none of them. Here the whole prompt reads close to the WhatsApp lesson and far from the Spotify one, so only a lookup per part of the prompt (or by the app it names) finds both, and the GCP lesson it has nothing to do with stays out.
+func TestSimilarLessonsFindsALessonForEachPartOfAPrompt(t *testing.T) {
+	store, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	emb := newActEmbedder()
+	store.SetEmbedder(emb)
+	ctx := context.Background()
+	add := func(app, goal, lesson string, deg float64) {
+		id, err := store.AddLesson(ctx, app, goal, lesson)
+		if err != nil {
+			t.Fatalf("AddLesson: %v", err)
+		}
+		emb.register(lessonEmbedText(goal, lesson), deg)
+		if err := store.embedLesson(ctx, id, goal, lesson); err != nil {
+			t.Fatalf("embedLesson: %v", err)
+		}
+	}
+	add("Spotify", "play a song", "Click the middle of the search bar, not the search icon", 0)
+	add("Brave Browser", "message a WhatsApp group", "Search the chat list before scrolling it", 90)
+	add("Brave Browser", "reopen a billing account", "The Reopen button sits under Account management", 180)
+
+	const prompt = "open spotify and play champagne coast, then message the group on whatsapp"
+	emb.register(prompt, 60)
+	emb.register("open spotify", 5)
+	emb.register("message the group on whatsapp", 85)
+
+	got, err := store.SimilarLessons(ctx, prompt, 3)
+	if err != nil {
+		t.Fatalf("SimilarLessons: %v", err)
+	}
+	var lines []string
+	for _, l := range got {
+		lines = append(lines, l.Lesson)
+	}
+	joined := strings.Join(lines, " | ")
+	for _, want := range []string{"search bar", "chat list"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("lessons = %q, want the one about %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "Reopen") {
+		t.Errorf("lessons = %q, want the billing lesson left out", joined)
 	}
 }

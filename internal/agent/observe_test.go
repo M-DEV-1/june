@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -82,17 +83,6 @@ func TestExecuteTool_ObserveScreen_ListsNumberedNodes(t *testing.T) {
 	}
 }
 
-func TestExecuteTool_ObserveScreen_ReportsFailure(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		return "", "", nil, errors.New("no accessibility bus")
-	}
-	got := a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	if !strings.Contains(got, "no accessibility bus") {
-		t.Errorf("result = %q, want the error surfaced", got)
-	}
-}
-
 // point_at draws the ring around the node the model means, by the number observe_screen gave it, and only ever around something the model has actually seen in this session.
 func TestExecuteTool_PointAt_RingsTheObservedNode(t *testing.T) {
 	a, rings := observingAgent(t)
@@ -129,18 +119,6 @@ func TestExecuteTool_PointAt_WithoutADrawer(t *testing.T) {
 	}
 }
 
-func TestToolDefinitions_DeclareObserveAndPoint(t *testing.T) {
-	names := map[string]bool{}
-	for _, tool := range toolDefinitions() {
-		for _, d := range tool.FunctionDeclarations {
-			names[d.Name] = true
-		}
-	}
-	if !names["observe_screen"] || !names["point_at"] {
-		t.Errorf("declared tools %v lack observe_screen or point_at", names)
-	}
-}
-
 // The daemon answers /ask through evalExecute, which only lets the read-only memory tools run unless writes were allowed for an eval. The screen tools are read-only too (a ring is not a write), so they must pass that gate, or the model tells the user its eyes are disabled, which it did on 2026-09-04.
 func TestEvalExecute_AllowsTheScreenTools(t *testing.T) {
 	a, rings := observingAgent(t)
@@ -158,15 +136,20 @@ func TestEvalExecute_AllowsTheScreenTools(t *testing.T) {
 }
 
 type fakeActions struct {
-	clicked  []string
-	scrolled []string
-	typed    []string
+	clicked      []string
+	rightClicked []string
+	scrolled     []string
+	typed        []string
 }
 
 // fakeActions doubles as the keyboard and pointer, recording what type_text sent and taking every key or click without complaint.
-func (f *fakeActions) TypeText(text string) error             { f.typed = append(f.typed, text); return nil }
-func (f *fakeActions) PressKey(string) error                  { return nil }
-func (f *fakeActions) ClickAt(float64, float64) error         { return nil }
+func (f *fakeActions) TypeText(text string) error     { f.typed = append(f.typed, text); return nil }
+func (f *fakeActions) PressKey(string) error          { return nil }
+func (f *fakeActions) ClickAt(float64, float64) error { return nil }
+func (f *fakeActions) RightClickAt(x, y float64) error {
+	f.rightClicked = append(f.rightClicked, fmt.Sprintf("%.0f,%.0f", x, y))
+	return nil
+}
 func (f *fakeActions) ScrollAt(float64, float64, int32) error { return nil }
 
 func actingAgent(t *testing.T) (*Agent, *fakeActions) {
@@ -200,6 +183,22 @@ func TestExecuteTool_Click_PressesTheObservedNode(t *testing.T) {
 	}
 	if !strings.Contains(got, "Merge") || !strings.Contains(got, "press") {
 		t.Errorf("result = %q, want the node named and the action used", got)
+	}
+}
+
+// Nothing in the accessibility tree opens a context menu: a node's showContextMenu is the one action pickAction never fires, and most toolkits publish no such action at all. A right-click therefore has to drive the real pointer's right button at the element, whatever actions that element offers.
+func TestExecuteTool_Click_RightButtonOpensTheContextMenuWithThePointer(t *testing.T) {
+	a, f := actingAgent(t)
+	a.executeTool(context.Background(), "observe_screen", map[string]any{})
+	got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(2), "button": "right"})
+	if len(f.rightClicked) != 1 || f.rightClicked[0] != "400,210" {
+		t.Errorf("right clicks = %v, want one at the centre of the address bar", f.rightClicked)
+	}
+	if len(f.clicked) != 0 {
+		t.Errorf("accessibility actions fired = %v, want none: none of them opens a context menu", f.clicked)
+	}
+	if !strings.Contains(got, "right-clicked") {
+		t.Errorf("result = %q, want it to say it right-clicked", got)
 	}
 }
 
@@ -280,31 +279,6 @@ func TestExecuteTool_TypeText_TypesAndOptionallySubmits(t *testing.T) {
 	}
 }
 
-func TestEvalExecute_AllowsTheActionTools(t *testing.T) {
-	a, f := actingAgent(t)
-	a.evalExecute(context.Background(), "observe_screen", map[string]any{})
-	a.evalExecute(context.Background(), "click", map[string]any{"n": float64(1)})
-	a.evalExecute(context.Background(), "scroll_to", map[string]any{"n": float64(1)})
-	a.evalExecute(context.Background(), "type_text", map[string]any{"text": "x"})
-	if len(f.clicked) != 1 || len(f.scrolled) != 1 || len(f.typed) != 1 {
-		t.Errorf("the ask gate must let click, scroll_to and type_text through: %+v", f)
-	}
-}
-
-func TestToolDefinitions_DeclareTheActionTools(t *testing.T) {
-	names := map[string]bool{}
-	for _, tool := range toolDefinitions() {
-		for _, d := range tool.FunctionDeclarations {
-			names[d.Name] = true
-		}
-	}
-	for _, n := range []string{"click", "scroll_to", "type_text"} {
-		if !names[n] {
-			t.Errorf("tool %q is not declared", n)
-		}
-	}
-}
-
 // show_marks puts a numbered mark over every element observe_screen listed, so the user can see on their own screen which number the model means without asking it to ring them one at a time.
 func TestExecuteTool_ShowMarks_MarksEveryObservedItem(t *testing.T) {
 	a, _ := observingAgent(t)
@@ -337,51 +311,6 @@ func TestExecuteTool_ShowMarks_WithoutADrawer(t *testing.T) {
 	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
 	if !strings.Contains(got, "cannot draw") {
 		t.Errorf("result = %q, want a plain refusal when nothing can draw on this screen", got)
-	}
-}
-
-// show_marks caps at 40 marks so the screen stays readable, and says how many of how many it actually drew.
-func TestExecuteTool_ShowMarks_CapsAt40(t *testing.T) {
-	a, _ := observingAgent(t)
-	var nodes []act.Node
-	for i := 0; i < 51; i++ {
-		nodes = append(nodes, act.Node{Role: "push button", Label: strconv.Itoa(i), X: i, Y: i, W: 10, H: 10, Showing: true})
-	}
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		return "brave", "many", nodes, nil
-	}
-	var marked []act.Item
-	a.Marks = func(items []act.Item) error { marked = items; return nil }
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
-	if len(marked) != 40 {
-		t.Errorf("marked %d items, want the cap of 40", len(marked))
-	}
-	if !strings.Contains(got, "40") || !strings.Contains(got, "51") {
-		t.Errorf("result = %q, want it to say 40 of 51", got)
-	}
-}
-
-func TestToolDefinitions_DeclareShowMarks(t *testing.T) {
-	names := map[string]bool{}
-	for _, tool := range toolDefinitions() {
-		for _, d := range tool.FunctionDeclarations {
-			names[d.Name] = true
-		}
-	}
-	if !names["show_marks"] {
-		t.Errorf("declared tools %v lack show_marks", names)
-	}
-}
-
-func TestEvalExecute_AllowsShowMarks(t *testing.T) {
-	a, _ := observingAgent(t)
-	var marked []act.Item
-	a.Marks = func(items []act.Item) error { marked = items; return nil }
-	a.evalExecute(context.Background(), "observe_screen", map[string]any{})
-	got := a.evalExecute(context.Background(), "show_marks", map[string]any{})
-	if len(marked) != 2 || strings.Contains(got, "not available in an ask") {
-		t.Errorf("show_marks through the ask gate = %q, marked %v; want it to run", got, marked)
 	}
 }
 

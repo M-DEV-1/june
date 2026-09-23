@@ -272,7 +272,8 @@ func (d *Dictation) finish(cur *dictating) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	text = strings.TrimSpace(text)
+	// Every language comes out in Latin letters, the same as a meeting transcript, so Hindi said aloud is typed as Hinglish rather than Devanagari.
+	text = recorder.Romanize(strings.TrimSpace(text))
 	slog.Info("dictation transcribed", "id", cur.id, "audio", time.Duration(len(raw)/2)*time.Second/time.Duration(d.rate), "took", time.Since(started), "chars", len(text))
 
 	d.hub.broadcast(Event{ID: cur.id, Type: "dictation", Text: text, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
@@ -353,7 +354,8 @@ func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 	args := []string{"-f", wavPath, "-np", "-nt", "-et", dictateEntropyThreshold, "-lpt", dictateLogProbThreshold}
 	// No model beside the binary means a stub, which is how a test's bare script gets run without flags it would not understand.
 	if model := filepath.Join(filepath.Dir(bin), whisperCPPModelName); fileExists(model) {
-		args = append(args, "-m", model)
+		// -l auto for the same reason internal/recorder passes it: whisper-cli defaults to -l en, and a dictation that is not in English comes back as [NON-ENGLISH SPEECH] rather than as words.
+		args = append(args, "-m", model, "-l", "auto")
 		if dev := config.LoadConfig().Transcribe.GPUDevice; dev > 0 {
 			args = append(args, "-dev", strconv.Itoa(dev))
 		}

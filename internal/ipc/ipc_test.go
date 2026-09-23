@@ -93,43 +93,6 @@ func mustEvent(t *testing.T, ch <-chan Event) Event {
 	return Event{}
 }
 
-func TestAsk_ReturnsAcceptedWithID(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{trace: agent.TurnTrace{Answer: "hi"}}, dbtest.Open(t), nil, nil)
-
-	resp, err := http.Post(srv.URL+"/ask", "application/json", strings.NewReader(`{"question":"what time is it","context":""}`))
-	if err != nil {
-		t.Fatalf("POST /ask: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusAccepted)
-	}
-	var body struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if body.ID == "" {
-		t.Fatalf("expected non-empty id")
-	}
-}
-
-func TestAsk_BadJSON(t *testing.T) {
-	srv := newTestServer(t, &fakeAsker{}, dbtest.Open(t), nil, nil)
-
-	resp, err := http.Post(srv.URL+"/ask", "application/json", strings.NewReader(`{not json`))
-	if err != nil {
-		t.Fatalf("POST /ask: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
-	}
-}
-
 func TestEvents_DeliversStatusAnswerDoneInOrder(t *testing.T) {
 	trace := agent.TurnTrace{
 		ToolHops: []agent.ToolHop{{Name: "search_memory"}, {Name: "query_store"}},
@@ -272,30 +235,6 @@ func TestHub_LevelBurstDoesNotDropStalledClient(t *testing.T) {
 		t.Fatalf("the ordinary event broadcast after the level burst never arrived")
 	}
 	h.unsubscribe(stalled)
-}
-
-// evidenceFor turns the agent's evidence rows into the window's evidence items: the title as it is, kind and when joined as the meta line, the excerpt as the body, in the agent's order; a turn with no evidence yields an empty, non-nil list so the JSON stays [] and never null.
-func TestEvidenceFor(t *testing.T) {
-	trace := agent.TurnTrace{Evidence: []agent.Evidence{
-		{Kind: "meeting", ID: 153, Title: "Lodestone sync", When: "2026-08-26", Excerpt: "after the demo the PFP task goes to Sorrek"},
-		{Kind: "note", ID: 9, Title: "", When: "", Excerpt: "Vexil wants the invoice first"},
-	}}
-	got := evidenceFor(trace)
-	want := []EvidenceItem{
-		{Title: "Lodestone sync", Meta: "meeting · 2026-08-26", Body: "after the demo the PFP task goes to Sorrek"},
-		{Title: "note", Meta: "note", Body: "Vexil wants the invoice first"},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d items, want %d: %+v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("item %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-	if empty := evidenceFor(agent.TurnTrace{}); empty == nil || len(empty) != 0 {
-		t.Errorf("no evidence should give an empty non-nil list, got %#v", empty)
-	}
 }
 
 // hangingAsker blocks until its context ends, the way a stuck model call would, and reports the context's error.

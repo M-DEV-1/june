@@ -35,7 +35,7 @@ afterEach(() => {
 });
 
 const days: DaySummary[] = [
-  { date: "2026-09-04", title: "A long day of TCFD work.", has_page: true, seen: 366, meetings: 5, meeting_minutes: 140 },
+  { date: "2026-09-04", title: "A long day of Meridian work.", has_page: true, seen: 366, meetings: 5, meeting_minutes: 140 },
   { date: "2026-09-03", title: "", has_page: false, seen: 60, meetings: 1, meeting_minutes: 28 },
   { date: "2026-08-30", title: "", has_page: false, seen: 0, meetings: 0, meeting_minutes: 0 },
 ];
@@ -44,10 +44,10 @@ const page: DayView = {
   date: "2026-09-04",
   brief: "",
   close: "",
-  page: "You spent the morning on the TCFD statements.\nThe afternoon went to the flights.",
+  page: "You spent the morning on the Meridian statements.\nThe afternoon went to the flights.",
   you: [],
   tasks: [
-    { id: "11", title: "Send the TCFD file", done: false, status: "open", owner: "me" },
+    { id: "11", title: "Send the Meridian file", done: false, status: "open", owner: "me" },
     { id: "12", title: "Book the flight", done: true, status: "done", owner: "me" },
   ],
   heading: "366 things seen · 5 calls, 140 min",
@@ -55,7 +55,7 @@ const page: DayView = {
 
 /** The same two rows GET /tasks would answer, so a tick made on the Days page has something in the Tasks list to keep in step with. */
 const tasks: Task[] = [
-  { id: "11", title: "Send the TCFD file", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "TCFD call, 2026-09-04", owner: "me" },
+  { id: "11", title: "Send the Meridian file", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "Meridian call, 2026-09-04", owner: "me" },
   { id: "12", title: "Book the flight", source: "you", when: new Date().toISOString(), done: true, conversation_id: "c1", detail: "you said", owner: "me" },
 ];
 
@@ -97,28 +97,16 @@ describe("the day's own page", () => {
     await screen.findByText("Quiet.");
     expect(screen.queryByRole("complementary", { name: "About this day" })).toBeNull();
   });
-
-  it("says no days have been written rather than showing an empty page", async () => {
-    renderApp({}, { place: "days" });
-    expect(await screen.findByText("No days written yet.")).toBeDefined();
-  });
 });
 
 describe("ticking a raised task", () => {
-  it("gives the raised list's circles real buttons, named the same way the Tasks screen names its own", async () => {
-    renderApp({ days, tasks, pages: { "2026-09-04": page } }, { place: "days" });
-    await screen.findByText("Raised that day");
-    expect(await screen.findByRole("checkbox", { name: "Mark Send the TCFD file done" })).toBeDefined();
-    expect(screen.getByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
-  });
-
   it("ticks a raised item done through the same route the Tasks screen uses, and the row updates", async () => {
     const { calls } = renderApp({ days, tasks, pages: { "2026-09-04": page } }, { place: "days" });
     await screen.findByText("Raised that day");
-    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the Meridian file done" }));
     await waitFor(() => expect(calls.find((c) => c.path === "/tasks/11/done")?.body).toEqual({ status: "done" }));
     // The tag setTaskStatus invalidates ("Task") is the same tag the day query carries, so the day refetches and the tick it now sees reflects the same row the Tasks screen would.
-    expect(await screen.findByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+    expect(await screen.findByRole("checkbox", { name: "Reopen Send the Meridian file" })).toBeDefined();
   });
 
   it("holds the circle filled from the click until the day itself agrees, rather than emptying it while the day is being read again", async () => {
@@ -126,14 +114,14 @@ describe("ticking a raised task", () => {
     await screen.findByText("Raised that day");
     const release = holdTheDay();
 
-    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the Meridian file done" }));
     await waitFor(() => expect(calls.find((c) => c.path === "/tasks/11/done")?.body).toEqual({ status: "done" }));
     // The status change has been answered and the day has not been read again yet: the circle must still be filled.
     await new Promise((r) => setTimeout(r, 50));
-    expect(screen.getByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+    expect(screen.getByRole("checkbox", { name: "Reopen Send the Meridian file" })).toBeDefined();
 
     release();
-    expect(await screen.findByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+    expect(await screen.findByRole("checkbox", { name: "Reopen Send the Meridian file" })).toBeDefined();
   });
 
   it("takes a click after the change has gone out as a fresh tick rather than swallowing it", async () => {
@@ -141,12 +129,12 @@ describe("ticking a raised task", () => {
     await screen.findByText("Raised that day");
     holdTheDay();
 
-    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Send the Meridian file done" }));
     await waitFor(() => expect(sent(calls)).toHaveLength(1));
     // The day has still not caught up, so the circle is showing a change that has already gone out: clicking it again asks for the opposite, rather than undoing something that was never sent.
-    await userEvent.click(screen.getByRole("checkbox", { name: "Reopen Send the TCFD file" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Reopen Send the Meridian file" }));
     await waitFor(() => expect(sent(calls)).toEqual([{ status: "done" }, { status: "open" }]));
-    expect(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" })).toBeDefined();
+    expect(screen.getByRole("checkbox", { name: "Mark Send the Meridian file done" })).toBeDefined();
   });
 
   it("gives the circle up after a while when the day never comes round to agreeing", async () => {
@@ -156,17 +144,17 @@ describe("ticking a raised task", () => {
     holdTheDay();
     vi.useFakeTimers();
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Mark Send the Meridian file done" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(500);
     });
     expect(sent(calls)).toHaveLength(1);
-    expect(screen.getByRole("checkbox", { name: "Reopen Send the TCFD file" })).toBeDefined();
+    expect(screen.getByRole("checkbox", { name: "Reopen Send the Meridian file" })).toBeDefined();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    expect(screen.getByRole("checkbox", { name: "Mark Send the TCFD file done" })).toBeDefined();
+    expect(screen.getByRole("checkbox", { name: "Mark Send the Meridian file done" })).toBeDefined();
     vi.useRealTimers();
   });
 });

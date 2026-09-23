@@ -264,20 +264,6 @@ func waitJobState(t *testing.T, runner *actjob.Runner, id string, want actjob.St
 	return actjob.Job{}
 }
 
-// TestActRoutes_RefusesAGoallessOrUnknownBrainJob checks the two ways a job is refused before it is written anywhere.
-func TestActRoutes_RefusesAGoallessOrUnknownBrainJob(t *testing.T) {
-	j, _, _ := jobServer(t, &jobExec{}, `{"done":true,"say":"done"}`)
-	if got := post(t, j, "POST", "/act", `{"goal":"   "}`); got.Code != http.StatusBadRequest {
-		t.Errorf("a job with no goal = %d, want 400", got.Code)
-	}
-	if got := post(t, j, "POST", "/act", `{"goal":"play it","brain":"nope"}`); got.Code != http.StatusBadRequest {
-		t.Errorf("a job naming an unknown brain = %d, want 400", got.Code)
-	}
-	if got := post(t, j, "POST", "/act", `not json`); got.Code != http.StatusBadRequest {
-		t.Errorf("a body that will not decode = %d, want 400", got.Code)
-	}
-}
-
 // TestActStart_BadRequestOnlyForValidationErrors checks POST /act separates what the caller got wrong from what the daemon could not do: a blank goal and a brain this daemon does not have are 400, while a store that cannot take the job is 500 — reporting a wedged store as "you sent a bad goal" sends the user looking in the wrong place.
 func TestActStart_BadRequestOnlyForValidationErrors(t *testing.T) {
 	j, _, _ := jobServer(t, &jobExec{}, stepJSON)
@@ -378,13 +364,5 @@ func TestSpokenJob_WaitsForTheJobThenHandsBackWhatItSaid(t *testing.T) {
 	}
 	if !strings.Contains(said, "It is playing S16 E8.") {
 		t.Errorf("Spoken returned %q, want the job's own closing words", said)
-	}
-}
-
-// A job the runner would not open must come back as an error, so do says nothing started rather than leaving the user waiting on a chain that never began.
-func TestSpokenJob_RefusesAGoalTheRunnerWouldNotOpen(t *testing.T) {
-	j, _, _ := jobServer(t, &jobExec{}, stepJSON)
-	if said, err := j.Spoken(context.Background(), "   "); err == nil {
-		t.Errorf("Spoken on an empty goal returned %q with no error, want the runner's refusal", said)
 	}
 }

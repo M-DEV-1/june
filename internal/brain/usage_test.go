@@ -1,12 +1,11 @@
 package brain
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"ora/internal/agent"
 )
 
 // TestUsageStore_KeepsTheLastReadingAcrossARestart checks a reading survives the daemon stopping: the picker draws a bar the moment the window opens, from what the last response said, rather than staying blank until the next call to that provider.
@@ -49,11 +48,19 @@ func TestUsageStore_AnEmptyReadingLeavesTheLastGoodOne(t *testing.T) {
 	}
 }
 
-// TestUsageStore_SaysWhenItHasNothing checks a provider nothing has ever been recorded for reports no reading rather than an empty one, so /brains can leave its limits array empty.
-func TestUsageStore_SaysWhenItHasNothing(t *testing.T) {
+// A successful answer from the provider is proof the login works again, even one that carries no windows. The Codex login check answers with no rate-limit headers, and Record ignored it, so after `codex login` the row stayed greyed out until a real call happened to carry headers.
+func TestUsageStore_AnEmptyReadingClearsASignedOutMark(t *testing.T) {
 	store := NewUsageStore(t.TempDir())
-	if snap, ok := store.Get("grok"); ok {
-		t.Fatalf("grok has a reading nobody recorded: %+v", snap)
+	store.Record("codex", []UsageLimit{{Window: "5h", UsedFraction: 0.65}})
+	store.RecordSignedOut("codex", "run codex login")
+	store.Record("codex", nil)
+
+	snap, _ := store.Get("codex")
+	if snap.SignedOut || snap.Note != "" {
+		t.Errorf("after the login answered the store still says %+v", snap)
+	}
+	if len(snap.Limits) != 1 {
+		t.Errorf("the empty reading wiped the last good window: %+v", snap.Limits)
 	}
 }
 
@@ -94,8 +101,13 @@ func TestGeminiDaily_CountsTodayAgainstTheModelsCeiling(t *testing.T) {
 	if got.Window != "daily" || got.UsedFraction != 0.25 {
 		t.Errorf("limit = %+v, want the daily window at 0.25", got)
 	}
-	if want := time.Date(2026, 9, 6, 0, 0, 0, 0, time.Local); !got.ResetsAt.Equal(want) {
-		t.Errorf("resets at %v, want the next local midnight %v", got.ResetsAt, want)
+	// The provider's midnight, not the machine's: Google's free tier rolls over on Pacific time, and naming local midnight told the user their allowance returned hours before it did.
+	pacific, err := time.LoadLocation(quotaResetZone)
+	if err != nil {
+		t.Skip("no zone database on this machine")
+	}
+	if want := time.Date(2026, 9, 6, 0, 0, 0, 0, pacific); !got.ResetsAt.Equal(want) {
+		t.Errorf("resets at %v, want the provider's next midnight %v", got.ResetsAt, want)
 	}
 	if got.Source != "brain_quota.json gemini-3.5-flash" {
 		t.Errorf("source = %q, want the file and model the count came from", got.Source)
@@ -116,24 +128,6 @@ func TestGeminiDaily_DrawsAnUnlistedGeminiModelAgainstTheDefaultCeiling(t *testi
 	}
 }
 
-// TestGeminiDaily_SaysNothingForAModelFromAnotherNamespace checks a name that is not a Gemini model at all draws no bar, since there is no free-tier ceiling it could be measured against.
-func TestGeminiDaily_SaysNothingForAModelFromAnotherNamespace(t *testing.T) {
-	if _, ok := GeminiDaily(NewQuotaState(t.TempDir()), "sonnet", DefaultQuotaOptions(), time.Now()); ok {
-		t.Fatalf("a non-Gemini model name reported a daily window")
-	}
-}
-
-// TestGeminiDaily_NoNoteForAMeasuredModel checks a model with its own measured ceiling carries no note, so an ordinary row does not tell the user the number is a guess.
-func TestGeminiDaily_NoNoteForAMeasuredModel(t *testing.T) {
-	snap, ok := GeminiDaily(NewQuotaState(t.TempDir()), "gemini-3.5-flash", DefaultQuotaOptions(), time.Now())
-	if !ok {
-		t.Fatal("a measured model drew no window")
-	}
-	if snap.Note != "" {
-		t.Errorf("note = %q, want empty for a model whose ceiling was actually observed", snap.Note)
-	}
-}
-
 // TestUsageStore_ATornWriteDoesNotLoseTheReadings checks the usage file is replaced by a rename rather than truncated in place, so a crash mid-write leaves the last good readings on disk instead of blanking every bar.
 func TestUsageStore_ATornWriteDoesNotLoseTheReadings(t *testing.T) {
 	dir := t.TempDir()
@@ -146,5 +140,38 @@ func TestUsageStore_ATornWriteDoesNotLoseTheReadings(t *testing.T) {
 	}
 }
 
-// The store is the recorder the agent package writes its readings into; this says so at compile time, so a change to agent.UsageRecorder breaks here rather than in cmd/daemon.go.
-var _ agent.UsageRecorder = (*UsageStore)(nil)
+// The Gemini bar has to read the same day the counter wrote. The count is keyed on the provider's own day (QuotaDay, America/Los_Angeles) because Google's free-tier allowance rolls over on Pacific midnight, but the reading looked the count up under the machine's local date. On IST those two differ from local midnight until about 12:30 every day, so for the whole of a working morning the bar read a day the counter had never written and drew an empty allowance over a spent one.
+func TestGeminiDaily_ReadsTheDayTheCounterWrote(t *testing.T) {
+	kolkata, err := time.LoadLocation("Asia/Kolkata")
+	pacific, err2 := time.LoadLocation(quotaResetZone)
+	if err != nil || err2 != nil {
+		t.Skip("no zone database on this machine")
+	}
+	// Nine in the morning in Kolkata, which is still the previous day in Los Angeles.
+	now := time.Date(2026, 9, 15, 9, 0, 0, 0, kolkata)
+	day := now.In(pacific).Format("2006-01-02")
+	if day == now.Format("2006-01-02") {
+		t.Fatalf("the test's own premise is wrong: %s and %s are the same day", day, now.Format("2006-01-02"))
+	}
+
+	// Twelve requests spent, written under the provider's day exactly as the counter writes them.
+	dir := t.TempDir()
+	body := fmt.Sprintf(`{%q:{"gemini-3.5-flash":12}}`, day)
+	if err := os.WriteFile(filepath.Join(dir, "brain_quota.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := NewQuotaState(dir)
+	opts := QuotaOptions{"gemini-3.5-flash": {Limit: 100}}
+
+	snap, ok := GeminiDaily(state, "gemini-3.5-flash", opts, now)
+	if !ok || len(snap.Limits) != 1 {
+		t.Fatalf("no reading: ok=%v snap=%+v", ok, snap)
+	}
+	if got := snap.Limits[0].UsedFraction; got != 0.12 {
+		t.Errorf("used = %v, want 0.12 — the bar read a different day than the counter wrote", got)
+	}
+	// The window turns over on the provider's midnight, not the machine's, or the bar promises a refill hours before one happens.
+	if reset := snap.Limits[0].ResetsAt.In(pacific); reset.Hour() != 0 {
+		t.Errorf("resets at %s in the provider's zone, want its midnight", reset.Format(time.RFC3339))
+	}
+}

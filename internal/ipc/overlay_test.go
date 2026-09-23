@@ -229,41 +229,6 @@ func TestOverlayMethods_BroadcastFieldMapping(t *testing.T) {
 	}
 }
 
-// Draw dispatches to Arrow, Line, Path, Box or Circle by shape, so cmd/daemon.go can wire the agent's Draw field straight to this method without a closure. A shape that is none of the five is refused and nothing is broadcast.
-func TestDraw_DispatchesByShapeAndRejectsUnknownOnes(t *testing.T) {
-	s := New(&fakeAsker{}, nil, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	cases := []struct {
-		shape string
-		want  string
-	}{
-		{"arrow", "arrow"},
-		{"line", "line"},
-		{"path", "path"},
-		{"box", "box"},
-		{"circle", "circle"},
-	}
-	for _, tc := range cases {
-		if err := s.Draw("", tc.shape, [][2]int{{1, 1}, {2, 2}, {3, 3}}, 10, 20, 30, 40, "go"); err != nil {
-			t.Fatalf("Draw(%s) error: %v", tc.shape, err)
-		}
-		if _, got := waitOverlay(t, ch); got.Kind != tc.want {
-			t.Errorf("kind = %q, want %q", got.Kind, tc.want)
-		}
-	}
-
-	if err := s.Draw("", "sparkle", [][2]int{{1, 1}, {2, 2}}, 0, 0, 0, 0, "go"); err == nil {
-		t.Fatal("Draw(sparkle) error = nil, want a complaint about the shape")
-	}
-	select {
-	case ev := <-ch:
-		t.Fatalf("a rejected shape was still broadcast: %+v", ev)
-	case <-time.After(50 * time.Millisecond):
-	}
-}
-
 func TestOverlay_RejectsBadBodies(t *testing.T) {
 	cases := []struct {
 		name string

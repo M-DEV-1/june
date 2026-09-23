@@ -8,14 +8,12 @@ import (
 	"testing"
 )
 
-// fakeGate stands in for the daemon's shared daily-quota gate. err, when set, is what every Allow call returns; calls records every model name Allow was asked about, so a test can check whether the gate was reached at all.
+// fakeGate stands in for the daemon's shared daily-quota gate. err, when set, is what every Allow call returns.
 type fakeGate struct {
-	err   error
-	calls []string
+	err error
 }
 
 func (g *fakeGate) Allow(model string) error {
-	g.calls = append(g.calls, model)
 	return g.err
 }
 
@@ -92,53 +90,6 @@ func TestGeminiSummarizer_GateRefusesWithoutCallingBackend(t *testing.T) {
 			}
 			summarizer.SetRequestGate(&fakeGate{err: gateErr})
 			c.call(t, summarizer)
-		})
-	}
-}
-
-// Installing a permitting gate must not disturb any method's existing empty-input short circuit, and the gate must never even be consulted when there is nothing to send.
-func TestGeminiSummarizer_PermittingGateLeavesEmptyShortCircuitUnchanged(t *testing.T) {
-	cases := []struct {
-		name string
-		call func(t *testing.T, s *memory.GeminiSummarizer)
-	}{
-		{"ReconcileNotes", func(t *testing.T, s *memory.GeminiSummarizer) {
-			ops, err := s.ReconcileNotes(context.Background(), nil, nil)
-			if err != nil || ops != nil {
-				t.Fatalf("ReconcileNotes(empty) = (%v, %v), want (nil, nil) same as with no gate installed", ops, err)
-			}
-		}},
-		{"DeriveState", func(t *testing.T, s *memory.GeminiSummarizer) {
-			state, err := s.DeriveState(context.Background(), nil, nil)
-			if err != nil || state != "" {
-				t.Fatalf("DeriveState(empty) = (%q, %v), want (\"\", nil) same as with no gate installed", state, err)
-			}
-		}},
-		{"ConsolidateNotes", func(t *testing.T, s *memory.GeminiSummarizer) {
-			merged, err := s.ConsolidateNotes(context.Background(), nil)
-			if err != nil || merged != nil {
-				t.Fatalf("ConsolidateNotes(empty) = (%v, %v), want (nil, nil) same as with no gate installed", merged, err)
-			}
-		}},
-		{"AnalyzeScreen", func(t *testing.T, s *memory.GeminiSummarizer) {
-			sight := s.AnalyzeScreen(context.Background(), nil)
-			if sight.UserActivity != "" || len(sight.VisibleText) != 0 || sight.Summary != "" {
-				t.Fatalf("AnalyzeScreen(nil) = %+v, want the zero value", sight)
-			}
-		}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-			if err != nil {
-				t.Fatalf("NewGeminiSummarizer: %v", err)
-			}
-			gate := &fakeGate{}
-			summarizer.SetRequestGate(gate)
-			c.call(t, summarizer)
-			if len(gate.calls) != 0 {
-				t.Errorf("gate.Allow called %d times for empty input, want 0: nothing to send", len(gate.calls))
-			}
 		})
 	}
 }

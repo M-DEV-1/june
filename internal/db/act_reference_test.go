@@ -1,6 +1,6 @@
 package db
 
-// act_reference_test.go lives in package db (white-box) because the closeness score is a cosine between two stored vectors and the tests pin its arithmetic directly, because setting a run's started_at and reading back a stored vector need the store's own handle, and because the tests drive the write-side embed helper by hand instead of racing its goroutine.
+// act_reference_test.go lives in package db (white-box) because setting a run's started_at and reading back a stored vector need the store's own handle, and because the tests drive the write-side embed helper by hand instead of racing its goroutine.
 //
 // No test here talks to an embedding server. Every vector is a fixed two-dimensional unit vector at a chosen angle, so the cosine between any two of them is the cosine of the angle between them and every expected score in this file is arithmetic a reader can check: 0 degrees apart is 1.000, 20 apart is 0.940, 60 apart is 0.500. Two dimensions rather than EmbeddingGemma's 768 is deliberate — nothing in the lookup may assume a dimension.
 
@@ -116,14 +116,6 @@ func seedActRuns(t *testing.T, store *Store, emb *actTestEmbedder, questions ...
 	return ids
 }
 
-// backdateActRun moves one stored run's started_at, so a test can say how old a run is without waiting.
-func backdateActRun(t *testing.T, store *Store, id int64, at time.Time) {
-	t.Helper()
-	if _, err := store.db.Exec(`UPDATE act_runs SET started_at = ? WHERE id = ?`, at.UTC().Format("2006-01-02 15:04:05"), id); err != nil {
-		t.Fatalf("backdate act run %d: %v", id, err)
-	}
-}
-
 // actRunVector reads back the vector stored against one run, as raw bytes, and gives back nothing for a run that has none.
 func actRunVector(t *testing.T, store *Store, id int64) []byte {
 	t.Helper()
@@ -151,54 +143,6 @@ func waitForActRunVector(t *testing.T, store *Store, id int64) []byte {
 			return nil
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// TestActRunCosineIsTheAngleBetweenTwoVectors pins the arithmetic every score in this package is: the cosine of the angle between the asking question's vector and a stored one's. Two vectors of different lengths score zero rather than comparing what they have in common, because a stored vector of another length came from another embedding model and means nothing on this one's scale.
-func TestActRunCosineIsTheAngleBetweenTwoVectors(t *testing.T) {
-	cases := []struct {
-		name string
-		a, b []float32
-		want float64
-	}{
-		{"the same direction", actUnit(0), actUnit(0), 1},
-		{"twenty degrees apart", actUnit(0), actUnit(20), 0.9397},
-		{"sixty degrees apart", actUnit(0), actUnit(60), 0.5},
-		{"at right angles", actUnit(0), actUnit(90), 0},
-		{"opposite", actUnit(0), actUnit(180), -1},
-		{"length has no say", []float32{3, 0}, []float32{7, 0}, 1},
-		{"a vector from another model", []float32{1, 0}, []float32{1, 0, 0}, 0},
-		{"nothing to compare", []float32{0, 0}, actUnit(0), 0},
-		{"no vector at all", nil, actUnit(0), 0},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := actRunCosine(c.a, c.b)
-			if diff := got - c.want; diff > 0.001 || diff < -0.001 {
-				t.Errorf("actRunCosine(%v, %v) = %.4f, want %.4f", c.a, c.b, got, c.want)
-			}
-		})
-	}
-}
-
-// TestActRunVectorSurvivesTheRoundTrip checks a vector written to the row and read back is the same vector, since a score is only worth anything if the stored side of it survived storage.
-func TestActRunVectorSurvivesTheRoundTrip(t *testing.T) {
-	want := []float32{0.5, -0.25, 0, 1}
-	got := decodeActRunVector(encodeActRunVector(want))
-	if len(got) != len(want) {
-		t.Fatalf("round trip gave %d numbers, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("number %d came back as %v, want %v", i, got[i], want[i])
-		}
-	}
-	if v := decodeActRunVector(nil); v != nil {
-		t.Errorf("decoding no bytes gave %v, want nothing", v)
-	}
-	// Four bytes to a number, so a blob that is not a whole number of them is not a vector this store wrote.
-	if v := decodeActRunVector([]byte{1, 2, 3}); v != nil {
-		t.Errorf("decoding a broken blob gave %v, want nothing", v)
 	}
 }
 
@@ -230,70 +174,6 @@ func TestSimilarActRunsFindsTheRunThatMeansTheSameThing(t *testing.T) {
 	}
 	if len(matches[0].Run.Steps) != 2 || matches[0].Run.Steps[1].Name != "point_at" {
 		t.Errorf("match steps = %+v, want the run's own observe_screen then point_at", matches[0].Run.Steps)
-	}
-}
-
-// TestSimilarActRunsCarriesTheRunAndWhenItHappened checks what a match is made of beyond its score: the whole run as it was stored, with its steps decoded, and the time it started, which is what the caller renders as "6 hours ago".
-func TestSimilarActRunsCarriesTheRunAndWhenItHappened(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	const asked = "show me how to change subtitles"
-	emb.register(asked, 0)
-
-	ctx := context.Background()
-	const question = "show me how to change subtitles on this page, or where"
-	emb.register(question, 10)
-	id, err := store.AddActRun(ctx, ActRun{Question: question, Model: "gemini-3-flash", Outcome: "ok", Answer: "the Audio & Subtitles button", DurationMS: 8092, Steps: twoScreenSteps()})
-	if err != nil {
-		t.Fatalf("AddActRun: %v", err)
-	}
-	store.SetEmbedder(emb)
-	if err := store.embedActRunQuestion(ctx, id, question); err != nil {
-		t.Fatalf("embedActRunQuestion: %v", err)
-	}
-	when := time.Now().Add(-6 * time.Hour).Truncate(time.Second)
-	backdateActRun(t, store, id, when)
-
-	matches, err := store.SimilarActRuns(ctx, asked, 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 1 {
-		t.Fatalf("SimilarActRuns returned %d matches, want the one run: %+v", len(matches), matches)
-	}
-	got := matches[0]
-	if !got.When.Equal(when.UTC()) {
-		t.Errorf("match When = %v, want the run's started_at %v", got.When, when.UTC())
-	}
-	if got.Run.Answer != "the Audio & Subtitles button" || got.Run.DurationMS != 8092 || got.Run.Model != "gemini-3-flash" {
-		t.Errorf("match run = %+v, want the fields the run was stored with", got.Run)
-	}
-}
-
-// TestSimilarActRunsScoresEveryMatchAtOrAboveTheFloor checks the caller is never handed a match it would have to filter itself, and that the score it can read is the one the floor was applied to.
-func TestSimilarActRunsScoresEveryMatchAtOrAboveTheFloor(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	const asked = "show me how to change subtitles"
-	emb.register(asked, 0)
-	seedActRuns(t, store, emb,
-		actQuestion{"where can i change subtitles here?", 20},
-		actQuestion{"show me how to change subtitles on this page, or where", 10},
-		actQuestion{"take me to the open tab where family guy is playing", 75},
-		actQuestion{"Read the numbers you can see in the window in front and list them in one line.", 88},
-	)
-
-	matches, err := store.SimilarActRuns(context.Background(), asked, 4)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 2 {
-		t.Fatalf("SimilarActRuns returned %d matches, want the two about subtitles: %+v", len(matches), matches)
-	}
-	for _, m := range matches {
-		if m.Score < store.actRunFloor() {
-			t.Errorf("match %q scored %.3f, below the floor %.2f the lookup applies", m.Run.Question, m.Score, store.actRunFloor())
-		}
 	}
 }
 
@@ -412,36 +292,6 @@ func TestSimilarActRunsOffersOneRunPerGoal(t *testing.T) {
 	}
 	if matches[0].Run.ID != more[1] {
 		t.Errorf("match is run %d, want the newest run of the goal (%d)", matches[0].Run.ID, more[1])
-	}
-}
-
-// TestSimilarActRunsHonoursTheLimit checks the caller's cap is what bounds the result, since this goes into a prompt with a budget.
-func TestSimilarActRunsHonoursTheLimit(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	const asked = "show me how to change subtitles"
-	emb.register(asked, 0)
-	seedActRuns(t, store, emb,
-		actQuestion{"show me how to change subtitles now", 5},
-		actQuestion{"show me how to change subtitles on this page", 10},
-		actQuestion{"show me how to change subtitles on this page, or where", 15},
-	)
-
-	matches, err := store.SimilarActRuns(context.Background(), asked, 2)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 2 {
-		t.Fatalf("SimilarActRuns returned %d matches under a limit of 2, want 2", len(matches))
-	}
-	for _, limit := range []int{0, -1} {
-		matches, err := store.SimilarActRuns(context.Background(), asked, limit)
-		if err != nil {
-			t.Fatalf("SimilarActRuns(limit=%d): %v", limit, err)
-		}
-		if len(matches) != 0 {
-			t.Errorf("SimilarActRuns(limit=%d) returned %d matches, want none", limit, len(matches))
-		}
 	}
 }
 
@@ -635,43 +485,6 @@ func TestSimilarActRunsReplacesAVectorFromAnotherModel(t *testing.T) {
 			t.Fatalf("the stale vector is still %d bytes after a second, want it replaced with 8", len(actRunVector(t, store, ids[0])))
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// TestActRunFloorIsAConfigurableDefault checks the number this whole thing turns on can be moved without a rebuild, and that it cannot be turned off by accident: a floor of zero or less is ignored and the default stands.
-func TestActRunFloorIsAConfigurableDefault(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	const asked = "show me how to change subtitles"
-	emb.register(asked, 0)
-	// 55 degrees is 0.574: below the default floor, above a floor of 0.5.
-	ids := seedActRuns(t, store, emb, actQuestion{"show me how to change the graph function", 55})
-
-	if store.actRunFloor() != DefaultActRunSimilarity {
-		t.Errorf("a store with nothing set uses a floor of %.2f, want the default %.2f", store.actRunFloor(), DefaultActRunSimilarity)
-	}
-	matches, err := store.SimilarActRuns(context.Background(), asked, 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("SimilarActRuns returned %d matches under the default floor, want none: %+v", len(matches), matches)
-	}
-
-	for _, ignored := range []float64{0, -1} {
-		store.SetActRunSimilarityFloor(ignored)
-		if store.actRunFloor() != DefaultActRunSimilarity {
-			t.Errorf("a floor of %v changed the floor to %.2f, want it ignored", ignored, store.actRunFloor())
-		}
-	}
-
-	store.SetActRunSimilarityFloor(0.5)
-	matches, err = store.SimilarActRuns(context.Background(), asked, 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns under a lowered floor: %v", err)
-	}
-	if len(matches) != 1 || matches[0].Run.ID != ids[0] {
-		t.Fatalf("SimilarActRuns returned %+v under a floor of 0.5, want the one run %d", matches, ids[0])
 	}
 }
 

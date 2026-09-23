@@ -216,25 +216,3 @@ func TestRaiser_ListParsesTheWindowsTheExtensionReports(t *testing.T) {
 		}
 	}
 }
-
-// The daemon holds one Raiser for its whole life and closes it with everything else it opened, so Close has to actually release the bus connection rather than leave it to process exit.
-func TestRaiser_CloseReleasesTheConnection(t *testing.T) {
-	addr := startPrivateBus(t)
-	serveFakeExtension(t, addr, &fakeExtension{})
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", addr)
-	r, err := New()
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if ok, err := r.Available(ctx); err != nil || !ok {
-		t.Fatalf("Available before Close: ok=%v err=%v", ok, err)
-	}
-	if err := r.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if ok, err := r.Available(ctx); ok || err == nil {
-		t.Errorf("Available after Close: ok=%v err=%v, want false and an error from a closed connection", ok, err)
-	}
-}

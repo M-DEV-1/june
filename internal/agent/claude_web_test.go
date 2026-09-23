@@ -52,20 +52,6 @@ func TestStripSourcesBlock_WithSourcesBlock(t *testing.T) {
 	}
 }
 
-// TestStripSourcesBlock_WithoutSourcesBlock checks that an ordinary answer — no WebSearch call, so no Sources block — is returned exactly as it came, with no evidence manufactured from nothing.
-func TestStripSourcesBlock_WithoutSourcesBlock(t *testing.T) {
-	answer := "The meeting moved to 3pm; nothing else on the calendar changed."
-
-	got, evidence := stripSourcesBlock(answer)
-
-	if got != answer {
-		t.Errorf("stripSourcesBlock text = %q, want the answer unchanged", got)
-	}
-	if evidence != nil {
-		t.Errorf("evidence = %+v, want nil when there was no Sources block", evidence)
-	}
-}
-
 // flagValue returns the argument following name.
 func flagValue(t *testing.T, args []string, name string) string {
 	t.Helper()

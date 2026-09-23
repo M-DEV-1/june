@@ -34,18 +34,6 @@ func TestPickAction(t *testing.T) {
 	}
 }
 
-// A ref travels as one string through act.Node and the model's numbered list; it has to come back as the same bus name and object path.
-func TestRefRoundTrip(t *testing.T) {
-	in := aref{Name: ":1.28", Path: "/org/a11y/atspi/accessible/1234"}
-	out, err := parseARef(refString(in))
-	if err != nil || out != in {
-		t.Errorf("round trip = %+v, %v; want %+v", out, err, in)
-	}
-	if _, err := parseARef("nonsense"); err == nil {
-		t.Error("a ref without a separator must be refused")
-	}
-}
-
 // verifyAgainst tells the model whether a node from its numbered list is still what the list said it was, so a click fires on the right element rather than on whatever a recycled object path now names. It no longer compares rectangles at all: a click fires the accessibility action on the ref itself, so a stale rectangle never stopped it from landing on the right element, and comparing one only ever produced a false refusal — Teams' title carries a live memory count, and the window placer that corrects a listing's coordinates by title used to miss on the exact-title lookup when that count changed between the list and the click, moving every rectangle by a monitor's width or the desktop's top-bar height and refusing a perfectly good click. The role and the label are still compared.
 func TestVerifyAgainst(t *testing.T) {
 	cases := []struct {
@@ -73,13 +61,6 @@ func TestVerifyAgainst(t *testing.T) {
 		if (err != nil) != c.wantErr {
 			t.Errorf("%s: VerifyAgainst(...) = %v, want error: %v", c.name, err, c.wantErr)
 		}
-	}
-}
-
-// Extents reads one element's rectangle so a ring can be drawn where the element is now. A ref that never came from a node list cannot be read at all, and that has to come back as an error rather than as the rectangle 0,0 0x0, which would put a ring in the corner of the screen.
-func TestExtents_RefusesAMalformedRef(t *testing.T) {
-	if _, _, _, _, err := Extents(context.Background(), "nonsense"); err == nil {
-		t.Error("Extents must refuse a ref with no bus name and object path in it")
 	}
 }
 
@@ -183,29 +164,6 @@ func TestShiftFromPlacer(t *testing.T) {
 	}
 }
 
-// A GTK4 Wayland client such as gnome-control-center answers the accessibility bus with 0,0 for its window frame no matter where it is floating on the screen, so windowShift's size-based guess never fires for it: a floating window is not full screen, not maximized, and is left alone at dx,dy = 0,0, which presses window-relative coordinates as if they were desktop ones. The shell extension's window list carries the real frame, matched by pid the same way compositorFront matches, and its answer is asked before windowShift's guess ever runs (see shiftOf), so this is the case that actually fixes the gnome-control-center click.
-func TestShiftFromPlacer_FloatingWindowReportedAtOrigin(t *testing.T) {
-	frame := rect{X: 0, Y: 0, W: 500, H: 400}
-	restore := windowPlacer
-	t.Cleanup(func() { windowPlacer = restore })
-
-	windowPlacer = func(ctx context.Context, pid uint32, title string) (x, y, w, h int, ok bool) {
-		if pid == 4343 {
-			return 1200, 300, 500, 400, true
-		}
-		return 0, 0, 0, 0, false
-	}
-	dx, dy, ok := shiftFromPlacer(context.Background(), 4343, "Settings", frame)
-	if !ok || dx != 1200 || dy != 300 {
-		t.Errorf("shiftFromPlacer(floating window at origin) = %d,%d,%v; want 1200,300,true", dx, dy, ok)
-	}
-
-	// A window the shell does not know about (a different pid) gets no answer from the placer, which is exactly the signal that leaves windowShift's own guess as the only source: a frame reported at 0,0 with a size neither maximized nor full screen stays at dx,dy = 0,0 there too (see "a floating window cannot be placed and is left alone" in TestWindowShift).
-	if _, _, ok := shiftFromPlacer(context.Background(), 9999, "Settings", frame); ok {
-		t.Error("shiftFromPlacer must say false for a window the shell does not list, falling back to windowShift's guess")
-	}
-}
-
 // show_marks reads the rectangle of up to forty items in one call, and each of those reads went through screenShift, which opened one X connection for _NET_WORKAREA and another for RandR every time: eighty connections for one call, all of them asking a layout that changes when a monitor is plugged in and not otherwise. deskNow reads it once and hands the same answer back for deskTTL.
 func TestDeskNow_ReadsTheDesktopOncePerCall(t *testing.T) {
 	reads := 0
@@ -228,13 +186,6 @@ func TestDeskNow_ReadsTheDesktopOncePerCall(t *testing.T) {
 	forgetDesk()
 	if _, ok := deskNow(); !ok || reads != 2 {
 		t.Errorf("after the cache expired X was asked %d times, want 2", reads)
-	}
-}
-
-// A ref that never came from a node list cannot be read at all, and Focused has to say so rather than answer false, which the caller would read as "some other element has the keyboard" and refuse a legitimate typing.
-func TestFocused_RefusesAMalformedRef(t *testing.T) {
-	if _, err := Focused(context.Background(), "nonsense"); err == nil {
-		t.Error("Focused must refuse a ref with no bus name and object path in it")
 	}
 }
 

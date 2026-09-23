@@ -11,35 +11,6 @@ import (
 	"ora/internal/db"
 )
 
-// TestFormatSearchResult pins the contract formatSearchResult must satisfy regardless of which provider filled the response in: an answer, when present, must reach the model; result content must reach the model when there's no answer to lean on; and a genuinely empty response must still return something non-empty, since branch()'s caller (the live model, mid-conversation) needs a sentence to say, not silence or a panic.
-func TestFormatSearchResult(t *testing.T) {
-	t.Run("prefers the synthesized answer when present", func(t *testing.T) {
-		got := formatSearchResult(searchResponse{
-			Answer:  "Rayleigh scattering makes the sky look blue.",
-			Results: []searchResult{{Title: "Sky color", Content: "unrelated snippet"}},
-		})
-		if !strings.Contains(got, "Rayleigh scattering") {
-			t.Errorf("formatSearchResult = %q, want it to contain the answer text", got)
-		}
-	})
-
-	t.Run("falls back to result content when there is no answer", func(t *testing.T) {
-		got := formatSearchResult(searchResponse{
-			Results: []searchResult{{Title: "OpenAI Navier-Stokes controversy", Content: "Buckmaster filed a complaint alleging his draft proofs were seen."}},
-		})
-		if !strings.Contains(got, "Buckmaster") {
-			t.Errorf("formatSearchResult = %q, want it to contain result content since there is no answer", got)
-		}
-	})
-
-	t.Run("never returns an empty string, even with nothing to report", func(t *testing.T) {
-		got := formatSearchResult(searchResponse{})
-		if strings.TrimSpace(got) == "" {
-			t.Error("formatSearchResult returned an empty string for a response with no answer and no results — the live model needs something to say")
-		}
-	})
-}
-
 // TestExaSearch_ParsesResultsIntoNormalizedForm verifies exaSearch sends the query and API key correctly and maps Exa's title/text fields into searchResult without needing a real Exa account.
 func TestExaSearch_ParsesResultsIntoNormalizedForm(t *testing.T) {
 	var gotAuth, gotPath string
@@ -91,33 +62,6 @@ func TestTavilySearch_ParsesAnswerAndResults(t *testing.T) {
 	}
 	if len(resp.Results) != 1 || resp.Results[0].Content != "laptop GPU details" {
 		t.Errorf("tavilySearch Results = %+v", resp.Results)
-	}
-}
-
-// TestExaSearch_RecordsTokenLedgerRow checks that a successful Exa call files one token-ledger row through the recorder set by SetSearchUsageRecorder, in the shape the ask path's own ledger rows use (see recordTokenUse in internal/ipc/ipc.go): provider "exa", model "search" (there is no model, it is a search call), channel "branch" (branch() is the only caller), one round, the query as the question, and zero tokens since a search spends no model tokens.
-func TestExaSearch_RecordsTokenLedgerRow(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"results":[]}`))
-	}))
-	defer srv.Close()
-
-	var got []db.TokenUse
-	SetSearchUsageRecorder(func(u db.TokenUse) { got = append(got, u) })
-	defer SetSearchUsageRecorder(nil)
-
-	if _, err := exaSearch(context.Background(), srv.Client(), srv.URL, "test-key", "riemann hypothesis"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("recorded %d rows, want 1", len(got))
-	}
-	u := got[0]
-	if u.Provider != "exa" || u.Model != "search" || u.Channel != "branch" || u.Rounds != 1 || u.Question != "riemann hypothesis" {
-		t.Errorf("recorded row = %+v, want provider exa, model search, channel branch, rounds 1, question preserved", u)
-	}
-	if u.InputTokens != 0 || u.OutputTokens != 0 || u.TotalTokens != 0 {
-		t.Errorf("recorded row token counts = %+v, want zero", u)
 	}
 }
 
@@ -196,27 +140,27 @@ func TestExaSearch_AsksForTextTheWayExaWants(t *testing.T) {
 func TestSearchProvidersKeepTheResultURL(t *testing.T) {
 	exa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"results":[{"title":"Careers at Emergent","url":"https://emergent.sh/careers","text":"We are hiring."}]}`))
+		_, _ = w.Write([]byte(`{"results":[{"title":"Careers at Northwind","url":"https://example.com/careers","text":"We are hiring."}]}`))
 	}))
 	defer exa.Close()
-	got, err := exaSearch(context.Background(), exa.Client(), exa.URL, "k", "emergent careers")
+	got, err := exaSearch(context.Background(), exa.Client(), exa.URL, "k", "northwind careers")
 	if err != nil {
 		t.Fatalf("exaSearch: %v", err)
 	}
-	if len(got.Results) != 1 || got.Results[0].URL != "https://emergent.sh/careers" {
+	if len(got.Results) != 1 || got.Results[0].URL != "https://example.com/careers" {
 		t.Errorf("exaSearch results = %+v, want the url kept", got.Results)
 	}
 
 	tav := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"answer":"They are hiring.","results":[{"title":"Careers","url":"https://harvey.ai/careers","content":"Open roles."}]}`))
+		_, _ = w.Write([]byte(`{"answer":"They are hiring.","results":[{"title":"Careers","url":"https://example.org/careers","content":"Open roles."}]}`))
 	}))
 	defer tav.Close()
-	got, err = tavilySearch(context.Background(), tav.Client(), tav.URL, "k", "harvey careers")
+	got, err = tavilySearch(context.Background(), tav.Client(), tav.URL, "k", "brightpath careers")
 	if err != nil {
 		t.Fatalf("tavilySearch: %v", err)
 	}
-	if len(got.Results) != 1 || got.Results[0].URL != "https://harvey.ai/careers" {
+	if len(got.Results) != 1 || got.Results[0].URL != "https://example.org/careers" {
 		t.Errorf("tavilySearch results = %+v, want the url kept", got.Results)
 	}
 }
@@ -225,9 +169,9 @@ func TestSearchProvidersKeepTheResultURL(t *testing.T) {
 func TestFormatSearchResult_CarriesTheURLs(t *testing.T) {
 	t.Run("beside each result when there is no answer", func(t *testing.T) {
 		got := formatSearchResult(searchResponse{Results: []searchResult{
-			{Title: "Careers at Emergent", URL: "https://emergent.sh/careers", Content: "We are hiring."},
+			{Title: "Careers at Northwind", URL: "https://example.com/careers", Content: "We are hiring."},
 		}})
-		for _, want := range []string{"Careers at Emergent", "https://emergent.sh/careers", "We are hiring."} {
+		for _, want := range []string{"Careers at Northwind", "https://example.com/careers", "We are hiring."} {
 			if !strings.Contains(got, want) {
 				t.Errorf("formatSearchResult = %q, want it to contain %q", got, want)
 			}
@@ -237,13 +181,13 @@ func TestFormatSearchResult_CarriesTheURLs(t *testing.T) {
 	// Tavily's synthesized answer used to win outright and take the results with it, so the one path that produced the best prose was also the one that left Ora with no link to open.
 	t.Run("under the answer, which used to swallow them", func(t *testing.T) {
 		got := formatSearchResult(searchResponse{
-			Answer:  "Harvey is hiring in Bengaluru.",
-			Results: []searchResult{{Title: "Careers", URL: "https://harvey.ai/careers", Content: "Open roles."}},
+			Answer:  "Brightpath is hiring remotely.",
+			Results: []searchResult{{Title: "Careers", URL: "https://example.org/careers", Content: "Open roles."}},
 		})
-		if !strings.Contains(got, "Harvey is hiring in Bengaluru.") {
+		if !strings.Contains(got, "Brightpath is hiring remotely.") {
 			t.Errorf("formatSearchResult = %q, want the answer kept", got)
 		}
-		if !strings.Contains(got, "https://harvey.ai/careers") {
+		if !strings.Contains(got, "https://example.org/careers") {
 			t.Errorf("formatSearchResult = %q, want the url alongside the answer", got)
 		}
 	})

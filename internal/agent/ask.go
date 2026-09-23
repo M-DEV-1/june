@@ -28,8 +28,8 @@ const (
 	ChannelVoice Channel = "voice"
 )
 
-// maxAskIterations is the hard cap on tool-call steps a single ask may spend, on every path that runs a tool loop (askText, askVoice, askCodex, and the Claude/Antigravity command-line paths via claudeToolServer): fifty, past which the loop stops and returns capError naming where it got to. A round that only re-observed a screen already seen, or only drew on it, does not spend a step (see sameScreenAgain, onlyAnnotated), so a task that looks twice for every action it takes still fits.
-const maxAskIterations = 50
+// maxAskIterations is the checkpoint on tool-call steps a single ask may spend, on every path that runs a tool loop (askText, askVoice, askCodex, and the Claude/Antigravity command-line paths via claudeToolServer). Past it the loop stops and answers with capError: where it got to, what it last did, and an offer to carry on, which a "continue" picks up from the thread. It is a checkpoint rather than a limit on the task, so a long task runs as several stretches with the user able to steer between them, and a loop that is going nowhere still stops. The three failed runs of 2026-09-16 to 09-23 stopped at fifty steps after 130 to 200 seconds, so a hundred fits well inside the twelve-minute wall clock every path allows. A round that only re-observed a screen already seen, or only drew on it, does not spend a step (see sameScreenAgain, onlyAnnotated).
+const maxAskIterations = 100
 
 // askWallClock is the one hard stop on askText's tool loop, alongside the step cap above: past this much wall time since the turn started, the request in flight fails on its own deadline and the loop returns rather than spinning forever. The Codex, Claude and Antigravity paths already wrap their own call in a timeout of the same size (codexAskTimeout, claudeAskTimeout, agyAskTimeout); this is askText's equivalent, since Gemini's own GenerateContent path had none. A package var, not a const, so a test can shrink it rather than waiting twelve minutes for the stop to prove itself.
 var askWallClock = 12 * time.Minute
@@ -505,7 +505,7 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	defer cancel()
 	// Carried on ctx so a screen tool deep in the loop — click, checking whether the front window changed out from under it — can tell whether this very question named the window it now finds in front.
 	ctx = WithQuestion(ctx, question)
-	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
+	// The picture draw maps coordinates against and what the pictures cost belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
 	ctx = withAskLookState(ctx)
 	instruction := a.LeanPrompt(now)
 	var handshake []string
@@ -561,8 +561,6 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	// steps is how many rounds of this loop have actually spent one of the ask's maxAskIterations tool-call steps (sameScreenAgain and onlyAnnotated below decide which rounds do not), so the loop can stop and hand back capError the moment the cap is hit rather than running on to maxAskRounds.
 	steps := 0
 	for i := 0; i < maxAskRounds; i++ {
-		// The look allowance comes back at every model round, the same boundary voice gives it back at. It used to be attached once per ask and never reset, so a typed ask with a fifty-step budget had two pictures for the whole of it while the refusal told the model it had "already looked twice this turn" — the most frequent refusal in the log, 57 of them, and the one that ended runs that legitimately had to look after each action.
-		lookStateFrom(ctx).resetLooks()
 		prompt, thread := instruction, history
 		cfg.Tools = tools
 		if screenAsk || screenTaskStarted(tr.ToolHops) {
@@ -719,6 +717,19 @@ func lastObservedWindow(hops []ToolHop) string {
 	return ""
 }
 
+// lastObservedApp is the app the run last looked at, which is where a lesson from it applies: a prompt spanning Spotify and WhatsApp ends in one of them. Input: the run's tool hops in call order. Output: the app half of the newest observe_screen that worked, or "" when the run never looked.
+func lastObservedApp(hops []ToolHop) string {
+	for i := len(hops) - 1; i >= 0; i-- {
+		if hops[i].Name != "observe_screen" || strings.HasPrefix(hops[i].Result, "error:") {
+			continue
+		}
+		line, _, _ := strings.Cut(hops[i].Result, "\n")
+		app, _, _ := strings.Cut(line, " · ")
+		return strings.TrimSpace(app)
+	}
+	return ""
+}
+
 // screenActionToolNames are the tools a screen task uses to do something rather than only look, for lastAction — observe_screen is left out on purpose, since seeing the screen again is not an answer to what the turn did on it.
 var screenActionToolNames = map[string]bool{"click": true, "scroll_to": true, "type_text": true, "point_at": true, "draw": true, "show_marks": true, "press_key": true, "click_at": true, "scroll_at": true, "switch_window": true}
 
@@ -728,22 +739,31 @@ func lastAction(hops []ToolHop) string {
 		if !screenActionToolNames[hops[i].Name] || strings.HasPrefix(hops[i].Result, "error:") {
 			continue
 		}
-		return strings.TrimSpace(hops[i].Result)
+		// A tool result tells the model what to do next after a "; " ("scrolled 8 steps; call observe_screen to see the page now"), and that half is not for the user.
+		done, _, _ := strings.Cut(hops[i].Result, "; ")
+		return strings.TrimSpace(done)
 	}
 	return ""
 }
 
-// capError is what an ask returns when its tool loop runs out of steps. It used to read "I looked 12 times and could not settle on an answer", which tells the user nothing he can act on: not where the turn got to, not what it did there, not whether it had got anywhere at all. Input: the turn's tool hops in call order. Output: an error naming the window it last saw and the last thing it did there, alongside how many tool calls it made; the window alone when it never acted; the count alone when it never even looked at a screen.
+// StepCapError is what an ask returns when its tool loop spends every step. Msg is written for the user: where the turn got to, what it last did there, and an offer to carry on. The daemon files it as Ora's answer rather than as a failure, so a "continue" that follows has the task and where it stopped in its history.
+type StepCapError struct{ Msg string }
+
+func (e *StepCapError) Error() string { return e.Msg }
+
+// capError builds the StepCapError an ask returns when it runs out of steps. Input: the turn's tool hops in call order. Output: the error naming the window it last saw and the last thing it did there, alongside how many tool calls it made; the window alone when it never acted; the count alone when it never even looked at a screen.
 func capError(hops []ToolHop) error {
 	window, action := lastObservedWindow(hops), lastAction(hops)
+	var where string
 	switch {
 	case window != "" && action != "":
-		return fmt.Errorf("I got as far as %q, having just %s, and ran out of steps after %d of them", window, action, len(hops))
+		where = fmt.Sprintf("I got as far as %q, having just %s, and ran out of steps after %d of them.", window, action, len(hops))
 	case window != "":
-		return fmt.Errorf("I got as far as %q and ran out of steps after %d of them", window, len(hops))
+		where = fmt.Sprintf("I got as far as %q and ran out of steps after %d of them.", window, len(hops))
 	default:
-		return fmt.Errorf("I ran out of steps after %d of them without settling on an answer", len(hops))
+		where = fmt.Sprintf("I ran out of steps after %d of them without settling on an answer.", len(hops))
 	}
+	return &StepCapError{Msg: where + " Say continue and I will carry on from there."}
 }
 
 func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Content, question string) (TurnTrace, error) {
@@ -1155,7 +1175,7 @@ func (a *Agent) AfterScreenRun(ctx context.Context, trace TurnTrace, outcome str
 			slog.Warn("lessons: could not score the lessons this run was shown", "error", err)
 		}
 	}
-	app := a.frontWindowApp()
+	app := lastObservedApp(trace.ToolHops)
 	if app == "" {
 		return
 	}

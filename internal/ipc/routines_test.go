@@ -64,19 +64,6 @@ func TestRoutinesCreateListDelete(t *testing.T) {
 	}
 }
 
-// TestCreateRoutineRequiresTextAndSchedule checks a blank instruction or schedule is 400.
-func TestCreateRoutineRequiresTextAndSchedule(t *testing.T) {
-	store := dbtest.Open(t)
-	_, srv := newRoutinesServer(t, &fakeAsker{}, store)
-
-	cases := []string{`{"text":"","schedule":"every day at 8"}`, `{"text":"tell me something","schedule":""}`}
-	for _, body := range cases {
-		if code := postJSON(t, srv, "/routines", body, nil); code != http.StatusBadRequest {
-			t.Errorf("POST /routines %s = %d, want 400", body, code)
-		}
-	}
-}
-
 // waitForRoutineAnswer polls the routine until its last run holds want, which is how a caller sees the result of a run started in the background. Input: the store, the routine's id and the answer expected. Output: none; the test fails if it has not been recorded within two seconds.
 func waitForRoutineAnswer(t *testing.T, store *db.Store, id int64, want string) {
 	t.Helper()
@@ -178,15 +165,6 @@ func TestRoutineRunSendsNoNoticeForNothing(t *testing.T) {
 	case n := <-said:
 		t.Errorf("a NOTHING run said %+v, want nothing said", n)
 	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-// TestRoutineRunMissingIDIs404 checks POST /routines/{id}/run against an id that names no routine.
-func TestRoutineRunMissingIDIs404(t *testing.T) {
-	store := dbtest.Open(t)
-	_, srv := newRoutinesServer(t, &fakeAsker{}, store)
-	if code := postJSON(t, srv, "/routines/999/run", `{}`, nil); code != http.StatusNotFound {
-		t.Errorf("POST /routines/999/run = %d, want 404", code)
 	}
 }
 

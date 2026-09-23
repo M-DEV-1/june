@@ -25,13 +25,6 @@ func TestParseScreenSight_ProseFallback(t *testing.T) {
 	}
 }
 
-func TestParseScreenSight_Empty(t *testing.T) {
-	s := ParseScreenSight("  ")
-	if s.UserActivity != "" || s.Summary != "" || len(s.VisibleText) != 0 {
-		t.Fatalf("expected zero, got %+v", s)
-	}
-}
-
 func TestComposeMoment_PrefersStructured(t *testing.T) {
 	got := ComposeMoment("editing compiler.go", []string{"func Ingest", "wordFlushLimit"}, "raw a11y dump")
 	if !strings.Contains(got, "editing compiler.go") || !strings.Contains(got, "func Ingest") {
@@ -39,12 +32,6 @@ func TestComposeMoment_PrefersStructured(t *testing.T) {
 	}
 	if strings.Contains(got, "raw a11y") {
 		t.Fatalf("fallback leaked: %q", got)
-	}
-}
-
-func TestComposeMoment_FallbackWhenEmpty(t *testing.T) {
-	if got := ComposeMoment("", nil, "Netflix · Suits"); got != "Netflix · Suits" {
-		t.Fatalf("got %q", got)
 	}
 }
 

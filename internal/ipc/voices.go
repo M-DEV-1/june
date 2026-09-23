@@ -8,7 +8,7 @@ import (
 	"ora/internal/config"
 )
 
-// LiveModelView is one of the two Live models on GET or POST /voices. Trait is what choosing it costs and buys, in one line, because the trade between them — tone against about four seconds of latency — is the whole reason there is a choice.
+// LiveModelView is one of the Live models on GET or POST /voices. Trait is what choosing it costs and buys, in one line, because the trade between them — tone against about four seconds of latency, and whether the model decides for itself that audio was aimed at it — is the whole reason there is a choice.
 type LiveModelView struct {
 	Name    string `json:"name"`
 	Label   string `json:"label"`

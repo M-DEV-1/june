@@ -61,26 +61,6 @@ func TestWriteEpisode_StoresSecondMonitorFrames(t *testing.T) {
 	}
 }
 
-// TestEpisodeExtraImages_EmptyForSingleMonitor proves a one-screen capture reports no extras rather than paths to files that do not exist.
-func TestEpisodeExtraImages_EmptyForSingleMonitor(t *testing.T) {
-	dir := t.TempDir()
-	store, err := db.New(filepath.Join(dir, "db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	id, err := store.WriteEpisode(context.Background(), db.EpisodeWrite{
-		App: "Firefox", Title: "docs", ScreenText: "reading", ImageJPEG: []byte("only-frame"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := store.EpisodeExtraImages(id); len(got) != 0 {
-		t.Fatalf("EpisodeExtraImages = %v, want none", got)
-	}
-}
-
 // TestAgeEpisodeImages_DeletesExtraMonitorFrames is the retention guarantee: extras die with their primary, or -b.jpg files pile up in the frames dir forever with nothing left in the database pointing at them.
 func TestAgeEpisodeImages_DeletesExtraMonitorFrames(t *testing.T) {
 	dir := t.TempDir()

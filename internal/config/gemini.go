@@ -14,6 +14,8 @@ const (
 	Live31Model = "gemini-3.1-flash-live-preview"
 	// Live25Model is the 2.5 native-audio model: slower to answer, and the only one that carries affective dialog and proactive audio. Measured the same day and the same way: first audio at 5.4 to 7.9 s, and 8.1 s with proactive audio on.
 	Live25Model = "gemini-2.5-flash-native-audio-preview-12-2025"
+	// Live38Model is Gemini 3.8 Live. The id carries no "flash" and no "-preview", unlike the other two. It supports Google Search grounding and interleaved thinking; it does not take a thinking level or a thinking budget, affective dialog has been removed from the API for it, and proactive audio is permanently on with no field to switch it off — so it always decides for itself whether audio was aimed at it. All of that is what ai.google.dev/gemini-api/docs/models/gemini-3.8-live said on 2026-09-17; none of it has been probed against Ora's own handshake, and grounding is left off in liveToolsFor until it is.
+	Live38Model = "gemini-3.8-live"
 
 	// for background tasks like memory compiler.
 	// gemini-3.5-flash-lite supersedes 3.1 at the same cost-effective positioning (2026-07-21), verified current against ai.google.dev.
@@ -31,13 +33,15 @@ const (
 	TTSModel = "gemini-3.1-flash-tts-preview"
 )
 
-// LiveVoiceModels are the two Live models Ora can speak through, in the order the picker draws them, each with what choosing it costs and buys. The trade is real and neither answer is right for everyone: 3.1 answers in about two seconds but hears the room flatly and has one tone, while 2.5 takes five to eight seconds and can decline audio that was not aimed at it.
+// LiveVoiceModels are the Live models Ora can speak through, in the order the picker draws them, each with what choosing it costs and buys. The trade is real and no one answer is right for everyone: 3.1 answers in about two seconds but hears the room flatly and has one tone, while 2.5 takes five to eight seconds and can decline audio that was not aimed at it.
+// The order is DefaultVoiceModel first so the picker opens on the model a fresh config actually dials, then 3.8 beside the other gemini-3 entry, then 2.5 last as the one with the measured multi-second wait.
 var LiveVoiceModels = []struct {
 	Name  string
 	Label string
 	Trait string
 }{
 	{Live31Model, "Gemini 3.1 Flash Live", "Fast — about two seconds to first word, one tone, hears everything"},
+	{Live38Model, "Gemini 3.8 Live", "Always decides whether the audio was meant for it, and cannot be told not to"},
 	{Live25Model, "Gemini 2.5 Native Audio", "Warm — five to eight seconds, but it has moods and can ignore the room"},
 }
 

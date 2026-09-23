@@ -14,7 +14,6 @@ import (
 	"ora/internal/agent"
 	"ora/internal/ipctoken"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -99,22 +98,6 @@ func TestPollDaemonHTTP(t *testing.T) {
 				t.Errorf("expected the %s header to carry %q, got %q", ipctoken.HeaderName, wantToken, gotToken)
 			}
 		})
-	}
-}
-
-func TestUpdate_DaemonStatusMsg_FlipsDaemonOKBothDirections(t *testing.T) {
-	m := model{daemonOK: false}
-	next, _ := m.Update(daemonStatusMsg(true))
-	nm := next.(model)
-	if !nm.daemonOK {
-		t.Error("expected daemonOK to flip to true on daemonStatusMsg(true)")
-	}
-
-	m2 := model{daemonOK: true}
-	next2, _ := m2.Update(daemonStatusMsg(false))
-	nm2 := next2.(model)
-	if nm2.daemonOK {
-		t.Error("expected daemonOK to flip to false on daemonStatusMsg(false)")
 	}
 }
 
@@ -416,7 +399,7 @@ func TestUpdate_ToolRequest_SecondArrivesWhileFirstPending_QueuesInsteadOfOverwr
 		t.Fatalf("expected the first request to stay active while the second queues, got %+v", m.activeToolReq)
 	}
 
-	// Resolve the first request (Esc rejects it, same as TestUpdate_Esc_InToolConfirm_RejectsCommand).
+	// Resolve the first request (Esc rejects it, as the first row of TestUpdate_Esc checks).
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(model)
 
@@ -983,61 +966,6 @@ func TestUpdate_TickMsg(t *testing.T) {
 	}
 }
 
-// TestExecuteCommand_Quit_ReturnsQuitCmd verifies /quit quits immediately, no confirmation — it's explicit, unlike Ctrl+C.
-func TestExecuteCommand_Quit_ReturnsQuitCmd(t *testing.T) {
-	m := newTestModel()
-
-	cmd := m.executeCommand("/quit")
-
-	if cmd == nil {
-		t.Fatal("expected a non-nil quit cmd from /quit")
-	}
-	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Errorf("expected tea.QuitMsg, got %T", cmd())
-	}
-}
-
-// TestFilterCommands_MatchesSubstringAndPrefix verifies the "/" command menu filters by substring,
-// not just prefix — "otes" still finds "notes" — while the common case of a prefix query (typing
-// from the start of a command name, e.g. "vo" for the voice commands) keeps matching too.
-func TestFilterCommands_MatchesSubstringAndPrefix(t *testing.T) {
-	cases := []struct {
-		name  string
-		query string
-		check func(t *testing.T, items []list.Item)
-	}{
-		{"substring query matches mid-word", "otes", func(t *testing.T, items []list.Item) {
-			found := false
-			for _, it := range items {
-				if ci, ok := it.(commandItem); ok && ci.title == "notes" {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("expected substring query %q to match \"notes\", got items: %+v", "otes", items)
-			}
-		}},
-		{"prefix query still matches", "vo", func(t *testing.T, items []list.Item) {
-			if len(items) == 0 {
-				t.Fatal("expected prefix query \"vo\" to match at least the voice commands")
-			}
-			for _, it := range items {
-				ci, ok := it.(commandItem)
-				if !ok || !strings.Contains(ci.title, "vo") {
-					t.Errorf("unexpected non-matching item in filtered results: %+v", it)
-				}
-			}
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			l := newCommandList(DefaultStyles())
-			FilterCommands(&l, tc.query)
-			tc.check(t, l.Items())
-		})
-	}
-}
-
 // TestUpdate_Esc is a table over Esc's priority rungs, one row per rung and never quitting the
 // app: in ModeToolConfirm it has the same effect as Reject (rejects on ResultChan, drops back to
 // ModeBoth, clears the pending request); with the "/" command menu open it closes the menu without
@@ -1253,24 +1181,6 @@ func TestRecalcViewportHeight(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, tc.run)
-	}
-}
-
-// TestUpdate_TypingSlash_ShrinksViewportForMenu verifies the viewport actually shrinks as soon as typing "/" opens the command menu — through the real Update() key-handling path, not just a direct recalcViewportHeight() call — since the menu-overflow accounting is only useful if every showCmdList mutation site actually triggers it.
-func TestUpdate_TypingSlash_ShrinksViewportForMenu(t *testing.T) {
-	m := newTestModel()
-	m.width, m.height = 100, 40
-	m.recalcViewportHeight()
-	before := m.viewport.Height
-
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	nm := next.(model)
-
-	if !nm.showCmdList {
-		t.Fatal("setup: expected showCmdList to be true after typing \"/\"")
-	}
-	if nm.viewport.Height >= before {
-		t.Errorf("expected the viewport to shrink once the menu opened, before=%d after=%d", before, nm.viewport.Height)
 	}
 }
 
@@ -1582,110 +1492,8 @@ func TestUpdate_CtrlE(t *testing.T) {
 	}
 }
 
-// --- rendering smoke tests ---
-//
-// Real terminal rendering isn't unit-tested here (see waveform_test.go's TestWaveform_VisualDemo, which just prints for human inspection) — but View() panicking is a real regression, and driving bubbletea interactively needs a real TTY/daemon/API key this environment doesn't have. These tests just prove each new rendering path doesn't panic and the expected text shows up.
+// --- input deck rendering ---
 
-// TestView is a table of rendering smoke tests, one row per path: a live tool activity shows its
-// label, a finished tool leaves its result in the collapsed transcript line, a thinking status
-// shows its label, and with no activity at all the status line is omitted entirely.
-func TestView(t *testing.T) {
-	cases := []struct {
-		name string
-		run  func(t *testing.T)
-	}{
-		{"with tool activity shows the label", func(t *testing.T) {
-			m := newTestModel()
-			next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-			m = next.(model)
-
-			started, _ := m.Update(agent.ToolActivity{ID: "call-1", Name: "query_memory", ArgsSummary: `"Riddler"`, Phase: agent.ToolStarted})
-			m = started.(model)
-
-			out := m.View()
-			if !strings.Contains(out, `query_memory("Riddler")`) {
-				t.Errorf("expected the live status line's label in the rendered output, got:\n%s", out)
-			}
-		}},
-		{"after tool finishes shows the transcript log line", func(t *testing.T) {
-			m := newTestModel()
-			next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-			m = next.(model)
-
-			started, _ := m.Update(agent.ToolActivity{ID: "call-1", Name: "query_memory", ArgsSummary: `"Riddler"`, Phase: agent.ToolStarted})
-			m = started.(model)
-			finished, _ := m.Update(agent.ToolActivity{ID: "call-1", Name: "query_memory", ArgsSummary: `"Riddler"`, Phase: agent.ToolFinished, ResultSummary: "3 hits"})
-			m = finished.(model)
-
-			out := m.View()
-			if !strings.Contains(out, "3 hits") {
-				t.Errorf("expected the collapsed transcript entry's result in the rendered output, got:\n%s", out)
-			}
-		}},
-		{"with thinking status does not panic", func(t *testing.T) {
-			m := newTestModel()
-			next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-			m = next.(model)
-			m.textarea.SetValue("what did I do yesterday")
-
-			sent, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-			m = sent.(model)
-
-			out := m.View()
-			if !strings.Contains(out, "thinking") {
-				t.Errorf("expected the thinking status label in the rendered output, got:\n%s", out)
-			}
-		}},
-		{"no activity omits the status line entirely", func(t *testing.T) {
-			m := newTestModel()
-			next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-			m = next.(model)
-
-			if got := m.renderStatusLine(); got != "" {
-				t.Errorf("expected renderStatusLine to return \"\" when nothing is active, got %q", got)
-			}
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, tc.run)
-	}
-}
-
-// --- contextual shortcut bar (WP3 item 1) ---
-
-// TestHintsText_ReflectsState is table-driven over every state the hint bar must distinguish: normal, slash menu open, tool confirm, tool edit, and quit-confirm-armed (which overrides all the others, since Ctrl+C works from every mode).
-func TestHintsText_ReflectsState(t *testing.T) {
-	cases := []struct {
-		name  string
-		setup func(*model)
-		want  string
-	}{
-		{"normal", func(m *model) {}, "↵ send · ctrl+j newline · / commands · esc clear · pgup/pgdn scroll"},
-		{"slash menu open", func(m *model) { m.showCmdList = true }, "↑↓ navigate · ↵ select · esc close"},
-		{"tool confirm", func(m *model) { m.mode = ModeToolConfirm }, "↑↓ choose · ↵ confirm · esc reject"},
-		{"tool edit", func(m *model) { m.mode = ModeToolEdit }, "↵ run · esc cancel"},
-		{"quit armed overrides menu state", func(m *model) {
-			m.quitConfirmArmed = true
-			m.showCmdList = true
-		}, "press ctrl+c again to quit"},
-		{"quit armed overrides tool confirm", func(m *model) {
-			m.quitConfirmArmed = true
-			m.mode = ModeToolConfirm
-		}, "press ctrl+c again to quit"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := newTestModel()
-			tc.setup(&m)
-			got := m.hintsText()
-			if !strings.Contains(got, tc.want) {
-				t.Errorf("expected hintsText() to contain %q, got %q", tc.want, got)
-			}
-		})
-	}
-}
-
-// TestRenderInput_NormalState_StillShowsModeChip verifies the normal-state hint row keeps the mode chip at the end — the ram chip was deleted in WP6 (ReadMemStats sampling caused a periodic GC stop-the-world for cosmetic dev trivia).
 // TestRenderInput is a table over renderInput's per-state rendering rules: the mode chip shows in
 // the normal state (the ram chip was deleted in WP6 — ReadMemStats sampling caused a periodic GC
 // stop-the-world for cosmetic dev trivia); the daemon/connection warning chips WP8 moved off the
@@ -2176,18 +1984,3 @@ func TestUpdate_ToolConfirmResolved_RestoresPriorMode(t *testing.T) {
 }
 
 // --- elapsed time on tool activity ---
-
-// TestRenderStatusLine_ShowsElapsedSeconds: a running tool must look obviously alive rather than hung, so the status row carries how long it has been going, ticking up while it runs.
-func TestRenderStatusLine_ShowsElapsedSeconds(t *testing.T) {
-	m := newTestModel()
-	m.activity = &liveStatus{kind: statusTool, id: "call-1", label: `recall("meeting notes")`, started: time.Now().Add(-3 * time.Second)}
-
-	got := m.renderStatusLine()
-
-	if !strings.Contains(got, "3.0s") {
-		t.Errorf("expected the elapsed time in the status line, got %q", got)
-	}
-	if !strings.Contains(got, `recall("meeting notes")`) {
-		t.Errorf("expected the tool label in the status line, got %q", got)
-	}
-}

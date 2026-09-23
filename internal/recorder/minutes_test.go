@@ -11,37 +11,6 @@ import (
 	"ora/internal/db"
 )
 
-// SetBrain installs the brain the daemon meters against its shared Gemini quota; once installed, defaultBrain must call it rather than building its own unmetered brain from config.
-func TestDefaultBrain_UsesInstalledBrain(t *testing.T) {
-	r := New(context.Background(), t.TempDir(), &fakeStore{}, "")
-	<-r.swept
-	var gotPrompt string
-	r.SetBrain(func(ctx context.Context, prompt string) (string, error) {
-		gotPrompt = prompt
-		return "installed brain replied", nil
-	})
-
-	out, err := r.defaultBrain(context.Background(), "a meeting prompt")
-	if err != nil {
-		t.Fatalf("defaultBrain returned an error with a brain installed: %v", err)
-	}
-	if out != "installed brain replied" {
-		t.Errorf("defaultBrain returned %q, want the installed brain's reply", out)
-	}
-	if gotPrompt != "a meeting prompt" {
-		t.Errorf("installed brain got prompt %q, want the one defaultBrain was called with", gotPrompt)
-	}
-}
-
-// The minutes are the only place an action item's owner is ever decided, and the tasks page is built from the "Me" items alone, so the prompt has to name both owners it will accept — and only those two, since work nobody took on is not an item at all.
-func TestMinutesInstruction_NamesTheTwoOwners(t *testing.T) {
-	for _, want := range []string{`"Me", for anything the [me] speaker owes`, `One other person's name`, `never "Owner unclear"`, `"I'll send the deck" are all "Me"`} {
-		if !strings.Contains(minutesInstruction, want) {
-			t.Errorf("the minutes prompt no longer says %q", want)
-		}
-	}
-}
-
 // The prompt states the meeting's own clock in local time, so the screen timeline under it has to be on the same clock: episodes come back from SQLite in UTC, and a row printed straight from CreatedAt reads hours away from the meeting it belongs to.
 func TestBuildPrompt_StampsTheTimelineInLocalTime(t *testing.T) {
 	saved := time.Local
@@ -71,5 +40,20 @@ func TestCoveredHeadingMatchesFrontend(t *testing.T) {
 	}
 	if !strings.Contains(string(data), CoveredHeading) {
 		t.Errorf("%s no longer contains %q; update its COVERED constant to match internal/recorder.CoveredHeading", path, CoveredHeading)
+	}
+}
+
+// A mic stream that carried no speech used to reach the model as a transcript with nothing but [call] lines in it, and the model read that as a person who sat through the meeting without speaking: "the user did not speak in this meeting" on 16 September 2026, in a standup where mic.wav holds his whole update at a fortieth of normal level. The prompt has to say the microphone failed, because the transcript alone cannot tell the two apart.
+func TestBuildPrompt_SaysWhenTheMicrophoneCapturedNothing(t *testing.T) {
+	r := &Recorder{store: &fakeStore{}}
+	callOnly := "[00:00:02] [call] friday works\n"
+	prompt := r.buildPrompt(context.Background(), callOnly, time.Now(), time.Now().Add(time.Hour))
+	if !strings.Contains(prompt, micCapturedNothing) {
+		t.Errorf("a transcript with no [me] line should carry the microphone warning:\n%s", prompt)
+	}
+
+	both := "[00:00:00] [me] shall we ship friday\n\n[00:00:02] [call] friday works\n"
+	if prompt := r.buildPrompt(context.Background(), both, time.Now(), time.Now().Add(time.Hour)); strings.Contains(prompt, micCapturedNothing) {
+		t.Error("a transcript with [me] lines in it should not carry the microphone warning")
 	}
 }

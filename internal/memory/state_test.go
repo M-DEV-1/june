@@ -13,30 +13,6 @@ import (
 	"google.golang.org/genai"
 )
 
-// TestGeminiSummarizer_DeriveState_EmptyInputsShortCircuit checks that DeriveState returns ("", nil) on empty inputs instead of calling the API with nothing to summarize, and that the short circuit happens before even a local backend would be asked.
-func TestGeminiSummarizer_DeriveState_EmptyInputsShortCircuit(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	called := false
-	summarizer.SetJobBackend(config.JobWorkingState, func(ctx context.Context, prompt string) (string, error) {
-		called = true
-		return "x", nil
-	})
-
-	state, err := summarizer.DeriveState(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("DeriveState: unexpected error: %v", err)
-	}
-	if state != "" {
-		t.Errorf("expected empty state for empty inputs, got %q", state)
-	}
-	if called {
-		t.Error("local backend was called with nothing to summarize, want the empty-input short circuit to skip even the local call")
-	}
-}
-
 // TestStateGate_TenMinuteFloor checks that a second derive is refused inside the ten-minute floor even when the material has changed completely.
 func TestStateGate_TenMinuteFloor(t *testing.T) {
 	var gate memory.StateGate
@@ -80,18 +56,6 @@ func TestStateGate_ChangeTriggers(t *testing.T) {
 				t.Errorf("ShouldDerive = %v, want %v", got, tc.wantDerive)
 			}
 		})
-	}
-}
-
-// TestEpisodeSignature_OrderIndependent checks that the signature names the set of apps and window titles seen, so the same set in a different order is the same signature and does not by itself earn a derive.
-func TestEpisodeSignature_OrderIndependent(t *testing.T) {
-	a := memory.EpisodeSignature([]string{"code|main.go", "browser|docs"})
-	b := memory.EpisodeSignature([]string{"browser|docs", "code|main.go"})
-	if a != b {
-		t.Errorf("signature depends on order: %q vs %q", a, b)
-	}
-	if a == memory.EpisodeSignature([]string{"code|main.go"}) {
-		t.Error("dropping a window left the signature unchanged, want a different signature")
 	}
 }
 

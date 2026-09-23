@@ -39,8 +39,9 @@ install -m 0755 packaging/install.sh "$dist/install.sh"
 install -m 0755 packaging/uninstall.sh "$dist/uninstall.sh"
 mkdir -p "$dist/gnome-extension/ora@ora.local"
 cp packaging/gnome-extension/ora@ora.local/metadata.json packaging/gnome-extension/ora@ora.local/extension.js "$dist/gnome-extension/ora@ora.local/"
+install -m 0755 packaging/gnome-extension/check-shell-version.sh "$dist/gnome-extension/check-shell-version.sh"
 
-"$root/scripts/check-stage.sh" "$dist"
+"$root/packaging/check-stage.sh" "$dist"
 
 # The thing a person downloads is one file, not a directory, and the tar has to carry the executable bits install.sh relies on.
 echo "packing the archive..."

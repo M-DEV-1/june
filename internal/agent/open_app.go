@@ -160,6 +160,50 @@ func isChromiumUnder(root string) bool {
 	return found
 }
 
+// desktopEntryMarker is the first line patchAccessibility writes into a copy it makes, so a later run can tell its own copy from a file it did not write and must never overwrite.
+const desktopEntryMarker = "# Ora added " + accessibilityFlag + " to Exec below; see internal/agent/open_app.go"
+
+// patchAccessibility gives a Chromium-based desktop entry a copy in the user's own applications directory with accessibilityFlag appended to every Exec line, main entry and desktop actions alike, so the application reads on every future launch, however the user starts it: XDG looks in the user's own directory before /usr/share, /var/lib/snapd and /var/lib/flatpak. Input: the entry's path. Output: true when the application will start with support from now on (Ora's copy is written or already there, or the entry already carries the flag); false when it will not: a read or write failure, an entry that is not Chromium-based, or a destination file this function did not write, all of which leave the filesystem as it was.
+func patchAccessibility(entry string) bool {
+	if entry == "" {
+		return false
+	}
+	cmd := execOf(entry)
+	if len(cmd) == 0 || !isChromium(cmd[0]) {
+		return false
+	}
+	data, err := os.ReadFile(entry)
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(data), "\n")
+	changed := false
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "Exec=") || strings.Contains(line, accessibilityFlag) {
+			continue
+		}
+		lines[i] = line + " " + accessibilityFlag
+		changed = true
+	}
+	if !changed {
+		return true // the entry itself already starts the application with support
+	}
+	dest := filepath.Join(os.Getenv("HOME"), ".local/share/applications", filepath.Base(entry))
+	out := desktopEntryMarker + "\n" + strings.Join(lines, "\n")
+	if existing, err := os.ReadFile(dest); err == nil {
+		if !strings.HasPrefix(string(existing), desktopEntryMarker) {
+			return false // a file Ora did not write: never overwrite it
+		}
+		if string(existing) == out {
+			return true // already patched, nothing to do
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return false
+	}
+	return os.WriteFile(dest, []byte(out), 0o644) == nil
+}
+
 // launchEntry starts an application from its desktop entry. A Chromium-based one is run from its Exec line with accessibilityFlag added, since gio launch cannot pass a flag and the tree is the whole point of opening it; anything else is started the way the shell would, through gio launch, so it gets the same environment and sandbox as a click on its icon. Input: the entry's path. Output: the start error, if any; the process is left to outlive the daemon.
 func launchEntry(entry string) error {
 	cmd := execOf(entry)
@@ -183,11 +227,13 @@ func (a *Agent) openApp(ctx context.Context, app string) string {
 	}
 	entries := a.desktopEntries()
 	entry := pickDesktopEntry(entries, app)
+	// Every encounter with a Chromium-based entry is a chance to fix it for good: patch a copy into the user's own applications directory so the next launch, whoever starts it, builds an accessibility tree.
+	patched := patchAccessibility(entry)
 	if frontIsApp(before, app) {
-		return fmt.Sprintf("%q is already the window in front; nothing was started", before) + a.treelessNote(entry, a.pidOf(ctx, app))
+		return fmt.Sprintf("%q is already the window in front; nothing was started", before) + a.treelessNote(entry, a.pidOf(ctx, app), patched)
 	}
 	if ok, how := a.raiseWindow(ctx, app); ok {
-		return a.switchOutcome(ctx, app, before, how, nil) + a.treelessNote(entry, how)
+		return a.switchOutcome(ctx, app, before, how, nil) + a.treelessNote(entry, how, patched)
 	}
 	if entry == "" {
 		return toolError(fmt.Sprintf("no installed application is named %q; %s; if it is a website, open_url is the way to it", app, nearEntries(entries, app)))
@@ -230,8 +276,8 @@ var processArgs = func(pid uint32) string {
 	return strings.ReplaceAll(string(data), "\x00", " ")
 }
 
-// treelessNote says when an application already running is one whose window observe_screen cannot read, so the model knows why the listing is empty and what its options are, instead of pressing on into nothing. Input: the application's desktop entry ("" when unknown) and the how raiseWindow answered, which names the window's pid when the extension raised it. Output: the note to append, or "" when the application is not Chromium-based or was started with accessibilityFlag.
-func (a *Agent) treelessNote(entry, how string) string {
+// treelessNote says when an application already running is one whose window observe_screen cannot read, so the model knows why the listing is empty and what its options are, instead of pressing on into nothing. Input: the application's desktop entry ("" when unknown), the how raiseWindow answered, which names the window's pid when the extension raised it, and whether patchAccessibility set the entry up to start with support. Output: the note to append, or "" when the application is not Chromium-based or was started with accessibilityFlag.
+func (a *Agent) treelessNote(entry, how string, patched bool) string {
 	var pid uint32
 	if entry == "" || how == "" {
 		return ""
@@ -243,7 +289,11 @@ func (a *Agent) treelessNote(entry, how string) string {
 	if len(cmd) == 0 || !isChromium(cmd[0]) || strings.Contains(processArgs(pid), accessibilityFlag) {
 		return ""
 	}
-	return "; it was started without accessibility support, so observe_screen will list nothing inside its window: work from look and click_at, or ask the user to quit it and call open_app again so it starts with support"
+	note := "; it was started without accessibility support, so observe_screen will list nothing inside this window: work from look and click_at for now"
+	if !patched {
+		return note + "; Ora could not set it up to start with support, so this will stay true after a relaunch"
+	}
+	return note + "; the application has been patched to start with support, so it will read the next time it is launched, once the user closes this window and opens it again"
 }
 
 // pidOf names the process behind an application's window as raiseWindow would, "pid N", for treelessNote when nothing was raised. Output: "" when the extension is not there or lists no window of the application.

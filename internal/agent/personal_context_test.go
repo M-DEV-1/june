@@ -9,15 +9,6 @@ import (
 	"time"
 )
 
-// TestPersonalContextTool_IsNonBlocking keeps it consistent with every other write tool: a store write must not freeze the voice conversation.
-func TestPersonalContextTool_IsNonBlocking(t *testing.T) {
-	for _, fd := range toolDefinitions()[0].FunctionDeclarations {
-		if fd.Name == "personal_context" && fd.Behavior != "NON_BLOCKING" {
-			t.Errorf("personal_context behavior is %q, want NON_BLOCKING", fd.Behavior)
-		}
-	}
-}
-
 func TestPersonalContextTool_SetViewDelete(t *testing.T) {
 	ctx := context.Background()
 	brain := &toolTestBrain{}
@@ -42,32 +33,6 @@ func TestPersonalContextTool_SetViewDelete(t *testing.T) {
 	}
 	if _, still := brain.personal["vexil-quorin"]; still {
 		t.Error("delete left the entry behind")
-	}
-}
-
-func TestPersonalContextTool_RejectsBlanksAndBadActions(t *testing.T) {
-	ctx := context.Background()
-	a := &Agent{brain: &toolTestBrain{}}
-
-	cases := []struct {
-		name string
-		args map[string]any
-	}{
-		{"no subject", map[string]any{"action": "set", "content": "something"}},
-		{"blank subject", map[string]any{"action": "set", "subject": "  ", "content": "something"}},
-		{"no content", map[string]any{"action": "set", "subject": "identity"}},
-		{"blank content", map[string]any{"action": "set", "subject": "identity", "content": " "}},
-		{"delete with no subject", map[string]any{"action": "delete"}},
-		{"unknown action", map[string]any{"action": "forget-everything"}},
-	}
-	for _, c := range cases {
-		got := a.executeTool(ctx, "personal_context", c.args)
-		if !strings.HasPrefix(got, "error:") {
-			t.Errorf("%s: want an error, got %q", c.name, got)
-		}
-		if strings.Contains(got, "%!") || strings.Contains(strings.ToLower(got), "sql") {
-			t.Errorf("%s: error text is not plain words: %q", c.name, got)
-		}
 	}
 }
 

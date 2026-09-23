@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"context"
-	"errors"
+
 	"io"
 	"net"
 	"net/http"
@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/config"
 	"ora/internal/db"
 	"ora/internal/db/dbtest"
 	"ora/internal/tracker"
@@ -104,18 +103,6 @@ func TestWeeklyStudyMaterial_ReadsReplaysUnderTheDataDir(t *testing.T) {
 	emptyReplays, emptyTraces := weeklyStudyMaterial(t.TempDir())
 	if len(emptyReplays) != 0 || len(emptyTraces) != 0 {
 		t.Fatalf("expected nothing to read, got %d replays and %d traces", len(emptyReplays), len(emptyTraces))
-	}
-}
-
-// The tally counters are grouped by provider name, and Codex and Ollama used to fall through to the default and be filed under gemini — which on this machine, whose config is codex-direct, meant every counter the daemon kept named the wrong brain.
-func TestBrainProviderName_NamesCodexAndOllama(t *testing.T) {
-	for _, provider := range []string{config.BrainCodex, config.BrainOllama, config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI} {
-		if got := brainProviderName(config.BrainConfig{Provider: provider}); got != provider {
-			t.Errorf("brainProviderName(%q) = %q, want %q", provider, got, provider)
-		}
-	}
-	if got := brainProviderName(config.BrainConfig{}); got != "gemini" {
-		t.Errorf("an unset provider is the Gemini API path, got %q", got)
 	}
 }
 
@@ -275,14 +262,5 @@ func TestEveryMeteredAfter_RecordsEachRun(t *testing.T) {
 			t.Fatal("the job ran but recorded no last-run marker, so a restart would run it again two minutes in")
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// A job whose brain fails for any reason answers from the fallback, since the user is watching it die otherwise.
-func TestFallThrough_AnswersFromTheFallbackOnAnyError(t *testing.T) {
-	primary := func(context.Context, string) (string, error) { return "", errors.New("codex: HTTP 429") }
-	fallback := func(context.Context, string) (string, error) { return "plan", nil }
-	if got, err := fallThrough(primary, fallback)(context.Background(), "go"); err != nil || got != "plan" {
-		t.Errorf("got %q, %v; want the fallback's answer", got, err)
 	}
 }

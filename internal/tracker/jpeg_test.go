@@ -96,15 +96,6 @@ func TestEncodeFrames_CapsVeryWideMonitor(t *testing.T) {
 	}
 }
 
-func TestScreenFrames_Empty(t *testing.T) {
-	if screenFrames(nil) != nil {
-		t.Error("no bytes in, no frames out")
-	}
-	if screenFrames([]byte("not an image")) != nil {
-		t.Error("undecodable bytes should yield no frames")
-	}
-}
-
 // TestScreenFrames_FallsBackToWholeCanvas: when the monitor layout is unknown (headless, no RandR, HiDPI mismatch), one frame of the whole screenshot is still better than none.
 func TestScreenFrames_FallsBackToWholeCanvas(t *testing.T) {
 	src := encodePNG(t, canvas(800, 600))

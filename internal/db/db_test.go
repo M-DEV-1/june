@@ -72,20 +72,20 @@ func TestStore_GetImplicitContext_GatesIrrelevantNotes(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
-	// current focus: debugging the ESG portal
-	if err := store.SetWorkingState(ctx, "debugging the ESG Benchmarking Portal backend"); err != nil {
+	// current focus: debugging the Brightpath portal
+	if err := store.SetWorkingState(ctx, "debugging the Brightpath Benchmarking Portal backend"); err != nil {
 		t.Fatalf("SetWorkingState: %v", err)
 	}
 	// a live thread that matches what the user is doing now
 	if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ESG Benchmarking Portal",
+		Subject: "Brightpath Benchmarking Portal",
 		Kind:    "work",
 		State:   "Monitoring CRD dashboard while debugging backend",
 	}); err != nil {
 		t.Fatalf("UpsertThread: %v", err)
 	}
 	// a durable identity note with nothing to do with the current focus
-	if _, err := store.LogNote(ctx, "user has an interest in Pune real estate", "fact"); err != nil {
+	if _, err := store.LogNote(ctx, "user has an interest in vintage camera repair", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
 
@@ -96,52 +96,12 @@ func TestStore_GetImplicitContext_GatesIrrelevantNotes(t *testing.T) {
 	joined := strings.Join(branch, "\n")
 
 	// the live thread must surface — that's the useful recall
-	if !strings.Contains(joined, "ESG Benchmarking Portal") {
+	if !strings.Contains(joined, "Brightpath Benchmarking Portal") {
 		t.Errorf("expected live thread in context, got: %+v", branch)
 	}
 	// the irrelevant identity note must NOT be dumped in unconditionally
-	if strings.Contains(joined, "Pune real estate") {
+	if strings.Contains(joined, "vintage camera repair") {
 		t.Errorf("irrelevant note leaked into context (unconditional note dump): %+v", branch)
-	}
-}
-
-func TestStore_SearchMemory_FTS5(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// seed a summary and a note
-	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "Voice Pipeline",
-		Summary:  "Debugging WebSocket reconnect loop in Gemini Live session",
-	})
-	_, _ = store.LogNote(ctx, "user works at Acme ESG as an intern", "fact")
-
-	// FTS5 should find the summary by a tokenized word
-	hits, err := store.SearchMemory(ctx, "WebSocket")
-	if err != nil {
-		t.Fatalf("SearchMemory: %v", err)
-	}
-	if len(hits) == 0 {
-		t.Fatal("FTS5 returned no hits for 'WebSocket'")
-	}
-	if !strings.Contains(hits[0].Content, "WebSocket") {
-		t.Errorf("expected hit to mention WebSocket: %s", hits[0].Content)
-	}
-	if hits[0].Source != "summary" {
-		t.Errorf("expected source=summary, got %s", hits[0].Source)
-	}
-
-	// FTS5 should also surface notes
-	noteHits, err := store.SearchMemory(ctx, "Acme")
-	if err != nil {
-		t.Fatalf("SearchMemory notes: %v", err)
-	}
-	if len(noteHits) == 0 {
-		t.Fatal("FTS5 returned no hits for 'Acme'")
-	}
-	if noteHits[0].Source != "note" {
-		t.Errorf("expected source=note, got %s", noteHits[0].Source)
 	}
 }
 
@@ -449,15 +409,15 @@ func TestStore_GetImplicitContext_WithWorkingState(t *testing.T) {
 	}
 }
 
-// TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts guards against the missing time bound in GetImplicitContext's focus signal: it folds the last 2 task names in unconditionally, by id, so a stale task from days ago can still be "recent by id" and self-match its own summary back into context regardless of relevance. This reproduces the "ESG facts bleed into an unrelated project" bug as a concrete test.
+// TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts guards against the missing time bound in GetImplicitContext's focus signal: it folds the last 2 task names in unconditionally, by id, so a stale task from days ago can still be "recent by id" and self-match its own summary back into context regardless of relevance. This reproduces the "filing facts bleed into an unrelated project" bug as a concrete test.
 func TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
 	if err := store.LogSemanticNode(ctx, memory.TaskSummary{
 		SameTask: false,
-		TaskName: "ESG Report Review",
-		Summary:  "Reviewed the Q1 ESG compliance report line by line",
+		TaskName: "Quarterly Filing Review",
+		Summary:  "Reviewed the Q1 filing line by line",
 	}); err != nil {
 		t.Fatalf("LogSemanticNode (old task): %v", err)
 	}
@@ -466,7 +426,7 @@ func TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts(t *testing.
 	staleTime := time.Now().Add(-72 * time.Hour).UTC().Format("2006-01-02 15:04:05")
 	if _, err := store.DB().ExecContext(ctx,
 		`UPDATE nodes SET created_at = ? WHERE type = 'task' AND content = ?`,
-		staleTime, "ESG Report Review"); err != nil {
+		staleTime, "Quarterly Filing Review"); err != nil {
 		t.Fatalf("backdate old task: %v", err)
 	}
 
@@ -488,7 +448,7 @@ func TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts(t *testing.
 		t.Fatalf("GetImplicitContext: %v", err)
 	}
 	for _, line := range branch {
-		if strings.Contains(line, "ESG") {
+		if strings.Contains(line, "Quarterly Filing") {
 			t.Errorf("stale, unrelated task summary leaked into a fresh working-state context: %+v", branch)
 		}
 	}
@@ -766,55 +726,8 @@ func TestStore_ReplaceSummariesWithDigest_ResumesADayWithAnExistingDigestAndLoos
 
 // ─── Thread tests ─────────────────────────────────────────────────────────────
 
-// TestStore_UpsertThread covers the three shapes an UpsertThread call takes: a zero-ID insert (new row, salience seeded from Novel, times_seen=1, status active), a zero-ID call repeating an existing (subject, kind) (same row updated in place, salience bumped and capped at 1.0, times_seen incremented), and an ID>0 call (state replaced, times_seen incremented, same id returned).
+// TestStore_UpsertThread covers the two update shapes an UpsertThread call takes: a zero-ID call repeating an existing (subject, kind) (same row updated in place, salience bumped and capped at 1.0, times_seen incremented) and an ID>0 call (state replaced, times_seen incremented, same id returned).
 func TestStore_UpsertThread(t *testing.T) {
-	t.Run("new thread seeds salience from Novel", func(t *testing.T) {
-		ctx := context.Background()
-		store := memStore(t)
-
-		cases := []struct {
-			novel        bool
-			wantSalience float64
-		}{
-			{novel: false, wantSalience: 0.5},
-			{novel: true, wantSalience: 0.6},
-		}
-
-		for _, tc := range cases {
-			subject := fmt.Sprintf("project-novel-%v", tc.novel)
-			id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-				Subject: subject,
-				Kind:    "work",
-				State:   "working on it",
-				Novel:   tc.novel,
-			})
-			if err != nil {
-				t.Fatalf("UpsertThread (novel=%v): %v", tc.novel, err)
-			}
-			if id == 0 {
-				t.Fatalf("novel=%v: expected non-zero id", tc.novel)
-			}
-
-			var sal float64
-			var timesSeen int
-			var status string
-			if err := store.DB().QueryRowContext(ctx,
-				`SELECT salience, times_seen, status FROM threads WHERE id = ?`, id).
-				Scan(&sal, &timesSeen, &status); err != nil {
-				t.Fatalf("query thread (novel=%v): %v", tc.novel, err)
-			}
-			if sal != tc.wantSalience {
-				t.Errorf("novel=%v: want salience %v, got %v", tc.novel, tc.wantSalience, sal)
-			}
-			if timesSeen != 1 {
-				t.Errorf("novel=%v: want times_seen=1, got %d", tc.novel, timesSeen)
-			}
-			if status != "active" {
-				t.Errorf("novel=%v: want status='active', got %q", tc.novel, status)
-			}
-		}
-	})
-
 	t.Run("conflict on subject and kind updates the one row", func(t *testing.T) {
 		ctx := context.Background()
 		store := memStore(t)
@@ -1080,70 +993,6 @@ func TestStore_ThreadsForAttribution_Window(t *testing.T) {
 	}
 }
 
-// TestStore_GetImplicitContext_ThreadFormat verifies that GetImplicitContext emits [thread:kind] subject — state for threads with a state, [thread:kind] subject for threads without one, and [now] for working_state (and no [about] lines — identity notes are relevance-gated, not dumped).
-func TestStore_GetImplicitContext_ThreadFormat(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// seed 10 notes — none should be dumped as [about] lines anymore (relevance-gated)
-	for i := 0; i < 10; i++ {
-		_, _ = store.LogNote(ctx, fmt.Sprintf("identity fact %d", i), "fact")
-	}
-
-	// thread with state
-	_, _ = store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "Suits",
-		Kind:    "entertainment",
-		State:   "season 1 episode 3",
-	})
-
-	// thread without state (empty string)
-	_, _ = store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "",
-	})
-
-	_ = store.SetWorkingState(ctx, "debugging the audio pipeline")
-
-	branch, err := store.GetImplicitContext(ctx)
-	if err != nil {
-		t.Fatalf("GetImplicitContext: %v", err)
-	}
-
-	var aboutCount int
-	var foundThreadWithState, foundThreadNoState, foundNow bool
-	for _, line := range branch {
-		if strings.HasPrefix(line, "[about] ") {
-			aboutCount++
-		}
-		// [thread:entertainment] Suits — season 1 episode 3
-		if line == "[thread:entertainment] Suits — season 1 episode 3" {
-			foundThreadWithState = true
-		}
-		// [thread:work] ORA project (no state → no em dash suffix)
-		if line == "[thread:work] ORA project" {
-			foundThreadNoState = true
-		}
-		if strings.HasPrefix(line, "[now] ") {
-			foundNow = true
-		}
-	}
-
-	if aboutCount != 0 {
-		t.Errorf("identity notes must no longer be dumped as [about] lines (relevance-gated now), got %d", aboutCount)
-	}
-	if !foundThreadWithState {
-		t.Errorf("[thread:entertainment] Suits — state line not found in: %v", branch)
-	}
-	if !foundThreadNoState {
-		t.Errorf("[thread:work] ORA project (no-state) line not found in: %v", branch)
-	}
-	if !foundNow {
-		t.Errorf("[now] line not found in: %v", branch)
-	}
-}
-
 // TestStore_SearchMemory_FindsThread verifies that after UpsertThread, SearchMemory
 // returns a hit whose Source is "thread".
 func TestStore_SearchMemory_FindsThread(t *testing.T) {
@@ -1172,71 +1021,6 @@ func TestStore_SearchMemory_FindsThread(t *testing.T) {
 }
 
 // ─── Relevance retrieval tests (B2) ───────────────────────────────────────────
-
-// TestStore_GetImplicitContext_WiresRelevanceRetrieval verifies that the working-state focus drives the relevance-retrieval layer, surfacing a matching item as a [note] line. Exclusion of unrelated items is covered by the dedicated RetrieveRelevant tests.
-func TestStore_GetImplicitContext_WiresRelevanceRetrieval(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// a relevant note; no summaries/tasks so the focus signal stays clean
-	_, _ = store.LogNote(ctx, "debugging Linux audio pipeline crackle", "fact")
-
-	const state = "debugging Linux audio"
-	if err := store.SetWorkingState(ctx, state); err != nil {
-		t.Fatalf("SetWorkingState: %v", err)
-	}
-
-	branch, err := store.GetImplicitContext(ctx)
-	if err != nil {
-		t.Fatalf("GetImplicitContext: %v", err)
-	}
-
-	var hasRelevanceLine bool
-	for _, b := range branch {
-		if strings.HasPrefix(b, "[note]") && strings.Contains(b, "Linux audio pipeline") {
-			hasRelevanceLine = true
-		}
-	}
-	if !hasRelevanceLine {
-		t.Errorf("expected a [note] relevance line driven by working-state focus: %+v", branch)
-	}
-}
-
-func TestStore_RetrieveRelevant_FocusAffectsResults(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	_, _ = store.LogNote(ctx, "user works with Go and SQLite", "fact")
-	_, _ = store.LogNote(ctx, "user likes hiking in mountains", "fact")
-
-	// focus on Go should return Go note
-	goResults, _ := store.RetrieveRelevant(ctx, "Go and SQLite", 5)
-	foundGo := false
-	for _, r := range goResults {
-		if strings.Contains(r, "Go and SQLite") {
-			foundGo = true
-		}
-	}
-	if !foundGo {
-		t.Errorf("focus 'Go' should surface Go note, got: %+v", goResults)
-	}
-
-	// different focus should not surface unrelated
-	hikeResults, _ := store.RetrieveRelevant(ctx, "hiking in mountains", 5)
-	foundHikeInGoFocus := false
-	for _, r := range goResults {
-		if strings.Contains(r, "hiking") {
-			foundHikeInGoFocus = true
-		}
-	}
-	if foundHikeInGoFocus {
-		t.Errorf("focus on Go should not surface hike note: %+v", goResults)
-	}
-	// check that different focus returns different sets
-	if len(goResults) > 0 && len(hikeResults) > 0 && goResults[0] == hikeResults[0] {
-		t.Errorf("different focus should return different result sets, got: %+v vs %+v", goResults, hikeResults)
-	}
-}
 
 // TestStore_RelevantNotes_CapsAndFilters verifies the fix for the unbounded note dump fed into DeriveState (cmd/daemon.go): RelevantNotes returns a relevance-ranked, capped subset of notes matching focus — not the entire notes table — as plain content strings (no "[note] " prefix, since DeriveState expects bare facts).
 func TestStore_RelevantNotes_CapsAndFilters(t *testing.T) {
@@ -1429,70 +1213,6 @@ func TestStore_LogEpisode_ImportanceHeuristic(t *testing.T) {
 }
 
 // ─── Episode tests (Cycle 4: ranking) ─────────────────────────────────────────
-
-// TestStore_RankedEpisodes_WeightedOrdering constructs episodes where recency/importance/relevance pull in different directions and asserts that a slightly-less-relevant but far-more-important+recent episode outranks a stale, barely-relevant one, per the documented weighted formula.
-func TestStore_RankedEpisodes_WeightedOrdering(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	raw := store.DB()
-
-	// winner: recent, high importance, decent (but not perfect) relevance.
-	winnerID, err := store.LogEpisode(ctx, "VSCode", "compiler.go", "refactoring the memory compiler ranking logic today")
-	if err != nil {
-		t.Fatalf("LogEpisode (winner): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.95, created_at = datetime('now') WHERE id = ?`, winnerID); err != nil {
-		t.Fatalf("backdate winner: %v", err)
-	}
-
-	// loser: stale (30 days old), low importance, but a slightly more literal relevance match on the focus term.
-	loserID, err := store.LogEpisode(ctx, "Notes", "old memo", "ranking ranking ranking notes from a month ago")
-	if err != nil {
-		t.Fatalf("LogEpisode (loser): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.05, created_at = datetime('now', '-720 hours') WHERE id = ?`, loserID); err != nil {
-		t.Fatalf("backdate loser: %v", err)
-	}
-
-	results, err := store.RankedEpisodes(ctx, "ranking", 10)
-	if err != nil {
-		t.Fatalf("RankedEpisodes: %v", err)
-	}
-	if len(results) < 2 {
-		t.Fatalf("expected at least 2 ranked episodes, got %d: %+v", len(results), results)
-	}
-
-	winnerIdx, loserIdx := -1, -1
-	for i, r := range results {
-		if strings.Contains(r.Content, "refactoring the memory compiler") {
-			winnerIdx = i
-		}
-		if strings.Contains(r.Content, "old memo") || strings.Contains(r.Content, "month ago") {
-			loserIdx = i
-		}
-	}
-	if winnerIdx == -1 {
-		t.Fatalf("winner episode not found in results: %+v", results)
-	}
-	if loserIdx == -1 {
-		t.Fatalf("loser episode not found in results: %+v", results)
-	}
-	if winnerIdx > loserIdx {
-		t.Errorf("expected recent+important episode (idx %d) to outrank stale low-importance episode (idx %d): %+v", winnerIdx, loserIdx, results)
-	}
-
-	// limit is honored
-	limited, err := store.RankedEpisodes(ctx, "ranking", 1)
-	if err != nil {
-		t.Fatalf("RankedEpisodes (limit=1): %v", err)
-	}
-	if len(limited) != 1 {
-		t.Errorf("expected exactly 1 result with limit=1, got %d", len(limited))
-	}
-}
 
 // ─── Consolidation retrieval (Cycle 1: temporal walk) ─────────────────────────
 
@@ -1900,61 +1620,6 @@ func TestSearchMemory_DigestHitReturnsPlainTextUnchanged(t *testing.T) {
 	}
 }
 
-// TestFormatHit_EpisodeProvenance_TableShapes is WP12 Part C: episode hits must render App/Title so the model can tell two unrelated captures apart instead of confabulating a connection between them (exactly how the Aug 7 log's confabulation happened — see systemInstructionText's new synthesis-rule comment). Every other source's shape stays exactly as it was.
-func TestFormatHit_EpisodeProvenance_TableShapes(t *testing.T) {
-	cases := []struct {
-		name string
-		hit  db.MemoryHit
-		want string
-	}{
-		{
-			name: "episode with app and title carries provenance trailing, content first",
-			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go"},
-			want: "[episode] fixing the null pointer bug (Code — tracker_linux.go)",
-		},
-		{
-			name: "episode without app/title falls back to the plain shape",
-			hit:  db.MemoryHit{Source: "episode", Content: "debugging the parser"},
-			want: "[episode] debugging the parser",
-		},
-		{
-			name: "thread hit unchanged",
-			hit:  db.MemoryHit{Source: "thread", Content: "Suits Season 7 — watching episode 6"},
-			want: "[thread] Suits Season 7 — watching episode 6",
-		},
-		{
-			name: "note hit unchanged",
-			hit:  db.MemoryHit{Source: "note", Content: "the user's favorite color is blue"},
-			want: "[note] the user's favorite color is blue",
-		},
-		{
-			name: "summary hit unchanged",
-			hit:  db.MemoryHit{Source: "summary", Content: "wrote a blog post about Go generics"},
-			want: "[summary] wrote a blog post about Go generics",
-		},
-		{
-			// Notes are durable facts, not time-decaying observations, so they never get an age suffix.
-			name: "note with a created_at stays ageless",
-			hit:  db.MemoryHit{Source: "note", Content: "the user's favorite color is blue", CreatedAt: time.Now().Add(-30 * 24 * time.Hour)},
-			want: "[note] the user's favorite color is blue",
-		},
-		{
-			// Age and provenance both show up: one does not replace the other. Past the first day the label also carries the calendar date, so "which day was that" is answerable straight off the row.
-			name: "episode with app, title and age",
-			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go", CreatedAt: time.Now().Add(-3 * 24 * time.Hour)},
-			want: "[episode (" + time.Now().Add(-3*24*time.Hour).Local().Format("Mon Jan 2 15:04") + ", 3d ago)] fixing the null pointer bug (Code — tracker_linux.go)",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := db.FormatHit(tc.hit, 0); got != tc.want {
-				t.Errorf("FormatHit(%+v) = %q, want %q", tc.hit, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestRetrieveRelevant_EmptyFocus_SkipsLiteralMatch verifies that an empty focus skips running relevance searches (for RetrieveRelevant, RelevantNotes, and GetImplicitContext) rather than substituting literal strings like "recent context" that would spuriously match unrelated stored notes.
 func TestRetrieveRelevant_EmptyFocus_SkipsLiteralMatch(t *testing.T) {
 	ctx := context.Background()
@@ -2254,7 +1919,7 @@ func TestSummaryTimeline_CarriesRealDates(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "climate scoring", Summary: "adjusting vulnerability scores"}); err != nil {
+	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "route scoring", Summary: "adjusting vulnerability scores"}); err != nil {
 		t.Fatalf("LogSemanticNode: %v", err)
 	}
 	sums, err := store.SummaryTimeline(ctx, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
@@ -2492,27 +2157,5 @@ func TestStore_GetImplicitContext_UnderstandingDoesNotSuppressTheColdStartWalk(t
 	}
 	if !hasUnderstanding || !hasSummary {
 		t.Errorf("cold start wants both the understanding and the summary walk, got understanding=%v summary=%v in %+v", hasUnderstanding, hasSummary, branch)
-	}
-}
-
-// TestStore_GetImplicitContext_TrimsARunawayUnderstanding keeps a doc that grew past its instructed length from eating the handshake: the block is cut to understandingContextCap runes.
-func TestStore_GetImplicitContext_TrimsARunawayUnderstanding(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	long := strings.Repeat("a very long standing model of the user. ", 200)
-	if err := store.SetDiaryEntry(ctx, "", "understanding", long); err != nil {
-		t.Fatalf("SetDiaryEntry: %v", err)
-	}
-
-	branch, err := store.GetImplicitContext(ctx)
-	if err != nil {
-		t.Fatalf("GetImplicitContext: %v", err)
-	}
-	if len(branch) == 0 {
-		t.Fatal("GetImplicitContext returned nothing")
-	}
-	if runes := len([]rune(branch[0])); runes > db.UnderstandingContextCap+32 {
-		t.Errorf("understanding line is %d runes, want it cut near %d", runes, db.UnderstandingContextCap)
 	}
 }

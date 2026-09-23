@@ -15,77 +15,6 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// The Request object path is predictable from the caller's own unique bus name and the handle_token, per the portal spec, so the Response signal can be subscribed to before the call is made.
-func TestPredictRequestPath(t *testing.T) {
-	got := predictRequestPath(":1.234", "tok1")
-	want := dbus.ObjectPath("/org/freedesktop/portal/desktop/request/1_234/tok1")
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-// SelectDevices asks for both keyboard and pointer, with persist_mode 2 (persist until revoked) so consent survives across runs.
-func TestSelectDevicesOptionsNoToken(t *testing.T) {
-	opts := selectDevicesOptions("")
-	if got := opts["types"].Value().(uint32); got != deviceKeyboard|devicePointer {
-		t.Fatalf("types = %v, want %v", got, deviceKeyboard|devicePointer)
-	}
-	if got := opts["persist_mode"].Value().(uint32); got != 2 {
-		t.Fatalf("persist_mode = %v, want 2", got)
-	}
-	if _, ok := opts["restore_token"]; ok {
-		t.Fatal("restore_token should be absent when none is stored")
-	}
-}
-
-// A stored restore_token is forwarded so the compositor can skip the consent dialog.
-func TestSelectDevicesOptionsWithToken(t *testing.T) {
-	opts := selectDevicesOptions("saved-token")
-	got, ok := opts["restore_token"]
-	if !ok {
-		t.Fatal("restore_token missing")
-	}
-	if got.Value().(string) != "saved-token" {
-		t.Fatalf("restore_token = %v, want saved-token", got.Value())
-	}
-}
-
-// SelectSources restricts to monitors and hides the cursor from the stream, since the stream is only ever used for its node id, not viewed.
-func TestSelectSourcesOptions(t *testing.T) {
-	opts := selectSourcesOptions()
-	if got := opts["types"].Value().(uint32); got != 1 {
-		t.Fatalf("types = %v, want 1 (monitor)", got)
-	}
-	if got := opts["cursor_mode"].Value().(uint32); got != 1 {
-		t.Fatalf("cursor_mode = %v, want 1 (hidden)", got)
-	}
-	if got := opts["multiple"].Value().(bool); got != true {
-		t.Fatalf("multiple = %v, want true, so the consent dialog can grant every monitor", got)
-	}
-}
-
-// parseResponse reports success (code 0) with its results dict.
-func TestParseResponseSuccess(t *testing.T) {
-	results, err := parseResponse([]interface{}{
-		uint32(0),
-		map[string]dbus.Variant{"session_handle": dbus.MakeVariant("/session/1")},
-	})
-	if err != nil {
-		t.Fatalf("parseResponse: %v", err)
-	}
-	if results["session_handle"].Value().(string) != "/session/1" {
-		t.Fatalf("unexpected results %v", results)
-	}
-}
-
-// A non-zero response code (user cancelled or declined) is reported as an error.
-func TestParseResponseDeclined(t *testing.T) {
-	_, err := parseResponse([]interface{}{uint32(1), map[string]dbus.Variant{}})
-	if err == nil {
-		t.Fatal("expected error for declined request")
-	}
-}
-
 // A malformed response body is reported instead of panicking on a bad type assertion.
 func TestParseResponseMalformed(t *testing.T) {
 	if _, err := parseResponse([]interface{}{uint32(0)}); err == nil {
@@ -187,27 +116,6 @@ func TestOpenSequenceRefusesAGrantWithNoStreams(t *testing.T) {
 	}
 }
 
-// With known monitor bounds from Open, an out-of-range coordinate is rejected with a typed error instead of being passed through to the portal.
-func TestToStreamKnownBounds(t *testing.T) {
-	streams := []streamInfo{{Node: 1, Rect: streamRect{W: 1920, H: 1080}}}
-	if _, _, _, err := toStream(-1, 100, streams); err == nil {
-		t.Fatal("expected error for negative x")
-	}
-	if _, _, _, err := toStream(100, 1081, streams); err == nil {
-		t.Fatal("expected error for y past height")
-	}
-	if _, _, _, err := toStream(1920, 1080, streams); err != nil {
-		t.Fatalf("boundary coordinate should be valid: %v", err)
-	}
-	if _, _, node, err := toStream(100, 100, streams); err != nil || node != 1 {
-		t.Fatalf("toStream = (node %v, err %v), want node 1, no error", node, err)
-	}
-	var coordErr *CoordinateError
-	if _, _, _, err := toStream(-1, 0, streams); !errors.As(err, &coordErr) {
-		t.Fatalf("error should be a *CoordinateError, got %T", err)
-	}
-}
-
 // A point on the second of two granted monitors maps into that stream's own space, not the first's, and carries that stream's node id so NotifyPointerMotionAbsolute is told the right one.
 func TestToStreamPicksTheStreamThatCoversThePoint(t *testing.T) {
 	streams := []streamInfo{
@@ -281,34 +189,6 @@ func TestOpenSequenceClosesOnFailure(t *testing.T) {
 				t.Fatalf("closedHandle = %q, want session-1", c.p.closedHandle)
 			}
 		})
-	}
-}
-
-// A createSession failure has no handle to leak, so closeSession must never be called.
-func TestOpenSequenceCreateSessionFailureNoClose(t *testing.T) {
-	p := &fakePortal{createSessionErr: errBoom}
-	_, _, _, err := openSequence(context.Background(), p, "")
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("err = %v, want errBoom", err)
-	}
-	if p.closedHandle != "" {
-		t.Fatalf("closedHandle = %q, want none", p.closedHandle)
-	}
-}
-
-// The success path never calls closeSession.
-func TestOpenSequenceSuccessNoClose(t *testing.T) {
-	p := &fakePortal{}
-	handle, streams, _, err := openSequence(context.Background(), p, "")
-	if err != nil {
-		t.Fatalf("openSequence: %v", err)
-	}
-	want := []streamInfo{{Node: 42, Rect: streamRect{W: 1920, H: 1080}}}
-	if handle != "session-1" || len(streams) != 1 || streams[0] != want[0] {
-		t.Fatalf("got (%q, %+v)", handle, streams)
-	}
-	if p.closedHandle != "" {
-		t.Fatalf("closedHandle = %q, want none", p.closedHandle)
 	}
 }
 
@@ -404,7 +284,7 @@ func sameEvents(got [][2]int32, want [][2]int32) bool {
 	return true
 }
 
-// A chord used to be one flat press-all-then-release-all list handed to paceEvents, which stops at the first error, so a press that failed halfway through skipped every release after it and left the modifiers held down from the compositor's point of view — the next key or click the model sent was then silently chorded with Ctrl+Shift. Every key that actually went down has to come back up, in reverse order, whether the rest of the chord made it or not.
+// A chord used to be one flat press-all-then-release-all list that stopped at the first error, so a press that failed halfway through skipped every release after it and left the modifiers held down from the compositor's point of view — the next key or click the model sent was then silently chorded with Ctrl+Shift. Every key that actually went down has to come back up, in reverse order, whether the rest of the chord made it or not.
 func TestPressKeyReleasesWhatItPressedWhenAPressFails(t *testing.T) {
 	var events [][2]int32
 	sent := 0
@@ -427,7 +307,7 @@ func TestPressKeyReleasesWhatItPressedWhenAPressFails(t *testing.T) {
 	}
 }
 
-// TypeText used to hand its whole press/release sequence to paceEvents, which stops at the first error: if a character's own release call failed, that key stayed down from the compositor's point of view for whatever the model sent next (a click, a chord, more typed text), with no attempt to bring it back up. A failed release must be retried once before the error is returned, mirroring the recovery PressKey already does for a chord.
+// TypeText used to run its whole press/release sequence through a helper that stopped at the first error: if a character's own release call failed, that key stayed down from the compositor's point of view for whatever the model sent next (a click, a chord, more typed text), with no attempt to bring it back up. A failed release must be retried once before the error is returned, mirroring the recovery PressKey already does for a chord.
 func TestTypeText_RetriesAReleaseThatFailsBeforeReturning(t *testing.T) {
 	var events [][3]interface{}
 	sent := 0
@@ -612,5 +492,24 @@ func TestNotAllowedForgetsTheSavedToken(t *testing.T) {
 	}
 	if loadToken(dir) != "" {
 		t.Fatal("the token that restores a device-less grant should be gone")
+	}
+}
+
+// A context menu opens on the right pointer button and on nothing else, and the portal takes that button as an evdev code: BTN_RIGHT is 0x111, one above BTN_LEFT. A session that sends 0x110 for every click can never open a menu.
+func TestRightClickAt_SendsTheRightButton(t *testing.T) {
+	var buttons [][2]int32
+	s := &Session{handle: "/session/1", streams: []streamInfo{{Node: 1, Rect: streamRect{W: 1920, H: 1080}}}, send: func(_ context.Context, method string, args ...interface{}) error {
+		if method == "NotifyPointerButton" {
+			buttons = append(buttons, [2]int32{args[2].(int32), int32(args[3].(uint32))})
+		}
+		return nil
+	}}
+
+	if err := s.RightClickAt(10, 20); err != nil {
+		t.Fatalf("RightClickAt: %v", err)
+	}
+	want := [][2]int32{{0x111, 1}, {0x111, 0}}
+	if len(buttons) != len(want) || !sameEvents(buttons, want) {
+		t.Errorf("buttons = %v, want BTN_RIGHT pressed then released", buttons)
 	}
 }

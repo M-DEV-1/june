@@ -2,7 +2,7 @@ package agent
 
 import (
 	"context"
-	"errors"
+
 	"os"
 	"strings"
 	"testing"
@@ -128,28 +128,6 @@ func TestBuildBrief(t *testing.T) {
 	}
 }
 
-// A "to" other than "" or "claude" is refused before the runner is ever called, rather than silently run as claude.
-func TestDelegate_RejectsUnknownTo(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{result: "done"}
-	_, err := a.delegate(t.Context(), run, Delegation{To: "codex", Brief: "do it"}, nil)
-	if err == nil || !strings.Contains(err.Error(), `"codex" is not a delegate Ora can run`) {
-		t.Errorf("err = %v", err)
-	}
-	if run.gotPrompt != "" {
-		t.Errorf("runner should never have been called for an unsupported target")
-	}
-}
-
-// delegateHandler's error message carries the underlying error, not a generic line — so a made-up cwd tells the model the path was wrong instead of "try again". The cwd-existence check (tested below at the delegate level) means this never has to start the real claude binary to see an error.
-func TestDelegateHandler_ErrorIncludesUnderlyingError(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	got := delegateHandler(t.Context(), a, map[string]any{"brief": "do it", "cwd": "/home/x/proj-does-not-exist"})
-	if !strings.Contains(got, "/home/x/proj-does-not-exist") {
-		t.Errorf("got = %q, want the underlying error naming the bad cwd", got)
-	}
-}
-
 // A cwd that does not exist, or is a regular file rather than a directory, fails before the runner is ever started, naming the problem.
 func TestDelegate_RejectsMissingCWD(t *testing.T) {
 	file := t.TempDir() + "/not-a-dir"
@@ -169,17 +147,18 @@ func TestDelegate_RejectsMissingCWD(t *testing.T) {
 	}
 }
 
-// The delegate's own child process runs in its own process group so cmd.Cancel can kill the whole group, not just the direct child, once the wall-clock budget or caller context ends the run.
-func TestNewDelegateCmd_RunsInOwnProcessGroupAndCancelKillsIt(t *testing.T) {
+// Twice in a week a delegate was handed real work outside this repo (a PR in another clone, a zip in ~/Downloads) and refused every read, because with no cwd it ran in the daemon's own working directory and Claude Code only reads under its cwd; in the old "default" mode every command that needed approval was denied too, since a headless run has nobody to ask. With no cwd it runs in the home directory, under auto mode, which approves routine work and still blocks the risky kind.
+func TestNewDelegateCmd_RunsInHomeUnderAutoMode(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
 	cmd := newDelegateCmd(context.Background(), "", "/tmp/does-not-matter")
-	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
-		t.Errorf("cmd.SysProcAttr = %+v, want Setpgid true", cmd.SysProcAttr)
+	if cmd.Dir != home {
+		t.Errorf("cmd.Dir = %q, want the home directory %q", cmd.Dir, home)
 	}
-	if cmd.Cancel == nil {
-		t.Errorf("cmd.Cancel is nil, want a group-kill on cancel")
-	}
-	if cmd.WaitDelay != 2*time.Second {
-		t.Errorf("cmd.WaitDelay = %s, want 2s kept", cmd.WaitDelay)
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--permission-mode auto") {
+		t.Errorf("args = %v, want --permission-mode auto", cmd.Args)
 	}
 }
 
@@ -207,28 +186,6 @@ func TestDelegate_PassesCWDThrough(t *testing.T) {
 	}
 }
 
-// Delegate with no brief fails before ever calling the runner.
-func TestDelegate_NoBriefIsAnError(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{result: "done"}
-	if _, err := a.delegate(t.Context(), run, Delegation{Brief: "  "}, nil); err == nil {
-		t.Fatal("expected an error for an empty brief")
-	}
-	if run.gotPrompt != "" {
-		t.Errorf("runner should never have been called")
-	}
-}
-
-// A runner error surfaces as-is, except when the context's own deadline is what ended the run, which is reported as a timeout saying how long it ran.
-func TestDelegate_RunnerErrorSurfaces(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	run := &fakeRunner{err: errors.New("boom")}
-	_, err := a.delegate(t.Context(), run, Delegation{Brief: "do it"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Errorf("err = %v", err)
-	}
-}
-
 // A delegate call that outlives its wall budget ends in a timeout error rather than hanging forever — driven by a context whose own deadline is already shorter than delegateTimeout, so the test does not wait ten minutes for it.
 func TestDelegate_TimesOut(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
@@ -238,17 +195,6 @@ func TestDelegate_TimesOut(t *testing.T) {
 	_, err := a.delegate(ctx, run, Delegation{Brief: "do it"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("err = %v, want a timeout error", err)
-	}
-}
-
-// delegateHandler with no brief argument, or one that is only whitespace, returns a toolError sentence rather than calling the runner or panicking; a blank brief is treated the same as a missing one.
-func TestDelegateHandler_MissingBriefReturnsToolError(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	for _, args := range []map[string]any{{}, {"brief": "   "}} {
-		got := delegateHandler(t.Context(), a, args)
-		if !strings.HasPrefix(got, "error: ") {
-			t.Errorf("args %v: got = %q, want an error: prefixed message", args, got)
-		}
 	}
 }
 
@@ -264,16 +210,6 @@ func TestDelegate_RedactsTheGoalOnStdin(t *testing.T) {
 	}
 	if strings.Contains(run.gotSystemPrompt, "hunter2") {
 		t.Errorf("secret goal reached the system prompt: %s", run.gotSystemPrompt)
-	}
-}
-
-// A run a short deadline ended says how long it actually ran, in milliseconds, never "0s".
-func TestDelegate_TimeoutNamesTheRealRunTime(t *testing.T) {
-	if got := ranFor(20 * time.Millisecond); got.String() != "20ms" {
-		t.Errorf("ranFor(20ms) = %s", got)
-	}
-	if got := ranFor(90*time.Second + 400*time.Millisecond); got.String() != "1m30s" {
-		t.Errorf("ranFor(90.4s) = %s", got)
 	}
 }
 

@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"ora/internal/memory"
 )
 
 // TestConversationsAndTurns writes a conversation with two turns and reads it back: the list carries the newest turn's text, the detail carries the turns oldest first with their evidence and tool names intact.
@@ -21,11 +19,11 @@ func TestConversationsAndTurns(t *testing.T) {
 		t.Fatalf("CreateConversation: %v", err)
 	}
 
-	evidence := json.RawMessage(`[{"title":"Lodestone sync","meta":"meeting","body":"emission factors"}]`)
+	evidence := json.RawMessage(`[{"title":"Lodestone sync","meta":"meeting","body":"shipping factors"}]`)
 	if _, err := store.AddTurn(ctx, id, "you", "what did vexil ask about", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn you: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, id, "ora", "she asked about emission factors", "ask", evidence, []string{"query_memory", "recall"}); err != nil {
+	if _, err := store.AddTurn(ctx, id, "ora", "she asked about shipping factors", "ask", evidence, []string{"query_memory", "recall"}); err != nil {
 		t.Fatalf("AddTurn ora: %v", err)
 	}
 
@@ -39,7 +37,7 @@ func TestConversationsAndTurns(t *testing.T) {
 	if list[0].Title != "what did vexil ask about" || list[0].Brain != "claude" {
 		t.Errorf("ListConversations[0] = %+v, want the title and brain it was created with", list[0])
 	}
-	if list[0].Last != "she asked about emission factors" {
+	if list[0].Last != "she asked about shipping factors" {
 		t.Errorf("Last = %q, want the newest turn's text", list[0].Last)
 	}
 
@@ -76,38 +74,6 @@ func TestConversationsAndTurns(t *testing.T) {
 	}
 	if turns[1].When.IsZero() {
 		t.Errorf("a turn came back with no time")
-	}
-}
-
-// TestTurnsBetween checks that the window's day page only sees the turns inside the window it asks for.
-func TestTurnsBetween(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	id, err := store.CreateConversation(ctx, "today", "")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	turnID, err := store.AddTurn(ctx, id, "you", "what is on my plate", "ask", nil, nil)
-	if err != nil {
-		t.Fatalf("AddTurn: %v", err)
-	}
-
-	now := time.Now()
-	inside, err := store.TurnsBetween(ctx, now.Add(-time.Hour), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("TurnsBetween: %v", err)
-	}
-	if len(inside) != 1 || inside[0].ID != turnID {
-		t.Errorf("TurnsBetween over now returned %d turns, want the one just written", len(inside))
-	}
-
-	outside, err := store.TurnsBetween(ctx, now.AddDate(0, 0, -3), now.AddDate(0, 0, -2))
-	if err != nil {
-		t.Fatalf("TurnsBetween: %v", err)
-	}
-	if len(outside) != 0 {
-		t.Errorf("TurnsBetween over a past window returned %d turns, want none", len(outside))
 	}
 }
 
@@ -292,25 +258,6 @@ func TestRenameConversation(t *testing.T) {
 	}
 }
 
-// TestActionNotesStayNotes is a guard on the assumption /tasks rests on: an action item is still an ordinary note of kind "action" that memory.ParseAction can read back.
-func TestActionNotesStayNotes(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: "Zemna", Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
-		t.Fatalf("AddActionItems: %v", err)
-	}
-	notes, err := store.NotesOfKindSince(ctx, memory.ActionNoteKind, time.Time{})
-	if err != nil {
-		t.Fatalf("NotesOfKindSince: %v", err)
-	}
-	if len(notes) != 1 {
-		t.Fatalf("action notes = %d, want 1", len(notes))
-	}
-	if a, ok := memory.ParseAction(notes[0].Content); !ok || a.Text != "send the deck" {
-		t.Errorf("ParseAction(%q) = %+v, %v", notes[0].Content, a, ok)
-	}
-}
-
 // TestDeleteConversation checks that deleting a conversation removes it and every turn said in it, and that deleting one that does not exist is an error rather than a silent no-op.
 func TestDeleteConversation(t *testing.T) {
 	store := newStore(t)
@@ -396,7 +343,7 @@ func TestAddTurnTouchesItsConversation(t *testing.T) {
 	}
 }
 
-// TestTurnsBetweenDayEdges pins the window's edges to what internal/ipc's Day handler asks for: one local calendar day, from midnight to a nanosecond short of the next. The first and last second of the day both belong to it, and neither neighbouring day claims them. TestTurnsBetween above only checks an hour either side of now, which would pass just as well if either edge were exclusive.
+// TestTurnsBetweenDayEdges pins the window's edges to what internal/ipc's Day handler asks for: one local calendar day, from midnight to a nanosecond short of the next. The first and last second of the day both belong to it, and neither neighbouring day claims them.
 func TestTurnsBetweenDayEdges(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()

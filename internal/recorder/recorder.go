@@ -56,11 +56,7 @@ type Store interface {
 
 // Recorder owns at most one meeting recording at a time. Start and StopAndProcess are what the tray calls; everything after the stop runs in the background.
 type Recorder struct {
-	// minutesFallback is the brain a minutes call hands over to when Gemini answers 429 or 503, installed by the daemon through SetMinutesFallback; nil means no hand-over.
-	minutesFallback brain.Brain
-	// minutesFallbackMu guards minutesFallback, which the daemon may install while a meeting is already being written up.
-	minutesFallbackMu sync.RWMutex
-	// mainBrain is the brain minutes are written with, installed by the daemon through SetBrain so a meeting write-up spends from the same shared Gemini daily quota as everything else the daemon meters; nil means defaultBrain builds its own unmetered one from config, per meeting.
+	// mainBrain is the brain minutes are written with, installed by the daemon through SetBrain so a meeting write-up spends from the same shared Gemini daily quota as everything else the daemon meters; nil means defaultBrain builds its own routed one from config, per meeting.
 	mainBrain brain.Brain
 	// mainBrainMu guards mainBrain, which the daemon may install while a meeting is already being written up.
 	mainBrainMu sync.RWMutex
@@ -114,9 +110,9 @@ func New(ctx context.Context, dataDir string, store Store, apiKey string) *Recor
 		return c, c.MicStart, c.SystemStart, nil
 	}
 	r.whisper = transcribeWAV
-	r.findWhisper = whisperCPPBinary
+	r.findWhisper = WhisperCPPBinary
 	r.diarize = diarizeWAV
-	r.findSherpa = sherpaBinary
+	r.findSherpa = SherpaBinary
 	r.minutes = r.defaultBrain
 	r.notify = notifySend
 	r.notifyAt = notifySendAt
@@ -532,6 +528,7 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	if err != nil {
 		return fmt.Errorf("summarise meeting: %w", err)
 	}
+	text = trimPreamble(text)
 	// A blank reply is not a summary of anything: writing it as minutes.md would mark the meeting done and lose it silently. Treating it as an error instead sends it through the same failure marker and hour-long backoff as a summariser that returned an error outright.
 	if strings.TrimSpace(text) == "" {
 		return errors.New("summarise meeting: the brain returned empty minutes")
@@ -551,6 +548,16 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 
 	r.notify("Meeting summary ready", filepath.Join(s.dir, "minutes.md"))
 	return nil
+}
+
+// trimPreamble drops whatever the model wrote before the minutes themselves. Input: the model's whole reply. Output: the reply from its first "# " heading on, or the reply unchanged when it has no heading.
+// Models often open with a line addressed to the reader — "I'll write the minutes for this platform sprint standup meeting." — and that line is not part of the minutes. It mattered beyond tidiness because the meeting's name is read off the first line that is not a heading (memory.MinutesLabel), so on 16 September 2026 two meetings were listed in the window under the model's own opening sentence. A reply with no heading at all is left alone: that is the shape of a model refusing to write minutes, and the refusal is the only record of what happened.
+func trimPreamble(text string) string {
+	i := strings.Index(text, "\n# ")
+	if i < 0 || strings.HasPrefix(text, "# ") {
+		return text
+	}
+	return text[i+1:]
 }
 
 // fileGivenUp files the note that puts a recording the sweep has stopped retrying into the meetings list, where GET /meetings reads notes of this kind. Without it the only trace of a recording that never became minutes is an hourly error line in the log. Input: the store's own context, the recording's session and the error its last attempt returned. Output: none — the note is best effort, like every other write in this sweep, and filing it through fileMinutes means a later retry that succeeds replaces it in place rather than adding a second note for the same meeting.
@@ -672,8 +679,17 @@ func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error
 	// Every remote voice arrived under one pooled label; the diarizer's clusters split it back into people, which is what lets the minutes attribute a line rather than hedge about it.
 	theirs = assignSpeakers(theirs, turns)
 
+	// Every line is written in Latin letters whatever language it was spoken in, and the lines nobody in the meeting said are dropped before anything counts them as speech.
+	var segs []Segment
+	for _, seg := range append(mine, theirs...) {
+		if cannedLine.MatchString(seg.Text) {
+			continue
+		}
+		seg.Text = Romanize(seg.Text)
+		segs = append(segs, seg)
+	}
+
 	// Whisper exiting 0 with nothing to show for it is not a success: the meeting may have been silent, or this whisper build may print segments in a shape parseSegments does not recognise. Either way the WAVs are still the only copy of the meeting, so they stay put and the marker records why.
-	segs := append(mine, theirs...)
 	if len(segs) == 0 {
 		note := fmt.Sprintf("Transcription ran without error but found no speech in this recording, so the audio has been kept instead of deleted. Written %s.\n", time.Now().Format(time.RFC3339))
 		if err := os.WriteFile(filepath.Join(s.dir, noSpeechMarker), []byte(note), 0o644); err != nil {
@@ -727,7 +743,7 @@ func (r *Recorder) diarizeCall(ctx context.Context, path string, offset time.Dur
 }
 
 // remoteVoices is how many people the meeting app showed inside its window, which the diarizer is given so it returns that many voices instead of estimating from an audio distance that does not transfer between meetings. Zero means the window did not say, and the diarizer estimates instead.
-// The window's TITLE is deliberately not counted, though it often carries a name. A one-to-one call is titled after the other person — "Microsoft Teams (PWA) - Chat | Vexil Quorin" — but a group call is titled after the meeting, and "Daily AI Standup" is two capitalised words that read exactly like a name. Counting titles would therefore report one voice for a nine-person standup and merge all nine into one, which is worse than not knowing: one voice too many splits a person across two clusters and the summarising model rejoins them from what was said, while one too few fuses two people and nothing downstream can undo it.
+// The window's TITLE is deliberately not counted, though it often carries a name. A one-to-one call is titled after the other person — "Microsoft Teams (PWA) - Chat | Vexil Quorin" — but a group call is titled after the meeting, and "Daily Platform Standup" is two capitalised words that read exactly like a name. Counting titles would therefore report one voice for a nine-person standup and merge all nine into one, which is worse than not knowing: one voice too many splits a person across two clusters and the summarising model rejoins them from what was said, while one too few fuses two people and nothing downstream can undo it.
 // Only the window's own contents count — the participant tiles and roster the accessibility tree reads out of the meeting window itself, which name people and nothing else.
 func (r *Recorder) remoteVoices(ctx context.Context, since, until time.Time) int {
 	eps, err := r.store.EpisodesInWindow(ctx, since.Add(-contextMargin), until.Add(contextMargin), episodeLimit)

@@ -17,41 +17,50 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "./alert-dialog";
-import { useDeleteMeetingMutation, useMeetingsQuery, useTasksQuery } from "./api";
-import { dayHeading, groupMeetings, hhmm, meetingLength, meetingTasks, meetingWho, meetingsShown, minutesLines } from "./format";
+import { useDeleteMeetingMutation, useMeetingsQuery, useTasksQuery, type Meeting, type Task } from "./api";
+import { dayHeading, groupMeetings, hhmm, keyed, meetingLength, meetingTasks, meetingWho, meetingsShown, minutesBlocks, minutesLines, type MinutesBlock } from "./format";
 import { Blank, HEAD, Outline, PageHeader, Picker, Rail, RailBlock, Reading, Scroller, TAIL, useReading, useWide } from "./parts";
 import { ui, useAppDispatch, useAppSelector } from "./store";
 import { Owed } from "./meeting-owed";
-import { Minutes, minutesBlocks, sectionId } from "./meeting-minutes";
+import { Minutes } from "./meeting-minutes";
 
-/** The Meetings screen. Input: none. Output: the header with the recording picker in it, and under it the chosen recording's minutes, with what was around the meeting either beside them or above them depending on how much room the pane has. */
-export function MeetingsScreen() {
+/** The question asked before a recording's write-up is removed, the same as deleting a chat: minutes are written once from audio that may since have been cleared, and there is no undo. Input: the recording, the one to open in its place, and whether the question is being asked. Output: the dialog. */
+function DeleteMeeting({ meeting, next, open, onOpenChange }: { meeting?: Meeting; next: string; open: boolean; onOpenChange: (open: boolean) => void }) {
   const dispatch = useAppDispatch();
-  const { meetingId, query } = useAppSelector((s) => s.ui);
-  const { data: meetings = [], isError, isLoading } = useMeetingsQuery();
-  const { data: tasks = [] } = useTasksQuery();
   const [removeMeeting] = useDeleteMeetingMutation();
-  const [asking, setAsking] = useState(false);
-  const [wide, pane] = useWide();
-
-  const now = new Date();
-  const shown = meetingsShown(meetings, query.meetings);
-  const selected = meetings.find((m) => m.id === meetingId) ?? shown[0];
-
-  const blocks = minutesBlocks(minutesLines(selected?.minutes ?? "", selected?.title ?? ""));
-  const sections = blocks.filter((b) => b.kind === "h").map((b, i) => ({ id: sectionId(i), text: (b as { text: string }).text }));
-  const { active, goTo } = useReading(sections.map((sec) => sec.id));
-
-  const owed = selected ? meetingTasks(tasks, selected) : [];
-  const when = selected ? [dayHeading(selected.when, now), hhmm(selected.when)].filter(Boolean).join(" · ") : "";
-  const ran = selected ? meetingLength(selected.duration_s) : "";
-  const who = selected ? meetingWho(selected.attendees) : "";
-
-  const options = groupMeetings(shown, now).flatMap((g) =>
-    g.items.map((m) => ({ id: m.id, label: m.title, hint: [hhmm(m.when), meetingLength(m.duration_s)].filter(Boolean).join(" · "), group: g.label })),
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete “{meeting?.title}”?</AlertDialogTitle>
+          <AlertDialogDescription>This removes the write-up. The recording itself stays on disk, so the minutes can be written again from it.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep it</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => {
+              if (!meeting) return;
+              // The next recording in the list is opened by hand: the one showing has just gone, and leaving the screen pointed at it would show a blank document until the list came back.
+              void removeMeeting(meeting.id)
+                .unwrap()
+                .then(() => dispatch(ui.meetingOpened(next)))
+                .catch(() => dispatch(ui.noticed({ text: "Could not delete", kind: "error" })));
+            }}
+          >
+            Delete it
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
+}
 
-  const rail = selected ? (
+/** What sits beside a meeting in a wide pane: when it ran, who was on it, what it left the user owing, and an outline of the minutes. Input: the meeting, the three lines about it, the tasks it raised for the user, and the minutes already gathered into blocks. Output: the rail. */
+function MeetingRail({ meeting, when, ran, owed, blocks }: { meeting: Meeting; when: string; ran: string; owed: Task[]; blocks: MinutesBlock[] }) {
+  const who = meetingWho(meeting.attendees);
+  const sections = blocks.flatMap((b) => (b.kind === "h" ? [{ id: b.id, text: b.text }] : []));
+  const { active, goTo } = useReading(sections.map((sec) => sec.id));
+  return (
     <Rail label="About this meeting">
       <RailBlock title="When">
         <div>{when}</div>
@@ -60,8 +69,8 @@ export function MeetingsScreen() {
       {who ? (
         <RailBlock title="Who was there">
           <ul className="flex flex-col gap-1">
-            {selected.attendees.map((a, i) => (
-              <li key={`${a.name}-${i}`} className="truncate" title={a.name}>
+            {keyed(meeting.attendees, (a) => a.name).map(({ key, item: a }) => (
+              <li key={key} className="truncate" title={a.name}>
                 {a.heard_only ? `${a.name} (heard)` : a.name}
               </li>
             ))}
@@ -75,11 +84,50 @@ export function MeetingsScreen() {
         </RailBlock>
       ) : null}
     </Rail>
-  ) : undefined;
+  );
+}
+
+/** One recording as it reads on the page: its title, the minutes typeset as a document, and in a wide pane the rail beside them. Input: the recording, every task the daemon has (the ones it raised are picked out here), whether the pane is wide, and the moment the dates are read against. Output: the document and its rail. */
+function MeetingView({ meeting, tasks, wide, now }: { meeting: Meeting; tasks: Task[]; wide: boolean; now: Date }) {
+  const blocks = minutesBlocks(minutesLines(meeting.minutes ?? "", meeting.title ?? ""));
+  const owed = meetingTasks(tasks, meeting);
+  const when = [dayHeading(meeting.when, now), hhmm(meeting.when)].filter(Boolean).join(" · ");
+  const ran = meetingLength(meeting.duration_s);
+  return (
+    <Reading wide={wide} rail={wide ? <MeetingRail meeting={meeting} when={when} ran={ran} owed={owed} blocks={blocks} /> : undefined}>
+      <article>
+        <h2 className="text-title text-foreground">{meeting.title}</h2>
+        {/* In a wide pane the rail already says when it ran and who was on it, so the line under the title is not printed twice. */}
+        {wide ? null : <p className="mt-2 text-meta text-muted-foreground">{[when, ran, meetingWho(meeting.attendees)].filter(Boolean).join(" · ")}</p>}
+        {wide ? null : <Owed tasks={owed} />}
+        <div className="mt-8">
+          <Minutes blocks={blocks} />
+        </div>
+      </article>
+    </Reading>
+  );
+}
+
+/** The Meetings screen. Input: none. Output: the header with the recording picker in it, and under it the chosen recording's minutes, with what was around the meeting either beside them or above them depending on how much room the pane has. */
+export function MeetingsScreen() {
+  const dispatch = useAppDispatch();
+  const { meetingId, query } = useAppSelector((s) => s.ui);
+  const { data: meetings = [], isError, isLoading } = useMeetingsQuery();
+  const { data: tasks = [] } = useTasksQuery();
+  const [asking, setAsking] = useState(false);
+  const [wide, pane] = useWide();
+
+  const now = new Date();
+  const shown = meetingsShown(meetings, query.meetings);
+  const selected = meetings.find((m) => m.id === meetingId) ?? shown[0];
+
+  const options = groupMeetings(shown, now).flatMap((g) =>
+    g.items.map((m) => ({ id: m.id, label: m.title, hint: [hhmm(m.when), meetingLength(m.duration_s)].filter(Boolean).join(" · "), group: g.label })),
+  );
 
   return (
     <div ref={pane} data-pane className="flex h-full min-h-0 flex-col">
-      <PageHeader wide={wide} railed={Boolean(rail)}>
+      <PageHeader wide={wide} railed={Boolean(selected)}>
         <h1 className="shrink-0 text-ui font-medium">Meetings</h1>
         <Picker
           list="meetings"
@@ -99,17 +147,7 @@ export function MeetingsScreen() {
       </PageHeader>
       <Scroller bodyClassName={selected ? `${HEAD} ${TAIL}` : "flex"}>
         {selected ? (
-          <Reading wide={wide} rail={rail}>
-            <article>
-              <h2 className="text-title text-foreground">{selected.title}</h2>
-              {/* In a wide pane the rail already says when it ran and who was on it, so the line under the title is not printed twice. */}
-              {wide ? null : <p className="mt-2 text-meta text-muted-foreground">{[when, ran, who].filter(Boolean).join(" · ")}</p>}
-              {wide ? null : <Owed tasks={owed} />}
-              <div className="mt-8">
-                <Minutes blocks={blocks} />
-              </div>
-            </article>
-          </Reading>
+          <MeetingView meeting={selected} tasks={tasks} wide={wide} now={now} />
         ) : (
           <Blank
             up={!isError}
@@ -120,31 +158,7 @@ export function MeetingsScreen() {
         )}
       </Scroller>
 
-      {/* The question is asked before anything is removed, the same as deleting a chat: minutes are written once from audio that may since have been cleared, and there is no undo. */}
-      <AlertDialog open={asking} onOpenChange={setAsking}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete “{selected?.title}”?</AlertDialogTitle>
-            <AlertDialogDescription>This removes the write-up. The recording itself stays on disk, so the minutes can be written again from it.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep it</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (!selected) return;
-                // The next recording in the list is opened by hand: the one showing has just gone, and leaving the screen pointed at it would show a blank document until the list came back.
-                const next = meetings.find((m) => m.id !== selected.id)?.id ?? "";
-                void removeMeeting(selected.id)
-                  .unwrap()
-                  .then(() => dispatch(ui.meetingOpened(next)))
-                  .catch(() => dispatch(ui.noticed({ text: "Could not delete", kind: "error" })));
-              }}
-            >
-              Delete it
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <DeleteMeeting meeting={selected} next={meetings.find((m) => m.id !== selected?.id)?.id ?? ""} open={asking} onOpenChange={setAsking} />
     </div>
   );
 }

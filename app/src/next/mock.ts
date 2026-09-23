@@ -15,7 +15,7 @@ export type Canned = {
   meetings?: Meeting[];
   brains?: Brain[];
   voices?: Voice[];
-  /** The two Live models GET /voices reports beside the voice roster, one carrying current true. */
+  /** The Live models GET /voices reports beside the voice roster, one carrying current true. */
   models?: LiveModel[];
   settings?: Partial<SettingsView>;
   usage?: Usage;
@@ -227,7 +227,7 @@ function day(days: number): string {
 export const demo: Canned = {
   conversations: [
     { id: "c1", title: "Flights to Zurich", brain: "claude", last: "Both are refundable until the 12th.", updated: ago(0, 15, 12) },
-    { id: "c2", title: "TCFD statement pattern analysis", brain: "claude", last: "She wants the file before Friday.", updated: ago(0, 11, 40) },
+    { id: "c2", title: "Meridian statement pattern analysis", brain: "claude", last: "She wants the file before Friday.", updated: ago(0, 11, 40) },
     { id: "c3", title: "What Vexil asked for on the call", brain: "claude", last: "The legal review, and the numbers behind table 4.", updated: ago(1, 17, 5) },
     { id: "c4", title: "Rewriting the onboarding note", brain: "codex", last: "Shorter, and without the second heading.", updated: ago(3, 10, 20) },
     { id: "c5", title: "Why the nightly loop stopped", brain: "claude", last: "It ran out of disk at 02:14.", updated: ago(9, 22, 30) },
@@ -272,7 +272,7 @@ export const demo: Canned = {
           text: "Friday, and she meant end of the working day rather than midnight.\n\nShe also said the flights can wait until the statement is signed off, so there is no need to book before Wednesday.",
           kind: "ask",
           evidence: [
-            { title: "TCFD statement pattern analysis", meta: "meeting · yesterday", body: "the deadline is Friday, close of business — not midnight, please" },
+            { title: "Meridian statement pattern analysis", meta: "meeting · yesterday", body: "the deadline is Friday, close of business — not midnight, please" },
             { title: "A note you wrote", meta: "note · 2 days ago", body: "flights can wait until sign-off" },
           ],
           tools: ["search_memory", "read_meeting"],
@@ -331,19 +331,19 @@ export const demo: Canned = {
     },
   },
   tasks: [
-    { id: "11", title: "Send the TCFD file to legal", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(0)}`, owner: "me" },
+    { id: "11", title: "Send the Meridian file to legal", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: `Meridian statement pattern analysis, ${day(0)}`, owner: "me" },
     { id: "12", title: "Book the Zurich flight before the 12th", source: "you", when: ago(0, 9, 0), done: false, conversation_id: "c1", detail: "you said", owner: "me" },
-    { id: "13", title: "Ask Vexil for the numbers behind table 4", source: "noticed", when: ago(1, 17, 5), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(1)}`, owner: "me" },
+    { id: "13", title: "Ask Vexil for the numbers behind table 4", source: "noticed", when: ago(1, 17, 5), done: false, conversation_id: "", detail: `Meridian statement pattern analysis, ${day(1)}`, owner: "me" },
     { id: "14", title: "Rewrite the onboarding note without the second heading", source: "you", when: ago(3, 10, 20), done: false, conversation_id: "c4", detail: "you said", owner: "me" },
     { id: "15", title: "Clear the disk the nightly loop filled", source: "you", when: ago(9, 22, 30), done: true, conversation_id: "c5", detail: "you said", owner: "me" },
     // Raised by a meeting but not the user's own — this is the "Watching" section: one clearly someone else's, one nobody named.
-    { id: "16", title: "Re-run the source data once the register is updated", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: `TCFD statement pattern analysis, ${day(0)}`, owner: "them" },
-    { id: "17", title: "Write up what the cap was costing", source: "noticed", when: ago(1, 9, 45), done: false, conversation_id: "", detail: `Daily AI sprint standup, ${day(1)}`, owner: "unclear" },
+    { id: "16", title: "Re-run the source data once the directory is updated", source: "noticed", when: ago(0, 11, 40), done: false, conversation_id: "", detail: `Meridian statement pattern analysis, ${day(0)}`, owner: "them" },
+    { id: "17", title: "Write up what the cap was costing", source: "noticed", when: ago(1, 9, 45), done: false, conversation_id: "", detail: `Daily standup, ${day(1)}`, owner: "unclear" },
   ],
   meetings: [
     {
       id: "m1",
-      title: "TCFD statement pattern analysis",
+      title: "Meridian statement pattern analysis",
       when: ago(0, 11, 0),
       duration_s: 2820,
       attendees: [
@@ -352,26 +352,26 @@ export const demo: Canned = {
         { name: "Turnek", heard_only: true },
       ],
       minutes: [
-        "# TCFD statement pattern analysis",
-        "The call was about which of the 155 statements actually follow the four-pillar pattern, and what to do about the ones that do not. Vexil opened by saying legal will not sign anything before Friday, so the shape of the argument matters more this week than the wording of it.",
+        "# Meridian statement pattern analysis",
+        "The call was about which of the 240 statements actually follow the agreed template, and what to do about the ones that do not. Vexil opened by saying legal will not sign anything before Friday, so the shape of the argument matters more this week than the wording of it.",
         "## What was decided",
-        "- The four-pillar split stays, and the statements that do not fit it are listed separately rather than forced into a pillar.",
+        "- The template stays as it is, and the statements that do not fit it are listed separately rather than forced into a section.",
         "- Table 4 keeps its current numbers until the source data is re-run.",
-        "- Legal sees the whole file at once, not pillar by pillar.",
+        "- Legal sees the whole file at once, not section by section.",
         "## What was said",
-        "Vexil walked through the eleven statements that fail the pattern. Nine of them fail because they name a governance body that does not exist in the register; the other two are written as forward-looking targets, which is a different section of the guidance entirely.",
+        "Vexil walked through the eleven statements that fail the template. Nine of them fail because they name a team that is not in the project directory; the other two are written as future plans, which belong in a different part of the file entirely.",
         "Turnek asked whether the eleven should be dropped. The answer was no: they are still statements, and dropping them would change the denominator every other number in the paper is worked out against.",
         "## Action items",
         "- send the file to legal before Friday, close of business",
         "- ask Vexil for the numbers behind table 4",
-        "- re-run the source data once the register is updated",
+        "- re-run the source data once the directory is updated",
         "## What is still open",
-        "Whether the two forward-looking targets belong in this paper at all. Nobody had the guidance to hand and it was left for the next call.",
+        "Whether the two future plans belong in this paper at all. Nobody had the template to hand and it was left for the next call.",
       ].join("\n"),
     },
     {
       id: "m2",
-      title: "Daily AI sprint standup",
+      title: "Daily standup",
       when: ago(1, 9, 30),
       duration_s: 900,
       attendees: [
@@ -389,7 +389,7 @@ export const demo: Canned = {
   ],
   days: [
     { date: day(0), title: "", has_page: false, seen: 212, meetings: 2, meeting_minutes: 62 },
-    { date: day(1), title: "A long day of TCFD work.", has_page: true, seen: 366, meetings: 5, meeting_minutes: 140 },
+    { date: day(1), title: "A long day of Meridian work.", has_page: true, seen: 366, meetings: 5, meeting_minutes: 140 },
     { date: day(2), title: "", has_page: true, seen: 288, meetings: 3, meeting_minutes: 95 },
     { date: day(8), title: "", has_page: true, seen: 120, meetings: 1, meeting_minutes: 28 },
   ],
@@ -397,17 +397,17 @@ export const demo: Canned = {
     [day(1)]: {
       date: day(1),
       heading: "366 things seen · 5 calls, 140 min",
-      brief: "Two calls before lunch, both about the TCFD statements, and the file is owed to legal by Friday. Nothing else is due today.",
+      brief: "Two calls before lunch, both about the Meridian statements, and the file is owed to legal by Friday. Nothing else is due today.",
       close: "",
       page: [
-        "You spent the morning on the TCFD statements, and most of it on the eleven that do not fit the four-pillar pattern.",
+        "You spent the morning on the Meridian statements, and most of it on the eleven that do not fit the agreed template.",
         "The call with Vexil settled the shape of the argument rather than the wording: the eleven stay in, listed separately, because dropping them would move the denominator under every other number in the paper. Turnek wanted them dropped and was talked out of it.",
         "The afternoon went to the flights. You looked at two, both refundable until the 12th, and booked neither — the trip depends on legal signing off, and legal will not look at anything before Friday.",
         "The evening was the window rebuild. The retrieval work from last week is holding: nothing you searched for came back empty.",
       ].join("\n"),
       you: [],
       tasks: [
-        { id: "11", title: "Send the TCFD file to legal", done: false, status: "open", owner: "me" },
+        { id: "11", title: "Send the Meridian file to legal", done: false, status: "open", owner: "me" },
         { id: "13", title: "Ask Vexil for the numbers behind table 4", done: false, status: "open", owner: "me" },
         { id: "15", title: "Clear the disk the nightly loop filled", done: true, status: "done", owner: "me" },
       ],
@@ -420,7 +420,7 @@ export const demo: Canned = {
       schedule: "weekdays at 8",
       enabled: true,
       last_run: ago(0, 8, 0),
-      last_answer: "Send the TCFD file to legal — Vexil said Friday, close of business.",
+      last_answer: "Send the Meridian file to legal — Vexil said Friday, close of business.",
     },
     { id: "2", text: "tell me if anything is on fire", schedule: "every 3 hours", enabled: true, last_run: ago(0, 6, 0), last_answer: "NOTHING" },
     { id: "3", text: "when Vexil replies about the venue, tell me", schedule: "when Vexil replies about the venue", enabled: true, last_run: "", last_answer: "" },
@@ -434,6 +434,7 @@ export const demo: Canned = {
   ],
   models: [
     { name: "gemini-3.1-flash-live-preview", label: "Gemini 3.1 Flash Live", trait: "Fast — about two seconds to first word, one tone, hears everything", current: true },
+    { name: "gemini-3.8-live", label: "Gemini 3.8 Live", trait: "Always decides whether the audio was meant for it, and cannot be told not to", current: false },
     { name: "gemini-2.5-flash-native-audio-preview-12-2025", label: "Gemini 2.5 Native Audio", trait: "Warm — five to eight seconds, but it has moods and can ignore the room", current: false },
   ],
   brains: [
@@ -535,7 +536,7 @@ export const demo: Canned = {
         output_tokens: 320,
         total_tokens: 10120,
         duration_ms: 2400,
-        question: "summarise the TCFD call",
+        question: "summarise the Meridian call",
         cached_input_tokens: 0,
       },
       {
@@ -582,10 +583,10 @@ const firstRunSteps = {
   steps: ["Set GEMINI_API_KEY in ~/.config/ora/env.", "Or sign in with the Claude CLI: run claude login.", "Or sign in with the Codex CLI: run codex login.", "Or point ORA_LOCAL_MODEL at a model on this machine."],
 };
 
-/** Puts the fake daemon in fetch's place for a page opened with ?mock=1, so the window can be looked at in a plain browser tab with no daemon running. Input: the page's location. Output: true when the fake was installed. Called once from main.tsx before anything is rendered; on any other URL it does nothing and the window talks to the real daemon as always. ?firstrun=1 on top of ?mock=1 answers /settings as a daemon that cannot answer yet, so the panel Settings only draws in that state can be screenshotted. */
+/** Puts the fake daemon in fetch's place for a page opened with ?mock=1, so the window can be looked at in a plain browser tab with no daemon running. Input: the page's location. Output: true when the fake was installed. Called once from main.tsx before anything is rendered; on any other URL it does nothing and the window talks to the real daemon as always. ?firstrun=1 on top of ?mock=1 answers /settings and /brains as a daemon that cannot answer yet, so the panels Settings and the chat page only draw in that state can be screenshotted. */
 export function installMock(loc: { search: string } = location): boolean {
   if (!wantsMock(loc.search)) return false;
-  const canned = new URLSearchParams(loc.search).get("firstrun") === "1" ? { ...demo, settings: { ...demo.settings, first_run: firstRunSteps } } : demo;
+  const canned = new URLSearchParams(loc.search).get("firstrun") === "1" ? { ...demo, brains: demo.brains?.map((b) => ({ ...b, signed_in: false })), settings: { ...demo.settings, first_run: firstRunSteps } } : demo;
   window.fetch = daemonFetch(canned);
   // A job in flight belongs in the store, not in fetch's fake answers, so this reaches the store directly rather than growing a second daemon fake that only ever plays back one fixed script. Loaded lazily and only here: daemonFetch above is also what the vitest suite imports for its own fake daemon, and it never triggers this path, so the test suite never pulls Redux in by way of a fixture.
   if (canned.runningJob) {

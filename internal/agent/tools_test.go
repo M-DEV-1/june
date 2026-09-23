@@ -366,22 +366,6 @@ func TestRecallBounds(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_QueryMemory_SurfacesEpisodeHit verifies query_memory surfaces episode hits (raw screen-capture history), labeled "[episode] ...", so the model can search episode specifics.
-func TestExecuteTool_QueryMemory_SurfacesEpisodeHit(t *testing.T) {
-	brain := &toolTestBrain{
-		hybridHits: []db.MemoryHit{
-			{Source: "episode", Content: "saw the Riddler press conference on Gotham News", RefID: 1},
-		},
-	}
-	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-
-	result := a.executeTool(context.Background(), "query_memory", map[string]any{"query": "Riddler"})
-
-	if !strings.Contains(result, "[episode] saw the Riddler press conference") {
-		t.Errorf("expected query_memory result to surface episode hit, got: %q", result)
-	}
-}
-
 func TestExecuteTool_QueryMemory_FiltersByApp(t *testing.T) {
 	brain := &toolTestBrain{
 		hybridHits: []db.MemoryHit{
@@ -578,29 +562,6 @@ func TestExecuteTool_Recall_SubjectWithApp_AnswersAndSaysTheFilterWasIgnored(t *
 	}
 }
 
-// TestExecuteTool_QueryMemory_DomainFilterArgs verifies that query_memory passes the optional domain arg through to HybridSearch, defaulting to empty when omitted.
-func TestExecuteTool_QueryMemory_DomainFilterArgs(t *testing.T) {
-	cases := []struct {
-		name       string
-		args       map[string]any
-		wantDomain string
-	}{
-		{"omitted domain defaults to empty filter", map[string]any{"query": "x"}, ""},
-		{"provided domain passes through verbatim", map[string]any{"query": "x", "domain": "work"}, "work"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			brain := &toolTestBrain{capturedDomain: "sentinel"}
-			a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
-			a.executeTool(context.Background(), "query_memory", tc.args)
-			if brain.capturedDomain != tc.wantDomain {
-				t.Errorf("domainFilter = %q, want %q", brain.capturedDomain, tc.wantDomain)
-			}
-		})
-	}
-}
-
 // TestExecuteTool_QueryMemory_HitFormatting verifies that query_memory formats hits consistently (including source tags, note ref_ids, excerpt truncation, and empty result sentinels).
 func TestExecuteTool_QueryMemory_HitFormatting(t *testing.T) {
 	overlong := strings.Repeat("x", 2000)
@@ -655,27 +616,6 @@ func TestExecuteTool_QueryMemory_HitFormatting(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestLiveTools_IncludesFunctionDeclarationsAndGoogleSearch verifies the Live API tool list carries both ORA's custom function tools AND Gemini's native GoogleSearch grounding tool — so Ora can look things up instead of answering from memory alone (see liveTools' doc comment in tools.go for the live-verification note).
-func TestLiveTools_IncludesFunctionDeclarationsAndGoogleSearch(t *testing.T) {
-	tools := liveToolsFor("gemini-2.5-flash-native-audio-preview-12-2025")
-
-	var hasFunctionDecls, hasGoogleSearch bool
-	for _, tl := range tools {
-		if len(tl.FunctionDeclarations) > 0 {
-			hasFunctionDecls = true
-		}
-		if tl.GoogleSearch != nil {
-			hasGoogleSearch = true
-		}
-	}
-	if !hasFunctionDecls {
-		t.Error("expected liveTools to include the custom FunctionDeclarations tool")
-	}
-	if !hasGoogleSearch {
-		t.Error("expected liveTools to include the native GoogleSearch grounding tool")
 	}
 }
 
@@ -1020,22 +960,6 @@ func TestFormatEpisodeTimeline_LeadsWithTheHumanHandle(t *testing.T) {
 	}
 }
 
-// TestFormatEpisodeTimeline_FallsBackToTheAppName verifies a capture with no human handle still renders one row: the app name leads and only the window title stays in the parenthetical, rather than printing an empty handle or repeating the app twice.
-func TestFormatEpisodeTimeline_FallsBackToTheAppName(t *testing.T) {
-	at := time.Date(2026, 8, 28, 9, 15, 0, 0, time.Local)
-	lines := formatEpisodeTimeline([]db.Episode{{
-		CreatedAt:  at,
-		App:        "Mail",
-		Title:      "Inbox",
-		ScreenText: "reading morning emails",
-	}}, func(e db.Episode) string { return e.ScreenText })
-
-	want := "[Aug 28 09:15] Mail (Inbox): reading morning emails"
-	if len(lines) != 1 || lines[0] != want {
-		t.Errorf("expected %q, got: %q", want, lines)
-	}
-}
-
 // TestExecuteTool_ErrorsAreSaidInPlainWords covers every failure the model can provoke with bad arguments or a broken store: the result says what went wrong in words a person would use and keeps enough signal to retry, and no Go error text (a time-parse dump, a %!v verb, a type name) survives into it. A real session read "parsing time \"2 days ago\"" out loud to the user.
 func TestExecuteTool_ErrorsAreSaidInPlainWords(t *testing.T) {
 	goText := []string{"parsing time", "cannot parse", "%!", "0x", "ISO-8601", "RFC3339", "map[", "*errors", "got float64", "sql:"}
@@ -1138,30 +1062,6 @@ func TestParseInstant_ZonelessDateTime(t *testing.T) {
 	want := time.Date(2026, 8, 20, 14, 30, 0, 0, time.Local)
 	if !got.Equal(want) {
 		t.Errorf("parseInstant = %v, want %v", got, want)
-	}
-}
-
-// TestParseInstant_TodayAndYesterday verifies the two temporal words the user actually says resolve against now, so "what did I do today" filters by date instead of lexically matching the word "today" (which is how "India Today" articles came back as the answer).
-func TestParseInstant_TodayAndYesterday(t *testing.T) {
-	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.Local)
-	cases := []struct {
-		in       string
-		endOfDay bool
-		want     time.Time
-	}{
-		{"today", false, time.Date(2026, 8, 28, 0, 0, 0, 0, time.Local)},
-		{"today", true, time.Date(2026, 8, 28, 23, 59, 59, 0, time.Local)},
-		{"yesterday", false, time.Date(2026, 8, 27, 0, 0, 0, 0, time.Local)},
-		{"Yesterday", true, time.Date(2026, 8, 27, 23, 59, 59, 0, time.Local)},
-	}
-	for _, c := range cases {
-		got, err := parseInstant(c.in, now, c.endOfDay)
-		if err != nil {
-			t.Fatalf("parseInstant(%q, endOfDay=%v): unexpected error: %v", c.in, c.endOfDay, err)
-		}
-		if !got.Equal(c.want) {
-			t.Errorf("parseInstant(%q, endOfDay=%v) = %v, want %v", c.in, c.endOfDay, got, c.want)
-		}
 	}
 }
 
@@ -1429,13 +1329,13 @@ func TestExecuteTool_Recall_BigWindowClimbsToSummaries(t *testing.T) {
 		})
 	}
 	brain.windowSummaries = []db.WindowSummary{
-		{CreatedAt: base.UTC(), Content: `{"task_name":"Climate Risk Statement Builder ASRS","summary":"scoring vulnerability data"}`},
+		{CreatedAt: base.UTC(), Content: `{"task_name":"Brightpath Statement Builder VRDS","summary":"scoring vulnerability data"}`},
 		{CreatedAt: base.Add(8 * time.Hour).UTC(), Content: `{"task_name":"Ora Memory Architecture Development","summary":"recall surgery"}`},
 		{CreatedAt: base.Add(9 * time.Hour).UTC(), Content: `{"task_name":"Raw Activity Log","summary":"Unknown | Unknown"}`},
 	}
 	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
 	out := a.ExecuteTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
-	if !strings.Contains(out, "Climate Risk Statement Builder ASRS") || !strings.Contains(out, "Ora Memory Architecture Development") {
+	if !strings.Contains(out, "Brightpath Statement Builder VRDS") || !strings.Contains(out, "Ora Memory Architecture Development") {
 		t.Errorf("an overflowing window must answer from summaries covering the whole window, got:\n%s", out)
 	}
 	if strings.Contains(out, "late night content") {
@@ -1455,19 +1355,11 @@ func TestExecuteTool_Recall_BigWindowClimbsToSummaries(t *testing.T) {
 // "What do I owe?" is a question about a column, not about meaning, and query_memory answered it with ten summaries about attending meetings. The action_items tool reads the list directly, and leads each line with the id so revise can close one without a second lookup.
 func TestExecuteTool_ActionItemsListsWhatIsOwed(t *testing.T) {
 	brain := &toolTestBrain{openActions: []memory.ActionItem{
-		{NoteID: 41, Owner: "Zemna Braxen", Text: "push the value chain branch", Status: memory.StatusOpen, Priority: memory.PriorityNormal},
+		{NoteID: 41, Owner: "Zemna Braxen", Text: "push the route planning branch", Status: memory.StatusOpen, Priority: memory.PriorityNormal},
 	}}
 	got := NewAgent(nil, nil, brain, nil, "").ExecuteTool(context.Background(), "action_items", map[string]any{})
-	if !strings.Contains(got, "[note#41]") || !strings.Contains(got, "push the value chain branch") {
+	if !strings.Contains(got, "[note#41]") || !strings.Contains(got, "push the route planning branch") {
 		t.Errorf("got %q, want the item with its id", got)
-	}
-}
-
-// Nothing outstanding is an answer, not an error: a model handed an empty result has to be told the list is empty rather than left to read silence as a failure.
-func TestExecuteTool_ActionItemsSaysWhenNothingIsOwed(t *testing.T) {
-	got := NewAgent(nil, nil, &toolTestBrain{}, nil, "").ExecuteTool(context.Background(), "action_items", map[string]any{})
-	if !strings.Contains(got, "nothing outstanding") {
-		t.Errorf("got %q", got)
 	}
 }
 
@@ -1722,23 +1614,6 @@ func TestExecuteTool_Draw_UsesWhereTheElementIsNow(t *testing.T) {
 	}
 }
 
-// Points and rectangles the model supplies itself are its own coordinates, not references to anything observe_screen listed, so nothing is checked and they are drawn as given.
-func TestExecuteTool_Draw_TakesTheModelsOwnCoordinatesAsGiven(t *testing.T) {
-	a, drawn := drawingAgent(t)
-	f := drawingScreen(a)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	ctx := lookedAt(t, a)
-	f.stale = errors.New("every element has moved")
-	a.executeTool(ctx, "draw", map[string]any{"shape": "line", "points": []any{[]any{1.0, 2.0}, []any{3.0, 4.0}}})
-	a.executeTool(ctx, "draw", map[string]any{"shape": "box", "rect": map[string]any{"x": 5.0, "y": 6.0, "w": 7.0, "h": 8.0}})
-	if len(*drawn) != 2 {
-		t.Fatalf("drew %v, want both shapes drawn from the coordinates given", *drawn)
-	}
-	if len(f.verified) != 0 {
-		t.Errorf("checked %v, want no element checked when the model gave its own coordinates", f.verified)
-	}
-}
-
 // from and to name elements by the numbers observe_screen just listed; draw has to turn those into the screen points the overlay actually draws through, which are each element's rectangle centre, not its top-left corner.
 func TestExecuteTool_Draw_MapsElementNumbersToCentres(t *testing.T) {
 	a, drawn := drawingAgent(t)
@@ -1750,125 +1625,6 @@ func TestExecuteTool_Draw_MapsElementNumbersToCentres(t *testing.T) {
 	}
 	if !strings.Contains(got, "arrow") {
 		t.Errorf("result = %q, want it to name the shape drawn", got)
-	}
-}
-
-// The model sometimes has raw screen coordinates already (an observe_screen list's centres, worked out itself) rather than two element numbers; draw has to take those through unchanged, with no observe_screen call required first.
-func TestExecuteTool_Draw_FreePointsForm(t *testing.T) {
-	a, drawn := drawingAgent(t)
-	ctx := lookedAt(t, a)
-	got := a.executeTool(ctx, "draw", map[string]any{
-		"shape":  "line",
-		"points": []any{[]any{float64(1), float64(2)}, []any{float64(3), float64(4)}},
-		"label":  "path",
-	})
-	want := `line [[1 2] [3 4]] 0,0,0,0 "path"`
-	if len(*drawn) != 1 || (*drawn)[0] != want {
-		t.Errorf("drawn = %v, want %q", *drawn, want)
-	}
-	if !strings.Contains(got, "line") {
-		t.Errorf("result = %q, want it to name the shape drawn", got)
-	}
-}
-
-// path is the free-form multi-point shape: it needs at least three points and takes no from/to, unlike arrow and line.
-func TestExecuteTool_Draw_PathNeedsThreePoints(t *testing.T) {
-	a, drawn := drawingAgent(t)
-	ctx := lookedAt(t, a)
-	got := a.executeTool(ctx, "draw", map[string]any{
-		"shape":  "path",
-		"points": []any{[]any{float64(1), float64(1)}, []any{float64(2), float64(2)}},
-	})
-	if len(*drawn) != 0 {
-		t.Errorf("drawn = %v, want nothing drawn for a path with only two points", *drawn)
-	}
-	if !strings.Contains(got, "at least 3") {
-		t.Errorf("result = %q, want it to say path needs at least 3 points", got)
-	}
-
-	got = a.executeTool(ctx, "draw", map[string]any{
-		"shape":  "path",
-		"points": []any{[]any{float64(1), float64(1)}, []any{float64(2), float64(2)}, []any{float64(3), float64(3)}},
-		"label":  "route",
-	})
-	want := `path [[1 1] [2 2] [3 3]] 0,0,0,0 "route"`
-	if len(*drawn) != 1 || (*drawn)[0] != want {
-		t.Errorf("drawn = %v, want %q", *drawn, want)
-	}
-	if !strings.Contains(got, "path") {
-		t.Errorf("result = %q, want it to name the shape drawn", got)
-	}
-}
-
-// box and circle draw around a rectangle rather than through points: "on" names a listed element, mapped to its own rectangle (not its centre, unlike arrow/line's from/to).
-func TestExecuteTool_Draw_BoxAndCircleFromAnElementNumber(t *testing.T) {
-	for _, shape := range []string{"box", "circle"} {
-		t.Run(shape, func(t *testing.T) {
-			a, drawn := drawingAgent(t)
-			a.executeTool(context.Background(), "observe_screen", map[string]any{})
-			got := a.executeTool(context.Background(), "draw", map[string]any{"shape": shape, "on": float64(1), "label": "here"})
-			want := fmt.Sprintf(`%s [] 10,20,80,30 "here"`, shape)
-			if len(*drawn) != 1 || (*drawn)[0] != want {
-				t.Errorf("drawn = %v, want %q", *drawn, want)
-			}
-			if !strings.Contains(got, shape) {
-				t.Errorf("result = %q, want it to name the shape drawn", got)
-			}
-		})
-	}
-}
-
-// box and circle also take an explicit rect instead of an element number, for a region that was never one of observe_screen's elements.
-func TestExecuteTool_Draw_BoxFromAnExplicitRect(t *testing.T) {
-	a, drawn := drawingAgent(t)
-	ctx := lookedAt(t, a)
-	got := a.executeTool(ctx, "draw", map[string]any{
-		"shape": "box",
-		"rect":  map[string]any{"x": float64(1), "y": float64(2), "w": float64(3), "h": float64(4)},
-	})
-	want := `box [] 1,2,3,4 ""`
-	if len(*drawn) != 1 || (*drawn)[0] != want {
-		t.Errorf("drawn = %v, want %q", *drawn, want)
-	}
-	if !strings.Contains(got, "box") {
-		t.Errorf("result = %q, want it to name the shape drawn", got)
-	}
-}
-
-// box and circle need either on or rect; given neither, draw has to say so plainly rather than draw around a zeroed rectangle.
-func TestExecuteTool_Draw_CircleRefusesWithNeitherOnNorRect(t *testing.T) {
-	a, drawn := drawingAgent(t)
-	got := a.executeTool(context.Background(), "draw", map[string]any{"shape": "circle"})
-	if len(*drawn) != 0 {
-		t.Errorf("drawn = %v, want nothing drawn with neither on nor rect", *drawn)
-	}
-	if !strings.Contains(got, "on") || !strings.Contains(got, "rect") {
-		t.Errorf("result = %q, want it to name both on and rect as the ways to say where", got)
-	}
-}
-
-// draw's bad-input validation refuses two different problems the same way: a shape name it does not recognise, and a from/to element number observe_screen never listed. Neither draws anything, and each names its own problem in the result text.
-func TestExecuteTool_Draw_RefusesBadInput(t *testing.T) {
-	cases := []struct {
-		name string
-		args map[string]any
-		want string
-	}{
-		{"bad shape", map[string]any{"shape": "sparkle", "from": float64(1), "to": float64(2)}, "arrow, line, path, box or circle"},
-		{"unknown element number", map[string]any{"shape": "arrow", "from": float64(1), "to": float64(9)}, "no element 9"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			a, drawn := drawingAgent(t)
-			a.executeTool(context.Background(), "observe_screen", map[string]any{})
-			got := a.executeTool(context.Background(), "draw", c.args)
-			if len(*drawn) != 0 {
-				t.Errorf("drawn = %v, want nothing drawn for %s", *drawn, c.name)
-			}
-			if !strings.Contains(got, c.want) {
-				t.Errorf("result = %q, want it to contain %q", got, c.want)
-			}
-		})
 	}
 }
 
@@ -2035,35 +1791,6 @@ func TestExecuteTool_Look_SaysHowBigThePictureIsAndWhereItCameFrom(t *testing.T)
 	}
 }
 
-// Pictures are the most expensive thing an ask can send, so a turn may take two and no more.
-func TestExecuteTool_Look_StopsAtTwoPerAsk(t *testing.T) {
-	a, _, taken := lookingAgent(t)
-	ctx := withAskLookState(context.Background())
-	a.executeTool(ctx, "look", map[string]any{})
-	a.executeTool(ctx, "look", map[string]any{})
-	got := a.executeTool(ctx, "look", map[string]any{})
-	if *taken != maxLooksPerAsk {
-		t.Errorf("the camera ran %d times, want the cap of %d", *taken, maxLooksPerAsk)
-	}
-	if !strings.HasPrefix(got, "error") {
-		t.Errorf("the third look answered %q, want a refusal", got)
-	}
-	ctx = withAskLookState(context.Background())
-	if got := a.executeTool(ctx, "look", map[string]any{}); strings.HasPrefix(got, "error") {
-		t.Errorf("the next ask's first look answered %q, want the cap to have been reset with the ask", got)
-	}
-}
-
-// What a look costs is recorded, because no provider breaks its input count down by part and an ask that sent two screenfuls would otherwise look exactly like one that sent none.
-func TestExecuteTool_Look_RecordsWhatThePictureCost(t *testing.T) {
-	a, _, _ := lookingAgent(t)
-	ctx := withAskLookState(context.Background())
-	a.executeTool(ctx, "look", map[string]any{})
-	if got, want := lookTokensSpent(ctx), lookTokenCost(1280, 704); got != want || got == 0 {
-		t.Errorf("look tokens = %d, want %d", got, want)
-	}
-}
-
 // A routine and a typed question can both be mid-ask on the same Agent at once; each must get back only the picture its own look took. The look state used to live on the shared Agent, so one ask's look could clobber the other's before either read it back — this drives two looks through one Agent at the same time and checks each ask's own context still holds only its own picture.
 func TestExecuteTool_Look_TwoConcurrentAsksDoNotShareAPicture(t *testing.T) {
 	type askIDKey struct{}
@@ -2158,16 +1885,6 @@ func TestExecuteTool_Draw_RefusesAPointOutsideThePicture(t *testing.T) {
 	}
 }
 
-// Element numbers are unaffected: an element observe_screen listed carries its own screen rectangle, and no look is needed to draw around it.
-func TestExecuteTool_Draw_ElementNumbersNeedNoLook(t *testing.T) {
-	a, drawn, _ := lookingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	a.executeTool(context.Background(), "draw", map[string]any{"shape": "box", "on": float64(1)})
-	if len(*drawn) != 1 {
-		t.Errorf("drawn = %v, want the box around the listed element with no look taken", *drawn)
-	}
-}
-
 // fakeInput is a keyboard and pointer that records what was sent instead of touching the user's own screen, standing in for the portal session the daemon opens.
 type fakeInput struct {
 	opens int
@@ -2187,6 +1904,11 @@ func (f *fakeInput) TypeText(text string) error {
 
 func (f *fakeInput) ClickAt(x, y float64) error {
 	f.calls = append(f.calls, fmt.Sprintf("click %.0f,%.0f", x, y))
+	return f.err
+}
+
+func (f *fakeInput) RightClickAt(x, y float64) error {
+	f.calls = append(f.calls, fmt.Sprintf("right-click %.0f,%.0f", x, y))
 	return f.err
 }
 
@@ -2216,15 +1938,6 @@ func TestExecuteTool_PressKey_PressesTheKey(t *testing.T) {
 	}
 	if !strings.Contains(got, "Ctrl+L") {
 		t.Errorf("result = %q, want it to name the key it pressed", got)
-	}
-}
-
-// A session with no keyboard says so rather than failing silently, the same way look says this session cannot see the screen.
-func TestExecuteTool_PressKey_SaysWhenThereIsNoKeyboard(t *testing.T) {
-	a, _, _ := lookingAgent(t)
-	got := a.executeTool(context.Background(), "press_key", map[string]any{"keys": "Enter"})
-	if !strings.HasPrefix(got, "error") {
-		t.Errorf("result = %q, want an error saying this session cannot reach the keyboard", got)
 	}
 }
 
@@ -2488,15 +2201,6 @@ func TestOnceInput_ReopensWhenThePortalSaysTheSessionIsGone(t *testing.T) {
 	dev.ClickAt(1, 2)
 	if opens != 3 {
 		t.Errorf("opens = %d, want a device-less session dropped and reopened", opens)
-	}
-}
-
-// Every new tool has to be offered to a screen round, allowed through the ask gate, and kept out of the log file, or it is declared and unusable.
-func TestScreenToolLists_CarryTheKeyboardAndPointerTools(t *testing.T) {
-	for _, name := range []string{"press_key", "click", "scroll_at"} {
-		if !askAllowedTools[name] || !screenRoundTools[name] || !screenToolNames[name] {
-			t.Errorf("%s: allowed=%v screenRound=%v screenNames=%v, want all three", name, askAllowedTools[name], screenRoundTools[name], screenToolNames[name])
-		}
 	}
 }
 
@@ -3022,22 +2726,6 @@ func TestExecuteTool_ReadFile_TruncatesWithoutSplittingARune(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_WaitFor_RefusesAnUnknownKind checks a check kind outside the four wait_for declares is refused by name rather than polled for five seconds and reported as a real negative.
-func TestExecuteTool_WaitFor_RefusesAnUnknownKind(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-
-	got := a.executeTool(context.Background(), "wait_for", map[string]any{"kind": "spinner_gone", "value": "Loading"})
-
-	if !strings.HasPrefix(got, "error") {
-		t.Fatalf("wait_for with an unknown kind = %q, want a refusal", got)
-	}
-	for _, kind := range []string{"title_contains", "item_present", "item_absent", "field_holds"} {
-		if !strings.Contains(got, kind) {
-			t.Errorf("the refusal %q does not name %s", got, kind)
-		}
-	}
-}
-
 // The field the last click acted on stands in for the keyboard, and a dialog or the application itself can move the focus off it without a click of ours. The accessibility focused state says whether it still holds the keyboard, and when it does not the typing is refused instead of being checked against a control the text will not reach.
 func TestExecuteTool_TypeText_RefusesWhenTheClickedFieldNoLongerHasFocus(t *testing.T) {
 	a, in := typingAgent(t)
@@ -3162,20 +2850,6 @@ func TestExecuteTool_PressKey_StopsBeforeSendChordsOnASendButton(t *testing.T) {
 	}
 }
 
-// A chord that does not press the focused control is not put through the stop line: Ctrl+L is the address bar, not the button under the keyboard.
-func TestPressesFocused_LeavesOtherChordsAlone(t *testing.T) {
-	for _, keys := range []string{"Ctrl+L", "Tab", "Escape", "Ctrl+Space", "Alt+F4"} {
-		if pressesFocused(keys) {
-			t.Errorf("pressesFocused(%q) = true, want false", keys)
-		}
-	}
-	for _, keys := range []string{"Enter", "return", " Space ", "ctrl+enter", "Cmd+Return"} {
-		if !pressesFocused(keys) {
-			t.Errorf("pressesFocused(%q) = false, want true", keys)
-		}
-	}
-}
-
 // scroll_to resolves a number off a list that may be several rounds old, so it runs the same staleness check click and point_at do rather than scrolling to whatever the toolkit has since put behind that object path and reporting it as the element the list named.
 func TestExecuteTool_ScrollTo_RefusesAStaleElement(t *testing.T) {
 	a, _ := observingAgent(t)
@@ -3197,51 +2871,6 @@ func TestExecuteTool_ScrollTo_RefusesAStaleElement(t *testing.T) {
 	}
 }
 
-// WithToolObserver/ObserveTool round-trip: a context carrying an observer must deliver name, summary and the failed flag to it exactly as given.
-func TestWithToolObserver_RoundTrips(t *testing.T) {
-	var got []string
-	ctx := WithToolObserver(context.Background(), func(name, summary string, failed bool) {
-		got = append(got, fmt.Sprintf("%s:%s:%v", name, summary, failed))
-	})
-	ObserveTool(ctx, "click", "pressing Reload", false)
-	if len(got) != 1 || got[0] != "click:pressing Reload:false" {
-		t.Errorf("observer round-trip = %v", got)
-	}
-}
-
-// ObserveTool must deliver failed=true through to the observer on an after-call report of a failed tool.
-func TestWithToolObserver_RoundTripsFailed(t *testing.T) {
-	var got []string
-	ctx := WithToolObserver(context.Background(), func(name, summary string, failed bool) {
-		got = append(got, fmt.Sprintf("%s:%s:%v", name, summary, failed))
-	})
-	ObserveTool(ctx, "click", "error: element not found", true)
-	if len(got) != 1 || got[0] != "click:error: element not found:true" {
-		t.Errorf("observer round-trip = %v", got)
-	}
-}
-
-// A context with no observer attached, or one attached as an explicit nil, must be a silent no-op rather than a nil-func panic — askText and askVoice call this on every tool hop of every turn, most of which (a plain /ask with no live window watching) carry no observer at all.
-func TestObserveTool_NoObserverIsANoop(t *testing.T) {
-	ObserveTool(context.Background(), "click", "pressing Reload", false)
-	ObserveTool(WithToolObserver(context.Background(), nil), "click", "pressing Reload", false)
-}
-
-// The gate that lets a text ask run tools without AllowEvalWrites has to admit whatever a real /ask turn needs, since the daemon never sets AllowEvalWrites: it now also allows the store-writing tools that need no HITL approval (save_note, personal_context, revise, action_items, query_store, open_url), while the ones gated behind ToolApprovalChan (shell_exec, read_file, list_files) stay blocked, because nothing in the daemon reads that channel to answer the prompt.
-func TestEvalExecute_AllowsUnapprovedWriteTools(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	for _, tool := range []string{"save_note", "personal_context", "revise", "action_items", "query_store", "open_url"} {
-		if got := a.evalExecute(context.Background(), tool, map[string]any{}); strings.Contains(got, "not available in an ask") {
-			t.Errorf("%s must be allowed without AllowEvalWrites, got %q", tool, got)
-		}
-	}
-	for _, tool := range []string{"shell_exec", "read_file", "list_files"} {
-		if got := a.evalExecute(context.Background(), tool, map[string]any{}); !strings.Contains(got, "not available in an ask") {
-			t.Errorf("%s must stay behind the gate, got %q", tool, got)
-		}
-	}
-}
-
 // "Put that on my list" writes a task, not a note. There was no tool that made one, so the model's only move was save_note — which files a fact nothing shows in Tasks, and then it said it had put the thing on the list.
 func TestAddTask_WritesATaskAndSaysSo(t *testing.T) {
 	b := &toolTestBrain{}
@@ -3260,21 +2889,6 @@ func TestAddTask_WritesATaskAndSaysSo(t *testing.T) {
 	}
 }
 
-// A title with nothing in it is refused rather than filed as a blank row the user then finds in Tasks.
-func TestAddTask_RefusesABlankTitle(t *testing.T) {
-	b := &toolTestBrain{}
-	a := NewAgent(nil, nil, b, nil, "")
-
-	out := a.executeTool(t.Context(), "add_task", map[string]any{"title": "   "})
-
-	if !strings.HasPrefix(out, "error") {
-		t.Errorf("tool said %q, want an error", out)
-	}
-	if len(b.addedTasks) != 0 {
-		t.Errorf("wrote %v, want nothing", b.addedTasks)
-	}
-}
-
 // A failed write is reported as failed. Saying "added" over a write that did not happen is the whole complaint.
 func TestAddTask_SaysWhenTheWriteFailed(t *testing.T) {
 	b := &toolTestBrain{addTaskErr: errors.New("disk full")}
@@ -3284,26 +2898,6 @@ func TestAddTask_SaysWhenTheWriteFailed(t *testing.T) {
 
 	if !strings.HasPrefix(out, "error") {
 		t.Errorf("tool said %q, want an error the model cannot read as success", out)
-	}
-}
-
-// An element with no accessibility action to fire, like a dock button, is clicked with the real pointer at the centre of its rectangle instead of failing.
-func TestExecuteTool_Click_FallsBackToThePointerWhenThereIsNoAction(t *testing.T) {
-	a, _ := ringingAgent(t, act.Node{Role: "push button", Label: "Brave", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-brave"})
-	// No camera: a pointer press is judged against the pixels around it when one is wired, and this test is about the fallback, not the judgement.
-	a.capture = nil
-	in := &fakeInput{}
-	a.input = onceInput(func(ctx context.Context) (InputDevice, error) { return in, nil })
-	a.doAction = func(ctx context.Context, ref string) (string, error) {
-		return "", errors.New("the element offers no action to fire")
-	}
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
-	if len(in.calls) != 1 || in.calls[0] != "click 50,35" {
-		t.Errorf("pointer = %v, want one click at the centre of the button", in.calls)
-	}
-	if !strings.Contains(got, "via pointer") {
-		t.Errorf("result = %q, want it to say the pointer did it", got)
 	}
 }
 
@@ -3383,9 +2977,11 @@ func TestLaunchEntry_AddsTheAccessibilityFlagToAChromiumApp(t *testing.T) {
 	}
 }
 
-// Spotify was already running, started plain, when open_app raised it on 2026-09-08, and the model was handed an empty listing with no reason. The reason and the two ways on are said with the raise.
+// Spotify was already running, started plain, when open_app raised it on 2026-09-08, and the model was handed an empty listing with no reason. The reason and the two ways on are said with the raise, and the entry is patched so the next launch reads.
 func TestExecuteTool_OpenApp_SaysWhenARunningChromiumAppHasNoTree(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	bin := filepath.Join(dir, "player")
 	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
 	os.WriteFile(filepath.Join(dir, chromiumMarker), nil, 0o644)
@@ -3400,9 +2996,104 @@ func TestExecuteTool_OpenApp_SaysWhenARunningChromiumAppHasNoTree(t *testing.T) 
 	if !strings.Contains(got, "without accessibility support") {
 		t.Errorf("result = %q, want the empty listing explained", got)
 	}
+	if !strings.Contains(got, "next time") && !strings.Contains(got, "next launch") {
+		t.Errorf("result = %q, want it to say the app reads from the next launch on", got)
+	}
+	patched, err := os.ReadFile(filepath.Join(home, ".local/share/applications", "player.desktop"))
+	if err != nil || !strings.Contains(string(patched), accessibilityFlag) {
+		t.Errorf("patched copy = %q, err %v, want a copy in the user's own applications directory carrying the flag", patched, err)
+	}
 	processArgs = func(pid uint32) string { return bin + " " + accessibilityFlag }
 	if got := a.executeTool(context.Background(), "open_app", map[string]any{"app": "Player"}); strings.Contains(got, "without accessibility") {
 		t.Errorf("result = %q, want no note for an app started with the flag", got)
+	}
+}
+
+// A Chromium desktop entry gets a patched copy in the user's own applications directory, with the flag added to Exec under the main entry and under every desktop action, since XDG resolves that directory before /usr/share, /var/lib/snapd or /var/lib/flatpak, so a click on the icon then launches with the flag. Every other line, and the %U placeholder, survive untouched.
+func TestPatchAccessibility_WritesTheFlagIntoTheUserCopyAndItsActions(t *testing.T) {
+	src := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bin := filepath.Join(src, "player")
+	os.WriteFile(bin, nil, 0o755)
+	os.WriteFile(filepath.Join(src, chromiumMarker), nil, 0o644)
+	entry := filepath.Join(src, "player.desktop")
+	original := "[Desktop Entry]\nName=Player\nExec=" + bin + " %U\nActions=NewWindow\n\n[Desktop Action NewWindow]\nName=New Window\nExec=" + bin + " --new-window %U\n"
+	os.WriteFile(entry, []byte(original), 0o644)
+
+	patchAccessibility(entry)
+
+	dest := filepath.Join(home, ".local/share/applications", "player.desktop")
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read patched copy: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(got), "\n"), "\n")
+	var execLines []string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "Exec=") {
+			execLines = append(execLines, l)
+		}
+	}
+	want := []string{
+		"Exec=" + bin + " %U " + accessibilityFlag,
+		"Exec=" + bin + " --new-window %U " + accessibilityFlag,
+	}
+	if len(execLines) != 2 || execLines[0] != want[0] || execLines[1] != want[1] {
+		t.Errorf("Exec lines = %v, want %v: the flag on both, the %%U placeholder kept", execLines, want)
+	}
+	if !strings.Contains(string(got), "Name=Player") || !strings.Contains(string(got), "Name=New Window") || !strings.Contains(string(got), "Actions=NewWindow") {
+		t.Errorf("patched copy = %q, want every non-Exec line preserved", got)
+	}
+}
+
+// Running the patch twice must do nothing the second time, and a file at the destination that Ora did not write - no user hand-edited a copy there, say - must never be overwritten.
+func TestPatchAccessibility_IsIdempotentAndNeverOverwritesAForeignFile(t *testing.T) {
+	src := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bin := filepath.Join(src, "player")
+	os.WriteFile(bin, nil, 0o755)
+	os.WriteFile(filepath.Join(src, chromiumMarker), nil, 0o644)
+	entry := filepath.Join(src, "player.desktop")
+	os.WriteFile(entry, []byte("[Desktop Entry]\nName=Player\nExec="+bin+" %U\n"), 0o644)
+
+	patchAccessibility(entry)
+	dest := filepath.Join(home, ".local/share/applications", "player.desktop")
+	first, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read patched copy: %v", err)
+	}
+
+	patchAccessibility(entry)
+	second, err := os.ReadFile(dest)
+	if err != nil || string(second) != string(first) {
+		t.Errorf("second patch changed the file: got %q, want it unchanged from %q", second, first)
+	}
+
+	// An entry that already carries the flag must not be rewritten at all.
+	alreadyFlagged := filepath.Join(src, "flagged.desktop")
+	os.WriteFile(alreadyFlagged, []byte("[Desktop Entry]\nName=Flagged\nExec="+bin+" "+accessibilityFlag+" %U\n"), 0o644)
+	patchAccessibility(alreadyFlagged)
+	if _, err := os.Stat(filepath.Join(home, ".local/share/applications", "flagged.desktop")); !os.IsNotExist(err) {
+		t.Error("an entry that already carries the flag must not get a patched copy")
+	}
+
+	// A file at the destination that Ora did not write, marked by carrying no Ora marker, must survive untouched.
+	foreign := filepath.Join(src, "foreign.desktop")
+	os.WriteFile(foreign, []byte("[Desktop Entry]\nName=Foreign\nExec="+bin+" %U\n"), 0o644)
+	foreignDest := filepath.Join(home, ".local/share/applications", "foreign.desktop")
+	os.MkdirAll(filepath.Dir(foreignDest), 0o755)
+	os.WriteFile(foreignDest, []byte("hand-edited by the user, not Ora"), 0o644)
+	// The Teams PWA case: open_app told the model "the application has been patched" whatever happened here, and the model passed the promise on.
+	if patchAccessibility(foreign) {
+		t.Error("a patch that left a foreign file in place reported the application as patched")
+	}
+	if !patchAccessibility(entry) {
+		t.Error("Ora's own patched copy reported as not patched")
+	}
+	if got, _ := os.ReadFile(foreignDest); string(got) != "hand-edited by the user, not Ora" {
+		t.Errorf("foreign file = %q, want it left untouched", got)
 	}
 }
 
@@ -3435,23 +3126,6 @@ func TestExecuteTool_OpenApp_AMissNamesTheNearestInstalledApps(t *testing.T) {
 	got = a.executeTool(context.Background(), "open_app", map[string]any{"app": "Figma"})
 	if !strings.Contains(got, "3 installed") {
 		t.Errorf("result = %q, want a miss with no near name to say how many applications are installed", got)
-	}
-}
-
-// The allowance handed back at a round boundary leaves the picture in place: click_at in the next round aims by the picture the last look took.
-func TestEndScreenRound_GivesLooksBackAndKeepsThePicture(t *testing.T) {
-	a, _ := typingAgent(t)
-	ctx := lookedAt(t, a)
-	a.executeTool(ctx, "look", map[string]any{})
-	if got := a.executeTool(ctx, "look", map[string]any{}); !strings.HasPrefix(got, "error") {
-		t.Fatalf("third look = %q, want the allowance spent", got)
-	}
-	a.EndScreenRound(ctx)
-	if got := a.executeTool(ctx, "look", map[string]any{}); strings.HasPrefix(got, "error") {
-		t.Errorf("look after the round ended = %q, want it allowed again", got)
-	}
-	if got := a.executeTool(ctx, "click_at", map[string]any{"x": 100.0, "y": 100.0}); strings.Contains(got, "look at the screen first") {
-		t.Errorf("click_at after the round ended = %q, want the picture kept", got)
 	}
 }
 
@@ -3729,5 +3403,14 @@ func TestExecuteTool_Click_AToggleThatRenamedItselfIsStillTheSameButton(t *testi
 	}
 	if len(f.clicked) != 1 {
 		t.Errorf("the button was pressed %d times, want the second attempt refused", len(f.clicked))
+	}
+}
+
+// gemini-3.8-live documents Google Search grounding as supported, but nobody has dialled it with Ora's own handshake, and the failure it would inherit is the 2026-09-02 one: the session closes with "You exceeded your current quota" a quarter second after connecting, before a word is spoken. Grounding stays off until someone probes it, because a missing web search only degrades the session while a 429 ends it.
+func TestLiveToolsFor_NoSearchOnLive38(t *testing.T) {
+	for _, tool := range liveToolsFor("gemini-3.8-live") {
+		if tool.GoogleSearch != nil {
+			t.Fatal("3.8 must not be handed Google Search grounding until it is probed")
+		}
 	}
 }

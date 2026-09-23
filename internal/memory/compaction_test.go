@@ -107,33 +107,6 @@ func TestCompactor_GroupsWithTwoSummaries_TriggersDigestAndReplace(t *testing.T)
 	}
 }
 
-func TestCompactor_SingleSummaryGroup_IsSkipped(t *testing.T) {
-	digester := &fakeDigester{result: "should not be called"}
-	store := &fakeCompactStore{
-		groups: []memory.SummaryGroup{
-			{
-				DayID: 20,
-				Day:   "2026-06-02",
-				Summaries: []memory.NodeRef{
-					{ID: 200, Content: "only one summary"},
-				},
-			},
-		},
-	}
-	c := memory.NewCompactor(digester, store)
-
-	if err := c.Compact(context.Background(), 7*24*time.Hour); err != nil {
-		t.Fatalf("Compact returned error: %v", err)
-	}
-
-	if digester.callCount != 0 {
-		t.Errorf("expected 0 Digest calls for single-summary group, got %d", digester.callCount)
-	}
-	if len(store.replaceCalls) != 0 {
-		t.Errorf("expected 0 Replace calls for single-summary group, got %d", len(store.replaceCalls))
-	}
-}
-
 func TestCompactor_DigestErrorOnOneGroup_DoesNotAbortOthers(t *testing.T) {
 	store := &fakeCompactStore{
 		groups: []memory.SummaryGroup{

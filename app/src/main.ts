@@ -405,7 +405,6 @@ function msLeft(n: Notice, now: number): number | undefined {
   return Math.max(0, at - now);
 }
 
-
 /** The buttons a fresh notice carries, so the card is dealt with where it appears. Input: the notice. Output: the row's HTML — exactly the actions the notice named, in that order, and an empty row when it named none. Each button also names its notice in an aria-label, because "Not happening" read on its own says nothing about what is not happening.
  * The daemon decides which buttons a notice can answer: a task carries the full Done/snooze/Open set, the stale-task question carries its own three, and a moment with nothing to complete carries only Open (see openOnlyActions and noticeActions in internal/proactive). The card used to fall back to the full set for any notice that named none, which is how "Transcribing meeting" came to offer Done and three snoozes and answer "Could not do that" when one was pressed. */
 function noticeButtonsHtml(n: Notice): string {

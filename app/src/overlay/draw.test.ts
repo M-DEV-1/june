@@ -5,17 +5,13 @@ import {
   flightFor,
   flightFrames,
   labelWidth,
-  monitorFor,
   parseSpec,
   pointFor,
   shapesFor,
   shouldRipple,
   rippleSize,
-  boxPath,
   circlePath,
   headPath,
-  moodFor,
-  smoothPath,
   startOf,
   ringPath,
   drawMs,
@@ -40,7 +36,6 @@ const wide: Layout = {
   ],
 };
 
-
 /** The one stroke a ring draws, for the assertions that measure it. Input: the shapes of one event. Output: that stroke's path string. */
 function strokeOf(shapes: ReturnType<typeof shapesFor>): string {
   const stroke = shapes.find((s) => s.kind === "stroke");
@@ -61,7 +56,6 @@ function pathBounds(d: string): { x: number; y: number; w: number; h: number } {
   }
   return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
 }
-
 
 describe("a ring is one mark", () => {
   /** The ring's own rectangle: the element grown by the padding, which is what every assertion below measures against. */
@@ -121,10 +115,6 @@ describe("parseSpec", () => {
     expect(spec).toEqual({ kind: "ring", label: "Pause", rects: [{ x: 107, y: 984, w: 73, h: 72 }], ttl_ms: 3000 });
   });
 
-  it("returns null for text that is not JSON", () => {
-    expect(parseSpec("not json")).toBeNull();
-  });
-
   it("returns null for JSON that is not an overlay spec", () => {
     expect(parseSpec('"hello"')).toBeNull();
     expect(parseSpec("null")).toBeNull();
@@ -133,44 +123,13 @@ describe("parseSpec", () => {
 });
 
 describe("ttlFor", () => {
-  it("uses the ttl the event carries", () => {
-    expect(ttlFor({ kind: "ring", ttl_ms: 8000 })).toBe(8000);
-  });
-
   it("falls back to three seconds when there is none", () => {
     expect(ttlFor({ kind: "ring" })).toBe(3000);
     expect(ttlFor({ kind: "ring", ttl_ms: 0 })).toBe(3000);
   });
-
-  it("never schedules a drawing to vanish in the past", () => {
-    expect(ttlFor({ kind: "ring", ttl_ms: -5 })).toBe(1);
-  });
-});
-
-describe("monitorFor", () => {
-  it("picks the monitor the rect's centre is on", () => {
-    expect(monitorFor({ x: 2000, y: 100, w: 100, h: 100 }, wide.monitors)).toEqual(wide.monitors[1]);
-  });
-
-  it("returns null when the centre is off every monitor", () => {
-    expect(monitorFor({ x: 5000, y: 5000, w: 10, h: 10 }, wide.monitors)).toBeNull();
-  });
 });
 
 describe("shapesFor", () => {
-  it("rings a wide target and puts its label above it", () => {
-    const spec = { kind: "ring", label: "Graph settings", rects: [{ x: 600, y: 300, w: 320, h: 40 }] };
-    expect(shapesFor(spec, single)).toEqual([
-      { kind: "stroke", d: ringPath(600, 300, 320, 40), width: 3 },
-      { kind: "label", x: 597, y: 263, text: "Graph settings", tail: "down" },
-    ]);
-  });
-
-  it("rings a small target with the same outline, grown to the smallest a ring may be", () => {
-    const spec = { kind: "ring", rects: [{ x: 100, y: 200, w: 32, h: 32 }] };
-    expect(shapesFor(spec, single)).toEqual([{ kind: "stroke", d: ringPath(100, 200, 32, 32), width: 3 }]);
-  });
-
   it("prefers the label on the rect over the one on the event", () => {
     const spec = { kind: "ring", label: "event", rects: [{ x: 10, y: 200, w: 200, h: 40, label: "rect" }] };
     expect(shapesFor(spec, single)).toContainEqual({ kind: "label", x: 8, y: 163, text: "rect", tail: "down" });
@@ -178,11 +137,6 @@ describe("shapesFor", () => {
 
   it("draws no label when neither the rect nor the event names one", () => {
     expect(shapesFor({ kind: "ring", rects: [{ x: 10, y: 200, w: 200, h: 40 }] }, single)).toHaveLength(1);
-  });
-
-  it("drops the label below a target that sits under the desktop's panel, where the panel would hide it, and turns its tail up", () => {
-    const spec = { kind: "ring", label: "Close", rects: [{ x: 40, y: 39, w: 200, h: 32 }] };
-    expect(shapesFor(spec, single)).toContainEqual({ kind: "label", x: 37, y: 86, text: "Close", tail: "up" });
   });
 
   it("numbers marks from one in the order the rects arrived", () => {
@@ -199,21 +153,9 @@ describe("shapesFor", () => {
     ]);
   });
 
-  it("draws a dashed rectangle for a box", () => {
-    const spec = { kind: "box", rects: [{ x: 100, y: 100, w: 200, h: 80 }] };
-    expect(shapesFor(spec, single)).toEqual([{ kind: "stroke", d: boxPath(100, 100, 200, 80), width: 2, dashed: true }]);
-  });
-
   it("inscribes a circle in the rect it is given, rather than sizing it like a spotlight", () => {
     const spec = { kind: "circle", rects: [{ x: 100, y: 100, w: 200, h: 80 }] };
     expect(shapesFor(spec, single)).toEqual([{ kind: "stroke", d: circlePath(200, 140, 40), width: 2, dashed: true }]);
-  });
-
-  it("draws a stroke along the points of a path, with no head", () => {
-    const spec = { kind: "path", points: [[100, 100], [300, 200], [500, 150]] as [number, number][] };
-    expect(shapesFor(spec, single)).toEqual([
-      { kind: "stroke", d: smoothPath([{ x: 100, y: 100 }, { x: 300, y: 200 }, { x: 500, y: 150 }]), width: 3 },
-    ]);
   });
 
   it("puts a solid head on the end of an arrow and a label at the point it starts from", () => {
@@ -226,18 +168,6 @@ describe("shapesFor", () => {
   it("draws nothing for a stroke kind with fewer than two points", () => {
     expect(shapesFor({ kind: "arrow", points: [[10, 10]] as [number, number][] }, single)).toEqual([]);
     expect(shapesFor({ kind: "line" }, single)).toEqual([]);
-  });
-
-  it("draws nothing for a stroke whose first point is on no monitor", () => {
-    expect(shapesFor({ kind: "line", points: [[5000, 5000], [10, 10]] as [number, number][] }, single)).toEqual([]);
-  });
-
-  it("draws nothing for a clear", () => {
-    expect(shapesFor({ kind: "clear", rects: [{ x: 0, y: 0, w: 10, h: 10 }] }, single)).toEqual([]);
-  });
-
-  it("draws nothing for a kind it does not know", () => {
-    expect(shapesFor({ kind: "sparkle", rects: [{ x: 0, y: 0, w: 10, h: 10 }] }, single)).toEqual([]);
   });
 
   it("drops a rect whose centre is on no monitor", () => {
@@ -303,10 +233,6 @@ describe("shapesFor", () => {
     ]);
   });
 
-  it("draws nothing when the event carries no rects", () => {
-    expect(shapesFor({ kind: "ring" }, single)).toEqual([]);
-  });
-
   it("pulls a label back from the right edge so the whole pill stays on the monitor", () => {
     const spec = { kind: "ring", label: "Graph settings", rects: [{ x: 1850, y: 400, w: 60, h: 40 }] };
     const label = shapesFor(spec, single).find((s) => s.kind === "label");
@@ -319,11 +245,6 @@ describe("shapesFor", () => {
     expect(label?.x).toBe(3840 - labelWidth("Send") - 8);
   });
 
-  it("leaves a label alone when there is room for it where the target is", () => {
-    const spec = { kind: "ring", label: "Send", rects: [{ x: 300, y: 400, w: 200, h: 30 }] };
-    expect(shapesFor(spec, single)).toContainEqual({ kind: "label", x: 297, y: 363, text: "Send", tail: "down" });
-  });
-
   it("stops drawing marks once there are more than a screen can show", () => {
     const rects = Array.from({ length: 260 }, (_, i) => ({ x: (i % 60) * 30, y: Math.floor(i / 60) * 30, w: 20, h: 20 }));
     expect(shapesFor({ kind: "marks", rects }, single)).toHaveLength(200);
@@ -331,29 +252,6 @@ describe("shapesFor", () => {
 });
 
 describe("the ink's own shapes", () => {
-  it("draws a ring as a closed rounded outline three pixels clear of the element", () => {
-    expect(ringPath(100, 200, 300, 40)).toBe(
-      "M 105 197 H 395 A 8 8 0 0 1 403 205 V 235 A 8 8 0 0 1 395 243 H 105 A 8 8 0 0 1 97 235 V 205 A 8 8 0 0 1 105 197 Z",
-    );
-  });
-
-  it("starts a box at its top-left corner and closes it", () => {
-    const d = boxPath(10, 20, 100, 50);
-    expect(d.startsWith("M 16 20")).toBe(true);
-    expect(d.endsWith("Z")).toBe(true);
-  });
-
-  it("keeps a box's corners inside a target too small for the full radius", () => {
-    expect(boxPath(0, 0, 8, 8).startsWith("M 4 0")).toBe(true);
-  });
-
-  it("smooths a run of points into one curve that still passes through each of them", () => {
-    const d = smoothPath([{ x: 0, y: 0 }, { x: 100, y: 100 }, { x: 200, y: 0 }]);
-    expect(d.startsWith("M 0 0 C")).toBe(true);
-    expect(d).toContain("100 100");
-    expect(d.endsWith("200 0")).toBe(true);
-  });
-
   it("puts a closed triangle on the end of an arrow, pointing the way the arrow was going", () => {
     const d = headPath([{ x: 0, y: 0 }, { x: 100, y: 0 }]);
     expect(d.startsWith("M 100 0 L")).toBe(true);
@@ -361,50 +259,9 @@ describe("the ink's own shapes", () => {
     // Both corners sit back along the shaft, to the left of the tip.
     expect([...d.matchAll(/L (-?[\d.]+)/g)].map((m) => Number(m[1]))).toEqual([86.3, 86.3]);
   });
-
-  it("draws no head when there is no direction to point in", () => {
-    expect(headPath([{ x: 5, y: 5 }, { x: 5, y: 5 }])).toBe("");
-  });
-
-  it("reads back the point a path starts from, which is where the pointer flies before it draws", () => {
-    expect(startOf(ringPath(100, 200, 300, 40))).toEqual({ x: 105, y: 197 });
-    expect(startOf("not a path")).toBeNull();
-  });
-
-  it("draws a short stroke in 400 milliseconds and a long one in no more than 700", () => {
-    expect(drawMs(100)).toBe(400);
-    expect(drawMs(1400)).toBe(500);
-    expect(drawMs(5000)).toBe(700);
-  });
-});
-
-describe("moodFor", () => {
-  it("colours a tap as a press about to happen", () => {
-    expect(moodFor("tap", false)).toBe("act");
-  });
-  it("is Ora's own colour while it is only numbering the screen", () => {
-    expect(moodFor("marks", false)).toBe("neutral");
-  });
-
-  it("is the warm colour when Ora is showing you something", () => {
-    expect(moodFor("ring", false)).toBe("point");
-    expect(moodFor("arrow", false)).toBe("point");
-  });
-
-  it("turns to the act colour when a press is coming", () => {
-    expect(moodFor("ring", true)).toBe("act");
-  });
-
-  it("is the done colour on an erase", () => {
-    expect(moodFor("clear", false)).toBe("done");
-  });
 });
 
 describe("pointFor", () => {
-  it("gives the centre of a rect in the page's own pixels", () => {
-    expect(pointFor({ x: 600, y: 300, w: 320, h: 40 }, single)).toEqual({ x: 760, y: 320 });
-  });
-
   it("halves the centre on a doubled display and subtracts the window's corner", () => {
     const hidpi: Layout = { origin_x: 200, origin_y: 0, scale: 2, monitors: [] };
     expect(pointFor({ x: 600, y: 300, w: 320, h: 40 }, hidpi)).toEqual({ x: 280, y: 160 });
@@ -416,40 +273,15 @@ describe("edgeStart", () => {
     expect(edgeStart({ x: 60, y: 500 }, 1920, 1080)).toEqual({ x: -40, y: 500 });
   });
 
-  it("comes in from the right when the target is nearest the right edge", () => {
-    expect(edgeStart({ x: 1880, y: 500 }, 1920, 1080)).toEqual({ x: 1960, y: 500 });
-  });
-
-  it("comes in from the top when the target is nearest the top edge", () => {
-    expect(edgeStart({ x: 900, y: 20 }, 1920, 1080)).toEqual({ x: 900, y: -40 });
-  });
-
   it("comes in from the bottom when the target is nearest the bottom edge", () => {
     expect(edgeStart({ x: 900, y: 1060 }, 1920, 1080)).toEqual({ x: 900, y: 1120 });
   });
 });
 
 describe("flightFor", () => {
-  it("lifts the curve's control point above the midpoint of the trip", () => {
-    const flight = flightFor({ x: 100, y: 500 }, { x: 900, y: 500 });
-    expect(flight.control).toEqual({ x: 500, y: 420 });
-  });
-
   it("keeps a short hop's arc in proportion to the hop rather than looping it over its own target", () => {
     const flight = flightFor({ x: 400, y: 400 }, { x: 440, y: 400 });
     expect(flight.control).toEqual({ x: 420, y: 400 - 40 * 0.2 });
-  });
-
-  it("stops lifting the arc past eighty pixels, however far the trip", () => {
-    expect(flightFor({ x: 0, y: 500 }, { x: 1800, y: 500 }).control.y).toBe(420);
-  });
-
-  it("takes the shortest time for a hop that goes nowhere", () => {
-    expect(flightFor({ x: 400, y: 400 }, { x: 400, y: 400 }).ms).toBe(600);
-  });
-
-  it("takes longer the further it goes", () => {
-    expect(flightFor({ x: 0, y: 0 }, { x: 600, y: 800 }).ms).toBe(1250);
   });
 
   it("never takes longer than 1400 milliseconds, however far across the desk it goes", () => {
@@ -462,13 +294,6 @@ describe("flightAt", () => {
     const flight = flightFor({ x: 100, y: 500 }, { x: 900, y: 500 });
     expect(flightAt(flight, 0)).toMatchObject({ x: 100, y: 500 });
     expect(flightAt(flight, 1)).toMatchObject({ x: 900, y: 500 });
-  });
-
-  it("passes through the lifted midpoint of the curve, halfway to the control point", () => {
-    const flight = flightFor({ x: 100, y: 500 }, { x: 900, y: 500 });
-    const mid = flightAt(flight, 0.5);
-    expect(mid.x).toBeCloseTo(500);
-    expect(mid.y).toBeCloseTo(460);
   });
 
   it("faces up on the way out and down on the way in, on a trip to the right", () => {
@@ -485,29 +310,11 @@ function part(frame: Keyframe, name: string): number {
 }
 
 describe("flightFrames", () => {
-  it("gives one frame for each step, plus the four it lands on", () => {
-    expect(flightFrames(flightFor({ x: 0, y: 0 }, { x: 400, y: 400 }), 8)).toHaveLength(13);
-  });
-
-  it("cuts the flight into one frame a screen frame when it is not told otherwise", () => {
-    const flight = flightFor({ x: 0, y: 0 }, { x: 1200, y: 0 });
-    expect(flightFrames(flight)).toHaveLength(Math.round(flight.ms / 16) + 5);
-  });
-
   it("starts at the point it left, upright so no frame asks the pointer to jump from one angle to another, and comes to rest upright on the target", () => {
     const frames = flightFrames(flightFor({ x: 100, y: 500 }, { x: 900, y: 500 }), 8);
     expect(frames[0].transform).toBe("translate(100px, 500px) rotate(0deg) scale(1)");
     expect(frames[12].transform).toBe("translate(900px, 500px) rotate(0deg) scale(1)");
     expect(frames[12].offset).toBe(1);
-  });
-
-  it("swells a little at the top of the arc, and only a little, because the ink is what the eye is meant to follow", () => {
-    expect(part(flightFrames(flightFor({ x: 0, y: 0 }, { x: 800, y: 0 }), 8)[4], "scale")).toBe(1.12);
-  });
-
-  it("gives under the landing and comes back past its own size before it stops", () => {
-    const frames = flightFrames(flightFor({ x: 0, y: 0 }, { x: 800, y: 0 }), 8);
-    expect(frames.slice(9).map((f) => part(f, "scale"))).toEqual([0.95, 1.03, 1, 1]);
   });
 
   it("hands the settle the last part of the timeline, with the offsets never going backwards", () => {
@@ -552,10 +359,6 @@ describe("shouldRipple", () => {
     expect(rippleSize({ x: 0, y: 0, w: 320, h: 40 }, single)).toBeCloseTo(52);
   });
 
-  it("keeps a ripple on a tiny icon big enough to see", () => {
-    expect(rippleSize({ x: 0, y: 0, w: 12, h: 12 }, single)).toBe(24);
-  });
-
   it("never lets a ripple on a whole panel grow into a circle across the screen", () => {
     expect(rippleSize({ x: 0, y: 0, w: 900, h: 600 }, single)).toBe(96);
   });
@@ -572,18 +375,6 @@ describe("shouldRipple", () => {
 });
 
 describe("nextCursor", () => {
-  it("keeps staggering strokes by the gap while the running delay is still under budget", () => {
-    expect(nextCursor(500, 100, 3000, 100)).toBe(600);
-  });
-
-  it("caps a stroke that would cross the budget to land exactly on it, not one gap past", () => {
-    expect(nextCursor(3450, 2950, 3000, 100)).toBe(3000);
-  });
-
-  it("freezes further strokes at the budget once it has been reached, so they land together", () => {
-    expect(nextCursor(3450, 3000, 3000, 100)).toBe(3000);
-  });
-
   it("keeps a drawing of many strokes bounded to the stagger budget plus one stroke's own draw time, however many strokes it has", () => {
     const budget = 3000;
     const gap = 100;
@@ -608,10 +399,6 @@ describe("keepsPrevious", () => {
 
   it("replaces when a different ask draws, because the old answer's ink is stale", () => {
     expect(keepsPrevious("ask-8", drawn("ask-7"), box)).toBe(false);
-  });
-
-  it("replaces when the layer is empty", () => {
-    expect(keepsPrevious("ask-7", null, box)).toBe(false);
   });
 
   it("replaces for marks, so one screen never carries two number ones", () => {

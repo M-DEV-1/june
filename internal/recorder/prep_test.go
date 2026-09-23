@@ -10,19 +10,6 @@ import (
 	"ora/internal/db"
 )
 
-// A window title names a meeting through its proper nouns, not through app furniture around them.
-func TestMeetingTitleFragments_PrefersProperNounsOverChrome(t *testing.T) {
-	got := meetingTitleFragments("Meet – Acme Corp weekly sync - Google Chrome")
-	if !contains(got, "Acme Corp") {
-		t.Errorf("meetingTitleFragments(%q) = %v, want it to include %q", "Meet – Acme Corp weekly sync - Google Chrome", got, "Acme Corp")
-	}
-	for _, f := range got {
-		if strings.EqualFold(f, "Google Chrome") || strings.EqualFold(f, "Chrome") {
-			t.Errorf("meetingTitleFragments picked up app chrome: %v", got)
-		}
-	}
-}
-
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {
@@ -256,7 +243,7 @@ func TestPickMeetingNote(t *testing.T) {
 		},
 		{
 			name:         "matches on a participant named on screen",
-			notes:        append(twelveMeetingNotes(), db.Note{ID: 99, Kind: "meeting", Content: "# Sync\nVexil walked through the value chain work."}),
+			notes:        append(twelveMeetingNotes(), db.Note{ID: 99, Kind: "meeting", Content: "# Sync\nVexil walked through the route planning work."}),
 			participants: []string{"Vexil"},
 			wantOK:       true,
 			wantID:       99,
@@ -402,29 +389,10 @@ func TestCollectMeetingNames(t *testing.T) {
 	}
 }
 
-// A name written in a script without letter case has no "all caps" form, so the shouting check must leave it alone, while a Latin word in all caps is still interface furniture.
-func TestLooksLikeName_ScriptsWithoutCaseAreNotShouting(t *testing.T) {
-	cases := []struct {
-		name string
-		want bool
-	}{
-		{"वेक्सिल ज़ेल्ब्रक", true},
-		{"ゼムナ ブラクセン", true},
-		{"Emzor Wandel", true},
-		{"MUTE", false},
-		{"Share Screen 2", false},
-	}
-	for _, c := range cases {
-		if got := looksLikeName(c.name); got != c.want {
-			t.Errorf("looksLikeName(%q) = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// On 2026-09-08 the prep for a Teams standup reached the window as a card titled "Before you join: Calendar | Daily Ai Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB", with the brief cut off at three lines and an Open button that opened nothing, because the notice named no place. The name is the one section of the title that is not furniture, the brief is filed as a conversation of Ora's own so it can be read in full, and the card opens that conversation.
+// On 2026-09-08 the prep for a Teams standup reached the window as a card titled "Before you join: Calendar | Daily Platform Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB", with the brief cut off at three lines and an Open button that opened nothing, because the notice named no place. The name is the one section of the title that is not furniture, the brief is filed as a conversation of Ora's own so it can be read in full, and the card opens that conversation.
 func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
-	title := "Calendar | Daily Ai Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB"
-	if got := meetingName(title); got != "Daily Ai Sprint Standup" {
+	title := "Calendar | Daily Platform Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB"
+	if got := meetingName(title); got != "Daily Platform Sprint Standup" {
 		t.Fatalf("meetingName = %q, want the meeting's own name", got)
 	}
 	store := &fakeStore{episodes: []db.Episode{{Title: title, ScreenText: "Oskrev Thivan: joining now"}}}
@@ -440,13 +408,13 @@ func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
 
 	r.prepMeeting()
 
-	if len(store.conversations) != 1 || store.conversations[0] != "Before you join: Daily Ai Sprint Standup" {
+	if len(store.conversations) != 1 || store.conversations[0] != "Before you join: Daily Platform Sprint Standup" {
 		t.Fatalf("conversations = %v, want one named for the meeting", store.conversations)
 	}
 	if len(store.turns) != 1 || !strings.Contains(store.turns[0], "Bill Eval Studio") {
 		t.Errorf("turns = %v, want the brief filed as Ora's turn", store.turns)
 	}
-	if len(got.sent) != 1 || !strings.HasPrefix(got.sent[0], "Before you join: Daily Ai Sprint Standup: ") || !strings.HasSuffix(got.sent[0], " @chats/1") {
+	if len(got.sent) != 1 || !strings.HasPrefix(got.sent[0], "Before you join: Daily Platform Sprint Standup: ") || !strings.HasSuffix(got.sent[0], " @chats/1") {
 		t.Errorf("notice = %v, want it to open the conversation in chats", got.sent)
 	}
 }

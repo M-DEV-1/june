@@ -268,12 +268,21 @@ var brainRequiredTools = map[string]bool{
 // Every path that runs a tool comes through here — the ask loop, the sub-task loop, the computer-use job and the live voice session — which is why the record is written at this one point rather than at each of them. Before this the live session recorded nothing at all, so the tools it used most were invisible to anything reading the store.
 func (a *Agent) executeTool(ctx context.Context, name string, args map[string]any) string {
 	start := time.Now()
-	result := a.runTool(ctx, name, args)
+	var result string
+	if busy := a.screenBusy(ctx, name); busy != "" {
+		result = toolError(busy)
+	} else {
+		result = a.runTool(ctx, name, args)
+	}
+	outcome := toolOutcome(result)
+	if outcome == OutcomeOK {
+		a.holdScreen(ctx, name)
+	}
 	if rec := recorderFrom(ctx); rec != nil {
 		rec(ToolRecord{
 			Name:     name,
 			Args:     toolActivitySummary(name, args),
-			Outcome:  toolOutcome(result),
+			Outcome:  outcome,
 			Result:   resultSummary(name, result),
 			Output:   util.UTF8Bytes(result, toolOutputCap),
 			TurnID:   turnIDFrom(ctx),
@@ -390,15 +399,15 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if a.capture == nil {
 			return toolError("this session cannot see the screen")
 		}
-		if !looksLeft(ctx) {
-			return toolError(fmt.Sprintf("I have already looked at the screen %d times this turn; answer from what those pictures showed", looksCap(ctx)))
-		}
 		shot, err := a.capture(ctx)
 		if err != nil {
 			slog.Warn("look failed", "error", err)
 			return toolError("could not take a picture of the screen: " + err.Error())
 		}
-		recordLook(ctx, shot)
+		// There is no count of looks: a video, a loading page or a window redrawing itself changes with nothing done in between, and a screen nobody touched does not, so the only look turned away is one at the very picture the model already has.
+		if !recordLook(ctx, shot) {
+			return unchangedLookMarker + ", so the picture you already have is what is showing; act on it, or wait_for a change"
+		}
 		// A channel that cannot be handed a picture with the tool result is given a road of its own here: the Live voice session takes its tool results as text, so without this it took a picture it was never shown and every coordinate it named afterwards was refused. Nothing changes for a text ask, which has no sender and collects the picture through takeLook instead.
 		deliverPicture(ctx, shot)
 		return fmt.Sprintf("here is the picture, %d wide and %d high. Its top-left corner is %d,%d on the screen and one of its pixels is %.2f screen pixels, so point at things in it with its own coordinates and draw will put them back on the screen for you.", shot.W, shot.H, shot.X, shot.Y, shot.Scale)
@@ -584,7 +593,8 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 			}
 		}
 		if !known && !blindConsent(questionFrom(ctx)) && !goAllowed(ctx) {
-			return fmt.Sprintf("Stopped before typing: the keyboard is held by %s %q in %q, which is no place to type. Click the field first, or say \"yes, go ahead\" and I will type where the focus is.", focused.Role, focused.Label, window)
+			// press_key is named because it is the only way in that the model itself can take. The other two ways past this line — the phrase in the question and the go field on the request — are both the user's, and a model that has hit this mid-task cannot reach either. On 2026-09-20 a GNOME Clocks run was refused here twice, told to ask for something it could not ask for, and found press_key on its own eighty seconds later.
+			return fmt.Sprintf("Stopped before typing: the keyboard is held by %s %q in %q, which is no place to type. Click the field first. If this window draws its own fields and publishes none of them, send the characters one at a time with press_key instead.", focused.Role, focused.Label, window)
 		}
 		if secretField(focused, window) {
 			return fmt.Sprintf("Stopped before typing into %s %q in %q, I never type passwords, card numbers or other secrets, so say it yourself once the field is focused.", focused.Role, focused.Label, window)

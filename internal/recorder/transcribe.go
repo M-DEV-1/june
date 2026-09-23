@@ -222,6 +222,10 @@ func parseSegments(out, speaker string, offset time.Duration) []Segment {
 	return dropHallucinations(segs)
 }
 
+// cannedLine matches a segment nobody in the meeting said: the video-channel sign-offs and copyright credits whisper invents over silence, and the recorded greeting of a call that went to voicemail. The recording of 2026-09-16 11:29 was 23 seconds of exactly that, a copyright credit and a "no part of this recording may be reproduced" line on the microphone side and a voicemail greeting on the call side, and it got minutes because the no-speech check only saw that the transcript was not empty. The wordings are the ones found in the transcripts on this machine up to 2026-09-17: 21 transcript lines across 12 recordings match them, 17 on the microphone side and 4 on the call side, and none of the 21 is anything a person on the call said.
+// A matching segment is dropped whole. Whisper cuts a segment every few seconds, so the phrases are held to wordings a person in a work call does not say, such as "subscribe to my channel" rather than "subscribe".
+var cannedLine = regexp.MustCompile(`(?i)thanks? (you )?for watching|subscribe (to (my|our|the) channel|for more videos)|like and subscribe|hit the bell icon|copyright ©|all rights reserved|no part of this recording may be reproduced|leave (a|your) message after the (tone|beep)|when you have finished,? please hang up`)
+
 // Thresholds for the repeat rules below, all counted in one stream.
 // minLoopRun is how many identical segments in a row it takes before the run is a loop rather than someone saying the same short thing twice.
 // minScatteredRepeats is how many times one sentence has to appear across the whole stream before it is treated as invented.
@@ -423,16 +427,16 @@ func breaksTurn(turn []Segment, next Segment) bool {
 // primingPromptBudget caps the priming prompt, in characters. Whisper keeps only the last whisperMaxContext tokens of the text it is primed with, and English averages a little over three characters per token, so a prompt longer than this has its front silently cut off — which is exactly where the participant names sit.
 const primingPromptBudget = 500
 
-// acronymPattern matches an all-capitals token — INFORM, GRDI, ASRS, ESG. These are exactly the words speech recognition mangles ("ND game" for INFORM) and exactly the words a meeting's own screens are full of.
+// acronymPattern matches an all-capitals token — ORVEC, KDNI, VRDS, OPX. These are exactly the words speech recognition mangles ("or vec" for ORVEC) and exactly the words a meeting's own screens are full of.
 var acronymPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,5}\b`)
 
-// properNounPattern matches a run of two or more capitalised words — "Climate Risk Studio", "Acme Essentials", "Vexil Quorin". One capitalised word on its own is almost always a sentence start, so the run has to be at least two.
+// properNounPattern matches a run of two or more capitalised words — "Brightpath Studio", "Acme Basics", "Vexil Quorin". One capitalised word on its own is almost always a sentence start, so the run has to be at least two.
 var properNounPattern = regexp.MustCompile(`\b[A-Z][a-z]+(?: [A-Z][a-z0-9]+)+\b`)
 
 // chatSenderPattern matches a name written the way a chat window writes it: at the start of its own line, immediately before a colon, as in "Vexil Quorin: ok sure ping me". The line anchor is what keeps it off the labels an app puts mid-sentence ("Industry Division: Health Care"), which look identical without it.
 var chatSenderPattern = regexp.MustCompile(`(?m)^\s*([A-Z][a-z]+(?: [A-Z][a-z]+| [A-Z]{2,4})+):`)
 
-// chromeWords is the capitalised furniture every browser, app window and meeting-call toolbar carries regardless of what the meeting is about. A candidate term or roster name is thrown away if any of its words is in here, which is what keeps "Insights Settings Private Branches" and "Datepicker All" out of a prompt about climate risk scoring, and "Mute", "Share Screen" or "Raise Hand" out of a participant list.
+// chromeWords is the capitalised furniture every browser, app window and meeting-call toolbar carries regardless of what the meeting is about. A candidate term or roster name is thrown away if any of its words is in here, which is what keeps "Insights Settings Private Branches" and "Datepicker All" out of a prompt about route planning scoring, and "Mute", "Share Screen" or "Raise Hand" out of a participant list.
 // ponytail: a hand-written word list, extended when a new app's furniture shows up in a prompt or a roster. The principled version would rank a word by how unusual it is for this user's screens rather than by a fixed list, which needs a corpus of episodes from outside the meeting window to compare against.
 var chromeWords = map[string]bool{
 	"about": true, "actions": true, "activity": true, "add": true, "admit": true, "all": true,

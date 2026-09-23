@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ora/internal/brain"
@@ -63,7 +64,7 @@ func (c *LiveConfig) Update(fn func(*config.OraConfig)) error {
 	return c.save(*c.cfg)
 }
 
-// Brains builds the /brains handler. GET answers the brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would. An id outside the known ones is 400 and changes nothing, and so is an id whose provider has no backend in internal/brain, with the reason in the body. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
+// Brains builds the /brains handler. GET answers the brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would; with "default": false as well it only remembers the model, and the default brain stays where it was. An id outside the known ones is 400 and changes nothing, and so is an id whose provider has no backend in internal/brain, with the reason in the body. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
 func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -73,6 +74,8 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 			var req struct {
 				Brain string `json:"brain"`
 				Model string `json:"model"`
+				// Default is false only when the body says so: the Settings model chip sends it to store a model without moving the default brain, and the header's brain picker leaves it out.
+				Default *bool `json:"default"`
 			}
 			if !DecodeJSON(w, r, &req) {
 				return
@@ -82,16 +85,24 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 				http.Error(w, "unknown brain: "+req.Brain, http.StatusBadRequest)
 				return
 			}
-			// A brain internal/brain has no code to answer with is refused here, not merely greyed out in the list GET returns. Accepting it persisted the provider, FromConfig then failed every call with ErrNoBackend, and WithCodexFallback answered each one on Codex — which is the "answering on a provider they did not choose" the ErrNoBackend change was written to stop, moved from Gemini to Codex.
+			// A brain internal/brain has no code to answer with is refused here, not merely greyed out in the list GET returns. Accepting it persisted the provider and FromConfig then failed every call to it with ErrNoBackend, so every duty pinned to it was answered by whichever provider the router offered next, which is a provider the user did not choose.
 			if note := brain.NoBackendNote(provider); note != "" {
 				http.Error(w, "cannot pick "+req.Brain+": "+note, http.StatusBadRequest)
 				return
 			}
-			// The router answers a question with the picked brain first from this moment, not from the next daemon start.
-			agent.SetPreferredProvider(provider)
+			makeDefault := req.Default == nil || *req.Default
+			if makeDefault {
+				// The router answers a question with the picked brain first from this moment, not from the next daemon start.
+				agent.SetPreferredProvider(provider)
+			}
 			err := cfg.Update(func(c *config.OraConfig) {
-				c.Brain.Provider = provider
-				c.Brain.Model = req.Model
+				if makeDefault {
+					c.Brain.Provider = provider
+				}
+				// A model picked for the default brain is the model the daemon calls it with.
+				if c.Brain.Provider == provider {
+					c.Brain.Model = req.Model
+				}
 				// Get hands out shallow copies that share this map, and a GET may be reading one of them right now, so the map is replaced rather than written into: a Go map read and written at once is a fatal runtime error, not a race a lock elsewhere could tolerate.
 				models := maps.Clone(c.BrainModels)
 				if models == nil {
@@ -156,20 +167,27 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 	// Both rosters come out of the cache rather than off the command line: `agy models` takes about three and a half seconds, and this route runs on every settings render and again after every pick.
 	ollamaModels := []string{}
 	if has("ollama") {
-		ollamaModels = ollamaCache.get(ollamaList)
+		ollamaModels, _ = ollamaCache.get(ollamaList)
 	}
 	agyList := []string{}
 	if has("agy") {
-		agyList = agyCache.get(agyModels)
+		agyList, _ = agyCache.get(agyModels)
+	}
+	// The roster is also the Antigravity login's health check. `agy models` fails the same UNAUTHENTICATED eligibility check an ask does when the login has expired, and agyModels records that refusal. Measured on 2026-09-15, when the picker drew the row as available for hours while every ask to it failed. A read that failed any other way, or that nobody has made yet, is not evidence, so the row keeps its binary-presence answer.
+	agySignedOut := has("agy") && agyRefused.Load()
+	agyNote := ""
+	if agySignedOut {
+		agyNote = "the Antigravity login has expired: run agy in a terminal to sign in again"
 	}
 
 	list := []BrainView{
 		{
-			ID:       "antigravity",
-			Name:     "Antigravity",
-			SignedIn: has("agy"),
-			Models:   agyList,
-			Note:     "Antigravity runs models under the Google plan the user already pays for, so a duty answered here costs nothing against the metered API key. The list is whatever `agy models` reports, which on this plan is more than Gemini — Claude and GPT-OSS are in it too.",
+			ID:         "antigravity",
+			Name:       "Antigravity",
+			SignedIn:   has("agy") && !agySignedOut,
+			Models:     agyList,
+			LimitsNote: agyNote,
+			Note:       "Antigravity runs models under the Google plan the user already pays for, so a duty answered here costs nothing against the metered API key. The list is whatever `agy models` reports, which on this plan is more than Gemini — Claude and GPT-OSS are in it too.",
 		},
 		{
 			ID:       "gemini",
@@ -187,12 +205,11 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 			Note:     "OpenAI endorses using a Codex login from open-source harnesses, so Ora may call it under the plan the user already pays for.",
 		},
 		{
-			ID:         "grok",
-			Name:       "Grok",
-			SignedIn:   has("grok"),
-			Models:     []string{},
-			Note:       "The Grok command line exposes no model choice, so there is nothing to pick here.",
-			LimitsNote: brain.GrokNote(),
+			ID:       "grok",
+			Name:     "Grok",
+			SignedIn: has("grok"),
+			Models:   []string{},
+			Note:     "The Grok command line exposes no model choice, so there is nothing to pick here. Its plan allowance is read from the same billing endpoint its own /usage reads, using the login the CLI already wrote.",
 		},
 		{
 			ID:       "ollama",
@@ -232,6 +249,10 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 		snap, ok := limitsFor(ctx, list[i].ID)
 		if !ok {
 			continue
+		}
+		// The provider itself refused this login when its usage was last read, which it can only have done for a credential that no longer works. The row says so and cannot be picked, rather than waiting for the first question to die.
+		if snap.SignedOut {
+			list[i].SignedIn = false
 		}
 		if len(snap.Limits) > 0 {
 			list[i].Limits = snap.Limits
@@ -311,14 +332,23 @@ func plainField(path, object, field string) string {
 	return value
 }
 
-// agyModels asks the Antigravity command line which models the user's plan can call. Output: the model ids in the order it lists them, or an empty list when the command fails or reports none.
+// agyRefused says the last `agy models` run was refused with UNAUTHENTICATED, which is the one failure that means the Antigravity login is gone. agyModels writes it; brainList reads it.
+var agyRefused atomic.Bool
+
+// agyModels asks the Antigravity command line which models the user's plan can call, and records in agyRefused whether it refused the login. Output: the model ids in the order it lists them, or an empty list when the command fails or reports none.
 // The output is two columns, the id and a human label — "gemini-3.8-flash-high     Gemini 3.8 Flash (High)" — with no header row, so every non-blank line's first field is an id. The roster is read live rather than hardcoded because it is the user's own plan that decides what is in it, and it grows.
 func agyModels() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), agyModelsTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "agy", "models").Output()
-	if err != nil {
-		slog.Warn("could not read the Antigravity model roster", "error", err)
+	cmd := exec.CommandContext(ctx, "agy", "models")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	// UNAUTHENTICATED is a gRPC status code rather than prose, so it is not part of any model id or label.
+	refused := strings.Contains(string(out)+stderr.String(), "UNAUTHENTICATED")
+	agyRefused.Store(refused)
+	if err != nil || refused {
+		slog.Warn("could not read the Antigravity model roster", "error", err, "refused", refused)
 		return []string{}
 	}
 	// Every line is "id\tLabel"; the ids carry the effort agy will run at, as a -high, -medium or -low suffix, so picking a model here is also picking the effort.

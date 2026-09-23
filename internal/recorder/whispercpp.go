@@ -22,23 +22,34 @@ import (
 const (
 	whisperCPPBinaryName = "whisper-cli"
 	whisperCPPModelName  = "ggml-medium.bin"
+	// whisperVADModelName is the Silero voice-activity model whisper.cpp loads with --vad. It is optional: without it the decoder is handed the whole stream, as it was before.
+	whisperVADModelName = "ggml-silero-v6.2.0.bin"
 )
 
-// whisperCPPBinary returns the path to the whisper.cpp build: $ORA_WHISPER_CPP if set, otherwise <dataDir>/whispercpp/whisper-cli, but only when the model is present beside it.
-func whisperCPPBinary(dataDir string) (string, error) {
-	dir := filepath.Join(dataDir, "whispercpp")
-	bin := filepath.Join(dir, whisperCPPBinaryName)
-	if p := os.Getenv("ORA_WHISPER_CPP"); p != "" {
-		bin = p
-		dir = filepath.Dir(p)
-	}
+// WhisperCPPBinary returns the path to the whisper.cpp build: $ORA_WHISPER_CPP if set, otherwise <dataDir>/whispercpp/whisper-cli, but only when the model is present beside it. The error names the exact path of each missing file, which is also what ora doctor prints.
+func WhisperCPPBinary(dataDir string) (string, error) {
+	bin := whisperCPPPath(dataDir)
+	model := filepath.Join(filepath.Dir(bin), whisperCPPModelName)
 	if info, err := os.Stat(bin); err != nil || info.IsDir() {
-		return "", fmt.Errorf("no whisper.cpp build at %s: put whisper-cli and its model there", bin)
+		return "", fmt.Errorf("no whisper-cli at %s, and it needs %s beside it", bin, model)
 	}
-	if _, err := os.Stat(filepath.Join(dir, whisperCPPModelName)); err != nil {
-		return "", fmt.Errorf("the whisper.cpp build at %s is missing %s beside it", bin, whisperCPPModelName)
+	if _, err := os.Stat(model); err != nil {
+		return "", fmt.Errorf("no %s at %s, beside whisper-cli", whisperCPPModelName, model)
 	}
 	return bin, nil
+}
+
+// WhisperVADModel returns where the Silero voice-activity model is looked for: beside whisper-cli, so in $ORA_WHISPER_CPP's directory when that is set and in <dataDir>/whispercpp otherwise.
+func WhisperVADModel(dataDir string) string {
+	return filepath.Join(filepath.Dir(whisperCPPPath(dataDir)), whisperVADModelName)
+}
+
+// whisperCPPPath returns where whisper-cli is looked for, whether or not it is there: $ORA_WHISPER_CPP if set, otherwise <dataDir>/whispercpp/whisper-cli.
+func whisperCPPPath(dataDir string) string {
+	if p := os.Getenv("ORA_WHISPER_CPP"); p != "" {
+		return p
+	}
+	return filepath.Join(dataDir, "whispercpp", whisperCPPBinaryName)
 }
 
 // whisperCPPArgs returns the flags that point whisper-cli at its model and its GPU, or nil when no model sits beside the binary — which is how a test's bare stub script gets run without flags it would not understand.
@@ -50,9 +61,15 @@ func whisperCPPArgs(bin string) []string {
 	if _, err := os.Stat(model); err != nil {
 		return nil
 	}
-	args := []string{"-m", model}
+	// -l auto, because whisper-cli's own default is -l en and that is not a preference: told the audio is English, it prints [NON-ENGLISH SPEECH] for every stretch that is not, and those lines are dropped as markers. The Hindi call on the evening of 16 September 2026 reached the minutes as an empty transcript that way — 456 of 461 lines in a ten-minute slice were that marker — and the write-up said nobody spoke. Auto-detection transcribes the same audio properly. --translate is not added with it: on that slice it went back to printing the marker.
+	args := []string{"-m", model, "-l", "auto"}
 	if d := config.LoadConfig().Transcribe.GPUDevice; d > 0 {
 		args = append(args, "-dev", strconv.Itoa(d))
+	}
+	// Voice activity detection, when its model is installed. Whisper decodes in 30-second windows and carries what it decoded into the next one, so a stream that is mostly quiet teaches it that this stream is not speech: on the 16 September 2026 standup it printed "[waves crashing]" for 23 minutes and never transcribed the 51 seconds of the user's own update sitting in the middle, and the minutes said he did not speak. Cutting the stream to the spans Silero calls speech recovered the whole update, and made the run 29 seconds instead of 83.
+	// The decoder thresholds and the priming prompt do not help here: the same file transcribes to nothing at 40x gain, with -sns, and unprimed, while the 60 seconds around the speech transcribe perfectly untouched. The silence around the speech is the problem, so the fix is to stop handing it over.
+	if vad := filepath.Join(filepath.Dir(bin), whisperVADModelName); exists(vad) {
+		args = append(args, "--vad", "-vm", vad)
 	}
 	return args
 }

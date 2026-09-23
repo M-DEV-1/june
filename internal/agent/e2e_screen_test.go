@@ -36,6 +36,19 @@ func flatPNG() []byte {
 	return buf.Bytes()
 }
 
+// shadePNG is a small picture of one flat shade, so a test can hand the screen a different picture each time it needs one to have changed.
+func shadePNG(shade byte) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	for i := range img.Pix {
+		img.Pix[i] = shade
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
+
 // fakeDesktop stands in for the machine's screen: which application is in front, what it is called, and the elements it publishes. A test moves it between tool calls the way a real application moves under a model that is working on it — a page scrolls, a toggle renames itself, a click starts audio and the window title grows a suffix.
 type fakeDesktop struct {
 	app, title string
@@ -58,9 +71,6 @@ func (d *fakeDesktop) node(ref string) *act.Node {
 	}
 	return nil
 }
-
-// window is what currentWindow reads, in the "app · title" shape the real one produces.
-func (d *fakeDesktop) window() string { return d.app + " · " + d.title }
 
 // desktopAgent wires an Agent to a fakeDesktop through every seam the screen loop crosses: the accessibility walk, the per-element verify, the extents read, the action fire, the pointer, the keyboard and the camera. Input: the desktop to drive. Output: the agent.
 // The verify goes through tracker.VerifyAgainst, the same decision the bus-backed read makes, so a test here cannot pass against a rule this file invented.
@@ -117,6 +127,11 @@ func (i *desktopInput) TypeText(text string) error {
 
 func (i *desktopInput) ClickAt(x, y float64) error {
 	i.d.clicks = append(i.d.clicks, fmt.Sprintf("point %.0f,%.0f", x, y))
+	return nil
+}
+
+func (i *desktopInput) RightClickAt(x, y float64) error {
+	i.d.clicks = append(i.d.clicks, fmt.Sprintf("right-point %.0f,%.0f", x, y))
 	return nil
 }
 
@@ -288,6 +303,72 @@ func TestE2E_ScreenTasksThatUsedToStall(t *testing.T) {
 				}
 			},
 		},
+		{
+			// 2026-09-20T20:19-20:21, GNOME Clocks. The window publishes its four tabs and nothing else: the timer's digits are drawn by the app, so the accessibility tree is identical before and after every click on them. Two looks in, the third was refused with "I have already looked at the screen 2 times this turn" and the remaining 24 calls of the run were blind. The allowance is given back by the ask loop at a model round, and the three CLI brains (claude, codex, agy) have no round boundary this side of the tool server, so on those it was never given back at all.
+			// The same run was told "(unchanged since the last look" six times, which is true of the tree and says nothing about the screen, and was refused twice by type_text for a list item holding the keyboard without being told that press_key reaches a window like this one.
+			name: "a window that draws its own fields",
+			desktop: func() *fakeDesktop {
+				d := &fakeDesktop{app: "org.gnome.clocks", title: "", pixels: flatPNG()}
+				d.items = []act.Node{
+					{Role: "tab", Label: "World", X: 500, Y: 40, W: 60, H: 30, Ref: "world", Showing: true},
+					{Role: "tab", Label: "Alarms", X: 570, Y: 40, W: 60, H: 30, Ref: "alarms", Showing: true},
+					{Role: "tab", Label: "Stopwatch", X: 640, Y: 40, W: 80, H: 30, Ref: "stopwatch", Showing: true},
+					{Role: "tab", Label: "Timer", X: 730, Y: 40, W: 60, H: 30, Ref: "timer", Showing: true},
+				}
+				return d
+			},
+			run: func(t *testing.T, a *Agent, ctx context.Context, d *fakeDesktop) []string {
+				// An unlabelled list item is what really held the keyboard once the Timer tab was open.
+				holdsKeyboard(t, act.Node{Role: "list item", Label: "", Ref: "digits"}, true)
+				return []string{
+					a.executeTool(ctx, "look", map[string]any{}),
+					a.executeTool(ctx, "click", map[string]any{"n": 4.0}),
+					a.executeTool(ctx, "look", map[string]any{}),
+					a.executeTool(ctx, "observe_screen", map[string]any{}),
+					a.executeTool(ctx, "press_key", map[string]any{"keys": "Down"}),
+					a.executeTool(ctx, "look", map[string]any{}),
+					a.executeTool(ctx, "type_text", map[string]any{"text": "15"}),
+				}
+			},
+			check: func(t *testing.T, d *fakeDesktop, listing string, said []string) {
+				for i, got := range []string{said[0], said[2], said[5]} {
+					if strings.Contains(got, "already looked") {
+						t.Errorf("look %d was refused: %q; a run that acts between looks must get a picture each time", i+1, got)
+					}
+				}
+				if !strings.Contains(said[3], "accessibility tree") {
+					t.Errorf("the repeat listing = %q, want it to say the tree is all it read, so an unchanged tree is not read as an action that did nothing", said[3])
+				}
+				if !strings.Contains(said[6], "press_key") {
+					t.Errorf("the typing refusal = %q, want it to name press_key, the way into a window that publishes no field", said[6])
+				}
+			},
+		},
+		{
+			// 49 of the 91 looks filed between 2026-09-16 and 09-23 were refused with "I have already looked at the screen 2 times this turn", and the runs that were refused looked again and again. A count of looks says nothing about whether there is anything new to see: a video, a page still loading or a window that redraws itself changes with no action in between, and a screen nobody touched does not. The only look worth refusing is one at the very picture the model already has.
+			name: "a look is refused only when the screen is the picture already seen",
+			desktop: func() *fakeDesktop {
+				return &fakeDesktop{app: "Brave Browser", title: "Video", pixels: shadePNG(10)}
+			},
+			run: func(t *testing.T, a *Agent, ctx context.Context, d *fakeDesktop) []string {
+				said := []string{a.executeTool(ctx, "look", map[string]any{}), a.executeTool(ctx, "look", map[string]any{})}
+				for shade := byte(20); shade <= 50; shade += 10 {
+					d.pixels = shadePNG(shade)
+					said = append(said, a.executeTool(ctx, "look", map[string]any{}))
+				}
+				return said
+			},
+			check: func(t *testing.T, d *fakeDesktop, listing string, said []string) {
+				if !strings.Contains(said[1], "has not changed") {
+					t.Errorf("a second look at the same screen = %q, want it told the screen has not changed since the picture it has", said[1])
+				}
+				for i, got := range append([]string{said[0]}, said[2:]...) {
+					if !strings.Contains(got, "here is the picture") {
+						t.Errorf("look %d at a changed screen = %q, want a picture", i+1, got)
+					}
+				}
+			},
+		},
 	}
 
 	for _, c := range cases {
@@ -377,4 +458,30 @@ func toolCallResponse(name string, args map[string]any) string {
 		panic(err)
 	}
 	return `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":` + string(call) + `}]}}]}`
+}
+
+// 2026-09-19: a Spotify job and a WhatsApp ask drove the screen at the same time, each switching windows under the other, and the ask ended on the Spotify window it had never meant to touch. One task drives the screen at a time: a second one is told who has it, and gets it once the first has ended.
+func TestE2E_TwoTasksDoNotFightOverTheScreen(t *testing.T) {
+	pressSettle, tapLead = 0, 0
+	d := &fakeDesktop{app: "Brave Browser", title: "WhatsApp", pixels: flatPNG()}
+	d.items = []act.Node{{Role: "push button", Label: "Play", X: 10, Y: 10, W: 20, H: 20, Ref: "play", Showing: true}}
+	a := desktopAgent(t, d)
+
+	jobCtx, endJob := context.WithCancel(WithQuestion(withAskLookState(context.Background()), "play a song on Spotify"))
+	a.executeTool(jobCtx, "observe_screen", map[string]any{})
+	if got := a.executeTool(jobCtx, "click", map[string]any{"n": 1.0}); strings.HasPrefix(got, "error") {
+		t.Fatalf("the first task's click = %q", got)
+	}
+
+	askCtx := WithQuestion(withAskLookState(context.Background()), "open the WhatsApp group")
+	a.executeTool(askCtx, "observe_screen", map[string]any{})
+	got := a.executeTool(askCtx, "click", map[string]any{"n": 1.0})
+	if !strings.Contains(got, "play a song on Spotify") {
+		t.Errorf("a second task's click while the first drives the screen = %q, want a refusal naming the task that has it", got)
+	}
+
+	endJob()
+	if got := a.executeTool(askCtx, "click", map[string]any{"n": 1.0}); strings.HasPrefix(got, "error") {
+		t.Errorf("the click once the first task ended = %q, want it to go ahead", got)
+	}
 }

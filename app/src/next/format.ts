@@ -12,6 +12,7 @@ import type {
   Task,
   Turn,
 } from "./api";
+import type { JobRun } from "./store";
 
 /** Renders a Date as a 24-hour clock time in this window's own style, "HH:MM". The one place hhmm and noticeActionMessage below both turn a Date into a clock face, so the two never drift apart on padding or separators. */
 function hhmmFromDate(d: Date): string {
@@ -291,6 +292,8 @@ export function meetingWho(
 
 /** One line of the minutes as it should be drawn. kind is "h" for one of the minutes' own headings, "bullet" for a list item, "label" for a line that names the items indented under it, and "text" for a paragraph. lead is the bold phrase the daemon opens some bullets with — "You said", "Said to you", a person's name — which names whose part the line is and is set in medium weight ahead of the text rather than left inside it. */
 export type MinutesLine = {
+  /** Which row of the minutes this line was read from, as "minutes-line-N". Identity in the source text rather than a position in the output, so a line keeps its id when the lines around it are filtered — which is what the Meetings page's outline scrolls a heading by and what every list of these is keyed on. */
+  id: string;
   kind: "h" | "bullet" | "label" | "text";
   text: string;
   lead?: string;
@@ -334,7 +337,8 @@ export function minutesLines(minutes: string, title = ""): MinutesLine[] {
         : bullet && (nested || body.length <= LONG_BULLET)
           ? "bullet"
           : "text";
-    out.push(lead ? { kind, text: body, lead } : { kind, text: body });
+    const id = `minutes-line-${at}`;
+    out.push(lead ? { id, kind, text: body, lead } : { id, kind, text: body });
   }
   return out;
 }
@@ -489,7 +493,7 @@ export function meetingTasks(tasks: Task[], meeting: Meeting): Task[] {
   });
 }
 
-/** The meeting a noticed task was raised in. Input: every meeting the daemon knows about and the task. Output: the meeting whose name and day match the task's detail line ("Lodestone X growth strategy briefing, 2026-08-31"), or undefined for a task the user typed in and for one whose meeting is no longer on file. The match is meetingTasks' own, asked the other way round, so a task and its meeting agree on which of them belongs to the other. */
+/** The meeting a noticed task was raised in. Input: every meeting the daemon knows about and the task. Output: the meeting whose name and day match the task's detail line ("Meridian statement pattern analysis, 2026-09-01"), or undefined for a task the user typed in and for one whose meeting is no longer on file. The match is meetingTasks' own, asked the other way round, so a task and its meeting agree on which of them belongs to the other. */
 export function taskMeeting(meetings: Meeting[], task?: Task): Meeting | undefined {
   if (!task || task.source !== "noticed") return undefined;
   return meetings.find((m) => meetingTasks([task], m).length > 0);
@@ -552,4 +556,69 @@ export function modelEffort(id: string): { model: string; effort: string } {
   if (tail === "high" || tail === "medium" || tail === "low")
     return { model: id.slice(0, at), effort: tail };
   return { model: id, effort: "" };
+}
+
+/** One block of the minutes as it is drawn: a heading, a paragraph, a label naming the list beneath it, or a run of bullets gathered into one list. */
+export type MinutesBlock = { id: string; kind: "h" | "label" | "text"; text: string; lead?: string } | { id: string; kind: "list"; items: MinutesLine[] };
+
+/** Gathers the lines the minutes reader produced into the blocks a document is made of, so a run of bullets becomes one list rather than a paragraph each. Input: the lines. Output: headings and paragraphs as they came, and each run of bullets as one list. */
+export function minutesBlocks(lines: MinutesLine[]): MinutesBlock[] {
+  const out: MinutesBlock[] = [];
+  for (const line of lines) {
+    const last = out[out.length - 1];
+    if (line.kind === "bullet") {
+      if (last && last.kind === "list") last.items.push(line);
+      else out.push({ id: line.id, kind: "list", items: [line] });
+      continue;
+    }
+    out.push(line.lead ? { id: line.id, kind: line.kind, text: line.text, lead: line.lead } : { id: line.id, kind: line.kind, text: line.text });
+  }
+  return out;
+}
+
+/** Where an arrow key lands in a list. Input: the index selected now (-1 when nothing is), how many rows there are, and the key. Output: the new index, clamped to the list; an empty list stays at -1. */
+export function step(current: number, length: number, key: string): number {
+  if (length === 0) return -1;
+  const delta = key === "ArrowDown" ? 1 : key === "ArrowUp" ? -1 : 0;
+  if (delta === 0) return current;
+  if (current < 0) return delta > 0 ? 0 : length - 1;
+  return Math.min(length - 1, Math.max(0, current + delta));
+}
+
+/** How far through a job is, in the two numbers the model itself supplied. Input: the job. Output: "step 3 of about 6", or "step 3" before a plan arrived with an estimate on it, or "" before the first step.
+ * Read against the estimate rather than against the step budget, because the budget is twice the estimate and nobody chose either as a limit: the job asks whether to carry on when it runs out (see actjob's outOfRoomQuestion), so a number the user reads as a countdown to failure would be a lie.
+ */
+export function stepLine(job: JobRun): string {
+  if (job.steps.length === 0) return "";
+  const step = `step ${job.steps.length}`;
+  return job.estimate ? `${step} of about ${job.estimate}` : step;
+}
+
+/** What a limit's own window reads as in sentence case: "5-hour" for the ones Codex reports in hours, "Daily", "Weekly" and "Monthly" for the named ones, and whatever the provider called it, capitalised, for anything else. Input: the window as the daemon sent it ("5h", "daily", "weekly", "monthly", or a provider's own name). Output: the label. */
+export function windowLabel(window: string): string {
+  if (!window) return "Limit";
+  // Antigravity meters two model families against separate allowances and names its windows "<family>-<window>": gemini-5h, 3p-weekly. Without this the picker drew "Gemini-5h" and "3p-weekly" raw, and "3p" says nothing about what it covers.
+  const family = /^(gemini|3p)-(.+)$/i.exec(window);
+  if (family) {
+    const who = family[1].toLowerCase() === "gemini" ? "Gemini" : "Other models";
+    return `${who} · ${windowLabel(family[2])}`;
+  }
+  const hours = /^(\d+)h$/i.exec(window);
+  if (hours) return `${hours[1]}-hour`;
+  if (window === "daily") return "Daily";
+  if (window === "weekly") return "Weekly";
+  if (window === "monthly") return "Monthly";
+  const word = window.replace(/_/g, " ");
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/** Keys for a list whose items carry no id of their own — the paragraphs split out of a day's page, the quotes behind an answer. Input: the items and the text that says which item this is. Output: one entry per item, in the same order, each carrying the item and a key: the text itself the first time it appears and the text with its occurrence number after that, so two identical paragraphs still get a key each. The text is the identity, so an item keeps its key when the list grows at either end, which is what the array index does not do. */
+export function keyed<T>(items: T[], text: (item: T) => string): { key: string; item: T }[] {
+  const seen = new Map<string, number>();
+  return items.map((item) => {
+    const of = text(item);
+    const n = seen.get(of) ?? 0;
+    seen.set(of, n + 1);
+    return { key: n ? `${of}#${n}` : of, item };
+  });
 }

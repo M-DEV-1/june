@@ -2,6 +2,7 @@ package embed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -15,6 +16,32 @@ import (
 type TextEngine struct {
 	*serverProcess
 	call brain.Brain
+	// gpuBusy reports whether a heavier job holds the card. See SetGPUGate.
+	gpuBusy func() bool
+}
+
+// SetGPUGate wires in the question "is something heavier using the card right now". Input: a function reporting whether another job holds the GPU (recorder.GPUBusy in the daemon, nil in tests that do not care). Output: none.
+// This engine is the card's largest tenant: 1853 MiB of a 4096 MiB RTX 3050 on 2026-09-15, against the embedding server's 653 MiB. It had neither half of the protocol Engine has, so a whisper decode found nothing it could evict, ran out of device memory and redid the whole meeting on the CPU — 50 minutes for a decode that takes 15 on the card.
+// Safe on a nil *TextEngine, which is what the daemon holds when no local text model is configured — the common case on a fresh install, and a panic at startup before this.
+func (e *TextEngine) SetGPUGate(busy func() bool) {
+	if e == nil {
+		return
+	}
+	e.gpuBusy = busy
+}
+
+// gpuTaken reports whether another job holds the GPU. False when no gate was wired in.
+func (e *TextEngine) gpuTaken() bool { return e != nil && e.gpuBusy != nil && e.gpuBusy() }
+
+// errGPUHeld is what a generate gets while a whisper decode holds the card, so the text server is not spawned back onto it mid-decode.
+var errGPUHeld = errors.New("text engine: the GPU is held by a transcription")
+
+// StopIfIdle kills the child now so its GPU memory can go to a heavier job. Unlike Engine there is no client presence to weigh against it: nobody waits on a working-state derive, so a transcription always wins. Not final — the next Generate after the decode spawns it again. Reports whether the server is down when it returns. Safe on a nil *TextEngine, which has no card to give up.
+func (e *TextEngine) StopIfIdle() bool {
+	if e == nil {
+		return true
+	}
+	return e.stopNow()
 }
 
 // NewTextEngine returns the engine for the local text model cfg names, or nil when no local text model is configured (LocalText.Enabled is false). Input: the whole app config, for the fallbacks LocalTextConfig resolves against. Output: the engine, or nil. Nothing is spawned until the first Generate.
@@ -50,6 +77,10 @@ func newTextEngine(binary string, args []string, baseURL string, timeoutSeconds 
 func (e *TextEngine) Generate(ctx context.Context, prompt string) (string, error) {
 	if e == nil {
 		return "", fmt.Errorf("text engine: no local text model configured")
+	}
+	// Asking once before the decode is not enough on its own: the working-state derive ticks every five minutes, so one lands inside any decode longer than that and would spawn the server straight back onto the card. The daemon installs this behind a fallback to the routed cloud brain, so a derive refused here is answered there instead of being lost.
+	if e.gpuTaken() {
+		return "", errGPUHeld
 	}
 	if err := e.ensureUp(ctx); err != nil {
 		return "", err

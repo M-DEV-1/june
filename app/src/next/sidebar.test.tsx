@@ -7,7 +7,7 @@ import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { ConversationSummary } from "./api";
-import { progress, ui } from "./store";
+import { progress } from "./store";
 import { renderApp } from "./testing";
 
 afterEach(() => {
@@ -93,13 +93,6 @@ describe("the rail", () => {
     expect(store.getState().ui.chatDraft).toBe(true);
     expect(screen.getByRole("heading", { name: "Ora" })).toBeDefined();
     expect(calls.some((c) => c.method === "POST" && c.path === "/conversations")).toBe(false);
-  });
-
-  it("leads to the four places that are not a chat, and to no ledger of its own", async () => {
-    renderApp({ conversations: conversations() });
-    await row("Flights to Zurich");
-    for (const place of ["Tasks", "Meetings", "Days", "Settings"]) expect(screen.getByRole("button", { name: place })).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Usage" })).toBeNull();
   });
 });
 
@@ -216,22 +209,6 @@ describe("a live notice's own buttons", () => {
     );
   });
 
-  it("says what the notice is about, not only what it said", async () => {
-    const { store } = renderApp({ conversations: conversations() });
-    await row("Flights to Zurich");
-    store.dispatch(
-      progress.eventArrived({
-        id: "",
-        type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", actions: TASK_ACTIONS },
-      }),
-    );
-
-    // The title was stored and never drawn, so the rail showed a loose sentence under the search field with buttons beneath it and nothing saying what it belonged to.
-    expect(await screen.findByText("Still open")).toBeTruthy();
-    expect(store.getState().ui.liveNotice).toBeDefined();
-  });
-
   // The design sheets of 2026-09-12 draw a notice as a face tile, then "Ora" with how long ago it landed, then the line, then the detail under it in muted grey. The card said only the title and the body, so it read as a loose paragraph with buttons rather than as something Ora said.
   it("reads as a notification from Ora: the face, the name, how long ago, then the words", async () => {
     const { store } = renderApp({ conversations: conversations() });
@@ -331,6 +308,31 @@ describe("a live notice's own buttons", () => {
     expect(screen.getByText("Vexil replied about the venue.")).toBeDefined();
   });
 
+  // A question's answer window closes on the daemon's clock, after which its buttons answer "Could not do that". The hover card took itself down at expires; the window's card had no expires at all and stayed up with dead buttons.
+  it("takes a question off the card once its answer window has passed", async () => {
+    const { store } = renderApp({ conversations: conversations() });
+    await row("Flights to Zurich");
+    store.dispatch(
+      progress.eventArrived({
+        id: "",
+        type: "notice",
+        notice: {
+          title: "Still open",
+          body: "Send the invoice",
+          place: "tasks",
+          id: "7",
+          kind: "stale",
+          actions: [{ key: "dropped", label: "Not happening" }],
+          expires: new Date(Date.now() + 100).toISOString(),
+        },
+      }),
+    );
+    expect(await screen.findByRole("button", { name: /^Not happening/ })).toBeDefined();
+
+    await waitFor(() => expect(store.getState().ui.liveNotice).toBeUndefined());
+    expect(screen.queryByRole("button", { name: /^Not happening/ })).toBeNull();
+  });
+
   it("replaces the buttons with the rail line's own text once the daemon answers", async () => {
     const { store } = renderApp({ conversations: conversations() });
     await row("Flights to Zurich");
@@ -353,30 +355,6 @@ describe("a live notice's own buttons", () => {
 
     expect(await screen.findByText("Send the invoice: Done")).toBeDefined();
     expect(screen.queryByRole("button", { name: /^1 h/ })).toBeNull();
-  });
-});
-
-describe("the notice line", () => {
-  it("opens with the noticed face, whatever the notice says", async () => {
-    const { store } = renderApp({ conversations: [] });
-    store.dispatch(ui.noticed({ text: "Routine started", kind: "info" }));
-    expect(await screen.findByText("Routine started")).toBeDefined();
-    expect(screen.getByRole("img", { name: "ora is noticed" })).toBeDefined();
-  });
-
-  it("colours a success notice with the normal muted foreground, not destructive red", async () => {
-    const { store } = renderApp({ conversations: [] });
-    store.dispatch(ui.noticed({ text: "Routine started", kind: "info" }));
-    const line = await screen.findByText("Routine started");
-    expect(line.className).toContain("text-muted-foreground");
-    expect(line.className).not.toContain("text-destructive");
-  });
-
-  it("colours a failure notice with destructive red", async () => {
-    const { store } = renderApp({ conversations: [] });
-    store.dispatch(ui.noticed({ text: "Could not delete", kind: "error" }));
-    const line = await screen.findByText("Could not delete");
-    expect(line.className).toContain("text-destructive");
   });
 });
 

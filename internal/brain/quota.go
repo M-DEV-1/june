@@ -180,13 +180,23 @@ func WithDailyQuota(state *QuotaState, model string, forAsks bool, opts QuotaOpt
 	}
 }
 
-// Metered is the daemon's one-line call site: it builds cfg's brain with FromConfig and, only when cfg actually resolves to the Gemini API (see GeminiModelFor), wraps it in the same daily quota every other Metered call sharing state and opts is gated by. A CLI-provider cfg is returned unmetered, since the ceiling only exists to protect Gemini's free tier. Input: the same arguments FromConfig takes, plus the shared counter, whether this call site is the interactive-ask band, and the configured limits. Output: a Brain ready to hand to tally.Wrap.
-func Metered(cfg config.BrainConfig, apiKey string, state *QuotaState, forAsks bool, opts QuotaOptions) Brain {
-	primary := FromConfig(cfg, apiKey)
+// Metered is the daemon's one-line call site: it builds cfg's brain with FromConfig and, only when cfg actually resolves to the Gemini API (see GeminiModelFor), wraps it in the same daily quota every other Metered call sharing state and opts is gated by. A CLI-provider cfg is returned unmetered, since the ceiling only exists to protect Gemini's free tier. Input: the same arguments FromConfig takes, plus the shared counter, whether this call site is the interactive-ask band, and the configured limits, with the optional Codex asker last. Output: a Brain ready to hand to tally.Wrap.
+func Metered(cfg config.BrainConfig, apiKey string, state *QuotaState, forAsks bool, opts QuotaOptions, asker ...CodexAsker) Brain {
+	primary := FromConfig(cfg, apiKey, asker...)
 	if model, ok := GeminiModelFor(cfg); ok {
 		return WithDailyQuota(state, model, forAsks, opts, primary)
 	}
 	return primary
+}
+
+// quotaResetMidnight is the next moment the provider's day rolls over after now, which is when a daily allowance actually refills. Input: the moment. Output: the next midnight in the provider's zone, or the machine's own next midnight when the zone database is not installed.
+func quotaResetMidnight(now time.Time) time.Time {
+	loc, err := time.LoadLocation(quotaResetZone)
+	if err != nil {
+		loc = now.Location()
+	}
+	there := now.In(loc)
+	return time.Date(there.Year(), there.Month(), there.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1)
 }
 
 // quotaResetZone is the clock Google's free-tier daily quota rolls over on. The count has to be kept on the provider's day, not the machine's: this user is on IST, which reaches midnight about eleven and a half hours before Pacific does, so a local day key handed out a fresh allowance every morning while Google was still counting the previous day and refused the calls anyway.
@@ -194,10 +204,13 @@ func Metered(cfg config.BrainConfig, apiKey string, state *QuotaState, forAsks b
 const quotaResetZone = "America/Los_Angeles"
 
 // QuotaDay is the date the day's counts are keyed on, in the provider's own zone. Input: none. Output: the date as YYYY-MM-DD, falling back to UTC when the zone database is not installed, which is still closer to the provider's day than the machine's local time.
-func QuotaDay() string {
+func QuotaDay() string { return quotaDayAt(time.Now()) }
+
+// quotaDayAt is QuotaDay for a given moment, so a reader can ask which day a count belongs to rather than assuming the machine's own. Input: the moment. Output: the provider's date for it, falling back to UTC when the zone database is not installed.
+func quotaDayAt(now time.Time) string {
 	loc, err := time.LoadLocation(quotaResetZone)
 	if err != nil {
-		return time.Now().UTC().Format("2006-01-02")
+		return now.UTC().Format("2006-01-02")
 	}
-	return time.Now().In(loc).Format("2006-01-02")
+	return now.In(loc).Format("2006-01-02")
 }

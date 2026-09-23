@@ -148,6 +148,7 @@ func (p *serverProcess) finishStart(start *startState, exited chan struct{}) {
 	var dead chan struct{}
 	if err != nil {
 		cmd, dead = p.detachLocked()
+		p.dropDeviceLocked(exited)
 	}
 	p.start = nil
 	p.mu.Unlock()
@@ -269,5 +270,21 @@ func killChild(cmd *exec.Cmd, exited chan struct{}) {
 	case <-time.After(5 * time.Second):
 		cmd.Process.Kill()
 		<-exited
+	}
+}
+
+// dropDeviceLocked takes the GPU device flag out of the server's arguments after it died during startup, so the next start lets llama-server pick whatever it can find, down to the CPU. A named device can vanish under a running system: on 2026-09-23 a driver upgrade left the RTX 3050 out of Vulkan until a reboot, and the server refused "--device Vulkan1" on every start, so every embedding failed. Input: the exit channel of the start that failed, closed when the process died rather than timed out. Output: none; must be called with p.mu held.
+func (p *serverProcess) dropDeviceLocked(exited chan struct{}) {
+	select {
+	case <-exited:
+	default:
+		return // still alive but slow: not a refused device
+	}
+	for i, a := range p.args {
+		if (a == "--device" || a == "-dev") && i+1 < len(p.args) {
+			slog.Warn(p.logTag+" would not start on its GPU device, starting it on whatever device it finds", "device", p.args[i+1])
+			p.args = append(append([]string{}, p.args[:i]...), p.args[i+2:]...)
+			return
+		}
 	}
 }

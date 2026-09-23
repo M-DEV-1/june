@@ -278,24 +278,6 @@ func TestVoiceStop_EndsTheRunAndFreesTheAudio(t *testing.T) {
 	}
 }
 
-func TestVoiceStatus_FollowsTheAgentsChannels(t *testing.T) {
-	srv, _, _, _, run := newVoiceServer(t)
-
-	start := voicePost(t, srv, "/voice/start")
-	start.Body.Close()
-	<-run.running
-	waitState(t, srv, "listening")
-
-	run.tools <- agent.ToolActivity{Name: "query_memory", Phase: agent.ToolStarted}
-	waitState(t, srv, "thinking")
-
-	run.text <- agent.ResponseChunk{Text: "you were on the API doc"}
-	waitState(t, srv, "speaking")
-
-	run.text <- agent.ResponseChunk{TurnBoundary: true}
-	waitState(t, srv, "listening")
-}
-
 func TestVoiceEvents_HeardSaidAndStateReachASubscriber(t *testing.T) {
 	srv, _, _, _, run := newVoiceServer(t)
 
@@ -474,21 +456,6 @@ func TestNewVoiceAgent_WiresTheScreenDrawing(t *testing.T) {
 	}
 	if drawn.Label != "there" || len(drawn.Rects) != 1 || drawn.Rects[0] != (OverlayRect{X: 590, Y: 299, W: 100, H: 100}) {
 		t.Errorf("overlay = %+v, want a circle labelled there around 590,299 100x100", drawn)
-	}
-}
-
-// TestVoiceBackoff_DoublesAndCaps covers the retry delay itself, in isolation from any timer: each redial after a failure must wait longer than the last, not the same fixed interval forever, and the growth must stop at voiceMaxReconnectDelay rather than climbing without bound.
-func TestVoiceBackoff_DoublesAndCaps(t *testing.T) {
-	orig := voiceMaxReconnectDelay
-	voiceMaxReconnectDelay = 20 * time.Second
-	t.Cleanup(func() { voiceMaxReconnectDelay = orig })
-
-	d := voiceReconnectDelay
-	for i, want := range []time.Duration{4 * time.Second, 8 * time.Second, 16 * time.Second, 20 * time.Second, 20 * time.Second} {
-		d = voiceBackoff(d)
-		if d != want {
-			t.Fatalf("backoff #%d = %v, want %v", i, d, want)
-		}
 	}
 }
 

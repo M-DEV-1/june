@@ -472,7 +472,9 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 		prompt.WriteString(thread + "\n")
 	}
 	prompt.WriteString(turnContext(start, injected) + "\n\n")
-	if reference := a.ActReferenceFor(ctx, question, start); reference != "" {
+	reference, shownLessons := a.actReference(ctx, question, start)
+	tr.LessonsShown = shownLessons
+	if reference != "" {
 		prompt.WriteString(reference + "\n\n")
 	}
 	prompt.WriteString(question)
@@ -545,7 +547,7 @@ type CodexThenClaude struct {
 func (b CodexThenClaude) AskText(ctx context.Context, question string) (TurnTrace, error) {
 	tr, err := b.Agent.AskCodex(ctx, question)
 	// The same rule the router applies: hand on only when the failure is a spent allowance another provider does not share, only while no action has run so a click is never taken twice, and only when this machine has a Claude login.
-	if providerSpent(err) && actionHops(tr.ToolHops) == 0 && claudeLoggedIn() {
+	if ProviderSpent(err) && actionHops(tr.ToolHops) == 0 && claudeLoggedIn() {
 		slog.Warn("ask: the Codex allowance is spent, asking Claude", "error", err)
 		return b.Agent.AskClaude(ctx, question)
 	}
@@ -631,6 +633,9 @@ func claudeUsage(ctx context.Context, client *http.Client, url, credsPath string
 		return nil, fmt.Errorf("claude usage: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("%w: claude usage: HTTP %d", ErrLoggedOut, resp.StatusCode)
+	}
 	if resp.StatusCode/100 != 2 {
 		// The body is dropped rather than quoted: a refusal from this endpoint can echo the Authorization header back.
 		return nil, fmt.Errorf("claude usage: HTTP %d", resp.StatusCode)
@@ -682,6 +687,10 @@ func refreshClaudeUsage(ctx context.Context, client *http.Client, url, credsPath
 	ctx, cancel := context.WithTimeout(ctx, claudeUsageTimeout)
 	defer cancel()
 	limits, err := claudeUsage(ctx, client, url, credsPath)
+	if errors.Is(err, ErrLoggedOut) && rec != nil {
+		rec.RecordSignedOut(ProviderClaude, "the Claude login was refused: run claude login to sign in again")
+		return
+	}
 	if err != nil {
 		slog.Debug("claude: could not read the subscription's usage windows", "error", err)
 		return

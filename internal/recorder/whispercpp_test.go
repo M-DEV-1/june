@@ -10,32 +10,10 @@ import (
 	"time"
 )
 
-// A whisper.cpp build needs two things a bare stub does not: the model to load, and which GPU to run it on. The model is found beside the binary.
-func TestWhisperCPPArgs(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	dir := t.TempDir()
-	bin := filepath.Join(dir, whisperCPPBinaryName)
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	// With no model beside it the binary takes neither flag, which is what lets a test stub run bare.
-	if got := whisperCPPArgs(bin); got != nil {
-		t.Errorf("whisperCPPArgs = %v, want nil for a binary with no model beside it", got)
-	}
-	model := filepath.Join(dir, whisperCPPModelName)
-	if err := os.WriteFile(model, []byte("lmgg"), 0o644); err != nil {
-		t.Fatalf("write model: %v", err)
-	}
-	got := whisperCPPArgs(bin)
-	if len(got) < 2 || got[0] != "-m" || got[1] != model {
-		t.Errorf("whisperCPPArgs = %v, want it to load %s", got, model)
-	}
-}
-
-// whisperCPPBinary finds the whisper.cpp build next to its model under dataDir/whispercpp, and refuses a half-finished install rather than failing deep inside whisper.cpp.
+// WhisperCPPBinary finds the whisper.cpp build next to its model under dataDir/whispercpp, and refuses a half-finished install rather than failing deep inside whisper.cpp.
 func TestWhisperCPPBinary(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := whisperCPPBinary(dir); err == nil {
+	if _, err := WhisperCPPBinary(dir); err == nil {
 		t.Fatal("an empty data directory must not yield a whisper.cpp binary")
 	}
 	wcDir := filepath.Join(dir, "whispercpp")
@@ -46,15 +24,15 @@ func TestWhisperCPPBinary(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := whisperCPPBinary(dir); err == nil {
+	if _, err := WhisperCPPBinary(dir); err == nil {
 		t.Fatal("a binary with no model beside it must not count as an installed engine")
 	}
 	if err := os.WriteFile(filepath.Join(wcDir, whisperCPPModelName), []byte("lmgg"), 0o644); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
-	got, err := whisperCPPBinary(dir)
+	got, err := WhisperCPPBinary(dir)
 	if err != nil {
-		t.Fatalf("whisperCPPBinary: %v", err)
+		t.Fatalf("WhisperCPPBinary: %v", err)
 	}
 	if got != bin {
 		t.Errorf("got %q, want %q", got, bin)
@@ -171,5 +149,38 @@ func TestRunWhisper_AsksTheCardsOtherTenantToLeaveFirst(t *testing.T) {
 	}
 	if !askedBeforeTheRun {
 		t.Errorf("asked after the decode had already started, which is too late to stop the crash")
+	}
+}
+
+// Voice activity detection is what keeps a meeting the user barely spoke in from coming back empty: handed a whole stream, whisper decodes the near-silence around a short turn as non-speech and never comes out of that state. In the 16 September 2026 standup that lost the user's entire update — 51 seconds of speech inside 23 minutes of quiet — and the minutes said he had not spoken. The flags go on only when the VAD model is installed beside the whisper model, so a build without it transcribes exactly as before.
+func TestWhisperCPPArgs_TurnsOnVADWhenItsModelIsInstalled(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, whisperCPPBinaryName)
+	if err := os.WriteFile(filepath.Join(dir, whisperCPPModelName), []byte("lmgg"), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if got := strings.Join(whisperCPPArgs(bin), " "); strings.Contains(got, "--vad") {
+		t.Errorf("whisperCPPArgs = %v, want no VAD flags when its model is not installed", got)
+	}
+
+	vad := filepath.Join(dir, whisperVADModelName)
+	if err := os.WriteFile(vad, []byte("lmgg"), 0o644); err != nil {
+		t.Fatalf("write vad model: %v", err)
+	}
+	got := strings.Join(whisperCPPArgs(bin), " ")
+	if !strings.Contains(got, "--vad") || !strings.Contains(got, "-vm "+vad) {
+		t.Errorf("whisperCPPArgs = %v, want it to enable VAD with %s", got, vad)
+	}
+}
+
+// whisper-cli's own default is -l en, which does not mean "prefer English": told the audio is English, it prints [NON-ENGLISH SPEECH] for everything that is not, and those lines are dropped as non-speech markers. A 10-minute slice of the 16 September 2026 evening call came back as 456 such markers out of 461 lines, so the whole meeting reached the minutes as an empty transcript and the write-up said nobody had spoken. Auto-detection transcribes the same slice properly; --translate makes it worse, not better.
+func TestWhisperCPPArgs_LetsWhisperDetectTheLanguage(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, whisperCPPBinaryName)
+	if err := os.WriteFile(filepath.Join(dir, whisperCPPModelName), []byte("lmgg"), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if got := strings.Join(whisperCPPArgs(bin), " "); !strings.Contains(got, "-l auto") {
+		t.Errorf("whisperCPPArgs = %v, want it to auto-detect the spoken language", got)
 	}
 }

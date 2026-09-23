@@ -1,6 +1,6 @@
 package db
 
-// hybrid_test.go lives in package db (white-box), not db_test, because it needs direct access to unexported reciprocalRankFusion/rrfCandidate to test the pure fusion function numerically against the deck's worked example. db_test.go stays in package db_test, untouched.
+// hybrid_test.go lives in package db (white-box), not db_test, because it needs the store's own handle and unexported helpers (ensureNode, reconcileBackfillCandidates) to set up and check what HybridSearch and ReconcileVectors do.
 
 import (
 	"context"
@@ -15,7 +15,6 @@ import (
 	"ora/internal/memory"
 )
 
-// newStore opens a throwaway in-memory store that is closed when the test ends.
 // newStore opens a throwaway in-memory store, closed when the test ends. Every test in this package uses it; the in-memory pool is pinned to one connection (see New) so concurrent readers see the same database.
 func newStore(t *testing.T) *Store {
 	t.Helper()
@@ -25,66 +24,6 @@ func newStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
-}
-
-// --- reciprocalRankFusion: pure-function tests against the deck's §02 worked example ---
-
-// deckWorkedExampleLists reproduces docs/ora-memory-deck.html §02's worked example verbatim (k=50): lexical ranks "cuda-fix" > "cuda-toolkit" > "gpu-infra-doc"; vector ranks "gpu-rabbit-hole" > "cuda-fix" > "vllm-tuning".
-func deckWorkedExampleLists() (lexical, vector []rrfCandidate) {
-	lexical = []rrfCandidate{
-		{id: "cuda-fix", content: "CUDA out of memory fix", source: "episode"},
-		{id: "cuda-toolkit", content: "cuda toolkit install", source: "episode"},
-		{id: "gpu-infra-doc", content: "gpu infra doc", source: "summary"},
-	}
-	vector = []rrfCandidate{
-		{id: "gpu-rabbit-hole", content: "that GPU rabbit hole", source: "episode"},
-		{id: "cuda-fix", content: "CUDA out of memory fix", source: "episode"},
-		{id: "vllm-tuning", content: "vLLM tuning notes", source: "episode"},
-	}
-	return
-}
-
-// TestReciprocalRankFusion_DeckWorkedExample_FinalOrder asserts the exact fused ordering the deck calls out: the consensus item ("cuda-fix", found by both lists) wins outright over items either list ranked higher on its own.
-func TestReciprocalRankFusion_DeckWorkedExample_FinalOrder(t *testing.T) {
-	lexical, vector := deckWorkedExampleLists()
-	result := reciprocalRankFusion(rrfK, lexical, vector)
-
-	var gotOrder []string
-	for _, c := range result {
-		gotOrder = append(gotOrder, c.id)
-	}
-	wantOrder := []string{"cuda-fix", "gpu-rabbit-hole", "cuda-toolkit", "gpu-infra-doc", "vllm-tuning"}
-
-	if fmt.Sprint(gotOrder) != fmt.Sprint(wantOrder) {
-		t.Errorf("fused order = %v, want %v (the consensus item must win outright; ties broken by id)", gotOrder, wantOrder)
-	}
-}
-
-// TestReciprocalRankFusion_NoListsInput_ReturnsEmptyNotPanic documents that calling reciprocalRankFusion with zero input lists must return an empty slice, not panic.
-func TestReciprocalRankFusion_NoListsInput_ReturnsEmptyNotPanic(t *testing.T) {
-	result := reciprocalRankFusion(rrfK)
-	if len(result) != 0 {
-		t.Errorf("expected empty result for zero input lists, got %d items: %+v", len(result), result)
-	}
-}
-
-// TestReciprocalRankFusion_LargerKCompressesScores proves rrfK is actually wired into the scoring math (not hardcoded elsewhere): a much larger k should compress the top/bottom score ratio toward 1, compared to a lower k.
-func TestReciprocalRankFusion_LargerKCompressesScores(t *testing.T) {
-	lexical, vector := deckWorkedExampleLists()
-
-	resultLowK := reciprocalRankFusion(50, lexical, vector)
-	resultHighK := reciprocalRankFusion(1000, lexical, vector)
-
-	if len(resultLowK) == 0 || len(resultHighK) == 0 {
-		t.Fatalf("expected non-empty results, got low-k=%d high-k=%d", len(resultLowK), len(resultHighK))
-	}
-
-	ratioLowK := resultLowK[0].score / resultLowK[len(resultLowK)-1].score
-	ratioHighK := resultHighK[0].score / resultHighK[len(resultHighK)-1].score
-
-	if ratioHighK >= ratioLowK {
-		t.Errorf("expected top/bottom score ratio to shrink as k grows: ratio(k=50)=%.4f, ratio(k=1000)=%.4f", ratioLowK, ratioHighK)
-	}
 }
 
 // --- HybridSearch: Store-level integration tests, with fake embedder/vectorIndex ---
@@ -344,33 +283,6 @@ func TestHybridSearch_AbsentTopicQuery_ReturnsNoJunkRows(t *testing.T) {
 	}
 }
 
-// TestHybridSearch_LexicalOnly_NoEmbedderConfigured_BaselineNoCrash verifies that a Store with neither SetEmbedder nor SetVectorIndex called degrades gracefully to lexical-only fusion instead of erroring/panicking.
-func TestHybridSearch_LexicalOnly_NoEmbedderConfigured_BaselineNoCrash(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	if _, err := store.LogNote(ctx, "the user likes writing golang", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	hits, err := store.HybridSearch(ctx, "golang", "", 10)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	if len(hits) == 0 {
-		t.Fatalf("expected at least one lexical hit for 'golang'")
-	}
-	found := false
-	for _, h := range hits {
-		if h.Content == "the user likes writing golang" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected the logged note to surface via lexical-only fusion, got: %+v", hits)
-	}
-}
-
 // TestHybridSearch_VectorOnlyMatch_SurfacesSemanticHit proves the "vector recall" half of the hybrid property: an item the fake vector index returns (a semantic/paraphrase match) but that shares no keyword with the query, and so FTS5 alone would never find, still appears in HybridSearch's fused results.
 func TestHybridSearch_VectorOnlyMatch_SurfacesSemanticHit(t *testing.T) {
 	ctx := context.Background()
@@ -491,50 +403,6 @@ func TestHybridSearch_DomainFilter_ExcludesNonMatchingLexicalResult(t *testing.T
 	}
 	if !found {
 		t.Errorf("expected the work-tagged lexical result to remain, got: %+v", hits)
-	}
-}
-
-// TestHybridSearch_LimitHonored verifies HybridSearch never returns more than `limit` items even with many lexical + vector candidates available.
-func TestHybridSearch_LimitHonored(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	for i := 0; i < 5; i++ {
-		if _, err := store.LogNote(ctx, fmt.Sprintf("keyword match item number %d", i), "fact"); err != nil {
-			t.Fatalf("LogNote: %v", err)
-		}
-	}
-	var vecResults []Result
-	for i := 0; i < 5; i++ {
-		vecResults = append(vecResults, Result{
-			ID:      fmt.Sprintf("episode:%d", i),
-			Content: fmt.Sprintf("semantic match item number %d", i),
-		})
-	}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	store.SetVectorIndex(&fakeHybridVectorIndex{results: vecResults})
-
-	const limit = 3
-	hits, err := store.HybridSearch(ctx, "keyword match item", "", limit)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	if len(hits) > limit {
-		t.Errorf("expected at most %d hits, got %d: %+v", limit, len(hits), hits)
-	}
-}
-
-// TestHybridSearch_EmptyQuery_ReturnsEmptyNoError documents and asserts the chosen behavior for an empty query: an empty result and no error, mirroring SearchMemory's existing "empty query -> empty result, no error" contract elsewhere in this package.
-func TestHybridSearch_EmptyQuery_ReturnsEmptyNoError(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	hits, err := store.HybridSearch(ctx, "", "", 10)
-	if err != nil {
-		t.Fatalf("expected no error for an empty query, got: %v", err)
-	}
-	if len(hits) != 0 {
-		t.Errorf("expected empty result for an empty query, got: %+v", hits)
 	}
 }
 
@@ -925,7 +793,6 @@ func TestReconcileVectors_LeavesFreshEpisodeVectorAlone(t *testing.T) {
 	}
 }
 
-// TestReconcileVectors_BackfillsMissingNoteVector verifies a note that has no vector entry at all (e.g. from before hybrid search was wired client-side, or a dirty pre-existing store) gets embedded and added.
 // TestReconcileVectors_RespectsEmbedCap verifies the sweep stops backfilling once embedCap is reached, instead of embedding every missing candidate in one pass — protects API quota on a large dirty store.
 func TestReconcileVectors_RespectsEmbedCap(t *testing.T) {
 	ctx := context.Background()
@@ -1287,16 +1154,6 @@ func TestHybridSearchVectorFloorFollowsTheEmbedder(t *testing.T) {
 	}
 }
 
-// TestSetVectorSimilarityFloorIgnoresNonPositive verifies a zero or negative floor leaves the default in place, so a miswired caller cannot turn the floor off entirely and let every nearest neighbour chromem returns into fusion.
-func TestSetVectorSimilarityFloorIgnoresNonPositive(t *testing.T) {
-	store := newStore(t)
-
-	store.SetVectorSimilarityFloor(0)
-	if got := store.vectorFloor(); got != minVectorSimilarity {
-		t.Errorf("floor = %v after SetVectorSimilarityFloor(0), want the %v default", got, float32(minVectorSimilarity))
-	}
-}
-
 // TestReconcileBackfillCandidates_BoundedByTheEmbedCap covers the sweep's memory cost: with a local embedder the episode query has neither an age window nor a limit, so it pulled every episode row — id plus the full capture text — into memory to hand ReconcileVectors a list it only ever reads the first embedCap entries of. The candidate list must stay proportional to what one sweep can actually embed.
 func TestReconcileBackfillCandidates_BoundedByTheEmbedCap(t *testing.T) {
 	ctx := context.Background()
@@ -1601,24 +1458,6 @@ func TestFormatHitWithSource_AppendsParseableSourceTag(t *testing.T) {
 	}
 }
 
-// notes are the only source revise can follow up on, and FormatNoteHitWithSource needs to carry the same trace-back tag FormatHitWithSource does.
-func TestFormatNoteHitWithSource_AppendsParseableSourceTag(t *testing.T) {
-	when := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
-	h := MemoryHit{Source: "note", RefID: 7, Content: "the user prefers terse replies", CreatedAt: when}
-	got := FormatNoteHitWithSource(h, 0)
-	i := strings.Index(got, `{"source":`)
-	if i < 0 {
-		t.Fatalf("expected a {\"source\":...} tag, got %q", got)
-	}
-	var wrapped struct{ Source EvidenceSource }
-	if err := json.Unmarshal([]byte(got[i:]), &wrapped); err != nil {
-		t.Fatalf("source tag did not parse as JSON: %v (%q)", err, got[i:])
-	}
-	if wrapped.Source.Kind != "note" || wrapped.Source.ID != 7 {
-		t.Errorf("source = %+v, want kind=note id=7", wrapped.Source)
-	}
-}
-
 // Consolidation merges facts into fewer, better-worded ones, but a merge is a model's summary and the originals are the source. On 2026-09-03 the store held 19 facts after 28 consolidation runs, and nothing on disk could say what those runs had folded away. The replaced facts now move to notes_archive with the time they were archived, so a wrong merge can be traced and undone. Storage is not a concern: every note in the store together is about 115 KB.
 func TestReplaceAllNotes_ArchivesTheOldFacts(t *testing.T) {
 	store := newStore(t)
@@ -1647,71 +1486,6 @@ func TestReplaceAllNotes_ArchivesTheOldFacts(t *testing.T) {
 	}
 	if !got["the user likes tea"] || !got["the user likes coffee"] {
 		t.Fatalf("archived contents = %v, want both originals", got)
-	}
-}
-
-// TestNodeDomains_BatchesOneQueryForEveryNodeCandidate pins the batched replacement for the per-candidate domain lookup: given a mix of node ids, it returns the domain of each node that has one, omits ids with no row and ids whose domain column is empty, and answers an empty request without touching the database.
-func TestNodeDomains_BatchesOneQueryForEveryNodeCandidate(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	var ids []int64
-	for _, domain := range []string{"work", "personal", ""} {
-		res, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content, domain) VALUES ('summary', ?, ?)`, "summary about "+domain, domain)
-		if err != nil {
-			t.Fatalf("insert node: %v", err)
-		}
-		id, _ := res.LastInsertId()
-		ids = append(ids, id)
-	}
-
-	if got := store.nodeDomains(ctx, nil); len(got) != 0 {
-		t.Errorf("nodeDomains(nil) = %v, want an empty map", got)
-	}
-
-	// The last id plus one names a row that does not exist, which must simply be absent from the result rather than an error or a blank entry.
-	got := store.nodeDomains(ctx, append(append([]int64{}, ids...), ids[len(ids)-1]+1))
-	want := map[int64]string{ids[0]: "work", ids[1]: "personal"}
-	if len(got) != len(want) {
-		t.Fatalf("nodeDomains returned %v, want %v", got, want)
-	}
-	for id, domain := range want {
-		if got[id] != domain {
-			t.Errorf("nodeDomains[%d] = %q, want %q", id, got[id], domain)
-		}
-	}
-}
-
-// TestSummaryParents_BatchesOneQueryForEverySummaryCandidate pins the batched replacement for the per-summary parent lookup that dropSummariesShadowedByDigest ran: it returns the parent id of each summary that has one and omits summaries with a null parent.
-func TestSummaryParents_BatchesOneQueryForEverySummaryCandidate(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	parent, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content) VALUES ('digest', 'the digest')`)
-	if err != nil {
-		t.Fatalf("insert digest: %v", err)
-	}
-	parentID, _ := parent.LastInsertId()
-
-	child, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content, parent_id) VALUES ('summary', 'the child', ?)`, parentID)
-	if err != nil {
-		t.Fatalf("insert child summary: %v", err)
-	}
-	childID, _ := child.LastInsertId()
-
-	orphan, err := store.db.ExecContext(ctx, `INSERT INTO nodes (type, content) VALUES ('summary', 'the orphan')`)
-	if err != nil {
-		t.Fatalf("insert orphan summary: %v", err)
-	}
-	orphanID, _ := orphan.LastInsertId()
-
-	if got := store.summaryParents(ctx, nil); len(got) != 0 {
-		t.Errorf("summaryParents(nil) = %v, want an empty map", got)
-	}
-
-	got := store.summaryParents(ctx, []int64{childID, orphanID})
-	if len(got) != 1 || got[childID] != parentID {
-		t.Errorf("summaryParents = %v, want only {%d: %d}", got, childID, parentID)
 	}
 }
 

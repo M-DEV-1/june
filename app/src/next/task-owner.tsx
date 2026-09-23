@@ -31,13 +31,12 @@ export function OwnerControl({ task }: { task: Task }) {
           variant="ghost"
           size="icon-xs"
           aria-label={`${task.title}: ${ownerLabels[task.owner]} — change who owns it`}
-          className="shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
-          onClick={(e) => e.stopPropagation()}
+          className="relative shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
         >
           <ArrowRightLeft />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+      <DropdownMenuContent align="end">
         {(Object.keys(ownerLabels) as TaskOwner[]).map((owner) => (
           <DropdownMenuItem key={owner} onClick={() => void set(owner)}>
             {ownerLabels[owner]}

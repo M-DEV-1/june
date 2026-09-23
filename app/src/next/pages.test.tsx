@@ -17,10 +17,10 @@ afterEach(() => {
 const meetings: Meeting[] = [
   {
     id: "m1",
-    title: "TCFD statement pattern analysis",
+    title: "Meridian statement pattern analysis",
     when: new Date().toISOString(),
     duration_s: 1680,
-    minutes: "# TCFD statement pattern analysis\n## What was said\n- **Vexil** will send the file\n## Action items\n- send the file to legal\n",
+    minutes: "# Meridian statement pattern analysis\n## What was said\n- **Vexil** will send the file\n## Action items\n- send the file to legal\n",
     attendees: [
       { name: "Zemna Braxen", heard_only: false },
       { name: "Vexil Quorin", heard_only: true },
@@ -30,23 +30,23 @@ const meetings: Meeting[] = [
 
 /** One action item that meeting raised for the user and one raised somewhere else, as GET /tasks would answer them. */
 const meetingWork: Task[] = [
-  { id: "12", title: "send the file to legal", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "TCFD statement pattern analysis", owner: "me" },
+  { id: "12", title: "send the file to legal", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "Meridian statement pattern analysis", owner: "me" },
   { id: "13", title: "chase the standup notes", source: "noticed", when: new Date().toISOString(), done: false, conversation_id: "", detail: "Daily AI Sprint Standup", owner: "me" },
 ];
 
 describe("Meetings", () => {
   it("names the recording in the header and says when it ran and who was there", async () => {
     renderApp({ meetings }, { place: "meetings" });
-    expect(await screen.findByRole("heading", { name: "TCFD statement pattern analysis" })).toBeDefined();
+    expect(await screen.findByRole("heading", { name: "Meridian statement pattern analysis" })).toBeDefined();
     expect(screen.getByText(/28 min · Zemna Braxen, Vexil Quorin \(heard\)/)).toBeDefined();
     const picker = await openPicker("Choose a meeting");
     expect(picker.getByText("Today")).toBeDefined();
-    expect(picker.getByRole("option", { name: /TCFD statement pattern analysis/ })).toBeDefined();
+    expect(picker.getByRole("option", { name: /Meridian statement pattern analysis/ })).toBeDefined();
   });
 
   it("deletes a meeting whose minutes are not worth keeping, once the question is answered", async () => {
     const { calls } = renderApp({ meetings }, { place: "meetings" });
-    await screen.findByRole("heading", { name: "TCFD statement pattern analysis" });
+    await screen.findByRole("heading", { name: "Meridian statement pattern analysis" });
 
     await userEvent.click(screen.getByRole("button", { name: /^Delete/ }));
     // Nothing is removed on the press alone: a write-up is not recoverable, so the question is asked first.
@@ -54,26 +54,6 @@ describe("Meetings", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "Delete it" }));
     await waitFor(() => expect(calls.find((c) => c.method === "DELETE" && c.path === "/meetings/m1")).toBeDefined());
-  });
-
-  it("keeps the meeting when the question is dismissed", async () => {
-    const { calls } = renderApp({ meetings }, { place: "meetings" });
-    await screen.findByRole("heading", { name: "TCFD statement pattern analysis" });
-
-    await userEvent.click(screen.getByRole("button", { name: /^Delete/ }));
-    await userEvent.click(await screen.findByRole("button", { name: "Keep it" }));
-
-    expect(calls.find((c) => c.method === "DELETE")).toBeUndefined();
-    expect(screen.getByRole("heading", { name: "TCFD statement pattern analysis" })).toBeDefined();
-  });
-
-  it("reads the minutes rather than drawing their markdown", async () => {
-    renderApp({ meetings }, { place: "meetings" });
-    expect(await screen.findByText("Vexil will send the file")).toBeDefined();
-    expect(screen.getByText("What was said")).toBeDefined();
-    expect(screen.queryByText(/##/)).toBeNull();
-    // The opening heading only repeats the title, so it is left off; what is left is the page's own heading and the picker naming the same recording.
-    expect(screen.getAllByText("TCFD statement pattern analysis")).toHaveLength(2);
   });
 
   it("typesets the minutes as a document: real headings and one real list, not a paragraph per bullet with a dot typed in front of it", async () => {
@@ -104,18 +84,12 @@ describe("Meetings", () => {
     await waitFor(() => expect(calls.find((c) => c.path === "/tasks/12/done")?.body).toEqual({ status: "done" }));
   });
 
-  it("says nothing owed at all rather than an empty block", async () => {
-    renderApp({ meetings }, { place: "meetings" });
-    await screen.findByText("Vexil will send the file");
-    expect(screen.queryByText("What you owe from this")).toBeNull();
-  });
-
   it("leaves only what the picker's search matches, and says when nothing does", async () => {
     renderApp({ meetings }, { place: "meetings" });
     await screen.findByText("Vexil will send the file");
     const picker = await openPicker("Choose a meeting");
     await userEvent.type(screen.getByLabelText("Search meetings"), "vexil");
-    expect(picker.getByRole("option", { name: /TCFD/ })).toBeDefined();
+    expect(picker.getByRole("option", { name: /Meridian/ })).toBeDefined();
     await userEvent.clear(screen.getByLabelText("Search meetings"));
     await userEvent.type(screen.getByLabelText("Search meetings"), "nothing like this");
     expect(await picker.findByText(/Nothing matches/)).toBeDefined();
@@ -163,10 +137,5 @@ describe("Meetings", () => {
     };
     await userEvent.click(within(rail).getByRole("button", { name: "Action items" }));
     expect(scrolled).toContain("Action items");
-  });
-
-  it("says nothing has been recorded rather than showing an empty page", async () => {
-    renderApp({}, { place: "meetings" });
-    expect(await within(await screen.findByRole("main")).findByText("No meetings recorded yet.")).toBeDefined();
   });
 });

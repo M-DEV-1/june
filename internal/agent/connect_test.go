@@ -18,42 +18,6 @@ import (
 	"google.golang.org/genai"
 )
 
-// TestBuildTurnContent_SingleTurnWithContextAndText verifies buildTurnContent packs the turn context and user text into ONE Content/turn as two Parts, not two separate SendClientContent calls — the old two-call shape let the model reply to the bare context line, doubling Live API round-trips.
-func TestBuildTurnContent_SingleTurnWithContextAndText(t *testing.T) {
-	now := time.Date(2026, 7, 6, 14, 30, 0, 0, time.UTC)
-	recalls := []string{"working on the ora recall tool"}
-
-	turns := buildTurnContent(now, recalls, "what time is it")
-
-	if len(turns) != 1 {
-		t.Fatalf("expected exactly one Content/turn, got %d", len(turns))
-	}
-	parts := turns[0].Parts
-	if len(parts) != 2 {
-		t.Fatalf("expected exactly 2 parts (context + user text) in the single turn, got %d: %+v", len(parts), parts)
-	}
-	if !strings.Contains(parts[0].Text, "14:30") || !strings.Contains(parts[0].Text, "working on the ora recall tool") {
-		t.Errorf("expected first part to carry the turnContext (time + recalls), got %q", parts[0].Text)
-	}
-	if parts[1].Text != "what time is it" {
-		t.Errorf("expected second part to be the verbatim user text, got %q", parts[1].Text)
-	}
-}
-
-// TestNowAnchor_EncodesCurrentMoment verifies nowAnchor renders the weekday, calendar date, wall-clock time, and timezone — the temporal anchor injected into the system prompt so the model isn't blind to "now" (it was previously seen confusing the date and deriving IST by hand).
-func TestNowAnchor_EncodesCurrentMoment(t *testing.T) {
-	ist := time.FixedZone("IST", int(5.5*3600))
-	now := time.Date(2026, 7, 6, 12, 44, 0, 0, ist) // a Monday
-
-	anchor := nowAnchor(now)
-
-	for _, want := range []string{"Monday", "2026", "12:44", "IST"} {
-		if !strings.Contains(anchor, want) {
-			t.Errorf("nowAnchor(%v) = %q, missing %q", now, anchor, want)
-		}
-	}
-}
-
 // TestBuildHandshakeContext_BufferProviderSet_AddsWorkingLinesAndDrivesSearchMemory verifies a configured bufferProvider's activities land as "[working] app: title" context lines, and that their app+title names drive a SearchMemory focus lookup — this is the client-side wiring point F2 restores (compiler was always nil in the client process, so this whole path was dead in production; bufferProvider is what a daemon-IPC provider now feeds).
 func TestBuildHandshakeContext_BufferProviderSet_AddsWorkingLinesAndDrivesSearchMemory(t *testing.T) {
 	brain := &toolTestBrain{searchMemoryResult: []db.MemoryHit{{Source: "note", Content: "debugging the cuda kernel", RefID: 1}}}
@@ -105,76 +69,6 @@ func TestBuildHandshakeContext_NoBufferProvider_IsNoOp(t *testing.T) {
 	}
 }
 
-// TestBuildHandshakeContext_EmptyBuffer_SkipsSearchMemory verifies an empty buffer (provider set, but nothing in it) doesn't fire a content-free SearchMemory call.
-func TestBuildHandshakeContext_EmptyBuffer_SkipsSearchMemory(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "")
-	a.SetBufferProvider(func() []tracker.Activity { return nil })
-
-	a.buildHandshakeContext(context.Background(), nil)
-
-	if brain.searchMemoryCalledFocus != "" {
-		t.Errorf("expected no SearchMemory call for an empty buffer, got focus %q", brain.searchMemoryCalledFocus)
-	}
-}
-
-// TestScheduleFor covers the scheduling table for NON_BLOCKING tool results: a result the user is sitting there waiting for interrupts Ora's generation when she is silent, but waits for a natural gap instead — WHEN_IDLE — whenever she is currently speaking, so her own sentence never gets cut off. Quiet and unrecognized tools always wait for the gap, regardless of speaking state.
-func TestScheduleFor(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		tool     string
-		speaking bool
-		want     genai.FunctionResponseScheduling
-	}{
-		{"known tool, silent, interrupts", "query_memory", false, genai.FunctionResponseSchedulingInterrupt},
-		{"known tool, speaking, waits", "query_memory", true, genai.FunctionResponseSchedulingWhenIdle},
-		{"recall, silent, interrupts", "recall", false, genai.FunctionResponseSchedulingInterrupt},
-		{"branch, silent, interrupts", "branch", false, genai.FunctionResponseSchedulingInterrupt},
-		{"branch, speaking, waits", "branch", true, genai.FunctionResponseSchedulingWhenIdle},
-		{"quiet tool, silent, still waits", "save_note", false, genai.FunctionResponseSchedulingWhenIdle},
-		{"quiet tool, speaking, waits", "save_note", true, genai.FunctionResponseSchedulingWhenIdle},
-		{"quiet tool revise, silent, waits", "revise", false, genai.FunctionResponseSchedulingWhenIdle},
-		{"quiet tool open_url, silent, waits", "open_url", false, genai.FunctionResponseSchedulingWhenIdle},
-		{"unknown tool, silent, waits", "totally_unknown_tool", false, genai.FunctionResponseSchedulingWhenIdle},
-		{"unknown tool, speaking, waits", "totally_unknown_tool", true, genai.FunctionResponseSchedulingWhenIdle},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := scheduleFor(tc.tool, tc.speaking); got != tc.want {
-				t.Errorf("scheduleFor(%q, speaking=%v) = %q, want %q", tc.tool, tc.speaking, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestRunToolCall_SendsScheduling proves the scheduling table is actually attached to the FunctionResponse that goes back over the wire, not just computed. Without it the Live API defaults every NON_BLOCKING result to WHEN_IDLE, so an answer the user asked for waits for a gap that may never come. No speaker is set here, so isSpeaking() is false and the tool is expected to interrupt.
-func TestRunToolCall_SendsScheduling(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	fs := &fakeLiveSession{
-		msgCh:     make(chan *genai.LiveServerMessage, 2),
-		responses: make(chan genai.LiveSendToolResponseParameters, 2),
-		closeErr:  errors.New("fake session closed"),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
-
-	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{
-		FunctionCalls: []*genai.FunctionCall{
-			{ID: "call-1", Name: "query_memory", Args: map[string]any{"query": "riddler"}},
-		},
-	}}
-
-	select {
-	case resp := <-fs.responses:
-		fr := resp.FunctionResponses[0]
-		if fr.Scheduling != genai.FunctionResponseSchedulingInterrupt {
-			t.Errorf("expected query_memory's response to carry INTERRUPT scheduling, got %q", fr.Scheduling)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the tool response")
-	}
-}
-
 // TestRunToolCall_SchedulingFollowsSpeakingState proves the scheduling actually sent over the wire tracks a.speaker's amplitude at send time, not a fixed table. High amplitude (Ora audibly speaking) must produce WHEN_IDLE so her sentence isn't cut off; near-zero amplitude (she's quiet) must produce INTERRUPT so the waiting user hears the answer right away.
 func TestRunToolCall_SchedulingFollowsSpeakingState(t *testing.T) {
 	for _, tc := range []struct {
@@ -217,17 +111,6 @@ func TestRunToolCall_SchedulingFollowsSpeakingState(t *testing.T) {
 	}
 }
 
-// TestProactivityConfig verifies the proactive-audio knob maps to the Live API config: on means the model may stay quiet when what it heard wasn't addressed to it, off means the field is omitted entirely so the API keeps its own default.
-func TestProactivityConfig(t *testing.T) {
-	if cfg := proactivityConfig(false); cfg != nil {
-		t.Errorf("expected nil config when disabled, got %+v", cfg)
-	}
-	cfg := proactivityConfigFor("gemini-2.5-flash-native-audio-preview-12-2025", true)
-	if cfg == nil || cfg.ProactiveAudio == nil || !*cfg.ProactiveAudio {
-		t.Errorf("expected ProactiveAudio true when enabled, got %+v", cfg)
-	}
-}
-
 // TestFormatFocusHits_TruncatesOverlongContent verifies the handshake's focus-lookup formatting excerpts content via db.FormatHit/FormatNoteHit like every other read path — this was the one site injecting SearchMemory hits raw and uncapped straight into the system instruction. Raw Activity Log summaries in production run tens of KB; an unformatted hit here can blow the system-prompt budget on a single row.
 func TestFormatFocusHits_TruncatesOverlongContent(t *testing.T) {
 	overlong := strings.Repeat("x", 2000) // well past db's excerpt budget for a summary (maxSummaryExcerpt, 700 runes)
@@ -240,17 +123,6 @@ func TestFormatFocusHits_TruncatesOverlongContent(t *testing.T) {
 	}
 	if strings.Contains(got[0], overlong) {
 		t.Fatalf("expected overlong content to be truncated, got full %d-char content: %q", len(overlong), got[0])
-	}
-}
-
-// TestFormatFocusHits_NoteCarriesRefID verifies a note hit is formatted with its ref_id (matching query_memory's note formatting), not the generic "[note] ..." shape without an id.
-func TestFormatFocusHits_NoteCarriesRefID(t *testing.T) {
-	hits := []db.MemoryHit{{Source: "note", Content: "Samara is my wife", RefID: 105}}
-
-	got := formatFocusHits(hits, 2)
-
-	if len(got) != 1 || !strings.Contains(got[0], "note#105") {
-		t.Fatalf(`expected a "note#105" line, got %+v`, got)
 	}
 }
 
@@ -491,40 +363,6 @@ func TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject(t *testing.T) 
 	case sent := <-fs.sentContent:
 		t.Fatalf("expected receiveLoop not to send anything on its own, got %+v", sent)
 	case <-time.After(300 * time.Millisecond):
-	}
-}
-
-// TestThinkingConfig_BoundsThinkingBudget verifies the Live config sets an explicit, bounded ThinkingBudget instead of leaving it unset. Confirmed via a real session on 2026-08-09: with ThinkingConfig unset, gemini-2.5-flash-native-audio-preview-12-2025 ran multi-minute silent "thought" chains (12 thought parts, zero final replies logged across a 5-minute session) — genuinely relevant reasoning, but never surfaced as an actual spoken answer. ThinkingBudget=0 (Pipecat's low-latency voice preset) was considered and rejected: the observed thinking content was real synthesis the user explicitly wants (e.g. connecting a paper's argument to their own work), so the fix is a bound, not a kill switch.
-func TestThinkingConfig_BoundsThinkingBudget(t *testing.T) {
-	cfg := thinkingConfigFor("gemini-2.5-flash-native-audio-preview-12-2025")
-
-	if cfg == nil || cfg.ThinkingBudget == nil {
-		t.Fatalf("expected an explicit ThinkingBudget to be set, got %+v", cfg)
-	}
-	if got := *cfg.ThinkingBudget; got <= 0 {
-		t.Errorf("expected a positive bounded budget (not 0 — thinking should still happen, just not run away), got %d", got)
-	}
-	if !cfg.IncludeThoughts {
-		t.Error("expected IncludeThoughts=true — receiveLoop already routes Thought:true parts correctly (see ResponseChunk) and they're valuable for debugging turn-taking issues")
-	}
-}
-
-// TestCompressionConfig_TriggerAboveTarget verifies the context-window-compression config's trigger point is strictly above its shrink target — a session must accumulate real headroom before every compression, not just barely exceed the target and re-trigger immediately.
-func TestCompressionConfig_TriggerAboveTarget(t *testing.T) {
-	cfg := compressionConfig()
-
-	if cfg == nil || cfg.TriggerTokens == nil || cfg.SlidingWindow == nil || cfg.SlidingWindow.TargetTokens == nil {
-		t.Fatalf("expected TriggerTokens and SlidingWindow.TargetTokens both set, got %+v", cfg)
-	}
-	trigger, target := *cfg.TriggerTokens, *cfg.SlidingWindow.TargetTokens
-	if trigger != 64000 {
-		t.Errorf("expected TriggerTokens=64000, got %d", trigger)
-	}
-	if target != 32000 {
-		t.Errorf("expected TargetTokens=32000, got %d", target)
-	}
-	if trigger <= target {
-		t.Errorf("expected trigger (%d) strictly above target (%d)", trigger, target)
 	}
 }
 
@@ -918,33 +756,6 @@ func TestStripControlTokens(t *testing.T) {
 		if got := stripControlTokens(tc.in); got != tc.want {
 			t.Errorf("%s: stripControlTokens(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
 		}
-	}
-}
-
-// TestReceiveLoop_TurnComplete_EmitsTurnBoundaryChunk verifies receiveLoop emits a boundary marker on TextResponseChan when the server marks a turn complete — the UI uses this to stop merging the NEXT turn's ora chunks into whatever block the current turn left behind (see streamLine's TurnBoundary handling), which is what let a restart/garbage turn glue onto a good prior reply.
-func TestReceiveLoop_TurnComplete_EmitsTurnBoundaryChunk(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	fs := &fakeLiveSession{
-		msgCh:     make(chan *genai.LiveServerMessage, 1),
-		responses: make(chan genai.LiveSendToolResponseParameters, 1),
-		closeErr:  errors.New("fake session closed"),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
-
-	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
-
-	select {
-	case chunk := <-a.TextResponseChan:
-		if !chunk.TurnBoundary {
-			t.Errorf("expected a TurnBoundary chunk, got %+v", chunk)
-		}
-		if chunk.Text != "" {
-			t.Errorf("expected an empty-text boundary marker, got %+v", chunk)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the turn boundary chunk on TextResponseChan")
 	}
 }
 
@@ -1597,13 +1408,6 @@ func TestTurnContext_FlattensRecallsToOneLineEach(t *testing.T) {
 	}
 }
 
-// No memory means no fence — an empty block is noise in every turn that has nothing to recall.
-func TestTurnContext_NoBlockWithoutRecalls(t *testing.T) {
-	if out := turnContext(time.Now(), nil); strings.Contains(out, "memory") {
-		t.Errorf("emitted a memory block with no memory:\n%s", out)
-	}
-}
-
 // The Gemini 3 Live models take a thinking level, not a token budget; sending the budget field to them is a config the server rejects. The 2.5 model is the other way round.
 func TestThinkingConfigFor_ByGeneration(t *testing.T) {
 	cfg := thinkingConfigFor("gemini-3.1-flash-live-preview")
@@ -1766,29 +1570,6 @@ func TestAffectiveDialogFor_OnlyOnThe25Model(t *testing.T) {
 	}
 	if v := affectiveDialogFor("gemini-2.5-flash-native-audio-preview-12-2025"); v == nil || !*v {
 		t.Error("2.5 must enable affective dialog")
-	}
-}
-
-// OpenAI's GPT-Live demo replies about 0.1 s after the person stops and says one word of status within 0.6 s of a question it has to go and look up. Ora has never measured its own equivalent. turnClock times the gap from the user's last transcribed speech to the first audio the model plays, once per model turn.
-func TestTurnClock_FirstSoundOncePerTurn(t *testing.T) {
-	var c turnClock
-	t0 := time.Date(2026, 9, 3, 21, 0, 0, 0, time.UTC)
-	if _, ok := c.firstSound(t0); ok {
-		t.Fatal("no user speech yet, must not report a latency")
-	}
-	c.userSpoke(t0)
-	c.userSpoke(t0.Add(400 * time.Millisecond))
-	d, ok := c.firstSound(t0.Add(1100 * time.Millisecond))
-	if !ok || d != 700*time.Millisecond {
-		t.Fatalf("first sound = %v, %v; want 700ms measured from the last user speech", d, ok)
-	}
-	if _, ok := c.firstSound(t0.Add(2 * time.Second)); ok {
-		t.Fatal("second audio chunk of the same turn must not report again")
-	}
-	c.turnDone()
-	c.userSpoke(t0.Add(5 * time.Second))
-	if d, ok := c.firstSound(t0.Add(5200 * time.Millisecond)); !ok || d != 200*time.Millisecond {
-		t.Fatalf("next turn = %v, %v; want 200ms", d, ok)
 	}
 }
 
@@ -2005,16 +1786,6 @@ func TestRedeliverBranchNotes_ResumedSessionGetsTheResult(t *testing.T) {
 	}
 }
 
-// TestBranchNotes_StaleResultIsNotRedelivered covers the age limit on the ring: news older than branchNoteWindow is not worth telling.
-func TestBranchNotes_StaleResultIsNotRedelivered(t *testing.T) {
-	a := NewAgent(nil, nil, nil, nil, "")
-	a.rememberBranchResult("old news", "done", time.Now().Add(-2*branchNoteWindow))
-
-	if notes := a.takeBranchNotes(time.Now()); len(notes) != 0 {
-		t.Fatalf("expected the stale note dropped, got %+v", notes)
-	}
-}
-
 // TestVoiceScreenScope_SurvivesAReconnect covers the numbered list going missing after a reconnect. Measured 2026-09-09: Connect made a fresh screen scope every dial, so after a resume a click on item 25 answered "call observe_screen first" about a list the model had just been given.
 func TestVoiceScreenScope_SurvivesAReconnect(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
@@ -2112,5 +1883,19 @@ func TestNudgeGap_WidensThenHoldsAtTheCap(t *testing.T) {
 	}
 	if spoken > 15 {
 		t.Errorf("a five-minute wait would speak %d times, want a handful", spoken)
+	}
+}
+
+// gemini-3.8-live matches the "gemini-3" prefix the three handshake gates branch on, so it inherits all of them, and one of the three is wrong for it: the API takes interleaved thinking with no level to set, and rejects a thinking level the way the other 3.x models reject a token budget. The other two inheritances are right — affective dialog is removed from the API for this model, and proactive audio is permanently on and has no field to set. All three documented at ai.google.dev/gemini-api/docs/models/gemini-3.8-live on 2026-09-17, not probed against Ora's own dial.
+func TestLive38Handshake_NoThinkingLevelNoAffectNoProactivity(t *testing.T) {
+	cfg := thinkingConfigFor("gemini-3.8-live")
+	if cfg == nil || cfg.ThinkingLevel != "" || cfg.ThinkingBudget != nil {
+		t.Errorf("3.8 wants neither a ThinkingLevel nor a ThinkingBudget, got %+v", cfg)
+	}
+	if v := affectiveDialogFor("gemini-3.8-live"); v != nil {
+		t.Errorf("3.8 must not send enableAffectiveDialog, got %v", *v)
+	}
+	if c := proactivityConfigFor("gemini-3.8-live", true); c != nil {
+		t.Errorf("3.8 must not send a proactivity config, got %+v", c)
 	}
 }

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import type { Evidence, Turn } from "./api";
-import { hhmm } from "./format";
+import { hhmm, keyed } from "./format";
 import { ui, useAppDispatch, useAppSelector } from "./store";
 
 /** How many sources the rail shows before folding the rest behind "show all": a rail beside a wide thread has a capped, scrolling height, but a reply with dozens of sources should not hand a reader that much to scroll through before they can even see what it did. The full window's own fold under a reply (ReplyMeta, unaffected by this) already asks a click to see any of them, so it lists every one once opened. */
@@ -24,9 +24,9 @@ export function Quotes({
     <div
       className={compact ? "flex flex-col gap-3" : "mt-3 flex flex-col gap-2"}
     >
-      {shown.map((e, i) => (
+      {keyed(shown, (e) => `${e.title}\n${e.meta}\n${e.body}`).map(({ key, item: e }) => (
         <div
-          key={`${e.title}-${i}`}
+          key={key}
           className={
             compact ? "border-l pl-3" : "rounded-md bg-sunken px-3 py-2"
           }
@@ -97,61 +97,55 @@ function Fold({
   );
 }
 
-/** What sits under one of Ora's replies: the grey line saying when it was said and which tools it called, and the fold holding what it read. Input: the turn. Output: the line, the fold, and the quotes themselves when the fold is open. A failed ask gets the same shape, except that what the fold holds is the provider's whole message rather than what was read. */
-export function ReplyMeta({ turn, folded = true }: { turn: Turn; folded?: boolean }) {
+/** What a failed ask says under it: the time and that it could not answer, with the provider's own message folded away when it says something the reason line above does not. Input: the turn and whether this reply folds at all. Output: the line and the fold. */
+function ErrorMeta({ turn, folded }: { turn: Turn; folded: boolean }) {
   const dispatch = useAppDispatch();
   const open = useAppSelector((s) => s.ui.openRails.includes(turn.id));
-  const time = hhmm(turn.when);
+  const text = (turn.text ?? "").trim();
+  const whole = text.length > 0 && text !== (turn.reason ?? "").trim();
+  const foldable = whole && folded;
+  return (
+    <>
+      <div className="mt-1.5 text-meta text-muted-foreground">{hhmm(turn.when)} · could not answer</div>
+      {foldable ? (
+        <Fold label="The whole message" open={open} controls={`fold-${turn.id}`} onToggle={() => dispatch(ui.railToggled(turn.id))} />
+      ) : null}
+      {foldable && open ? (
+        <pre id={`fold-${turn.id}`} className="mt-2 max-h-[220px] overflow-auto rounded-md bg-sunken p-3 font-mono text-meta whitespace-pre-wrap">
+          {turn.text}
+        </pre>
+      ) : null}
+    </>
+  );
+}
 
-  if (turn.kind === "error") {
-    const whole =
-      (turn.text ?? "").trim() !== (turn.reason ?? "").trim() &&
-      (turn.text ?? "").trim().length > 0;
-    return (
-      <>
-        <div className="mt-1.5 text-meta text-muted-foreground">
-          {time} · could not answer
-        </div>
-        {whole && folded ? (
-          <Fold
-            label="The whole message"
-            open={open}
-            controls={`fold-${turn.id}`}
-            onToggle={() => dispatch(ui.railToggled(turn.id))}
-          />
-        ) : null}
-        {open && whole && folded ? (
-          <pre id={`fold-${turn.id}`} className="mt-2 max-h-[220px] overflow-auto rounded-md bg-sunken p-3 font-mono text-meta whitespace-pre-wrap">
-            {turn.text}
-          </pre>
-        ) : null}
-      </>
-    );
-  }
-
+/** What an answer says under it: the time and the tools it called on one grey line, and the quotes behind it folded away. Input: the turn and whether this reply folds at all. Output: the line, the fold, and the quotes when the fold is open. An answer that read nothing says so, since a reply built on nothing is one to treat differently. */
+function AnswerMeta({ turn, folded }: { turn: Turn; folded: boolean }) {
+  const dispatch = useAppDispatch();
+  const open = useAppSelector((s) => s.ui.openRails.includes(turn.id));
   const evidence = turn.evidence ?? [];
   const tools = (turn.tools ?? []).filter(Boolean);
+  const foldable = evidence.length > 0 && folded;
   return (
     <>
       <div className="mt-1.5 text-meta text-muted-foreground">
-        {time}
+        {hhmm(turn.when)}
         {tools.length && folded ? ` · ${tools.join(", ")}` : ""}
         {evidence.length ? "" : " · read nothing — treat it that way"}
       </div>
-      {evidence.length && folded ? (
-        <Fold
-          label="Sources"
-          count={evidence.length}
-          open={open}
-          controls={`fold-${turn.id}`}
-          onToggle={() => dispatch(ui.railToggled(turn.id))}
-        />
+      {foldable ? (
+        <Fold label="Sources" count={evidence.length} open={open} controls={`fold-${turn.id}`} onToggle={() => dispatch(ui.railToggled(turn.id))} />
       ) : null}
-      {open && evidence.length && folded ? (
+      {foldable && open ? (
         <div id={`fold-${turn.id}`}>
           <Quotes evidence={evidence} />
         </div>
       ) : null}
     </>
   );
+}
+
+/** What sits under one of Ora's replies: the grey line saying when it was said and which tools it called, and the fold holding what it read. Input: the turn. Output: the line and the fold. A failed ask gets the same shape, except that what the fold holds is the provider's whole message rather than what was read. */
+export function ReplyMeta({ turn, folded = true }: { turn: Turn; folded?: boolean }) {
+  return turn.kind === "error" ? <ErrorMeta turn={turn} folded={folded} /> : <AnswerMeta turn={turn} folded={folded} />;
 }

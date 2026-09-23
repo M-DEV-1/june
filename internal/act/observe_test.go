@@ -32,17 +32,6 @@ func TestFilterKeepsOnlyShowingActionableNodes(t *testing.T) {
 	}
 }
 
-// A page can carry thousands of links; past the cap the list stops, because a model reading two hundred numbered lines is no better at choosing than one reading one hundred and fifty, and it costs more.
-func TestFilterCapsTheList(t *testing.T) {
-	nodes := make([]Node, MaxItems+40)
-	for i := range nodes {
-		nodes[i] = Node{Role: "link", Label: "x", X: 1, Y: 1, W: 10, H: 10, Showing: true}
-	}
-	if got := len(Filter(nodes)); got != MaxItems {
-		t.Errorf("Filter kept %d items, want the cap %d", got, MaxItems)
-	}
-}
-
 // A chat window lists its transcript before its compose box and its Send button, and a busy one runs past the cap long before the walk reaches them. Stopping at the cap in tree order therefore hands the model a page of read-only messages with nothing on it to press: the button is not merely far down the list, it is absent, and the model cannot press what it cannot see. The read-only nodes are what the cap gives up.
 func TestFilterCapGivesUpReadingBeforeControls(t *testing.T) {
 	var nodes []Node

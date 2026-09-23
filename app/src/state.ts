@@ -986,6 +986,9 @@ export function step(
 
     // A notice is Ora speaking first, so every case below touches the notice fields and nothing else: a brief landing while a question is being answered must leave that question, its steps and the input exactly as they were.
     case "notice":
+      // A follow-up whose action has no line of its own is an answer to a button the notice named for itself ("dropped", "record"): it only says the card is dealt with, so the card goes.
+      if (event.notice.action && noticeActionLine(event.notice, new Date()) === undefined)
+        return { view: { ...view, notice: undefined, noticeAlone: false, noticeHeld: false } };
       return {
         view: {
           ...view,

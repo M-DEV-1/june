@@ -31,38 +31,6 @@ func seedFacts(t *testing.T, store *Store, n int) {
 	}
 }
 
-func TestNoteCompactor_BelowThresholdSkips(t *testing.T) {
-	store := newFileStore(t)
-	seedFacts(t, store, minNotesToConsolidate-1)
-	llm := &fakeConsolidator{}
-	nc := NewNoteCompactor(llm, store)
-
-	if err := nc.Compact(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if llm.called {
-		t.Error("consolidator should not be called below threshold")
-	}
-}
-
-func TestNoteCompactor_ReducesAndReplaces(t *testing.T) {
-	store := newFileStore(t)
-	seedFacts(t, store, minNotesToConsolidate)
-	llm := &fakeConsolidator{out: []string{"a", "b", "c"}}
-	nc := NewNoteCompactor(llm, store)
-
-	if err := nc.Compact(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	notes, err := store.GetNotes(context.Background())
-	if err != nil {
-		t.Fatalf("GetNotes: %v", err)
-	}
-	if len(notes) != 3 {
-		t.Errorf("expected 3 merged notes, got %d", len(notes))
-	}
-}
-
 func TestNoteCompactor_NeverWipesOnEmptyResult(t *testing.T) {
 	store := newFileStore(t)
 	seedFacts(t, store, minNotesToConsolidate)

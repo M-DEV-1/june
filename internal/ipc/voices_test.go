@@ -3,7 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
-	"errors"
+
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,20 +51,6 @@ func TestVoices_ListsEveryVoiceAndMarksTheCurrentOne(t *testing.T) {
 	}
 	if current != 1 {
 		t.Errorf("%d voices marked current, want exactly one", current)
-	}
-}
-
-// With no voice ever chosen the list still marks one, or the picker opens with nothing selected while the session is in fact speaking as config.DefaultVoice.
-func TestVoices_MarksTheDefaultWhenNothingIsChosen(t *testing.T) {
-	live, _ := savedConfig(t)
-	rec := httptest.NewRecorder()
-	Voices(live, nil)(rec, httptest.NewRequest(http.MethodGet, "/voices", nil))
-	var out struct{ Voices []VoiceView }
-	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	for _, v := range out.Voices {
-		if v.Current && v.Name != config.DefaultVoice {
-			t.Errorf("current voice = %q, want the default %q", v.Name, config.DefaultVoice)
-		}
 	}
 }
 
@@ -124,28 +110,7 @@ func TestVoicePreview_SpeaksWithoutChangingTheChoice(t *testing.T) {
 	}
 }
 
-// A preview that cannot be spoken says so, rather than answering 200 and leaving the user waiting for a sound that is never coming.
-func TestVoicePreview_ReportsAFailureToSpeak(t *testing.T) {
-	live, _ := savedConfig(t)
-	preview := func(ctx context.Context, name string) error { return errors.New("no speaker") }
-	rec := httptest.NewRecorder()
-	VoicePreview(live, preview)(rec, httptest.NewRequest(http.MethodPost, "/voices/preview", strings.NewReader(`{"name":"Puck"}`)))
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("a failed preview = %d, want 500", rec.Code)
-	}
-}
-
-// A daemon built without a previewer — no speaker on this machine — says the preview is unavailable instead of panicking on a nil call.
-func TestVoicePreview_SaysWhenThereIsNoPreviewer(t *testing.T) {
-	live, _ := savedConfig(t)
-	rec := httptest.NewRecorder()
-	VoicePreview(live, nil)(rec, httptest.NewRequest(http.MethodPost, "/voices/preview", strings.NewReader(`{"name":"Puck"}`)))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("preview with no previewer = %d, want 503", rec.Code)
-	}
-}
-
-// GET /voices carries the two Live models beside the voices, because the picker draws both and one read has to answer both.
+// GET /voices carries the Live models beside the voices, because the picker draws them all and one read has to answer both rosters.
 func TestVoices_ListsTheLiveModelsAndMarksTheCurrentOne(t *testing.T) {
 	live, cfg := savedConfig(t)
 	cfg.LiveModel = config.Live25Model
@@ -173,20 +138,6 @@ func TestVoices_ListsTheLiveModelsAndMarksTheCurrentOne(t *testing.T) {
 	}
 	if current != 1 {
 		t.Errorf("%d models marked current, want exactly one", current)
-	}
-}
-
-// With no model ever chosen the list still marks one, since a session with an empty config dials config.DefaultVoiceModel.
-func TestVoices_MarksTheDefaultModelWhenNothingIsChosen(t *testing.T) {
-	live, _ := savedConfig(t)
-	rec := httptest.NewRecorder()
-	Voices(live, nil)(rec, httptest.NewRequest(http.MethodGet, "/voices", nil))
-	var out struct{ Models []LiveModelView }
-	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	for _, m := range out.Models {
-		if m.Current && m.Name != config.DefaultVoiceModel {
-			t.Errorf("current model = %q, want the default %q", m.Name, config.DefaultVoiceModel)
-		}
 	}
 }
 

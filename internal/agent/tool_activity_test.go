@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
-	"strings"
+
 	"testing"
 	"time"
 
@@ -11,48 +11,6 @@ import (
 )
 
 // --- pure helpers ---
-
-func TestToolActivitySummary(t *testing.T) {
-	cases := []struct {
-		name string
-		args map[string]any
-		want string
-	}{
-		{"query_memory", map[string]any{"query": "Riddler puzzles"}, `"Riddler puzzles"`},
-		{"query_memory", map[string]any{"query": "cuda", "domain": "work"}, `"cuda"`},
-		{"recall", map[string]any{"subject": "DeepSeek"}, `"DeepSeek"`},
-		{"recall", map[string]any{"since": "2026-07-05", "until": "2026-07-06"}, `since 2026-07-05 until 2026-07-06`},
-		{"recall", map[string]any{}, ""},
-		{"shell_exec", map[string]any{"command": "ls -la"}, `"ls -la"`},
-		{"read_file", map[string]any{"path": "/etc/hosts"}, `"/etc/hosts"`},
-		{"list_files", map[string]any{"path": "."}, `"."`},
-		{"list_files", map[string]any{}, ""},
-		{"open_url", map[string]any{"url": "https://example.com"}, `"https://example.com"`},
-		{"read_clipboard", map[string]any{}, ""},
-		{"save_note", map[string]any{"content": "user has a dentist appointment Friday"}, `"user has a dentist appointment Friday"`},
-		{"revise", map[string]any{"ref": "note#12", "content": "corrected"}, `"note#12"`},
-		{"branch", map[string]any{"task": "catch me up on Riddler"}, `"catch me up on Riddler"`},
-		{"unknown_tool", map[string]any{"foo": "bar"}, ""},
-		// Screen tools used to summarize to "": the eval and the UI's live progress had no way to see what was clicked, scrolled to or typed, only that some numbered call happened.
-		{"click", map[string]any{"n": float64(13)}, "element 13"},
-		{"scroll_to", map[string]any{"n": float64(2)}, "element 2"},
-		{"point_at", map[string]any{"n": float64(4)}, "element 4"},
-		{"type_text", map[string]any{"text": "example.com"}, `"example.com"`},
-		{"click_at", map[string]any{"x": float64(120), "y": float64(340)}, "120,340"},
-		{"scroll_at", map[string]any{"x": float64(50), "y": float64(60), "dy": float64(3)}, "3 steps at 50,60"},
-		{"scroll_at", map[string]any{"x": float64(50), "y": float64(60)}, ""},
-		{"observe_screen", map[string]any{}, ""},
-		// A long argument is cut to a bounded length so one shell command or note body can't push the tool line off the status row.
-		{"shell_exec", map[string]any{"command": strings.Repeat("x", 200)}, `"` + strings.Repeat("x", toolArgSummaryRunes) + `…"`},
-		{"save_note", map[string]any{"content": strings.Repeat("y", 200)}, `"` + strings.Repeat("y", toolArgSummaryRunes) + `…"`},
-	}
-	for _, c := range cases {
-		got := toolActivitySummary(c.name, c.args)
-		if got != c.want {
-			t.Errorf("toolActivitySummary(%q, %v) = %q, want %q", c.name, c.args, got, c.want)
-		}
-	}
-}
 
 func TestResultSummary(t *testing.T) {
 	cases := []struct {

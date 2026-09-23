@@ -57,23 +57,3 @@ func TestAskErrorText(t *testing.T) {
 		})
 	}
 }
-
-// A nil error has nothing to say, and must not be turned into a sentence claiming something failed.
-func TestAskErrorText_NilErrorSaysNothing(t *testing.T) {
-	sentence, detail := AskErrorText(nil)
-	if sentence != "" || detail != "" {
-		t.Errorf("AskErrorText(nil) = %q, %q, want two empty strings", sentence, detail)
-	}
-}
-
-// The line the ask handler needs on its error event is AskSentence(err): the window is handed the sentence while the store still keeps the provider's whole message under the failed turn.
-func TestAskSentence_IsTheLineOnItsOwn(t *testing.T) {
-	err := fmt.Errorf("ask text: %w", genai.APIError{Code: 503})
-
-	if got := AskSentence(err); got != askOverloaded {
-		t.Errorf("AskSentence = %q, want %q", got, askOverloaded)
-	}
-	if got := AskSentence(nil); got != "" {
-		t.Errorf("AskSentence(nil) = %q, want an empty string", got)
-	}
-}

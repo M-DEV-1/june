@@ -24,7 +24,7 @@ const ORA_IFACE = `
   </interface>
 </node>`;
 
-// The names of the executables allowed to call this interface, checked against what /proc/<pid>/exe resolves to for the calling process. These are the binaries packaging/install.sh installs and scripts/release.sh stages: the daemon, under either name it has been shipped as. Anything else on the session bus is refused, because List alone enumerates every open window's title.
+// The names of the executables allowed to call this interface, checked against what /proc/<pid>/exe resolves to for the calling process. These are the binaries packaging/install.sh installs and packaging/release.sh stages: the daemon, under either name it has been shipped as. Anything else on the session bus is refused, because List alone enumerates every open window's title.
 const ORA_BINARIES = ['ora', 'ora-daemon'];
 
 // Raises a window the same way activate-window-by-title does: hand it to its own workspace with a fresh shell-generated timestamp, which GNOME's focus-stealing prevention accepts because it comes from inside the shell. Input: a Meta.Window, or null if nothing matched. Output: true if a window was raised, false if win was null.

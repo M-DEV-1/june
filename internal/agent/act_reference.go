@@ -114,9 +114,28 @@ func actReferenceAge(when, now time.Time) string {
 	}
 }
 
-// ActReferenceFor looks up the past screen runs closest to a question and renders them as the reference block. Input: ctx, the question about to be asked, and the clock the ages are measured against. Output: the block, or "" when the store cannot answer, holds nothing close enough, or is not a store that keeps act runs at all.
-// A lookup failure is logged and swallowed: the reference is a help, never a requirement, and an ask must not fail because a past run could not be read.
+// ActReferenceFor is actReference's block alone, for a caller that has no trace to carry the lesson ids on: a computer-use job (internal/actjob), which reads it through its Referencer interface.
 func (a *Agent) ActReferenceFor(ctx context.Context, question string, now time.Time) string {
+	block, _ := a.actReference(ctx, question, now)
+	return block
+}
+
+// actReference is what this machine did the last few times it was asked something like this question, and what it learned doing it: the past-run block, then the lessons block beneath it. Every ask path (Gemini, Claude, Codex, Antigravity) and every job reads it through here, so a lesson is offered whichever brain answers. Input: ctx, the question about to be asked, and the clock the ages are measured against. Output: the block, "" when there is nothing to show, and the id of every lesson it named, for the caller to carry on the trace so the end-of-ask hook can score them.
+// A lookup failure is logged and swallowed: the reference is a help, never a requirement, and an ask must not fail because a past run could not be read.
+func (a *Agent) actReference(ctx context.Context, question string, now time.Time) (string, []int64) {
+	block := a.pastRunsBlock(ctx, question, now)
+	lessonBlock, ids := RenderLessonBlock(a.LessonsFor(ctx, question))
+	switch {
+	case block == "":
+		block = lessonBlock
+	case lessonBlock != "":
+		block = block + "\n" + lessonBlock
+	}
+	return block, ids
+}
+
+// pastRunsBlock looks up the past screen runs closest to a question and renders them as the reference block. Output: the block, or "" when the store cannot answer, holds nothing close enough, or is not a store that keeps act runs at all.
+func (a *Agent) pastRunsBlock(ctx context.Context, question string, now time.Time) string {
 	// The one store method this needs is asserted off the brain rather than added to ContextReader, so wiring the block into an ask changes nothing else, and every fake brain in the tests of this package keeps working without gaining a method it has no use for.
 	lookup, ok := a.brain.(interface {
 		SimilarActRuns(ctx context.Context, question string, limit int) ([]db.ActMatch, error)
@@ -134,22 +153,19 @@ func (a *Agent) ActReferenceFor(ctx context.Context, question string, now time.T
 	return ActReferenceBlock(matches, now)
 }
 
-// LessonsFor looks up the lessons learned in the front app closest in meaning to a new goal, most hits first. Input: ctx, the app in front and the question about to be asked as its goal. Output: up to actReferenceLessonCap lessons (see db.SimilarLessons), or nil when the store cannot answer, is not one that keeps lessons at all, or app is "".
-func (a *Agent) LessonsFor(ctx context.Context, app, goal string) []db.Lesson {
-	if app == "" {
-		return nil
-	}
+// LessonsFor looks up the lessons worth showing before a run on a goal, whatever apps it spans (see db.SimilarLessons). Input: ctx and the question about to be asked as its goal. Output: up to actReferenceLessonCap lessons for each part of the goal, or nil when the store cannot answer or is not one that keeps lessons at all.
+func (a *Agent) LessonsFor(ctx context.Context, goal string) []db.Lesson {
 	lookup, ok := a.brain.(interface {
-		SimilarLessons(ctx context.Context, app, goal string, limit int) ([]db.Lesson, error)
+		SimilarLessons(ctx context.Context, goal string, limit int) ([]db.Lesson, error)
 	})
 	if !ok {
 		return nil
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, actReferenceTimeout)
 	defer cancel()
-	lessons, err := lookup.SimilarLessons(lookupCtx, app, goal, actReferenceLessonCap)
+	lessons, err := lookup.SimilarLessons(lookupCtx, goal, actReferenceLessonCap)
 	if err != nil {
-		slog.Warn("ask: could not look up lessons learned in this app, continuing without them", "error", err)
+		slog.Warn("ask: could not look up lessons, continuing without them", "error", err)
 		return nil
 	}
 	return lessons
@@ -169,32 +185,13 @@ func RenderLessonBlock(lessons []db.Lesson) (string, []int64) {
 	return lessonReferenceHeader + "\n" + strings.Join(lines, "\n"), ids
 }
 
-// frontWindowApp names the app a lesson lookup is scoped to: the app half of the screen target this session last pointed at or acted on (tools_screen.go's ScreenTarget, in its "app · title" form), read with no live screen call. frontWindowNow would answer more freshly, but calling it here — ahead of the very observe_screen the model has not asked for yet — would cost this turn one of its own looks before the model ever sees the screen, and on a run that just clicked or typed the target it remembers is what this run actually acted in anyway. Output: "" when nothing has been acted on yet this session.
-func (a *Agent) frontWindowApp() string {
-	t, ok := a.screenTarget()
-	if !ok {
-		return ""
-	}
-	if app, _, found := strings.Cut(t.Window, " · "); found {
-		return app
-	}
-	return t.Window
-}
-
 // WithActReference adds the reference block to a turn's content as a part of its own, ahead of the user's own words and behind the turn context, and returns the content unchanged when there is nothing to add. Input: ctx, the clock, the question being asked and the content buildTurnContent produced. Output: the same content with at most one part added to its first entry, and the ids of any lessons the block named (see RenderLessonBlock), for the caller to carry on the trace and score once the run ends.
 // It is one call so that wiring this into an ask path is one line, and so the block stays a part of its own rather than being folded into the user's text, which would blur the line between what the user said and what Ora merely did once.
 func (a *Agent) WithActReference(ctx context.Context, now time.Time, question string, contents []*genai.Content) ([]*genai.Content, []int64) {
 	if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
 		return contents, nil
 	}
-	block := a.ActReferenceFor(ctx, question, now)
-	lessonBlock, ids := RenderLessonBlock(a.LessonsFor(ctx, a.frontWindowApp(), question))
-	switch {
-	case block == "":
-		block = lessonBlock
-	case lessonBlock != "":
-		block = block + "\n" + lessonBlock
-	}
+	block, ids := a.actReference(ctx, question, now)
 	if block == "" {
 		return contents, nil
 	}

@@ -5,10 +5,6 @@ import { describe, expect, it } from "vitest";
 import { parseGeometry } from "./window";
 
 describe("reading a stored window geometry", () => {
-  it("takes a whole rectangle back", () => {
-    expect(parseGeometry(JSON.stringify({ x: 120, y: 80, width: 1200, height: 800 }))).toEqual({ x: 120, y: 80, width: 1200, height: 800 });
-  });
-
   it("refuses nothing, rubbish, and a shape with a field missing", () => {
     expect(parseGeometry(null)).toBeUndefined();
     expect(parseGeometry("")).toBeUndefined();

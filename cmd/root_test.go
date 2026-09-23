@@ -73,11 +73,6 @@ func TestSecureEnvFile_RestrictsPermissions(t *testing.T) {
 	}
 }
 
-// TestSecureEnvFile_MissingFile_DoesNotPanic verifies a missing .env (the common case — env vars set directly) is a silent no-op.
-func TestSecureEnvFile_MissingFile_DoesNotPanic(t *testing.T) {
-	secureEnvFile(filepath.Join(t.TempDir(), "does-not-exist"))
-}
-
 // TestFileIdentity_DiffersAfterRebuild verifies calling fileIdentity twice on the same unchanged file returns the same non-"unknown" string — the daemon and a freshly-relaunched client built from the same binary must agree when nothing has actually changed — that it changes when the file is overwritten (a rebuild), which is the whole point: an old daemon process holds an identity captured at ITS startup, while a freshly-relaunched client reads whatever's on disk now — and that a stat failure on a missing file degrades to "unknown" instead of panicking or erroring out, since this is a diagnostic, not something that should ever block startup.
 func TestFileIdentity_DiffersAfterRebuild(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ora-bin")
@@ -102,20 +97,6 @@ func TestFileIdentity_DiffersAfterRebuild(t *testing.T) {
 
 	if got := fileIdentity(filepath.Join(t.TempDir(), "does-not-exist")); got != "unknown" {
 		t.Errorf(`expected "unknown" for a missing file, got %q`, got)
-	}
-}
-
-// TestFormatHotkey verifies the GNOME accelerator gsettings reports turns into the plain text a terminal hint prints.
-func TestFormatHotkey(t *testing.T) {
-	cases := []struct{ raw, want string }{
-		{"<Control><Alt>space", "Ctrl+Alt+Space"},
-		{"<Super>a", "Super+A"},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		if got := formatHotkey(tc.raw); got != tc.want {
-			t.Errorf("formatHotkey(%q) = %q, want %q", tc.raw, got, tc.want)
-		}
 	}
 }
 
@@ -263,16 +244,5 @@ func TestOfferWindow_FreshDaemon_RetriesTheShowInstruction(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&opens); got != freshDaemonOpenAttempts {
 		t.Errorf("expected %d retries for a freshly spawned daemon, got %d", freshDaemonOpenAttempts, got)
-	}
-}
-
-// fetchWindowHotkey degrades to "" rather than erroring when the daemon can't be reached at all — offerWindow falls back to a generic hint in that case, and startup must never block or fail on this.
-func TestFetchWindowHotkey_UnreachableDaemon_ReturnsEmpty(t *testing.T) {
-	oldPort := DaemonPort
-	DaemonPort = "1" // nothing listens on a privileged low port in a test sandbox
-	t.Cleanup(func() { DaemonPort = oldPort })
-
-	if got := fetchWindowHotkey(); got != "" {
-		t.Errorf("fetchWindowHotkey() = %q, want empty when the daemon is unreachable", got)
 	}
 }

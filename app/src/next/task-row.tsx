@@ -40,20 +40,15 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
   };
 
   return (
-    <li
-      className={`group flex items-start gap-2.5 rounded-sm px-2 py-2 transition-colors ${selected ? "bg-selected" : "hover:bg-hover"}`}
-      // The whole row picks the task, not only the title: the padding, the gaps and the column saying when it was raised are part of the target. A click that landed on one of the row's own controls is that control's alone — the menus included, whose items are not buttons and reach here through the React tree however far the portal moved them in the document. The keyboard has the button below, which is the row's one tab stop, so this adds no second way in for anything but a pointer.
-      onClick={(e) => {
-        if (!(e.target as HTMLElement).closest('button,[role="menu"]')) dispatch(ui.taskOpened(task.id));
-      }}
-    >
+    <li className={`group relative flex items-start gap-2.5 rounded-sm px-2 py-2 transition-colors ${selected ? "bg-selected" : "hover:bg-hover"}`}>
       <TaskTick task={task} />
       <button
         type="button"
         data-row-id={task.id}
         aria-current={selected ? "true" : undefined}
         onClick={() => dispatch(ui.taskOpened(task.id))}
-        className="min-w-0 flex-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        // The button's own ::after covers the whole row, so the padding, the gaps and the column saying when it was raised all pick the task — a row with no detail line is eight pixels tall, and only its title being clickable loses a third of its width. The ring is drawn on that same surface, so what the keyboard highlights and what the pointer hits are one rectangle. The More and owner menus sit above it by being positioned and coming later in the DOM; the tick comes earlier, so it carries a z-index of its own.
+        className="min-w-0 flex-1 rounded-sm text-left outline-none after:absolute after:inset-0 after:rounded-sm after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-ring"
       >
         {/* Spans rather than divs: a button may only hold phrasing content, and some assistive technology flattens a block inside one oddly. */}
         <span className={`block text-ui break-words ${selected ? "font-medium" : ""} ${task.done ? "text-muted-foreground line-through" : ""}`}>
@@ -78,7 +73,7 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
             variant="ghost"
             size="icon-xs"
             aria-label={`More for ${task.title}`}
-            className="shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
+            className="relative shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
           >
             <MoreHorizontal />
           </Button>

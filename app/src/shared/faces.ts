@@ -1,7 +1,7 @@
 /** Ora's face: one kaomoji per state, shared by the main window (src/next/face.tsx) and the hover window (src/main.ts) so the two never show different faces for the same thing. A state with more than one face alternates through them.
  *
  * Three sets stacked, newest first. Each state leads with the face he picked off the specimen sheet on 2026-09-12; behind it sits the minimal face drawn from that day's design sheets, and behind that the hand-picked set of 2026-09-07. Nothing was retired, because he liked all of it: face() walks each list on a timer, so every face still gets its turn, and the one that leads is the one a still frame shows.
- * The first face of each state is the one that matters most, since it is what a single reading takes: overlay/extension.js copies exactly that one, and a test checks the copy has not drifted.
+ * The first face of each state is the one that matters most, since it is what a single reading takes.
  */
 
 export type OraState = "watching" | "listening" | "thinking" | "speaking" | "done" | "refused" | "asleep" | "dreaming" | "noticed" | "recording";

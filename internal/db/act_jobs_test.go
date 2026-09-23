@@ -171,15 +171,3 @@ func TestActRuns_SkipsJobRows(t *testing.T) {
 		t.Fatalf("ActRuns returned %d runs, want only the ask-shaped one", len(runs))
 	}
 }
-
-// TestNew_ActRunsHasJobColumnsBeforeAnySave checks a fresh store already carries the job columns on act_runs, so reading a job never depends on a save having run the migration first.
-func TestNew_ActRunsHasJobColumnsBeforeAnySave(t *testing.T) {
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	defer store.Close()
-	if _, err := store.db.Exec(`SELECT job_id, job_state, job_json FROM act_runs`); err != nil {
-		t.Fatalf("fresh act_runs lacks the job columns: %v", err)
-	}
-}

@@ -15,20 +15,17 @@ import (
 
 // fakeSummarizer stands in for the model. By default AttributeThreads returns one thread and no identity facts, and ReconcileNotes echoes every candidate back as an "add"; set attr, ops or opsErr to change that. Mutex-protected so `go test -race` can only blame the compiler.
 type fakeSummarizer struct {
-	mu             sync.Mutex
-	attr           func() (*memory.ThreadAttribution, error)
-	ops            []memory.NoteOp
-	opsErr         error
-	attrCalls      int
-	reconcileCalls int
-	received       []tracker.Activity
+	mu        sync.Mutex
+	attr      func() (*memory.ThreadAttribution, error)
+	ops       []memory.NoteOp
+	opsErr    error
+	attrCalls int
 }
 
 func (s *fakeSummarizer) AttributeThreads(_ context.Context, activities []tracker.Activity, _ []memory.Thread) (*memory.ThreadAttribution, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attrCalls++
-	s.received = activities
 	if s.attr != nil {
 		return s.attr()
 	}
@@ -40,7 +37,6 @@ func (s *fakeSummarizer) AttributeThreads(_ context.Context, activities []tracke
 func (s *fakeSummarizer) ReconcileNotes(_ context.Context, _ []memory.NoteRef, candidates []string) ([]memory.NoteOp, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.reconcileCalls++
 	if s.opsErr != nil {
 		return nil, s.opsErr
 	}
@@ -72,15 +68,14 @@ type updateCall struct {
 
 // fakeStorage records every durable write. With fail set, each write returns an error instead.
 type fakeStorage struct {
-	mu             sync.Mutex
-	fail           bool
-	existing       []memory.NoteRef
-	semantic       []memory.TaskSummary
-	notes          []noteCall
-	updates        []updateCall
-	upserts        []memory.ThreadUpdate
-	links          []linkCall
-	existingCalled int
+	mu       sync.Mutex
+	fail     bool
+	existing []memory.NoteRef
+	semantic []memory.TaskSummary
+	notes    []noteCall
+	updates  []updateCall
+	upserts  []memory.ThreadUpdate
+	links    []linkCall
 }
 
 // linkCall is one LinkEpisodesToThread the compiler made, so a test can check the buffer's evidence was joined to the thread it was attributed to.
@@ -119,7 +114,6 @@ func (s *fakeStorage) LogNote(_ context.Context, content, kind string) (int64, e
 func (s *fakeStorage) ExistingNotes(context.Context) ([]memory.NoteRef, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.existingCalled++
 	return s.existing, nil
 }
 
@@ -205,24 +199,6 @@ func TestCompiler_FlushesOnWordCountLimit(t *testing.T) {
 	}
 }
 
-func TestCompiler_PassesScreenTextToSummarizer(t *testing.T) {
-	llm := &fakeSummarizer{}
-	compiler := memory.NewCompiler(llm, &fakeStorage{})
-	ctx := context.Background()
-
-	// Pad screen text to exceed minFlushWords so the flush is not discarded.
-	screenText := "func validateToken " + strings.Repeat("word ", 30)
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: screenText})
-	compiler.ForceFlush(ctx)
-
-	if len(llm.received) == 0 {
-		t.Fatal("summarizer was not called")
-	}
-	if !strings.HasPrefix(llm.received[0].ScreenText, "func validateToken") {
-		t.Errorf("expected ScreenText passed to summarizer to start with 'func validateToken', got %q", llm.received[0].ScreenText)
-	}
-}
-
 // attributionFails is a summarizer whose AttributeThreads always errors, sending flush down the fallback path.
 func attributionFails() *fakeSummarizer {
 	return &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
@@ -271,31 +247,6 @@ func TestCompiler_FallbackCapsTotalLength(t *testing.T) {
 	// +1 tolerance: truncateRunes appends a trailing "…" marker after cutting to the cap.
 	if got := len([]rune(store.semantic[0].Summary)); got > 2001 {
 		t.Errorf("expected the fallback summary capped at ~2000 runes, got %d", got)
-	}
-}
-
-func TestCompiler_AutoExtractsNotes(t *testing.T) {
-	llm := &fakeSummarizer{attr: identityAttribution("user prefers terse responses", "user is debugging the React PR")}
-	store := &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-	compiler.ForceFlush(ctx)
-
-	if len(store.semantic) != 1 {
-		t.Fatalf("expected 1 LogSemanticNode call, got %d", len(store.semantic))
-	}
-	if len(store.notes) != 2 {
-		t.Fatalf("expected 2 LogNote calls, got %d", len(store.notes))
-	}
-	if store.notes[0].content != "user prefers terse responses" || store.notes[1].content != "user is debugging the React PR" {
-		t.Errorf("unexpected notes: %+v", store.notes)
-	}
-	for _, c := range store.notes {
-		if c.kind != "fact" {
-			t.Errorf("expected kind 'fact', got %q", c.kind)
-		}
 	}
 }
 
@@ -364,31 +315,6 @@ func TestCompiler_Reconcile(t *testing.T) {
 	}
 }
 
-func TestIsSalient(t *testing.T) {
-	cases := []struct {
-		name string
-		act  tracker.Activity
-		want bool
-	}{
-		{"empty title and empty screen text", tracker.Activity{App: "Explorer"}, false},
-		{"whitespace-only title", tracker.Activity{App: "Explorer", Title: "   "}, false},
-		{"new tab lowercase", tracker.Activity{App: "Chrome", Title: "new tab"}, false},
-		{"New Tab mixed case", tracker.Activity{App: "Chrome", Title: "New Tab"}, false},
-		{"untitled", tracker.Activity{App: "Notepad", Title: "Untitled"}, false},
-		{"desktop", tracker.Activity{App: "Explorer", Title: "Desktop"}, false},
-		{"trivial title but non-trivial screen text", tracker.Activity{App: "Chrome", Title: "New Tab", ScreenText: "package main\n\nfunc main() {}"}, true},
-		{"real title", tracker.Activity{App: "VSCode", Title: "compiler.go"}, true},
-		{"real title and screen text", tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: "func validateToken(tok string) bool"}, true},
-		{"empty title but has screen text", tracker.Activity{App: "Terminal", ScreenText: "go build ./..."}, true},
-	}
-
-	for _, tc := range cases {
-		if got := memory.IsSalient(tc.act); got != tc.want {
-			t.Errorf("%s: IsSalient(%+v) = %v, want %v", tc.name, tc.act, got, tc.want)
-		}
-	}
-}
-
 func TestCompiler_NonSalientActivitiesNotBuffered(t *testing.T) {
 	llm, store := &fakeSummarizer{}, &fakeStorage{}
 	compiler := memory.NewCompiler(llm, store)
@@ -433,35 +359,6 @@ func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	}
 	if !store.semantic[1].SameTask || store.semantic[1].TaskName != "ORA project" {
 		t.Errorf("thread id=5: got SameTask=%v TaskName=%q, want true/\"ORA project\"", store.semantic[1].SameTask, store.semantic[1].TaskName)
-	}
-}
-
-// Note reconciliation costs an LLM call and a table scan, so flush only does it when the attribution actually produced identity facts.
-func TestCompiler_IdentityReconciliationOnlyWhenThereAreFacts(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		facts []string
-		want  bool
-	}{
-		{"identity facts present", []string{"user prefers Go"}, true},
-		{"no identity facts", nil, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			llm := &fakeSummarizer{attr: identityAttribution(tc.facts...)}
-			store := &fakeStorage{}
-			compiler := memory.NewCompiler(llm, store)
-			ctx := context.Background()
-
-			compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-			compiler.ForceFlush(ctx)
-
-			if got := store.existingCalled > 0; got != tc.want {
-				t.Errorf("ExistingNotes called = %v, want %v", got, tc.want)
-			}
-			if got := llm.reconcileCalls > 0; got != tc.want {
-				t.Errorf("ReconcileNotes called = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }
 

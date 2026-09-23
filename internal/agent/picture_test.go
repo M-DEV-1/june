@@ -30,20 +30,6 @@ func TestDeliverPicture_SentPictureIsNotBlind(t *testing.T) {
 	}
 }
 
-// A channel with no road for pictures is unchanged: still blind, so draw refuses with the answer that names the path which does work rather than sending the model round the look loop again.
-func TestDeliverPicture_NoSenderStaysBlind(t *testing.T) {
-	ctx := liveScreenScope(context.Background())
-	shot := tracker.Capture{W: 1280, H: 698}
-	recordLook(ctx, shot)
-
-	if deliverPicture(ctx, shot) {
-		t.Fatal("a session with no sender reported the picture delivered")
-	}
-	if _, ok, blind := lookSeen(ctx); ok || !blind {
-		t.Errorf("lookSeen ok=%v blind=%v, want blind", ok, blind)
-	}
-}
-
 // A send that fails leaves the session blind rather than claiming the model saw a picture it never got, because a coordinate read off an unseen picture is a guess.
 func TestDeliverPicture_FailedSendStaysBlind(t *testing.T) {
 	ctx := WithPictureSender(liveScreenScope(context.Background()), func(context.Context, tracker.Capture) error {

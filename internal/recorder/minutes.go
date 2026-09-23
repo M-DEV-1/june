@@ -42,9 +42,9 @@ Rules for naming:
   - Never write "them", "the other side", or "the other participant" as if it were one person. Never write a speaker label like "[call:S2]" in the minutes themselves — name the person, or describe their role.
   - A name is a claim you must be able to point at evidence for. Knowing that [call:S2] and [call:S5] are two different people does not tell you either of their names.
   - Name everyone you can. Work at it: a name used once in the whole meeting, a person thanked at the end, a name in the meeting chat on screen, someone answering when addressed — all of these bind a name to a voice, and a name you can support is always better than a description.
-  - When you genuinely cannot name someone, never leave them as a bare label. Describe them in a sentence or two that would let the reader work out who it was: what they were responsible for, what they talked about, who they answered to or were answering, when in the meeting they spoke, whether they were presenting. "The person who demoed the emissions upload and kept asking about custom emission factors" is useful. "A second participant" is not — it tells the reader nothing they could act on or recognise.
+  - When you genuinely cannot name someone, never leave them as a bare label. Describe them in a sentence or two that would let the reader work out who it was: what they were responsible for, what they talked about, who they answered to or were answering, when in the meeting they spoke, whether they were presenting. "The person who demoed the shipping upload and kept asking about custom shipping factors" is useful. "A second participant" is not — it tells the reader nothing they could act on or recognise.
   - The transcript comes from speech recognition, so names in it may be misspelled. Where the screen context has the same name spelled properly, use that spelling.
-  - A name or acronym that appears only in the transcript, with no match on screen and none in "About the person recording", is a guess by the recogniser. Write it once as heard and marked so, for example a contact (heard as "Oshveln") or the (heard as "PSP") task, and do not turn it into a fact about who someone is. On 2026-09-03 the recogniser turned Sorrek into Oshveln and PFP into PSP, and both were written into memory as true.
+  - A name or acronym that appears only in the transcript, with no match on screen and none in "About the person recording", is a guess by the recogniser. Write it once as heard and marked so, for example a contact (heard as "Oshveln") or the (heard as "TSL") task, and do not turn it into a fact about who someone is. On 2026-09-03 the recogniser turned Sorrek into Oshveln and TDL into TSL, and both were written into memory as true.
   - For the [me] speaker: this is always the same one person, the owner of this computer. What the user has told Ora about themselves is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
 
 A section with nothing to report is a section you omit — heading and all — rather than fill in with a sentence that says so. Never write "Nothing recoverable", "Nothing was decided", "None beyond the above" or anything to that effect: a reader learns nothing from being told a section is empty that they would not already conclude from its absence. This applies to every section below, including a bullet inside "Your part" that would otherwise have nothing to fill it.
@@ -52,7 +52,7 @@ A section with nothing to report is a section you omit — heading and all — r
 Write markdown with these sections, in this order.
 
 # <the meeting's name>
-Name the meeting as the people in it would name it — "Daily AI standup", "Value chain demo prep", "1:1 with Arun". Take it from the meeting app's window title, from the recurring shape of the conversation, or from how someone in the room refers to it. Do not write "Meeting minutes" as the heading, and do not invent a name grander than the meeting was. If you genuinely cannot tell, write the date and the attendees instead.
+Name the meeting as the people in it would name it — "Daily Platform standup", "Route planning demo prep", "1:1 with Vexil". Take it from the meeting app's window title, from the recurring shape of the conversation, or from how someone in the room refers to it. Do not write "Meeting minutes" as the heading, and do not invent a name grander than the meeting was. If you genuinely cannot tell, write the date and the attendees instead.
 
 Directly under that heading, on its own line, repeat the name and when the meeting ran, in bold, with an em dash between them:
 **<the meeting's name> — <day, date and times>**
@@ -82,7 +82,7 @@ Write each one on its own bullet in exactly this shape, with an em dash between 
 The owner is one of exactly two things, and nothing else — no role, no parenthetical, no "(recording)", and never "Owner unclear":
   - "Me", for anything the [me] speaker owes. Write it exactly, never their own name — for example "- **Me** — send the deck by Friday". "About the person recording" above names them; that name in the transcript is this person, so "<their name> will send the deck", "you'll send the deck" and "I'll send the deck" are all "Me".
   - One other person's name, for anything somebody else promised to do. Everyone but the [me] speaker keeps their own name.
-Write the work so somebody who was not in the call can read it a week later: name the thing, the person or the file it is about, and what is being done to it. "Send Vexil the TCFD emissions file before the Q3 review" is an item; "send the file" is not.
+Write the work so somebody who was not in the call can read it a week later: name the thing, the person or the file it is about, and what is being done to it. "Send Vexil the Meridian shipping file before the Q3 review" is an item; "send the file" is not.
 The user's list is built from the "Me" items alone, so an item filed under the wrong owner either buries his own work or puts somebody else's on his plate.
 
 ## Attendees
@@ -94,6 +94,14 @@ A window title or chat header such as "Chat | A, B | Microsoft Teams" names the 
 Every distinct voice gets an entry here even when it has no name: describe the person the way the naming rules above require, so an unnamed attendee is still a recognisable one. Do not write "unclear" and stop.
 
 Be concise. Do not pad. Do not repeat the transcript back.`
+
+// micCapturedNothing is added to the prompt when the microphone side of a recording produced no transcript line at all. A transcript of nothing but [call] lines is the same on the page whether the user sat silent or the microphone failed, and the model read it the first way: the minutes of the 16 September 2026 standup said "did not speak in this meeting", while mic.wav for that meeting holds the user's whole update — whisper decoded the twenty-two minutes of near-silence around it as non-speech and never came out of that state. The model cannot tell the two apart from the transcript, so it is told which one this is.
+const micCapturedNothing = "The microphone captured nothing in this recording: not one line below is [me]. This is a fault in the recording, not a silent person, and what the user said is simply not here. Under \"Your part\", write one line saying the microphone captured nothing of what they said and that this meeting's minutes are missing their side. Never write that they did not speak, said nothing, or barely spoke, and never conclude from their absence that they had nothing to say. Write every other section from the [call] side as usual."
+
+// hasMicLine reports whether a rendered transcript has any line from the microphone side. Input: the transcript renderTranscript produced. Output: true when at least one turn is labelled [me].
+func hasMicLine(transcript string) bool {
+	return strings.Contains(transcript, "] ["+speakerMe+"] ")
+}
 
 // buildPrompt assembles the model input: the interleaved transcript plus the app-and-window timeline the tracker recorded while the meeting ran, which is what tells the model which app the call was in and what else was on screen.
 func (r *Recorder) buildPrompt(ctx context.Context, transcript string, startedAt, stoppedAt time.Time) string {
@@ -110,6 +118,12 @@ func (r *Recorder) buildPrompt(ctx context.Context, transcript string, startedAt
 	if timeline := r.desktopTimeline(ctx, startedAt, stoppedAt); timeline != "" {
 		b.WriteString("\nScreen context — what was on the user's screens while the meeting ran, in order, as read out of the windows themselves. This is where participant names, presenter labels and chat senders come from. It is context, not speech: never quote it as something someone said.\n")
 		b.WriteString(timeline)
+	}
+
+	if !hasMicLine(transcript) {
+		b.WriteString("\n")
+		b.WriteString(micCapturedNothing)
+		b.WriteString("\n")
 	}
 
 	b.WriteString("\nTranscript:\n")
@@ -205,17 +219,24 @@ func sampleTimeline(eps []db.Episode, n int) []db.Episode {
 	return out
 }
 
-// defaultBrain is the default minutes seam: one one-shot text call to whichever backend the config's brain block names, which is the Gemini API unless the user has pointed it at a CLI they are already paying a subscription for.
+// defaultBrain is the default minutes seam: one one-shot text call, answered by the first provider the router offers that can answer it.
 // When the daemon has installed a brain through SetBrain, that one is used instead, so a meeting write-up is metered against the same shared daily quota as the rest of the daemon's unattended work.
 // Without an installed brain, the config is read on each call rather than at construction, so changing provider takes effect on the next meeting instead of at the next daemon restart. On the Gemini API the model is then the one config.BackgroundModel names for the meeting-minutes job, so an unattended write-up spends the large per-day request allowance rather than the small one the user's own asks need.
-// When Gemini answers 429 or 503 the write-up is handed to the fallback brain the daemon installed, so a spent daily allowance costs the meeting its speed rather than its minutes.
+// This path has no ask agent, so Codex answers it with brain.ErrNoBackend, and the router hands the write-up on to the next provider as it does for a spent or signed-out one.
 func (r *Recorder) defaultBrain(ctx context.Context, prompt string) (string, error) {
-	primary := r.installedBrain()
-	if primary == nil {
-		cfg := config.BackgroundBrainConfig(config.LoadConfig().Brain, config.JobMeetingMinutes)
-		primary = brain.FromConfig(cfg, r.apiKey)
+	// The daemon installs a routed brain, which already hands a write-up on from a provider that is spent or signed out to the next one the router offers. Wrapping a second hand-over around it would only add Codex behind a chain that already includes it.
+	if primary := r.installedBrain(); primary != nil {
+		return primary(ctx, prompt)
 	}
-	return brain.WithCodexFallback(primary, r.minutesFallbackBrain())(ctx, prompt)
+	// No daemon installed one, so this recorder builds its own — routed the same way, so a recorder standing on its own is not stranded on whichever single provider the config happens to name.
+	return brain.Routed(func(provider string) brain.Brain {
+		cfg := config.LoadConfig().Brain
+		if provider != cfg.Provider {
+			cfg.Model, cfg.Binary = "", ""
+		}
+		cfg.Provider = provider
+		return brain.FromConfig(config.BackgroundBrainConfig(cfg, config.JobMeetingMinutes), r.apiKey)
+	})(ctx, prompt)
 }
 
 // SetBrain installs the brain meeting minutes are written with — in the daemon, the same brain the main brain and dream stages are metered against, so an unattended write-up spends the shared free-tier allowance rather than one of its own. Input: the brain to use; nil reverts to defaultBrain building its own per meeting.
@@ -230,20 +251,6 @@ func (r *Recorder) installedBrain() brain.Brain {
 	r.mainBrainMu.RLock()
 	defer r.mainBrainMu.RUnlock()
 	return r.mainBrain
-}
-
-// SetMinutesFallback installs the brain a failed minutes call hands over to — in the daemon, Codex under the user's ChatGPT login, which the recorder cannot build for itself because that needs an *agent.Agent. Input: the fallback brain; nil turns the hand-over off.
-func (r *Recorder) SetMinutesFallback(b brain.Brain) {
-	r.minutesFallbackMu.Lock()
-	defer r.minutesFallbackMu.Unlock()
-	r.minutesFallback = b
-}
-
-// minutesFallbackBrain reads the installed fallback under the lock, since the daemon may install it after a meeting is already in flight.
-func (r *Recorder) minutesFallbackBrain() brain.Brain {
-	r.minutesFallbackMu.RLock()
-	defer r.minutesFallbackMu.RUnlock()
-	return r.minutesFallback
 }
 
 // primingPrompt reads the desktop episodes recorded during the meeting and turns them into the initial prompt for whisper. It is best-effort: a store that cannot answer costs the transcript its spelling hints, not the transcript.

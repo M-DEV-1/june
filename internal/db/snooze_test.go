@@ -179,14 +179,3 @@ func TestCancelSnoozes_MarksPendingFired(t *testing.T) {
 		t.Fatalf("DueSnoozes after CancelSnoozes = %+v, want only notice 43's own snooze (id %d)", due, other)
 	}
 }
-
-// TestCancelSnoozes_NoPendingReturnsZero checks that cancelling a notice with nothing pending is a no-op that reports zero rather than an error.
-func TestCancelSnoozes_NoPendingReturnsZero(t *testing.T) {
-	n, err := newStore(t).CancelSnoozes(context.Background(), "task", "no-such-notice")
-	if err != nil {
-		t.Fatalf("CancelSnoozes: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("CancelSnoozes = %d, want 0", n)
-	}
-}

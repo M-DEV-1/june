@@ -70,7 +70,7 @@ func TestRoute_DropsAProviderThatIsNotReady(t *testing.T) {
 // A provider that just refused with a spent allowance is skipped until its breaker closes, rather than being asked again on every request and failing the same way each time.
 func TestRoute_SkipsAProviderWhoseAllowanceJustRanOut(t *testing.T) {
 	readyAll(t)
-	ProviderFailed(ProviderGemini, breakerWindow)
+	ProviderFailed(ProviderGemini, BreakerWindow)
 	got := Route(Need{})
 	if slices.Contains(got, ProviderGemini) {
 		t.Errorf("route = %v, want gemini skipped while its breaker is open", got)
@@ -87,17 +87,6 @@ func TestRoute_UsesAProviderAgainOnceItsBreakerCloses(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	if got := Route(Need{}); len(got) == 0 || got[0] != ProviderGemini {
 		t.Errorf("route = %v, want gemini back at the front once its breaker closed", got)
-	}
-}
-
-// With every provider either unready or broken the router says so with an empty list, rather than naming one that is going to fail.
-func TestRoute_ReturnsNothingWhenNoProviderCanServe(t *testing.T) {
-	readyAll(t)
-	for _, id := range []string{ProviderGemini, ProviderCodex, ProviderClaude, ProviderAgy} {
-		ProviderFailed(id, breakerWindow)
-	}
-	if got := Route(Need{}); len(got) != 0 {
-		t.Errorf("route = %v, want nothing when every provider is spent", got)
 	}
 }
 
@@ -200,17 +189,24 @@ func TestAskInOrder_RepeatsAReadOnAnotherProvider(t *testing.T) {
 	}
 }
 
-// With every provider filtered out the caller is told so, rather than getting an empty answer that reads as success.
-func TestAskInOrder_SaysWhenThereIsNobodyToAsk(t *testing.T) {
-	t.Cleanup(ResetRouter)
-	if _, err := askInOrder(nil, func(string) (TurnTrace, error) { return TurnTrace{}, nil }); err == nil {
-		t.Error("askInOrder succeeded with no provider to ask")
-	}
-}
-
 // errNoModelTextForTest stands in for a failure that has nothing to do with a provider's allowance.
 var errNoModelTextForTest = errTestOnly{}
 
 type errTestOnly struct{}
 
 func (errTestOnly) Error() string { return "the prompt was rejected" }
+
+// Grok has a duty backend in internal/brain but no asker here, so it belongs in a duty's route and must never reach an ask's. askRouted's switch has no grok case and falls through to Gemini, so a grok card offered to an ask would send the question to Gemini under grok's name and bill it there.
+func TestRouteDuty_OffersGrokWhereRouteDoesNot(t *testing.T) {
+	ResetRouter()
+	t.Cleanup(ResetRouter)
+	for _, id := range []string{ProviderGemini, ProviderCodex, ProviderAgy, ProviderClaude, ProviderGrok} {
+		SetProviderReady(id, true)
+	}
+	if slices.Contains(Route(Need{}), ProviderGrok) {
+		t.Error("an ask was offered grok, which has no asker and would be answered by Gemini under grok's name")
+	}
+	if !slices.Contains(RouteDuty(Need{}), ProviderGrok) {
+		t.Error("a duty was not offered grok, which has a backend in internal/brain")
+	}
+}

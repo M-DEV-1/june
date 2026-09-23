@@ -103,7 +103,7 @@ func (r *Recorder) prepMeeting() {
 	r.notifyAt(head, text, place, id)
 }
 
-// meetingName is the part of a meeting window's title that names the meeting. Input: the title, such as "Calendar | Daily Ai Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB". Output: the first section that is neither app furniture nor the meeting app's own name, "Daily Ai Sprint Standup" there, or "" when every section is furniture.
+// meetingName is the part of a meeting window's title that names the meeting. Input: the title, such as "Calendar | Daily Platform Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB". Output: the first section that is neither app furniture nor the meeting app's own name, "Daily Platform Sprint Standup" there, or "" when every section is furniture.
 func meetingName(title string) string {
 	for _, s := range titleSections(title) {
 		if hasChromeWord(s) || tracker.IsMeetingWindow("", s) || strings.EqualFold(s, "calendar") {
@@ -287,14 +287,14 @@ func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []str
 	return names
 }
 
-// titleSeparators are the characters a meeting app uses to divide its window title into parts. Read off this machine's own history: Teams writes "Calendar | climate risk sync | Microsoft Teams - Desktop content shared", Meet writes "Meet - abc-defg-hij - Microphone recording - Brave". The parts either name the meeting or describe the app, and which is which is decided later by how often each part has been seen before.
+// titleSeparators are the characters a meeting app uses to divide its window title into parts. Read off this machine's own history: Teams writes "Calendar | route planning sync | Microsoft Teams - Desktop content shared", Meet writes "Meet - abc-defg-hij - Microphone recording - Brave". The parts either name the meeting or describe the app, and which is which is decided later by how often each part has been seen before.
 var titleSeparators = []string{" | ", " \u2013 ", " \u2014 ", " - "}
 
 // titleSections splits a window title on the separators meeting apps use, and drops the parts that cannot be a meeting's name.
 //
 // Input: a window title. Output: its parts, trimmed, without the ones that are app furniture or mostly digits.
 //
-// Splitting is what catches a meeting whose name is not capitalised. Reading proper nouns alone finds "Microsoft Teams" in "Calendar | climate risk sync | Microsoft Teams" and misses the only part that says what the meeting is.
+// Splitting is what catches a meeting whose name is not capitalised. Reading proper nouns alone finds "Microsoft Teams" in "Calendar | route planning sync | Microsoft Teams" and misses the only part that says what the meeting is.
 // A part with at least as many digits as letters is dropped because it is a measurement rather than a name — a browser writes "852 MB" and "1.1 GB" into the title bar, and being unique to that moment those would otherwise look like the most identifying thing in it.
 func titleSections(title string) []string {
 	parts := []string{title}
@@ -362,7 +362,7 @@ const titleHistoryLimit = 2000
 //
 // Input: the fragments read from the current title, and the distinct titles seen before. Output: the fragments tied for least common, or all of them when there is no history to judge by.
 //
-// A window title is mostly furniture. Measured on this machine across 1,118 distinct titles, "Brave" appears in 1,022 of them, "Microsoft Teams" and "recording" in 33, "Meet" in 28 — while "climate risk sync" appears in 2 and a person's name in 8. The rare words are the meeting; the common ones are the browser talking about itself.
+// A window title is mostly furniture. Measured on this machine across 1,118 distinct titles, "Brave" appears in 1,022 of them, "Microsoft Teams" and "recording" in 33, "Meet" in 28 — while "route planning sync" appears in 2 and a person's name in 8. The rare words are the meeting; the common ones are the browser talking about itself.
 // Rarity is judged within the title rather than against a fixed count, so there is no threshold to tune and nothing breaks when a browser changes the words it writes: whatever is rarest in this title is what identifies it. When that rarest word is a Google Meet room code, it matches no past meeting, and declining is the right answer.
 func rarestFragments(fragments []string, titles []string) []string {
 	if len(titles) == 0 || len(fragments) < 2 {

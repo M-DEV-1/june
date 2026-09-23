@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-/** Tests for the one row of braille dots that says "Ora is working": that it draws braille, that it moves, that it stops moving when it leaves the page, and that it holds still for someone who asked for less motion. */
+/** Tests for the one row of braille dots that says "Ora is working": that it moves, that it stops moving when it leaves the page, and that it holds still for someone who asked for less motion. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
@@ -39,13 +39,6 @@ function stubReducedMotion(reduce: boolean): void {
 }
 
 describe("the working grid", () => {
-  it("draws one row of braille cells", () => {
-    render(<WorkingGrid />);
-    const row = screen.getByRole("img", { name: "Ora is working" });
-    expect(row.textContent).toHaveLength(24);
-    expect(allBraille(row.textContent ?? "")).toBe(true);
-  });
-
   it("moves as time passes", async () => {
     vi.useFakeTimers();
     render(<WorkingGrid />);

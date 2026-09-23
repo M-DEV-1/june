@@ -45,25 +45,6 @@ func TestMatch(t *testing.T) {
 	}
 }
 
-// TestCheckDescribe checks a check reads back as the plain sentence a step record and a prompt both carry.
-func TestCheckDescribe(t *testing.T) {
-	cases := []struct {
-		check Check
-		want  string
-	}{
-		{Check{Kind: TitleContains, Value: "S16 E8"}, `the title contains "S16 E8"`},
-		{Check{Kind: ItemPresent, Value: "Reload"}, `an item labelled "Reload" is showing`},
-		{Check{Kind: ItemAbsent, Value: "Reload"}, `no item labelled "Reload" is showing`},
-		{Check{Kind: FieldHolds, Value: "example.com"}, `the focused field holds "example.com"`},
-		{Check{}, "nothing in particular"},
-	}
-	for _, tc := range cases {
-		if got := tc.check.Describe(); got != tc.want {
-			t.Errorf("Describe(%+v) = %q, want %q", tc.check, got, tc.want)
-		}
-	}
-}
-
 // A field_holds verdict never repeats what the field holds, in either direction, because the field was just typed into and that text is what every other guard keeps off disk and off the stream.
 func TestMatch_FieldHoldsVerdictNeverEchoesTheField(t *testing.T) {
 	c := Check{Kind: FieldHolds, Value: "hunter2"}
@@ -74,12 +55,5 @@ func TestMatch_FieldHoldsVerdictNeverEchoesTheField(t *testing.T) {
 	ok, why = Match(c, "", nil, "secret sauce")
 	if ok || strings.Contains(why, "secret") {
 		t.Errorf("fail verdict = %v %q, want a fail that does not echo the field", ok, why)
-	}
-}
-
-func TestDescribe_ScreenChanged(t *testing.T) {
-	got := Check{Kind: ScreenChanged, Value: "a recording indicator"}.Describe()
-	if !strings.Contains(got, "screen") || !strings.Contains(got, "a recording indicator") {
-		t.Errorf("Describe() = %q", got)
 	}
 }

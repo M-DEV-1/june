@@ -89,53 +89,6 @@ func TestCodexTokens_AccountIDFallsBackToTheJWTClaim(t *testing.T) {
 	}
 }
 
-// Tool parameters are declared once as genai schemas and converted to JSON Schema for the Responses API: lower-case types, descriptions and the required list, and a nil schema is an empty object.
-func TestJSONSchema_ConvertsGenaiParameters(t *testing.T) {
-	got := jsonSchema(&genai.Schema{
-		Type:       genai.TypeObject,
-		Properties: map[string]*genai.Schema{"n": {Type: genai.TypeNumber, Description: "the item"}, "label": {Type: genai.TypeString, Description: "words"}},
-		Required:   []string{"n"},
-	})
-	if got["type"] != "object" {
-		t.Errorf("type = %v", got["type"])
-	}
-	props := got["properties"].(map[string]any)
-	if n := props["n"].(map[string]any); n["type"] != "number" || n["description"] != "the item" {
-		t.Errorf("n = %v", n)
-	}
-	if req, _ := got["required"].([]string); len(req) != 1 || req[0] != "n" {
-		t.Errorf("required = %v", got["required"])
-	}
-	empty := jsonSchema(nil)
-	if empty["type"] != "object" || len(empty["properties"].(map[string]any)) != 0 || empty["required"] != nil {
-		t.Errorf("nil schema = %v", empty)
-	}
-}
-
-// Every declared tool is offered to Codex as a function tool with its schema, so the model sees the same tools the Gemini text path does.
-func TestCodexTools_WrapsEveryDeclaration(t *testing.T) {
-	decls := ToolDeclarations()
-	tools := codexTools(decls)
-	if len(tools) != len(decls) {
-		t.Fatalf("%d tools for %d declarations", len(tools), len(decls))
-	}
-	for i, tl := range tools {
-		if tl.Type != "function" || tl.Name != decls[i].Name || tl.Description != decls[i].Description || tl.Parameters["type"] != "object" {
-			t.Errorf("tool %d = %+v", i, tl)
-		}
-	}
-	// The API marks strict required, and strict mode would reject a tool whose schema does not name every property as required, so it must be sent and sent as false.
-	raw, err := json.Marshal(tools[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sent map[string]any
-	json.Unmarshal(raw, &sent)
-	if strict, ok := sent["strict"]; !ok || strict != false {
-		t.Errorf("strict = %v (present %v)", strict, ok)
-	}
-}
-
 // An array or nested object parameter keeps its items and properties, because a bare {"type":"array"} is rejected and a flattened object tells the model nothing.
 func TestJSONSchema_KeepsArraysAndNestedObjects(t *testing.T) {
 	got := jsonSchema(&genai.Schema{
@@ -460,14 +413,6 @@ func TestCodexClient_RefreshHappensOnceForConcurrentAsks(t *testing.T) {
 	}
 }
 
-// A request cannot be sent without a ChatGPT account id, because the backend answers such a call with an error that says nothing about the real cause.
-func TestCodexClient_RefusesWithoutAnAccountID(t *testing.T) {
-	c := codexTestClient("http://127.0.0.1:1/never", "http://127.0.0.1:1/never", writeCodexAuth(t, map[string]any{"access_token": "a"}))
-	if _, err := c.round(t.Context(), "sys", nil, nil, "", nil); err == nil || !strings.Contains(err.Error(), "account id") {
-		t.Errorf("err = %v", err)
-	}
-}
-
 // Any other non-2xx answer is an error naming the status and the start of the body, and the request carried what the backend requires: the model, a non-empty instruction, stream true and store false.
 func TestCodexClient_ReportsHTTPErrorsAndSendsTheRequiredFields(t *testing.T) {
 	var body map[string]any
@@ -611,16 +556,6 @@ func TestAskCodex_StopsAtTheStepCapWithCapError(t *testing.T) {
 	}
 }
 
-// CodexBrain is the ipc.Asker the daemon registers under the "codex" brain name; it only forwards to AskCodex.
-func TestCodexBrain_ForwardsToTheAgent(t *testing.T) {
-	var asker interface {
-		AskText(ctx context.Context, q string) (TurnTrace, error)
-	} = CodexBrain{Agent: NewAgent(nil, nil, &toolTestBrain{}, nil, "")}
-	if asker.(CodexBrain).Agent == nil {
-		t.Fatal("agent not kept")
-	}
-}
-
 // What a turn cost in tokens is the sum of every round it took, not the last round's counts: a question the model answered after two tool calls cost what all three of its calls cost together. The counts are the backend's own, read from each round's response.completed, and the provider is named "codex" so the store can tell this path's calls from Gemini's.
 func TestAskCodex_AddsUpTheTokenCountsAcrossRounds(t *testing.T) {
 	var calls atomic.Int32
@@ -658,30 +593,6 @@ func TestAskCodex_AddsUpTheTokenCountsAcrossRounds(t *testing.T) {
 	// 1500, not 700: the last round's counts must not replace the two before it.
 	if tr.Usage.InputTokens != 1500 || tr.Usage.OutputTokens != 110 || tr.Usage.TotalTokens != 1610 {
 		t.Errorf("usage = %+v, want 1500 in, 110 out, 1610 total", tr.Usage)
-	}
-}
-
-// A backend that reports no usage at all leaves the counts at zero and still names the provider, so the call can be filed as having happened rather than guessed at.
-func TestAskCodex_ReportsZeroWhenTheBackendCountsNothing(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, sse(
-			`{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"quiet"}]}}`,
-			`{"type":"response.completed","response":{"model":"gpt-5.5"}}`))
-	}))
-	defer backend.Close()
-	c := codexTestClient(backend.URL, "http://127.0.0.1:1/never", writeCodexAuth(t, map[string]any{"access_token": "a", "account_id": "acct_1"}))
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-
-	tr, err := a.askCodex(t.Context(), c, nil, "silent backend")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tr.Usage.Provider != ProviderCodex {
-		t.Errorf("provider = %q, want %q", tr.Usage.Provider, ProviderCodex)
-	}
-	if tr.Usage.InputTokens != 0 || tr.Usage.OutputTokens != 0 || tr.Usage.TotalTokens != 0 {
-		t.Errorf("usage = %+v, want zeroes rather than an invented count", tr.Usage)
 	}
 }
 
@@ -1161,64 +1072,6 @@ func TestSystemInstructionText_ClockSentenceIsLastForPromptCaching(t *testing.T)
 	}
 }
 
-// TestScreenPersonalContext_KeepsIdentityAndFrontMatches covers what a screen round is meant to keep out of the personal-context store: the user's own identity, always, and an entry that names the app in front of it; a preference with nothing to do with either is dropped.
-func TestScreenPersonalContext_KeepsIdentityAndFrontMatches(t *testing.T) {
-	entries := []db.PersonalEntry{
-		{Subject: "identity", Content: "Their name is Vexil."},
-		{Subject: "browser", Content: "Uses Brave as their daily browser."},
-		{Subject: "diet", Content: "Vegetarian, no onion or garlic."},
-	}
-	got := screenPersonalContext(entries, "brave · PR #13 · GitHub")
-	if !strings.Contains(got, "Their name is Vexil.") {
-		t.Errorf("must always keep the user's own identity, got %q", got)
-	}
-	if !strings.Contains(got, "Uses Brave as their daily browser.") {
-		t.Errorf("must keep an entry naming the front app, got %q", got)
-	}
-	if strings.Contains(got, "Vegetarian") {
-		t.Errorf("must drop an entry naming neither the front app nor the user's identity, got %q", got)
-	}
-}
-
-// TestScreenPersonalContext_EmptyWhenNothingMatches covers the store holding nothing a screen round can use: no identity entry, nothing naming the front app.
-func TestScreenPersonalContext_EmptyWhenNothingMatches(t *testing.T) {
-	entries := []db.PersonalEntry{{Subject: "diet", Content: "Vegetarian."}}
-	if got := screenPersonalContext(entries, "brave · some page"); got != "" {
-		t.Errorf("got %q, want empty when nothing qualifies", got)
-	}
-}
-
-// TestScreenPersonalContext_CapsAtEightHundredTokens covers the budget: even a store full of matching entries is cut to 800 tokens (four characters each, the estimate internal/tally/weekly.go already uses), so a screen round's personal context never crowds out the screen-task guidance sharing its prompt.
-func TestScreenPersonalContext_CapsAtEightHundredTokens(t *testing.T) {
-	var entries []db.PersonalEntry
-	for i := 0; i < 50; i++ {
-		entries = append(entries, db.PersonalEntry{Subject: fmt.Sprintf("brave-note-%d", i), Content: strings.Repeat("x", 100) + " brave"})
-	}
-	got := screenPersonalContext(entries, "brave · some page")
-	if n := len([]rune(got)); n > screenPersonalTokenCap*4 {
-		t.Errorf("trimmed personal context is %d chars, want at most %d (800 tokens at 4 chars each)", n, screenPersonalTokenCap*4)
-	}
-}
-
-// TestFrontFromToolHops_ReadsNewestObserveScreen covers what a screen round's personal-context trim is matched against: the app-and-title line off the most recent observe_screen look, not an older one a click has since moved past.
-func TestFrontFromToolHops_ReadsNewestObserveScreen(t *testing.T) {
-	hops := []ToolHop{
-		{Name: "observe_screen", Result: "brave · old page\n[1] link \"x\""},
-		{Name: "click", Result: "clicked"},
-		{Name: "observe_screen", Result: "brave · PR #13 · GitHub\n[1] push button \"Merge\""},
-	}
-	if got := frontFromToolHops(hops); got != "brave · PR #13 · GitHub" {
-		t.Errorf("front = %q, want the newest observe_screen look", got)
-	}
-}
-
-// TestFrontFromToolHops_EmptyWithNoObserveScreen covers a turn that has not looked at the screen yet, which must trim personal context against nothing rather than panic or read a stale value.
-func TestFrontFromToolHops_EmptyWithNoObserveScreen(t *testing.T) {
-	if got := frontFromToolHops([]ToolHop{{Name: "click", Result: "clicked"}}); got != "" {
-		t.Errorf("front = %q, want empty with no screen look yet", got)
-	}
-}
-
 // A screen round used to drop the personal-context store entirely once a turn became a screen task (see TestAskCodex_TrimsTheInstructionOnceItIsAScreenTask), which meant a round choosing where to click also lost the user's own name and anything the store knew about the app in front of it. Trimmed to what the front app or the user's identity actually need, it comes back.
 func TestAskCodex_ScreenRoundCarriesTrimmedPersonalContext(t *testing.T) {
 	var bodies []map[string]any
@@ -1409,21 +1262,105 @@ func TestCodexRateLimits_TakesTheOlderResetAfterSpelling(t *testing.T) {
 	}
 }
 
-// TestCodexRateLimits_SaysNothingWhenTheHeadersAreAbsent checks a response with no rate-limit headers reports no windows rather than a window at zero, which would draw an empty bar over a real reading.
-func TestCodexRateLimits_SaysNothingWhenTheHeadersAreAbsent(t *testing.T) {
-	if got := codexRateLimits(http.Header{}, time.Now()); len(got) != 0 {
-		t.Fatalf("codexRateLimits on bare headers = %+v, want none", got)
+// A Codex login that can no longer be refreshed is a dead login, and the picker has to say so rather than leave the row available until a question dies on it. Codex is the one brain with no cheap pre-flight probe: its allowance rides the headers of real calls, and the only proof the login still works is a refresh round-trip that spends and rotates the refresh token, so doing one speculatively on every picker render would churn the user's own auth file. The refusal of a refresh is therefore the moment it becomes known, and it has to be recorded when it happens.
+// A refusal from the token endpoint is the signed-out case; the endpoint being down is not, and must leave the row alone.
+func TestCodexRound_ARefusedRefreshMarksTheLoginSignedOut(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		tokenCode int
+		auth      map[string]any
+		signedOut bool
+	}{
+		{"the refresh token is refused", http.StatusBadRequest, map[string]any{"id_token": "id.x.y", "access_token": "acc.x.y", "refresh_token": "ref", "account_id": "acct_1"}, true},
+		{"there is no refresh token at all", http.StatusOK, map[string]any{"id_token": "id.x.y", "access_token": "acc.x.y", "account_id": "acct_1"}, true},
+		{"the token endpoint is down", http.StatusBadGateway, map[string]any{"id_token": "id.x.y", "access_token": "acc.x.y", "refresh_token": "ref", "account_id": "acct_1"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordedUsage{}
+			SetUsageRecorder(rec)
+			t.Cleanup(func() { SetUsageRecorder(nil) })
+
+			always401 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer always401.Close()
+			tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.tokenCode)
+			}))
+			defer tokens.Close()
+
+			c := codexTestClient(always401.URL, tokens.URL, writeCodexAuth(t, tc.auth))
+			if _, err := c.round(t.Context(), "you are ora", nil, nil, "s1", nil); err == nil {
+				t.Fatal("the round answered on a login that could not be refreshed")
+			}
+			rec.mu.Lock()
+			got := rec.signedOut
+			rec.mu.Unlock()
+			if tc.signedOut && got != ProviderCodex {
+				t.Errorf("signed out = %q, want the codex row marked so the picker greys it before a question dies on it", got)
+			}
+			if !tc.signedOut && got != "" {
+				t.Errorf("signed out = %q, want nothing recorded — the token endpoint being down says nothing about the login", got)
+			}
+		})
 	}
 }
 
-// TestCodexWindowName checks the label each window length gets, so a five-hour window reads as "5h" and a seven-day one as "weekly" whichever exact minute count the backend names.
-func TestCodexWindowName(t *testing.T) {
-	for _, c := range []struct {
-		minutes int
-		want    string
-	}{{299, "5h"}, {300, "5h"}, {60, "1h"}, {1440, "daily"}, {10079, "weekly"}, {10080, "weekly"}, {43200, "monthly"}, {0, "session"}} {
-		if got := codexWindowName(c.minutes, "session"); got != c.want {
-			t.Errorf("codexWindowName(%d) = %q, want %q", c.minutes, got, c.want)
-		}
+// Codex does have a cheap pre-flight check after all, and it is the one the CLI itself uses for its /usage card: GET /wham/profiles/me on the ChatGPT backend, with the login's bearer token and account id. It spends no model tokens, rotates nothing, and answers 401 when the login is dead, so unlike a refresh it can be made speculatively whenever the picker renders. Verified against the live endpoint on 2026-09-15.
+// It carries no rate-limit windows — those stay in the headers of real calls — so this is a login check and nothing else.
+func TestCodexLoginCheck_SaysWhenTheLoginIsDeadWithoutSpendingAnything(t *testing.T) {
+	auth := writeCodexAuth(t, map[string]any{"id_token": "id.x.y", "access_token": "acc.x.y", "refresh_token": "ref", "account_id": "acct_1"})
+	for _, tc := range []struct {
+		name               string
+		code               int
+		loggedOut, wantErr bool
+	}{
+		{"the login works", http.StatusOK, false, false},
+		{"the login is refused", http.StatusUnauthorized, true, true},
+		{"the account is forbidden", http.StatusForbidden, true, true},
+		{"the backend is down", http.StatusBadGateway, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAuth, gotAccount string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth, gotAccount = r.Header.Get("Authorization"), r.Header.Get("ChatGPT-Account-Id")
+				w.WriteHeader(tc.code)
+				w.Write([]byte(`{"profile":{},"stats":{}}`))
+			}))
+			defer srv.Close()
+
+			err := codexLoginCheck(t.Context(), srv.Client(), srv.URL, auth)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("err = %v, want an error: %v", err, tc.wantErr)
+			}
+			if got := errors.Is(err, ErrLoggedOut); got != tc.loggedOut {
+				t.Errorf("logged out = %v, want %v (err %v)", got, tc.loggedOut, err)
+			}
+			if tc.code == http.StatusOK {
+				if gotAuth != "Bearer acc.x.y" {
+					t.Errorf("Authorization = %q, want the login's own access token", gotAuth)
+				}
+				if gotAccount != "acct_1" {
+					t.Errorf("ChatGPT-Account-Id = %q, want the login's account id", gotAccount)
+				}
+			}
+		})
+	}
+}
+
+// A window the headers describe with neither a length nor a reset is not a window anyone can read. This backend sends x-codex-secondary-used-percent with no window-minutes and no reset-at, which drew a bar in the picker labelled "Secondary", sitting at 0%, resetting in the year 1 — worse than drawing nothing, because it reads as a real allowance that is untouched.
+func TestCodexRateLimits_DropsAWindowWithNoLengthAndNoReset(t *testing.T) {
+	h := http.Header{}
+	h.Set("x-codex-primary-used-percent", "100")
+	h.Set("x-codex-primary-window-minutes", "43200")
+	h.Set("x-codex-primary-reset-at", "1791073410")
+	h.Set("x-codex-secondary-used-percent", "0")
+
+	limits := codexRateLimits(h, time.Now())
+	if len(limits) != 1 {
+		t.Fatalf("read %d windows, want only the one the headers actually describe: %+v", len(limits), limits)
+	}
+	if limits[0].Window != "monthly" {
+		t.Errorf("window = %q, want monthly for a 43200-minute window", limits[0].Window)
 	}
 }

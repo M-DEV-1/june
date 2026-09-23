@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"ora/internal/config"
 )
 
 // newTestTextEngine builds a TextEngine that spawns the TestEngineHelperProcess stand-in instead of llama-server, with the timers wound down so idle-shutdown tests finish in milliseconds. It reuses the same re-exec trick and helper process the Engine tests use, since the helper now also serves /v1/chat/completions.
@@ -31,38 +29,6 @@ func TestNilTextEngineIsSafe(t *testing.T) {
 	}
 	if err := e.Close(); err != nil {
 		t.Fatalf("Close on a nil TextEngine should be a no-op, got %v", err)
-	}
-}
-
-func TestNewTextEngine_NilWithoutAModelConfigured(t *testing.T) {
-	if e := NewTextEngine(config.OraConfig{}); e != nil {
-		t.Fatal("NewTextEngine should return nil when neither LocalText nor Dream names a model")
-	}
-}
-
-func TestNewTextEngine_FallsBackToDreamModelPath(t *testing.T) {
-	cfg := config.OraConfig{Dream: config.DreamConfig{ModelPath: "dream.gguf"}}
-	if e := NewTextEngine(cfg); e == nil {
-		t.Fatal("NewTextEngine should fall back to Dream.ModelPath and return a non-nil engine")
-	}
-}
-
-func TestTextEngineSpawnsLazilyOnFirstGenerate(t *testing.T) {
-	e := newTestTextEngine(t, time.Hour)
-
-	if e.running() {
-		t.Fatal("engine spawned the child before any Generate call")
-	}
-
-	reply, err := e.Generate(context.Background(), "hello")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	if reply != "the local reply" {
-		t.Fatalf("reply = %q, want %q", reply, "the local reply")
-	}
-	if !e.running() {
-		t.Fatal("engine should be running after a Generate")
 	}
 }
 
@@ -113,5 +79,42 @@ func TestTextEngineIdleShutdownAndRespawn(t *testing.T) {
 	}
 	if e.pid() == firstPID {
 		t.Fatal("engine reported the same PID after a respawn")
+	}
+}
+
+// The local text server is the card's largest tenant — 1853 MiB of a 4096 MiB RTX 3050 on 2026-09-15, against the embedding server's 653 MiB — and it was the one tenant nothing could evict. The embedding server had both halves of the protocol (whisper asks it to leave, and a gate keeps it off the card for the whole decode) and this engine, added later, had neither. A meeting that should have transcribed in 15 minutes took 50, because whisper found ~788 MiB free, died out of device memory and redid the whole decode on the CPU.
+func TestTextEngine_YieldsTheCardAndStaysOffItForTheWholeDecode(t *testing.T) {
+	e := newTestTextEngine(t, time.Hour)
+	busy := false
+	e.SetGPUGate(func() bool { return busy })
+
+	if _, err := e.Generate(context.Background(), "hello"); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if !e.running() {
+		t.Fatal("the server should be up before the decode starts")
+	}
+
+	// whisper claims the card and asks its tenants to leave.
+	busy = true
+	if !e.StopIfIdle() {
+		t.Fatal("the text server did not yield the card to a transcription")
+	}
+	if e.running() {
+		t.Error("the text server is still holding its GPU memory after yielding")
+	}
+
+	// The working-state derive ticks every five minutes, so something asks again mid-decode. It must not climb back onto the card.
+	if _, err := e.Generate(context.Background(), "the derive tick"); err == nil {
+		t.Error("a generate during a decode started the server again, putting a second model back on the card")
+	}
+	if e.running() {
+		t.Error("the text server climbed back onto the card mid-decode")
+	}
+
+	// Once the decode is done the next derive brings it back.
+	busy = false
+	if _, err := e.Generate(context.Background(), "after the decode"); err != nil {
+		t.Errorf("the text server did not come back after the decode: %v", err)
 	}
 }

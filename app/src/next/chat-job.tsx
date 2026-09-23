@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useSetJobPauseMutation, useStopJobMutation } from "./api";
 import { costLine, isJobLive, jobStateWord, took } from "./format";
-import type { JobRun } from "./store";
+import { ui, useAppDispatch, type JobRun } from "./store";
 
 /** The elapsed time on a job's own heading, ticking on its own second by second so the step list under it does not re-render along with it. Input: when the job started, and whether it is still live. Output: "3.2s", "1m 04s" — took() reused from the token ledger. Stops ticking the moment it is handed live=false, which is also the render where the closing text and cost line take this line's place. */
 function Elapsed({ startedAt, live }: { startedAt: number; live: boolean }) {
@@ -51,10 +51,37 @@ function JobStepView({ step }: { step: JobRun["steps"][number] }) {
   );
 }
 
-/** What a "do:" job shows while it runs and once it ends: the state word and, while it is still going, the ticking clock and the Stop/Pause controls beside it; the plan the model wrote on its first round, with its own guess at how many steps the job would take; the steps taken so far, each with its own tick or cross; the one question a stuck job is waiting on, whose answer is whatever the composer sends next; and, once it has ended, the closing sentence and what it cost. Input: the job. Output: the block. */
-export function JobTurn({ job }: { job: JobRun }) {
+/** What a job still running offers: pause it or let it carry on, and stop it outright. Input: the daemon's id for the job and whether it is paused now. Output: the two buttons. Only drawn while the job is live and the daemon has answered with an id, since neither call can be made without one. */
+function JobControls({ id, paused }: { id: string; paused: boolean }) {
+  const dispatch = useAppDispatch();
   const [stopJob] = useStopJobMutation();
   const [setJobPause] = useSetJobPauseMutation();
+  // A refused press leaves the job exactly as it was, so the rail says so rather than the button looking like it took.
+  const failed = (text: string) => () => dispatch(ui.noticed({ text, kind: "error" }));
+  return (
+    <div className="ml-auto flex items-center gap-0.5 text-muted-foreground">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button variant="ghost" size="icon-sm" aria-label={paused ? "Resume" : "Pause"} onClick={() => setJobPause({ id, pause: !paused }).unwrap().catch(failed(paused ? "Could not resume that job" : "Could not pause that job"))}>
+            {paused ? <Play /> : <Pause />}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">{paused ? "Resume" : "Pause"}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button variant="ghost" size="icon-sm" aria-label="Stop" onClick={() => stopJob(id).unwrap().catch(failed("Could not stop that job"))}>
+            <Square />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">Stop</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
+/** What a "do:" job shows while it runs and once it ends: the state word and, while it is still going, the ticking clock and the Stop/Pause controls beside it; the plan the model wrote on its first round, with its own guess at how many steps the job would take; the steps taken so far, each with its own tick or cross; the one question a stuck job is waiting on, whose answer is whatever the composer sends next; and, once it has ended, the closing sentence and what it cost. Input: the job. Output: the block. */
+export function JobTurn({ job }: { job: JobRun }) {
   const live = isJobLive(job.state);
   const paused = job.state === "paused";
 
@@ -63,31 +90,7 @@ export function JobTurn({ job }: { job: JobRun }) {
       <div className="flex items-center gap-2 text-meta text-work">
         <span className="font-medium">{jobStateWord(job.state)}</span>
         <Elapsed startedAt={job.startedAt} live={live} />
-        {live && job.id ? (
-          <div className="ml-auto flex items-center gap-0.5 text-muted-foreground">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={paused ? "Resume" : "Pause"}
-                  onClick={() => void setJobPause({ id: job.id!, pause: !paused })}
-                >
-                  {paused ? <Play /> : <Pause />}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{paused ? "Resume" : "Pause"}</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon-sm" aria-label="Stop" onClick={() => void stopJob(job.id!)}>
-                  <Square />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">Stop</TooltipContent>
-            </Tooltip>
-          </div>
-        ) : null}
+        {live && job.id ? <JobControls id={job.id} paused={paused} /> : null}
       </div>
       {job.plan ? (
         <div className="mt-2 text-meta text-muted-foreground">

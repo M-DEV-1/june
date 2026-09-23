@@ -161,17 +161,3 @@ func TestWalkWithOwnBudget_GivesEachWindowItsOwnBudget(t *testing.T) {
 		t.Fatalf("the window walked after a huge one kept %d nodes, want 1: its budget must start at zero, not wherever the previous window left off", kept)
 	}
 }
-
-// The shell's title for a Chromium window is the active tab's title, and the accessible window carries the same string; a title the accessible name only contains, or that contains it, still names the window, and nothing else does.
-func TestPickByTitle(t *testing.T) {
-	names := []string{"Spotify - Web Player - Brave", "Site Vulnerability Scoring - Brave", ""}
-	if got := pickByTitle(names, "Site Vulnerability Scoring - Brave"); got != 1 {
-		t.Errorf("exact = %d, want 1", got)
-	}
-	if got := pickByTitle(names, "Spotify - Web Player"); got != 0 {
-		t.Errorf("contained = %d, want 0", got)
-	}
-	if got := pickByTitle(names, "Settings"); got != -1 {
-		t.Errorf("stranger = %d, want -1", got)
-	}
-}

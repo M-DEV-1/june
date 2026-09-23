@@ -2,7 +2,6 @@ package embed
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"strconv"
 	"sync/atomic"
@@ -20,9 +19,6 @@ type Engine struct {
 
 	// lastClient is atomic rather than guarded by mu because MarkClientPresence runs on every authenticated IPC request, including ones with a 300ms budget, and must never wait behind a spawn, a model load, or a child being killed.
 	lastClient atomic.Int64
-
-	// gpuBusy reports whether a heavier job (a whisper decode) holds the GPU. Set once at wiring time by SetGPUGate and only read after, so it needs no lock.
-	gpuBusy func() bool
 }
 
 // defaultPresenceWindow is how long after a client's last authenticated IPC request the embedding server stays pinned in memory. Three minutes: a user pausing mid-conversation should not pay a cold start for their next question.
@@ -60,23 +56,16 @@ func newEngine(binary string, args []string, baseURL, model string, idle time.Du
 	}
 	e.serverProcess = newServerProcess("embed engine", "embedding server", binary, args, baseURL, idle, 90*time.Second, 100*time.Millisecond)
 	e.serverProcess.shouldKeepAlive = func() bool {
-		return !e.gpuTaken() && e.sinceLastClient() < e.presenceWindow
+		return e.sinceLastClient() < e.presenceWindow
 	}
 	return e
 }
-
-// SetGPUGate wires in the question "is something heavier using the card right now". Input: a function reporting whether another job holds the GPU (recorder.GPUBusy in the daemon, nil in tests that do not care). Output: none.
-// A transcription outranks client presence. The presence window exists so someone mid-conversation does not pay a cold start, but it is refreshed by every authenticated IPC request and the desktop window polls continuously, so in practice the server was pinned whenever Ora was open and StopIfIdle never actually yielded. whisper then decoded anyway, on a 4 GB laptop card already carrying 2.5 GB of Ora's own models, and died out of device memory 37 times in six days.
-func (e *Engine) SetGPUGate(busy func() bool) { e.gpuBusy = busy }
-
-// gpuTaken reports whether another job holds the GPU. False when no gate was wired in.
-func (e *Engine) gpuTaken() bool { return e.gpuBusy != nil && e.gpuBusy() }
 
 // MarkClientPresence records that an authenticated client request just arrived, and starts the server in the background if it is not already up. This is what pins the server in memory while a TUI is running, and what makes the user's first question meet an already-loaded model instead of paying the cold start. The daemon's IPC auth wrapper calls it on every authenticated request, so it never waits on a spawn or a model load — the timestamp write is lock-free and the start runs on its own goroutine.
 // Input: a context whose lifetime is the daemon's, used only for the background start. Output: none.
 func (e *Engine) MarkClientPresence(ctx context.Context) {
 	e.lastClient.Store(time.Now().UnixNano())
-	if e.running() || e.gpuTaken() {
+	if e.running() {
 		return
 	}
 	go func() {
@@ -97,9 +86,6 @@ func (e *Engine) sinceLastClient() time.Duration {
 
 // Embed starts the server if needed and then embeds text through it, applying the same EmbeddingGemma prefixes LocalEmbedder does.
 func (e *Engine) Embed(ctx context.Context, task TaskType, text string) ([]float32, error) {
-	if e.gpuTaken() {
-		return nil, errGPUHeld
-	}
 	if err := e.ensureUp(ctx); err != nil {
 		return nil, err
 	}
@@ -109,11 +95,12 @@ func (e *Engine) Embed(ctx context.Context, task TaskType, text string) ([]float
 
 // StopIfIdle kills the child now so its GPU memory can go to a heavier job, unless a client has been seen inside the presence window — someone mid-conversation keeps their fast embeds. Unlike Close this is not final: the next embed just spawns the server again. Reports whether the server is down when it returns.
 func (e *Engine) StopIfIdle() bool {
-	if !e.gpuTaken() && e.sinceLastClient() < e.presenceWindow {
+	// Safe on a nil *Engine: no embedder configured is no memory to give back, so the card is already as free as this call can make it.
+	if e == nil {
+		return true
+	}
+	if e.sinceLastClient() < e.presenceWindow {
 		return !e.running()
 	}
 	return e.stopNow()
 }
-
-// errGPUHeld is what an embed gets while a heavier job holds the card. Callers already degrade without the semantic half — hybrid search falls back to lexical only, and the background reconcile sweep stops and picks the work up next time — which is the right trade against putting a second model on a card a transcription is decoding on.
-var errGPUHeld = errors.New("embed engine: the GPU is held by a transcription")

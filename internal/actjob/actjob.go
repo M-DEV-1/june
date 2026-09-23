@@ -206,8 +206,6 @@ type Executor interface {
 // ScreenScope creates a fresh screen-tool namespace so concurrent jobs do not stomp on each other's numbered lists or focus state. Optional: when the executor implements it, NewScreenScope is called once per job run.
 type ScreenScope interface {
 	NewScreenScope(ctx context.Context) context.Context
-	// EndScreenRound gives the round's look allowance back, keeping the picture; the runner calls it at the start of every round.
-	EndScreenRound(ctx context.Context)
 }
 
 // Referencer supplies what this machine did the last few times it was asked something like this goal. Optional: when the executor implements it, it is called once per run and the block goes in every round's prompt.
@@ -513,10 +511,6 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		if !l.waitWhilePaused(ctx) {
 			r.endedWaiting(ctx, l)
 			return
-		}
-		// Each round may look afresh: the allowance is sized for one question, and a forty-step job is forty questions.
-		if scoped, ok := r.exec.(ScreenScope); ok {
-			scoped.EndScreenRound(ctx)
 		}
 		if over, why := overBudget(l.snapshot()); over {
 			job := l.snapshot()

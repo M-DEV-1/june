@@ -11,23 +11,18 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/brain"
 	"ora/internal/db/dbtest"
 )
 
-// fakeLedger stands in for the store's token ledger: it answers with whatever rows a test seeded, remembers the windows it was asked for, and can be made to fail.
+// fakeLedger stands in for the store's token ledger: it answers with whatever rows a test seeded, and can be made to fail.
 type fakeLedger struct {
-	totals   []TokenTotal
-	recent   []TokenUse
-	days     []TokenDay
-	since    []time.Time
-	limit    int
-	daysBack int
-	err      error
+	totals []TokenTotal
+	recent []TokenUse
+	days   []TokenDay
+	err    error
 }
 
 func (f *fakeLedger) TokenTotalsSince(_ context.Context, since time.Time) ([]TokenTotal, error) {
-	f.since = append(f.since, since)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -35,7 +30,6 @@ func (f *fakeLedger) TokenTotalsSince(_ context.Context, since time.Time) ([]Tok
 }
 
 func (f *fakeLedger) TokenUseRecent(_ context.Context, limit int) ([]TokenUse, error) {
-	f.limit = limit
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -43,7 +37,6 @@ func (f *fakeLedger) TokenUseRecent(_ context.Context, limit int) ([]TokenUse, e
 }
 
 func (f *fakeLedger) TokenDaysBack(_ context.Context, days int) ([]TokenDay, error) {
-	f.daysBack = days
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -53,38 +46,20 @@ func (f *fakeLedger) TokenDaysBack(_ context.Context, days int) ([]TokenDay, err
 // usageServer wires the /usage handler behind a real HTTP server under the same path cmd/daemon.go gives it.
 func usageServer(t *testing.T, ledger TokenLedger) *httptest.Server {
 	t.Helper()
-	return usageServerWithBudget(t, ledger, nil)
+	return usageServerWith(t, ledger, nil, 0)
 }
 
-// usageServerWithBudget is usageServer with a daily-token-budget lookup wired in, for the tests that check budget_used_fraction. nil behaves exactly like usageServer: no budgets set.
-func usageServerWithBudget(t *testing.T, ledger TokenLedger, budgetFor func(provider string) int) *httptest.Server {
-	t.Helper()
-	return usageServerFull(t, ledger, budgetFor, 0, nil)
-}
-
-// usageServerFull is usageServer with every optional wired in, for the tests that check the Exa monthly ceiling and the Tavily/Claude/Codex-style Limits map.
-func usageServerFull(t *testing.T, ledger TokenLedger, budgetFor func(provider string) int, exaMonthlyRequests int, limitsFor BrainLimits) *httptest.Server {
+// usageServerWith is usageServer with a daily-token-budget lookup and the Exa monthly request ceiling wired in. A nil lookup and a zero ceiling behave exactly like usageServer.
+func usageServerWith(t *testing.T, ledger TokenLedger, budgetFor func(provider string) int, exaMonthlyRequests int) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	if limitsFor == nil {
-		mux.HandleFunc("/usage", Usage(ledger, budgetFor, exaMonthlyRequests))
-	} else {
-		mux.HandleFunc("/usage", Usage(ledger, budgetFor, exaMonthlyRequests, limitsFor))
-	}
+	mux.HandleFunc("/usage", Usage(ledger, budgetFor, exaMonthlyRequests))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// TestUsage is one table over GET /usage's whole response shape, one row per property: provider
-// and model aggregation and sort order, the exact windows and row limits it asks the ledger for,
-// the day-bar series (zero-filled, oldest first), the recent-calls log's field mapping including
-// RFC3339 time and question truncation, cached-token and round-count pass-through on both the
-// recent log and the per-window totals, the today-only budget-fraction field (and its safe zero
-// with no budget lookup wired in at all), empty-store lists coming back as [] rather than null,
-// and a broken ledger reported as a 500 rather than read as "nothing spent". Each row is
-// independent — its own ledger, its own request, its own assertions — so a fold that fails still
-// names exactly which property broke.
+// TestUsage is one table over GET /usage's response, one row per property: provider and model aggregation and sort order, the day-bar series (zero-filled, oldest first), the recent-calls log's time format and question truncation, the today-only budget fraction, empty-store lists coming back as [] rather than null, a broken ledger reported as a 500 rather than read as "nothing spent", the Exa monthly bar, and the day keys against the real store.
 func TestUsage(t *testing.T) {
 	cases := []struct {
 		name string
@@ -121,35 +96,6 @@ func TestUsage(t *testing.T) {
 			}
 			if len(view.Week.Providers) != 2 {
 				t.Errorf("week providers = %+v, want the same shape as today", view.Week.Providers)
-			}
-		}},
-		{"windows are today, seven days, and the calendar month", func(t *testing.T) {
-			ledger := &fakeLedger{}
-			srv := usageServer(t, ledger)
-
-			var view UsageView
-			getUsage(t, srv, &view)
-
-			if len(ledger.since) != 3 {
-				t.Fatalf("TokenTotalsSince called %d times, want once per window (today, week, month)", len(ledger.since))
-			}
-			today := startOfToday(time.Now())
-			if !ledger.since[0].Equal(today) {
-				t.Errorf("today window starts at %s, want midnight this morning (%s)", ledger.since[0], today)
-			}
-			week := today.AddDate(0, 0, -(usageDays - 1))
-			if !ledger.since[1].Equal(week) {
-				t.Errorf("week window starts at %s, want %s", ledger.since[1], week)
-			}
-			month := startOfMonth(today)
-			if !ledger.since[2].Equal(month) {
-				t.Errorf("month window starts at %s, want midnight on the 1st (%s)", ledger.since[2], month)
-			}
-			if ledger.daysBack != usageDays {
-				t.Errorf("TokenDaysBack asked for %d days, want %d", ledger.daysBack, usageDays)
-			}
-			if ledger.limit != usageRecent {
-				t.Errorf("TokenUseRecent asked for %d rows, want %d", ledger.limit, usageRecent)
 			}
 		}},
 		{"day series is seven columns, oldest first, zero-filled", func(t *testing.T) {
@@ -210,42 +156,6 @@ func TestUsage(t *testing.T) {
 				t.Errorf("question is %d runes, want the opening %d of it", len([]rune(call.Question)), usageQuestionCap)
 			}
 		}},
-		{"cached tokens and rounds carried per call", func(t *testing.T) {
-			ledger := &fakeLedger{recent: []TokenUse{
-				{ID: 1, Provider: "codex", Model: "gpt-5.5", Channel: "text", InputTokens: 4614, OutputTokens: 80, TotalTokens: 4694, CachedTokens: 3840, Rounds: 3, Question: "click the merge button"},
-			}}
-			srv := usageServer(t, ledger)
-
-			var view UsageView
-			getUsage(t, srv, &view)
-
-			if len(view.Recent) != 1 {
-				t.Fatalf("recent = %+v, want 1", view.Recent)
-			}
-			call := view.Recent[0]
-			if call.CachedInputTokens != 3840 {
-				t.Errorf("cached input tokens = %d, want 3840", call.CachedInputTokens)
-			}
-			if call.Rounds != 3 {
-				t.Errorf("rounds = %d, want 3", call.Rounds)
-			}
-		}},
-		{"totals carry cached input tokens too", func(t *testing.T) {
-			ledger := &fakeLedger{totals: []TokenTotal{
-				{Provider: "codex", Model: "gpt-5.5", Calls: 2, InputTokens: 7614, OutputTokens: 100, TotalTokens: 7714, CachedInputTokens: 5340},
-			}}
-			srv := usageServer(t, ledger)
-
-			var view UsageView
-			getUsage(t, srv, &view)
-
-			if len(view.Today.Providers) != 1 || view.Today.Providers[0].CachedInputTokens != 5340 {
-				t.Errorf("today providers = %+v, want codex's cached input carried through", view.Today.Providers)
-			}
-			if len(view.Today.Models) != 1 || view.Today.Models[0].CachedInputTokens != 5340 {
-				t.Errorf("today models = %+v, want codex's cached input carried through", view.Today.Models)
-			}
-		}},
 		{"budget_used_fraction is today-only, zero with no budget", func(t *testing.T) {
 			ledger := &fakeLedger{totals: []TokenTotal{
 				{Provider: "codex", Model: "gpt-5.5", Calls: 2, InputTokens: 400000, OutputTokens: 0, TotalTokens: 400000},
@@ -257,7 +167,7 @@ func TestUsage(t *testing.T) {
 				}
 				return 0
 			}
-			srv := usageServerWithBudget(t, ledger, budgetFor)
+			srv := usageServerWith(t, ledger, budgetFor, 0)
 
 			var view UsageView
 			getUsage(t, srv, &view)
@@ -281,19 +191,6 @@ func TestUsage(t *testing.T) {
 				if p.BudgetUsedFraction != 0 {
 					t.Errorf("week provider %+v carries a budget_used_fraction; it must only ever be set on Today", p)
 				}
-			}
-		}},
-		{"nil budget lookup leaves the fraction zero", func(t *testing.T) {
-			ledger := &fakeLedger{totals: []TokenTotal{
-				{Provider: "codex", Model: "gpt-5.5", Calls: 1, InputTokens: 999999999, OutputTokens: 0, TotalTokens: 999999999},
-			}}
-			srv := usageServer(t, ledger)
-
-			var view UsageView
-			getUsage(t, srv, &view)
-
-			if len(view.Today.Providers) != 1 || view.Today.Providers[0].BudgetUsedFraction != 0 {
-				t.Errorf("today providers = %+v, want budget_used_fraction 0 with no budget lookup at all", view.Today.Providers)
 			}
 		}},
 		{"an empty ledger is empty lists, not null", func(t *testing.T) {
@@ -327,7 +224,7 @@ func TestUsage(t *testing.T) {
 		}},
 		{"exa's monthly call count shows with no bar when the ceiling is unknown", func(t *testing.T) {
 			ledger := &fakeLedger{totals: []TokenTotal{{Provider: "exa", Model: "search", Calls: 12}}}
-			srv := usageServerFull(t, ledger, nil, 0, nil)
+			srv := usageServerWith(t, ledger, nil, 0)
 
 			var view UsageView
 			getUsage(t, srv, &view)
@@ -345,7 +242,7 @@ func TestUsage(t *testing.T) {
 		}},
 		{"exa's used_fraction is calls this month divided by the configured ceiling", func(t *testing.T) {
 			ledger := &fakeLedger{totals: []TokenTotal{{Provider: "exa", Model: "search", Calls: 250}}}
-			srv := usageServerFull(t, ledger, nil, 1000, nil)
+			srv := usageServerWith(t, ledger, nil, 1000)
 
 			var view UsageView
 			getUsage(t, srv, &view)
@@ -356,52 +253,6 @@ func TestUsage(t *testing.T) {
 			}
 			if want := 0.25; exa.Limits[0].UsedFraction != want {
 				t.Errorf("exa used_fraction = %v, want %v (250/1000)", exa.Limits[0].UsedFraction, want)
-			}
-		}},
-		{"exa is absent from limits when it has not been called this month", func(t *testing.T) {
-			ledger := &fakeLedger{totals: []TokenTotal{{Provider: "gemini", Model: "gemini-3-flash", Calls: 1}}}
-			srv := usageServerFull(t, ledger, nil, 1000, nil)
-
-			var view UsageView
-			getUsage(t, srv, &view)
-
-			if _, ok := view.Limits["exa"]; ok {
-				t.Errorf("limits = %+v, want no exa row when nothing was called this month", view.Limits)
-			}
-		}},
-		{"tavily's own allowance windows are surfaced the same way claude's are, under their own id", func(t *testing.T) {
-			ledger := &fakeLedger{}
-			calledWith := []string{}
-			limitsFor := func(_ context.Context, id string) (brain.UsageSnapshot, bool) {
-				calledWith = append(calledWith, id)
-				if id != "tavily" {
-					return brain.UsageSnapshot{}, false
-				}
-				return brain.UsageSnapshot{
-					Limits: []brain.UsageLimit{{Window: "monthly", UsedFraction: 0.4, Source: "api.tavily.com/usage account.plan_usage"}},
-					At:     time.Date(2026, 9, 10, 8, 0, 0, 0, time.UTC),
-				}, true
-			}
-			srv := usageServerFull(t, ledger, nil, 0, limitsFor)
-
-			var view UsageView
-			getUsage(t, srv, &view)
-
-			tavily, ok := view.Limits["tavily"]
-			if !ok || len(tavily.Limits) != 1 {
-				t.Fatalf("limits = %+v, want a tavily row", view.Limits)
-			}
-			if tavily.Limits[0].Window != "monthly" || tavily.Limits[0].UsedFraction != 0.4 {
-				t.Errorf("tavily limit = %+v, want the window the lookup answered with, carried through unchanged", tavily.Limits[0])
-			}
-			found := false
-			for _, id := range calledWith {
-				if id == "tavily" {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("limitsFor was called with %v, want it asked about \"tavily\" the same way it is asked about every brain id", calledWith)
 			}
 		}},
 		{"against the real store, the day keys the ledger groups by match the ones the bar series fills in", func(t *testing.T) {

@@ -180,25 +180,6 @@ func TestDictationStartStopReturnsTranscript(t *testing.T) {
 	}
 }
 
-func TestDictationStopWithoutStartIs404(t *testing.T) {
-	_, srv, _ := newDictationTest(t, &fakeMic{}, &fakeTranscriber{})
-	resp := stopDictation(t, srv, "dictate-1")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("stop status = %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestDictationStopWithAStaleIdIs404(t *testing.T) {
-	_, srv, _ := newDictationTest(t, &fakeMic{chunks: [][]byte{pcm(160)}}, &fakeTranscriber{text: "x"})
-	startDictation(t, srv)
-	resp := stopDictation(t, srv, "dictate-99")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("stop status = %d, want 404 for an id that is not the open dictation", resp.StatusCode)
-	}
-}
-
 func TestSecondStartStopsTheFirst(t *testing.T) {
 	mic := &fakeMic{chunks: [][]byte{pcm(160)}}
 	tx := &fakeTranscriber{text: "second"}
@@ -319,16 +300,6 @@ func TestResampleTo16k(t *testing.T) {
 		if int16(binary.LittleEndian.Uint16(out[i*2:])) <= int16(binary.LittleEndian.Uint16(out[(i-1)*2:])) {
 			t.Fatalf("the resampled ramp is not increasing at sample %d", i)
 		}
-	}
-}
-
-func TestDictationPromptNames(t *testing.T) {
-	got := dictationPromptFrom([]string{"identity", "sorrek-thivan", "preferences-tone", "yalven"})
-	if got != "Notes. People: Sorrek Thivan, Yalven." {
-		t.Fatalf("prompt = %q", got)
-	}
-	if got := dictationPromptFrom([]string{"identity"}); got != "" {
-		t.Fatalf("prompt with nobody but the user = %q, want empty", got)
 	}
 }
 

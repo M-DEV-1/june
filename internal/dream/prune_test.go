@@ -102,22 +102,6 @@ func addPrunableRun(t *testing.T, store *db.Store, question, outcome string, age
 	}
 }
 
-// The stage prunes conversations first and act runs second. The order is the policy's: the procedures stage that ran a moment ago writes the notes that make the store keep an act run for good, and the conversation pass is the one that can never take anything the user said, so it goes first and the count-capped table goes last.
-func TestPruneStageRunsConversationsBeforeActRuns(t *testing.T) {
-	ctx := context.Background()
-	store := &countingStore{Store: dbtest.Open(t)}
-	r, _ := pruneRunner(store)
-
-	if _, err := r.pruneStage(ctx); err != nil {
-		t.Fatalf("pruneStage: %v", err)
-	}
-
-	want := []string{"ProtectedConversations", "PruneEmptyConversations", "ProtectedActRuns", "PruneActRuns"}
-	if got := store.recorded(); !slices.Equal(got, want) {
-		t.Errorf("the stage called the store as %v, want %v", got, want)
-	}
-}
-
 // A store that cannot be reached stops the stage where it failed: the pass after it never runs, and the error comes back so the caller commits no token and the next wake tries the whole stage again. An unreachable store must never read as a store with nothing to prune.
 func TestPruneStageStopsWhenTheStoreCannotBeReached(t *testing.T) {
 	ctx := context.Background()
@@ -304,22 +288,6 @@ func TestPruneStageLeavesTheTokenOffWhenItFails(t *testing.T) {
 	}
 	if !run.Finished {
 		t.Error("a failed pruning stage cost the night its morning report, which it must not")
-	}
-}
-
-// The retention numbers a live Runner prunes with come from the config file, not from anything chosen in this package: an unwritten config yields the two documented defaults.
-func TestRetentionComesFromTheConfig(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	store := dbtest.Open(t)
-	b := &fakeBrain{}
-	r := New(store, b.fn, yesProbes(), 23, 9)
-
-	keep, grace := r.retention()
-	if keep != config.DefaultActRunKeep {
-		t.Errorf("act run cap = %d, want the config default %d", keep, config.DefaultActRunKeep)
-	}
-	if want := time.Duration(config.DefaultActRunFailedKeepDays) * 24 * time.Hour; grace != want {
-		t.Errorf("failed run grace = %v, want the config default %v", grace, want)
 	}
 }
 

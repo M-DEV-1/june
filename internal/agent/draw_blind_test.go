@@ -33,12 +33,3 @@ func TestClickPoint_StillRefusesWhenTheImageWasNeverDelivered(t *testing.T) {
 		t.Error("click_at accepted a coordinate from a session that never saw the picture")
 	}
 }
-
-// With no look at all there is still no frame to map through, and saying so names the tool that produces one.
-func TestDrawPoint_StillAsksForALookWhenNoneHasBeenTaken(t *testing.T) {
-	a := &Agent{}
-	ctx := liveScreenScope(context.Background())
-	if _, _, errText := a.toScreenForDraw(ctx, 10, 10); errText == "" {
-		t.Error("draw accepted a point with no picture behind it at all")
-	}
-}

@@ -159,7 +159,15 @@ func (a *Agent) guardPoint(ctx context.Context, x, y int, window string) string 
 }
 
 // click is the one tool for putting a pointer on something, in the order a locator should try: an element number from the last observe_screen list when the accessibility walk saw the thing, a bare point from the last look when it did not, and a "then" list of further taps when the UI will not survive a round trip between them.
+// button picks which pointer button presses, "left" by default and "right" for the context menu; an unknown name is refused rather than clicked with the left button, since a click nobody asked for is what the model would otherwise get back.
 func (a *Agent) click(ctx context.Context, args map[string]any) string {
+	switch button, _ := args["button"].(string); strings.ToLower(strings.TrimSpace(button)) {
+	case "", "left":
+	case "right":
+		return a.rightClick(ctx, args)
+	default:
+		return toolError(fmt.Sprintf("button is left or right, not %q", button))
+	}
 	if _, ok := args["then"]; ok {
 		return a.clickSequence(ctx, args)
 	}
@@ -261,4 +269,31 @@ func (a *Agent) clickPoint(ctx context.Context, args map[string]any) string {
 	// The pointer has moved the keyboard somewhere this session cannot name, whatever was under the point, so type_text and a focused key press refuse until a fresh observe_screen or a numbered click says where the keyboard is again.
 	a.focusLost(ctx)
 	return fmt.Sprintf("clicked %d,%d on the screen%s; look or call observe_screen to see what it did", x, y, lands)
+}
+
+// rightClick presses the right pointer button on whatever the call named, which is what opens a context menu. There is no accessibility path for it: a node's showContextMenu action is Chromium's alone and the walk deliberately never fires it (see pickAction in internal/tracker), so this always drives the real pointer — at the centre of a numbered element's rectangle, or at a bare point read off the last look. Input: the click arguments, carrying n from the latest observe_screen list or x and y in the last look's picture coordinates. Output: the line saying where it clicked, or the reason it was refused, in which case nothing was pressed.
+func (a *Agent) rightClick(ctx context.Context, args map[string]any) string {
+	if _, ok := args["then"]; ok {
+		return toolError("a right-click is one press; leave then out and call click again for the menu item")
+	}
+	step, errText := a.resolveStep(ctx, args)
+	if errText != "" {
+		return errText
+	}
+	// The same stop line a left click at that point would face. Opening a menu commits to nothing on its own, but the point is resolved against the same listing, and a control this session may not press is not one it may open a menu on either.
+	window := a.frontWindow(ctx)
+	if stop := a.guardPoint(ctx, step.x, step.y, window); stop != "" {
+		return "Stopped before right-clicking: " + stop
+	}
+	dev, errText := a.inputDevice(ctx)
+	if errText != "" {
+		return errText
+	}
+	a.tapAt(step.x, step.y, step.label)
+	if err := dev.RightClickAt(float64(step.x), float64(step.y)); err != nil {
+		return toolError(fmt.Sprintf("could not right-click %s: %v", step.describe(), err))
+	}
+	// The pointer has moved the keyboard somewhere this session cannot name, exactly as a left click at a point does, so type_text and a focused key press refuse until a fresh observe_screen or a numbered click says where it is.
+	a.focusLost(ctx)
+	return fmt.Sprintf("right-clicked %s; call observe_screen to see the menu it opened", step.describe())
 }

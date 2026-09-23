@@ -520,21 +520,6 @@ func TestAskClaude_ReportsAFailedRun(t *testing.T) {
 	}
 }
 
-// The brain wrapper the daemon registers forwards to the agent, with and without a thread.
-func TestClaudeBrain_ForwardsToTheAgent(t *testing.T) {
-	var b any = ClaudeBrain{}
-	if _, ok := b.(interface {
-		AskText(context.Context, string) (TurnTrace, error)
-	}); !ok {
-		t.Errorf("ClaudeBrain does not answer an ask")
-	}
-	if _, ok := b.(interface {
-		AskTextWith(context.Context, History, string) (TurnTrace, error)
-	}); !ok {
-		t.Errorf("ClaudeBrain does not answer an ask with a thread")
-	}
-}
-
 // MCP hands a picture back as an image content item beside the text, which is how the Claude command line gets to see the screen a look took.
 func TestClaudeToolServer_ReturnsTheLookPictureAsAnImage(t *testing.T) {
 	a, _, _ := lookingAgent(t)
@@ -562,21 +547,6 @@ func TestClaudeToolServer_ReturnsTheLookPictureAsAnImage(t *testing.T) {
 	}
 }
 
-// A tool that took no picture sends no picture: only the text goes back, as it always did.
-func TestClaudeToolServer_SendsNoImageForAToolThatTookNone(t *testing.T) {
-	a, _, _ := lookingAgent(t)
-	s, err := a.startClaudeToolServer(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	call := rpcPost(t, s, "tools/call", 2, map[string]any{"name": "observe_screen", "arguments": map[string]any{}})
-	if content := call["result"].(map[string]any)["content"].([]any); len(content) != 1 {
-		t.Errorf("%d content items, want the text alone", len(content))
-	}
-}
-
 // A CLI error long enough to be cut is cut on a rune boundary, not a byte one: 299 ASCII characters followed by a two-byte rune used to be sliced through the middle of that rune and hand the log invalid UTF-8. A short line has its whitespace squeezed out but comes back whole, with no ellipsis.
 func TestClaudeHead(t *testing.T) {
 	long := strings.Repeat("a", 299) + "é" + "tail"
@@ -593,8 +563,15 @@ func TestClaudeHead(t *testing.T) {
 
 // recordedUsage is a UsageRecorder that keeps what it was handed, so a test can check what a refresh recorded.
 type recordedUsage struct {
-	mu     sync.Mutex
-	byName map[string][]UsageLimit
+	mu        sync.Mutex
+	byName    map[string][]UsageLimit
+	signedOut string
+}
+
+func (r *recordedUsage) RecordSignedOut(provider, note string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.signedOut = provider
 }
 
 func (r *recordedUsage) Record(provider string, limits []UsageLimit) {

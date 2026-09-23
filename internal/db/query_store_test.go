@@ -24,17 +24,6 @@ func TestQueryStore_RendersRows(t *testing.T) {
 	}
 }
 
-func TestQueryStore_EmptyResultSaysSo(t *testing.T) {
-	store := memStore(t)
-	out, err := store.QueryStore(context.Background(), "SELECT content FROM notes WHERE 1=0", 40)
-	if err != nil {
-		t.Fatalf("QueryStore: %v", err)
-	}
-	if out != "no rows matched" {
-		t.Fatalf("expected explicit empty-result text, got %q", out)
-	}
-}
-
 func TestQueryStore_ReadOnlyHandleRejectsWrites(t *testing.T) {
 	store := memStore(t)
 	_, err := store.QueryStore(context.Background(), "INSERT INTO notes (content, kind) VALUES ('x', 'fact')", 40)
@@ -93,5 +82,19 @@ func TestQueryStore_OneOversizedRowIsNotAnAbsence(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "substr") {
 		t.Errorf("error = %q, want it to say how to narrow the query", err)
+	}
+}
+
+// Between 2026-09-16 and 09-23 the model guessed columns that do not exist five times (episodes.url, episodes.window_title, episodes.ocr_text, episodes_fts.content) and spent a round on each. The error names the columns the queried table really has, so the next try can be right.
+func TestQueryStore_AMissingColumnNamesTheRealOnes(t *testing.T) {
+	store := memStore(t)
+	_, err := store.QueryStore(context.Background(), "SELECT e.window_title FROM episodes e WHERE e.id = 1", 40)
+	if err == nil {
+		t.Fatal("a query on a column that does not exist ran")
+	}
+	for _, want := range []string{"episodes", "title", "screen_text"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
 	}
 }

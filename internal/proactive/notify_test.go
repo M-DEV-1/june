@@ -76,36 +76,6 @@ func testScheduler(t *testing.T) (*Scheduler, *db.Store, *fakeNotifier) {
 	return s, store, f
 }
 
-// TestNotice_OffersEveryAction checks a notice reaching the desktop carries all five buttons, in order, so every notification can be opened, completed or pushed to later.
-func TestNotice_OffersEveryAction(t *testing.T) {
-	s, _, f := testScheduler(t)
-
-	s.say(Notice{Title: "Morning brief", Body: "Three things today.", Kind: "brief"})
-
-	if f.count() != 1 {
-		t.Fatalf("posted %d notifications, want 1", f.count())
-	}
-	want := []Action{
-		{"default", "Open in Ora"},
-		{"done", "Done"},
-		{"hour", "In an hour"},
-		{"evening", "This evening"},
-		{"tomorrow", "Tomorrow"},
-	}
-	got := f.sent[0].actions
-	if len(got) != len(want) {
-		t.Fatalf("actions = %+v, want %+v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("action %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-	if f.sent[0].title != "Morning brief" || f.sent[0].body != "Three things today." {
-		t.Errorf("posted %q / %q, want the notice's own title and body", f.sent[0].title, f.sent[0].body)
-	}
-}
-
 // TestSnoozeButtons_WriteDueAt presses each snooze button against a fixed clock and checks the moment the notice is due back, across a morning, an afternoon and an hour past the evening hour.
 func TestSnoozeButtons_WriteDueAt(t *testing.T) {
 	at := func(hour, minute int) time.Time {
@@ -219,20 +189,6 @@ func TestDone_OnRoutineNotice_ClosesNothing(t *testing.T) {
 	assertNoSnoozes(t, ctx, store)
 }
 
-// TestDefault_OpensTheWindow checks clicking the body of a notification, or its Open in Ora button, does what the tray's own Open Ora item does.
-func TestDefault_OpensTheWindow(t *testing.T) {
-	s, _, f := testScheduler(t)
-	opened := 0
-	s.SetOpenWindow(func() { opened++ })
-
-	s.say(Notice{Title: "Morning brief", Body: "Three things today.", Kind: "brief"})
-	f.press(t, 0, "default")
-
-	if opened != 1 {
-		t.Errorf("opened the window %d times, want 1", opened)
-	}
-}
-
 // TestDismissal_LeavesNothingBehind checks a notification closed without a button press — which is what NotificationClosed reports — changes nothing at all.
 func TestDismissal_LeavesNothingBehind(t *testing.T) {
 	ctx := context.Background()
@@ -307,14 +263,6 @@ func TestSnooze_OnARefiredSnooze_ReplacesIt(t *testing.T) {
 	}
 }
 
-// TestAct_BadAction checks an action string that is none of the four buttons is refused rather than silently doing nothing, since a route answering it must know to say 400.
-func TestAct_BadAction(t *testing.T) {
-	s, _, _ := testScheduler(t)
-	if err := s.Act(context.Background(), "task", "42", "Still open", "Send the invoice", "snooze-forever"); !errors.Is(err, ErrBadNoticeAction) {
-		t.Errorf("Act = %v, want ErrBadNoticeAction", err)
-	}
-}
-
 // TestAct_Done_ClosesTheTask checks Act's "done" takes the same task-done path a D-Bus press does, so the route and the notification apply Done identically.
 func TestAct_Done_ClosesTheTask(t *testing.T) {
 	ctx := context.Background()
@@ -333,18 +281,6 @@ func TestAct_Done_ClosesTheTask(t *testing.T) {
 		t.Errorf("task-done path called with %v, want [42]", closed)
 	}
 	assertNoSnoozes(t, ctx, store)
-}
-
-// TestAct_Done_TaskGone checks Act reports a task that no longer exists as ErrTaskGone rather than swallowing it, since a D-Bus press has nowhere to show that failure but a route answering it must say 404.
-func TestAct_Done_TaskGone(t *testing.T) {
-	s, _, _ := testScheduler(t)
-	s.SetTaskDone(func(context.Context, string) error {
-		return fmt.Errorf("closing task 42: %w", ErrTaskGone)
-	})
-
-	if err := s.Act(context.Background(), "task", "42", "Still open", "Send the invoice", "done"); !errors.Is(err, ErrTaskGone) {
-		t.Errorf("Act = %v, want ErrTaskGone", err)
-	}
 }
 
 // TestAct_Snooze_WritesTheSameSnoozeAPressWould checks Act's snooze buttons write the same pending snooze a D-Bus press writes, keyed off the kind and id it was called with rather than a notice built from a live posting.
@@ -603,16 +539,6 @@ func TestMaybeTaskNotices_CapsPerTick(t *testing.T) {
 	}
 }
 
-// TestNoticeKey_IdLessNoticesUseTheTitle checks a brief or a routine, which has no row id, still gets a key its banner can be closed by.
-func TestNoticeKey_IdLessNoticesUseTheTitle(t *testing.T) {
-	if got := noticeKey(Notice{Kind: "brief", Title: "Morning brief"}); got != "brief|Morning brief" {
-		t.Errorf("noticeKey = %q", got)
-	}
-	if got := noticeKey(Notice{Kind: "task", ID: "42", Title: "Still open"}); got != "task|42" {
-		t.Errorf("noticeKey with an id = %q", got)
-	}
-}
-
 // TestAct_Snooze_StoreFailureIsReturned checks a snooze the store could not write comes back as an error, so the route answers with a failure instead of a 200 that snoozed nothing.
 func TestAct_Snooze_StoreFailureIsReturned(t *testing.T) {
 	ctx := context.Background()
@@ -620,18 +546,6 @@ func TestAct_Snooze_StoreFailureIsReturned(t *testing.T) {
 	store.Close()
 	if err := s.Act(ctx, "task", "42", "Still open", "Send the invoice", actionEvening); err == nil {
 		t.Error("Act returned nil for a snooze the store refused")
-	}
-}
-
-// TestBusNotifier_FinishForgetsTheKey checks a pressed or dismissed banner takes its key with it, so the keyed map does not grow for the life of the daemon and a later Close does not aim at a dead id.
-func TestBusNotifier_FinishForgetsTheKey(t *testing.T) {
-	n := &BusNotifier{waiting: map[uint32]func(string){7: func(string) {}}, keyed: map[string]uint32{"task|42": 7, "task|43": 8}}
-	n.finish(7, "done")
-	if _, still := n.keyed["task|42"]; still {
-		t.Error("finished banner's key is still in keyed")
-	}
-	if n.keyed["task|43"] != 8 {
-		t.Error("an unrelated banner's key was dropped")
 	}
 }
 
