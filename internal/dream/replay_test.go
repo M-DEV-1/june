@@ -71,7 +71,7 @@ func (c *stepClock) now() time.Time {
 func TestReplayStage_NoShadowSkipsCleanly(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
 	if err := store.StartDreamRun(ctx, night); err != nil {
 		t.Fatal(err)
@@ -94,7 +94,7 @@ func TestReplayStage_NoShadowSkipsCleanly(t *testing.T) {
 func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.StartDreamRun(ctx, night); err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testin
 func TestReplayStage_ParseFailureCountedNotFatal(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.StartDreamRun(ctx, night); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestReplayStage_ParseFailureCountedNotFatal(t *testing.T) {
 func TestReplayStage_BudgetCutoffWritesPartialArtifactAndToken(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.StartDreamRun(ctx, night); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestReplayStage_BudgetCutoffWritesPartialArtifactAndToken(t *testing.T) {
 func TestTick_ReplayRunsLastAfterCompact(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A quiet day."); err != nil {
 		t.Fatal(err)
 	}

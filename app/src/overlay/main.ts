@@ -26,6 +26,8 @@ import {
   NO_ASK,
   POINTER_HEADING,
   SETTLE_MS,
+  smoothstep,
+  unwrap,
   type LastRing,
   type Layout,
   type Mood,
@@ -230,7 +232,7 @@ function tracePointer(path: SVGPathElement, length: number, delay: number, ms: n
     last = heading;
     // The flight before this one ends upright and the pointer has to be upright again when it stops, or it would sit at the end of an arrow looking like a second arrowhead. So the turn onto the stroke's own heading is eased in over the first eighth of it and out again over the last.
     const p = i / steps;
-    const banked = ease(Math.min(1, p / TRACE_TURN_IN)) * (1 - ease(Math.min(1, Math.max(0, p - 1 + TRACE_TURN_IN) / TRACE_TURN_IN)));
+    const banked = smoothstep(Math.min(1, p / TRACE_TURN_IN)) * (1 - smoothstep(Math.min(1, Math.max(0, p - 1 + TRACE_TURN_IN) / TRACE_TURN_IN)));
     const turn = Math.round(heading * banked * 100) / 100;
     frames.push({ transform: `translate(${here.x}px, ${here.y}px) rotate(${turn}deg) scale(1)`, offset: i / steps });
   }
@@ -242,13 +244,7 @@ function tracePointer(path: SVGPathElement, length: number, delay: number, ms: n
 
 /** Which way the pointer faces at one place along a stroke. Input: the points just behind and just ahead of it and the heading it had a moment ago. Output: the rotation in degrees, written as the number nearest the previous one so a stroke crossing due west does not spin the pointer round. */
 function headingOf(behind: DOMPoint, ahead: DOMPoint, previous: number): number {
-  const raw = (Math.atan2(ahead.y - behind.y, ahead.x - behind.x) * 180) / Math.PI - POINTER_HEADING;
-  return raw + Math.round((previous - raw) / 360) * 360;
-}
-
-/** Eases from 0 to 1, gently at both ends. */
-function ease(t: number): number {
-  return t * t * (3 - 2 * t);
+  return unwrap((Math.atan2(ahead.y - behind.y, ahead.x - behind.x) * 180) / Math.PI - POINTER_HEADING, previous);
 }
 
 /** Sets the colour every piece of ink, the pointer and the label pill are drawn in. Input: the mood. Output: nothing; the stylesheet tweens the change over 200 ms, so a drawing that turns from showing to about-to-press changes colour rather than blinking. */

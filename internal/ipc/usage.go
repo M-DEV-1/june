@@ -115,7 +115,7 @@ type UsageView struct {
 func Usage(ledger TokenLedger, budgetFor func(provider string) int, exaMonthlyRequests int, limitsFor ...BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		today := startOfToday(time.Now())
+		today := db.DayStart(time.Now())
 
 		todayTotals, err := ledger.TokenTotalsSince(ctx, today)
 		if err != nil {
@@ -152,7 +152,7 @@ func Usage(ledger TokenLedger, budgetFor func(provider string) int, exaMonthlyRe
 			limits["exa"] = exa
 		}
 
-		writeJSON(w, UsageView{
+		util.WriteJSON(w, UsageView{
 			Today:  todayWindow,
 			Week:   usageWindow(weekTotals),
 			Days:   daySeries(days, today),

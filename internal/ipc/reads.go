@@ -107,12 +107,6 @@ type Person struct {
 	Count     int    `json:"count"`
 }
 
-// writeJSON writes v as the response body with a JSON content type. Input: the response writer and any value. Output: none — an encode failure is already too late to turn into a status code, and the window treats a short body the same as a failed request.
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
-}
-
 // fail writes an error status with the message as the body, for a request the store could not answer.
 func fail(w http.ResponseWriter, err error, code int) {
 	http.Error(w, err.Error(), code)
@@ -142,11 +136,6 @@ func rfc3339(t time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
-}
-
-// startOfToday is midnight this morning in the daemon's local zone, which is the day boundary the diary and the dreaming loop already use.
-func startOfToday(now time.Time) time.Time {
-	return db.DayStart(now)
 }
 
 // liveFocusTimeout bounds how long Context waits for a synchronous read of the window in focus right now, so a slow or hung accessibility call never delays the response — it just falls back to the buffer, the same as when no live reader is wired at all.
@@ -194,14 +183,14 @@ func contextViewFrom(a tracker.Activity) ContextView {
 // Context handles GET /context: the app, window title and text of the window in focus right now. It reads the window in focus synchronously first (see readFocused), so the hotkey never names a stale window; that read applies the same refusals the tracker's own capture loop applies, Ora's own window and the app blocklist, so the hotkey cannot hand the model a window the episode store would never have held; falls back to the tracker's live buffer — the same buffer /buffer serves — when the live read fails, times out, or names Ora itself; and falls back to the newest stored episode when the buffer has just been flushed or no tracker is wired at all. Text is trimmed to 600 runes.
 func (s *Server) Context(w http.ResponseWriter, r *http.Request) {
 	if a, ok := readFocused(r.Context(), s.focused); ok && !tracker.IsOraWindow(a.App, a.Title) && !tracker.Blocklisted(a.App) {
-		writeJSON(w, contextViewFrom(a))
+		util.WriteJSON(w, contextViewFrom(a))
 		return
 	}
 
 	if s.screen != nil {
 		// The newest capture is often the Ora window itself, since the tracker sees it the moment it takes focus; the context the user means is the newest capture of anything else.
 		if a, ok := newestOtherThanOra(s.screen()); ok {
-			writeJSON(w, contextViewFrom(a))
+			util.WriteJSON(w, contextViewFrom(a))
 			return
 		}
 	}
@@ -223,10 +212,10 @@ func (s *Server) Context(w http.ResponseWriter, r *http.Request) {
 		if text == "" {
 			text = e.UserActivity
 		}
-		writeJSON(w, ContextView{App: e.App, Title: e.Title, Text: util.Runes(text, maxContextText)})
+		util.WriteJSON(w, ContextView{App: e.App, Title: e.Title, Text: util.Runes(text, maxContextText)})
 		return
 	}
-	writeJSON(w, ContextView{})
+	util.WriteJSON(w, ContextView{})
 }
 
 // Matters handles GET /matters: everything outstanding, in the order the window shows it — open action items first, then the five most recently touched threads, then the meetings of the last seven days. Capped at 30 items.
@@ -292,14 +281,14 @@ func (s *Server) Matters(w http.ResponseWriter, r *http.Request) {
 	if len(matters) > mattersCap {
 		matters = matters[:mattersCap]
 	}
-	writeJSON(w, map[string]any{"matters": matters})
+	util.WriteJSON(w, map[string]any{"matters": matters})
 }
 
 // Today handles GET /today: today's morning brief (or the latest daily digest when no brief was written) and the day's timeline, oldest first and capped at 60 entries. When there is more than that, the most recent 60 are kept.
 func (s *Server) Today(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
-	since := startOfToday(now)
+	since := db.DayStart(now)
 
 	brief, err := s.store.DiaryEntry(ctx, now.Format("2006-01-02"), "brief")
 	if err != nil {
@@ -373,7 +362,7 @@ func (s *Server) Today(w http.ResponseWriter, r *http.Request) {
 	for _, r := range rows {
 		timeline = append(timeline, r.entry)
 	}
-	writeJSON(w, TodayView{Brief: brief, Timeline: timeline})
+	util.WriteJSON(w, TodayView{Brief: brief, Timeline: timeline})
 }
 
 // Meetings handles GET /meetings: the last 30 recorded meetings, newest first, each with its minutes verbatim and the attendees read out of them.
@@ -400,7 +389,7 @@ func (s *Server) Meetings(w http.ResponseWriter, r *http.Request) {
 			Attendees: minutesAttendees(minutes),
 		})
 	}
-	writeJSON(w, map[string]any{"meetings": meetings})
+	util.WriteJSON(w, map[string]any{"meetings": meetings})
 }
 
 // Meeting handles DELETE /meetings/{id}: it removes one meeting's write-up, for a call whose minutes are not worth keeping. Output: 204 with nothing, 404 for an id that names no meeting, 405 for any other method.
@@ -487,7 +476,7 @@ func (s *Server) MemorySearch(w http.ResponseWriter, r *http.Request) {
 			Archived:    true,
 		})
 	}
-	writeJSON(w, map[string]any{"facts": facts})
+	util.WriteJSON(w, map[string]any{"facts": facts})
 }
 
 // People handles GET /people: the people personal context holds, then the names meetings of the last peopleWindow only ever heard, up to peopleCap in all. A personal-context entry is a person unless its subject is the user's own identity, the store's "unsure" bucket, or an area of preference.
@@ -537,7 +526,7 @@ func (s *Server) People(w http.ResponseWriter, r *http.Request) {
 			people = append(people, Person{Name: name, HeardOnly: true, Count: count})
 		}
 	}
-	writeJSON(w, map[string]any{"people": people})
+	util.WriteJSON(w, map[string]any{"people": people})
 }
 
 // meetingDurationPrefix opens the machine-readable line internal/recorder appends to a meeting note's stored content, after the minutes text — see fileMinutes in internal/recorder/recorder.go. It carries the recording's actual wall-clock start and stop, the one thing on the note that could never be recovered from the minutes text itself.

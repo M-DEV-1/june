@@ -24,7 +24,7 @@ func (s *Scheduler) maybeBrief(ctx context.Context) {
 	if s.backedOff("brief", now) {
 		return
 	}
-	day := now.Format(dayFormat)
+	day := now.Format(time.DateOnly)
 	existing, err := s.store.DiaryEntry(ctx, day, "brief")
 	if err != nil {
 		slog.Warn("morning brief: reading brief marker failed", "error", err)
@@ -69,7 +69,7 @@ func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string)
 	if err != nil {
 		return err
 	}
-	yesterday, err := s.store.DiaryEntry(ctx, now.AddDate(0, 0, -1).Format(dayFormat), "day")
+	yesterday, err := s.store.DiaryEntry(ctx, now.AddDate(0, 0, -1).Format(time.DateOnly), "day")
 	if err != nil {
 		return err
 	}
@@ -140,7 +140,7 @@ const staleNoticeKind = "stale"
 //
 // ponytail: re-asks every morning until answered. If that grates, stamp the item with the day it was last asked about and leave a gap.
 func (s *Scheduler) askAbout(ctx context.Context, a memory.ActionItem) {
-	body := fmt.Sprintf("%s — %s\n\nOpen since %s. Any progress?", a.Owner, a.Text, a.Raised.Format(dayFormat))
+	body := fmt.Sprintf("%s — %s\n\nOpen since %s. Any progress?", a.Owner, a.Text, a.Raised.Format(time.DateOnly))
 	n := Notice{Title: "Still open", Body: body, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: staleNoticeKind}
 	for _, ans := range askAnswers {
 		n.Actions = append(n.Actions, Action{Key: ans.key, Label: ans.label})
@@ -223,6 +223,6 @@ func writeActions(b *strings.Builder, items []memory.ActionItem) {
 		return
 	}
 	for _, a := range items {
-		fmt.Fprintf(b, "[%s] %s — %s (raised %s)\n", a.Priority, a.Owner, a.Text, a.Raised.Format(dayFormat))
+		fmt.Fprintf(b, "[%s] %s — %s (raised %s)\n", a.Priority, a.Owner, a.Text, a.Raised.Format(time.DateOnly))
 	}
 }

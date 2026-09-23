@@ -10,6 +10,7 @@ import (
 	"ora/internal/brain"
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/tracker"
 	"ora/internal/util"
 )
 
@@ -172,7 +173,7 @@ func (r *Recorder) desktopTimeline(ctx context.Context, since, until time.Time) 
 			text = e.VisibleText
 		}
 		budget := screenTextBudget
-		if isMeetingWindow(e.App, e.Title) {
+		if tracker.IsMeetingWindow(e.App, e.Title) {
 			budget = meetingTextBudget
 		}
 		text = util.RunesEllipsis(util.OneLine(text), budget)

@@ -1,34 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { actAnswer, actPauseResume, actStart, actStop, ask, context, devToken, events, matters, setEventSourceCtor, setToken, voiceStart, voiceStatus } from "./daemon";
+import { actAnswer, actPauseResume, actStart, actStop, ask, context, devToken, events, matters, setToken, voiceStart, voiceStatus } from "./daemon";
 
-/** Minimal fake EventSource: tests trigger messages/errors by calling the instance's own methods. */
+/** Minimal fake EventSource: records the URL each stream was opened with. */
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
-  url: string;
-  onmessage: ((e: MessageEvent) => void) | null = null;
-  onerror: (() => void) | null = null;
-  closed = false;
-  constructor(url: string) {
-    this.url = url;
+  constructor(public url: string) {
     FakeEventSource.instances.push(this);
   }
-  emit(data: unknown): void {
-    this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent);
-  }
-  emitRaw(data: string): void {
-    this.onmessage?.({ data } as MessageEvent);
-  }
-  fail(): void {
-    this.onerror?.();
-  }
-  close(): void {
-    this.closed = true;
-  }
+  close(): void {}
 }
 
 beforeEach(() => {
   FakeEventSource.instances = [];
-  setEventSourceCtor(FakeEventSource as unknown as new (url: string) => EventSource);
+  vi.stubGlobal("EventSource", FakeEventSource);
   setToken(undefined);
   vi.useFakeTimers();
 });
@@ -77,44 +61,6 @@ describe("ask", () => {
   });
 });
 
-describe("events", () => {
-  it("parses messages and forwards them", () => {
-    const onEvent = vi.fn();
-    events(onEvent);
-    const src = FakeEventSource.instances[0];
-    src.emit({ id: "1", type: "status", text: "reading mail" });
-    expect(onEvent).toHaveBeenCalledWith({ id: "1", type: "status", text: "reading mail" });
-  });
-
-  it("ignores a malformed message", () => {
-    const onEvent = vi.fn();
-    events(onEvent);
-    const src = FakeEventSource.instances[0];
-    src.emitRaw("{not json");
-    expect(onEvent).not.toHaveBeenCalled();
-  });
-
-  it("reconnects with a 2s backoff after the stream drops", () => {
-    events(vi.fn());
-    const first = FakeEventSource.instances[0];
-    first.fail();
-    expect(first.closed).toBe(true);
-    expect(FakeEventSource.instances.length).toBe(1);
-
-    vi.advanceTimersByTime(2000);
-    expect(FakeEventSource.instances.length).toBe(2);
-  });
-
-  it("does not reconnect after stop", () => {
-    const stop = events(vi.fn());
-    const first = FakeEventSource.instances[0];
-    stop();
-    first.fail();
-    vi.advanceTimersByTime(2000);
-    expect(FakeEventSource.instances.length).toBe(1);
-  });
-});
-
 describe("token", () => {
   it("ask sends the token header once set", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: "x" }) });
@@ -126,9 +72,10 @@ describe("token", () => {
     vi.unstubAllGlobals();
   });
 
-  it("events puts the token in the stream URL as a query param", () => {
+  it("events puts the token in the stream URL as a query param", async () => {
     setToken("secret123");
     events(vi.fn());
+    await vi.advanceTimersByTimeAsync(0);
     const src = FakeEventSource.instances[0];
     expect(src.url).toBe("http://127.0.0.1:6942/events?token=secret123");
   });

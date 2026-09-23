@@ -7,7 +7,8 @@ import { Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useStopJobMutation } from "./api";
-import { isJobLive, stepLine } from "./format";
+import { isJobLive } from "../shared/job";
+import { stepLine } from "./format";
 import { Face } from "./face";
 import { ui, useAppDispatch, useAppSelector, type JobRun } from "./store";
 

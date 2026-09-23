@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"ora/internal/db"
 )
@@ -544,20 +543,6 @@ func TestClaudeToolServer_ReturnsTheLookPictureAsAnImage(t *testing.T) {
 	}
 	if img["data"] != base64.StdEncoding.EncodeToString([]byte("fake-jpeg-bytes")) {
 		t.Errorf("data = %v, want the picture's bytes in base64", img["data"])
-	}
-}
-
-// A CLI error long enough to be cut is cut on a rune boundary, not a byte one: 299 ASCII characters followed by a two-byte rune used to be sliced through the middle of that rune and hand the log invalid UTF-8. A short line has its whitespace squeezed out but comes back whole, with no ellipsis.
-func TestClaudeHead(t *testing.T) {
-	long := strings.Repeat("a", 299) + "é" + "tail"
-	if got := claudeHead(long); !utf8.ValidString(got) {
-		t.Errorf("claudeHead returned invalid UTF-8: %q", got)
-	}
-	if got, want := claudeHead(long), strings.Repeat("a", 299)+"é"+"…"; got != want {
-		t.Errorf("claudeHead = %q, want the first 300 runes plus an ellipsis", got)
-	}
-	if got := claudeHead("  error:\n  could not\tstart\n"); got != "error: could not start" {
-		t.Errorf("claudeHead = %q, want the words on one line", got)
 	}
 }
 

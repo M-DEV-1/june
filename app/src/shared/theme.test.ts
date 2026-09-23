@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-/** Tests for theme.ts's own race guard: main.ts's hover keeps a themeAsk counter so an earlier "system" resolution still on its way back from Rust cannot land after a later theme choice and stamp the wrong colour (see applyThemeChoice in main.ts); applyTheme here now keeps the same guard, since App.tsx resolves "system" the identical way on every theme change and had nothing stopping the same race. */
+/** Tests for applyTheme's race guard: an earlier "system" resolution still on its way back from Rust must not land after a later theme choice and stamp the wrong colour. Both windows stamp their theme through applyTheme. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -22,7 +22,7 @@ describe("applyTheme", () => {
       .mockImplementationOnce(() => new Promise((r) => (resolveSecond = r)));
 
     const root = document.createElement("div");
-    // System, then a fast second pick to System again — the shape of the race described in main.ts's own themeAsk comment.
+    // System, then a fast second pick to System again, while the first answer from Rust is still in flight.
     const first = applyTheme("system", root);
     const second = applyTheme("system", root);
 

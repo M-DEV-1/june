@@ -9,6 +9,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { HOVER_POSITION_KEY, storedHoverPosition, type HoverPosition } from "../winplace";
 import {
+  errorStatus,
   useBrainsQuery,
   usePickBrainMutation,
   usePreviewVoiceMutation,
@@ -155,14 +156,6 @@ function Machine({ s }: { s: SettingsView }) {
       </Group>
     </section>
   );
-}
-
-/** Reads the HTTP status out of whatever .unwrap() threw. Input: the caught value. Output: the status code, or undefined when there is none to read. The daemon's error routes answer plain text through http.Error, which fetchBaseQuery cannot parse as JSON, so it reports the real code as a PARSING_ERROR carrying originalStatus rather than as status itself — the same shape stopDictation above already reads apart. */
-function errorStatus(e: unknown): number | undefined {
-  if (!e || typeof e !== "object" || !("status" in e)) return undefined;
-  const status = (e as { status: unknown }).status;
-  if (status === "PARSING_ERROR") return (e as { originalStatus?: number }).originalStatus;
-  return typeof status === "number" ? status : undefined;
 }
 
 /** The sentence the daemon sent with a failure. Input: whatever the mutation rejected with. Output: the plain-text body it carried, trimmed to one line, or "" when it carried none — RTK Query puts a text/plain error body in data and reports the status as PARSING_ERROR, since it expected JSON. */

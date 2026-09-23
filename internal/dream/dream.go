@@ -17,9 +17,6 @@ import (
 	"ora/internal/db"
 )
 
-// dayFormat is the local calendar-day key shared with the diary and dream_runs tables.
-const dayFormat = "2006-01-02"
-
 const (
 	// brainCurfewMinutes is the local time-of-day, in minutes after midnight, past which no unforced dream may start a brain call: the user's Claude subscription runs in five-hour windows and his workday window opens at 08:30, so any call after 03:28 would open an overnight window that bleeds into it. A forced run (the dream-now marker) bypasses the curfew — forcing is the user's own choice.
 	brainCurfewMinutes = 3*60 + 25
@@ -182,9 +179,9 @@ const closingEvidenceWindow = 7 * 24 * time.Hour
 
 func (r *Runner) nightKey(now time.Time) string {
 	if now.Hour() >= r.dreamHour {
-		return now.Format(dayFormat)
+		return now.Format(time.DateOnly)
 	}
-	return now.AddDate(0, 0, -1).Format(dayFormat)
+	return now.AddDate(0, 0, -1).Format(time.DateOnly)
 }
 
 // inWindow reports whether the hour lies in [dreamHour, briefHour), handling the usual case where the window wraps midnight.
@@ -197,7 +194,7 @@ func (r *Runner) inWindow(hour int) bool {
 
 // windowStart is the local instant the night's window opened, for the missing-diary grace check.
 func (r *Runner) windowStart(night string) time.Time {
-	d, err := time.ParseInLocation(dayFormat, night, time.Local)
+	d, err := time.ParseInLocation(time.DateOnly, night, time.Local)
 	if err != nil {
 		return time.Time{}
 	}
@@ -232,17 +229,17 @@ func (r *Runner) sweepBack(ctx context.Context, night string) int {
 
 // dayOf parses a night key into local midnight; a malformed key gives the zero time, which only ever shortens a sweep.
 func dayOf(night string) time.Time {
-	d, _ := time.ParseInLocation(dayFormat, night, time.Local)
+	d, _ := time.ParseInLocation(time.DateOnly, night, time.Local)
 	return d
 }
 
 // nightMinus returns the night key days earlier, for age comparisons — ISO date strings compare lexically.
 func nightMinus(night string, days int) string {
-	d, err := time.ParseInLocation(dayFormat, night, time.Local)
+	d, err := time.ParseInLocation(time.DateOnly, night, time.Local)
 	if err != nil {
 		return night
 	}
-	return d.AddDate(0, 0, -days).Format(dayFormat)
+	return d.AddDate(0, 0, -days).Format(time.DateOnly)
 }
 
 // userAway reports whether the user counts as away, given the session is not locked: real input idle time (GetIdletime) when the probe is wired and healthy, since that is actual keyboard/mouse activity — a screen-content change (autoplay rolling to the next episode, an unread-count title) is not. When the probe is nil or errors, this falls back to the old heuristic: no episode ever, or the newest one older than idleAfter.

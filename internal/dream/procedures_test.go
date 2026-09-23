@@ -44,7 +44,7 @@ func procedureNotes(t *testing.T, store *db.Store) []string {
 func TestProceduresStage_WritesOnePlainNotePerGoal(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 
 	insertActRun(t, store, "  Open the settings page  ", "ok", []db.ActStep{
 		{Name: "observe_screen", Args: map[string]any{}, Result: "code · Settings\n[1] push button \"Menu\" (10,20)"},
@@ -93,7 +93,7 @@ func TestProceduresStage_WritesOnePlainNotePerGoal(t *testing.T) {
 func TestProceduresStage_IgnoresFailedRuns(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 
 	insertActRun(t, store, "log in to the bank", "error", []db.ActStep{
 		{Name: "observe_screen", Args: map[string]any{}, Result: "browser · Bank"},
@@ -117,7 +117,7 @@ func TestProceduresStage_IgnoresFailedRuns(t *testing.T) {
 func TestProceduresStage_SecondRunWritesNothingNew(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 
 	insertActRun(t, store, "open the settings page", "ok", []db.ActStep{
 		{Name: "observe_screen", Args: map[string]any{}, Result: "code · Settings"},
@@ -149,7 +149,7 @@ func TestProceduresStage_SecondRunWritesNothingNew(t *testing.T) {
 func TestProceduresStage_ShortestRunWins(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 
 	insertActRun(t, store, "open the settings page", "ok", []db.ActStep{
 		{Name: "observe_screen", Args: map[string]any{}, Result: "code · Home"},
@@ -184,7 +184,7 @@ func TestProceduresStage_ShortestRunWins(t *testing.T) {
 func TestProceduresStage_WritesNoSecretFromAPasswordScreen(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	const secret = "correct horse battery staple"
 
 	insertActRun(t, store, "unlock my password manager", "ok", []db.ActStep{

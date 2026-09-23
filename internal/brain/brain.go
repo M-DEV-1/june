@@ -3,6 +3,7 @@
 package brain
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -47,12 +48,12 @@ func FromConfig(cfg config.BrainConfig, apiKey string, asker ...CodexAsker) Brai
 	switch cfg.Provider {
 	case config.BrainClaudeCLI:
 		// cfg.Model rides through to `--model`, so the writing duties can be pinned to a cheaper tier than the login's default.
-		return ClaudeCLI(or(cfg.Binary, "claude"), cfg.Model, timeout)
+		return ClaudeCLI(cmp.Or(cfg.Binary, "claude"), cfg.Model, timeout)
 	case config.BrainAgyCLI:
 		// cfg.Model rides through to --model, the same way it does for claude.
-		return AgyCLI(or(cfg.Binary, "agy"), timeout, cfg.Model)
+		return AgyCLI(cmp.Or(cfg.Binary, "agy"), timeout, cfg.Model)
 	case config.BrainGrokCLI:
-		return GrokCLI(or(cfg.Binary, "grok"), timeout, cfg.Model)
+		return GrokCLI(cmp.Or(cfg.Binary, "grok"), timeout, cfg.Model)
 	case config.BrainCodex:
 		if len(asker) > 0 && asker[0] != nil {
 			return FromAsker(asker[0])
@@ -73,7 +74,7 @@ func geminiModel(cfg config.BrainConfig) string {
 	if cfg.Provider != "" && cfg.Provider != config.BrainGeminiAPI {
 		return config.TextModel
 	}
-	return or(cfg.Model, config.TextModel)
+	return cmp.Or(cfg.Model, config.TextModel)
 }
 
 // GeminiAPI answers with one non-streaming GenerateContent call, the same shape memory.GeminiSummarizer uses for its background summaries. This is what ORA has always done and stays the default.
@@ -117,12 +118,4 @@ func GeminiModelFor(cfg config.BrainConfig) (model string, ok bool) {
 	default:
 		return geminiModel(cfg), true
 	}
-}
-
-// or returns s, or fallback when s is empty.
-func or(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
 }

@@ -1,4 +1,4 @@
-// Package util holds the small general-purpose helpers more than one package needs and the standard library does not provide as one call: string capping and matching, an atomic file write, and small HTTP-response helpers.
+// Package util holds the small general-purpose helpers more than one package needs and the standard library does not provide as one call: string capping and matching, a slice tail, file checks and an atomic file write, small HTTP helpers, and starting and stopping a local server child.
 package util
 
 import (
@@ -67,6 +67,37 @@ func RunesEllipsis(s string, n int) string {
 		return s
 	}
 	return cut + "…"
+}
+
+// RunesNote cuts s to n runes and, when it cut anything, puts note on a line of its own after it so the reader knows text is missing. Input: the text, the most runes to keep, and the note. Output: s unchanged when it fits, else its first n runes, a newline and note.
+func RunesNote(s string, n int, note string) string {
+	cut := Runes(s, n)
+	if cut == s {
+		return s
+	}
+	return cut + "\n" + note
+}
+
+// LogHead is the first 300 runes of s on one line, which is as much of a command's error output as belongs in one log line. Input: any string, including one that is not ASCII. Output: s with its whitespace collapsed, cut on a rune boundary with an ellipsis when it was longer than 300 runes.
+func LogHead(s string) string {
+	return RunesEllipsis(OneLine(s), 300)
+}
+
+// FirstLine returns the first non-empty line of s, trimmed. Input: any string. Output: that line, or "" when s is blank.
+func FirstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+// LastN keeps the newest n entries of a slice. Input: any slice and how many of its last entries to keep. Output: the last n, or the whole slice when it is already that short or shorter.
+func LastN[T any](items []T, n int) []T {
+	if len(items) <= n {
+		return items
+	}
+	return items[len(items)-n:]
 }
 
 // DesktopLine names the machine the session runs on, for a prompt: the desktop environment and display server from the session's own variables, and the distribution from /etc/os-release. Nothing is written in; a variable that is not set is left out. Output: one line such as "Ubuntu 24.04.4 LTS, desktop ubuntu:GNOME on wayland", or "Linux" when nothing is known.

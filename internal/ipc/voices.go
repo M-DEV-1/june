@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"ora/internal/config"
+	"ora/internal/util"
 )
 
 // LiveModelView is one of the Live models on GET or POST /voices. Trait is what choosing it costs and buys, in one line, because the trade between them — tone against about four seconds of latency, and whether the model decides for itself that audio was aimed at it — is the whole reason there is a choice.
@@ -97,7 +98,7 @@ func VoicePreview(cfg *LiveConfig, preview VoicePreviewer) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"played": canonical})
+		util.WriteJSON(w, map[string]any{"played": canonical})
 	}
 }
 
@@ -120,5 +121,5 @@ func writeVoices(w http.ResponseWriter, cfg config.OraConfig) {
 	for _, m := range config.LiveVoiceModels {
 		models = append(models, LiveModelView{Name: m.Name, Label: m.Label, Trait: m.Trait, Current: m.Name == chosen})
 	}
-	writeJSON(w, map[string]any{"voices": list, "models": models})
+	util.WriteJSON(w, map[string]any{"voices": list, "models": models})
 }

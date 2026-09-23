@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"ora/internal/util"
 )
 
 // appIconPNG is ORA's logo at 512x512, the largest raster the repo has (app/src-tauri/icons/icon.png, the same art the Tauri bundle ships). It is the source every dock icon size is scaled down from; there is no SVG of the logo anywhere in the repo, so no scalable icon is installed.
@@ -24,20 +26,6 @@ var dockIconSizes = []int{16, 32, 48, 64, 128, 256}
 // iconCacheRefresh runs gtk-update-icon-cache over an icon theme directory. It is a variable so the tests can record the call instead of shelling out to the real program.
 var iconCacheRefresh = runGTKUpdateIconCache
 
-// desktopEntryDataHome returns $XDG_DATA_HOME, falling back to ~/.local/share when it is unset.
-// Returns "" when neither XDG_DATA_HOME nor a home directory can be determined.
-func desktopEntryDataHome() string {
-	dir := os.Getenv("XDG_DATA_HOME")
-	if dir != "" {
-		return dir
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".local", "share")
-}
-
 // desktopEntryMarker is a comment line this daemon writes into every ora.desktop it owns, so a later run can tell its own dev-time entry apart from a real one a package's install.sh put there instead. A comment is invisible to every Desktop Entry parser, so its presence changes nothing about how the entry behaves.
 const desktopEntryMarker = "# Written by the ora daemon itself; delete this file to use an installed package's entry instead."
 
@@ -47,7 +35,7 @@ const desktopEntryMarker = "# Written by the ora daemon itself; delete this file
 // Each file that is written is written only when its content differs from what is already on disk, so a daemon restart does not rewrite any of them. When an icon file did change, or when the theme has no icon-theme.cache at all, gtk-update-icon-cache is run over the hicolor directory, because a desktop that reads that cache never sees a file the cache does not list.
 // Output: an error from a directory create, a stat, a decode, os.Executable, a write, or the cache refresh; the caller logs it and continues, since a missing dock icon should never stop the daemon.
 func installDesktopEntry() error {
-	dataHome := desktopEntryDataHome()
+	dataHome := util.DataHome()
 	if dataHome == "" {
 		return fmt.Errorf("cannot determine XDG data directory")
 	}

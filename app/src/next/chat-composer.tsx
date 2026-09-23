@@ -17,7 +17,7 @@ import {
   useStartJobMutation,
   useStopDictationMutation,
 } from "./api";
-import { isJobLive, jobGoal } from "./format";
+import { isJobLive, jobGoal } from "../shared/job";
 import { Reading } from "./parts";
 import { progress, ui, useAppDispatch, useAppSelector, type JobRun } from "./store";
 

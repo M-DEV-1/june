@@ -39,7 +39,7 @@ import { MeetingsScreen } from "./meetings";
 import { RoutinesScreen } from "./routines";
 import { SettingsScreen } from "./settings";
 import { AppSidebar } from "./sidebar";
-import { applyTheme } from "./theme";
+import { applyTheme } from "../shared/theme";
 import { conversationsUi, escaped, settings, ui, useAppDispatch, useAppSelector, type Place, type RootState } from "./store";
 
 // What the palette offers besides the chats: the five screens, so Ctrl+K reaches a page and not only a conversation. Module scope so it is not rebuilt on every render — it closes over nothing.

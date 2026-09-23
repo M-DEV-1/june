@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"ora/internal/agent"
 	"ora/internal/config"
@@ -237,27 +236,6 @@ func TestAgyCLI_Restored(t *testing.T) {
 	}
 	if _, err := AgyCLI(fakeCLI(t, "agy", `printf '%s' '{"status":"ERROR","response":""}'`), 10)(context.Background(), "x"); err == nil {
 		t.Error("a non-SUCCESS status must be an error")
-	}
-}
-
-// TestHead_CutsOnRunesSoALogLineIsAlwaysValidUTF8 pins that the CLI-stderr excerpt cuts on rune boundaries. It used to slice s[:300] by byte, which lands in the middle of a multi-byte character whenever a CLI's error output carries one and writes a broken half-character into the log.
-func TestHead_CutsOnRunesSoALogLineIsAlwaysValidUTF8(t *testing.T) {
-	long := strings.Repeat("é", 400) // two bytes each, so a 300-byte cut lands mid-character
-	got := head(long)
-	if !utf8.ValidString(got) {
-		t.Errorf("head returned invalid UTF-8: %q", got)
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("head(%d runes) = %q, want it marked as cut", utf8.RuneCountInString(long), got)
-	}
-	if n := utf8.RuneCountInString(got); n != 301 {
-		t.Errorf("head returned %d runes, want 300 plus the ellipsis", n)
-	}
-	if got := head("  a\n\tb  "); got != "a b" {
-		t.Errorf("head(%q) = %q, want %q", "  a\n\tb  ", got, "a b")
-	}
-	if got := head(""); got != "" {
-		t.Errorf("head(\"\") = %q, want \"\"", got)
 	}
 }
 

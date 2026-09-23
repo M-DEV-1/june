@@ -33,16 +33,9 @@ const (
 // EstimateTokens is the rough token count of a prompt, at four characters to the token. It is an estimate on purpose: no provider reports what a prompt cost before it is sent, and the point of the number is to keep one round's prompt from growing with the job's length. Input: the prompt. Output: the estimate.
 func EstimateTokens(s string) int { return len(s) / 4 }
 
-// capRunes cuts a string to n runes.
-func capRunes(s string, n int) string { return util.Runes(s, n) }
-
 // pushCapped adds one entry to a rolling list, cutting the entry to cap runes and keeping only the newest keep entries. Input: the list, the new entry, how many to keep and the per-entry rune cap. Output: the new list.
 func pushCapped(list []string, entry string, keep, cap int) []string {
-	list = append(list, capRunes(entry, cap))
-	if len(list) > keep {
-		list = list[len(list)-keep:]
-	}
-	return list
+	return util.LastN(append(list, util.Runes(entry, cap)), keep)
 }
 
 // systemPrompt is the fixed instruction every round of every job opens with: one action per round, the change it must produce written down first, and the JSON to reply in. It takes no arguments, so the same bytes open every round of every job and a provider's prompt cache can match them.
@@ -94,27 +87,27 @@ func BuildPrompt(j Job) string {
 	// Before the plan, because it is what the plan should be written against: the model reads what worked last time and then says what it will do this time. Sized by whoever rendered it (see agent.ActReferenceBlock), which already caps how many runs and lessons a block may carry.
 	if j.Reference != "" {
 		b.WriteString("\n\n")
-		b.WriteString(capRunes(j.Reference, referenceCap))
+		b.WriteString(util.Runes(j.Reference, referenceCap))
 	}
 	if j.Plan != "" {
 		b.WriteString("\n\nPLAN\n")
-		b.WriteString(capRunes(j.Plan, planCap))
+		b.WriteString(util.Runes(j.Plan, planCap))
 	}
 	// The answers come after the plan, not before it: the plan is written on the first round and never touched again, while an answer can arrive on any round, and putting the growing part first would move the plan to a new offset every time one did — which throws away the cached prefix that was holding it.
 	if len(j.Answers) > 0 {
 		b.WriteString("\n\nWHAT THE USER TOLD YOU WHEN YOU ASKED\n")
-		for _, a := range lastN(j.Answers, keptAnswers) {
-			b.WriteString("- " + capRunes(a, answerCap) + "\n")
+		for _, a := range util.LastN(j.Answers, keptAnswers) {
+			b.WriteString("- " + util.Runes(a, answerCap) + "\n")
 		}
 	}
 	b.WriteString("\n\nWHERE YOU HAVE GOT TO\n")
 	b.WriteString(progressLine(j))
 	if j.Summary != "" {
-		b.WriteString("\n" + capRunes(j.Summary, summaryCap))
+		b.WriteString("\n" + util.Runes(j.Summary, summaryCap))
 	}
 	if n := len(j.Steps); n > 0 {
 		last := j.Steps[n-1]
-		b.WriteString(fmt.Sprintf("\nThe last step was %s, expecting %s; it %s, and %s.", last.Tool, last.Expect.Describe(), outcomePhrase(last), capRunes(last.Why, resultCap)))
+		b.WriteString(fmt.Sprintf("\nThe last step was %s, expecting %s; it %s, and %s.", last.Tool, last.Expect.Describe(), outcomePhrase(last), util.Runes(last.Why, resultCap)))
 	}
 	if j.Next != "" {
 		b.WriteString("\nYou said the next thing to do was: " + j.Next)
@@ -169,7 +162,7 @@ func SummaryPrompt(j Job) string {
 	b.WriteString("Rewrite where this screen task has got to, in at most two plain sentences. Say what has actually been achieved and what is still in the way. No preamble, no markdown, just the two sentences.\n\nGOAL\n")
 	b.WriteString(j.Goal)
 	b.WriteString("\n\nSTEPS SO FAR\n")
-	for _, s := range lastN(j.Steps, keptSummarySteps) {
+	for _, s := range util.LastN(j.Steps, keptSummarySteps) {
 		b.WriteString(fmt.Sprintf("- %s, expecting %s: %s (%s)\n", s.Tool, s.Expect.Describe(), outcomePhrase(s), s.Why))
 	}
 	if len(j.Observations) > 0 {
@@ -180,11 +173,3 @@ func SummaryPrompt(j Job) string {
 
 // keptSummarySteps is how many of the newest steps the summary rewrite is shown. Ten, because the summary it is rewriting already carries everything older.
 const keptSummarySteps = 10
-
-// lastN keeps the newest n entries of a slice.
-func lastN[T any](items []T, n int) []T {
-	if len(items) <= n {
-		return items
-	}
-	return items[len(items)-n:]
-}

@@ -1,12 +1,14 @@
-/** The React window's whole connection to the local daemon at http://127.0.0.1:6942: the IPC token, the RTK Query API over the daemon's routes, and the SSE stream. The token is read here and nowhere else, so every request in the window authenticates the same way and there is one place to fix when the daemon changes its secret. Deliberately independent of src/daemon.ts, which belongs to the old pages and goes when they go. */
+/** The React window's whole connection to the local daemon at http://127.0.0.1:6942: the IPC token, the RTK Query API over the daemon's routes, and the SSE stream. The token is read here and nowhere else, so every request in the window authenticates the same way and there is one place to fix when the daemon changes its secret. The stream reader and its message shapes are shared with the hover's src/daemon.ts through shared/wire.ts. */
 
 import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type FetchBaseQueryError } from "@reduxjs/toolkit/query/react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { TOKEN_HEADER, devToken } from "../shared/token";
+import { openStream, type DaemonEvent, type Evidence, type Spend } from "../shared/wire";
 import { DAEMON_HOST_PORT } from "./daemon-url";
 
 export { devToken };
+export type { DaemonEvent, Evidence, ModelUsage, Notice, Spend } from "../shared/wire";
 
 /** Where the daemon listens. */
 const base = `http://${DAEMON_HOST_PORT}`;
@@ -61,9 +63,6 @@ export type ConversationSummary = {
   /** When the conversation was last touched, RFC3339. */
   updated: string;
 };
-
-/** One thing Ora read to answer with, carried both on a stored turn and on the answer event. Mirrors ipc.EvidenceItem. */
-export type Evidence = { title: string; meta: string; body: string };
 
 /** One thing said in a conversation. Mirrors ipc.TurnView. Role is "you" or "ora"; kind is "ask", "dictation", "voice" or "error"; reason is set only for an error turn. */
 export type Turn = {
@@ -257,12 +256,6 @@ export type ActStep = {
   why: string;
 };
 
-/** One round's tokens, filed under the model that served it. Mirrors actjob.Usage. */
-export type ModelUsage = { model: string; input: number; cached: number; output: number };
-
-/** What a whole job has cost: the rounds it took, the tokens on each side, and the same counts again per model, so two brains can be compared on the same task. Mirrors actjob.Spend. */
-export type Spend = { rounds: number; input: number; cached: number; output: number; by_model?: Record<string, ModelUsage> };
-
 /** A computer-use job's whole record, from GET /act/{id}. Mirrors actjob.Job (the fields the window reads out of it); state is one of "planning", "stepping", "verifying", "paused", "stuck", "done", "stopped" or "failed". plan is written once, early, and left alone after; question is set only while state is "stuck"; say is the closing sentence, set once state is "done", "stopped" or "failed". */
 export type ActJob = {
   id: string;
@@ -276,6 +269,14 @@ export type ActJob = {
   spend: Spend;
   elapsed_ms: number;
 };
+
+/** Reads the HTTP status out of whatever .unwrap() threw. Input: the caught value. Output: the status code, or undefined when there is none to read. The daemon's error routes answer plain text through http.Error, which fetchBaseQuery cannot parse as JSON, so it reports the real code as a PARSING_ERROR carrying originalStatus rather than as status itself. Also what stopDictation reads its 404 through. */
+export function errorStatus(e: unknown): number | undefined {
+  if (!e || typeof e !== "object" || !("status" in e)) return undefined;
+  const status = (e as { status: unknown }).status;
+  if (status === "PARSING_ERROR") return (e as { originalStatus?: number }).originalStatus;
+  return typeof status === "number" ? status : undefined;
+}
 
 /** Every daemon route the window reads or writes, as one RTK Query API. The daemon wraps its lists in an object named after the list ("conversations", "tasks", "days", "meetings", "brains"), so each list endpoint unwraps that here and components get a plain array. */
 export const oraApi = createApi({
@@ -517,9 +518,7 @@ export const oraApi = createApi({
     stopDictation: build.mutation<{ text: string }, string>({
       async queryFn(id, _api, _extra, baseQuery) {
         const result = await baseQuery({ url: "/dictate/stop", method: "POST", body: { id } });
-        // The daemon writes that 404 with http.Error, whose body is plain text: fetchBaseQuery cannot read it as JSON and reports it as a PARSING_ERROR carrying the real code, so the code is read off whichever of the two fields is holding it.
-        const code = result.error && (result.error.status === "PARSING_ERROR" ? result.error.originalStatus : result.error.status);
-        if (code === 404) return { data: { text: "" } };
+        if (errorStatus(result.error) === 404) return { data: { text: "" } };
         if (result.error) return { error: result.error };
         return { data: result.data as { text: string } };
       },
@@ -574,76 +573,7 @@ export const {
   useOpenUrlMutation,
 } = oraApi;
 
-/** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep, a task or routine raised on its own. body is the routine's or task's own text for those two kinds (see internal/proactive/routine.go and proactive.go); kind is "task", "routine", "brief", "close", "meeting" or "note", and id is the row's own id. action and until are empty on a notice arriving fresh, and set once the user has pressed Done or a snooze button on the desktop notification it was also posted as: action is "snoozed" or "done", and until is the RFC 3339 moment a snoozed notice comes back. Only the hover window draws title and place (see internal/ipc/notice.go); this window reacts to action and until alone, through noticeActionMessage in format.ts. */
-export type Notice = {
-  title: string;
-  body: string;
-  place: string;
-  id: string;
-  kind: string;
-  action?: string;
-  until?: string;
-  /** The buttons this notice can answer, named by the daemon rather than guessed by the window: a task and the stale-task question carry their own, and anything with nothing to complete carries only Open (see openOnlyActions and noticeActions in internal/proactive). Key is what goes back to POST /notices/{kind}/{id}/action. */
-  actions?: { key: string; label: string }[];
-  /** The RFC 3339 moment a question stops being answerable, set only on a notice that asked one. Past it the daemon has stopped waiting and the buttons would answer "Could not do that", so the card takes itself down then, as the hover card does. */
-  expires?: string;
-};
-
-/** One message off the daemon's SSE stream. The first five belong to an ask; "dictation" carries a finished transcript, "heard", "said", "state" and "level" belong to a live voice session, "notice" is Ora speaking first, "act" is one line of a computer-use job's progress, "overlay" and "window" are the daemon telling the on-screen accessories and the window itself what to do, and "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way. This window draws none of the last five, but they do arrive on the same stream, so they are named here rather than left to widen the type at the point of use. id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it — only the "answer" message carries a conversation_id. detail is the one-line summary a tool step reports about what it did, or for "act" the whole actjob.Event as JSON (kind, state, expect, outcome, spend), and evidence is what the answer was drawn from. notice is only carried on a "notice" event. */
-export type DaemonEvent = {
-  id: string;
-  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "level" | "act" | "notice" | "overlay" | "window" | "recording" | "dreaming";
-  text?: string;
-  detail?: string;
-  /** Only meaningful on the after-call "tool" event: true when that tool call's result was an error. */
-  failed?: boolean;
-  evidence?: Evidence[];
-  conversation_id?: string;
-  notice?: Notice;
-};
-
-/** Opens the daemon's SSE stream and forwards each parsed message to onEvent, reconnecting two seconds after a drop. Input: a callback for each event, and a callback for the stream opening again after it had dropped, which is the only signal this window gets that a daemon it had lost is answering again. Output: a stop function that closes the stream for good. The token goes in the query string because an EventSource cannot set headers, which is why the daemon accepts it there as well (see requireIPCToken in cmd/ipc.go). */
-/** How long a dropped stream waits before reconnecting, in milliseconds, and how much random extra is added on top. */
-const RETRY_MS = 2000;
-const RETRY_JITTER_MS = 1000;
-
+/** Opens the daemon's SSE stream for this window (see openStream in shared/wire.ts). Input: a callback for each event, and a callback for the stream opening again after it had dropped. Output: a stop function. The first connect reads the token this window already holds; a reconnect reads it again, because a dropped stream is also how a restarted daemon shows itself. */
 export function events(onEvent: (ev: DaemonEvent) => void, onReopen?: () => void): () => void {
-  let stopped = false;
-  let source: EventSource | undefined;
-  // Whether the stream has failed since it was last open. Set on every error, including each failed retry, so it is still true whenever a later attempt finally succeeds.
-  let dropped = false;
-
-  async function connect(): Promise<void> {
-    if (stopped) return;
-    const t = await ensureToken();
-    if (stopped) return;
-    const url = t ? `${base}/events?token=${encodeURIComponent(t)}` : `${base}/events`;
-    source = new EventSource(url);
-    source.onopen = () => {
-      // Only a stream that had dropped is a recovery worth telling the cache about; the first open of the window's life is not, since every query is already fetching by then. Cleared here rather than in the retry, so a second daemon restart later in the session is caught the same way this one was.
-      if (!dropped) return;
-      dropped = false;
-      onReopen?.();
-    };
-    source.onmessage = (e: MessageEvent) => {
-      try {
-        onEvent(JSON.parse(e.data) as DaemonEvent);
-      } catch {
-        /* malformed message, ignore */
-      }
-    };
-    source.onerror = () => {
-      source?.close();
-      dropped = true;
-      // A dropped stream is also how a restarted daemon shows itself, so the token is read again on the way back in. Up to a second of jitter is added because every open window drops at the same instant when the daemon dies, and without it they all reconnect and refetch on the same tick for as long as it flaps.
-      // react-doctor-disable-next-line insecure-crypto-risk -- the random number spreads reconnects over a second so every window does not retry on the same tick; nothing here is a secret, a token or an id.
-      if (!stopped) setTimeout(() => void refreshToken().then(connect), RETRY_MS + Math.random() * RETRY_JITTER_MS);
-    };
-  }
-  void connect();
-
-  return () => {
-    stopped = true;
-    source?.close();
-  };
+  return openStream(base, (retry) => (retry ? refreshToken() : ensureToken()), onEvent, onReopen);
 }

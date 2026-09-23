@@ -99,7 +99,7 @@ func insertEpisodeAt(t *testing.T, store *db.Store, ts time.Time) {
 
 // Each start condition individually blocks the run: no brain call, no run row. The final case proves the same setup does dream once nothing blocks.
 func TestTick_ConditionsGate(t *testing.T) {
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 
 	cases := []struct {
 		name  string
@@ -167,7 +167,7 @@ func TestTick_ConditionsGate(t *testing.T) {
 func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestDecideMechanics(t *testing.T) {
 func TestHypStage_ValidationCapsAndStale(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nplenty (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestHypStage_ValidationCapsAndStale(t *testing.T) {
 func TestTick_WhollyInvalidReplySkipsJudging(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestTick_WhollyInvalidReplySkipsJudging(t *testing.T) {
 func TestTick_DreamReportLands(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "The user built the dreaming loop.\n\nHypotheses:\nHe ships at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestTick_DreamReportLands(t *testing.T) {
 func TestTick_PreemptionCommitsNothing(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestTick_MissingDiaryFallsBackAfterGrace(t *testing.T) {
 	store := dbtest.Open(t)
 	// 01:30 belongs to yesterday's night, two and a half hours past a 23:00 dream hour.
 	now := at(1, 30)
-	night := now.AddDate(0, 0, -1).Format(dayFormat)
+	night := now.AddDate(0, 0, -1).Format(time.DateOnly)
 	if err := store.InsertHypothesis(ctx, "He codes at night.", "low", nightMinus(night, 10)); err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +473,7 @@ func (p *idleProbe) get() (time.Duration, error) {
 func TestTick_InputIdleOpensAwayGateDespiteFreshEpisode(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestTick_InputIdleOpensAwayGateDespiteFreshEpisode(t *testing.T) {
 func TestTick_InputIdleErrorFallsBackToEpisodeHeuristic(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +523,7 @@ func TestTick_InputIdleErrorFallsBackToEpisodeHeuristic(t *testing.T) {
 func TestWatcher_DoesNotPreemptOnEpisodeWhileInputStaysIdle(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +561,7 @@ func TestWatcher_DoesNotPreemptOnEpisodeWhileInputStaysIdle(t *testing.T) {
 func TestWatcher_NilInputIdlePreemptsOnEpisode(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +596,7 @@ func TestWatcher_NilInputIdlePreemptsOnEpisode(t *testing.T) {
 func TestWatcher_PreemptsWhenInputIdleDropsFresh(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -633,7 +633,7 @@ func TestWatcher_PreemptsWhenInputIdleDropsFresh(t *testing.T) {
 // The force marker makes a tick dream immediately with the away-gates bypassed, and is consumed so one touch means one run.
 func TestTick_ForceMarkerBypassesGates(t *testing.T) {
 	store := dbtest.Open(t)
-	if err := store.SetDiaryEntry(context.Background(), at(23, 30).Format(dayFormat), "day", "A day."); err != nil {
+	if err := store.SetDiaryEntry(context.Background(), at(23, 30).Format(time.DateOnly), "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
 	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
@@ -658,7 +658,7 @@ func TestTick_ForceMarkerBypassesGates(t *testing.T) {
 // Past the Claude curfew (03:25) an unforced dream must not start: an overnight five-hour usage window opened after it would bleed into the user's 08:30 workday window.
 func TestTick_CurfewHoldsTheNight(t *testing.T) {
 	store := dbtest.Open(t)
-	night := at(4, 0).AddDate(0, 0, -1).Format(dayFormat)
+	night := at(4, 0).AddDate(0, 0, -1).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(context.Background(), night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +676,7 @@ func TestTick_CurfewHoldsTheNight(t *testing.T) {
 func TestEvidenceMaterial_AllFourSectionsPresent(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "DIARYTEXT about the day."); err != nil {
 		t.Fatal(err)
 	}
@@ -720,7 +720,7 @@ func TestEvidenceMaterial_AllFourSectionsPresent(t *testing.T) {
 func TestEvidenceMaterial_BudgetDropsOldestFirst(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	big := strings.Repeat("filler sentence to bloat the entry. ", 280)
 	if err := store.SetDiaryEntry(ctx, nightMinus(night, 3), "day", "OLDESTMARK "+big); err != nil {
 		t.Fatal(err)
@@ -874,7 +874,7 @@ func TestCompactStage_MonthTierCollapsesCompleteMonths(t *testing.T) {
 func TestCompactStage_QuietNightCommitsToken(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	setDiary(t, store, night, "day", "Tonight's entry.")
 
 	brain := &fakeBrain{}
@@ -902,7 +902,7 @@ func TestCompactStage_QuietNightCommitsToken(t *testing.T) {
 func TestTraces_OneLinePerBrainCall(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -957,7 +957,7 @@ func TestTraces_OneLinePerBrainCall(t *testing.T) {
 func TestTraces_FailureIsBestEffort(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -977,7 +977,7 @@ func TestTraces_FailureIsBestEffort(t *testing.T) {
 // A model that says a sentence and then answers still gets its JSON read: the payload between the outermost brackets is the answer.
 func TestAskJSON_RecoversPaddedArrays(t *testing.T) {
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(context.Background(), night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -999,7 +999,7 @@ func TestAskJSON_RecoversPaddedArrays(t *testing.T) {
 func TestShadow_TracesAlongsidePrimaryAndNeverFailsAStage(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -1052,7 +1052,7 @@ func TestShadow_TracesAlongsidePrimaryAndNeverFailsAStage(t *testing.T) {
 func TestShadowLifecycle_StartFailureRunsShadowless(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -1091,7 +1091,7 @@ func TestShadowLifecycle_StartFailureRunsShadowless(t *testing.T) {
 func TestShadowLifecycle_StartSucceeds_StopRunsAfterNight(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -1233,7 +1233,7 @@ func TestCompactStage_CommitsTheWeeksBuiltBeforeAFailure(t *testing.T) {
 func TestShadow_AnswersTheNightWhenThePrimaryBrainIsDown(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -1280,7 +1280,7 @@ func TestShadow_AnswersTheNightWhenThePrimaryBrainIsDown(t *testing.T) {
 func TestShadow_PrimaryStillWinsWhenItAnswers(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -1304,7 +1304,7 @@ func TestShadow_PrimaryStillWinsWhenItAnswers(t *testing.T) {
 func TestDream_StopsRetryingANightWhoseBrainKeepsFailing(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}

@@ -441,7 +441,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		attachIPCToken(req, ipctoken.DefaultPath)
+		ipctoken.Attach(req, ipctoken.DefaultPath)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return err

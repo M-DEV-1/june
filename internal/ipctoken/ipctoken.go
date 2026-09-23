@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,4 +49,11 @@ func Read(path string) (string, error) {
 		return "", fmt.Errorf("read ipc token: %w", err)
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// Attach sets the auth header on req when the token file at path is readable. A read failure (daemon not started yet, file missing) just means the request goes out unauthenticated and the daemon 401s it, which the caller handles like any other failure. Input: the request to modify and the token file path. Output: none; req is changed in place.
+func Attach(req *http.Request, path string) {
+	if token, err := Read(path); err == nil {
+		req.Header.Set(HeaderName, token)
+	}
 }

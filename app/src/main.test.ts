@@ -2,7 +2,7 @@
 /** Regression test for the "stuttering" status line: main.ts used to rebuild the whole card's innerHTML on every daemon event while an ask was running (and once a second besides, from the elapsed-time ticker), tearing down and recreating the live step row on every one of them. A CSS animation restarts from its first frame whenever the element carrying it is removed and recreated, so the shimmer and breathe never got to run a full pass — that restart, not the animations themselves, was the stutter. patchLiveSteps (see main.ts) now patches that row in place instead. This checks the fix holds: the row survives a run of daemon events as the same DOM node instead of being swapped for a fresh one. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
-import type { DaemonEvent } from "./daemon";
+import type { DaemonEvent } from "./shared/wire";
 import type { Desktop, MonitorLike, WinLike } from "./winplace";
 
 // jsdom does not implement matchMedia at all; main.ts reads prefers-reduced-motion at module load.
@@ -30,7 +30,14 @@ vi.mock("./daemon", () => ({
   context: vi.fn().mockResolvedValue(null),
   matters: vi.fn().mockResolvedValue(null),
   ask: vi.fn().mockReturnValue(new Promise(() => {})),
-  endpoint: vi.fn().mockReturnValue({ base: "", token: undefined }),
+  // The real post, minus the base URL and the token, so a test sees each call on the stubbed fetch.
+  post: vi.fn(async (path: string, body?: unknown) => {
+    try {
+      return await fetch(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+    } catch {
+      return null;
+    }
+  }),
   voiceStart: vi.fn(),
   voiceStatus: vi.fn().mockResolvedValue(null),
   voiceStop: vi.fn(),

@@ -16,7 +16,7 @@ import (
 	"ora/internal/tracker"
 )
 
-// This file is the daemon<->client wire. The daemon owns the sqlite store, the chromem vector index and the activity buffer; the client process owns the TUI and the live Gemini session. Anything the client needs from that state travels over local HTTP on 127.0.0.1:<DaemonPort>, authenticated with a shared token file. Server side is requireIPCToken; client side is attachIPCToken plus the three callers below.
+// This file is the daemon<->client wire. The daemon owns the sqlite store, the chromem vector index and the activity buffer; the client process owns the TUI and the live Gemini session. Anything the client needs from that state travels over local HTTP on 127.0.0.1:<DaemonPort>, authenticated with a shared token file. Server side is requireIPCToken; client side is ipctoken.Attach plus the three callers below.
 
 // windowOrigins are the origins the packaged desktop window's webview sends. The Vite dev server used while working on the window is not in this list: a release daemon must never let a page on some local port read the store, so that origin is only honoured when ORA_DEV_ORIGIN names it (see windowOriginAllowed).
 var windowOrigins = map[string]bool{
@@ -67,20 +67,13 @@ func requireIPCToken(token string, next http.HandlerFunc) http.HandlerFunc {
 // ipcBodyLimit is the most bytes one IPC request body may carry: one mebibyte, hundreds of times the largest legitimate ask.
 const ipcBodyLimit = 1 << 20
 
-// attachIPCToken sets the auth header on req if the token file at path is readable. A read failure (daemon not started yet, file missing) just means the request goes out unauthenticated and the daemon 401s it — the caller handles that the same way it handles any other failure. Input: the request to modify and the token file path. Output: none; req is mutated in place.
-func attachIPCToken(req *http.Request, path string) {
-	if token, err := ipctoken.Read(path); err == nil {
-		req.Header.Set(ipctoken.HeaderName, token)
-	}
-}
-
 // authedDaemonGet fires a fire-and-forget authenticated GET at the local daemon. Used by the tray's pause/resume clicks on both platforms (tray_linux.go, tray_windows.go), which would otherwise each repeat the read-token-attach-header-GET dance.
 func authedDaemonGet(url string) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return
 	}
-	attachIPCToken(req, ipctoken.DefaultPath)
+	ipctoken.Attach(req, ipctoken.DefaultPath)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return
@@ -114,7 +107,7 @@ func (d daemonClient) post(ctx context.Context, path string, payload any) (*http
 	if err != nil {
 		return nil, fmt.Errorf("build %s request: %w", path, err)
 	}
-	attachIPCToken(req, d.tokenPath)
+	ipctoken.Attach(req, d.tokenPath)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -140,7 +133,7 @@ func (b *bufferProvider) Get() []tracker.Activity {
 	if err != nil {
 		return nil
 	}
-	attachIPCToken(req, b.tokenPath)
+	ipctoken.Attach(req, b.tokenPath)
 	resp, err := b.client.Do(req)
 	if err != nil {
 		return nil

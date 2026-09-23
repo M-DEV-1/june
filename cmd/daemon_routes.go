@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +18,7 @@ import (
 	"ora/internal/proactive"
 	"ora/internal/recorder"
 	"ora/internal/tracker"
+	"ora/internal/util"
 	"ora/internal/vector"
 )
 
@@ -84,8 +84,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 			return
 		}
 		buf := compiler.GetCurrentBuffer()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(buf)
+		util.WriteJSON(w, buf)
 	}))
 
 	// The tray asks the window it started to open or to show its hover; the instruction travels on the event stream the window already reads.
@@ -107,9 +106,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	}))
 
 	mux.HandleFunc("/status", auth(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		paused := daemon.IsPaused()
-		json.NewEncoder(w).Encode(map[string]bool{"paused": paused})
+		util.WriteJSON(w, map[string]bool{"paused": daemon.IsPaused()})
 	}))
 
 	// /vector/* let the client process reach the daemon's vector index over IPC instead of opening chromem itself — two processes opening the same chromem dir risks torn reads/corruption (see vecIndex's own doc comment above). All three return 503 with no body if the daemon has no vector index wired (no API key, or init failed) — the client's httpVectorIndex adapter treats any non-200 as an error, which HybridSearch already degrades gracefully from (see internal/db/hybrid.go's resilience handling).
@@ -131,8 +128,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"results": results})
+		util.WriteJSON(w, map[string]any{"results": results})
 	}))
 
 	mux.HandleFunc("/vector/add", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -192,8 +188,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
+		util.WriteJSON(w, map[string]any{"embedding": vec})
 	}))
 
 	// /ask and /events let the desktop window pose a question about what's on screen and stream the answer as it comes together — see internal/ipc for the route bodies.

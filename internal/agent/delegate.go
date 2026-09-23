@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"ora/internal/db"
+	"ora/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -74,7 +75,7 @@ func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt strin
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", errors.New("delegate: the run timed out")
 		}
-		return "", fmt.Errorf("delegate: %w: %s", err, claudeHead(stderr.String()))
+		return "", fmt.Errorf("delegate: %w: %s", err, util.LogHead(stderr.String()))
 	}
 	text := strings.TrimSpace(out.String())
 	if text == "" {
@@ -213,7 +214,7 @@ func (a *Agent) delegate(ctx context.Context, run Runner, d Delegation, thread [
 		}
 		return "", err
 	}
-	return capRunes(strings.TrimSpace(result), delegateResultBudget, "... (truncated)"), nil
+	return util.RunesNote(strings.TrimSpace(result), delegateResultBudget, "... (truncated)"), nil
 }
 
 // delegateTool is the declaration for a "delegate" tool, shaped exactly like every entry in toolDefinitions()'s slice (tools.go) — wiring it in is appending this value to that slice's FunctionDeclarations.

@@ -458,11 +458,6 @@ var chromeWords = map[string]bool{
 	"video": true, "view": true, "waiting": true, "whiteboard": true, "wiki": true, "you": true,
 }
 
-// isMeetingWindow reports whether an episode was captured from the window of a call rather than from whatever else was on screen. Everything that claims to name a participant is checked against this first: a screen during a meeting is mostly not the meeting. The tracker owns the test, since it is the same one it uses to decide which window to capture on its own clock.
-func isMeetingWindow(app, title string) bool {
-	return tracker.IsMeetingWindow(app, title)
-}
-
 // personNamesFromContext turns the store's person subjects into names whisper can be primed with. Input: the personal-context entries. Output: one display name per person subject, hyphens to spaces and each word capitalised, in store order; the identity entry and preference entries are skipped.
 func personNamesFromContext(entries []db.PersonalEntry) []string {
 	var names []string
@@ -518,7 +513,7 @@ func primingPromptBody(eps []db.Episode) string {
 
 	// A name written immediately before a colon is how a chat window labels who typed something. Only the meeting's own window counts: on 2026-08-31 a WhatsApp tab open during a standup put "Yalven Pravik" and "Claude Artifact" into the prompt as the meeting's participants, and whisper printed them back as the first line of the transcript.
 	for _, e := range eps {
-		inMeeting := isMeetingWindow(e.App, e.Title)
+		inMeeting := tracker.IsMeetingWindow(e.App, e.Title)
 		for _, text := range []string{e.Title, e.UserActivity, e.ScreenText, e.VisibleText} {
 			if !inMeeting {
 				continue

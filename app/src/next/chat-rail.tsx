@@ -1,7 +1,8 @@
 /** The rail beside a wide thread: a live job's plan and spend while one is running, or otherwise what the reply being read called and what it read. */
 
 import { useJobQuery, type Turn } from "./api";
-import { costLine, isJobLive } from "./format";
+import { isJobLive } from "../shared/job";
+import { costLine } from "./format";
 import { Rail, RailBlock } from "./parts";
 import type { JobRun } from "./store";
 import { Quotes } from "./chat-reply";

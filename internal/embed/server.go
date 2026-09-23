@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
+
+	"ora/internal/util"
 )
 
 // startState is one in-flight spawn-and-load. err is written before done is closed, so every waiter that observes the close sees it.
@@ -99,7 +100,7 @@ func (p *serverProcess) stopNow() bool {
 	if cmd != nil {
 		slog.Info("stopping the " + p.logTag + " to free its GPU memory")
 	}
-	killChild(cmd, exited)
+	util.KillChild(cmd, exited)
 	return true
 }
 
@@ -120,7 +121,7 @@ func (p *serverProcess) beginStart() (*startState, error) {
 	cmd := exec.Command(p.binary, p.args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = childProcAttr()
+	cmd.SysProcAttr = util.ChildProcAttr()
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("%s: start %s: %w", p.name, p.binary, err)
 	}
@@ -157,38 +158,17 @@ func (p *serverProcess) finishStart(start *startState, exited chan struct{}) {
 	close(start.done)
 
 	if err != nil {
-		killChild(cmd, dead)
+		util.KillChild(cmd, dead)
 		return
 	}
 	go p.reap(exited)
 }
 
 func (p *serverProcess) waitReady(exited chan struct{}) error {
-	ctx := context.Background()
-	deadline := time.Now().Add(p.startupTimeout)
-	client := &http.Client{Timeout: 2 * time.Second}
-	for {
-		select {
-		case <-exited:
-			return fmt.Errorf("%s: server exited during startup", p.name)
-		default:
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/health", nil)
-		if err != nil {
-			return fmt.Errorf("%s: build health request: %w", p.name, err)
-		}
-		if resp, err := client.Do(req); err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%s: server did not become ready at %s within %v", p.name, p.baseURL, p.startupTimeout)
-		}
-		time.Sleep(p.pollInterval)
+	if err := util.WaitHealthy(context.Background(), p.baseURL, exited, p.startupTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("%s: %w", p.name, err)
 	}
+	return nil
 }
 
 func (p *serverProcess) reap(exited chan struct{}) {
@@ -218,7 +198,7 @@ func (p *serverProcess) reap(exited chan struct{}) {
 		slog.Info(p.logTag+" idle, shutting it down", "idle_for", time.Since(p.lastUse).Round(time.Second))
 		cmd, dead := p.detachLocked()
 		p.mu.Unlock()
-		killChild(cmd, dead)
+		util.KillChild(cmd, dead)
 		return
 	}
 }
@@ -255,22 +235,8 @@ func (p *serverProcess) Close() error {
 	p.closed = true
 	cmd, dead := p.detachLocked()
 	p.mu.Unlock()
-	killChild(cmd, dead)
+	util.KillChild(cmd, dead)
 	return nil
-}
-
-// killChild SIGTERMs a detached child and waits for it to go, escalating to SIGKILL after five seconds. Called outside p.mu — nothing else may block on a dying process. A nil cmd is a no-op.
-func killChild(cmd *exec.Cmd, exited chan struct{}) {
-	if cmd == nil {
-		return
-	}
-	cmd.Process.Signal(os.Interrupt)
-	select {
-	case <-exited:
-	case <-time.After(5 * time.Second):
-		cmd.Process.Kill()
-		<-exited
-	}
 }
 
 // dropDeviceLocked takes the GPU device flag out of the server's arguments after it died during startup, so the next start lets llama-server pick whatever it can find, down to the CPU. A named device can vanish under a running system: on 2026-09-23 a driver upgrade left the RTX 3050 out of Vulkan until a reboot, and the server refused "--device Vulkan1" on every start, so every embedding failed. Input: the exit channel of the start that failed, closed when the process died rather than timed out. Output: none; must be called with p.mu held.

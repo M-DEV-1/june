@@ -1,6 +1,4 @@
-/** The word-boundary truncation both windows use for a failed ask's message: the hover's state.ts wants the cut text handed back as `detail`, next/format.ts only wants to know whether anything was cut, as `more`. This returns the `more` shape, since that is what format.ts already returns untouched, and it is also everything state.ts needs to build its own `detail` field from. */
-
-/** The one line a failed message reads as. Input: the raw text, which may be a provider's whole error, and cap, how many characters of it are shown before the rest is folded away (default 150, since a provider's own error can run past a thousand characters and this is what stops one failure filling the answer slot). Output: line, its first line cut at cap characters on a word boundary with an ellipsis, and more, whether anything was left out of the line. */
+/** The one line a failed message reads as. Input: the raw text, which may be a provider's whole error, and cap, how many characters of it are shown before the rest is folded away (default 150, since a provider's own error can run past a thousand characters and this is what stops one failure filling the answer slot). Output: line, its first line cut at cap characters on a word boundary with an ellipsis, and more, whether anything was left out of the line. The hover's errorLine (state.ts) and the window's turnText (next/format.ts) both cut through this. */
 export function truncateAtWord(
   text: string,
   cap: number = 150,

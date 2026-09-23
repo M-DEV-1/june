@@ -154,7 +154,7 @@ func (r *Runner) evidenceMaterial(ctx context.Context, night string, fallback bo
 	}
 	ev.haveDailies = len(dailies) > 0
 	for _, d := range dailies {
-		at, _ := time.ParseInLocation(dayFormat, d.Day, time.Local)
+		at, _ := time.ParseInLocation(time.DateOnly, d.Day, time.Local)
 		items = append(items, evidenceItem{secDiary, at, fmt.Sprintf("--- Diary entry, %s ---\n%s\n", d.Day, d.Content)})
 	}
 

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"ora/internal/db/dbtest"
 )
@@ -13,7 +14,7 @@ import (
 func TestLessonsStage_MergesLessonsThatSayTheSameThing(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 	a, _ := store.AddLesson(ctx, "Brave Browser", "close the tab", "Click the tab's Close button to close a tab")
 	b, _ := store.AddLesson(ctx, "Brave Browser", "close that tab", "Click the tab's close button directly rather than pressing Ctrl+W")
 	c, _ := store.AddLesson(ctx, "Brave Browser", "play a video", "Click the big Play button on the player")

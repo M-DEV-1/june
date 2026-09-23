@@ -419,8 +419,8 @@ function smootherstep(t: number): number {
   return t * t * t * (t * (t * 6 - 15) + 10);
 }
 
-/** Eases from 0 to 1, gently at both ends. */
-function smoothstep(t: number): number {
+/** Eases from 0 to 1, gently at both ends. Also the easing overlay/main.ts turns the traced pointer with. */
+export function smoothstep(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
@@ -458,7 +458,7 @@ function transformOf(x: number, y: number, deg: number, scale: number): string {
 }
 
 /** Moves an angle by whole turns until it is within half a turn of the one before it. Input: the angle and the previous angle, in degrees. Output: the same direction written as the nearest number to the previous angle. */
-function unwrap(deg: number, previous: number): number {
+export function unwrap(deg: number, previous: number): number {
   return deg + Math.round((previous - deg) / 360) * 360;
 }
 

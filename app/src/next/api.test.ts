@@ -1,4 +1,4 @@
-/** Tests for events(), api.ts's SSE connection. There is no injectable EventSource constructor here (unlike src/daemon.ts's setEventSourceCtor), so the global is stubbed directly, the same way store.test.ts's "the stream coming back" suite already does it. invoke() is mocked to reject, the "not inside Tauri" branch refreshToken() falls back from, and location is stubbed with no dev token, so every connect() reads no token and the stream URL carries none. */
+/** Tests for events(), api.ts's SSE connection. The global EventSource is stubbed directly, the same way store.test.ts's "the stream coming back" suite already does it. invoke() is mocked to reject, the "not inside Tauri" branch refreshToken() falls back from, and location is stubbed with no dev token, so every connect() reads no token and the stream URL carries none. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockRejectedValue(new E
 import type { DaemonEvent } from "./api";
 import { events } from "./api";
 
-/** Minimal fake EventSource: tests drive it by calling onopen/onmessage/onerror themselves, the same shape as daemon.test.ts's FakeEventSource plus onopen, which api.ts's events() also assigns. */
+/** Minimal fake EventSource: tests drive it by calling onopen/onmessage/onerror themselves, plus onopen, which openStream also assigns. */
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
   onopen: (() => void) | null = null;

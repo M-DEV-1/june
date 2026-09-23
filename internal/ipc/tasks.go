@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"ora/internal/memory"
+	"ora/internal/util"
 )
 
 // allOwners is the ?owner value that filters nothing out.
@@ -122,7 +123,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			Detail: raisedIn(a),
 		})
 	}
-	writeJSON(w, map[string]any{"tasks": tasks})
+	util.WriteJSON(w, map[string]any{"tasks": tasks})
 }
 
 // createTask answers POST /tasks: a task of the user's own plus a conversation named after it, so asking Ora about the task has somewhere to go. A blank title is 400.

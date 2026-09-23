@@ -119,7 +119,7 @@ func meetingName(title string) string {
 func meetingTitle(eps []db.Episode) string {
 	for i := len(eps) - 1; i >= 0; i-- {
 		t := strings.TrimSpace(eps[i].Title)
-		if t != "" && isMeetingWindow(eps[i].App, t) {
+		if t != "" && tracker.IsMeetingWindow(eps[i].App, t) {
 			return t
 		}
 	}
@@ -244,7 +244,7 @@ func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []str
 	seen := map[string]bool{}
 	for _, e := range eps {
 		// Only the call's own window names the people on the call. Any other chat open at the time names people who are not in it.
-		if !isMeetingWindow(e.App, e.Title) {
+		if !tracker.IsMeetingWindow(e.App, e.Title) {
 			continue
 		}
 		sources := []string{e.UserActivity, e.ScreenText, e.VisibleText}

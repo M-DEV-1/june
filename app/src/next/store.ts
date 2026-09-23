@@ -3,8 +3,10 @@
 import { configureStore, createAction, createListenerMiddleware, createSlice, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
 import { useDispatch, useSelector } from "react-redux";
 
-import { events, oraApi, type DaemonEvent, type Evidence, type Notice, type Spend } from "./api";
-import { isJobLive, jobStateWord, noticeActionMessage } from "./format";
+import { events, oraApi } from "./api";
+import type { DaemonEvent, Evidence, Notice, Spend } from "../shared/wire";
+import { isJobLive, parseActDetail } from "../shared/job";
+import { jobStateWord, noticeActionMessage } from "./format";
 import type { Theme } from "../shared/theme";
 
 export type { Theme };
@@ -266,18 +268,6 @@ export type JobRun = {
   spend?: Spend;
   startedAt: number;
 };
-
-/** The shape of an "act" event's JSON detail (see internal/actjob.Event on the Go side). kind is "started", "plan", "step", "verified", "question", "answered", "paused", "resumed" or "done". */
-type ActDetail = { kind: string; state: string; text: string; step?: number; expect?: string; outcome?: string; held_before?: boolean; spend?: Spend };
-
-/** Decodes one "act" event's detail. Input: the detail text off the wire. Output: the parts, or every field empty when the text will not parse — which never happens against a daemon that sent it, but leaves nothing to throw on a malformed one. */
-function parseActDetail(detail: string | undefined): ActDetail {
-  try {
-    return JSON.parse(detail ?? "{}") as ActDetail;
-  } catch {
-    return { kind: "", state: "", text: "" };
-  }
-}
 
 /** What the daemon is doing right now: the one question in flight, the computer-use jobs in flight keyed by the conversation each was started from, the transcript of a dictation the daemon closed by itself, and whether the event stream is open. Jobs are keyed rather than held one at a time because a job runs for minutes and the user goes on to another chat while it does; a single slot would lose the first job the moment a second was started and fold the first's events into the second. */
 /** What a live voice session is doing, off the daemon's "state" events; unset when no session runs. */

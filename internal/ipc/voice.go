@@ -18,6 +18,7 @@ import (
 	"ora/internal/audio"
 	"ora/internal/config"
 	"ora/internal/db"
+	"ora/internal/util"
 )
 
 // voiceRunner is the part of a live *agent.Agent a voice session drives: the blocking session loop, the two channels the agent already writes everything it hears, says and calls to, and what the turn that just finished cost. Narrowed to an interface so the tests run the whole session against a fake instead of dialing Gemini and opening the user's microphone.
@@ -410,8 +411,7 @@ func (v *VoiceSession) Stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.end()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"active": false})
+	util.WriteJSON(w, map[string]any{"active": false})
 }
 
 // Status handles GET /voice/status. Output: JSON {"active": bool, "id": string, "state": string}, where state is "idle" when nothing is running and otherwise "listening", "speaking" or "thinking".
@@ -420,8 +420,7 @@ func (v *VoiceSession) Status(w http.ResponseWriter, r *http.Request) {
 	active, id, state := v.id != "", v.id, v.state
 	v.mu.Unlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"active": active, "id": id, "state": state})
+	util.WriteJSON(w, map[string]any{"active": active, "id": id, "state": state})
 }
 
 // emptyUsage reports whether a turn's usage carries no count of any kind, which is what a boundary that arrived between snapshots looks like. Input: the usage. Output: true when every field the ledger stores is zero.

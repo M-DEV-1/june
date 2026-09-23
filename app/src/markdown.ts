@@ -1,7 +1,7 @@
 /** The hover window's own markdown, for the replies Ora writes back. The main window renders these through react-markdown; this window is a small always-on surface that does not carry React, so it gets a renderer covering what a reply actually contains — paragraphs, bullet and numbered lists, bold, italic and inline code — and nothing else. Everything is escaped before any tag is put back, exactly as the plain escape does, so nothing a model wrote or a tool read off the screen can turn into markup. */
 
-/** Escapes the four characters that could otherwise open a tag or close an attribute. Input: raw text. Output: text safe to place in HTML. */
-function esc(s: string): string {
+/** Escapes the four characters that could otherwise open a tag or close an attribute. Input: raw text. Output: text safe to place in HTML, both in a text node and inside a double-quoted attribute. The hover's templates in main.ts use this same call for questions, titles and aria-labels. */
+export function esc(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

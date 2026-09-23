@@ -38,6 +38,11 @@ type codexAuth struct {
 	LastRefresh string      `json:"last_refresh"`
 }
 
+// CodexAuthPath is where the Codex CLI writes its login under the home directory home when CODEX_HOME is not set.
+func CodexAuthPath(home string) string {
+	return filepath.Join(home, ".codex", "auth.json")
+}
+
 // codexAuthPath returns where Codex CLI keeps its login: $CODEX_HOME/auth.json when set, else ~/.codex/auth.json.
 func codexAuthPath() string {
 	if home := os.Getenv("CODEX_HOME"); home != "" {
@@ -47,7 +52,7 @@ func codexAuthPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".codex", "auth.json")
+	return CodexAuthPath(home)
 }
 
 // loadCodexAuth reads the Codex CLI auth file at path. Output: the parsed file, or an error when it is missing, malformed, or holds no access token.

@@ -332,7 +332,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	}
 
 	// A prompt cache matches a prefix, so every round of an ask that opens on different bytes than the round before it starts from nothing. Both of the pieces a screen round shrinks are therefore settled here, once, rather than rebuilt each round: the thread it keeps, and the instruction it sends. screenPrompt is left empty until the first round that actually needs it and then never changes, so a question whose own words already name a screen task (isScreenTask with no hops) has the same instruction on round 0 as on round 5, and a question that turns into a screen task partway through has the same one from that round on. The personal context it carries is trimmed against the first screen the ask saw, not against each round's own.
-	screenThread := lastTurns(historyItems, maxScreenHistoryTurns)
+	screenThread := util.LastN(historyItems, maxScreenHistoryTurns)
 	screenAsk := isScreenTask(question, nil)
 	screenPrompt := ""
 	// sameScreenAgain and onlyAnnotated (ask.go) decide which rounds count as one of the ask's maxAskIterations steps; maxAskRounds bounds a run that does nothing but repeat those.

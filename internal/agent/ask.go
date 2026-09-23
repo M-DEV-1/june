@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"ora/internal/util"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
+
+	"ora/internal/util"
 
 	"ora/internal/config"
 	"ora/internal/db"
@@ -367,14 +368,6 @@ func trimToolsToScreen(tools []*genai.Tool, keep map[string]bool) []*genai.Tool 
 // maxScreenHistoryTurns is how much of the thread a screen round keeps: the last two turns, one question and the answer to it. "Do it again" and "the other one" reach back exactly that far; anything older describes a screen that has changed since, and the whole thread is re-sent on every round of the turn.
 const maxScreenHistoryTurns = 2
 
-// lastTurns keeps the newest n entries of a slice. Input: any slice and how many of its last entries to keep. Output: the last n, or the whole slice when it is already that short or shorter.
-func lastTurns[T any](items []T, n int) []T {
-	if len(items) <= n {
-		return items
-	}
-	return items[len(items)-n:]
-}
-
 // History is the conversation so far: the prior turns an ask sends ahead of the question, oldest first, in the same shape the multi-turn evals hand to AskWith. The Gemini text and voice paths send these Contents as they are; the Codex path renders the same turns into its own message items (see codexHistoryItems).
 type History []*genai.Content
 
@@ -555,7 +548,7 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	// listings holds the function-response parts carrying a screen listing that is still being sent whole. Only the newest one is, so this never holds more than one entry.
 	var listings []*genai.Part
 	// Gemini serves a request out of its implicit cache only where the prefix is the same bytes, and only from 2,048 tokens of prefix upwards, so what a screen round narrows to is decided here, once, rather than each round: a question whose own words already name a screen task (isScreenTask with no hops) opens on the screen instruction, the cut thread and the screen tools at round 0 and keeps all three, and every round then only appends to what the round before it sent.
-	screenThread := lastTurns(history, maxScreenHistoryTurns)
+	screenThread := util.LastN(history, maxScreenHistoryTurns)
 	screenAsk := isScreenTask(question, nil)
 	screen := ""
 	// steps is how many rounds of this loop have actually spent one of the ask's maxAskIterations tool-call steps (sameScreenAgain and onlyAnnotated below decide which rounds do not), so the loop can stop and hand back capError the moment the cap is hit rather than running on to maxAskRounds.
@@ -916,14 +909,10 @@ func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Con
 	}
 }
 
-func evalTools() []*genai.Tool {
-	// The same tool list the live session sends for this model. On the gemini-3 live models that list has no Google Search grounding, because pairing it with function tools closes the session with a quota error (measured 2026-09-02 and again here on 2026-09-03 when this still sent it).
-	return liveToolsFor(config.VoiceModel())
-}
-
 // askTools is the tool list an ask offers the model: every tool the ask gate would actually run, and nothing else. A model cannot tell a tool it has been offered but may not use from one it may, so it spends a round finding out — the 2026-09-05 run that ran out of steps spent two of its twelve being refused shell_exec and then branch, both of which it had been handed. Input: none beyond the agent, whose evalWrites flag (see AllowEvalWrites) lifts the gate and so restores the full list. Output: the tools the gate admits, with any entry carrying no function declarations — Gemini's own search grounding, which has nothing to gate — kept as it is.
 func (a *Agent) askTools() []*genai.Tool {
-	tools := evalTools()
+	// The same tool list the live session sends for this model. On the gemini-3 live models that list has no Google Search grounding, because pairing it with function tools closes the session with a quota error (measured 2026-09-02 and again here on 2026-09-03 when this still sent it).
+	tools := liveTools()
 	if a.evalWrites {
 		return tools
 	}
@@ -1029,7 +1018,7 @@ const reflectiveLessonMinHops = 3
 //
 // The run has to be in the question. Until 2026-09-12 this named only the app, and the call goes through AskText, which builds a fresh ask with a memory lookup of its own — so the model answered about whatever that lookup surfaced rather than about the run. That is how a run whose question was "open spotify, play classic rock playlist" filed a lesson about skipping a Spearman's correlation search: the run was never shown to it.
 //
-// It asks for one imperative line and a bare NONE otherwise, because the old wording ("Reply \"nothing\" if nothing") got "Nothing worth flagging — just browsing, a Meet call, and a PDF read" instead, nineteen times out of twenty-one. isNothingReply still guards the hedges, since a prompt cannot make a model obey.
+// It asks for one imperative line and a bare NONE otherwise, because the old wording ("Reply \"nothing\" if nothing") got "Nothing worth flagging — just browsing, a Meet call, and a PDF read" instead, nineteen times out of twenty-one. db.IsNothingLesson still guards the hedges, since a prompt cannot make a model obey.
 const reflectivePromptFmt = `A screen run in %s has just finished.
 
 It was asked: %q
@@ -1114,32 +1103,6 @@ func automaticLessons(app string, hops []ToolHop, maxLines int) []string {
 	return out
 }
 
-// nothingHedges are the openings a reflective reply takes when it means "nothing" but will not say only that. Every one of these was written by the real model into the real store: on 2026-09-12, 19 of the 21 lessons it held were one of these sentences, all of them retrievable and all of them due to be put in front of a later run as guidance.
-//
-// ponytail: a list of openings, not a classifier. It is matched against what the model actually wrote on this machine, so a new hedge shape gets stored once and then added here. Spending a second model call to judge the first is not worth it for a line whose whole value is that it can be dropped for free.
-var nothingHedges = []string{
-	"nothing worth", "nothing jumps", "nothing stands", "nothing of note", "nothing to report",
-	"nothing to flag", "nothing to add", "nothing much", "nothing obvious", "nothing here",
-	"nothing there", "nothing that", "nothing in particular", "nothing —", "nothing -", "nothing,",
-}
-
-// isNothingReply reports whether a reflective call's answer says there is nothing to add, so a blank turn writes no lesson instead of filing one. It catches the sentinel reflectivePromptFmt asks for ("none"), the bare word in any case or punctuation ("Nothing."), and the hedged forms in nothingHedges.
-//
-// The hedges are the reason this is more than an equality check. The old guard compared against the single word "nothing", so "Nothing worth flagging — just browsing, a Meet call, and a PDF read" passed straight through it and was filed as a lesson. A reply that opens with "nothing" and then says something real — "Nothing on the page worked until I focused the field first, so click it before typing" — is not a hedge and is kept.
-func isNothingReply(reply string) bool {
-	bare := strings.ToLower(strings.TrimSpace(reply))
-	bare = strings.Trim(bare, ` .!"'`)
-	if bare == "" || bare == "nothing" || bare == "none" {
-		return true
-	}
-	for _, hedge := range nothingHedges {
-		if strings.HasPrefix(bare, hedge) {
-			return true
-		}
-	}
-	return false
-}
-
 // reflectiveLesson asks the same brain that just ran a screen turn, in one plain question through AskText — the cheapest existing entry point that gets a plain answer back without offering it screen tools it has no reason to reach for on a question about itself — what a later run in app should carry forward from this one. Input: ctx, the app, and the finished trace, whose question and hops go into the prompt so the model is reflecting on this run rather than on whatever its own memory lookup turned up. Output: the model's own words, trimmed, or "" when it said there was nothing, the call failed, app is "", or the run had no hops to describe.
 func (a *Agent) reflectiveLesson(ctx context.Context, app string, trace TurnTrace) string {
 	if app == "" {
@@ -1155,7 +1118,7 @@ func (a *Agent) reflectiveLesson(ctx context.Context, app string, trace TurnTrac
 		return ""
 	}
 	reply := strings.TrimSpace(tr.Answer)
-	if isNothingReply(reply) {
+	if db.IsNothingLesson(reply) {
 		return ""
 	}
 	return reply

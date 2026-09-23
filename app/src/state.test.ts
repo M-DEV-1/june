@@ -11,17 +11,15 @@ import {
   noticeActionLine,
   stepsCollapsed,
   stepsSummaryLine,
-  THEME_KEY,
   themeFromStorage,
-  type ContextInfo,
-  type DaemonEvent,
   type JobMeta,
   type Matter,
-  type MatterRow,
-  type Notice,
   type ToolStep,
   type View,
 } from "./state";
+import type { ContextInfo, MatterRow } from "./daemon";
+import { THEME_KEY } from "./shared/theme";
+import type { DaemonEvent, Notice } from "./shared/wire";
 
 function matter(partial: Partial<Matter> = {}): Matter {
   return { id: "m1", title: "m1", context: "ctx", turns: [], ...partial };

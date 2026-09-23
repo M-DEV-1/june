@@ -1,5 +1,6 @@
 /** Every pure function the React window's screens need to turn what the daemon sent into what a person reads: the date labels, the sidebar's groups, the searches over each list, the minutes reader, and the number formats. Nothing here touches React, Redux or the network — data in, a string or a list out — which is what makes it testable on its own and shared by every screen. The behaviour is the current window's, taken from src/app/render.ts rather than invented again. */
 
+import { clockTime } from "../shared/clock";
 import { truncateAtWord } from "../shared/errorline";
 import { noticeActionSuffix } from "../shared/notice";
 import type {
@@ -14,24 +15,19 @@ import type {
 } from "./api";
 import type { JobRun } from "./store";
 
-/** Renders a Date as a 24-hour clock time in this window's own style, "HH:MM". The one place hhmm and noticeActionMessage below both turn a Date into a clock face, so the two never drift apart on padding or separators. */
-function hhmmFromDate(d: Date): string {
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
 /** Formats a timestamp as a 24-hour clock time. Input: an RFC3339 string. Output: "HH:MM", or the input unchanged when it does not parse. */
 export function hhmm(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso || "";
-  return hhmmFromDate(d);
+  return clockTime(d);
 }
 
-/** The rail-line message a notice becomes once the user has pressed Done or a snooze button on the desktop notification it was also posted as (see internal/proactive/notify.go's chose/snooze/markDone, which send the same notice back with action and until filled in). body is the routine's or task's own text for those two kinds, so the line reads "Send the invoice: Done" or "Vexil replied about the venue.: Snoozed until 18:00". Input: the notice, and the moment to compare its until against. Output: the message, or undefined for a notice with no action, which this window does not show at all. The suffix after the colon is the same one the hover's own noticeActionLine computes (see shared/notice.ts); this window only adds the body prefix and renders the clock time in its own 24-hour style. */
+/** The rail-line message a notice becomes once the user has pressed Done or a snooze button on the desktop notification it was also posted as (see internal/proactive/notify.go's chose/snooze/markDone, which send the same notice back with action and until filled in). body is the routine's or task's own text for those two kinds, so the line reads "Send the invoice: Done" or "Vexil replied about the venue.: Snoozed until 18:00". Input: the notice, and the moment to compare its until against. Output: the message, or undefined for a notice with no action, which this window does not show at all. The suffix after the colon is the same one the hover's own noticeActionLine computes (see shared/notice.ts); this window only adds the body prefix. */
 export function noticeActionMessage(
   n: Pick<Notice, "body" | "action" | "until">,
   now: Date = new Date(),
 ): string | undefined {
-  const suffix = noticeActionSuffix(n, now, hhmmFromDate);
+  const suffix = noticeActionSuffix(n, now);
   return suffix === undefined ? undefined : `${n.body}: ${suffix}`;
 }
 
@@ -208,16 +204,10 @@ export function hotkeyKeys(accel: string): string[] {
     );
 }
 
-/** How much of a failed ask's message is shown before it is folded away. The daemon stores the provider's whole error, which runs past a thousand characters. */
-/** The one line a failed ask reads as. Input: the turn's stored text, which is the provider's whole error. Output: its first line, cut at 150 characters on a word boundary with an ellipsis, and whether anything was left out; the same cut the hover makes, from shared/errorline.ts. */
-export function errorLine(text: string): { line: string; more: boolean } {
-  return truncateAtWord(text ?? "");
-}
-
 /** What one of Ora's turns reads as. Input: the turn. Output: its text, replaced for a failed ask by the daemon's own plain sentence, or by one line of the provider's error when the daemon sent none. */
 export function turnText(turn: Turn): string {
   if (turn.kind !== "error") return turn.text ?? "";
-  return (turn.reason ?? "").trim() || errorLine(turn.text ?? "").line;
+  return (turn.reason ?? "").trim() || truncateAtWord(turn.text).line;
 }
 
 /** Formats a size the way a person says it. Input: a byte count. Output: "0 B", "21.0 MB", "4.0 GB" — one decimal place above a kilobyte, powers of 1024. */
@@ -356,22 +346,6 @@ export function sourcedTurns(turns: Turn[]): Turn[] {
   );
 }
 
-/** The goal of a "do:" question, which starts a computer-use job instead of an ask. Input: the text typed into the composer. Output: the goal with the prefix and any leading space stripped, or undefined for text that does not start with it — including "do:" with nothing after it, which names no goal to run. Case-insensitive, so "Do: reload the page" works the same as "do:". */
-export function jobGoal(text: string): string | undefined {
-  const m = /^do:\s*(.+)/is.exec(text.trim());
-  return m ? m[1].trim() || undefined : undefined;
-}
-
-/** Whether a job's own state word is one it may still take a step from. Input: the state, straight off the wire (see actjob.State). Output: false for "done", "stopped", "failed" and "" (no job yet), true for every other word a daemon sends. */
-export function isJobLive(state: string): boolean {
-  return (
-    state !== "" &&
-    state !== "done" &&
-    state !== "stopped" &&
-    state !== "failed"
-  );
-}
-
 /** The plain word a job's state reads as: the line above its live step list, and the sidebar row's subtitle while it runs. Input: the state. Output: the word. */
 export function jobStateWord(state: string): string {
   switch (state) {
@@ -473,6 +447,11 @@ export function meetingsShown(list: Meeting[], query: string): Meeting[] {
   return list.filter((m) => hits(query, m.title, meetingWho(m.attendees)));
 }
 
+/** The local calendar day of a moment, written the way the daemon keys days (/days/{date}, a task's "<meeting>, YYYY-MM-DD" provenance). Input: the moment. Output: "YYYY-MM-DD". */
+export function isoDay(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 /** The tasks one meeting raised, as the Meetings page pins them above the minutes. Input: everything GET /tasks answered and the meeting. Output: the action items whose provenance is this meeting's own name on this meeting's own day, in the order the daemon listed them. The daemon writes that provenance as "<meeting>, YYYY-MM-DD" (raisedIn in internal/ipc/tasks.go), and the day is what keeps Monday's standup from listing everything every standup ever raised. GET /tasks only ever holds the items that are the user's own and still open, so this needs no filter of its own for either; the items other people took away are left in the minutes text, which is where the model wrote them.
  */
 export function meetingTasks(tasks: Task[], meeting: Meeting): Task[] {
@@ -481,7 +460,7 @@ export function meetingTasks(tasks: Task[], meeting: Meeting): Task[] {
   const d = new Date(meeting?.when ?? "");
   const day = Number.isNaN(d.getTime())
     ? ""
-    : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    : isoDay(d);
   return tasks.filter((t) => {
     if (t.source !== "noticed") return false;
     const detail = (t.detail ?? "").trim();
