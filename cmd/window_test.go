@@ -35,27 +35,27 @@ func TestWindowBinary_SkipsWhatCannotBeRun(t *testing.T) {
 		"no execute bit":      notExecutable,
 		"nothing of the name": filepath.Join(dir, "missing"),
 	} {
-		t.Setenv("ORA_WINDOW", path)
+		t.Setenv("JUNE_WINDOW", path)
 		if got, _, err := windowBinary(); err == nil && got == path {
 			t.Errorf("%s: windowBinary returned %q, which cannot be run", name, got)
 		}
 	}
 }
 
-// The daemon binary is named "ora" as well, so a candidate that resolves to this very process is passed over; launching it would fork daemons without end.
+// The daemon binary is named "june" as well, so a candidate that resolves to this very process is passed over; launching it would fork daemons without end.
 func TestWindowBinary_NeverReturnsTheDaemonItself(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ORA_WINDOW", exe)
+	t.Setenv("JUNE_WINDOW", exe)
 	got, _, err := windowBinary()
 	if err == nil && got == exe {
 		t.Fatalf("windowBinary returned the daemon's own binary %q", got)
 	}
 }
 
-// The hint printed when nothing is found needs every path windowBinary actually tried, so it must come back even when none of them panned out — and it must include a candidate built from the working directory, since `go build -o ora . && ./ora` from a checkout is the path that never has anything beside the executable.
+// The hint printed when nothing is found needs every path windowBinary actually tried, so it must come back even when none of them panned out — and it must include a candidate built from the working directory, since `go build -o june . && ./june` from a checkout is the path that never has anything beside the executable.
 func TestWindowBinary_ReturnsCandidatesTriedEvenOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	oldwd, err := os.Getwd()
@@ -66,7 +66,7 @@ func TestWindowBinary_ReturnsCandidatesTriedEvenOnFailure(t *testing.T) {
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ORA_WINDOW", "")
+	t.Setenv("JUNE_WINDOW", "")
 
 	_, tried, err := windowBinary()
 	if err == nil {
@@ -75,7 +75,7 @@ func TestWindowBinary_ReturnsCandidatesTriedEvenOnFailure(t *testing.T) {
 	if len(tried) == 0 {
 		t.Fatal("expected windowBinary to report the candidates it tried")
 	}
-	wantSuffix := filepath.Join("app", "src-tauri", "target", "release", "ora")
+	wantSuffix := filepath.Join("app", "src-tauri", "target", "release", "june")
 	found := false
 	for _, c := range tried {
 		if strings.HasSuffix(c, wantSuffix) && strings.HasPrefix(c, dir) {
@@ -138,7 +138,7 @@ func TestWindowLog_AppendsInTheDataDir(t *testing.T) {
 	}
 	info, _ := os.Stat(filepath.Join(dir, "window.log"))
 	if info.Mode().Perm() != 0600 {
-		t.Errorf("mode = %v; want 0600 like ora.log", info.Mode().Perm())
+		t.Errorf("mode = %v; want 0600 like june.log", info.Mode().Perm())
 	}
 }
 

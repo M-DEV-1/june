@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/memory"
+	"june/internal/memory"
 )
 
 func item(owner, text string) memory.ActionItem {

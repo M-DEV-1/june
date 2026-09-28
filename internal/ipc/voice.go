@@ -13,19 +13,19 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/agent"
-	"ora/internal/audio"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/act"
+	"june/internal/agent"
+	"june/internal/audio"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // voiceRunner is the part of a live *agent.Agent a voice session drives: the blocking session loop, the two channels the agent already writes everything it hears, says and calls to, and what the turn that just finished cost. Narrowed to an interface so the tests run the whole session against a fake instead of dialing Gemini and opening the user's microphone.
 type voiceRunner interface {
 	// Run holds one live session open until it fails or its context is cancelled, reading microphone audio from mic.
 	Run(ctx context.Context, mic <-chan []byte) error
-	// Text carries the user's transcribed speech (Sender "you"), Ora's own transcribed speech (no sender), her thoughts, and the end-of-turn marker.
+	// Text carries the user's transcribed speech (Sender "you"), June's own transcribed speech (no sender), her thoughts, and the end-of-turn marker.
 	Text() <-chan agent.ResponseChunk
 	// Tools carries a started/finished pair for every tool call the model makes.
 	Tools() <-chan agent.ToolActivity
@@ -131,7 +131,7 @@ func newVoiceAgent(s *Server, mic audio.Microphone, speaker audio.Speaker, store
 	a.Point = func(x, y, w, h int, label string) error { return s.Ring(overlayNoAsk, x, y, w, h, label) }
 	// draw goes through the same overlay path as point_at and show_marks. Server.Draw stamps it with whichever ask is running, which for a spoken session is none, so it lands under the same non-ask id the other two use.
 	a.Draw = s.Draw
-	// A keyboard and a pointer, through the same desktop portal the typed ask has always had. Without one press_key, click_at and scroll_at refused every call with "this session cannot reach the keyboard or the pointer", so a spoken request to scroll down a page ended with Ora asking the user to scroll it themselves — which is what happened on 2026-09-07 against a blog the user asked it to read. The portal asks for consent once and remembers it, so this does not put a dialog in front of the user on every session.
+	// A keyboard and a pointer, through the same desktop portal the typed ask has always had. Without one press_key, click_at and scroll_at refused every call with "this session cannot reach the keyboard or the pointer", so a spoken request to scroll down a page ended with June asking the user to scroll it themselves — which is what happened on 2026-09-07 against a blog the user asked it to read. The portal asks for consent once and remembers it, so this does not put a dialog in front of the user on every session.
 	a.UsePortalInput(config.DataDir())
 	// show_marks marks through the same overlay path, one rect per observed item, labelled with the item's own number so the marks line up with what observe_screen just listed.
 	a.Marks = func(items []act.Item) error {
@@ -149,7 +149,7 @@ func (v *VoiceSession) emit(id, typ, text string) {
 	v.hub.broadcast(Event{ID: id, Type: typ, Text: text, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 }
 
-// setState records the session's new state and broadcasts it, but only when it actually changed and only while id is still the running session — Ora's speech arrives word by word, so without this every chunk would repeat "speaking".
+// setState records the session's new state and broadcasts it, but only when it actually changed and only while id is still the running session — June's speech arrives word by word, so without this every chunk would repeat "speaking".
 func (v *VoiceSession) setState(id, state string) {
 	v.mu.Lock()
 	if v.id != id || v.state == state {
@@ -305,7 +305,7 @@ func (v *VoiceSession) giveUp(id string) {
 	v.emit(id, "state", "idle")
 }
 
-// watch turns the agent's own channels into events on the hub for as long as the session runs: what the user said becomes "heard", what Ora said becomes "said", each tool call becomes "tool", and the session's state changes become "state".
+// watch turns the agent's own channels into events on the hub for as long as the session runs: what the user said becomes "heard", what June said becomes "said", each tool call becomes "tool", and the session's state changes become "state".
 func (v *VoiceSession) watch(ctx context.Context, id string, run voiceRunner) {
 	for {
 		select {
@@ -324,7 +324,7 @@ func (v *VoiceSession) watch(ctx context.Context, id string, run voiceRunner) {
 					go v.end()
 				}
 			case chunk.Sender == agent.SenderSystem:
-				// Connection notices and "[ora stopped]" are the terminal transcript's business, not the window's.
+				// Connection notices and "[june stopped]" are the terminal transcript's business, not the window's.
 			case chunk.IsThought:
 				v.setState(id, "thinking")
 			case chunk.Text != "":
@@ -370,9 +370,9 @@ func (v *VoiceSession) recordTurnUsage(usage agent.TokenUsage) {
 }
 
 // stopWords are the whole utterances that end a session when the user says one. The window is often hidden while a session runs, so a key press is not always available and the spoken command has to work from the daemon's side.
-var stopWords = map[string]bool{"stop": true, "ora stop": true, "ora, stop": true}
+var stopWords = map[string]bool{"stop": true, "june stop": true, "june, stop": true}
 
-// isStopPhrase reports whether what the user just said is the spoken command to end the session. Input: one transcribed utterance. Output: true for "stop" and "Ora, stop" in any case, with surrounding space and trailing punctuation ignored; false for a sentence that merely contains the word.
+// isStopPhrase reports whether what the user just said is the spoken command to end the session. Input: one transcribed utterance. Output: true for "stop" and "June, stop" in any case, with surrounding space and trailing punctuation ignored; false for a sentence that merely contains the word.
 func isStopPhrase(text string) bool {
 	return stopWords[strings.ToLower(strings.Trim(strings.TrimSpace(text), ".!?…"))]
 }

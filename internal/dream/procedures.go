@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 const (

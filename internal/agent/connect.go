@@ -6,11 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"june/internal/config"
+	"june/internal/obs"
+	"june/internal/tracker"
+	"june/internal/util"
 	"log/slog"
-	"ora/internal/config"
-	"ora/internal/obs"
-	"ora/internal/tracker"
-	"ora/internal/util"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -24,10 +24,10 @@ import (
 	"google.golang.org/genai"
 )
 
-// controlTokenPattern matches the artifacts the Live API occasionally leaves in OutputTranscription text instead of consuming them internally: a literal "<ctrlN>" marker (a real session logged "ora said" text of exactly "<ctrl46><ctrl46>"), or a run of the Unicode replacement character U+FFFD produced by the same kind of encoding slip.
+// controlTokenPattern matches the artifacts the Live API occasionally leaves in OutputTranscription text instead of consuming them internally: a literal "<ctrlN>" marker (a real session logged "june said" text of exactly "<ctrl46><ctrl46>"), or a run of the Unicode replacement character U+FFFD produced by the same kind of encoding slip.
 var controlTokenPattern = regexp.MustCompile(`<ctrl\d+>|\x{FFFD}+`)
 
-// stripControlTokens removes control-token artifacts from a chunk of Ora's own transcribed speech before it is logged or forwarded anywhere else. Applied at receiveLoop's single OutputTranscription choke point, upstream of both the "ora said" log and the TUI/voice channel, so every downstream consumer sees the same cleaned text instead of each needing its own filter. Input: one OutputTranscription text chunk. Output: the chunk with control-token artifacts removed, otherwise untouched — spacing around real words is left alone since chunks stream in word-by-word and later get concatenated, so trimming here would merge two chunks together. A chunk that was nothing but such artifacts (or whitespace once they're gone) comes back empty.
+// stripControlTokens removes control-token artifacts from a chunk of June's own transcribed speech before it is logged or forwarded anywhere else. Applied at receiveLoop's single OutputTranscription choke point, upstream of both the "june said" log and the TUI/voice channel, so every downstream consumer sees the same cleaned text instead of each needing its own filter. Input: one OutputTranscription text chunk. Output: the chunk with control-token artifacts removed, otherwise untouched — spacing around real words is left alone since chunks stream in word-by-word and later get concatenated, so trimming here would merge two chunks together. A chunk that was nothing but such artifacts (or whitespace once they're gone) comes back empty.
 func stripControlTokens(s string) string {
 	cleaned := controlTokenPattern.ReplaceAllString(s, "")
 	if strings.TrimSpace(cleaned) == "" {
@@ -36,13 +36,13 @@ func stripControlTokens(s string) string {
 	return cleaned
 }
 
-// prefixPaddingMs is the required duration of sustained detected speech before the Live API commits to "user started speaking". Raised above the SDK's zero-value default as a mitigation for acoustic echo (Ora's own voice bleeding into the mic and getting misread as a barge-in) — confirmed in production logs as 5+ false interrupts in under a minute. This is a tradeoff, not a fix: it also delays recognizing a genuine interruption by the same margin, and it does nothing for echo that outlasts the padding window. The real fix is acoustic echo cancellation (e.g. PulseAudio module-echo-cancel) or mic ducking during playback; this is a same-day mitigation pending those.
+// prefixPaddingMs is the required duration of sustained detected speech before the Live API commits to "user started speaking". Raised above the SDK's zero-value default as a mitigation for acoustic echo (June's own voice bleeding into the mic and getting misread as a barge-in) — confirmed in production logs as 5+ false interrupts in under a minute. This is a tradeoff, not a fix: it also delays recognizing a genuine interruption by the same margin, and it does nothing for echo that outlasts the padding window. The real fix is acoustic echo cancellation (e.g. PulseAudio module-echo-cancel) or mic ducking during playback; this is a same-day mitigation pending those.
 const prefixPaddingMs = 300
 
-// bargeInConfirmWindow is how long an Interrupted that arrived with no user transcript is held open, waiting for one. The Live server raises Interrupted the moment its voice detector fires, and the matching InputTranscription fragment lands a few hundred milliseconds later, so requiring the transcript to already be there rejected real interruptions: 35 of 93 in the machine's log, 8 of them after echo cancellation was in place and the mic had stopped hearing Ora at all.
+// bargeInConfirmWindow is how long an Interrupted that arrived with no user transcript is held open, waiting for one. The Live server raises Interrupted the moment its voice detector fires, and the matching InputTranscription fragment lands a few hundred milliseconds later, so requiring the transcript to already be there rejected real interruptions: 35 of 93 in the machine's log, 8 of them after echo cancellation was in place and the mic had stopped hearing June at all.
 const bargeInConfirmWindow = 1200 * time.Millisecond
 
-// bargeInEchoAmplitude is the speaker level above which Ora counts as audibly speaking. The speaker reports RMS scaled to [0,1] (see the audio package), where an idle stream sits at ~0 and speech runs 0.2-0.6, so this sits just above silence. Used to reject an interrupt that arrived with no user transcript while Ora's own voice was still playing — the room hearing itself, not someone cutting in.
+// bargeInEchoAmplitude is the speaker level above which June counts as audibly speaking. The speaker reports RMS scaled to [0,1] (see the audio package), where an idle stream sits at ~0 and speech runs 0.2-0.6, so this sits just above silence. Used to reject an interrupt that arrived with no user transcript while June's own voice was still playing — the room hearing itself, not someone cutting in.
 const bargeInEchoAmplitude = 0.05
 
 // realtimeInputConfig builds the Live API's voice-activity-detection config. Extracted from Connect() so it's testable without dialing a real websocket.
@@ -94,9 +94,9 @@ func compressionConfig() *genai.ContextWindowCompressionConfig {
 	}
 }
 
-// proactivityConfig builds the Live API's proactive-audio config, or nil when the feature is switched off in ora-config.json (see config.ProactiveAudioEnabled). Extracted from Connect() so it's testable without dialing a real websocket, same pattern as realtimeInputConfig/thinkingConfig/compressionConfig.
-// Proactive audio lets the model decline to answer audio that wasn't aimed at it — a conversation in the room, a video playing, the user talking to someone else. Ora's mic is always open, so without it every stray sentence in earshot is a prompt. Only supported on the 2.5 native-audio models, which is what config.VoiceModel() is.
-// Returning nil rather than a config with ProactiveAudio=false leaves the field off the wire entirely, so the API keeps its own default instead of Ora pinning it.
+// proactivityConfig builds the Live API's proactive-audio config, or nil when the feature is switched off in june-config.json (see config.ProactiveAudioEnabled). Extracted from Connect() so it's testable without dialing a real websocket, same pattern as realtimeInputConfig/thinkingConfig/compressionConfig.
+// Proactive audio lets the model decline to answer audio that wasn't aimed at it — a conversation in the room, a video playing, the user talking to someone else. June's mic is always open, so without it every stray sentence in earshot is a prompt. Only supported on the 2.5 native-audio models, which is what config.VoiceModel() is.
+// Returning nil rather than a config with ProactiveAudio=false leaves the field off the wire entirely, so the API keeps its own default instead of June pinning it.
 // affectiveDialogFor enables the 2.5 model's affective dialog, which matches the reply's tone to how the user sounds. Input: the Live model name. Output: true for the 2.5 native-audio model, nil for the gemini-3 live models, which reject the field.
 func affectiveDialogFor(model string) *bool {
 	if strings.HasPrefix(model, "gemini-3") {
@@ -180,14 +180,14 @@ func isNonSpeechTranscript(s string) bool {
 	return strings.TrimSpace(nonSpeechMarker.ReplaceAllString(s, "")) == ""
 }
 
-// echoWindow is how long after Ora finishes saying something a matching transcript from the mic still counts as her own voice picked back up, not a new user turn. Set from the production loop that motivated this: the mic's transcript of Ora's own greeting arrived 4 seconds after she said it.
+// echoWindow is how long after June finishes saying something a matching transcript from the mic still counts as her own voice picked back up, not a new user turn. Set from the production loop that motivated this: the mic's transcript of June's own greeting arrived 4 seconds after she said it.
 const echoWindow = 8 * time.Second
 
-// echoHistorySize is how many of Ora's most recent utterances are kept for echo matching. A handful is enough to cover the case where she speaks two short things in quick succession before the mic's transcript of the first one comes back.
+// echoHistorySize is how many of June's most recent utterances are kept for echo matching. A handful is enough to cover the case where she speaks two short things in quick succession before the mic's transcript of the first one comes back.
 const echoHistorySize = 3
 
-// oraUtterance is one thing Ora said, kept just long enough to catch the mic hearing it come back as if it were the user talking. Input to isEchoOfOraSpeech: the text and the time she finished saying it — approximated as the moment the utterance was flushed, whether by a normal turn boundary or a barge-in.
-type oraUtterance struct {
+// juneUtterance is one thing June said, kept just long enough to catch the mic hearing it come back as if it were the user talking. Input to isEchoOfJuneSpeech: the text and the time she finished saying it — approximated as the moment the utterance was flushed, whether by a normal turn boundary or a barge-in.
+type juneUtterance struct {
 	text string
 	end  time.Time
 }
@@ -237,22 +237,22 @@ func textsNearDuplicate(a, b string) bool {
 	return float64(commonSubsequenceLength(wordsA, wordsB))/float64(shorter) >= 0.8
 }
 
-// isEchoOfOraSpeech reports whether a transcript the mic just picked up is Ora's own voice coming back through the speaker rather than something the user said. Input: what Ora said and when she finished, plus the candidate transcript and when it arrived. Output: true when the candidate arrived within echoWindow of Ora finishing and is a near-duplicate of what she said (see textsNearDuplicate).
-func isEchoOfOraSpeech(ora oraUtterance, candidate string, arrived time.Time) bool {
-	gap := arrived.Sub(ora.end)
+// isEchoOfJuneSpeech reports whether a transcript the mic just picked up is June's own voice coming back through the speaker rather than something the user said. Input: what June said and when she finished, plus the candidate transcript and when it arrived. Output: true when the candidate arrived within echoWindow of June finishing and is a near-duplicate of what she said (see textsNearDuplicate).
+func isEchoOfJuneSpeech(june juneUtterance, candidate string, arrived time.Time) bool {
+	gap := arrived.Sub(june.end)
 	if gap < 0 {
 		gap = -gap
 	}
 	if gap > echoWindow {
 		return false
 	}
-	return textsNearDuplicate(ora.text, candidate)
+	return textsNearDuplicate(june.text, candidate)
 }
 
-// matchesRecentOraSpeech reports whether candidate is an echo of any of Ora's recently kept utterances — see isEchoOfOraSpeech. Shared by both call sites that need to tell a real user turn from the mic hearing Ora: the ordinary voice-transcript path and the barge-in path, so the rule lives in one place rather than being checked two different ways.
-func matchesRecentOraSpeech(recent []oraUtterance, candidate string, arrived time.Time) bool {
+// matchesRecentJuneSpeech reports whether candidate is an echo of any of June's recently kept utterances — see isEchoOfJuneSpeech. Shared by both call sites that need to tell a real user turn from the mic hearing June: the ordinary voice-transcript path and the barge-in path, so the rule lives in one place rather than being checked two different ways.
+func matchesRecentJuneSpeech(recent []juneUtterance, candidate string, arrived time.Time) bool {
 	for _, said := range recent {
-		if isEchoOfOraSpeech(said, candidate, arrived) {
+		if isEchoOfJuneSpeech(said, candidate, arrived) {
 			return true
 		}
 	}
@@ -263,7 +263,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	// Every tool call this session makes shares one screen state, the way every tool call of a typed ask shares the ask's. Without it each call got a throwaway: look recorded its picture into something discarded the moment it returned, and the draw that followed answered "I need to look at the screen first", so the model looked again and the two went round forever (a real session did exactly that on 2026-09-07).
 	ctx = a.voiceScreenScope(ctx)
 
-	tracer := obs.GetTracer(ctx, "ora.agent")
+	tracer := obs.GetTracer(ctx, "june.agent")
 	handshakeCtx, span := tracer.Start(ctx, "Agent.ConnectHandshake")
 
 	client, err := genai.NewClient(handshakeCtx, &genai.ClientConfig{
@@ -343,7 +343,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		ThinkingConfig:      thinkingConfig(),
 		// InputAudioTranscription is what makes voice per-turn retrieval possible at all (see receiveLoop's InputTranscription handling below) — it does NOT change how audio is generated or played; it's purely an additive text side-channel alongside the native audio-in/audio-out the Live API already provides.
 		InputAudioTranscription: inputTranscriptionConfig(),
-		// OutputAudioTranscription is enabled for the same reason but has no consumer yet — Ora's own spoken replies transcribed to text is what conversation persistence needs, deliberately left for that later piece of work rather than half-wiring a consumer with nowhere to store the result.
+		// OutputAudioTranscription is enabled for the same reason but has no consumer yet — June's own spoken replies transcribed to text is what conversation persistence needs, deliberately left for that later piece of work rather than half-wiring a consumer with nowhere to store the result.
 		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 		Tools:                    tools,
 		ContextWindowCompression: compressionConfig(),
@@ -440,7 +440,7 @@ func (a *Agent) voiceScreenScope(ctx context.Context) context.Context {
 // ErrGoAway is what receiveLoop returns when it gave the session up because the server said it was about to hang up. The caller's reconnect loop redials on any error; this one says the drop was planned, not a failure.
 var ErrGoAway = errors.New("live session ended on server GoAway")
 
-// goAwayDrainLimit bounds how long a GoAway waits for Ora to finish the sentence she is speaking before the session is closed. The server gives its own deadline in GoAway.TimeLeft, which measured around ten seconds on 2026-09-09, so this stays well inside it.
+// goAwayDrainLimit bounds how long a GoAway waits for June to finish the sentence she is speaking before the session is closed. The server gives its own deadline in GoAway.TimeLeft, which measured around ten seconds on 2026-09-09, so this stays well inside it.
 const goAwayDrainLimit = 5 * time.Second
 
 // goAwayDrainPoll is how often the speaker is asked whether it has gone quiet during that wait.
@@ -467,7 +467,7 @@ type branchNote struct {
 	at     time.Time
 }
 
-// branchNoteWindow is how long a branch result stays worth telling the model after a reconnect. Measured 2026-09-09: a branch result was sent at 03:43:41 and the server killed the socket at 03:43:50, nine seconds later, and the resumed session had no trace of it, so Ora kept saying the search was still running. Ninety seconds covers that gap and the redial after it.
+// branchNoteWindow is how long a branch result stays worth telling the model after a reconnect. Measured 2026-09-09: a branch result was sent at 03:43:41 and the server killed the socket at 03:43:50, nine seconds later, and the resumed session had no trace of it, so June kept saying the search was still running. Ninety seconds covers that gap and the redial after it.
 const branchNoteWindow = 90 * time.Second
 
 // pendingBranchNotes holds the recent branch results of each live agent, so a resumed session can be told the news the dead one carried. Notes past branchNoteWindow are dropped on every read and write, and an agent left with none is removed from the map, so nothing is held past the conversation it belongs to.
@@ -566,7 +566,7 @@ func (a *Agent) recordVoiceTurnUsage(usage TokenUsage) {
 }
 
 func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model string, errChan chan error) {
-	otelTracer := obs.GetTracer(ctx, "ora.agent")
+	otelTracer := obs.GetTracer(ctx, "june.agent")
 	recvCtx, recvSpan := otelTracer.Start(ctx, "Agent.ReceiveLoop")
 	defer recvSpan.End()
 
@@ -574,41 +574,41 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 	var clock turnClock
 	var inputTranscriptBuf strings.Builder
 
-	// outputTranscriptBuf accumulates OutputTranscription chunks — Ora's own reply — for the turn currently being spoken, mirroring inputTranscriptBuf. Session-scoped in the same way.
+	// outputTranscriptBuf accumulates OutputTranscription chunks — June's own reply — for the turn currently being spoken, mirroring inputTranscriptBuf. Session-scoped in the same way.
 	var outputTranscriptBuf strings.Builder
 
-	// pendingBargeIn is when an Interrupted arrived while Ora was speaking with nothing yet in the input transcript. Zero means none is waiting. A user transcript inside bargeInConfirmWindow turns it into a real barge-in; anything else lets it expire, which is what the room and the ceiling fan do.
+	// pendingBargeIn is when an Interrupted arrived while June was speaking with nothing yet in the input transcript. Zero means none is waiting. A user transcript inside bargeInConfirmWindow turns it into a real barge-in; anything else lets it expire, which is what the room and the ceiling fan do.
 	var pendingBargeIn time.Time
 
-	// recentOraSpeech holds Ora's last few completed utterances, for telling the mic hearing her own voice apart from the user talking (see matchesRecentOraSpeech). Session-scoped in the same way as the buffers above.
-	var recentOraSpeech []oraUtterance
+	// recentJuneSpeech holds June's last few completed utterances, for telling the mic hearing her own voice apart from the user talking (see matchesRecentJuneSpeech). Session-scoped in the same way as the buffers above.
+	var recentJuneSpeech []juneUtterance
 
 	// turnUsage accumulates the Live API's own token counts for the turn currently in progress, the same way askVoice's eval loop does with TurnTrace.Usage — most server messages of a turn carry no UsageMetadata and addLive is then a no-op, so this only grows on the messages that do. Session-scoped in the same way as the buffers above.
 	turnUsage := TokenUsage{Provider: ProviderGemini}
 
-	// flushTurnUsage files turnUsage as the turn that just finished (see VoiceUsage) and resets the accumulator for the next turn, mirroring flushOraSpeech's reset-after-read pattern for outputTranscriptBuf.
+	// flushTurnUsage files turnUsage as the turn that just finished (see VoiceUsage) and resets the accumulator for the next turn, mirroring flushJuneSpeech's reset-after-read pattern for outputTranscriptBuf.
 	flushTurnUsage := func() {
 		a.recordVoiceTurnUsage(turnUsage)
 		turnUsage = TokenUsage{Provider: ProviderGemini}
 	}
 
-	// flushOraSpeech logs the reply Ora just finished (or was cut off partway through) as one line and resets the buffer. Nothing Ora said reached the log at all between 7 August and this, which made scoring a session against its own replies impossible: the user's side, the model's thoughts and every tool result were all logged, and the reply itself was not.
-	flushOraSpeech := func() {
+	// flushJuneSpeech logs the reply June just finished (or was cut off partway through) as one line and resets the buffer. Nothing June said reached the log at all between 7 August and this, which made scoring a session against its own replies impossible: the user's side, the model's thoughts and every tool result were all logged, and the reply itself was not.
+	flushJuneSpeech := func() {
 		said := strings.TrimSpace(outputTranscriptBuf.String())
 		outputTranscriptBuf.Reset()
 		if said == "" {
 			return
 		}
-		slog.Info("ora said", "text", said)
-		// Recorded so a matching mic transcript that comes back within echoWindow can be recognized as Ora's own voice rather than a new user turn (see matchesRecentOraSpeech). Trimmed to the last few so a long session doesn't grow this without bound.
-		recentOraSpeech = append(recentOraSpeech, oraUtterance{text: said, end: time.Now()})
-		if len(recentOraSpeech) > echoHistorySize {
-			recentOraSpeech = recentOraSpeech[len(recentOraSpeech)-echoHistorySize:]
+		slog.Info("june said", "text", said)
+		// Recorded so a matching mic transcript that comes back within echoWindow can be recognized as June's own voice rather than a new user turn (see matchesRecentJuneSpeech). Trimmed to the last few so a long session doesn't grow this without bound.
+		recentJuneSpeech = append(recentJuneSpeech, juneUtterance{text: said, end: time.Now()})
+		if len(recentJuneSpeech) > echoHistorySize {
+			recentJuneSpeech = recentJuneSpeech[len(recentJuneSpeech)-echoHistorySize:]
 		}
 	}
 
 	// flushInputTranscript sends whatever's accumulated in inputTranscriptBuf as a SenderYou chunk and resets the buffer — a no-op if nothing's there, so it's safe to call from every "the model is now responding" trigger point without worrying about emitting an empty "you" line on a typed turn. Genai's own Transcription.Finished doc comment says it marks the last chunk, but current Live API model versions never actually set it (documented: googleapis/js-genai#1429 — only fragments arrive, the flag never updates), so this is called from wherever the FIRST sign of a reply shows up, not just Finished: the first OutputTranscription fragment, a ModelTurn message, a ToolCall, TurnComplete/GenerationComplete, or Interrupted. The Finished path is kept too — harmless if a future model version starts firing it.
-	// flushInputTranscript's bool return is true only when the buffered text was queued as a genuine user turn — false for empty/non-speech, muted, or an echo of Ora's own recent speech. The barge-in path below needs this to tell a real interruption from the mic hearing Ora talk to herself.
+	// flushInputTranscript's bool return is true only when the buffered text was queued as a genuine user turn — false for empty/non-speech, muted, or an echo of June's own recent speech. The barge-in path below needs this to tell a real interruption from the mic hearing June talk to herself.
 	flushInputTranscript := func() bool {
 		utterance := strings.TrimSpace(inputTranscriptBuf.String())
 		inputTranscriptBuf.Reset()
@@ -620,9 +620,9 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			slog.Debug("dropping voice transcript: mic is muted", "text", utterance)
 			return false
 		}
-		// The mic picking up Ora's own voice and transcribing it as if the user said it: a real production session answered its own greeting, then answered that answer, and looped for minutes. See matchesRecentOraSpeech.
-		if matchesRecentOraSpeech(recentOraSpeech, utterance, time.Now()) {
-			slog.Debug("ignoring echo of ora's own speech", "text", utterance)
+		// The mic picking up June's own voice and transcribing it as if the user said it: a real production session answered its own greeting, then answered that answer, and looped for minutes. See matchesRecentJuneSpeech.
+		if matchesRecentJuneSpeech(recentJuneSpeech, utterance, time.Now()) {
+			slog.Debug("ignoring echo of june's own speech", "text", utterance)
 			return false
 		}
 		slog.Info("user said (voice)", "text", utterance)
@@ -654,7 +654,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		// The Live API reports usage on the server message that finishes a response rather than on a response object, so a turn that runs tools reports usage once per round and they add up here the same way askVoice's eval loop totals TurnTrace.Usage (see TokenUsage.addLive in ask.go). Most messages of a turn carry no UsageMetadata at all, and addLive is then a no-op.
 		turnUsage.addLive(msg.UsageMetadata)
 
-		// GoAway: the server is about to hang up (session expiry or rate limits). Logging it and carrying on is what produced "close 1008 client failed to close the connection after receiving a GoAway" three times in 25 minutes on 2026-09-09, each force-close losing whatever a tool delivered in its last seconds. So the session is given up here instead: wait out the sentence Ora is in the middle of, hang up, and let the caller's reconnect loop redial and resume from the stored handle.
+		// GoAway: the server is about to hang up (session expiry or rate limits). Logging it and carrying on is what produced "close 1008 client failed to close the connection after receiving a GoAway" three times in 25 minutes on 2026-09-09, each force-close losing whatever a tool delivered in its last seconds. So the session is given up here instead: wait out the sentence June is in the middle of, hang up, and let the caller's reconnect loop redial and resume from the stored handle.
 		if msg.GoAway != nil {
 			slog.Warn("live session GoAway received, closing the session so the reconnect happens on our terms",
 				"time_left", msg.GoAway.TimeLeft)
@@ -677,13 +677,13 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			inputTranscriptBuf.WriteString(it.Text)
 			if !isNonSpeechTranscript(it.Text) {
 				clock.userSpoke(time.Now())
-				// The late half of a barge-in: an Interrupted came in while Ora was talking and nothing had been transcribed yet, and this is that speech arriving. Cut her off now rather than letting her talk over the user for the rest of the sentence.
+				// The late half of a barge-in: an Interrupted came in while June was talking and nothing had been transcribed yet, and this is that speech arriving. Cut her off now rather than letting her talk over the user for the rest of the sentence.
 				if waited := time.Since(pendingBargeIn); !pendingBargeIn.IsZero() && waited < bargeInConfirmWindow {
 					pendingBargeIn = time.Time{}
 					slog.Info("barge-in confirmed by a late transcript", "waited", waited)
-					flushOraSpeech()
+					flushJuneSpeech()
 					a.speaker.Flush()
-					notice := "[ora stopped]"
+					notice := "[june stopped]"
 					if a.typedTurnActive.Load() {
 						notice = "[interrupted by voice input — the answer above is cut short]"
 					}
@@ -698,7 +698,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			}
 		}
 
-		// OutputTranscription is the text of Ora's own spoken audio — with ResponseModalities=[Audio], this is the only complete-text form of what Ora actually said, since ModelTurn text parts are fragments (see below). Also the first sign the model is responding, so it flushes any pending input-transcript first (see flushInputTranscript's doc comment).
+		// OutputTranscription is the text of June's own spoken audio — with ResponseModalities=[Audio], this is the only complete-text form of what June actually said, since ModelTurn text parts are fragments (see below). Also the first sign the model is responding, so it flushes any pending input-transcript first (see flushInputTranscript's doc comment).
 		if msg.ServerContent != nil && msg.ServerContent.OutputTranscription != nil && msg.ServerContent.OutputTranscription.Text != "" {
 			flushInputTranscript()
 			// Strip control-token artifacts here, before the text reaches either consumer below — the log line and the TUI/voice channel both read from this one spot, so cleaning it once here is enough for both. A chunk that was nothing but artifacts comes back empty and is dropped rather than logged or spoken as if it were real content.
@@ -711,7 +711,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			}
 		}
 
-		// Not every Interrupted flag is a barge-in. Sending a tool result with INTERRUPT scheduling asks the Live server to interrupt its own generation to fold the result in, and the server reports that with the very same flag — measured at 72-80ms after the send on four consecutive tool calls in one production session (2026-08-28, 03:01-03:06). Treating it as a barge-in flushed the audio Ora was still speaking and wrote "[ora stopped]" into the transcript, which is what left the user with a preamble and then silence.
+		// Not every Interrupted flag is a barge-in. Sending a tool result with INTERRUPT scheduling asks the Live server to interrupt its own generation to fold the result in, and the server reports that with the very same flag — measured at 72-80ms after the send on four consecutive tool calls in one production session (2026-08-28, 03:01-03:06). Treating it as a barge-in flushed the audio June was still speaking and wrote "[june stopped]" into the transcript, which is what left the user with a preamble and then silence.
 		// The signal that separates them is whether the user is actually saying anything: a real barge-in has InputTranscription accumulating, a tool delivery has none. Checked before flushInputTranscript below, which would empty that buffer. Clearing the flag rather than skipping the message keeps every other handler (ModelTurn audio, TurnComplete) running on it.
 		if msg.ServerContent != nil && msg.ServerContent.Interrupted && inputTranscriptBuf.Len() == 0 && a.consumeToolDeliveryInterrupt(time.Now()) {
 			slog.Debug("interrupt attributed to tool-result delivery, not a barge-in")
@@ -720,36 +720,36 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 
 		// check for server-side barge-in (VAD)
 		if msg.ServerContent != nil && msg.ServerContent.Interrupted {
-			// Checked before flushInputTranscript empties the buffer: an echo of Ora's own recent speech must not read as a barge-in at all, not just fail to become a user turn — otherwise the flush and speaker.Flush() below still fire on nothing more than the mic hearing her talk to herself.
-			if pending := strings.TrimSpace(inputTranscriptBuf.String()); pending != "" && matchesRecentOraSpeech(recentOraSpeech, pending, time.Now()) {
+			// Checked before flushInputTranscript empties the buffer: an echo of June's own recent speech must not read as a barge-in at all, not just fail to become a user turn — otherwise the flush and speaker.Flush() below still fire on nothing more than the mic hearing her talk to herself.
+			if pending := strings.TrimSpace(inputTranscriptBuf.String()); pending != "" && matchesRecentJuneSpeech(recentJuneSpeech, pending, time.Now()) {
 				inputTranscriptBuf.Reset()
-				slog.Debug("ignoring echo of ora's own speech", "text", pending)
+				slog.Debug("ignoring echo of june's own speech", "text", pending)
 				continue
 			}
 			// Whether the user is actually saying anything is the one signal that separates a real interruption from everything else that trips the server's voice detector.
 			userSpoke := flushInputTranscript()
-			// Muted means no audio of ours reached the server, so a voice-activity interrupt can only be the room. Ignoring it keeps ambient noise from cutting Ora off mid-answer in text-only mode.
+			// Muted means no audio of ours reached the server, so a voice-activity interrupt can only be the room. Ignoring it keeps ambient noise from cutting June off mid-answer in text-only mode.
 			if a.isMuted.Load() {
 				slog.Debug("ignoring barge-in: mic is muted")
 				continue
 			}
-			// Nobody has said anything yet and Ora's own speaker is audibly running. This is either the room (a ceiling fan produced 47 of these in 17 minutes, every one flushing the audio mid-sentence) or a real interruption whose transcript has not landed yet — the server raises Interrupted on voice detection, and the words follow a few hundred milliseconds later. Hold it open instead of deciding now: the InputTranscription branch above cuts Ora off if speech arrives inside bargeInConfirmWindow, and nothing happens if it does not.
+			// Nobody has said anything yet and June's own speaker is audibly running. This is either the room (a ceiling fan produced 47 of these in 17 minutes, every one flushing the audio mid-sentence) or a real interruption whose transcript has not landed yet — the server raises Interrupted on voice detection, and the words follow a few hundred milliseconds later. Hold it open instead of deciding now: the InputTranscription branch above cuts June off if speech arrives inside bargeInConfirmWindow, and nothing happens if it does not.
 			if !userSpoke && a.speaker.CurrentAmplitude() > bargeInEchoAmplitude {
 				pendingBargeIn = time.Now()
-				slog.Debug("barge-in held open: no user transcript yet while ora is speaking")
+				slog.Debug("barge-in held open: no user transcript yet while june is speaking")
 				continue
 			}
 			pendingBargeIn = time.Time{}
 			slog.Info("barge-in detected: server interrupted model generation", "user_spoke", userSpoke)
-			flushOraSpeech()
+			flushJuneSpeech()
 			a.speaker.Flush()
 
 			// The notice explains a cut-off answer, so it is only honest when the user actually cut in. It was written 62 times in one day with no user transcript behind almost any of them, each one telling the user they interrupted a reply they never touched.
 			if !userSpoke {
 				continue
 			}
-			// The generation is already cancelled server-side and cannot be resumed, so the answer just stops mid-sentence. Whatever streamed stays in the transcript; this line says why it ends where it does. A typed turn gets the explicit wording — "you interrupted Ora" is the wrong story to tell someone who typed the question and never spoke.
-			notice := "[ora stopped]"
+			// The generation is already cancelled server-side and cannot be resumed, so the answer just stops mid-sentence. Whatever streamed stays in the transcript; this line says why it ends where it does. A typed turn gets the explicit wording — "you interrupted June" is the wrong story to tell someone who typed the question and never spoke.
+			notice := "[june stopped]"
 			if a.typedTurnActive.Load() {
 				notice = "[interrupted by voice input — the answer above is cut short]"
 			}
@@ -772,14 +772,14 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			for _, part := range msg.ServerContent.ModelTurn.Parts {
 				if part.Text != "" {
 					if part.Thought {
-						slog.Debug("ora thought", "text", part.Text)
+						slog.Debug("june thought", "text", part.Text)
 						select {
 						case a.TextResponseChan <- ResponseChunk{Text: part.Text, IsThought: true}:
 						default:
 						}
 					} else {
 						// Not forwarded to TextResponseChan: under ResponseModalities=[Audio], non-thought ModelTurn text parts are incomplete fragments — OutputTranscription (handled above) is the complete-text source.
-						slog.Debug("ora response fragment (not forwarded, see OutputTranscription)", "text", part.Text)
+						slog.Debug("june response fragment (not forwarded, see OutputTranscription)", "text", part.Text)
 						textContent = part.Text
 					}
 				}
@@ -804,12 +804,12 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			turnSpan.End()
 		}
 
-		// TurnComplete/GenerationComplete mark the end of one model turn — the boundary the UI needs so it stops merging this turn's ora chunks into whatever arrives for the NEXT turn (see streamLine's TurnBoundary handling). The SDK can signal either depending on realtime-playback timing, so both are checked; Interrupted (handled above) already breaks the merge chain on its own since it emits a system-sender chunk.
+		// TurnComplete/GenerationComplete mark the end of one model turn — the boundary the UI needs so it stops merging this turn's june chunks into whatever arrives for the NEXT turn (see streamLine's TurnBoundary handling). The SDK can signal either depending on realtime-playback timing, so both are checked; Interrupted (handled above) already breaks the merge chain on its own since it emits a system-sender chunk.
 		if msg.ServerContent != nil && (msg.ServerContent.TurnComplete || msg.ServerContent.GenerationComplete) {
 			a.endTurn()
 			clock.turnDone()
 			flushInputTranscript()
-			flushOraSpeech()
+			flushJuneSpeech()
 			flushTurnUsage()
 			// The typed turn (if this was one) is over — a later interruption belongs to whatever comes next. A barge-in still waiting for its transcript goes with it: the turn it would have cut off has already ended on its own.
 			a.typedTurnActive.Store(false)
@@ -841,7 +841,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 }
 
 // quietTools are the tools whose result the user is not sitting there waiting to hear.
-// Saving, correcting or forgetting a note, and opening a URL, all produce their real effect outside the conversation — the user sees the browser open, or simply trusts that the note was saved — so their result is scheduled WHEN_IDLE and slots into the next natural gap instead of cutting off whatever Ora is saying.
+// Saving, correcting or forgetting a note, and opening a URL, all produce their real effect outside the conversation — the user sees the browser open, or simply trusts that the note was saved — so their result is scheduled WHEN_IDLE and slots into the next natural gap instead of cutting off whatever June is saying.
 var quietTools = map[string]bool{
 	"save_note": true,
 	"add_task":  true,
@@ -851,8 +851,8 @@ var quietTools = map[string]bool{
 
 // scheduleFor picks when a NON_BLOCKING tool's result is folded back into the conversation.
 // A quiet or unrecognized tool always waits for an idle moment: quietTools produce their real effect outside the conversation, and an unrecognized name is by definition not one the model was told to announce.
-// Every other tool answers a question the user just asked out loud, so it wants INTERRUPT — but only when Ora has gone quiet. Sending INTERRUPT while she is still speaking would ask the Live server to cancel her current generation to fold the result in, which cuts her own sentence off mid-word; WHEN_IDLE there lets the sentence finish and folds the result in right after.
-// Input: the tool's name and whether Ora is audibly speaking right now. Output: the scheduling to send with that tool's FunctionResponse.
+// Every other tool answers a question the user just asked out loud, so it wants INTERRUPT — but only when June has gone quiet. Sending INTERRUPT while she is still speaking would ask the Live server to cancel her current generation to fold the result in, which cuts her own sentence off mid-word; WHEN_IDLE there lets the sentence finish and folds the result in right after.
+// Input: the tool's name and whether June is audibly speaking right now. Output: the scheduling to send with that tool's FunctionResponse.
 func scheduleFor(name string, speaking bool) genai.FunctionResponseScheduling {
 	if _, known := knownToolNames[name]; !known {
 		return genai.FunctionResponseSchedulingWhenIdle
@@ -866,7 +866,7 @@ func scheduleFor(name string, speaking bool) genai.FunctionResponseScheduling {
 	return genai.FunctionResponseSchedulingInterrupt
 }
 
-// isSpeaking reports whether Ora's own voice is audible right now, the same check receiveLoop's echo guard uses.
+// isSpeaking reports whether June's own voice is audible right now, the same check receiveLoop's echo guard uses.
 // Input: none, reads a.speaker. Output: false when there is no speaker (e.g. in a test harness), otherwise whether the current amplitude is above bargeInEchoAmplitude.
 func (a *Agent) isSpeaking() bool {
 	return a.speaker != nil && a.speaker.CurrentAmplitude() > bargeInEchoAmplitude
@@ -875,9 +875,9 @@ func (a *Agent) isSpeaking() bool {
 // toolInterruptWindow is how long after an INTERRUPT-scheduled FunctionResponse send an Interrupted event is credited to that delivery instead of to the user. Production measured 72-80ms; a second is more than ten times that and still far shorter than a person deciding to cut in.
 const toolInterruptWindow = time.Second
 
-// longRunNudgeDelay is how long a tool may run before Ora tells the user it's still on it. A var, not a const, only so tests can shrink it.
+// longRunNudgeDelay is how long a tool may run before June tells the user it's still on it. A var, not a const, only so tests can shrink it.
 // Sent as an interim FunctionResponse with WillContinue set — the generator form of a NON_BLOCKING call, and the only turn-safe way to inject anything into a tool exchange. A bare out-of-turn SendClientContent is not: one broke native-audio turn-taking for three minutes in a real session (see the InputTranscription comment in receiveLoop).
-// Five seconds, down from eight: at eight a 30-second open_app left two silences of nearly the length of a held breath before Ora said anything, and the user heard the tool as a hang rather than as work in progress. The gaps still double from here (see nudgeGap), so a genuinely long job does not become chatter.
+// Five seconds, down from eight: at eight a 30-second open_app left two silences of nearly the length of a held breath before June said anything, and the user heard the tool as a hang rather than as work in progress. The gaps still double from here (see nudgeGap), so a genuinely long job does not become chatter.
 var longRunNudgeDelay = 5 * time.Second
 
 // knownToolNames is the set of names in toolDefinitions, built once so scheduleFor can tell an unrecognized tool from a declared one.
@@ -978,7 +978,7 @@ func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session li
 		return
 	}
 
-	// Recomputed here, not reused from before the tool ran: the tool may have taken seconds, and whether Ora is speaking now — not when the call started — is what decides whether an INTERRUPT would cut her off.
+	// Recomputed here, not reused from before the tool ran: the tool may have taken seconds, and whether June is speaking now — not when the call started — is what decides whether an INTERRUPT would cut her off.
 	scheduling = scheduleFor(fc.Name, a.isSpeaking())
 
 	// Marked before the send, not after: the server's fold-in interrupt comes back within ~80ms, and receiveLoop must already see the record by then. See consumeToolDeliveryInterrupt.
@@ -1047,7 +1047,7 @@ func nudgeGap(n int) time.Duration {
 
 // runToolWithNudge runs the tool and, for as long as it keeps running, sends an interim FunctionResponse every longRunNudgeDelay telling the model the call hasn't finished — so it can keep saying "still on it" out loud instead of leaving the user in silence through a long operation.
 //
-// It nudges repeatedly, not once. One nudge and then silence is what made the 30-second open_app on 2026-09-12 feel like being dropped: Ora said "that one's still going", then said nothing for the remaining 22 seconds while the user asked "can you hear me?". Each nudge carries a different line (see nudgeLines) so the model has something new to say each time.
+// It nudges repeatedly, not once. One nudge and then silence is what made the 30-second open_app on 2026-09-12 feel like being dropped: June said "that one's still going", then said nothing for the remaining 22 seconds while the user asked "can you hear me?". Each nudge carries a different line (see nudgeLines) so the model has something new to say each time.
 // Only INTERRUPT-scheduled tools get a nudge: a WHEN_IDLE result (saving a note, opening a URL) is not something the user is waiting through silence for.
 // Input: the tool call and the scheduling its result will carry. Output: the tool's result string, exactly as executeTool returned it.
 func (a *Agent) runToolWithNudge(ctx context.Context, session liveSession, fc *genai.FunctionCall, scheduling genai.FunctionResponseScheduling) string {
@@ -1075,7 +1075,7 @@ func (a *Agent) runToolWithNudge(ctx context.Context, session liveSession, fc *g
 		sent++
 		timer.Reset(nudgeGap(sent + 1))
 		line := nudgeLine(sent)
-		// Recomputed at each nudge, not reused from the caller: time has passed, so whether Ora is speaking now is what decides whether INTERRUPT would cut her off.
+		// Recomputed at each nudge, not reused from the caller: time has passed, so whether June is speaking now is what decides whether INTERRUPT would cut her off.
 		nudgeScheduling := scheduleFor(fc.Name, a.isSpeaking())
 		slog.Info("tool still running, sending a progress nudge", "tool", fc.Name, "nudge", sent, "after", time.Duration(sent)*longRunNudgeDelay)
 		if nudgeScheduling == genai.FunctionResponseSchedulingInterrupt {
@@ -1125,7 +1125,7 @@ func micInput(pcm []byte) genai.LiveRealtimeInput {
 }
 
 func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micChan <-chan []byte, errChan chan error) {
-	otelTracer := obs.GetTracer(ctx, "ora.agent")
+	otelTracer := obs.GetTracer(ctx, "june.agent")
 	sendCtx, sendSpan := otelTracer.Start(ctx, "Agent.SendLoop")
 	defer sendSpan.End()
 	lastSent := time.Now()

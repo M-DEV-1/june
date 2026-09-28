@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // A session with a road for pictures is not blind: the look is pushed to the model out of band and the coordinates it reads off that picture resolve. Without this the Live voice session took a picture it could never be shown, so draw and click_at refused every time and it told the user its screen tools were broken.

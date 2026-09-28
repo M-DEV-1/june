@@ -1,4 +1,4 @@
-// Package tally is ORA's self-accounting seam: a decorator that counts brain
+// Package tally is June's self-accounting seam: a decorator that counts brain
 // calls per provider per day, and a weekly render of everything the daemon
 // tracks about its own behavior (brain usage, vector-search contribution,
 // dreaming nights, diary entries) — so the machine can be asked how it spent
@@ -10,10 +10,10 @@ import (
 	"log/slog"
 	"time"
 
-	"ora/internal/brain"
+	"june/internal/brain"
 )
 
-// Recorder is what Wrap needs to record one brain call's outcome. Satisfied structurally by *ora/internal/db.Store's RecordUsage, so a Store can be handed to Wrap with no adapter.
+// Recorder is what Wrap needs to record one brain call's outcome. Satisfied structurally by *june/internal/db.Store's RecordUsage, so a Store can be handed to Wrap with no adapter.
 // It takes characters rather than tokens on purpose. The Brain seam is func(ctx, prompt) (string, error) and carries no usage metadata, and the CLI providers do not report token counts at all — so characters are the one quantity measurable on every provider. Converting to tokens is done at read time with a stated divisor, which keeps the stored numbers facts rather than estimates.
 type Recorder interface {
 	RecordUsage(provider string, ok bool, ms time.Duration, promptChars, replyChars int) error

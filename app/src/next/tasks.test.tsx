@@ -42,7 +42,7 @@ describe("the list", () => {
     expect(list().getByText("Book the flight")).toBeDefined();
     expect(screen.getAllByText(/from Meridian call/)).toHaveLength(2);
     expect(screen.queryByText("You set")).toBeNull();
-    expect(screen.queryByText("Ora noticed")).toBeNull();
+    expect(screen.queryByText("June noticed")).toBeNull();
   });
 
   it("draws the rows as a plain list, so the tick and the menus a row holds are controls in their own right rather than parts of one option", async () => {
@@ -92,7 +92,7 @@ describe("the list", () => {
     renderApp({ fails: ["GET /tasks"] }, { place: "tasks" });
     // The detail pane on the right shows its own asleep face too, since its thread is also unanswered, so more than one is expected here.
     expect(await screen.findByText("Not connected.")).toBeDefined();
-    expect(screen.getAllByRole("img", { name: "ora is asleep" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("img", { name: "june is asleep" }).length).toBeGreaterThan(0);
   });
 });
 
@@ -117,7 +117,7 @@ describe("changing a task's status", () => {
     expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
   });
 
-  it("drops an action item Ora noticed, and takes it out of the list", async () => {
+  it("drops an action item June noticed, and takes it out of the list", async () => {
     const { calls } = renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("button", { name: "More for Send the Meridian file" });
     await userEvent.click(screen.getByRole("button", { name: "More for Send the Meridian file" }));
@@ -217,7 +217,7 @@ describe("changing a task's status", () => {
   it("adds a task of your own and aims the composer at what the daemon named after it", async () => {
     const { calls, store } = renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.type(screen.getByLabelText("Give Ora something to do"), "call the hotel{Enter}");
+    await userEvent.type(screen.getByLabelText("Give June something to do"), "call the hotel{Enter}");
     await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/tasks")?.body).toEqual({ title: "call the hotel" }));
     await waitFor(() => expect(store.getState().ui.taskId).toBe("task-9"));
   });
@@ -232,7 +232,7 @@ describe("talking to a task", () => {
   it("sends the task and where it came from as the question's context", async () => {
     const { calls } = renderApp({ tasks, turns: { c1: conversation } }, { place: "tasks" });
     await screen.findByText("which airline?");
-    await userEvent.type(await screen.findByLabelText("Ask Ora"), "which airline did she book?{Enter}");
+    await userEvent.type(await screen.findByLabelText("Ask June"), "which airline did she book?{Enter}");
     await waitFor(() =>
       expect(calls.find((c) => c.path === "/ask")?.body).toMatchObject({
         question: "which airline did she book?",
@@ -246,13 +246,13 @@ describe("talking to a task", () => {
     const { calls, store } = renderApp({ tasks }, { place: "tasks" });
     await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
     await userEvent.click(list().getByText("Send the Meridian file"));
-    await userEvent.type(await screen.findByLabelText("Ask Ora"), "what did she want?{Enter}");
+    await userEvent.type(await screen.findByLabelText("Ask June"), "what did she want?{Enter}");
     // The conversation is opened through the same POST /conversations the rail's New chat makes, and the question goes into it.
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/conversations")).toBe(true));
     await waitFor(() =>
       expect(calls.find((c) => c.path === "/ask")?.body).toMatchObject({
         conversation_id: "new",
-        context: 'This is about one thing on the user\'s list: "Send the Meridian file". Ora noticed it in Meridian call.',
+        context: 'This is about one thing on the user\'s list: "Send the Meridian file". June noticed it in Meridian call.',
       }),
     );
     // The pairing is remembered, so the next question about the same task does not open a second conversation.

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // A capture whose every line is accessibility chrome leaves memory.Normalize with no content, and WriteEpisode then falls back to the raw capture so the row is not stored empty. The fallback is the whole capture, so without a cap of its own a 2000-word screenful of box-drawing glyphs is stored in full, indexed in full by FTS, and chunked in full for embedding. This holds the fallback to the same 120 words the normalized path is held to, and to the same removal of control characters.

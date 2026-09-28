@@ -6,9 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/memory"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/memory"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -733,7 +733,7 @@ func TestStore_UpsertThread(t *testing.T) {
 		store := memStore(t)
 
 		id1, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-			Subject: "ORA project",
+			Subject: "June project",
 			Kind:    "work",
 			State:   "initial state",
 			Novel:   false,
@@ -750,7 +750,7 @@ func TestStore_UpsertThread(t *testing.T) {
 
 		// second upsert with same subject+kind, different state
 		id2, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-			Subject: "ORA project",
+			Subject: "June project",
 			Kind:    "work",
 			State:   "writing more tests",
 			Novel:   false,
@@ -783,7 +783,7 @@ func TestStore_UpsertThread(t *testing.T) {
 		// must stay at exactly one row
 		var count int
 		if err := store.DB().QueryRowContext(ctx,
-			`SELECT count(*) FROM threads WHERE subject = 'ORA project' AND kind = 'work'`).Scan(&count); err != nil {
+			`SELECT count(*) FROM threads WHERE subject = 'June project' AND kind = 'work'`).Scan(&count); err != nil {
 			t.Fatalf("count threads: %v", err)
 		}
 		if count != 1 {
@@ -821,7 +821,7 @@ func TestStore_UpsertThread(t *testing.T) {
 		store := memStore(t)
 
 		id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-			Subject: "ORA project",
+			Subject: "June project",
 			Kind:    "work",
 			State:   "initial",
 			Novel:   false,
@@ -1028,7 +1028,7 @@ func TestStore_RelevantNotes_CapsAndFilters(t *testing.T) {
 	store := memStore(t)
 
 	for i := 0; i < 5; i++ {
-		if _, err := store.LogNote(ctx, fmt.Sprintf("user works on the ora recall project part %d", i), "fact"); err != nil {
+		if _, err := store.LogNote(ctx, fmt.Sprintf("user works on the june recall project part %d", i), "fact"); err != nil {
 			t.Fatalf("LogNote: %v", err)
 		}
 	}
@@ -1042,7 +1042,7 @@ func TestStore_RelevantNotes_CapsAndFilters(t *testing.T) {
 		t.Fatalf("expected 6 seeded notes, got %d", len(all))
 	}
 
-	relevant, err := store.RelevantNotes(ctx, "ora recall project", 3)
+	relevant, err := store.RelevantNotes(ctx, "june recall project", 3)
 	if err != nil {
 		t.Fatalf("RelevantNotes: %v", err)
 	}
@@ -1185,10 +1185,10 @@ func TestStore_LogEpisode_ImportanceHeuristic(t *testing.T) {
 	}
 
 	// prior visit to the same app+title, so the next visit counts as a revisit
-	if _, err := store.LogEpisode(ctx, "VSCode", "main.go — ora", "package main\n\nfunc main() {}"); err != nil {
+	if _, err := store.LogEpisode(ctx, "VSCode", "main.go — june", "package main\n\nfunc main() {}"); err != nil {
 		t.Fatalf("LogEpisode (seed revisit): %v", err)
 	}
-	richID, err := store.LogEpisode(ctx, "VSCode", "main.go — ora", strings.Repeat("word ", 300))
+	richID, err := store.LogEpisode(ctx, "VSCode", "main.go — june", strings.Repeat("word ", 300))
 	if err != nil {
 		t.Fatalf("LogEpisode (rich revisit): %v", err)
 	}
@@ -1946,7 +1946,7 @@ func TestStore_ThreadEpisodeEdges(t *testing.T) {
 		}
 		since := time.Now().Add(-time.Minute)
 
-		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work", State: "reading the findings"})
+		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of june", Kind: "work", State: "reading the findings"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1971,7 +1971,7 @@ func TestStore_ThreadEpisodeEdges(t *testing.T) {
 		ctx := context.Background()
 		store := memStore(t)
 
-		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work"})
+		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of june", Kind: "work"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1980,7 +1980,7 @@ func TestStore_ThreadEpisodeEdges(t *testing.T) {
 			t.Fatal(err)
 		}
 		// The summary node the compiler wrote for that flush, named after the thread.
-		if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "code review of ora", Summary: "reviewed the code"}); err != nil {
+		if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "code review of june", Summary: "reviewed the code"}); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2103,12 +2103,12 @@ func TestDeleteNote_MissingID_Errors(t *testing.T) {
 	}
 }
 
-// TestStore_GetImplicitContext_CarriesTheNightsUnderstanding is the sleep-time-compute wiring: the understanding doc the night rewrites is the one thing Ora computed while the user was away, and until now no live session read it. It must arrive first in the handshake context, before the live threads and the relevance hits, because it is the standing model everything else is read against.
+// TestStore_GetImplicitContext_CarriesTheNightsUnderstanding is the sleep-time-compute wiring: the understanding doc the night rewrites is the one thing June computed while the user was away, and until now no live session read it. It must arrive first in the handshake context, before the live threads and the relevance hits, because it is the standing model everything else is read against.
 func TestStore_GetImplicitContext_CarriesTheNightsUnderstanding(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
-	const doc = "He works on ora most evenings and tests before he writes. His partner is Ada."
+	const doc = "He works on june most evenings and tests before he writes. His partner is Ada."
 	if err := store.SetDiaryEntry(ctx, "", "understanding", doc); err != nil {
 		t.Fatalf("SetDiaryEntry: %v", err)
 	}

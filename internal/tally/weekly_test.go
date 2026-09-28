@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db/dbtest"
+	"june/internal/db/dbtest"
 )
 
 // TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows seeds one week's worth of brain-call, vector-contribution, dream-run, and diary fixture rows, and asserts the rendered text names every section and reflects the fixture numbers — the render is the whole point of the weekly log, so every input this package can produce must show up somewhere in the output.

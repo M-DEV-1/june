@@ -16,11 +16,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/db"
-	"ora/internal/memory"
-	"ora/internal/tracker"
-	"ora/internal/util"
+	"june/internal/act"
+	"june/internal/db"
+	"june/internal/memory"
+	"june/internal/tracker"
+	"june/internal/util"
 )
 
 // maxToolRows caps how many rows any one tool result may carry. A tool result is prompt text, and action_items reads from a store that grows without bound — open action items never expire by design. query_memory has queryMemoryHits for the same reason.
@@ -128,8 +128,8 @@ func optionalWindow(args map[string]any, now time.Time) (time.Time, time.Time, b
 // queryMemoryHits is how many hits query_memory shows the model. The since/until window is enforced inside HybridSearchWindow (SQL-side, before top-k), so a windowed call asks for the same limit as a plain one.
 const queryMemoryHits = 10
 
-// sensitivePathSubstrings/sensitivePathSuffixes gate read_file behind HITL approval — credentials, SSH/GPG/cloud keys, and ora's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
-var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "ora-db/ipc-token"}
+// sensitivePathSubstrings/sensitivePathSuffixes gate read_file behind HITL approval — credentials, SSH/GPG/cloud keys, and june's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
+var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "june-db/ipc-token"}
 var sensitivePathSuffixes = []string{".pem", ".key"}
 
 // isSensitivePath reports whether path matches one of the patterns above.

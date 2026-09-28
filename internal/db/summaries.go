@@ -6,16 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
+	"june/internal/memory"
+	"june/internal/obs"
 	"log/slog"
-	"ora/internal/memory"
-	"ora/internal/obs"
 	"strings"
 	"time"
 )
 
 // SetWorkingState upserts the single-row working-state cache. Content is synthesized by the daemon's state deriver and overwritten in full each cadence tick — no history is kept.
 func (s *Store) SetWorkingState(ctx context.Context, content string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.SetWorkingState")
 	defer span.End()
 
@@ -32,7 +32,7 @@ func (s *Store) SetWorkingState(ctx context.Context, content string) error {
 
 // GetWorkingState returns the cached working-state content, or ("", nil) when no row has been written yet.
 func (s *Store) GetWorkingState(ctx context.Context) (string, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.GetWorkingState")
 	defer span.End()
 
@@ -50,7 +50,7 @@ func (s *Store) GetWorkingState(ctx context.Context) (string, error) {
 
 // RecentSummaries returns the content of the most recent summary and digest nodes, newest-first, up to limit rows. Used by the state deriver to build the synthesis prompt without walking the full ancestor tree.
 func (s *Store) RecentSummaries(ctx context.Context, limit int) ([]string, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.RecentSummaries")
 	defer span.End()
 
@@ -88,7 +88,7 @@ type WindowSummary struct {
 
 // SummaryTimeline returns the summary and digest nodes whose created_at falls in [since, until], oldest first. This is the tier recall reads when a window holds more episodes than fit in one tool result: the summaries are bounded per day by construction, so a whole day or week comes back with every stretch of it represented.
 func (s *Store) SummaryTimeline(ctx context.Context, since, until time.Time) ([]WindowSummary, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.SummaryTimeline")
 	defer span.End()
 
@@ -122,7 +122,7 @@ func (s *Store) SummaryTimeline(ctx context.Context, since, until time.Time) ([]
 // CountSummariesSince returns the number of summary and digest nodes created after since. Used as a cost guard so the state deriver skips recomputation when nothing new has been written.
 // since is formatted as UTC "2006-01-02 15:04:05" to match SQLite's CURRENT_TIMESTAMP storage format, which has no sub-second component.
 func (s *Store) CountSummariesSince(ctx context.Context, since time.Time) (int, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.CountSummariesSince")
 	defer span.End()
 
@@ -145,7 +145,7 @@ const recentTaskWindow = 2 * time.Hour
 
 // get or create
 func (s *Store) ensureNode(ctx context.Context, parentID int64, nodeType, content string) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	_, span := tracer.Start(ctx, "DB.EnsureNode")
 	span.SetAttributes(attribute.String("node.type", nodeType))
 	defer span.End()
@@ -206,7 +206,7 @@ const (
 
 // OldSummaryGroups returns summary nodes older than olderThan, grouped by their ancestor DAY node, capped at MaxSummariesPerGroup rows per day and MaxDayGroupsPerRun days. Used by the compaction job to decide which days are ready to roll up.
 func (s *Store) OldSummaryGroups(ctx context.Context, olderThan time.Duration) ([]memory.SummaryGroup, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.OldSummaryGroups")
 	defer span.End()
 
@@ -385,7 +385,7 @@ func (s *Store) dedupeSummaryContent(ctx context.Context, tx *sql.Tx, digestID i
 // The digest is dated the day it covers, not the moment compaction ran; see digestCreatedAt.
 // If the digest insert fails the reparenting never happens — summaries are never left orphaned.
 func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, summaryIDs []int64, digest string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.ReplaceSummariesWithDigest")
 	defer span.End()
 
@@ -529,7 +529,7 @@ func (s *Store) ReplaceSummariesWithDigest(ctx context.Context, dayID int64, sum
 
 // LogSemanticNode implements the memory.Storage interface: it creates task nodes and summary leaf nodes in the temporal tree.
 func (s *Store) LogSemanticNode(ctx context.Context, summary memory.TaskSummary) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "LogSemanticNode")
 	defer span.End()
 

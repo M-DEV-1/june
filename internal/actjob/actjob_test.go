@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/act"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // fakeExec is a tool executor that answers from a script instead of touching the screen: every call is recorded, observe_screen and wait_for get canned answers, and anything else returns what the script says.

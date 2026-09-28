@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
+	"june/internal/memory"
+	"june/internal/obs"
+	"june/internal/util"
 	"log/slog"
-	"ora/internal/memory"
-	"ora/internal/obs"
-	"ora/internal/util"
 	"strings"
 	"time"
 )
@@ -63,7 +63,7 @@ func normalizeNoteContent(s string) string {
 //
 // The exact-match (content, kind) unique index still backs the INSERT OR IGNORE path below for byte-identical restatements and is what actually guards concurrent identical inserts — the normalized-comparison scan above is an application-level, non-atomic check and doesn't itself prevent a race between two differently-cased paraphrases.
 func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.LogNote")
 	defer span.End()
 
@@ -149,7 +149,7 @@ func (s *Store) findNoteByNormalizedContent(ctx context.Context, normalized, kin
 
 // NotesSince returns the notes touched at or after since, newest first. Input: the context and the bound. Output: every note whose created_at or updated_at is at or after the bound, so a note written days ago and closed today still comes back — that is the day it belongs on. This is what GET /today reads instead of GetNotes, which has no bound at all and grows with the whole store.
 func (s *Store) NotesSince(ctx context.Context, since time.Time) ([]Note, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.NotesSince")
 	defer span.End()
 
@@ -181,7 +181,7 @@ func (s *Store) NotesSince(ctx context.Context, since time.Time) ([]Note, error)
 
 // GetNotes returns all notes ordered newest first.
 func (s *Store) GetNotes(ctx context.Context) ([]Note, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.GetNotes")
 	defer span.End()
 
@@ -229,7 +229,7 @@ func (s *Store) RelevantNotes(ctx context.Context, focus string, limit int) ([]s
 
 // DeleteNote removes a note by id, erroring when no such note exists. FTS5 mirror is dropped via trigger. Its vector (if any) is deleted async/best-effort — same non-blocking pattern as LogNote's embed goroutine — so a vector-index error never fails the SQL delete the model is waiting on.
 func (s *Store) DeleteNote(ctx context.Context, id int64) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.DeleteNote")
 	defer span.End()
 
@@ -266,7 +266,7 @@ func (s *Store) DeleteNote(ctx context.Context, id int64) error {
 
 // UpdateNote overwrites the content of an existing note. FTS5 mirror is kept in sync via the notes_au trigger, and updated_at is refreshed atomically. The stale vector is deleted and the corrected content re-embedded async/best-effort, same non-blocking pattern as LogNote — a vector-index error never fails the SQL update.
 func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.UpdateNote")
 	defer span.End()
 
@@ -328,7 +328,7 @@ type NoteRef = memory.NoteRef
 // ExistingNotes returns id+content for every stored note of kind "fact". Used by the memory compiler to feed the reconciliation LLM call and by note consolidation to feed the curation call.
 // Both of those calls hand the notes to a model whose job is to merge and drop entries, and both write the result back through ReplaceAllNotes, so only the kind they are allowed to rewrite is shown to them. Other kinds — meeting minutes above all, which are the only record of what was said in a call — are never offered up for curation.
 func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.ExistingNotes")
 	defer span.End()
 
@@ -356,7 +356,7 @@ func (s *Store) ExistingNotes(ctx context.Context) ([]memory.NoteRef, error) {
 // Notes of any other kind are left exactly as they are, rows and vectors both: meeting minutes live in this table under kind "meeting" and are the only record of what was said in a call, so consolidation must not be able to reach them.
 // The caller must guarantee contents is non-empty — an empty swap would wipe the facts — but we defend against it here too.
 func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.ReplaceAllNotes")
 	defer span.End()
 

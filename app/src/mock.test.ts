@@ -44,7 +44,7 @@ describe("startMockVoice", () => {
   });
 
   it(
-    "shows Ora's silent row while only the mic bursts, and animates it once the speaker's own (odd-cycle) burst lands",
+    "shows June's silent row while only the mic bursts, and animates it once the speaker's own (odd-cycle) burst lands",
     async () => {
       const { startMockVoice } = await import("./mock");
 
@@ -66,7 +66,7 @@ describe("startMockVoice", () => {
         }
       };
 
-      // Ora's row exists and sits at its silent baseline the moment the session starts (this is the first, even cycle: the mic bursts, but there is no mic row left to show it on).
+      // June's row exists and sits at its silent baseline the moment the session starts (this is the first, even cycle: the mic bursts, but there is no mic row left to show it on).
       await waitUntil(() => nearTop() !== "", 2000);
       const silentNearTop = nearTop();
       expect(silentNearTop).toBeTruthy();

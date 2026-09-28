@@ -98,7 +98,7 @@ export function useFollowSelection(container: RefObject<HTMLElement | null>, id?
   }, [container, id]);
 }
 
-/** What an empty list says where there is room for one short line, with Ora's own face above it — the hero of the empty state, sized a step up from the page's own heading rather than left at the sidebar chip's size. Input: whether the daemon answered, the sentence for an answer with nothing in it, and whether the list is still on its first fetch. While loading, the real empty sentence is held back and a "thinking" face shows instead, so "Nothing to do." never flashes before the data it describes has actually arrived. Output: the block. */
+/** What an empty list says where there is room for one short line, with June's own face above it — the hero of the empty state, sized a step up from the page's own heading rather than left at the sidebar chip's size. Input: whether the daemon answered, the sentence for an answer with nothing in it, and whether the list is still on its first fetch. While loading, the real empty sentence is held back and a "thinking" face shows instead, so "Nothing to do." never flashes before the data it describes has actually arrived. Output: the block. */
 export function Nothing({ up, empty, loading }: { up: boolean; empty: string; loading?: boolean }) {
   const state = loading ? "thinking" : up ? "watching" : "asleep";
   const line = loading ? "Looking…" : up ? empty : "Not connected.";
@@ -110,11 +110,11 @@ export function Nothing({ up, empty, loading }: { up: boolean; empty: string; lo
   );
 }
 
-/** What an empty pane says, which is the whole reading side of the window and so gets the four parts an empty state is made of: Ora's own face as its hero, one line in the text colour naming what is not there, one muted sentence saying what to do about it, and the action itself when there is one to offer. Input: whether the daemon answered, the line for an answer with nothing in it, the sentence under it, the action, and whether the pane is still on its first fetch. While loading, the hint and action are held back and the face shows "thinking" with a short "Looking…" in place of the real empty line, so the real copy never flashes before data arrives. Output: a centred block. */
+/** What an empty pane says, which is the whole reading side of the window and so gets the four parts an empty state is made of: June's own face as its hero, one line in the text colour naming what is not there, one muted sentence saying what to do about it, and the action itself when there is one to offer. Input: whether the daemon answered, the line for an answer with nothing in it, the sentence under it, the action, and whether the pane is still on its first fetch. While loading, the hint and action are held back and the face shows "thinking" with a short "Looking…" in place of the real empty line, so the real copy never flashes before data arrives. Output: a centred block. */
 export function Blank({ up, empty, hint, action, loading }: { up: boolean; empty: string; hint?: string; action?: ReactNode; loading?: boolean }) {
   const state = loading ? "thinking" : up ? "watching" : "asleep";
   const title = loading ? "Looking…" : up ? empty : "Nothing is answering";
-  const under = loading ? undefined : up ? hint : `Ora's daemon should be listening on ${DAEMON_ADDRESS}. The window keeps trying and fills in on its own once it is back.`;
+  const under = loading ? undefined : up ? hint : `June's daemon should be listening on ${DAEMON_ADDRESS}. The window keeps trying and fills in on its own once it is back.`;
   return (
     <div className="m-auto flex max-w-[46ch] flex-col items-center gap-3 px-8 py-12 text-center">
       <Face state={state} className="text-title" />

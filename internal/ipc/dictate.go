@@ -16,10 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/audio"
-	"ora/internal/config"
-	"ora/internal/recorder"
-	"ora/internal/util"
+	"june/internal/audio"
+	"june/internal/config"
+	"june/internal/recorder"
+	"june/internal/util"
 )
 
 // micRate is the sample rate internal/audio's microphone delivers: its PulseAudio record stream is opened at 24 kHz mono s16le (see StartCapture in internal/audio/capture_linux.go), so everything captured here has to come down to whisper's rate before it is written.
@@ -247,7 +247,7 @@ func (d *Dictation) finish(cur *dictating) (string, error) {
 	raw := cur.pcm
 	cur.mu.Unlock()
 
-	f, err := os.CreateTemp("", "ora-dictation-*.wav")
+	f, err := os.CreateTemp("", "june-dictation-*.wav")
 	if err != nil {
 		return "", fmt.Errorf("create dictation wav: %w", err)
 	}
@@ -342,7 +342,7 @@ const (
 // recorder.RunWhisper now asks the embedding server off the card before its first attempt, so a dictation no longer walks onto a card the embedder still holds. It asks once rather than polling the way a meeting transcription does, because somebody is waiting on a dictation.
 func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 	bin := filepath.Join(config.DataDir(), "whispercpp", whisperCPPBinaryName)
-	if p := os.Getenv("ORA_WHISPER_CPP"); p != "" {
+	if p := os.Getenv("JUNE_WHISPER_CPP"); p != "" {
 		bin = p
 	}
 	if info, err := os.Stat(bin); err != nil || info.IsDir() {

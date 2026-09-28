@@ -1,4 +1,4 @@
-// usage.go keeps what each provider says about the user's own allowance — Codex's five-hour and weekly windows, Claude's subscription windows, Gemini's daily request ceiling — so the brain picker can draw a bar per brain instead of only saying whether the machine is signed in. Nothing here calls a provider on its own: the readings come off responses Ora already makes, or out of the counter internal/brain/quota.go already keeps.
+// usage.go keeps what each provider says about the user's own allowance — Codex's five-hour and weekly windows, Claude's subscription windows, Gemini's daily request ceiling — so the brain picker can draw a bar per brain instead of only saying whether the machine is signed in. Nothing here calls a provider on its own: the readings come off responses June already makes, or out of the counter internal/brain/quota.go already keeps.
 package brain
 
 import (
@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/util"
+	"june/internal/agent"
+	"june/internal/util"
 )
 
 // UsageLimit is one allowance window a provider reports for the user's account: the window ("5h", "daily", "weekly", "monthly"), how much of it is spent as a fraction from 0 to 1, when it resets, and the field or header the reading came from.

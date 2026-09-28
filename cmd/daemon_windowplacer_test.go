@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	"ora/internal/window"
+	"june/internal/window"
 )
 
 // pickPlacedWindow is what closes the Teams bug: the accessibility bus's window placer used to match by exact title alone, and Teams' title carries a live memory count ("High memory usage - 985 MB") that had changed to "1,005 MB" by the time the click that followed the listing asked for it, so the lookup missed and every rectangle in the listing was shifted by the fallback's guess instead of the real one — refusing the click every time. Matching by pid first, since the shell extension and the accessibility bus agree on it even when the title has moved on, is the fix.

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // fakeEmbed returns a fixed-size vector so HybridSearch's vector path can run under -race without a network.

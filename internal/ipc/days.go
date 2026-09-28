@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/memory"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/memory"
+	"june/internal/util"
 )
 
 // daysBack is how far the history goes: the last sixty days that have anything in them.
@@ -28,7 +28,7 @@ const diaryDayKind = "day"
 // diaryBriefKind is the diary kind the morning brief writes one row of per day (see internal/proactive.Scheduler.deliverBrief).
 const diaryBriefKind = "brief"
 
-// DaySummary is one row of GET /days. Title is the first line of the day's page, empty for a day Ora never wrote about; HasPage says whether such a page exists. Seen is the episodes recorded that day, Meetings the recordings held, and MeetingMinutes their total recorded length rounded to whole minutes.
+// DaySummary is one row of GET /days. Title is the first line of the day's page, empty for a day June never wrote about; HasPage says whether such a page exists. Seen is the episodes recorded that day, Meetings the recordings held, and MeetingMinutes their total recorded length rounded to whole minutes.
 type DaySummary struct {
 	Date           string `json:"date"`
 	Title          string `json:"title"`
@@ -54,7 +54,7 @@ type DayTask struct {
 	Owner  string `json:"owner"`
 }
 
-// DayView is GET /days/{date}: what Ora wrote about the day, what the user asked that day, and the work the day raised. Heading is the day's activity summarised as one line, for example "60 things seen · 1 call, 28 min", or "" for a day with nothing in it. Brief is the morning brief delivered that day and Close the evening close entry, both "" when that day had none — Page carries the same close text when there is one, falling back to the day's digest when there is not, so a caller that only wants the reading page can keep using it unchanged.
+// DayView is GET /days/{date}: what June wrote about the day, what the user asked that day, and the work the day raised. Heading is the day's activity summarised as one line, for example "60 things seen · 1 call, 28 min", or "" for a day with nothing in it. Brief is the morning brief delivered that day and Close the evening close entry, both "" when that day had none — Page carries the same close text when there is one, falling back to the day's digest when there is not, so a caller that only wants the reading page can keep using it unchanged.
 type DayView struct {
 	Date    string    `json:"date"`
 	Page    string    `json:"page"`
@@ -116,7 +116,7 @@ func (s *Server) Days(w http.ResponseWriter, r *http.Request) {
 	util.WriteJSON(w, map[string]any{"days": days})
 }
 
-// Day handles GET /days/{date}, date as local 'YYYY-MM-DD'. Page is the diary entry Ora wrote that evening, or the day's digest when there is no entry, or empty. You are the user's own turns from that day's conversations, oldest first; Tasks are the action items the day raised, each with whether it is now closed. A date that does not parse is 400.
+// Day handles GET /days/{date}, date as local 'YYYY-MM-DD'. Page is the diary entry June wrote that evening, or the day's digest when there is no entry, or empty. You are the user's own turns from that day's conversations, oldest first; Tasks are the action items the day raised, each with whether it is now closed. A date that does not parse is 400.
 func (s *Server) Day(w http.ResponseWriter, r *http.Request) {
 	date := r.PathValue("date")
 	day, err := time.ParseInLocation("2006-01-02", date, time.Local)
@@ -248,7 +248,7 @@ func countWord(n int, singular, plural string) string {
 	return strconv.Itoa(n) + " " + word
 }
 
-// digestOfDay is the fallback page for a day Ora never wrote a diary entry for: the daily digest the compaction pass wrote for that day. Input: the store and the day's bounds. Output: the digest text, or "" when the day has none. The summary timeline carries both the compiler's per-task summaries (marshalled JSON) and the digests (plain prose), and only the digest is prose — the same test Today() uses to tell them apart.
+// digestOfDay is the fallback page for a day June never wrote a diary entry for: the daily digest the compaction pass wrote for that day. Input: the store and the day's bounds. Output: the digest text, or "" when the day has none. The summary timeline carries both the compiler's per-task summaries (marshalled JSON) and the digests (plain prose), and only the digest is prose — the same test Today() uses to tell them apart.
 func digestOfDay(ctx context.Context, store *db.Store, from, to time.Time) (string, error) {
 	rows, err := store.SummaryTimeline(ctx, from, to)
 	if err != nil {

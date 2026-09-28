@@ -3,7 +3,7 @@
 import { truncateAtWord } from "./shared/errorline";
 import { clockTime } from "./shared/clock";
 import { noticeActionSuffix } from "./shared/notice";
-import {type OraState} from "./shared/faces";
+import {type JuneState} from "./shared/faces";
 import { isJobLive, jobGoal, parseActDetail } from "./shared/job";
 import { THEME_KEY, themeChoice, type Theme } from "./shared/theme";
 import type { DaemonEvent, Evidence, Notice, Spend } from "./shared/wire";
@@ -338,8 +338,8 @@ export function placeholder(v: View): string {
   return ASK_PLACEHOLDER;
 }
 
-/** Which of Ora's faces the hover window shows beside the input, from the same signals as dotLabel. Input: the view and whether the daemon is reachable. Output: the state, see src/shared/faces.ts. */
-export function faceState(v: View, daemonUp: boolean): OraState {
+/** Which of June's faces the hover window shows beside the input, from the same signals as dotLabel. Input: the view and whether the daemon is reachable. Output: the state, see src/shared/faces.ts. */
+export function faceState(v: View, daemonUp: boolean): JuneState {
   if (v.dictating) return "listening";
   if (v.voice) return v.voiceState === "speaking" ? "speaking" : v.voiceState === "thinking" ? "thinking" : "listening";
   if (v.state === "asking") return "thinking";
@@ -382,7 +382,7 @@ export function applyToolEvent(
   }
   const name = ev.text ?? "";
   const detail = ev.detail ?? "";
-  // A screen task calls observe_screen and look over and over, and both of them say "Looking at the screen": a row each meant the card filled with the same sentence repeated. A call that would say what the row above it already says reopens that row instead of adding another, so the list has one line per thing Ora is doing rather than one per tool call.
+  // A screen task calls observe_screen and look over and over, and both of them say "Looking at the screen": a row each meant the card filled with the same sentence repeated. A call that would say what the row above it already says reopens that row instead of adding another, so the list has one line per thing June is doing rather than one per tool call.
   const done = steps[steps.length - 1];
   if (done && stepLabel(done.name, done.detail) === stepLabel(name, detail)) {
     return [...steps.slice(0, -1), { ...done, finishedAt: undefined }];
@@ -652,7 +652,7 @@ export function step(
       };
 
     case "escape": {
-      // Escape only hides the window. A live session is not the window's to end — the user hides this and goes back to what they were doing while Ora keeps listening — so only Shift+Space, the spoken "stop", or a stop from somewhere else finishes it.
+      // Escape only hides the window. A live session is not the window's to end — the user hides this and goes back to what they were doing while June keeps listening — so only Shift+Space, the spoken "stop", or a stop from somewhere else finishes it.
       if (view.evidenceOpen) return { view: { ...view, evidenceOpen: false } };
       // A live job is not dropped by one stray Escape: the first asks for confirmation, and only the next one actually stops it.
       const job = currentJob(view);
@@ -923,7 +923,7 @@ export function step(
         },
       };
 
-    // A notice is Ora speaking first, so every case below touches the notice fields and nothing else: a brief landing while a question is being answered must leave that question, its steps and the input exactly as they were.
+    // A notice is June speaking first, so every case below touches the notice fields and nothing else: a brief landing while a question is being answered must leave that question, its steps and the input exactly as they were.
     case "notice":
       // A follow-up whose action has no line of its own is an answer to a button the notice named for itself ("dropped", "record"): it only says the card is dealt with, so the card goes.
       if (event.notice.action && noticeActionLine(event.notice, new Date()) === undefined)
@@ -1005,7 +1005,7 @@ export function step(
 
       switch (ev.type) {
         case "heard":
-          // Speech is transcribed in pieces, so a run of them is one thing the user said; anything Ora has already answered ends the turn and the next piece starts a new one.
+          // Speech is transcribed in pieces, so a run of them is one thing the user said; anything June has already answered ends the turn and the next piece starts a new one.
           if (last && last.a === "")
             turns[turns.length - 1] = {
               ...last,
@@ -1015,7 +1015,7 @@ export function step(
           break;
 
         case "said":
-          // Ora's reply arrives word by word and joins onto whatever turn is on screen, without a space: the words already carry their own.
+          // June's reply arrives word by word and joins onto whatever turn is on screen, without a space: the words already carry their own.
           if (last)
             turns[turns.length - 1] = { ...last, a: `${last.a}${text}` };
           else turns.push({ q: "", a: text });

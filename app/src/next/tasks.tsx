@@ -1,4 +1,4 @@
-/** The Tasks screen, laid out as list and detail: everything owed in one column on the left, and on the right the picked task — its title, where it came from, the conversation about it, and the composer at the foot. Picking a row swaps the detail; there is no header picker and no split to drag, and the sidebar stays for chats. A task the user typed in can be ticked done and unticked open again; one Ora noticed in a meeting can also be dropped, which is the third state the store holds and the daemon takes on POST /tasks/{id}/done. */
+/** The Tasks screen, laid out as list and detail: everything owed in one column on the left, and on the right the picked task — its title, where it came from, the conversation about it, and the composer at the foot. Picking a row swaps the detail; there is no header picker and no split to drag, and the sidebar stays for chats. A task the user typed in can be ticked done and unticked open again; one June noticed in a meeting can also be dropped, which is the third state the store holds and the daemon takes on POST /tasks/{id}/done. */
 
 import { useRef, type RefObject } from "react";
 
@@ -55,7 +55,7 @@ export function TasksScreen() {
   const shown = tasksShown(tasks, query.tasks);
   const selected = tasks.find((t) => t.id === taskId) ?? shown[0];
   useFollowSelection(rows, selected?.id);
-  // A task the app opened owns its conversation; one Ora noticed has none until it is asked about, and the one opened for it then is remembered here for the rest of the session.
+  // A task the app opened owns its conversation; one June noticed has none until it is asked about, and the one opened for it then is remembered here for the rest of the session.
   const conversationId = selected ? selected.conversation_id || taskChats[selected.id] || undefined : undefined;
   // currentData rather than data: RTK Query keeps the previous argument's result in data while the new one is still in flight, which showed the task just left under the task just picked.
   const { currentData: view } = useConversationQuery(conversationId ?? "", { skip: !conversationId });
@@ -102,7 +102,7 @@ export function TasksScreen() {
             up={!isError}
             sources={false}
             empty={emptyLine}
-            hint={selected ? "Ask below and Ora answers with this task as the subject." : undefined}
+            hint={selected ? "Ask below and June answers with this task as the subject." : undefined}
             run={mine}
             newest={conversationId}
           />

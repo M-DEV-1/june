@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/config"
-	"ora/internal/memory"
+	"june/internal/config"
+	"june/internal/memory"
 )
 
 // newSummarizer builds a summarizer with a key that can never reach the network, so any duty that is not routed to a backend fails rather than quietly calling Gemini during a test.

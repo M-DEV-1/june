@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // TestDescribeSchema covers what the description a model reads must and must not say. The description is read from the store instead of written by hand, because a written one goes stale silently: the hand-written version once claimed notes.kind included "action_item", the real value is "action", and the model dutifully counted zero open items against twenty-five real ones. Each subtest checks one property: tables and columns are listed, FTS5's shadow tables are not (storage internals, answer no question anyone would ask), a column holding a small fixed vocabulary has its values listed (so a query never asks for a value that has never existed), a column of long unique text is not treated as a vocabulary (or the store's own text would leak into every prompt), and a column of dates is not treated as a vocabulary either (or the description would change shape with the calendar).

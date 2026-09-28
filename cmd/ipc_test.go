@@ -5,15 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"june/internal/embed"
 	"net/http"
 	"net/http/httptest"
-	"ora/internal/embed"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"ora/internal/ipctoken"
-	"ora/internal/tracker"
+	"june/internal/ipctoken"
+	"june/internal/tracker"
 )
 
 // requireIPCToken is the daemon's auth boundary: only the exact token gets through, and the wrapped handler must never run otherwise. The empty-token rows cover a startup where ipctoken.Generate failed — subtle.ConstantTimeCompare("", "") returns 1, so without an explicit guard a request with no header would match and auth would fail open.
@@ -199,7 +199,7 @@ func TestRequireIPCToken_CORSForTheWindow(t *testing.T) {
 		wantCalled bool
 	}{
 		{name: "preflight from the packaged window needs no token", method: http.MethodOptions, origin: "tauri://localhost", wantCode: http.StatusNoContent, wantACAO: "tauri://localhost"},
-		{name: "preflight from the dev server when ORA_DEV_ORIGIN names it", method: http.MethodOptions, origin: "http://localhost:1420", devOrigin: "http://localhost:1420", wantCode: http.StatusNoContent, wantACAO: "http://localhost:1420"},
+		{name: "preflight from the dev server when JUNE_DEV_ORIGIN names it", method: http.MethodOptions, origin: "http://localhost:1420", devOrigin: "http://localhost:1420", wantCode: http.StatusNoContent, wantACAO: "http://localhost:1420"},
 		{name: "the dev server gets nothing in a plain run", method: http.MethodOptions, origin: "http://localhost:1420", wantCode: http.StatusNoContent, wantACAO: ""},
 		{name: "request from the window with the token", method: http.MethodGet, origin: "http://tauri.localhost", token: "the-real-token", wantCode: http.StatusOK, wantACAO: "http://tauri.localhost", wantCalled: true},
 		{name: "request from the window without the token", method: http.MethodGet, origin: "tauri://localhost", wantCode: http.StatusUnauthorized, wantACAO: "tauri://localhost"},
@@ -209,7 +209,7 @@ func TestRequireIPCToken_CORSForTheWindow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("ORA_DEV_ORIGIN", tc.devOrigin)
+			t.Setenv("JUNE_DEV_ORIGIN", tc.devOrigin)
 			called := false
 			handler := requireIPCToken("the-real-token", func(w http.ResponseWriter, r *http.Request) {
 				called = true

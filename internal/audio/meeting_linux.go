@@ -28,7 +28,7 @@ type MeetingCapture struct {
 // Sharing the microphone with the voice agent needs no special handling: PulseAudio and PipeWire both fan one source out to every record stream attached to it, and this opens its own client rather than borrowing the agent's.
 // Input: two writers, one per stream. Output: a running capture, or an error if either stream could not be opened.
 func StartMeetingCapture(mic, system io.Writer) (*MeetingCapture, error) {
-	client, err := pulse.NewClient(pulse.ClientApplicationName("Ora meeting recorder"))
+	client, err := pulse.NewClient(pulse.ClientApplicationName("June meeting recorder"))
 	if err != nil {
 		return nil, fmt.Errorf("connect to pulse: %w", err)
 	}
@@ -40,12 +40,12 @@ func StartMeetingCapture(mic, system io.Writer) (*MeetingCapture, error) {
 		return nil, err
 	}
 
-	micStream, err := c.open(mic, "Ora meeting (microphone)")
+	micStream, err := c.open(mic, "June meeting (microphone)")
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("open microphone stream: %w", err)
 	}
-	sysStream, err := c.open(system, "Ora meeting (system audio)", pulse.RecordMonitor(sink))
+	sysStream, err := c.open(system, "June meeting (system audio)", pulse.RecordMonitor(sink))
 	if err != nil {
 		micStream.Close()
 		client.Close()
@@ -91,7 +91,7 @@ func meetingSink(client *pulse.Client) (*pulse.Sink, error) {
 	return def, nil
 }
 
-// activeSinkIndex returns the sink index of the first stream that is actually playing, skipping paused streams and Ora's own speech (which is not part of the meeting and would drag the recording back to whatever sink the assistant talks through).
+// activeSinkIndex returns the sink index of the first stream that is actually playing, skipping paused streams and June's own speech (which is not part of the meeting and would drag the recording back to whatever sink the assistant talks through).
 // Input: the sink inputs PulseAudio reports, and this process's PID as a string. Output: the sink index and true, or false when nothing else is playing.
 func activeSinkIndex(inputs []*proto.GetSinkInputInfoReply, ownPID string) (uint32, bool) {
 	for _, in := range inputs {

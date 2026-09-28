@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/recorder"
+	"june/internal/recorder"
 )
 
 // fakeMic stands in for the machine's microphone: it hands the capture goroutine a fixed list of PCM chunks and then waits for the context to be cancelled, the same shape audio.Microphone has.
@@ -522,7 +522,7 @@ func TestDictationStopWaitsForTheGPUWithoutSpendingItsClock(t *testing.T) {
 	}
 }
 
-// fakeDictateWhisper writes a stand-in for whisper-cli at $ORA_WHISPER_CPP and returns the path of the log each run appends to. The first run dies the way the real one died on 2026-09-06 — the Vulkan allocation failure on stderr and then SIGSEGV — and every run after it prints stdout and exits 0, unless alwaysFail is set, in which case every run dies. Each run logs whether the WAV it was handed is still on disk, so a file deleted between the attempts shows up.
+// fakeDictateWhisper writes a stand-in for whisper-cli at $JUNE_WHISPER_CPP and returns the path of the log each run appends to. The first run dies the way the real one died on 2026-09-06 — the Vulkan allocation failure on stderr and then SIGSEGV — and every run after it prints stdout and exits 0, unless alwaysFail is set, in which case every run dies. Each run logs whether the WAV it was handed is still on disk, so a file deleted between the attempts shows up.
 func fakeDictateWhisper(t *testing.T, stdout string, alwaysFail bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -544,7 +544,7 @@ func fakeDictateWhisper(t *testing.T, stdout string, alwaysFail bool) string {
 	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake whisper: %v", err)
 	}
-	t.Setenv("ORA_WHISPER_CPP", bin)
+	t.Setenv("JUNE_WHISPER_CPP", bin)
 	return log
 }
 

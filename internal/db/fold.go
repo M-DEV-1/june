@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"ora/internal/obs"
+	"june/internal/obs"
 )
 
 // Fold is one branch() subtask's result that couldn't be delivered into the
@@ -21,7 +21,7 @@ type Fold struct {
 
 // SaveFold persists a branch() result that couldn't be delivered live.
 func (s *Store) SaveFold(ctx context.Context, task, result string) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.SaveFold")
 	defer span.End()
 
@@ -42,7 +42,7 @@ func (s *Store) SaveFold(ctx context.Context, task, result string) (int64, error
 
 // UnconsumedFolds returns every fold not yet surfaced to the user, oldest first.
 func (s *Store) UnconsumedFolds(ctx context.Context) ([]Fold, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.UnconsumedFolds")
 	defer span.End()
 
@@ -72,7 +72,7 @@ func (s *Store) UnconsumedFolds(ctx context.Context) ([]Fold, error) {
 
 // ConsumeFold marks a fold as surfaced, so it doesn't repeat at the next session's handshake.
 func (s *Store) ConsumeFold(ctx context.Context, id int64) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.ConsumeFold")
 	defer span.End()
 

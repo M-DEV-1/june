@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/agent"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // newWindowServer wires a Server behind a real HTTP server with the conversation, task and day routes registered under the same patterns cmd/daemon.go gives them, so the path values ({id}, {date}) resolve exactly as they do in the daemon.
@@ -152,8 +152,8 @@ func TestAskStoresTurns(t *testing.T) {
 	if one.Turns[0].Role != "you" || one.Turns[0].Kind != "ask" {
 		t.Errorf("first turn = %+v, want your question", one.Turns[0])
 	}
-	if one.Turns[1].Role != "ora" || one.Turns[1].Text != "at half past four" {
-		t.Errorf("second turn = %+v, want Ora's answer", one.Turns[1])
+	if one.Turns[1].Role != "june" || one.Turns[1].Text != "at half past four" {
+		t.Errorf("second turn = %+v, want June's answer", one.Turns[1])
 	}
 	if len(one.Turns[1].Tools) != 1 || one.Turns[1].Tools[0] != "query_memory" {
 		t.Errorf("answer tools = %v, want the one tool the agent called", one.Turns[1].Tools)
@@ -211,7 +211,7 @@ func TestConversationErrorTurnCarriesAReason(t *testing.T) {
 	if _, err := store.AddTurn(ctx, id, "you", "are you there", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn you: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, id, "ora", "Error 503, high demand", "error", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, id, "june", "Error 503, high demand", "error", nil, nil); err != nil {
 		t.Fatalf("AddTurn error: %v", err)
 	}
 	_, srv := newWindowServer(t, &fakeAsker{}, store)
@@ -325,7 +325,7 @@ func TestAskWithAStaleConversationIs404(t *testing.T) {
 	}
 }
 
-// A failed ask used to leave the conversation with a question and no reply, which the app showed as silence and the user read as a hang. The failure is filed as Ora's turn of kind "error" so the thread shows it, and the error event still goes out.
+// A failed ask used to leave the conversation with a question and no reply, which the app showed as silence and the user read as a hang. The failure is filed as June's turn of kind "error" so the thread shows it, and the error event still goes out.
 func TestRun_StoresAFailedAskAsAnErrorTurn(t *testing.T) {
 	store, err := db.New(":memory:")
 	if err != nil {
@@ -348,8 +348,8 @@ func TestRun_StoresAFailedAskAsAnErrorTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConversationTurns: %v", err)
 	}
-	if len(turns) != 1 || turns[0].Role != "ora" || turns[0].Kind != "error" || turns[0].Text != "Error 503, high demand" {
-		t.Fatalf("turns = %+v, want one ora turn of kind error carrying the message", turns)
+	if len(turns) != 1 || turns[0].Role != "june" || turns[0].Kind != "error" || turns[0].Text != "Error 503, high demand" {
+		t.Fatalf("turns = %+v, want one june turn of kind error carrying the message", turns)
 	}
 	types := []string{}
 	for len(ch) > 0 {
@@ -360,7 +360,7 @@ func TestRun_StoresAFailedAskAsAnErrorTurn(t *testing.T) {
 	}
 }
 
-// On 2026-09-19 a WhatsApp task ran out of steps half done, the report was filed as an error turn, and history drops error turns, so the "Continue" that followed reached the model with nothing to continue and it resumed the Spotify song on screen instead. Running out of steps is where the work got to, so it is filed and shown as Ora's answer.
+// On 2026-09-19 a WhatsApp task ran out of steps half done, the report was filed as an error turn, and history drops error turns, so the "Continue" that followed reached the model with nothing to continue and it resumed the Spotify song on screen instead. Running out of steps is where the work got to, so it is filed and shown as June's answer.
 func TestRun_StoresAStepCapAsAnAnswer(t *testing.T) {
 	store, err := db.New(":memory:")
 	if err != nil {
@@ -385,7 +385,7 @@ func TestRun_StoresAStepCapAsAnAnswer(t *testing.T) {
 		t.Fatalf("ConversationTurns: %v", err)
 	}
 	if len(turns) != 1 || turns[0].Kind != "ask" || turns[0].Text != msg {
-		t.Fatalf("turns = %+v, want one ora answer carrying where it got to", turns)
+		t.Fatalf("turns = %+v, want one june answer carrying where it got to", turns)
 	}
 	var answer string
 	for len(ch) > 0 {

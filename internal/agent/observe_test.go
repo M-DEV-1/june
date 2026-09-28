@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
 func observingAgent(t *testing.T) (*Agent, *[]string) {
@@ -270,9 +270,9 @@ func TestExecuteTool_TypeText_TypesAndOptionallySubmits(t *testing.T) {
 	if len(f.typed) != 1 || f.typed[0] != "hello" || !strings.Contains(got, "typed") {
 		t.Errorf("typed = %v result = %q", f.typed, got)
 	}
-	a.executeTool(context.Background(), "type_text", map[string]any{"text": "ora", "enter": true})
-	if len(f.typed) != 2 || f.typed[1] != "ora\n" {
-		t.Errorf("typed = %v, want ora with a newline when enter is set", f.typed)
+	a.executeTool(context.Background(), "type_text", map[string]any{"text": "june", "enter": true})
+	if len(f.typed) != 2 || f.typed[1] != "june\n" {
+		t.Errorf("typed = %v, want june with a newline when enter is set", f.typed)
 	}
 	if got := a.executeTool(context.Background(), "type_text", map[string]any{}); !strings.Contains(got, "text") {
 		t.Errorf("type_text without text must say so, got %q", got)

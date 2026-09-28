@@ -79,7 +79,7 @@ function useSend({
       return;
     }
 
-    // A task Ora noticed owns no conversation until it is asked about; opening one is the same POST /conversations the rail's New chat used to make. A fresh chat draft owns none either, and names none at all: the daemon opens one of its own on an ask that names no conversation, which is what turns this composer's first message into the conversation itself.
+    // A task June noticed owns no conversation until it is asked about; opening one is the same POST /conversations the rail's New chat used to make. A fresh chat draft owns none either, and names none at all: the daemon opens one of its own on an ask that names no conversation, which is what turns this composer's first message into the conversation itself.
     let id: string | undefined;
     if (conversationId) id = conversationId;
     else if (start) id = await start();
@@ -193,7 +193,7 @@ export function Composer({
   conversationId,
   draftKey,
   brain,
-  placeholder = "Ask Ora, or give it something to do",
+  placeholder = "Ask June, or give it something to do",
   context,
   start,
   wide = false,
@@ -277,7 +277,7 @@ export function Composer({
             placeholder={
               dictateNotice ?? (ready ? placeholder : "Open a chat first, or start a new one")
             }
-            aria-label="Ask Ora"
+            aria-label="Ask June"
             className="min-h-0 resize-none border-0 bg-transparent px-2 py-1.5 text-lead font-medium shadow-none focus-visible:border-0 focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent dark:disabled:bg-transparent"
             onChange={(e) =>
               key &&

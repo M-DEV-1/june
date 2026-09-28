@@ -8,7 +8,7 @@ import (
 	"net"
 	"regexp"
 
-	"ora/internal/util"
+	"june/internal/util"
 
 	"google.golang.org/genai"
 )

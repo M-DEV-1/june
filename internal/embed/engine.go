@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // Engine is a LocalEmbedder that owns the embedding server as a child process. The daemon holds exactly one of these; nothing else may spawn the server, because two copies would fight over the same port.

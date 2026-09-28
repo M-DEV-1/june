@@ -58,7 +58,7 @@ function codeSpans(text: string): React.ReactNode[] {
   return out;
 }
 
-/** What to do before Ora can answer at all, drawn only while the daemon still says none of the four ways of answering text is set up. Input: none — it reads GET /settings itself, so it can sit at the top of Settings and inside the empty Chats pane without either of them passing it anything. Output: the panel, or nothing once the daemon reports an empty step list. "Check again" re-reads /settings, which is what a person does after running one of the commands in another window.
+/** What to do before June can answer at all, drawn only while the daemon still says none of the four ways of answering text is set up. Input: none — it reads GET /settings itself, so it can sit at the top of Settings and inside the empty Chats pane without either of them passing it anything. Output: the panel, or nothing once the daemon reports an empty step list. "Check again" re-reads /settings, which is what a person does after running one of the commands in another window.
  *
  * The steps are the daemon's own sentences and are shown verbatim as a real list; the window does not restate them, because then there would be two places to fix when a step changes.
  */
@@ -66,10 +66,10 @@ export function FirstRunPanel() {
   const { data: daemon, refetch, isFetching } = useSettingsQuery();
   const steps = daemon?.first_run?.steps ?? [];
   if (!steps.length) return null;
-  return <SetUpCard lead="Ora needs a model before it can answer." ways={steps.map(codeSpans)} checking={isFetching} onCheck={() => void refetch()} />;
+  return <SetUpCard lead="June needs a model before it can answer." ways={steps.map(codeSpans)} checking={isFetching} onCheck={() => void refetch()} />;
 }
 
-/** The chat page's card while GET /brains lists no brain signed in: every way Ora can be given one, since it works with whichever the user already has. Input: the daemon's data directory, whose env file is the one every ora command reads (loadEnvFiles in cmd/root.go). Output: the card. "Check again" re-reads /brains; a key added to the env file is only read when the daemon starts, which is why that line says to restart Ora. */
+/** The chat page's card while GET /brains lists no brain signed in: every way June can be given one, since it works with whichever the user already has. Input: the daemon's data directory, whose env file is the one every june command reads (loadEnvFiles in cmd/root.go). Output: the card. "Check again" re-reads /brains; a key added to the env file is only read when the daemon starts, which is why that line says to restart June. */
 export function NoBrainPanel({ dataDir }: { dataDir: string }) {
   const { refetch, isFetching } = useBrainsQuery();
   const ways = [
@@ -77,7 +77,7 @@ export function NoBrainPanel({ dataDir }: { dataDir: string }) {
     <>Codex: run <code>codex login</code>.</>,
     <>Antigravity: run <code>agy</code> and sign in.</>,
     <>Grok: run <code>grok</code> and sign in.</>,
-    <>Gemini: put <code>GEMINI_API_KEY=your-key</code> in <code>{`${dataDir}/env`}</code>, then restart Ora.</>,
+    <>Gemini: put <code>GEMINI_API_KEY=your-key</code> in <code>{`${dataDir}/env`}</code>, then restart June.</>,
   ];
   return <SetUpCard lead="No brain is signed in on this machine." ways={ways} checking={isFetching} onCheck={() => void refetch()} />;
 }
@@ -87,7 +87,7 @@ function SetUpCard({ lead, ways, checking, onCheck }: { lead: string; ways: Reac
   return (
     <Group>
       <div className="px-4 py-3.5">
-        <h2 className="text-doc text-foreground">Ora cannot answer yet</h2>
+        <h2 className="text-doc text-foreground">June cannot answer yet</h2>
         <p className="mt-1.5 text-read text-muted-foreground">{lead} Any one of these will do.</p>
         <ul className="mt-3 list-disc pl-5 text-read marker:text-muted-foreground [&_code]:font-mono [&_code]:text-[0.92em]">
           {ways.map((w, i) => (
@@ -386,7 +386,7 @@ function SearchSpend({ limits }: { limits?: Record<string, ProviderLimits> }) {
  */
 export function UsageLedger({ usage, up }: { usage?: Usage; up: boolean }) {
   const spent = usage && (usage.today.providers.length > 0 || usage.week.providers.length > 0 || usage.recent.length > 0);
-  if (!spent) return <Blank up={up} empty="Nothing asked yet" hint="No tokens have been spent on this machine. Ask Ora something and what it cost appears here." />;
+  if (!spent) return <Blank up={up} empty="Nothing asked yet" hint="No tokens have been spent on this machine. Ask June something and what it cost appears here." />;
   const max = (usage.days ?? []).reduce((m, d) => Math.max(m, d.total_tokens || 0), 0);
   const today = totals(usage.today);
   const week = totals(usage.week);
@@ -559,7 +559,7 @@ export function SettingsScreen() {
       </PageHeader>
       <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
         <Reading wide={wide}>
-          {/* Nothing else on this page matters while Ora cannot answer, so the steps go above the first group and disappear on their own once the daemon reports none left. */}
+          {/* Nothing else on this page matters while June cannot answer, so the steps go above the first group and disappear on their own once the daemon reports none left. */}
           {daemon?.first_run?.steps?.length ? (
             <div className="mb-8">
               <FirstRunPanel />
@@ -597,7 +597,7 @@ export function SettingsScreen() {
                     ))}
                   </div>
                 </Row>
-                <Row label="Watching the screen" hint="what Ora sees is what it can remember">
+                <Row label="Watching the screen" hint="what June sees is what it can remember">
                   <Switch checked={watching} aria-label="Watching the screen" onCheckedChange={(on) => void watch(on)} />
                 </Row>
                 <Row label="Recording meetings" hint="turned on in the config file, not from here">

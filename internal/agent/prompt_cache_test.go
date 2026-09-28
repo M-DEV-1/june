@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // geminiRequest is the part of one recorded GenerateContent body this file compares between rounds.
@@ -68,11 +68,11 @@ func TestAskText_ScreenAskSendsOnePrefixOnEveryRound(t *testing.T) {
 
 	history := HistoryFromTurns([]db.Turn{
 		{Role: "you", Text: "first question", Kind: "ask"},
-		{Role: "ora", Text: "first answer", Kind: "ask"},
+		{Role: "june", Text: "first answer", Kind: "ask"},
 		{Role: "you", Text: "second question", Kind: "ask"},
-		{Role: "ora", Text: "second answer", Kind: "ask"},
+		{Role: "june", Text: "second answer", Kind: "ask"},
 		{Role: "you", Text: "third question", Kind: "ask"},
-		{Role: "ora", Text: "third answer", Kind: "ask"},
+		{Role: "june", Text: "third answer", Kind: "ask"},
 	})
 	if _, err := a.askText(t.Context(), "gemini-test", history, "click the merge button"); err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestAskText_ScreenAskSendsOnePrefixOnEveryRound(t *testing.T) {
 	}
 }
 
-// The handshake the ask paths open with is what a provider's prompt cache has to match, and a cache can only match a prefix. Everything that reads the same on every ask therefore comes first — who Ora is, how it talks, this machine, the screen-task guidance — and the three things that change (the personal block, the memory lines, the clock) are the tail. Two asks a minute apart must agree on every byte up to that tail.
+// The handshake the ask paths open with is what a provider's prompt cache has to match, and a cache can only match a prefix. Everything that reads the same on every ask therefore comes first — who June is, how it talks, this machine, the screen-task guidance — and the three things that change (the personal block, the memory lines, the clock) are the tail. Two asks a minute apart must agree on every byte up to that tail.
 func TestHandshakeInstruction_OnlyTheTailChangesBetweenAsks(t *testing.T) {
 	const personal = "Personal context — things known for certain about the user and their world:\n  Their name is Vexil."
 	const contextStr = "  [working] Brave: some tab"

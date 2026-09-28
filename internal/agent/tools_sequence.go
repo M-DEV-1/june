@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
 const (

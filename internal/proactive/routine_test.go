@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // TestParseScheduleAcceptedForms checks every form ParseSchedule documents itself as accepting.

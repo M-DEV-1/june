@@ -7,12 +7,12 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"ora/internal/act"
+	"june/internal/act"
 	"strings"
 	"testing"
 	"time"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // shot is a flat grey picture, with one block painted over when block is set, encoded the way a capture is. The capture starts at 0,32 on the screen at scale 2, like the one lookingAgent hands out.

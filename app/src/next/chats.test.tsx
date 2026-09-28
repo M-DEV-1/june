@@ -46,7 +46,7 @@ const view: ConversationView = {
     },
     {
       id: "t2",
-      role: "ora",
+      role: "june",
       text: "She said Friday.",
       kind: "ask",
       evidence: [
@@ -63,7 +63,7 @@ const view: ConversationView = {
     },
     {
       id: "t3",
-      role: "ora",
+      role: "june",
       text: "the provider returned 529\nand a wall of json",
       kind: "error",
       evidence: [],
@@ -97,18 +97,18 @@ const brains: Brain[] = [
   },
 ];
 
-// A clean install, or one whose every login has lapsed, has nothing to answer with, and a question typed into the chat just failed. The chat page says so and lists every way Ora can be given a brain.
+// A clean install, or one whose every login has lapsed, has nothing to answer with, and a question typed into the chat just failed. The chat page says so and lists every way June can be given a brain.
 describe("with no brain signed in", () => {
   it("says so on the chat page and lists every way to sign one in", async () => {
     renderApp({
       conversations: summary,
       turns: { c1: view },
       brains: brains.map((b) => ({ ...b, signed_in: false })),
-      settings: { data_dir: "/home/you/.local/share/ora" },
+      settings: { data_dir: "/home/you/.local/share/june" },
     });
-    expect(await screen.findByText("Ora cannot answer yet")).toBeDefined();
+    expect(await screen.findByText("June cannot answer yet")).toBeDefined();
     const ways = Array.from(document.querySelectorAll("li")).map((li) => li.textContent);
-    for (const way of ["claude", "/login", "codex login", "agy", "grok", "GEMINI_API_KEY", "/home/you/.local/share/ora/env"])
+    for (const way of ["claude", "/login", "codex login", "agy", "grok", "GEMINI_API_KEY", "/home/you/.local/share/june/env"])
       expect(ways.some((w) => w?.includes(way)), way).toBe(true);
   });
 });
@@ -122,7 +122,7 @@ describe("a daemon that restarts mid-question", () => {
       { conversationId: "c1", open: (_onEvent, onReopen) => ((reopen = onReopen), () => {}) },
     );
     store.dispatch(progress.streamOpened());
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(box, "a question{Enter}");
     await userEvent.type(box, "the next one");
     await waitFor(() => expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true));
@@ -134,7 +134,7 @@ describe("a daemon that restarts mid-question", () => {
 });
 
 describe("the thread", () => {
-  it("draws what was said, and what Ora answered with the line saying how much it read", async () => {
+  it("draws what was said, and what June answered with the line saying how much it read", async () => {
     renderApp(
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
@@ -332,7 +332,7 @@ describe("asking a question", () => {
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
     );
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(box, "and what about the flights?{Enter}");
     expect(
       await screen.findByText("and what about the flights?"),
@@ -355,7 +355,7 @@ describe("asking a question", () => {
       { conversations: summary, turns: { c1: view }, fails: ["POST /ask"] },
       { conversationId: "c1" },
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await userEvent.type(box, "a long question worth not retyping{Enter}");
     expect(await screen.findByRole("status")).toHaveProperty(
       "textContent",
@@ -371,7 +371,7 @@ describe("asking a question", () => {
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await userEvent.type(box, "and what about the flights?{Enter}");
     await waitFor(() => expect(store.getState().progress.run?.askId).toBe("ask-1"));
 
@@ -386,7 +386,7 @@ describe("asking a question", () => {
       { conversations: summary, turns: { c1: view }, fails: ["POST /act"] },
       { conversationId: "c1" },
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await userEvent.type(box, "do: reorder the slides{Enter}");
     expect(await screen.findByRole("status")).toHaveProperty("textContent", "Could not start that job");
     await waitFor(() => expect(box.value).toBe("do: reorder the slides"));
@@ -404,9 +404,9 @@ describe("asking a question", () => {
     store.dispatch(
       progress.askAccepted({ askId: "ask-1", conversationId: "c1" }),
     );
-    // The question in flight says it is working with the dot grid, the one shape that means Ora is busy, and no words of its own.
+    // The question in flight says it is working with the dot grid, the one shape that means June is busy, and no words of its own.
     await waitFor(() =>
-      expect(screen.getAllByRole("img", { name: "Ora is working" })).toHaveLength(1),
+      expect(screen.getAllByRole("img", { name: "June is working" })).toHaveLength(1),
     );
     expect(screen.queryByText("working…")).toBeNull();
     store.dispatch(
@@ -438,14 +438,14 @@ describe("asking a question", () => {
     );
     expect(await screen.findByText("They are booked.")).toBeDefined();
     // Under the partial answer the same dot grid says the rest is still coming, in place of the old words.
-    expect(screen.getAllByRole("img", { name: "Ora is working" })).toHaveLength(1);
+    expect(screen.getAllByRole("img", { name: "June is working" })).toHaveLength(1);
     expect(screen.queryByText("still writing")).toBeNull();
   });
 
 });
 
 describe("a fresh chat draft", () => {
-  // The front door said "Pick a chat on the left, or start a new one", which is an instruction about the furniture rather than anything Ora has to offer. The design he approved opens with the face, the time of day, one line saying Ora has been keeping track, and a few things it can actually do.
+  // The front door said "Pick a chat on the left, or start a new one", which is an instruction about the furniture rather than anything June has to offer. The design he approved opens with the face, the time of day, one line saying June has been keeping track, and a few things it can actually do.
   it("greets by time of day on a new chat and offers something to do", async () => {
     const { store } = renderApp({ conversations: summary, turns: { c1: view } }, { conversationId: "c1" });
     store.dispatch(ui.chatDraftOpened());
@@ -472,7 +472,7 @@ describe("a fresh chat draft", () => {
       { conversationId: "c1" },
     );
     await userEvent.click(screen.getByRole("button", { name: "New chat" }));
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     expect((box as HTMLTextAreaElement).disabled).toBe(false);
     await waitFor(() => expect(screen.queryByText("She said Friday.")).toBeNull());
     await userEvent.type(box, "book the flight{Enter}");
@@ -495,7 +495,7 @@ describe("giving up a draft", () => {
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
     );
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(box, "and the flights?");
     await userEvent.keyboard("{Escape}");
     expect((box as HTMLTextAreaElement).value).toBe("");
@@ -507,7 +507,7 @@ describe("giving up a draft", () => {
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
     );
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(
       box,
       "and the flights?{Shift>}{Enter}{/Shift}book them too",
@@ -532,7 +532,7 @@ describe("dictating in the composer", () => {
     await waitFor(() =>
       expect(calls.find((c) => c.path === "/dictate/stop")?.body).toEqual({ id: "dictate-1" }),
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await waitFor(() => expect(box.value).toBe("book the flight"));
   });
 
@@ -545,7 +545,7 @@ describe("dictating in the composer", () => {
     await screen.findByRole("button", { name: "Stop dictation" });
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull());
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await waitFor(() => expect(box.value).toBe("yes"));
   });
 
@@ -554,7 +554,7 @@ describe("dictating in the composer", () => {
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await userEvent.click(box);
     await userEvent.keyboard(" ");
     await waitFor(() => expect(calls.find((c) => c.path === "/dictate/start")).toBeDefined());
@@ -581,7 +581,7 @@ describe("dictating in the composer", () => {
     store.dispatch(
       progress.eventArrived({ id: "dictate-1", type: "dictation", text: "book the flight to Zurich" }),
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await waitFor(() => expect(box.value).toBe("book the flight to Zurich"));
     expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull();
   });
@@ -591,7 +591,7 @@ describe("dictating in the composer", () => {
       { conversations: summary, turns: { c1: view }, dictateText: "and the hotel" },
       { conversationId: "c1" },
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await userEvent.type(box, "half a question");
     await userEvent.click(screen.getByRole("button", { name: "Dictate" }));
     await screen.findByRole("button", { name: "Stop dictation" });
@@ -608,7 +608,7 @@ describe("dictating in the composer", () => {
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
     );
-    const box = (await screen.findByLabelText("Ask Ora")) as HTMLTextAreaElement;
+    const box = (await screen.findByLabelText("Ask June")) as HTMLTextAreaElement;
     await userEvent.click(screen.getByRole("button", { name: "Dictate" }));
     await screen.findByRole("button", { name: "Stop dictation" });
 
@@ -625,7 +625,7 @@ describe("dictating in the composer", () => {
     await userEvent.click(screen.getByRole("button", { name: "Stop dictation" }));
     await waitFor(() => expect(stopped).toBe(true));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Stop dictation" })).toBeNull());
-    expect(box.getAttribute("placeholder")).toBe("Ask Ora, or give it something to do");
+    expect(box.getAttribute("placeholder")).toBe("Ask June, or give it something to do");
   });
 
   it("says on the composer's own placeholder, for a few seconds, when the daemon would not start a dictation", async () => {
@@ -634,7 +634,7 @@ describe("dictating in the composer", () => {
       { conversationId: "c1" },
     );
     await userEvent.click(await screen.findByRole("button", { name: "Dictate" }));
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await waitFor(() => expect(box.getAttribute("placeholder")).toBe("Could not start dictation"));
   });
 });
@@ -735,7 +735,7 @@ describe("starting a job", () => {
       { conversations: summary, turns: { c1: view } },
       { conversationId: "c1" },
     );
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(box, "do: reorder the slides{Enter}");
     // The goal now reads in two places at once and both are wanted: the turn it was asked in, and the sidebar's running strip, which is what keeps a job visible from another screen. This one is about the turn.
     const asked = await screen.findAllByText("reorder the slides");
@@ -914,7 +914,7 @@ describe("starting a job", () => {
       }),
     );
     expect(await screen.findByText("Which deck do you mean?")).toBeDefined();
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(box, "the review deck{Enter}");
     await waitFor(() =>
       expect(calls.find((c) => c.path === "/act/act-1/answer")?.body).toEqual(

@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/util"
+	"june/internal/config"
+	"june/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -47,7 +47,7 @@ var DefaultQuotaLimit = QuotaLimit{Limit: 20, Reserved: 8}
 // These belong in config.BrainConfig once another agent adds fields for them (for example DailyRequestLimit and ReservedForAsks per model, or a map keyed by model name); until then the daemon fills this from DefaultQuotaOptions.
 type QuotaOptions map[string]QuotaLimit
 
-// DefaultQuotaOptions is the ceiling observed in ora.log's 429 bodies and recorded in internal/config/gemini.go's comments: Google's free tier allows 20 requests a day for gemini-3.5-flash and 500 for gemini-3.5-flash-lite. 8 and 100 requests respectively stay reserved for interactive asks.
+// DefaultQuotaOptions is the ceiling observed in june.log's 429 bodies and recorded in internal/config/gemini.go's comments: Google's free tier allows 20 requests a day for gemini-3.5-flash and 500 for gemini-3.5-flash-lite. 8 and 100 requests respectively stay reserved for interactive asks.
 func DefaultQuotaOptions() QuotaOptions {
 	return QuotaOptions{
 		"gemini-3.5-flash":      {Limit: 20, Reserved: 8},

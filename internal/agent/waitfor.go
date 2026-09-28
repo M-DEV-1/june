@@ -3,11 +3,11 @@ package agent
 import (
 	"context"
 	"fmt"
-	"ora/internal/tracker"
+	"june/internal/tracker"
 	"strings"
 	"time"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
 // How wait_for watches for a change. Polling four hundred milliseconds apart is fast enough that a page settling in half a second costs half a round rather than a whole one, and slow enough that a five-second wait is a dozen accessibility walks rather than hundreds.

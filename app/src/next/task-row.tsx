@@ -20,7 +20,7 @@ export function TaskRow({ task, selected, now }: { task: Task; selected: boolean
   const [deleteTask] = useDeleteTaskMutation();
   const detail = taskDetail(task);
   const when = task.when ? shortWhen(task.when, now) : "";
-  // Only an action item Ora noticed can be dropped: the daemon answers 400 for a dropped task of the user's own, because user_tasks has nowhere to hold a third state.
+  // Only an action item June noticed can be dropped: the daemon answers 400 for a dropped task of the user's own, because user_tasks has nowhere to hold a third state.
   const droppable = task.source === "noticed";
 
   const set = async (status: TaskStatus) => {

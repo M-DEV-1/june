@@ -140,53 +140,53 @@ func TestConsumeFollowsTheDesktop(t *testing.T) {
 	}
 }
 
-// Opening Ora's hover must not make Ora the answer: the state keeps the last window that was not Ora's own and reports that one while Ora holds focus, so /context still names where the user came from. When Ora is dismissed and the window under it activates again, that window is the answer directly.
-func TestFocusStateReportsThePreviousWindowWhileOraHasFocus(t *testing.T) {
+// Opening June's hover must not make June the answer: the state keeps the last window that was not June's own and reports that one while June holds focus, so /context still names where the user came from. When June is dismissed and the window under it activates again, that window is the answer directly.
+func TestFocusStateReportsThePreviousWindowWhileJuneHasFocus(t *testing.T) {
 	chrome := aref{Name: ":1.3068", Path: "/org/a11y/atspi/accessible/1"}
-	ora := aref{Name: ":1.9001", Path: "/org/a11y/atspi/accessible/1"}
+	june := aref{Name: ":1.9001", Path: "/org/a11y/atspi/accessible/1"}
 	frame := aref{Name: ":1.9002", Path: "/org/a11y/atspi/accessible/1"}
 
 	var s focusState
 	s.apply("Activate", chrome, "Google Chrome", "Teams")
 	s.apply("Deactivate", chrome, "", "")
-	s.apply("Activate", ora, "ora", "Ora")
+	s.apply("Activate", june, "june", "June")
 
 	ref, app, ok := s.get()
 	if !ok || ref != chrome || app != "Google Chrome" {
-		t.Fatalf("with Ora focused get() = %v, %q, %v, want the Chrome window", ref, app, ok)
+		t.Fatalf("with June focused get() = %v, %q, %v, want the Chrome window", ref, app, ok)
 	}
 
-	// The XWayland frame process is Ora too, and must not displace the remembered window either.
-	s.apply("Activate", frame, "mutter-x11-frames", "Ora")
+	// The XWayland frame process is June too, and must not displace the remembered window either.
+	s.apply("Activate", frame, "mutter-x11-frames", "June")
 	if ref, app, ok := s.get(); !ok || ref != chrome || app != "Google Chrome" {
-		t.Fatalf("with the Ora frame focused get() = %v, %q, %v, want the Chrome window", ref, app, ok)
+		t.Fatalf("with the June frame focused get() = %v, %q, %v, want the Chrome window", ref, app, ok)
 	}
 
-	// A terminal that happens to be titled "Ora" is a real window and replaces it.
+	// A terminal that happens to be titled "June" is a real window and replaces it.
 	term := aref{Name: ":1.9003", Path: "/org/a11y/atspi/accessible/1"}
-	s.apply("Activate", term, "gnome-terminal", "Ora")
+	s.apply("Activate", term, "gnome-terminal", "June")
 	if ref, _, _ := s.get(); ref != term {
-		t.Fatalf("get() = %v, want the terminal: only the app name decides what is Ora", ref)
+		t.Fatalf("get() = %v, want the terminal: only the app name decides what is June", ref)
 	}
 }
 
-// When Ora's hover closes, the window under it must be the answer again. The desktop does not say so on its own: that window sent its deactivate when Ora took focus and sends no fresh activate when Ora goes away, so blanking the state on Ora's own deactivate left nothing focused at all until the user next switched applications — no episodes recorded, and every screen tool answering that nothing has focus.
-func TestFocusStateRestoresThePreviousWindowWhenOraGoesAway(t *testing.T) {
+// When June's hover closes, the window under it must be the answer again. The desktop does not say so on its own: that window sent its deactivate when June took focus and sends no fresh activate when June goes away, so blanking the state on June's own deactivate left nothing focused at all until the user next switched applications — no episodes recorded, and every screen tool answering that nothing has focus.
+func TestFocusStateRestoresThePreviousWindowWhenJuneGoesAway(t *testing.T) {
 	chrome := aref{Name: ":1.3068", Path: "/org/a11y/atspi/accessible/1"}
-	ora := aref{Name: ":1.9001", Path: "/org/a11y/atspi/accessible/1"}
+	june := aref{Name: ":1.9001", Path: "/org/a11y/atspi/accessible/1"}
 
 	var s focusState
 	s.apply("Activate", chrome, "Google Chrome", "Teams")
 	s.apply("Deactivate", chrome, "", "")
-	s.apply("Activate", ora, "ora", "Ora")
-	s.apply("Deactivate", ora, "", "")
+	s.apply("Activate", june, "june", "June")
+	s.apply("Deactivate", june, "", "")
 
 	ref, app, ok := s.get()
 	if !ok || ref != chrome || app != "Google Chrome" {
-		t.Fatalf("after Ora's hover closed get() = %v, %q, %v, want the Chrome window back", ref, app, ok)
+		t.Fatalf("after June's hover closed get() = %v, %q, %v, want the Chrome window back", ref, app, ok)
 	}
 
-	// Restoring is for Ora only: a real window's deactivate still means nothing holds focus, because the window that took over may simply publish no accessibility tree.
+	// Restoring is for June only: a real window's deactivate still means nothing holds focus, because the window that took over may simply publish no accessibility tree.
 	s.apply("Deactivate", chrome, "", "")
 	if ref, app, ok := s.get(); ok {
 		t.Fatalf("after the restored window was deactivated get() = %v, %q, %v, want nothing focused", ref, app, ok)
@@ -196,7 +196,7 @@ func TestFocusStateRestoresThePreviousWindowWhenOraGoesAway(t *testing.T) {
 // previous answers what the user was last in even when nothing holds focus, which is the state whenever focus moves to an application that publishes no accessibility tree: that window is deactivated, no activate follows, and get() rightly reports no focus. The screen observer needs the window anyway — without it it scans the whole desktop and picks a background one.
 func TestFocusStatePrevious(t *testing.T) {
 	chrome := aref{Name: ":1.3068", Path: "/org/a11y/atspi/accessible/1"}
-	ora := aref{Name: ":1.9001", Path: "/org/a11y/atspi/accessible/1"}
+	june := aref{Name: ":1.9001", Path: "/org/a11y/atspi/accessible/1"}
 
 	var s focusState
 	if _, _, ok := s.previous(); ok {
@@ -212,10 +212,10 @@ func TestFocusStatePrevious(t *testing.T) {
 		t.Fatalf("previous() = %v, %q, %v, want the Chrome window", ref, app, ok)
 	}
 
-	// Ora's own window never becomes the remembered one, or the hover would answer with itself.
-	s.apply("Activate", ora, "ora", "Ora")
+	// June's own window never becomes the remembered one, or the hover would answer with itself.
+	s.apply("Activate", june, "june", "June")
 	if ref, _, _ := s.previous(); ref != chrome {
-		t.Fatalf("previous() = %v after Ora took focus, want the Chrome window", ref)
+		t.Fatalf("previous() = %v after June took focus, want the Chrome window", ref)
 	}
 
 	// A window that has left the bus can no longer answer, so it is dropped from here too.
@@ -306,12 +306,12 @@ func TestActiveOrFallback(t *testing.T) {
 	files := aref{Name: ":1.4001", Path: "/org/a11y/atspi/accessible/1"}
 	brave := aref{Name: ":1.4002", Path: "/org/a11y/atspi/accessible/1"}
 
-	t.Run("a scan that finds only Ora's own window reports no focus", func(t *testing.T) {
+	t.Run("a scan that finds only June's own window reports no focus", func(t *testing.T) {
 		scan := func() (activeWindow, bool) {
-			return activeWindow{ref: aref{Name: ":1.9", Path: "/org/a11y/atspi/accessible/1"}, app: "ora", title: "Ora", focused: true}, true
+			return activeWindow{ref: aref{Name: ":1.9", Path: "/org/a11y/atspi/accessible/1"}, app: "june", title: "June", focused: true}, true
 		}
 		if _, _, _, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, false, scan); ok {
-			t.Fatal("activeOrFallback adopted Ora's own window as the focus")
+			t.Fatal("activeOrFallback adopted June's own window as the focus")
 		}
 	})
 
@@ -332,10 +332,10 @@ func TestActiveOrFallback(t *testing.T) {
 
 	t.Run("remembered window inactive and another active reports the other", func(t *testing.T) {
 		scan := func() (activeWindow, bool) {
-			return activeWindow{ref: brave, app: "brave", title: "Ora - GitHub"}, true
+			return activeWindow{ref: brave, app: "brave", title: "June - GitHub"}, true
 		}
 		ref, app, title, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", false, false, scan)
-		if !ok || ref != brave || app != "brave" || title != "Ora - GitHub" {
+		if !ok || ref != brave || app != "brave" || title != "June - GitHub" {
 			t.Fatalf("activeOrFallback = %v, %q, %q, %v, want the window the scan found active", ref, app, title, ok)
 		}
 	})
@@ -343,10 +343,10 @@ func TestActiveOrFallback(t *testing.T) {
 	// This is the failure the file documents and the code did not cover: Chrome hosting the Teams PWA keeps STATE_ACTIVE after losing focus, and the window that really took focus never announced itself, so the remembered window was reported for as long as the user worked elsewhere and the meeting's conversation was walked and stored the whole time.
 	t.Run("remembered window active but not focused loses to the window that claims the keyboard", func(t *testing.T) {
 		scan := func() (activeWindow, bool) {
-			return activeWindow{ref: brave, app: "brave", title: "Ora - GitHub", focused: true}, true
+			return activeWindow{ref: brave, app: "brave", title: "June - GitHub", focused: true}, true
 		}
 		ref, app, title, ok := activeOrFallback(files, "chrome", "Chat | Vexil | Microsoft Teams", true, false, scan)
-		if !ok || ref != brave || app != "brave" || title != "Ora - GitHub" {
+		if !ok || ref != brave || app != "brave" || title != "June - GitHub" {
 			t.Fatalf("activeOrFallback = %v, %q, %q, %v, want the window that claims the keyboard focus", ref, app, title, ok)
 		}
 	})
@@ -354,7 +354,7 @@ func TestActiveOrFallback(t *testing.T) {
 	// The other half of the same bit being untrustworthy: when nothing on the desktop claims the keyboard, a second window that merely kept STATE_ACTIVE is no better evidence than the remembered one, so the remembered window stands.
 	t.Run("remembered window active but not focused keeps its place against another stale window", func(t *testing.T) {
 		scan := func() (activeWindow, bool) {
-			return activeWindow{ref: brave, app: "brave", title: "Ora - GitHub"}, true
+			return activeWindow{ref: brave, app: "brave", title: "June - GitHub"}, true
 		}
 		ref, app, title, ok := activeOrFallback(files, "org.gnome.Nautilus", "Home", true, false, scan)
 		if !ok || ref != files || app != "org.gnome.Nautilus" || title != "Home" {

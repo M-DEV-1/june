@@ -1,4 +1,4 @@
-// brains.go holds GET /brains: which backends can answer for Ora on this machine, which of them the user is signed in to, and which one the daemon is configured to use. Every signal is read live — a login file on disk, a binary on PATH — so a brain nobody has set up says so instead of being offered.
+// brains.go holds GET /brains: which backends can answer for June on this machine, which of them the user is signed in to, and which one the daemon is configured to use. Every signal is read live — a login file on disk, a binary on PATH — so a brain nobody has set up says so instead of being offered.
 package ipc
 
 import (
@@ -13,11 +13,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/util"
+	"june/internal/agent"
+	"june/internal/util"
 
-	"ora/internal/brain"
-	"ora/internal/config"
+	"june/internal/brain"
+	"june/internal/config"
 )
 
 // ollamaListTimeout bounds the `ollama list` call this route makes, so a wedged local server cannot hang the window's settings screen.
@@ -48,14 +48,14 @@ type BrainView struct {
 type BrainLimits func(ctx context.Context, brainID string) (brain.UsageSnapshot, bool)
 
 // Update changes the config in place and persists it, both under the lock, so no request goroutine reads the struct between the change and the copy that goes to disk. Input: a function that edits the config it is handed. Output: whatever the save function returned.
-func (c *LiveConfig) Update(fn func(*config.OraConfig)) error {
+func (c *LiveConfig) Update(fn func(*config.JuneConfig)) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fn(c.cfg)
 	return c.save(*c.cfg)
 }
 
-// Brains builds the /brains handler. GET answers the brains Ora knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would; with "default": false as well it only remembers the model, and the default brain stays where it was. An id outside the known ones is 400 and changes nothing, and so is an id whose provider has no backend in internal/brain, with the reason in the body. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
+// Brains builds the /brains handler. GET answers the brains June knows about as JSON. POST {"brain": id, "model": string} picks one as the default and remembers its model, persists that to disk so it survives a restart, and answers with the same list GET would; with "default": false as well it only remembers the model, and the default brain stays where it was. An id outside the known ones is 400 and changes nothing, and so is an id whose provider has no backend in internal/brain, with the reason in the body. Input: the config accessor shared with the rest of the daemon, so a POST's change is visible everywhere and no two request goroutines touch the struct at once, and the usage lookup for the rows' limit bars. Output: the handler.
 func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -86,7 +86,7 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 				// The router answers a question with the picked brain first from this moment, not from the next daemon start.
 				agent.SetPreferredProvider(provider)
 			}
-			err := cfg.Update(func(c *config.OraConfig) {
+			err := cfg.Update(func(c *config.JuneConfig) {
 				if makeDefault {
 					c.Brain.Provider = provider
 				}
@@ -114,12 +114,12 @@ func Brains(cfg *LiveConfig, limitsFor BrainLimits) http.HandlerFunc {
 }
 
 // writeBrains writes the brain rows for cfg as JSON, the body both GET and POST /brains answer with.
-func writeBrains(ctx context.Context, w http.ResponseWriter, cfg config.OraConfig, limitsFor BrainLimits) {
+func writeBrains(ctx context.Context, w http.ResponseWriter, cfg config.JuneConfig, limitsFor BrainLimits) {
 	home, _ := os.UserHomeDir()
 	util.WriteJSON(w, map[string]any{"brains": brainList(ctx, cfg, home, onPath, limitsFor)})
 }
 
-// providerForBrainID maps a brain id to the BrainConfig provider that should answer ORA's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every id gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's has no backend at all, which is why brainList marks that row unavailable rather than letting a pick land on a provider that cannot answer. ok is false when id names none of the brains Ora knows about, and the caller must leave the config untouched in that case.
+// providerForBrainID maps a brain id to the BrainConfig provider that should answer June's one-shot duties when that brain is picked as the default, using only the provider constants config.go declares. Every id gets its own distinct provider, so POST /brains never persists a different brain's provider under this one's name — codex's row answers for real once internal/brain.FromConfig is given an asker to call, and ollama's has no backend at all, which is why brainList marks that row unavailable rather than letting a pick land on a provider that cannot answer. ok is false when id names none of the brains June knows about, and the caller must leave the config untouched in that case.
 func providerForBrainID(id string) (provider string, ok bool) {
 	switch id {
 	case "claude":
@@ -139,8 +139,8 @@ func providerForBrainID(id string) (provider string, ok bool) {
 	}
 }
 
-// brainIDs are the brains Ora knows about, in the order the picker draws them. GET /usage keys its per-provider allowance windows by the same ids, so the settings page and the picker name a brain the same way.
-// Claude is last on purpose: that subscription is the user's own coding workhorse, so Ora treats it as the fallback the ask path already makes it (Gemini, then Codex, then Claude — see internal/agent/ask.go), not as the brain a picker offers first.
+// brainIDs are the brains June knows about, in the order the picker draws them. GET /usage keys its per-provider allowance windows by the same ids, so the settings page and the picker name a brain the same way.
+// Claude is last on purpose: that subscription is the user's own coding workhorse, so June treats it as the fallback the ask path already makes it (Gemini, then Codex, then Claude — see internal/agent/ask.go), not as the brain a picker offers first.
 var brainIDs = []string{"antigravity", "gemini", "codex", "grok", "ollama", "claude"}
 
 // onPath reports whether a binary of that name can be run from this process's PATH.
@@ -150,7 +150,7 @@ func onPath(name string) bool {
 }
 
 // brainList builds the rows. Input: a context for the limits lookup, the config (for the default brain and the Gemini model), the home directory the login files live under, the PATH check — both injected so the tests read a temporary home and never shell out — and the allowance lookup, which may be nil. Output: the rows in the order the window draws them, with signed_in false on any brain internal/brain cannot actually answer with and limits_note saying why.
-func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(string) bool, limitsFor BrainLimits) []BrainView {
+func brainList(ctx context.Context, cfg config.JuneConfig, home string, has func(string) bool, limitsFor BrainLimits) []BrainView {
 	def := defaultBrainID(cfg.Brain.Provider)
 	claudeAccount := plainField(agent.ClaudeCredentialsPath(home), "claudeAiOauth", "subscriptionType")
 	codexAccount := plainField(agent.CodexAuthPath(home), "", "auth_mode")
@@ -185,7 +185,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 			Name:     "Gemini",
 			SignedIn: os.Getenv("GEMINI_API_KEY") != "",
 			Models:   geminiModels(cfg.Brain),
-			Note:     "Gemini answers on the metered API key in ~/.config/ora/env, which has a free tier that a day of duties can run through; the model comes from ora-config.json.",
+			Note:     "Gemini answers on the metered API key in ~/.config/june/env, which has a free tier that a day of duties can run through; the model comes from june-config.json.",
 		},
 		{
 			ID:       "codex",
@@ -193,7 +193,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 			SignedIn: util.Exists(agent.CodexAuthPath(home)),
 			Account:  codexAccount,
 			Models:   []string{"gpt-5.5", "gpt-5.6-luna"},
-			Note:     "OpenAI endorses using a Codex login from open-source harnesses, so Ora may call it under the plan the user already pays for.",
+			Note:     "OpenAI endorses using a Codex login from open-source harnesses, so June may call it under the plan the user already pays for.",
 		},
 		{
 			ID:       "grok",
@@ -215,7 +215,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 			SignedIn: util.Exists(agent.ClaudeCredentialsPath(home)),
 			Account:  claudeAccount,
 			Models:   []string{"haiku", "sonnet", "opus"},
-			Note:     "Ora runs Claude through Anthropic's own command line, because a third-party login is billed as extra usage on top of the subscription. It is drawn last because the same subscription is the user's own coding workhorse, so Ora spends it only when the others are out.",
+			Note:     "June runs Claude through Anthropic's own command line, because a third-party login is billed as extra usage on top of the subscription. It is drawn last because the same subscription is the user's own coding workhorse, so June spends it only when the others are out.",
 		},
 	}
 
@@ -258,7 +258,7 @@ func brainList(ctx context.Context, cfg config.OraConfig, home string, has func(
 }
 
 // modelFor is the model to show already chosen for a brain row. Input: the row's id, the config, and the id of the default brain. Output: whatever POST /brains last set for that id; failing that, the model BrainConfig itself carries when this row is the one the daemon is actually configured to use, so a config written before BrainModels existed still shows correctly; otherwise "".
-func modelFor(id string, cfg config.OraConfig, def string) string {
+func modelFor(id string, cfg config.JuneConfig, def string) string {
 	if m := cfg.BrainModels[id]; m != "" {
 		return m
 	}

@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // shadowTimeout bounds one shadow brain call. Generous: a local Q2_K quantised model at roughly 76 tokens/second on a long dream prompt can take minutes, and getting the full reasoning trace out is the whole point of running it.

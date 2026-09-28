@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // stepResultRuneCap bounds how many runes of a tool's result are kept per step, so a chatty tool (observe_screen listing a long page) cannot make one run's steps_json unbounded.

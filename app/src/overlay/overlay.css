@@ -1,8 +1,8 @@
 /* The drawing layer's page. Everything under it must show through, so nothing here paints a background and nothing here takes a pointer event; the window itself is click-through as well, set from Rust.
- * The primitives are Clicky's, in Ora's colours: a small triangle buddy that flies to a thing and then draws on it, solid strokes for underlines and arrows, dashes for spotlights and drop areas, and a pill for words. There is no box around the element and nothing dims the rest of the screen. Every animation moves only transform, opacity and a dash offset, which a compositor can do on its own, so the drawing keeps to the screen's own frame rate. */
+ * The primitives are Clicky's, in June's colours: a small triangle buddy that flies to a thing and then draws on it, solid strokes for underlines and arrows, dashes for spotlights and drop areas, and a pill for words. There is no box around the element and nothing dims the rest of the screen. Every animation moves only transform, opacity and a dash offset, which a compositor can do on its own, so the drawing keeps to the screen's own frame rate. */
 
 :root {
-  /* The colour of everything Ora draws. The page sets it from the mood of the event: Ora's own purple when it is only looking, orange when it is showing you something, red when a press is coming, green when a thing is done. Every stroke carries a dark shadow and a light hairline so any of them reads on whatever is underneath. */
+  /* The colour of everything June draws. The page sets it from the mood of the event: June's own purple when it is only looking, orange when it is showing you something, purple again when a press is coming, green when a thing is done. Every stroke carries a dark shadow and a light hairline so any of them reads on whatever is underneath. */
   --ink: #7b68f5;
   /* How long a change of mood takes to tween. */
   --mood: 200ms;
@@ -108,7 +108,7 @@ body {
   border-radius: 6px;
   padding: 3px 8px;
   transition: background-color var(--mood) ease;
-  /* Clicky's own speech bubble glows in its cursor's colour (OverlayWindow.swift:270-278: a shadow filled with DS.Colors.overlayCursorBlue, 6pt radius at rest); this pill picks up the same colour rather than the plain black Ora's marks use, so the thing saying what the ink is about visibly belongs to the ink. */
+  /* Clicky's own speech bubble glows in its cursor's colour (OverlayWindow.swift:270-278: a shadow filled with DS.Colors.overlayCursorBlue, 6pt radius at rest); this pill picks up the same colour rather than the plain black June's marks use, so the thing saying what the ink is about visibly belongs to the ink. */
   box-shadow:
     0 0 0 1px rgb(255 255 255 / 30%),
     0 2px 8px rgb(0 0 0 / 35%),
@@ -172,7 +172,7 @@ body {
   }
 }
 
-/* Ora's buddy: a small solid triangle in whatever colour the mood is, with a faint light outline and a soft shadow under it. No glow: it is what takes the eye to the target and draws the ink, not the thing the eye is meant to stop on. Its own coordinates have the point at 0,0, and the negative margins put that point wherever a transform translates the element to. */
+/* June's buddy: a small solid triangle in whatever colour the mood is, with a faint light outline and a soft shadow under it. No glow: it is what takes the eye to the target and draws the ink, not the thing the eye is meant to stop on. Its own coordinates have the point at 0,0, and the negative margins put that point wherever a transform translates the element to. */
 #pointer {
   position: absolute;
   left: 0;
@@ -182,7 +182,7 @@ body {
   transform-origin: 50% 50%;
   transition: opacity 380ms ease;
   will-change: transform, opacity;
-  /* Clicky's file header calls its own pointer "the blue glowing cursor" and draws that glow as a shadow filled with the cursor's own colour, 8pt radius at rest (OverlayWindow.swift:5, :309); this is that same coloured glow behind Ora's ordinary black drop-shadows. */
+  /* Clicky's file header calls its own pointer "the blue glowing cursor" and draws that glow as a shadow filled with the cursor's own colour, 8pt radius at rest (OverlayWindow.swift:5, :309); this is that same coloured glow behind June's ordinary black drop-shadows. */
   filter: drop-shadow(0 1px 2px rgb(0 0 0 / 45%)) drop-shadow(0 3px 8px rgb(0 0 0 / 25%)) drop-shadow(0 0 8px var(--ink));
 }
 

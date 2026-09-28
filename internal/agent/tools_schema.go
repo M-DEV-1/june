@@ -5,7 +5,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // drawShapeProperties are the fields one shape takes. The flat form of the draw tool and every entry of its shapes array share this one definition, so the two forms cannot drift apart and a model that learned one has learned the other.
@@ -47,8 +47,8 @@ func drawParameters() *genai.Schema {
 	}
 }
 
-// toolDefinitions returns ORA's own function declarations for the Live API.
-// Every declaration is NON_BLOCKING. An unset Behavior means BLOCKING, which tells the Live API to freeze the conversation for the whole duration of a tool call — the model stops speaking and stops listening until the result lands, so a two-second memory lookup becomes two seconds of dead air on a voice call. NON_BLOCKING keeps the model talking and listening while the call runs; the result is folded back in later, at the moment picked by scheduleFor in connect.go. Ora's own tool execution was already off the receive loop (see runToolCall), so this changes nothing about the transport — only the model-level contract.
+// toolDefinitions returns June's own function declarations for the Live API.
+// Every declaration is NON_BLOCKING. An unset Behavior means BLOCKING, which tells the Live API to freeze the conversation for the whole duration of a tool call — the model stops speaking and stops listening until the result lands, so a two-second memory lookup becomes two seconds of dead air on a voice call. NON_BLOCKING keeps the model talking and listening while the call runs; the result is folded back in later, at the moment picked by scheduleFor in connect.go. June's own tool execution was already off the receive loop (see runToolCall), so this changes nothing about the transport — only the model-level contract.
 func toolDefinitions() []*genai.Tool {
 	return []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
@@ -254,7 +254,7 @@ func toolDefinitions() []*genai.Tool {
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "query_memory",
 				Description: "Topical search over memory (moments, facts, arcs, period summaries). " +
-					"It searches Ora's record of what the user has already done: it is not a web search and it never reaches or opens anything, so it can no more find a page than remember one nobody visited. For anything on the screen now, or anywhere to get to, use observe_screen and the screen tools. " +
+					"It searches June's record of what the user has already done: it is not a web search and it never reaches or opens anything, so it can no more find a page than remember one nobody visited. For anything on the screen now, or anywhere to get to, use observe_screen and the screen tools. " +
 					"Moments (screen observations) rank with recency; facts/notes do not expire. " +
 					"Use app to restrict to one application (Slack, Firefox, Code). " +
 					"Whenever the question is anchored to a time, a day, a part of a day, a range, pass since/until: " +
@@ -279,7 +279,7 @@ func toolDefinitions() []*genai.Tool {
 			{
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "query_store",
-				Description: "Run one read-only SQL query straight against Ora's sqlite store, for structural and aggregate questions that a relevance-ranked search cannot answer, counts, group-bys, joins, \"which meetings did I attend today\", \"what hour do I usually stop working\". " +
+				Description: "Run one read-only SQL query straight against June's sqlite store, for structural and aggregate questions that a relevance-ranked search cannot answer, counts, group-bys, joins, \"which meetings did I attend today\", \"what hour do I usually stop working\". " +
 					"query_memory searches by meaning and ranks by relevance; this reads the tables directly, so use it whenever the real answer is a COUNT, a GROUP BY, a MIN/MAX, or a join across tables rather than the ten most-relevant rows. " +
 					"The connection itself is read-only, INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA-writes fail at the database, not by a filter on your text, so only SELECT, PRAGMA table_info(...), and EXPLAIN can do anything. " +
 					"Exactly one statement per call, no trailing statements after a semicolon. " +
@@ -406,7 +406,7 @@ func toolDefinitions() []*genai.Tool {
 			{
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "revise",
-				Description: "Fix or remove something Ora remembered wrong, or something on the task list: a note, an action item, a thread, or a task. " +
+				Description: "Fix or remove something June remembered wrong, or something on the task list: a note, an action item, a thread, or a task. " +
 					"Look it up first with query_memory or recall to get its ref, the \"[note#N]\" or \"[thread#N]\" a result showed you, then call this. A task's ref is the \"task#N\" add_task handed back, or its id in user_tasks. " +
 					"Pass content to correct the text. For an action item, pass state (open, done, or dropped) instead, never leave a task the user says is done still open, and priority (high, normal, or low) when they say how much it matters. " +
 					"Pass remove to delete a note or a task entirely (a thread cannot be removed, only corrected). A task the user says to drop is deleted, since the list has nowhere to keep a dropped one. " +
@@ -440,7 +440,7 @@ func toolDefinitions() []*genai.Tool {
 	}}
 }
 
-// liveTools returns every tool exposed to the Live API session: ORA's own FunctionDeclarations (shell_exec, query_memory, save_note, etc.) plus Gemini's native GoogleSearch grounding tool, so Ora can look something up instead of guessing from memory.
+// liveTools returns every tool exposed to the Live API session: June's own FunctionDeclarations (shell_exec, query_memory, save_note, etc.) plus Gemini's native GoogleSearch grounding tool, so June can look something up instead of guessing from memory.
 // Verified live (2026-07-25) that both tool types work together on config.VoiceModel() (gemini-2.5-flash-native-audio-preview-12-2025) — not guaranteed on every Gemini model/endpoint.
 // GoogleSearch calls are grounded server-side by Gemini and never surface as a ToolCall, so they don't show up in the TUI's live tool status line the way the FunctionDeclarations tools do.
 func liveTools() []*genai.Tool {

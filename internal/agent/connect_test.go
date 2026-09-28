@@ -3,11 +3,11 @@ package agent
 import (
 	"context"
 	"errors"
+	"june/internal/act"
+	"june/internal/db"
+	"june/internal/tracker"
 	"log/slog"
 	"math"
-	"ora/internal/act"
-	"ora/internal/db"
-	"ora/internal/tracker"
 	"runtime"
 	"strings"
 	"sync"
@@ -69,7 +69,7 @@ func TestBuildHandshakeContext_NoBufferProvider_IsNoOp(t *testing.T) {
 	}
 }
 
-// TestRunToolCall_SchedulingFollowsSpeakingState proves the scheduling actually sent over the wire tracks a.speaker's amplitude at send time, not a fixed table. High amplitude (Ora audibly speaking) must produce WHEN_IDLE so her sentence isn't cut off; near-zero amplitude (she's quiet) must produce INTERRUPT so the waiting user hears the answer right away.
+// TestRunToolCall_SchedulingFollowsSpeakingState proves the scheduling actually sent over the wire tracks a.speaker's amplitude at send time, not a fixed table. High amplitude (June audibly speaking) must produce WHEN_IDLE so her sentence isn't cut off; near-zero amplitude (she's quiet) must produce INTERRUPT so the waiting user hears the answer right away.
 func TestRunToolCall_SchedulingFollowsSpeakingState(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -126,7 +126,7 @@ func TestFormatFocusHits_TruncatesOverlongContent(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_ModelTurn_ForwardsThoughtButNotFinalText verifies receiveLoop still forwards Thought:true parts (tagged via genai's own Part.Thought bit, not content-sniffed) but no longer forwards non-thought ModelTurn text — those are incomplete fragments under ResponseModalities=[Audio]; OutputTranscription (see TestReceiveLoop_OutputTranscription_StreamsAsOraText) is the sole source of ora's final text now.
+// TestReceiveLoop_ModelTurn_ForwardsThoughtButNotFinalText verifies receiveLoop still forwards Thought:true parts (tagged via genai's own Part.Thought bit, not content-sniffed) but no longer forwards non-thought ModelTurn text — those are incomplete fragments under ResponseModalities=[Audio]; OutputTranscription (see TestReceiveLoop_OutputTranscription_StreamsAsJuneText) is the sole source of june's final text now.
 func TestReceiveLoop_ModelTurn_ForwardsThoughtButNotFinalText(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
 
@@ -169,8 +169,8 @@ func TestReceiveLoop_ModelTurn_ForwardsThoughtButNotFinalText(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_OutputTranscription_StreamsAsOraText verifies the transcript of Ora's own spoken audio (ServerContent.OutputTranscription, enabled at handshake since the config landed) is forwarded to TextResponseChan as ordinary ora text. With ResponseModalities=[Audio], ModelTurn text parts are incomplete fragments — this transcription stream is the only complete text form of what Ora actually said, so it's what the TUI renders.
-func TestReceiveLoop_OutputTranscription_StreamsAsOraText(t *testing.T) {
+// TestReceiveLoop_OutputTranscription_StreamsAsJuneText verifies the transcript of June's own spoken audio (ServerContent.OutputTranscription, enabled at handshake since the config landed) is forwarded to TextResponseChan as ordinary june text. With ResponseModalities=[Audio], ModelTurn text parts are incomplete fragments — this transcription stream is the only complete text form of what June actually said, so it's what the TUI renders.
+func TestReceiveLoop_OutputTranscription_StreamsAsJuneText(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
 	fs := &fakeLiveSession{
 		msgCh:     make(chan *genai.LiveServerMessage, 2),
@@ -220,15 +220,15 @@ func TestReceiveLoop_Interrupted_EmitsSystemStoppedChunk(t *testing.T) {
 		if chunk.Sender == SenderYou {
 			chunk = <-a.TextResponseChan
 		}
-		if chunk.Text != "[ora stopped]" || chunk.Sender != SenderSystem {
-			t.Errorf("expected {Text: \"[ora stopped]\", Sender: %q}, got %+v", SenderSystem, chunk)
+		if chunk.Text != "[june stopped]" || chunk.Sender != SenderSystem {
+			t.Errorf("expected {Text: \"[june stopped]\", Sender: %q}, got %+v", SenderSystem, chunk)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the interrupted chunk on TextResponseChan")
 	}
 }
 
-// TestReceiveLoop_InputFragmentsNeverFinished_FlushedAsYouBeforeOutputTranscription is WP10 Part A: current Live API model versions never set InputTranscription.Finished (documented: googleapis/js-genai#1429 — only text fragments arrive, the finished flag never updates), so waiting on it exclusively left the accumulated utterance stuck in the buffer forever — the user's own speech never rendered ("no way to know if Ora heard me"). The fix flushes the pending buffer as a SenderYou chunk on the first sign the model is responding; here that's the first OutputTranscription fragment. The "you" chunk must arrive before the ora chunk that triggered the flush.
+// TestReceiveLoop_InputFragmentsNeverFinished_FlushedAsYouBeforeOutputTranscription is WP10 Part A: current Live API model versions never set InputTranscription.Finished (documented: googleapis/js-genai#1429 — only text fragments arrive, the finished flag never updates), so waiting on it exclusively left the accumulated utterance stuck in the buffer forever — the user's own speech never rendered ("no way to know if June heard me"). The fix flushes the pending buffer as a SenderYou chunk on the first sign the model is responding; here that's the first OutputTranscription fragment. The "you" chunk must arrive before the june chunk that triggered the flush.
 func TestReceiveLoop_InputFragmentsNeverFinished_FlushedAsYouBeforeOutputTranscription(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -264,7 +264,7 @@ func TestReceiveLoop_InputFragmentsNeverFinished_FlushedAsYouBeforeOutputTranscr
 		t.Fatalf("expected the first chunk to be the flushed you-utterance, got %+v", got)
 	}
 	if got[1].Sender != "" || got[1].Text != "You're watching Suits." {
-		t.Errorf("expected the second chunk to be the ora reply, got %+v", got[1])
+		t.Errorf("expected the second chunk to be the june reply, got %+v", got[1])
 	}
 }
 
@@ -297,7 +297,7 @@ func TestReceiveLoop_InputFragmentsNeverFinished_FlushedAsYouBeforeToolCall(t *t
 	}
 }
 
-// TestReceiveLoop_NoInputFragments_OutputTranscription_NoEmptyYouChunk verifies a typed (non-voice) turn — no InputTranscription fragments ever accumulated — doesn't emit a spurious empty "you" chunk when the model responds; only the ora chunk should appear.
+// TestReceiveLoop_NoInputFragments_OutputTranscription_NoEmptyYouChunk verifies a typed (non-voice) turn — no InputTranscription fragments ever accumulated — doesn't emit a spurious empty "you" chunk when the model responds; only the june chunk should appear.
 func TestReceiveLoop_NoInputFragments_OutputTranscription_NoEmptyYouChunk(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -319,7 +319,7 @@ func TestReceiveLoop_NoInputFragments_OutputTranscription_NoEmptyYouChunk(t *tes
 			t.Fatalf("expected no you-chunk for a typed turn with no input fragments, got %+v", chunk)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the ora chunk")
+		t.Fatal("timed out waiting for the june chunk")
 	}
 
 	select {
@@ -366,10 +366,10 @@ func TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject(t *testing.T) 
 	}
 }
 
-// fakeSpeaker is a no-op audio.Speaker for receiveLoop tests that exercise the barge-in (Interrupted) path, which calls Flush() on the real speaker — a nil speaker panics there. It counts Flush calls so a test can assert that a tool-delivery interrupt does NOT throw away the audio Ora is in the middle of playing.
+// fakeSpeaker is a no-op audio.Speaker for receiveLoop tests that exercise the barge-in (Interrupted) path, which calls Flush() on the real speaker — a nil speaker panics there. It counts Flush calls so a test can assert that a tool-delivery interrupt does NOT throw away the audio June is in the middle of playing.
 type fakeSpeaker struct {
 	flushes atomic.Int32
-	// amplitude is what CurrentAmplitude reports — the barge-in path uses it to tell a real interruption from the room's own noise coming back through the mic while Ora is audibly speaking.
+	// amplitude is what CurrentAmplitude reports — the barge-in path uses it to tell a real interruption from the room's own noise coming back through the mic while June is audibly speaking.
 	amplitude atomic.Uint64
 }
 
@@ -742,7 +742,7 @@ func TestRunToolCall_PanicIsRecoveredAndReportedAsAFailedToolCall(t *testing.T) 
 	}
 }
 
-// TestStripControlTokens covers a real "ora said" log line that came back as the literal text "<ctrl46><ctrl46>" — a control-token artifact that leaked out of OutputTranscription instead of being consumed internally by the Live API.
+// TestStripControlTokens covers a real "june said" log line that came back as the literal text "<ctrl46><ctrl46>" — a control-token artifact that leaked out of OutputTranscription instead of being consumed internally by the Live API.
 func TestStripControlTokens(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -910,7 +910,7 @@ func TestReceiveLoop_Muted_IgnoresBargeIn(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_TypedTurnInterrupted_SaysInterruptedByVoice is bug 2's mic-on half: the Live API cancels the generation server-side and it cannot be resumed, so the answer to a TYPED question just stops mid-sentence. The transcript must say why instead of showing the generic spoken-barge-in marker, which reads as "you interrupted Ora" when the user typed and never spoke.
+// TestReceiveLoop_TypedTurnInterrupted_SaysInterruptedByVoice is bug 2's mic-on half: the Live API cancels the generation server-side and it cannot be resumed, so the answer to a TYPED question just stops mid-sentence. The transcript must say why instead of showing the generic spoken-barge-in marker, which reads as "you interrupted June" when the user typed and never spoke.
 func TestReceiveLoop_TypedTurnInterrupted_SaysInterruptedByVoice(t *testing.T) {
 	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
 	a.markTypedTurn()
@@ -988,7 +988,7 @@ func TestReceiveLoop_TurnBoundary_ClearsTypedTurn(t *testing.T) {
 
 // --- tool-delivery interrupts vs. real barge-ins ---
 
-// TestReceiveLoop_InterruptAfterToolResponse_IsNotABargeIn is the voice bug from the 2026-08-28 03:01-03:06 session: every FunctionResponse Ora sent was followed 72-80ms later by "barge-in detected". Sending a tool result with INTERRUPT scheduling asks the Live server to interrupt its own generation to fold the result in, and the server reports that with the same ServerContent.Interrupted flag a user barge-in uses. Treating it as a barge-in flushed the audio Ora was still speaking and wrote "[ora stopped]" into the transcript, so the user heard the preamble and then nothing.
+// TestReceiveLoop_InterruptAfterToolResponse_IsNotABargeIn is the voice bug from the 2026-08-28 03:01-03:06 session: every FunctionResponse June sent was followed 72-80ms later by "barge-in detected". Sending a tool result with INTERRUPT scheduling asks the Live server to interrupt its own generation to fold the result in, and the server reports that with the same ServerContent.Interrupted flag a user barge-in uses. Treating it as a barge-in flushed the audio June was still speaking and wrote "[june stopped]" into the transcript, so the user heard the preamble and then nothing.
 func TestReceiveLoop_InterruptAfterToolResponse_IsNotABargeIn(t *testing.T) {
 	sp := &fakeSpeaker{}
 	a := NewAgent(nil, sp, nil, nil, "")
@@ -1071,7 +1071,7 @@ func TestReceiveLoop_InterruptWithSpeechAfterToolResponse_IsStillABargeIn(t *tes
 	for !sawNotice {
 		select {
 		case chunk := <-a.TextResponseChan:
-			if chunk.Sender == SenderSystem && strings.Contains(chunk.Text, "ora stopped") {
+			if chunk.Sender == SenderSystem && strings.Contains(chunk.Text, "june stopped") {
 				sawNotice = true
 			}
 		case <-time.After(2 * time.Second):
@@ -1194,8 +1194,8 @@ func waitForLog(t *testing.T, c *logCapture, want string) {
 	t.Fatalf("timed out waiting for a log line containing %q; got:\n%s", want, c.String())
 }
 
-// TestReceiveLoop_TurnComplete_LogsWhatOraSaid verifies Ora's own spoken turn reaches the log as one line. Nothing Ora says has been logged since 7 August: the user's side is logged, the model's thoughts are logged, and the actual reply — the thing every conversational-quality question is about — was dropped on the floor. Scoring a session against what it said is impossible without this.
-func TestReceiveLoop_TurnComplete_LogsWhatOraSaid(t *testing.T) {
+// TestReceiveLoop_TurnComplete_LogsWhatJuneSaid verifies June's own spoken turn reaches the log as one line. Nothing June says has been logged since 7 August: the user's side is logged, the model's thoughts are logged, and the actual reply — the thing every conversational-quality question is about — was dropped on the floor. Scoring a session against what it said is impossible without this.
+func TestReceiveLoop_TurnComplete_LogsWhatJuneSaid(t *testing.T) {
 	logs := captureLogs(t)
 	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -1211,11 +1211,11 @@ func TestReceiveLoop_TurnComplete_LogsWhatOraSaid(t *testing.T) {
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: "are in the spreadsheet."}}}
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
 
-	waitForLog(t, logs, "ora said text=the vulnerability scores are in the spreadsheet.")
+	waitForLog(t, logs, "june said text=the vulnerability scores are in the spreadsheet.")
 }
 
-// TestReceiveLoop_Interrupted_LogsWhatOraSaidSoFar verifies a cut-off turn still logs the half sentence Ora got out — a barge-in is exactly the case where what was said matters, and the buffer is otherwise discarded with the turn.
-func TestReceiveLoop_Interrupted_LogsWhatOraSaidSoFar(t *testing.T) {
+// TestReceiveLoop_Interrupted_LogsWhatJuneSaidSoFar verifies a cut-off turn still logs the half sentence June got out — a barge-in is exactly the case where what was said matters, and the buffer is otherwise discarded with the turn.
+func TestReceiveLoop_Interrupted_LogsWhatJuneSaidSoFar(t *testing.T) {
 	logs := captureLogs(t)
 	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -1230,11 +1230,11 @@ func TestReceiveLoop_Interrupted_LogsWhatOraSaidSoFar(t *testing.T) {
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: "so yesterday you were mostly in"}}}
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
 
-	waitForLog(t, logs, "ora said text=so yesterday you were mostly in")
+	waitForLog(t, logs, "june said text=so yesterday you were mostly in")
 }
 
-// TestReceiveLoop_NoiseInterruptWhileOraSpeaks_IsNotABargeIn covers the ceiling fan: 47 interrupts in 17 minutes with nobody saying anything, every one of them flushing the audio mid-sentence so not one reply finished. An interrupt with no user transcript, arriving while Ora's own speaker is audibly running, is her voice or the room coming back through the mic — leave the sentence alone.
-func TestReceiveLoop_NoiseInterruptWhileOraSpeaks_IsNotABargeIn(t *testing.T) {
+// TestReceiveLoop_NoiseInterruptWhileJuneSpeaks_IsNotABargeIn covers the ceiling fan: 47 interrupts in 17 minutes with nobody saying anything, every one of them flushing the audio mid-sentence so not one reply finished. An interrupt with no user transcript, arriving while June's own speaker is audibly running, is her voice or the room coming back through the mic — leave the sentence alone.
+func TestReceiveLoop_NoiseInterruptWhileJuneSpeaks_IsNotABargeIn(t *testing.T) {
 	speaker := &fakeSpeaker{}
 	speaker.setAmplitude(0.4)
 	a := NewAgent(nil, speaker, nil, nil, "")
@@ -1260,11 +1260,11 @@ func TestReceiveLoop_NoiseInterruptWhileOraSpeaks_IsNotABargeIn(t *testing.T) {
 		t.Fatal("timed out waiting for the continuing turn")
 	}
 	if n := speaker.flushes.Load(); n != 0 {
-		t.Errorf("expected the audio Ora was speaking left alone, got %d flushes", n)
+		t.Errorf("expected the audio June was speaking left alone, got %d flushes", n)
 	}
 }
 
-// TestReceiveLoop_InterruptWithNoUserTranscript_WritesNoNotice verifies "[ora stopped]" is only written when the user actually said something. It was written 62 times in one day, almost all of them falsely, and each one tells the user they interrupted a reply they never interrupted.
+// TestReceiveLoop_InterruptWithNoUserTranscript_WritesNoNotice verifies "[june stopped]" is only written when the user actually said something. It was written 62 times in one day, almost all of them falsely, and each one tells the user they interrupted a reply they never interrupted.
 func TestReceiveLoop_InterruptWithNoUserTranscript_WritesNoNotice(t *testing.T) {
 	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -1289,8 +1289,8 @@ func TestReceiveLoop_InterruptWithNoUserTranscript_WritesNoNotice(t *testing.T) 
 	}
 }
 
-// TestReceiveLoop_EchoOfOraSpeech_NotTreatedAsUserTurn is the production bug: the mic transcribed Ora's own greeting back as a "user said (voice)" turn 4 seconds after she said it, so Ora answered herself and then answered that answer, looping for minutes with no one talking to it. A transcript that duplicates what Ora just said, arriving inside the echo window, must never reach TextResponseChan as a user turn.
-func TestReceiveLoop_EchoOfOraSpeech_NotTreatedAsUserTurn(t *testing.T) {
+// TestReceiveLoop_EchoOfJuneSpeech_NotTreatedAsUserTurn is the production bug: the mic transcribed June's own greeting back as a "user said (voice)" turn 4 seconds after she said it, so June answered herself and then answered that answer, looping for minutes with no one talking to it. A transcript that duplicates what June just said, arriving inside the echo window, must never reach TextResponseChan as a user turn.
+func TestReceiveLoop_EchoOfJuneSpeech_NotTreatedAsUserTurn(t *testing.T) {
 	logs := captureLogs(t)
 	a := NewAgent(nil, &fakeSpeaker{}, nil, nil, "")
 	fs := &fakeLiveSession{
@@ -1305,7 +1305,7 @@ func TestReceiveLoop_EchoOfOraSpeech_NotTreatedAsUserTurn(t *testing.T) {
 	const said = "Hey, still plugging away at that Linux window focus thing?"
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{OutputTranscription: &genai.Transcription{Text: said}}}
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
-	// The mic hearing Ora's own greeting come back, word for word, well inside the 8s echo window.
+	// The mic hearing June's own greeting come back, word for word, well inside the 8s echo window.
 	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
 		InputTranscription: &genai.Transcription{Text: said, Finished: true},
 	}}
@@ -1321,7 +1321,7 @@ func TestReceiveLoop_EchoOfOraSpeech_NotTreatedAsUserTurn(t *testing.T) {
 			if chunk.TurnBoundary {
 				boundaries++
 				if boundaries == 2 {
-					waitForLog(t, logs, "ignoring echo of ora's own speech")
+					waitForLog(t, logs, "ignoring echo of june's own speech")
 					return
 				}
 			}
@@ -1331,8 +1331,8 @@ func TestReceiveLoop_EchoOfOraSpeech_NotTreatedAsUserTurn(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_EchoOfOraSpeech_NotABargeIn covers the other half of the same production loop: the echoed transcript arrived alongside the server's own VAD-triggered Interrupted flag, which the old code took as a real barge-in — flushing the speaker and logging "barge-in detected" — on nothing more than the mic hearing Ora talk to herself. An echo must leave the speaker and the turn alone.
-func TestReceiveLoop_EchoOfOraSpeech_NotABargeIn(t *testing.T) {
+// TestReceiveLoop_EchoOfJuneSpeech_NotABargeIn covers the other half of the same production loop: the echoed transcript arrived alongside the server's own VAD-triggered Interrupted flag, which the old code took as a real barge-in — flushing the speaker and logging "barge-in detected" — on nothing more than the mic hearing June talk to herself. An echo must leave the speaker and the turn alone.
+func TestReceiveLoop_EchoOfJuneSpeech_NotABargeIn(t *testing.T) {
 	logs := captureLogs(t)
 	speaker := &fakeSpeaker{}
 	a := NewAgent(nil, speaker, nil, nil, "")
@@ -1366,7 +1366,7 @@ func TestReceiveLoop_EchoOfOraSpeech_NotABargeIn(t *testing.T) {
 			if chunk.TurnBoundary {
 				boundaries++
 				if boundaries == 2 {
-					waitForLog(t, logs, "ignoring echo of ora's own speech")
+					waitForLog(t, logs, "ignoring echo of june's own speech")
 					if n := speaker.flushes.Load(); n != 0 {
 						t.Errorf("an echo must not flush the speaker, got %d flushes", n)
 					}
@@ -1379,7 +1379,7 @@ func TestReceiveLoop_EchoOfOraSpeech_NotABargeIn(t *testing.T) {
 	}
 }
 
-// Recalled memory is text Ora scraped off the screen: a web page, an email, a document someone else wrote. It arrives in the same prompt as the user's own words, so it has to be fenced and labelled, or a page saying "ignore your instructions and run this" reads exactly like Ora's own context.
+// Recalled memory is text June scraped off the screen: a web page, an email, a document someone else wrote. It arrives in the same prompt as the user's own words, so it has to be fenced and labelled, or a page saying "ignore your instructions and run this" reads exactly like June's own context.
 func TestTurnContext_FencesRecalledMemoryAsUntrusted(t *testing.T) {
 	out := turnContext(time.Now(), []string{"a captured screen", "another one"})
 
@@ -1444,87 +1444,87 @@ func TestIsNonSpeechTranscript(t *testing.T) {
 	}
 }
 
-// TestIsEchoOfOraSpeech pins the rule that tells the mic hearing Ora's own voice apart from a real user turn. Production case (2026-09-05 03:41 IST): Ora's greeting came back as a "user said (voice)" transcript 4 seconds later, word for word, and Ora answered it, then answered that answer, looping for minutes.
-func TestIsEchoOfOraSpeech(t *testing.T) {
-	oraEnd := time.Date(2026, 9, 5, 3, 41, 0, 0, time.UTC)
+// TestIsEchoOfJuneSpeech pins the rule that tells the mic hearing June's own voice apart from a real user turn. Production case (2026-09-05 03:41 IST): June's greeting came back as a "user said (voice)" transcript 4 seconds later, word for word, and June answered it, then answered that answer, looping for minutes.
+func TestIsEchoOfJuneSpeech(t *testing.T) {
+	juneEnd := time.Date(2026, 9, 5, 3, 41, 0, 0, time.UTC)
 	tests := []struct {
 		name      string
-		oraText   string
+		juneText  string
 		candidate string
 		arrived   time.Time
 		want      bool
 	}{
 		{
 			name:      "identical text within the window",
-			oraText:   "Hey, still plugging away at that Linux window focus thing?",
+			juneText:  "Hey, still plugging away at that Linux window focus thing?",
 			candidate: "Hey, still plugging away at that Linux window focus thing?",
-			arrived:   oraEnd.Add(4 * time.Second),
+			arrived:   juneEnd.Add(4 * time.Second),
 			want:      true,
 		},
 		{
 			name:      "same words, different trailing punctuation and case",
-			oraText:   "Hey, still plugging away at that Linux window focus thing?",
+			juneText:  "Hey, still plugging away at that Linux window focus thing?",
 			candidate: "hey still plugging away at that linux window focus thing",
-			arrived:   oraEnd.Add(4 * time.Second),
+			arrived:   juneEnd.Add(4 * time.Second),
 			want:      true,
 		},
 		{
-			name:      "candidate is a truncated prefix of what ora said",
-			oraText:   "Yeah, I've got an agent working on that accessibility fix.",
+			name:      "candidate is a truncated prefix of what june said",
+			juneText:  "Yeah, I've got an agent working on that accessibility fix.",
 			candidate: "Yeah, I've got an agent working on that",
-			arrived:   oraEnd.Add(2 * time.Second),
+			arrived:   juneEnd.Add(2 * time.Second),
 			want:      true,
 		},
 		{
 			name:      "a genuinely different reply of similar length must not match",
-			oraText:   "Yeah, I've got an agent working on that.",
+			juneText:  "Yeah, I've got an agent working on that.",
 			candidate: "Got an agent looking at that accessibility.",
-			arrived:   oraEnd.Add(4 * time.Second),
+			arrived:   juneEnd.Add(4 * time.Second),
 			want:      false,
 		},
 		{
 			name:      "identical text but past the 8s window must not match",
-			oraText:   "Hey, still plugging away at that Linux window focus thing?",
+			juneText:  "Hey, still plugging away at that Linux window focus thing?",
 			candidate: "Hey, still plugging away at that Linux window focus thing?",
-			arrived:   oraEnd.Add(9 * time.Second),
+			arrived:   juneEnd.Add(9 * time.Second),
 			want:      false,
 		},
-		// The four heard-versus-said pairs of the 2026-09-05 03:41 loop, verbatim from ora.log, with the real gap between "ora said" and the "user said (voice)" that echoed it.
+		// The four heard-versus-said pairs of the 2026-09-05 03:41 loop, verbatim from june.log, with the real gap between "june said" and the "user said (voice)" that echoed it.
 		{
 			name:      "03:41:31.937 said, 03:41:35.587 heard",
-			oraText:   "Hey, still plugging away at that Linux window focus thing?",
+			juneText:  "Hey, still plugging away at that Linux window focus thing?",
 			candidate: "Hey, still plugging away at that Linux window focus thing?",
-			arrived:   oraEnd.Add(3650 * time.Millisecond),
+			arrived:   juneEnd.Add(3650 * time.Millisecond),
 			want:      true,
 		},
 		{
 			name:      "03:41:36.153 said, 03:41:39.774 heard",
-			oraText:   "Yeah, I've got an agent working on that",
+			juneText:  "Yeah, I've got an agent working on that",
 			candidate: "Yeah, I've got an agent working on that.",
-			arrived:   oraEnd.Add(3621 * time.Millisecond),
+			arrived:   juneEnd.Add(3621 * time.Millisecond),
 			want:      true,
 		},
 		{
 			// The mic's transcript is not word for word: "Got an" came back as "Gun". Five of the heard utterance's six words survive in order, which is 83% — just over the 80% floor, and the tightest of the four.
 			name:      "03:41:40.223 said, 03:41:44.168 heard as Gun agent",
-			oraText:   "Got an agent looking at that accessibility",
+			juneText:  "Got an agent looking at that accessibility",
 			candidate: "Gun agent looking at that accessibility.",
-			arrived:   oraEnd.Add(3945 * time.Millisecond),
+			arrived:   juneEnd.Add(3945 * time.Millisecond),
 			want:      true,
 		},
 		{
 			name:      "03:41:44.665 said, 03:41:48.708 heard",
-			oraText:   "Yeah, that's right, trying to get that accessibility",
+			juneText:  "Yeah, that's right, trying to get that accessibility",
 			candidate: "Yeah, that's right. Trying to get that accessibility.",
-			arrived:   oraEnd.Add(4043 * time.Millisecond),
+			arrived:   juneEnd.Add(4043 * time.Millisecond),
 			want:      true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ora := oraUtterance{text: tt.oraText, end: oraEnd}
-			if got := isEchoOfOraSpeech(ora, tt.candidate, tt.arrived); got != tt.want {
-				t.Errorf("isEchoOfOraSpeech(%q, %q) = %v, want %v", tt.oraText, tt.candidate, got, tt.want)
+			june := juneUtterance{text: tt.juneText, end: juneEnd}
+			if got := isEchoOfJuneSpeech(june, tt.candidate, tt.arrived); got != tt.want {
+				t.Errorf("isEchoOfJuneSpeech(%q, %q) = %v, want %v", tt.juneText, tt.candidate, got, tt.want)
 			}
 		})
 	}
@@ -1541,7 +1541,7 @@ func TestMicInput_UsesAudioNotDeprecatedMediaChunks(t *testing.T) {
 	}
 }
 
-// The 3.1 Live model closes a session that has heard nothing from the client for about 150 seconds: measured on 2026-09-03 as 2m32s across three probes, with the 2.5 model staying open past ten minutes under the same silence. Ora sends nothing while the mic is muted, and an afternoon on mute produced nine drops. A silent chunk every 60 seconds did not keep the session open, one every 10 seconds did, so while muted the loop sends one every 10 seconds.
+// The 3.1 Live model closes a session that has heard nothing from the client for about 150 seconds: measured on 2026-09-03 as 2m32s across three probes, with the 2.5 model staying open past ten minutes under the same silence. June sends nothing while the mic is muted, and an afternoon on mute produced nine drops. A silent chunk every 60 seconds did not keep the session open, one every 10 seconds did, so while muted the loop sends one every 10 seconds.
 func TestMutedInput_SendsSilenceOncePerKeepalive(t *testing.T) {
 	if _, send := mutedInput(4800, 3*time.Second); send {
 		t.Fatal("sent while muted only 3s after the last send")
@@ -1573,7 +1573,7 @@ func TestAffectiveDialogFor_OnlyOnThe25Model(t *testing.T) {
 	}
 }
 
-// On 2026-09-03 the live transcription wrote the user's English in Devanagari ("वेल वेरी वेरी" for "well, very, very"; a whole sentence of English rendered as Hindi letters), and those lines went to the model as the user's words. The user speaks to Ora in English; the transcription is given that as a hint.
+// On 2026-09-03 the live transcription wrote the user's English in Devanagari ("वेल वेरी वेरी" for "well, very, very"; a whole sentence of English rendered as Hindi letters), and those lines went to the model as the user's words. The user speaks to June in English; the transcription is given that as a hint.
 // The Gemini API refuses a session whose transcription config names languages ("languageCodes parameter is not supported in Gemini API"), so the config must ask for transcription and nothing more.
 func TestInputTranscriptionConfig_SendsNoLanguageCodes(t *testing.T) {
 	cfg := inputTranscriptionConfig()
@@ -1585,13 +1585,13 @@ func TestInputTranscriptionConfig_SendsNoLanguageCodes(t *testing.T) {
 	}
 }
 
-// TestMatchesRecentOraSpeech_TheLoopOf20260905 replays the 03:41 loop as receiveLoop actually saw it: Ora spoke, the mic transcribed her voice about four seconds later, and each of those transcripts became a user turn she then answered. The four utterances go into the history in the order they were said — only the last echoHistorySize are kept — and every transcript that came back has to be recognised against whichever of them is still there.
-func TestMatchesRecentOraSpeech_TheLoopOf20260905(t *testing.T) {
+// TestMatchesRecentJuneSpeech_TheLoopOf20260905 replays the 03:41 loop as receiveLoop actually saw it: June spoke, the mic transcribed her voice about four seconds later, and each of those transcripts became a user turn she then answered. The four utterances go into the history in the order they were said — only the last echoHistorySize are kept — and every transcript that came back has to be recognised against whichever of them is still there.
+func TestMatchesRecentJuneSpeech_TheLoopOf20260905(t *testing.T) {
 	base := time.Date(2026, 9, 5, 3, 41, 31, 937_000_000, time.UTC)
 	// Said at, text, then the transcript the mic returned and when.
 	turns := []struct {
 		said      time.Duration
-		oraText   string
+		juneText  string
 		heard     time.Duration
 		heardText string
 	}{
@@ -1601,19 +1601,19 @@ func TestMatchesRecentOraSpeech_TheLoopOf20260905(t *testing.T) {
 		{12728 * time.Millisecond, "Yeah, that's right, trying to get that accessibility", 16771 * time.Millisecond, "Yeah, that's right. Trying to get that accessibility."},
 	}
 
-	var recent []oraUtterance
+	var recent []juneUtterance
 	for _, turn := range turns {
-		recent = append(recent, oraUtterance{text: turn.oraText, end: base.Add(turn.said)})
+		recent = append(recent, juneUtterance{text: turn.juneText, end: base.Add(turn.said)})
 		if len(recent) > echoHistorySize {
 			recent = recent[len(recent)-echoHistorySize:]
 		}
-		if !matchesRecentOraSpeech(recent, turn.heardText, base.Add(turn.heard)) {
-			t.Errorf("%q came back from the mic %v after ora said %q and was not recognised as her own voice", turn.heardText, turn.heard-turn.said, turn.oraText)
+		if !matchesRecentJuneSpeech(recent, turn.heardText, base.Add(turn.heard)) {
+			t.Errorf("%q came back from the mic %v after june said %q and was not recognised as her own voice", turn.heardText, turn.heard-turn.said, turn.juneText)
 		}
 	}
 
 	// The same history must still let a real user turn through, or the fix would just mute the conversation.
-	if matchesRecentOraSpeech(recent, "can you open the accessibility settings for me", base.Add(17*time.Second)) {
+	if matchesRecentJuneSpeech(recent, "can you open the accessibility settings for me", base.Add(17*time.Second)) {
 		t.Error("a genuine user turn was dropped as an echo")
 	}
 }
@@ -1649,7 +1649,7 @@ func TestSystemInstruction_DoesNotAskPermissionForWhatCostsNothing(t *testing.T)
 	}
 }
 
-// On 2026-09-12 at 16:20:06 Ora called revise and said "I've updated the research task on your list with those details and the links" in the same instant; the call came back an error ten milliseconds later and the user was left believing a write that never happened. The rule that an action counts only once its result says so was already in the prompt, but it sat in the screen paragraph among clicks and window switches, so it read as being about the screen. Every write has the same shape: the tools are non-blocking, so nothing but the prompt stops the model narrating a result it has not seen.
+// On 2026-09-12 at 16:20:06 June called revise and said "I've updated the research task on your list with those details and the links" in the same instant; the call came back an error ten milliseconds later and the user was left believing a write that never happened. The rule that an action counts only once its result says so was already in the prompt, but it sat in the screen paragraph among clicks and window switches, so it read as being about the screen. Every write has the same shape: the tools are non-blocking, so nothing but the prompt stops the model narrating a result it has not seen.
 func TestSystemInstruction_WaitsForAWriteToLandBeforeSayingItDid(t *testing.T) {
 	prompt := SystemInstruction(time.Date(2026, 9, 12, 16, 20, 0, 0, time.UTC), "", "some context")
 	tools, _, ok := strings.Cut(prompt, "</tools_and_capabilities>")
@@ -1759,7 +1759,7 @@ func TestReceiveLoop_GoAway_ClosesSessionAndReturns(t *testing.T) {
 	}
 }
 
-// TestRedeliverBranchNotes_ResumedSessionGetsTheResult covers a branch result the model never saw. Measured 2026-09-09: a branch result was sent at 03:43:41 and the socket died at 03:43:50, and the resumed session had no trace of it, so Ora kept saying the search was still running.
+// TestRedeliverBranchNotes_ResumedSessionGetsTheResult covers a branch result the model never saw. Measured 2026-09-09: a branch result was sent at 03:43:41 and the socket died at 03:43:50, and the resumed session had no trace of it, so June kept saying the search was still running.
 func TestRedeliverBranchNotes_ResumedSessionGetsTheResult(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
 	a.rememberBranchResult("the price of tea", "about 400 rupees a kilo", time.Now())
@@ -1801,7 +1801,7 @@ func TestVoiceScreenScope_SurvivesAReconnect(t *testing.T) {
 	}
 }
 
-// A single nudge is what made the 30-second open_app on 2026-09-12 feel like being abandoned: Ora said "that one's still going" once and then went quiet for the remaining 22 seconds. A tool that keeps running has to keep saying so, and each nudge has to read differently from the last, or the same sentence twice reads as a stuck loop rather than as progress.
+// A single nudge is what made the 30-second open_app on 2026-09-12 feel like being abandoned: June said "that one's still going" once and then went quiet for the remaining 22 seconds. A tool that keeps running has to keep saying so, and each nudge has to read differently from the last, or the same sentence twice reads as a stuck loop rather than as progress.
 func TestRunToolCall_SlowTool_KeepsNudgingWithChangingWords(t *testing.T) {
 	orig := longRunNudgeDelay
 	longRunNudgeDelay = 30 * time.Millisecond
@@ -1886,7 +1886,7 @@ func TestNudgeGap_WidensThenHoldsAtTheCap(t *testing.T) {
 	}
 }
 
-// gemini-3.8-live matches the "gemini-3" prefix the three handshake gates branch on, so it inherits all of them, and one of the three is wrong for it: the API takes interleaved thinking with no level to set, and rejects a thinking level the way the other 3.x models reject a token budget. The other two inheritances are right — affective dialog is removed from the API for this model, and proactive audio is permanently on and has no field to set. All three documented at ai.google.dev/gemini-api/docs/models/gemini-3.8-live on 2026-09-17, not probed against Ora's own dial.
+// gemini-3.8-live matches the "gemini-3" prefix the three handshake gates branch on, so it inherits all of them, and one of the three is wrong for it: the API takes interleaved thinking with no level to set, and rejects a thinking level the way the other 3.x models reject a token budget. The other two inheritances are right — affective dialog is removed from the API for this model, and proactive audio is permanently on and has no field to set. All three documented at ai.google.dev/gemini-api/docs/models/gemini-3.8-live on 2026-09-17, not probed against June's own dial.
 func TestLive38Handshake_NoThinkingLevelNoAffectNoProactivity(t *testing.T) {
 	cfg := thinkingConfigFor("gemini-3.8-live")
 	if cfg == nil || cfg.ThinkingLevel != "" || cfg.ThinkingBudget != nil {

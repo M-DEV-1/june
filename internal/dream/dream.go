@@ -1,4 +1,4 @@
-// Package dream is the daemon's overnight loop: while the machine sits idle on mains between the dream hour and the morning brief, it tests the hypotheses Ora's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. Every model call goes to the configured dream brain, with the local shadow model standing in whenever that brain fails.
+// Package dream is the daemon's overnight loop: while the machine sits idle on mains between the dream hour and the morning brief, it tests the hypotheses June's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. Every model call goes to the configured dream brain, with the local shadow model standing in whenever that brain fails.
 package dream
 
 import (
@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/brain"
-	"ora/internal/db"
+	"june/internal/brain"
+	"june/internal/db"
 )
 
 const (
@@ -127,7 +127,7 @@ type Store interface {
 
 // Runner owns one machine's dreaming. Construct with New; the daemon calls Tick on a ticker and everything else is private.
 type Runner struct {
-	// OnNight, when set, is told when a night's run begins (true) and when it ends however it ends (false), so a window can show that Ora is dreaming.
+	// OnNight, when set, is told when a night's run begins (true) and when it ends however it ends (false), so a window can show that June is dreaming.
 	OnNight func(running bool)
 	store   Store
 	brain   brain.Brain

@@ -1,7 +1,7 @@
 /** The window's own size and position, remembered between runs. Tauri's window-state plugin lives on the Rust side and this window has none, so the geometry is read off the window with the JS API, kept in the same localStorage both windows already use for the theme, and put back the next time the page loads. Nothing here runs outside Tauri: every call is behind a try, and in a plain browser tab reading fails and the module does nothing. */
 
-/** The key the geometry is kept under, alongside "ora-theme" and "ora-hover-position". */
-const GEOMETRY_KEY = "ora-window-geometry";
+/** The key the geometry is kept under, alongside "june-theme" and "june-hover-position". */
+const GEOMETRY_KEY = "june-window-geometry";
 
 /** Where the window was and how big, in physical pixels on the whole desktop. */
 export type Geometry = { x: number; y: number; width: number; height: number };

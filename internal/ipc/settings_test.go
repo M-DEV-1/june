@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // withEmptyFirstRun points HOME at a fresh, empty temp directory and clears GEMINI_API_KEY, so a test that does not care about first-run detection gets the same "nothing set up" answer regardless of what is actually on this machine.
@@ -28,7 +28,7 @@ func withEmptyFirstRun(t *testing.T) {
 func noFirstRunSteps() FirstRunView { return FirstRunView{Steps: firstRunSteps(FirstRunView{})} }
 
 // noopSave is the persist function for a test that never posts a change and so never needs one to actually write anything.
-func noopSave(config.OraConfig) error { return nil }
+func noopSave(config.JuneConfig) error { return nil }
 
 // withFakeGsettings replaces the gsettings runner for the rest of the test, restoring the real one when it ends. Every test that does not care about the hotkey uses the "nothing configured" fake, so it never depends on what this machine's own desktop actually has bound.
 func withFakeGsettings(t *testing.T, fake func(args ...string) (string, error)) {
@@ -66,14 +66,14 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 
 	cases := []struct {
 		name            string
-		cfg             config.OraConfig
+		cfg             config.JuneConfig
 		meetingsEnabled bool
 		paused          bool
 		want            SettingsView
 	}{
 		{
 			name:            "gemini brain, local embedder, meetings and capture on",
-			cfg:             config.OraConfig{Brain: config.BrainConfig{}, Embed: config.EmbedConfig{LlamaServer: "/usr/bin/llama-server", ModelPath: "/models/embed.gguf"}},
+			cfg:             config.JuneConfig{Brain: config.BrainConfig{}, Embed: config.EmbedConfig{LlamaServer: "/usr/bin/llama-server", ModelPath: "/models/embed.gguf"}},
 			meetingsEnabled: true,
 			paused:          false,
 			want: SettingsView{
@@ -85,7 +85,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 		},
 		{
 			name:            "claude-cli brain with a pinned model, no local embedder, meetings and capture off",
-			cfg:             config.OraConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}},
+			cfg:             config.JuneConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}},
 			meetingsEnabled: false,
 			paused:          true,
 			want: SettingsView{
@@ -97,7 +97,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 		},
 		{
 			name:            "claude-cli brain with no pinned model falls back to the CLI name alone",
-			cfg:             config.OraConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI}},
+			cfg:             config.JuneConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI}},
 			meetingsEnabled: true,
 			paused:          false,
 			want: SettingsView{
@@ -127,9 +127,9 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 
 // TestSettings_PostClaudeUsageFromLoginPersists checks POST {"claude_usage_from_login": false} comes back false on the same response, is written to the on-disk config, and is read back correctly by a fresh LoadConfig — the point being that turning off the undocumented Claude usage fetch survives a daemon restart, the same round trip TestBrainsPostPersists checks for the brain picker.
 func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	withFakeGsettings(t, noCustomKeybindings)
-	cfg := &config.OraConfig{}
+	cfg := &config.JuneConfig{}
 	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, config.SaveConfig), false, nil, time.Now()))
 	defer srv.Close()
 
@@ -160,9 +160,9 @@ func TestSettings_PostEmptyBodyLeavesClaudeUsageUnchanged(t *testing.T) {
 	withFakeGsettings(t, noCustomKeybindings)
 	withEmptyFirstRun(t)
 	on := true
-	cfg := &config.OraConfig{ClaudeUsageFromLogin: &on}
+	cfg := &config.JuneConfig{ClaudeUsageFromLogin: &on}
 	saves := 0
-	save := func(config.OraConfig) error { saves++; return nil }
+	save := func(config.JuneConfig) error { saves++; return nil }
 	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, save), false, nil, time.Now()))
 	defer srv.Close()
 
@@ -190,7 +190,7 @@ func TestSettings_PostEmptyBodyLeavesClaudeUsageUnchanged(t *testing.T) {
 func TestSettings_ConcurrentPostAndClaudeUsageRead(t *testing.T) {
 	withFakeGsettings(t, noCustomKeybindings)
 	withEmptyFirstRun(t)
-	live := NewLiveConfig(&config.OraConfig{}, noopSave)
+	live := NewLiveConfig(&config.JuneConfig{}, noopSave)
 	srv := httptest.NewServer(Settings(t.TempDir(), live, false, nil, time.Now()))
 	defer srv.Close()
 
@@ -231,7 +231,7 @@ func fakeGsettingsWithHotkey(args ...string) (string, error) {
 	case strings.HasSuffix(schema, "custom0/") && key == "binding":
 		return "'<Super>f'", nil
 	case strings.HasSuffix(schema, "custom1/") && key == "command":
-		return "'/usr/bin/ora-window-toggle'", nil
+		return "'/usr/bin/june-window-toggle'", nil
 	case strings.HasSuffix(schema, "custom1/") && key == "binding":
 		return "'<Control><Alt>space'", nil
 	}
@@ -263,7 +263,7 @@ func TestSettings_Hotkey(t *testing.T) {
 			hotkeyGOOS = tc.goos
 			t.Cleanup(func() { hotkeyGOOS = prevGOOS })
 
-			srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.OraConfig{}, noopSave), false, nil, time.Now()))
+			srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(&config.JuneConfig{}, noopSave), false, nil, time.Now()))
 			defer srv.Close()
 
 			var got SettingsView
@@ -276,17 +276,17 @@ func TestSettings_Hotkey(t *testing.T) {
 }
 
 // TestFirstRun covers firstRun() over every combination of what is set up: nothing at all (every
-// field false, and a step listed for each), and each of the four ways on its own (Ora needs only
+// field false, and a step listed for each), and each of the four ways on its own (June needs only
 // one of them to answer text, not all of them, so whichever one is set up the steps list is empty).
 func TestFirstRun(t *testing.T) {
 	cases := []struct {
 		name  string
-		setup func(t *testing.T, home string) config.OraConfig
+		setup func(t *testing.T, home string) config.JuneConfig
 		check func(t *testing.T, got FirstRunView)
 	}{
-		{name: "nothing set up", setup: func(t *testing.T, home string) config.OraConfig {
+		{name: "nothing set up", setup: func(t *testing.T, home string) config.JuneConfig {
 			t.Setenv("GEMINI_API_KEY", "")
-			return config.OraConfig{}
+			return config.JuneConfig{}
 		}, check: func(t *testing.T, got FirstRunView) {
 			if got.GeminiKey || got.CodexLogin || got.ClaudeCLI || got.LocalModel {
 				t.Errorf("firstRun() = %+v, want every field false", got)
@@ -295,23 +295,23 @@ func TestFirstRun(t *testing.T) {
 				t.Error("firstRun() with nothing set up returned no steps")
 			}
 		}},
-		{name: "gemini key", setup: func(t *testing.T, home string) config.OraConfig {
+		{name: "gemini key", setup: func(t *testing.T, home string) config.JuneConfig {
 			t.Setenv("GEMINI_API_KEY", "sk-test")
-			return config.OraConfig{}
+			return config.JuneConfig{}
 		}},
-		{name: "codex login", setup: func(t *testing.T, home string) config.OraConfig {
+		{name: "codex login", setup: func(t *testing.T, home string) config.JuneConfig {
 			t.Setenv("GEMINI_API_KEY", "")
 			mustWriteFile(t, filepath.Join(home, ".codex", "auth.json"), `{"auth_mode":"chatgpt"}`)
-			return config.OraConfig{}
+			return config.JuneConfig{}
 		}},
-		{name: "claude cli", setup: func(t *testing.T, home string) config.OraConfig {
+		{name: "claude cli", setup: func(t *testing.T, home string) config.JuneConfig {
 			t.Setenv("GEMINI_API_KEY", "")
 			mustWriteFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{}`)
-			return config.OraConfig{}
+			return config.JuneConfig{}
 		}},
-		{name: "local model", setup: func(t *testing.T, home string) config.OraConfig {
+		{name: "local model", setup: func(t *testing.T, home string) config.JuneConfig {
 			t.Setenv("GEMINI_API_KEY", "")
-			return config.OraConfig{LocalText: config.LocalTextConfig{ModelPath: "/models/local.gguf"}}
+			return config.JuneConfig{LocalText: config.LocalTextConfig{ModelPath: "/models/local.gguf"}}
 		}},
 	}
 

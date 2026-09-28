@@ -2,7 +2,7 @@ package db_test
 
 import (
 	"context"
-	"ora/internal/db"
+	"june/internal/db"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,7 +119,7 @@ func TestPersonalContext_ConsolidatorCannotSeeIt(t *testing.T) {
 // TestPersonalContext_NoteNamingTheUserSurvivesRestart checks that opening the store leaves the notes table alone. The one-time identity migration ran inside createSchema on every open and unconditionally deleted every kind='fact' note naming both the user and their computer, so any later note the compiler or save_note wrote was destroyed on the next daemon start.
 func TestPersonalContext_NoteNamingTheUserSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "ora.db")
+	path := filepath.Join(t.TempDir(), "june.db")
 
 	store, err := db.New(path)
 	if err != nil {

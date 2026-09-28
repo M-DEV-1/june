@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // The diarizer is a sherpa-onnx build installed the same way the whisper.cpp one is: the binary, its shared libraries and its two models together under <data dir>/sherpa. It splits the call side of a recording into voices; it never sees the microphone side, which is one known person by construction.
@@ -21,7 +21,7 @@ const (
 )
 
 // defaultClusterThreshold is the cosine distance at which two stretches of speech stop being the same voice. It is only ever used when the number of people in the call is unknown, because as a way of getting the speaker count right it does not work: on the 2026-08-31 16:17 recording, a call with exactly one other person in it, thresholds of 0.85, 0.9 and 0.95 all returned four voices, while on a six-person standup the same range swung the answer from 35 down to 6. There is no value that transfers between two meetings, so tuning it is not a path to a correct answer, only to a differently wrong one.
-// What does transfer is being told the number outright: given --clustering.num-clusters the diarizer returns exactly that many, so the count is right by construction rather than by calibration. Ora can read that count off the meeting's own window, which is why this constant is the fallback and not the mechanism.
+// What does transfer is being told the number outright: given --clustering.num-clusters the diarizer returns exactly that many, so the count is right by construction rather than by calibration. June can read that count off the meeting's own window, which is why this constant is the fallback and not the mechanism.
 const defaultClusterThreshold = 0.8
 
 // clusterThreshold returns the configured threshold, or the default when none is set.
@@ -33,10 +33,10 @@ func clusterThreshold() string {
 	return strconv.FormatFloat(t, 'f', -1, 64)
 }
 
-// SherpaBinary returns the path to the diarizer, or an error naming the exact path of each missing file. $ORA_SHERPA overrides the location.
+// SherpaBinary returns the path to the diarizer, or an error naming the exact path of each missing file. $JUNE_SHERPA overrides the location.
 func SherpaBinary(dataDir string) (string, error) {
 	bin := filepath.Join(dataDir, "sherpa", sherpaBinaryName)
-	if p := os.Getenv("ORA_SHERPA"); p != "" {
+	if p := os.Getenv("JUNE_SHERPA"); p != "" {
 		bin = p
 	}
 	models := []string{filepath.Join(filepath.Dir(bin), sherpaSegmentation), filepath.Join(filepath.Dir(bin), sherpaEmbedding)}

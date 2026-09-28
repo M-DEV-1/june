@@ -9,7 +9,7 @@ import (
 	_ "image/png"
 	"time"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // pressSettle is the longest a press is given to show on the screen before it is called a miss. A row highlight or a button state lands within a frame or two and is seen by the first picture; the wait only runs its full length when nothing changes.

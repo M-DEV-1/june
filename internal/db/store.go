@@ -43,7 +43,7 @@ type Store struct {
 	// actRunBackfilling is held for the length of one background pass that embeds act run questions written before they were embedded, so several asks in a row start one pass between them rather than one each. See backfillActRunVectors.
 	actRunBackfilling atomic.Bool
 
-	// framesDir is ora-db/frames next to the sqlite file. Empty for :memory: stores — vision JPEGs are skipped.
+	// framesDir is june-db/frames next to the sqlite file. Empty for :memory: stores — vision JPEGs are skipped.
 	framesDir string
 
 	// path is the sqlite file this store was opened from, "" for :memory:. QueryStore uses it to open a second, read-only connection — see query_store.go.
@@ -189,7 +189,7 @@ func (s *Store) sessionForDay(ctx context.Context, at time.Time) (int64, error) 
 	return sessionID, nil
 }
 
-// JobMarkerKindPrefix is what every diary kind recording a metered background job's last run starts with, the whole kind being this plus the job's name (cmd/daemon.go's jobMarkerKind is the only writer). It lives here because the diary FTS triggers below name it: the content of such a row is a bare RFC 3339 timestamp rewritten every time that job runs, so like the task-notice watermark it is deliberately never mirrored into memory_fts and never comes back from a search as if it were something Ora wrote.
+// JobMarkerKindPrefix is what every diary kind recording a metered background job's last run starts with, the whole kind being this plus the job's name (cmd/daemon.go's jobMarkerKind is the only writer). It lives here because the diary FTS triggers below name it: the content of such a row is a bare RFC 3339 timestamp rewritten every time that job runs, so like the task-notice watermark it is deliberately never mirrored into memory_fts and never comes back from a search as if it were something June wrote.
 const JobMarkerKindPrefix = "job-last-run:"
 
 func (s *Store) createSchema() error {

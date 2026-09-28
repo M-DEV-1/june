@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/memory"
-	"ora/internal/tracker"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/memory"
+	"june/internal/tracker"
 )
 
 // getJSON performs a GET against the test server and decodes the body into out, failing the test on any status other than 200.
@@ -65,30 +65,30 @@ func TestContext_ReadsTheLatestCapture(t *testing.T) {
 		{
 			name: "the live buffer wins when the tracker has something",
 			screen: func() []tracker.Activity {
-				return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "first"}, {App: "Ghostty", Title: "ora", ScreenText: strings.Repeat("x", 900)}}
+				return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "first"}, {App: "Ghostty", Title: "june", ScreenText: strings.Repeat("x", 900)}}
 			},
 			wantApp:  "Ghostty",
 			wantText: strings.Repeat("x", 600),
 		},
 		{
-			name: "the window itself is never the context: the newest capture that is not Ora wins",
+			name: "the window itself is never the context: the newest capture that is not June wins",
 			screen: func() []tracker.Activity {
-				return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}, {App: "Ora", Title: "Ora", ScreenText: "Ask, or hold space"}}
+				return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}, {App: "June", Title: "June", ScreenText: "Ask, or hold space"}}
 			},
 			wantApp:  "Slack",
 			wantText: "slack text",
 		},
 		{
-			name: "the XWayland frame of the window, named by its title, is Ora too",
+			name: "the XWayland frame of the window, named by its title, is June too",
 			screen: func() []tracker.Activity {
-				return []tracker.Activity{{App: "Brave", Title: "docs", ScreenText: "doc text"}, {App: "mutter-x11-frames", Title: "Ora", ScreenText: "Ask"}}
+				return []tracker.Activity{{App: "Brave", Title: "docs", ScreenText: "doc text"}, {App: "mutter-x11-frames", Title: "June", ScreenText: "Ask"}}
 			},
 			wantApp:  "Brave",
 			wantText: "doc text",
 		},
 		{
-			name:     "a buffer holding only Ora falls back to the newest stored episode",
-			screen:   func() []tracker.Activity { return []tracker.Activity{{App: "ora", Title: "Ora", ScreenText: "Ask"}} },
+			name:     "a buffer holding only June falls back to the newest stored episode",
+			screen:   func() []tracker.Activity { return []tracker.Activity{{App: "june", Title: "June", ScreenText: "Ask"}} },
 			wantApp:  "Brave",
 			wantText: "older text",
 		},
@@ -127,7 +127,7 @@ func TestContext_LiveFocusWinsOverBuffer(t *testing.T) {
 		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
 	}
 	focused := func(context.Context) (tracker.Activity, bool) {
-		return tracker.Activity{App: "Ghostty", Title: "ora repo", ScreenText: "live text"}, true
+		return tracker.Activity{App: "Ghostty", Title: "june repo", ScreenText: "live text"}, true
 	}
 	srv := newTestServer(t, &fakeAsker{}, store, screen, focused)
 	var got ContextView
@@ -137,20 +137,20 @@ func TestContext_LiveFocusWinsOverBuffer(t *testing.T) {
 	}
 }
 
-// TestContext_LiveFocusOraFallsThroughToBuffer covers the moment the hotkey itself takes focus: the live read names Ora, so /context must still fall through to the buffer's newest non-Ora capture, exactly as it does for a stale buffer entry.
-func TestContext_LiveFocusOraFallsThroughToBuffer(t *testing.T) {
+// TestContext_LiveFocusJuneFallsThroughToBuffer covers the moment the hotkey itself takes focus: the live read names June, so /context must still fall through to the buffer's newest non-June capture, exactly as it does for a stale buffer entry.
+func TestContext_LiveFocusJuneFallsThroughToBuffer(t *testing.T) {
 	store := dbtest.Open(t)
 	screen := func() []tracker.Activity {
 		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
 	}
 	focused := func(context.Context) (tracker.Activity, bool) {
-		return tracker.Activity{App: "Ora", Title: "Ora", ScreenText: "Ask, or hold space"}, true
+		return tracker.Activity{App: "June", Title: "June", ScreenText: "Ask, or hold space"}, true
 	}
 	srv := newTestServer(t, &fakeAsker{}, store, screen, focused)
 	var got ContextView
 	getJSON(t, srv, "/context", &got)
 	if got.App != "Slack" || got.Text != "slack text" {
-		t.Errorf("got %+v, want the buffer's window since the live read named Ora", got)
+		t.Errorf("got %+v, want the buffer's window since the live read named June", got)
 	}
 }
 
@@ -209,7 +209,7 @@ func TestMatters_ActionsThenThreadsThenMeetings(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed action items: %v", err)
 	}
-	for _, subject := range []string{"route planning", "ora window"} {
+	for _, subject := range []string{"route planning", "june window"} {
 		if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: subject, Kind: "work", State: "in flight"}); err != nil {
 			t.Fatalf("seed thread: %v", err)
 		}
@@ -364,7 +364,7 @@ func TestMeetings_ReadsDurationMarkerAndStripsIt(t *testing.T) {
 	ctx := context.Background()
 	minutes := "# Standup\n\n## Key points\n- shipped it.\n"
 	// This is the exact shape internal/recorder's fileMinutes stores: the minutes text, then a blank line and the marker, matching withMeetingDuration in internal/recorder/recorder.go.
-	withMarker := minutes + "\n\n<!--ora:duration start=2026-09-04T10:00:00Z stop=2026-09-04T10:41:00Z-->\n"
+	withMarker := minutes + "\n\n<!--june:duration start=2026-09-04T10:00:00Z stop=2026-09-04T10:41:00Z-->\n"
 	if _, err := store.LogNote(ctx, withMarker, "meeting"); err != nil {
 		t.Fatalf("seed meeting: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestMeetings_ReadsDurationMarkerAndStripsIt(t *testing.T) {
 	if got.Meetings[0].DurationS != 41*60 {
 		t.Errorf("duration_s = %d, want %d (41 minutes)", got.Meetings[0].DurationS, 41*60)
 	}
-	if strings.Contains(got.Meetings[0].Minutes, "ora:duration") {
+	if strings.Contains(got.Meetings[0].Minutes, "june:duration") {
 		t.Errorf("duration marker leaked into the rendered minutes: %q", got.Meetings[0].Minutes)
 	}
 	if want := strings.TrimRight(minutes, "\n"); got.Meetings[0].Minutes != want {
@@ -467,14 +467,14 @@ func TestPeople_PersonalEntriesThenHeardOnlyNames(t *testing.T) {
 	}
 }
 
-// TestContext_StoredEpisodeFallbackSkipsOra covers the last resort: no live focus, no buffer, and the newest episodes in the store are Ora's own window, filed before the tracker learned to skip it. The answer must be the newest episode that is some other window.
-func TestContext_StoredEpisodeFallbackSkipsOra(t *testing.T) {
+// TestContext_StoredEpisodeFallbackSkipsJune covers the last resort: no live focus, no buffer, and the newest episodes in the store are June's own window, filed before the tracker learned to skip it. The answer must be the newest episode that is some other window.
+func TestContext_StoredEpisodeFallbackSkipsJune(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
 	for _, e := range []db.EpisodeWrite{
 		{App: "Brave", Title: "docs", ScreenText: "doc text"},
-		{App: "ora", Title: "Ora", ScreenText: "Ask, or hold space"},
-		{App: "mutter-x11-frames", Title: "Ora", ScreenText: "Ask"},
+		{App: "june", Title: "June", ScreenText: "Ask, or hold space"},
+		{App: "mutter-x11-frames", Title: "June", ScreenText: "Ask"},
 	} {
 		if _, err := store.WriteEpisode(ctx, e); err != nil {
 			t.Fatalf("seed episode: %v", err)
@@ -486,7 +486,7 @@ func TestContext_StoredEpisodeFallbackSkipsOra(t *testing.T) {
 	var got ContextView
 	getJSON(t, srv, "/context", &got)
 	if got.App != "Brave" || got.Text != "doc text" {
-		t.Errorf("got %+v, want the newest stored episode that is not Ora's own window", got)
+		t.Errorf("got %+v, want the newest stored episode that is not June's own window", got)
 	}
 }
 
@@ -494,7 +494,7 @@ func TestContext_StoredEpisodeFallbackSkipsOra(t *testing.T) {
 func TestMeetings_DatedByTheRecordingsStartNotTheNote(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
-	withMarker := "# Standup\n\n## Key points\n- shipped it.\n\n<!--ora:duration start=2026-09-04T16:10:00Z stop=2026-09-04T16:41:00Z-->\n"
+	withMarker := "# Standup\n\n## Key points\n- shipped it.\n\n<!--june:duration start=2026-09-04T16:10:00Z stop=2026-09-04T16:41:00Z-->\n"
 	if _, err := store.LogNote(ctx, withMarker, "meeting"); err != nil {
 		t.Fatalf("seed meeting: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestMeetings_DatedByTheRecordingsStartNotTheNote(t *testing.T) {
 	}
 }
 
-// The hotkey's live read must refuse the same windows the tracker refuses. /context filtered Ora's own window and nothing else, so pressing the hotkey with a password manager in front answered {"app":"1Password","title":"Vault — Personal"} and that is what the window fed into the model's prompt — a row the episode store would never hold, because the tracker's own skip drops it before it is written.
+// The hotkey's live read must refuse the same windows the tracker refuses. /context filtered June's own window and nothing else, so pressing the hotkey with a password manager in front answered {"app":"1Password","title":"Vault — Personal"} and that is what the window fed into the model's prompt — a row the episode store would never hold, because the tracker's own skip drops it before it is written.
 func TestContext_LiveFocusOnTheBlocklistFallsThroughToBuffer(t *testing.T) {
 	tracker.SetBlocklist([]string{"1password"})
 	t.Cleanup(func() { tracker.SetBlocklist(nil) })

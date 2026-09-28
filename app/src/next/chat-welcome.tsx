@@ -1,7 +1,7 @@
-/** The suggestions a new chat opens with, under the greeting: a few things Ora can actually do, in place of a line telling the person about the furniture.
+/** The suggestions a new chat opens with, under the greeting: a few things June can actually do, in place of a line telling the person about the furniture.
  *
  * Only the chips live here. The face, the greeting and the sentence under it are Blank's own four-part empty state (see parts.tsx), which every other screen's empty pane already uses, so the front door reads as the same window rather than a page of its own.
- * A suggestion fills the composer instead of sending, so it is a starting point the person can edit rather than a button committing them to a phrasing Ora chose.
+ * A suggestion fills the composer instead of sending, so it is a starting point the person can edit rather than a button committing them to a phrasing June chose.
  */
 
 import { DRAFT_CHAT, ui, useAppDispatch } from "./store";

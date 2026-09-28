@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/memory"
+	"june/internal/memory"
 )
 
 // newStore opens a throwaway in-memory store, closed when the test ends. Every test in this package uses it; the in-memory pool is pinned to one connection (see New) so concurrent readers see the same database.
@@ -233,7 +233,7 @@ func TestHybridSearch_VectorSearchFails_DegradesToLexicalOnly(t *testing.T) {
 	}
 }
 
-// TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm is the other side of the floor: a two-word question is how people ask about one thing, not a demand that both words appear. Requiring both turned every two-term query into a strict AND, so "ora daemon" stopped matching "the daemon crashed at startup" — the floor has to scale with the query, not sit at a flat two terms.
+// TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm is the other side of the floor: a two-word question is how people ask about one thing, not a demand that both words appear. Requiring both turned every two-term query into a strict AND, so "june daemon" stopped matching "the daemon crashed at startup" — the floor has to scale with the query, not sit at a flat two terms.
 func TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -242,7 +242,7 @@ func TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm(t *testing.T) {
 		t.Fatalf("LogNote: %v", err)
 	}
 
-	hits, err := store.HybridSearch(ctx, "ora daemon", "", 10)
+	hits, err := store.HybridSearch(ctx, "june daemon", "", 10)
 	if err != nil {
 		t.Fatalf("HybridSearch: %v", err)
 	}

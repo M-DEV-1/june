@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // weeklyWindow is how far back the weekly system log looks.

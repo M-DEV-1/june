@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/util"
+	"june/internal/config"
+	"june/internal/util"
 )
 
 // codexTokens is the tokens block of the Codex CLI auth file.
@@ -105,7 +105,7 @@ func jwtAccountID(token string) string {
 	return claims.Auth.AccountID
 }
 
-// codexInstallID returns a stable id for this installation, kept beside Ora's own data so the backend sees one installation rather than a new one per restart. Output: the stored id, a freshly made one, or "" when the data directory cannot be used.
+// codexInstallID returns a stable id for this installation, kept beside June's own data so the backend sees one installation rather than a new one per restart. Output: the stored id, a freshly made one, or "" when the data directory cannot be used.
 func codexInstallID() string {
 	dir := config.DataDir()
 	if dir == "" {
@@ -194,7 +194,7 @@ func jwtExpiry(token string) time.Time {
 	return time.Unix(claims.Exp, 0)
 }
 
-// writeCodexTokens merges refreshed tokens back into the Codex CLI auth file through a temp file and a rename, keeping every field Ora does not model, so a crash cannot leave the user with a truncated login. Input: the auth file path and the tokens to store. Output: an error when the file cannot be read or replaced.
+// writeCodexTokens merges refreshed tokens back into the Codex CLI auth file through a temp file and a rename, keeping every field June does not model, so a crash cannot leave the user with a truncated login. Input: the auth file path and the tokens to store. Output: an error when the file cannot be read or replaced.
 func writeCodexTokens(path string, tok codexTokens) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {

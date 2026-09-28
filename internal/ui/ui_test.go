@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/ipctoken"
+	"june/internal/agent"
+	"june/internal/ipctoken"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,7 +29,7 @@ func newTestModel() model {
 // TestNewModel_BuildMismatch_ShowsWarningLine is WP13: a non-empty buildMismatch string (the daemon is running an older build than this client — see cmd/root.go's checkDaemonBuildMismatch) must surface as a visible system line at startup, not silently logged and dropped.
 func TestNewModel_BuildMismatch_ShowsWarningLine(t *testing.T) {
 	a := agent.NewAgent(nil, nil, nil, nil, "")
-	m := NewModel(a, "connected", "daemon is running an older build — quit it from the tray or `pkill ora`, then relaunch")
+	m := NewModel(a, "connected", "daemon is running an older build — quit it from the tray or `pkill june`, then relaunch")
 
 	joined := strings.Join(func() []string {
 		var out []string
@@ -434,9 +434,9 @@ func TestUpdate_ToolRequest_SecondArrivesWhileFirstPending_QueuesInsteadOfOverwr
 }
 
 // TestUpdate_ResponseMsg is a table over responseMsg's effect on Update(), one row per property:
-// any chunk clears a pending live-status spinner, but only an ora/you chunk marks isConnected true
+// any chunk clears a pending live-status spinner, but only an june/you chunk marks isConnected true
 // (a system chunk like "connection lost — reconnecting…" must not, or the reconnecting hint-bar
-// chip would go quiet precisely while the link is down) and only an actual ora reply — not a "you"
+// chip would go quiet precisely while the link is down) and only an actual june reply — not a "you"
 // transcription or a system chunk — clears a pending thinking spinner (there is no reply yet for
 // either of those), the Sender field routes to the right transcript speaker, and a TurnBoundary
 // chunk (empty Text) sets the pending-boundary flag without appending an empty message.
@@ -470,7 +470,7 @@ func TestUpdate_ResponseMsg(t *testing.T) {
 				t.Error("expected isConnected to stay false for a system chunk")
 			}
 		}},
-		{"an ora or you chunk sets isConnected true", func(t *testing.T) {
+		{"an june or you chunk sets isConnected true", func(t *testing.T) {
 			for _, sender := range []string{"", agent.SenderYou} {
 				m := newTestModel()
 				m.isConnected = false
@@ -496,7 +496,7 @@ func TestUpdate_ResponseMsg(t *testing.T) {
 				}
 			}
 		}},
-		{"an ora chunk still clears a pending thinking spinner", func(t *testing.T) {
+		{"an june chunk still clears a pending thinking spinner", func(t *testing.T) {
 			m := newTestModel()
 			m.activity = &liveStatus{kind: statusThinking, label: "thinking", started: time.Now()}
 
@@ -504,7 +504,7 @@ func TestUpdate_ResponseMsg(t *testing.T) {
 			nm := next.(model)
 
 			if nm.activity != nil {
-				t.Error("expected activity to be cleared on an ora chunk")
+				t.Error("expected activity to be cleared on an june chunk")
 			}
 		}},
 		{"Sender routes to the right transcript speaker", func(t *testing.T) {
@@ -513,7 +513,7 @@ func TestUpdate_ResponseMsg(t *testing.T) {
 				chunkSender string
 				wantSender  string
 			}{
-				{"empty sender is ora", "", "ora"},
+				{"empty sender is june", "", "june"},
 				{"SenderYou is you", agent.SenderYou, "you"},
 				{"SenderSystem is system", agent.SenderSystem, "system"},
 			}
@@ -532,7 +532,7 @@ func TestUpdate_ResponseMsg(t *testing.T) {
 				})
 			}
 		}},
-		{"a TurnBoundary chunk sets closeOraBlock without appending a message", func(t *testing.T) {
+		{"a TurnBoundary chunk sets closeJuneBlock without appending a message", func(t *testing.T) {
 			m := newTestModel()
 			startBefore := len(m.messages)
 
@@ -542,8 +542,8 @@ func TestUpdate_ResponseMsg(t *testing.T) {
 			if len(nm.messages) != startBefore {
 				t.Fatalf("expected no message appended for a boundary marker, got %d new messages: %+v", len(nm.messages)-startBefore, nm.messages)
 			}
-			if !nm.closeOraBlock {
-				t.Error("expected closeOraBlock to be set")
+			if !nm.closeJuneBlock {
+				t.Error("expected closeJuneBlock to be set")
 			}
 		}},
 	}
@@ -554,10 +554,10 @@ func TestUpdate_ResponseMsg(t *testing.T) {
 
 // TestStreamLine is a table over streamLine's message-merging rules, one row per property: the
 // IsThought flag is tagged directly from the explicit parameter, not sniffed from "**" markdown;
-// "you" and "system" chunks are discrete units that never merge across calls while ora's own
+// "you" and "system" chunks are discrete units that never merge across calls while june's own
 // streaming text still does; a non-thought chunk right after a thought chunk starts its own new
-// non-thought message; voice mode shows both final ora text and thoughts; a pending turn boundary
-// forces the next ora chunk into a fresh block and is then a one-shot signal consumed by that first
+// non-thought message; voice mode shows both final june text and thoughts; a pending turn boundary
+// forces the next june chunk into a fresh block and is then a one-shot signal consumed by that first
 // post-boundary chunk; and the Live API chunk-reconciliation cases — a restarted utterance (the
 // next chunk is a prefix of the block, above the restart threshold) resets the block, a short
 // coincidental prefix below that threshold still appends, an exact resend of the tail is dropped,
@@ -571,7 +571,7 @@ func TestStreamLine(t *testing.T) {
 			m := newTestModel()
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", "**Planning the reply**", true)
+			m.streamLine("june", "**Planning the reply**", true)
 
 			if len(m.messages) != startBefore+1 {
 				t.Fatalf("expected 1 new message, got %d", len(m.messages)-startBefore)
@@ -603,23 +603,23 @@ func TestStreamLine(t *testing.T) {
 			m := newTestModel()
 			startBefore := len(m.messages)
 
-			m.streamLine("system", "[ora stopped]", false)
-			m.streamLine("system", "[ora stopped]", false)
+			m.streamLine("system", "[june stopped]", false)
+			m.streamLine("system", "[june stopped]", false)
 
 			if len(m.messages) != startBefore+2 {
 				t.Fatalf("expected 2 separate messages, got %d: %+v", len(m.messages)-startBefore, m.messages)
 			}
 		}},
-		{"ora sender still merges consecutive calls", func(t *testing.T) {
+		{"june sender still merges consecutive calls", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("you", "priming", false) // ensure the prior message isn't itself sender "ora"
+			m.streamLine("you", "priming", false) // ensure the prior message isn't itself sender "june"
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", "Hello", false)
-			m.streamLine("ora", " there.", false)
+			m.streamLine("june", "Hello", false)
+			m.streamLine("june", " there.", false)
 
 			if len(m.messages) != startBefore+1 {
-				t.Fatalf("expected the two ora chunks to merge into 1 message, got %d: %+v", len(m.messages)-startBefore, m.messages)
+				t.Fatalf("expected the two june chunks to merge into 1 message, got %d: %+v", len(m.messages)-startBefore, m.messages)
 			}
 			if m.messages[len(m.messages)-1].Content != "Hello there." {
 				t.Errorf("expected merged content %q, got %q", "Hello there.", m.messages[len(m.messages)-1].Content)
@@ -629,8 +629,8 @@ func TestStreamLine(t *testing.T) {
 			m := newTestModel()
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", "**Planning the reply**", true)
-			m.streamLine("ora", "Here's your answer.", false)
+			m.streamLine("june", "**Planning the reply**", true)
+			m.streamLine("june", "Here's your answer.", false)
 
 			if len(m.messages) != startBefore+2 {
 				t.Fatalf("expected 2 new separate messages, got %d: %+v", len(m.messages)-startBefore, m.messages)
@@ -643,28 +643,28 @@ func TestStreamLine(t *testing.T) {
 				t.Errorf("unexpected content %q", last.Content)
 			}
 		}},
-		{"voice mode shows both final ora text and thoughts", func(t *testing.T) {
+		{"voice mode shows both final june text and thoughts", func(t *testing.T) {
 			m := newTestModel()
 			m.mode = ModeVoice
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", "Here's your answer.", false)
+			m.streamLine("june", "Here's your answer.", false)
 			if len(m.messages) != startBefore+1 {
-				t.Fatalf("expected final ora text to be shown in voice mode, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
+				t.Fatalf("expected final june text to be shown in voice mode, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
 			}
 
-			m.streamLine("ora", "**thinking about it**", true)
+			m.streamLine("june", "**thinking about it**", true)
 			if len(m.messages) != startBefore+2 {
 				t.Fatalf("expected thought text to still be shown in voice mode, got %d new messages", len(m.messages)-startBefore)
 			}
 		}},
 		{"a pending turn boundary forces a new block instead of merging", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("ora", "Hello there.", false)
+			m.streamLine("june", "Hello there.", false)
 			startBefore := len(m.messages)
 
-			m.closeOraBlock = true
-			m.streamLine("ora", "Namaste again.", false)
+			m.closeJuneBlock = true
+			m.streamLine("june", "Namaste again.", false)
 
 			if len(m.messages) != startBefore+1 {
 				t.Fatalf("expected the turn boundary to force a new block, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
@@ -675,11 +675,11 @@ func TestStreamLine(t *testing.T) {
 		}},
 		{"the turn-boundary flag is a one-shot signal", func(t *testing.T) {
 			m := newTestModel()
-			m.closeOraBlock = true
-			m.streamLine("ora", "First.", false)
+			m.closeJuneBlock = true
+			m.streamLine("june", "First.", false)
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", " Second.", false)
+			m.streamLine("june", " Second.", false)
 
 			if len(m.messages) != startBefore {
 				t.Fatalf("expected the post-boundary chunk to merge normally, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
@@ -687,10 +687,10 @@ func TestStreamLine(t *testing.T) {
 		}},
 		{"a restarted utterance resets the block instead of appending", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("ora", "Hello there, how can I help", false)
+			m.streamLine("june", "Hello there, how can I help", false)
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", "Hello there, h", false) // restart, only got this far before restarting again
+			m.streamLine("june", "Hello there, h", false) // restart, only got this far before restarting again
 
 			if len(m.messages) != startBefore {
 				t.Fatalf("expected the restart to still merge into the same block, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
@@ -701,10 +701,10 @@ func TestStreamLine(t *testing.T) {
 		}},
 		{"a short prefix overlap below the restart threshold still appends", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("ora", "the weather today is nice", false)
+			m.streamLine("june", "the weather today is nice", false)
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", "the", false) // short coincidental prefix match, below the restart threshold
+			m.streamLine("june", "the", false) // short coincidental prefix match, below the restart threshold
 
 			if len(m.messages) != startBefore {
 				t.Fatalf("expected still one block, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
@@ -715,10 +715,10 @@ func TestStreamLine(t *testing.T) {
 		}},
 		{"an exact resend of the tail is dropped, not duplicated", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("ora", "Hello there", false)
+			m.streamLine("june", "Hello there", false)
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", " there", false) // exact resend of the existing tail
+			m.streamLine("june", " there", false) // exact resend of the existing tail
 
 			if len(m.messages) != startBefore {
 				t.Fatalf("expected still one block, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
@@ -729,10 +729,10 @@ func TestStreamLine(t *testing.T) {
 		}},
 		{"a cumulative snapshot chunk replaces the block", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("ora", "Hello", false)
+			m.streamLine("june", "Hello", false)
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", "Hello there", false)
+			m.streamLine("june", "Hello there", false)
 
 			if len(m.messages) != startBefore {
 				t.Fatalf("expected still one block, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
@@ -746,42 +746,42 @@ func TestStreamLine(t *testing.T) {
 			m := newTestModel()
 			m.lastUpdate = time.Now() // just updated, so the next chunk falls inside the throttle window
 
-			m.streamLine("ora", "partial reply", false)
+			m.streamLine("june", "partial reply", false)
 
 			if !m.viewportDirty {
 				t.Error("expected viewportDirty to be set when the render was throttled")
 			}
 		}},
-		{"an ora chunk after an interleaved voice line still merges in place", func(t *testing.T) {
+		{"an june chunk after an interleaved voice line still merges in place", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("ora", "मैं पैसे नहीं", false)
-			oraIdx := len(m.messages) - 1
+			m.streamLine("june", "मैं पैसे नहीं", false)
+			juneIdx := len(m.messages) - 1
 			startBefore := len(m.messages)
 
 			m.streamLine("you", "[noise]", false)
-			m.streamLine("ora", "मैं पैसे नहीं दे सकता, लेकिन...", false)
+			m.streamLine("june", "मैं पैसे नहीं दे सकता, लेकिन...", false)
 
 			if len(m.messages) != startBefore+1 {
 				t.Fatalf("expected only the voice line to be new, got %d new messages: %+v", len(m.messages)-startBefore, m.messages)
 			}
-			if got := m.messages[oraIdx].Content; got != "मैं पैसे नहीं दे सकता, लेकिन..." {
-				t.Errorf("expected the ora block updated in place, got %q", got)
+			if got := m.messages[juneIdx].Content; got != "मैं पैसे नहीं दे सकता, लेकिन..." {
+				t.Errorf("expected the june block updated in place, got %q", got)
 			}
 		}},
-		{"an ora chunk after a tool-log line still merges in place", func(t *testing.T) {
+		{"an june chunk after a tool-log line still merges in place", func(t *testing.T) {
 			m := newTestModel()
-			m.streamLine("ora", "let me check", false)
-			oraIdx := len(m.messages) - 1
+			m.streamLine("june", "let me check", false)
+			juneIdx := len(m.messages) - 1
 			m.messages = append(m.messages, Message{Sender: "tool", Content: "recall(...) → 12 lines", IsToolLog: true})
 			startBefore := len(m.messages)
 
-			m.streamLine("ora", " — you were on the spreadsheet.", false)
+			m.streamLine("june", " — you were on the spreadsheet.", false)
 
 			if len(m.messages) != startBefore {
 				t.Fatalf("expected no new message, got %d new: %+v", len(m.messages)-startBefore, m.messages)
 			}
-			if got := m.messages[oraIdx].Content; got != "let me check — you were on the spreadsheet." {
-				t.Errorf("expected the ora block updated in place, got %q", got)
+			if got := m.messages[juneIdx].Content; got != "let me check — you were on the spreadsheet." {
+				t.Errorf("expected the june block updated in place, got %q", got)
 			}
 		}},
 	}
@@ -1340,7 +1340,7 @@ func longThoughtContent() string {
 // property: a thought collapses to a preview plus the ctrl+e hint by default and shows its full
 // content once expanded, a non-thought message renders identically either way, a wide-glyph
 // (Malayalam) string never renders a line wider than the column it was given, plain content wraps
-// with a safety margin below the full gutter width rather than exactly at it, an ora message
+// with a safety margin below the full gutter width rather than exactly at it, an june message
 // carries no background ANSI code, and trailing blank lines are trimmed at render time. Each row
 // is independent, so a failure still names exactly which rendering property broke.
 func TestRenderMessage(t *testing.T) {
@@ -1351,7 +1351,7 @@ func TestRenderMessage(t *testing.T) {
 		{"thought collapsed by default", func(t *testing.T) {
 			m := newTestModel()
 			full := longThoughtContent()
-			msg := Message{Sender: "ora", IsThought: true, Content: full}
+			msg := Message{Sender: "june", IsThought: true, Content: full}
 
 			out := m.renderMessage(msg, 100)
 
@@ -1369,7 +1369,7 @@ func TestRenderMessage(t *testing.T) {
 			m := newTestModel()
 			m.expandThoughts = true
 			full := longThoughtContent()
-			msg := Message{Sender: "ora", IsThought: true, Content: full}
+			msg := Message{Sender: "june", IsThought: true, Content: full}
 
 			out := m.renderMessage(msg, 200)
 
@@ -1382,7 +1382,7 @@ func TestRenderMessage(t *testing.T) {
 		}},
 		{"non-thought message unaffected by expandThoughts", func(t *testing.T) {
 			m := newTestModel()
-			msg := Message{Sender: "ora", IsThought: false, Content: "the final answer is 42"}
+			msg := Message{Sender: "june", IsThought: false, Content: "the final answer is 42"}
 
 			collapsed := m.renderMessage(msg, 100)
 			m.expandThoughts = true
@@ -1398,7 +1398,7 @@ func TestRenderMessage(t *testing.T) {
 			m := newTestModel()
 			width := 60
 
-			rendered := m.renderMessage(Message{Sender: "ora", Content: malayalamRepro}, width)
+			rendered := m.renderMessage(Message{Sender: "june", Content: malayalamRepro}, width)
 
 			for i, line := range strings.Split(rendered, "\n") {
 				if w := lipgloss.Width(line); w != width {
@@ -1411,28 +1411,28 @@ func TestRenderMessage(t *testing.T) {
 			width := 40
 			content := strings.Repeat("a", width-GutterWidth)
 
-			rendered := m.renderMessage(Message{Sender: "ora", Content: content}, width)
+			rendered := m.renderMessage(Message{Sender: "june", Content: content}, width)
 			lines := strings.Split(rendered, "\n")
 
 			if len(lines) < 2 {
 				t.Fatalf("expected the safety margin to force a wrap before the full gutter-width column, got %d line(s): %+v", len(lines), lines)
 			}
 		}},
-		{"an ora message carries no background ANSI code", func(t *testing.T) {
+		{"an june message carries no background ANSI code", func(t *testing.T) {
 			lipgloss.SetColorProfile(termenv.TrueColor)
 			defer lipgloss.SetColorProfile(termenv.Ascii)
 
 			m := newTestModel()
-			out := m.renderMessage(Message{Sender: "ora", Content: "Hello there."}, 60)
+			out := m.renderMessage(Message{Sender: "june", Content: "Hello there."}, 60)
 
 			if noBackgroundCode.MatchString(out) {
-				t.Errorf("expected no background ANSI code in a rendered ora message, got %q", out)
+				t.Errorf("expected no background ANSI code in a rendered june message, got %q", out)
 			}
 		}},
 		{"trailing newlines trimmed at render time", func(t *testing.T) {
 			m := newTestModel()
-			withTrailing := m.renderMessage(Message{Sender: "ora", Content: "Hello there.\n\n\n"}, 60)
-			without := m.renderMessage(Message{Sender: "ora", Content: "Hello there."}, 60)
+			withTrailing := m.renderMessage(Message{Sender: "june", Content: "Hello there.\n\n\n"}, 60)
+			without := m.renderMessage(Message{Sender: "june", Content: "Hello there."}, 60)
 
 			if got, want := lipgloss.Height(withTrailing), lipgloss.Height(without); got != want {
 				t.Errorf("expected trailing newlines trimmed at render time (height %d, matching no-trailing-newline content), got height %d", want, got)
@@ -1587,7 +1587,7 @@ func TestUpdateViewport_SeparatorHasNoBackgroundCode(t *testing.T) {
 
 	m := newTestModel()
 	m.viewport.Width = 60
-	m.messages = []Message{{Sender: "you", Content: "hi"}, {Sender: "ora", Content: "hello"}}
+	m.messages = []Message{{Sender: "you", Content: "hi"}, {Sender: "june", Content: "hello"}}
 	m.updateViewport(false)
 
 	if noBackgroundCode.MatchString(m.viewport.View()) {
@@ -1757,7 +1757,7 @@ func TestView_RenderedHeightMatchesModelHeight(t *testing.T) {
 		content    bool
 		termHeight int
 	}{
-		{"ModeBoth with multiline ora content", func(m *model) { m.mode = ModeBoth }, true, 30},
+		{"ModeBoth with multiline june content", func(m *model) { m.mode = ModeBoth }, true, 30},
 		{"ModeText", func(m *model) { m.mode = ModeText }, false, 30},
 		// Drives the real agent.ToolRequest Update() path (not a direct m.mode flip) so the hitlList actually gets sized by that case's SetHeight(len(items)) call (WP7).
 		{"ModeToolConfirm with menu open at 30 rows", openToolConfirm, false, 30},
@@ -1790,7 +1790,7 @@ func TestView_RenderedHeightMatchesModelHeight(t *testing.T) {
 
 			if tc.content {
 				long := strings.Repeat("this is a filler reply line that repeats\n", 11)
-				m.streamLine("ora", long, false)
+				m.streamLine("june", long, false)
 			}
 
 			out := m.View()
@@ -1879,25 +1879,25 @@ func openSuggestChanges(t *testing.T, cmd string) (model, chan string) {
 // panicking on a nil activeToolReq.
 func TestUpdate_SuggestChanges(t *testing.T) {
 	t.Run("opening it keeps activeToolReq and prefills the textarea", func(t *testing.T) {
-		m, _ := openSuggestChanges(t, "echo ora-test")
+		m, _ := openSuggestChanges(t, "echo june-test")
 
 		if m.activeToolReq == nil {
 			t.Error("activeToolReq was cleared by Suggest changes — the edit handler needs it to deliver a result")
 		}
-		if got := m.textarea.Value(); got != "echo ora-test" {
+		if got := m.textarea.Value(); got != "echo june-test" {
 			t.Errorf("expected the textarea prefilled with the original command, got %q", got)
 		}
 	})
 
 	t.Run("Enter runs the edited command", func(t *testing.T) {
-		m, res := openSuggestChanges(t, "echo ora-original")
-		m.textarea.SetValue("echo ora-edited")
+		m, res := openSuggestChanges(t, "echo june-original")
+		m.textarea.SetValue("echo june-edited")
 
 		m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
 		select {
 		case got := <-res:
-			if !strings.Contains(got, "ora-edited") {
+			if !strings.Contains(got, "june-edited") {
 				t.Errorf("expected the edited command's output on ResultChan, got %q", got)
 			}
 		case <-time.After(5 * time.Second):
@@ -1906,7 +1906,7 @@ func TestUpdate_SuggestChanges(t *testing.T) {
 	})
 
 	t.Run("Esc rejects", func(t *testing.T) {
-		m, res := openSuggestChanges(t, "echo ora-test")
+		m, res := openSuggestChanges(t, "echo june-test")
 
 		m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 

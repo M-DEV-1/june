@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ora/internal/agent"
-	"ora/internal/config"
+	"june/internal/agent"
+	"june/internal/config"
 
 	"google.golang.org/genai"
 )

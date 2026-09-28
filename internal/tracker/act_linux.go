@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/act"
+	"june/internal/act"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/jezek/xgb"

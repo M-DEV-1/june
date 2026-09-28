@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	"ora/internal/config"
+	"june/internal/config"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -16,7 +16,7 @@ func (m *model) renderSignalField() string {
 	}
 
 	micView := m.micWave.Render(m.styles.WaveUser, "MICROPHONE")
-	speakerView := m.speakerWave.Render(m.styles.WaveOra, "ORA VOICE")
+	speakerView := m.speakerWave.Render(m.styles.WaveJune, "June VOICE")
 
 	// spacer needs to be as tall as the waveforms (label + 4 braille rows = 5) to avoid holes below it
 	spacer := lipgloss.NewStyle().

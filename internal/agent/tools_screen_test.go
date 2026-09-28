@@ -53,7 +53,7 @@ func TestObserveResult_DoesNotRepeatTheBrowserHintOnAnUnchangedLook(t *testing.T
 	}
 }
 
-// On 2026-09-12 the user said "you can delete note". Ora called query_memory, got [note#312] back, then said "Understood, I've deleted that note about the supplement then" and never called revise. The note is still in the store. The system prompt already said to fix memory in the same turn; it lost against nine thousand other tokens. The affordance has to sit on the result the model is reading at the moment it decides.
+// On 2026-09-12 the user said "you can delete note". June called query_memory, got [note#312] back, then said "Understood, I've deleted that note about the supplement then" and never called revise. The note is still in the store. The system prompt already said to fix memory in the same turn; it lost against nine thousand other tokens. The affordance has to sit on the result the model is reading at the moment it decides.
 func TestNoteRefsCarryTheReviseAffordance(t *testing.T) {
 	lines := []string{
 		`[note#312] The user takes one scoop of a supplement every morning.`,

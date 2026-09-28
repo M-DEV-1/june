@@ -8,10 +8,10 @@ import (
 	"sort"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/brain"
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/agent"
+	"june/internal/brain"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // usageDays is how many days the week window and the bar series cover, today counted as one of them.
@@ -49,7 +49,7 @@ type ProviderTotal struct {
 	TotalTokens  int    `json:"total_tokens"`
 	// CachedInputTokens is the part of InputTokens the provider answered out of its own prompt cache rather than reading afresh. Zero for a provider that reports none.
 	CachedInputTokens int `json:"cached_input_tokens"`
-	// BudgetUsedFraction is today's spend against the provider's config.OraConfig.DailyTokenBudget, as a fraction from 0 up (over 1 once the budget is spent), so the app can warn at 80%. Zero when the provider has no budget set, which reads the same as "spent nothing" and so never warns either way. Only ever computed for the Today window: a daily budget measured against the week's total would warn on a number no single day produced.
+	// BudgetUsedFraction is today's spend against the provider's config.JuneConfig.DailyTokenBudget, as a fraction from 0 up (over 1 once the budget is spent), so the app can warn at 80%. Zero when the provider has no budget set, which reads the same as "spent nothing" and so never warns either way. Only ever computed for the Today window: a daily budget measured against the week's total would warn on a number no single day produced.
 	BudgetUsedFraction float64 `json:"budget_used_fraction"`
 }
 
@@ -111,7 +111,7 @@ type UsageView struct {
 	Limits map[string]ProviderLimits `json:"limits"`
 }
 
-// Usage builds the GET /usage handler. Input: the store's token ledger, the daily budget set for a provider (config.OraConfig.DailyTokenBudgetFor; nil is the same as a config with no budgets set), the Exa plan's monthly request ceiling (config.OraConfig.ExaMonthlyRequests; 0 means unset), and optionally the same allowance lookup GET /brains uses, so the settings page can draw the providers' own usage bars beside the token spend. Output: a handler writing UsageView as JSON, or 500 when the ledger cannot answer — an empty answer would read as "you have spent nothing", which is a different thing from "the store is broken".
+// Usage builds the GET /usage handler. Input: the store's token ledger, the daily budget set for a provider (config.JuneConfig.DailyTokenBudgetFor; nil is the same as a config with no budgets set), the Exa plan's monthly request ceiling (config.JuneConfig.ExaMonthlyRequests; 0 means unset), and optionally the same allowance lookup GET /brains uses, so the settings page can draw the providers' own usage bars beside the token spend. Output: a handler writing UsageView as JSON, or 500 when the ledger cannot answer — an empty answer would read as "you have spent nothing", which is a different thing from "the store is broken".
 func Usage(ledger TokenLedger, budgetFor func(provider string) int, exaMonthlyRequests int, limitsFor ...BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -127,7 +127,7 @@ func Usage(ledger TokenLedger, budgetFor func(provider string) int, exaMonthlyRe
 			fail(w, err, http.StatusInternalServerError)
 			return
 		}
-		// monthTotals backs the Exa row of Limits below: Exa's own usage endpoint needs a team-management key Ora does not hold (see internal/agent/websearch.go), so calls-this-month off the same ledger every other row is built from is the only reading there is.
+		// monthTotals backs the Exa row of Limits below: Exa's own usage endpoint needs a team-management key June does not hold (see internal/agent/websearch.go), so calls-this-month off the same ledger every other row is built from is the only reading there is.
 		monthTotals, err := ledger.TokenTotalsSince(ctx, startOfMonth(today))
 		if err != nil {
 			fail(w, err, http.StatusInternalServerError)
@@ -184,7 +184,7 @@ func providerLimits(ctx context.Context, limitsFor []BrainLimits) map[string]Pro
 	return out
 }
 
-// exaProviderLimits builds the exa row for the usage view's Limits map: a local monthly call count against exaMonthlyRequests, since Exa's own usage endpoint needs a team-management key Ora does not hold (see internal/agent/websearch.go). Input: this month's per-provider ledger totals — the same rows AddTokenUse gets one of for every Exa call, see internal/agent/websearch.go's recordSearchUse — and the configured monthly ceiling, 0 meaning unknown. Output: the row and true when Exa has been called at all this month; false, meaning nothing to show, when it has not been called this month at all. UsedFraction is left at zero, which the window reads as "no bar to draw", when the ceiling is unknown; the call count itself is always named in Source so the number is visible either way, and no plan size is ever guessed at.
+// exaProviderLimits builds the exa row for the usage view's Limits map: a local monthly call count against exaMonthlyRequests, since Exa's own usage endpoint needs a team-management key June does not hold (see internal/agent/websearch.go). Input: this month's per-provider ledger totals — the same rows AddTokenUse gets one of for every Exa call, see internal/agent/websearch.go's recordSearchUse — and the configured monthly ceiling, 0 meaning unknown. Output: the row and true when Exa has been called at all this month; false, meaning nothing to show, when it has not been called this month at all. UsedFraction is left at zero, which the window reads as "no bar to draw", when the ceiling is unknown; the call count itself is always named in Source so the number is visible either way, and no plan size is ever guessed at.
 func exaProviderLimits(monthTotals []TokenTotal, exaMonthlyRequests int) (ProviderLimits, bool) {
 	calls := 0
 	for _, t := range monthTotals {

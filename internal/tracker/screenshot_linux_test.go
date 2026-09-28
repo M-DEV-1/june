@@ -52,7 +52,7 @@ func TestScreenLayout(t *testing.T) {
 }
 
 // TestScreenFramesLive captures the real screen and reports what each stored frame costs, which is the check that a monitor's frame keeps its native resolution instead of being squeezed into a shared thumbnail.
-// Set ORA_FRAME_DUMP to a directory to also write the frames out and look at them: ORA_FRAME_DUMP=/tmp/x go test -run TestScreenFramesLive ./internal/tracker/...
+// Set JUNE_FRAME_DUMP to a directory to also write the frames out and look at them: JUNE_FRAME_DUMP=/tmp/x go test -run TestScreenFramesLive ./internal/tracker/...
 func TestScreenFramesLive(t *testing.T) {
 	shot, err := grabScreen(context.Background())
 	if err != nil {
@@ -68,7 +68,7 @@ func TestScreenFramesLive(t *testing.T) {
 	if len(frames) == 0 {
 		t.Fatal("no frames")
 	}
-	dump := os.Getenv("ORA_FRAME_DUMP")
+	dump := os.Getenv("JUNE_FRAME_DUMP")
 	for i, f := range frames {
 		fc, err := jpeg_.DecodeConfig(bytes.NewReader(f))
 		if err != nil {
@@ -115,7 +115,7 @@ func TestDiscardLateShot_RemovesTheFileTheLateResponseNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handle := dbus.ObjectPath("/org/freedesktop/portal/desktop/request/x/ora_shot_1")
+	handle := dbus.ObjectPath("/org/freedesktop/portal/desktop/request/x/june_shot_1")
 	sigCh := make(chan *dbus.Signal, 1)
 	sigCh <- &dbus.Signal{Path: handle, Body: []interface{}{
 		uint32(0),

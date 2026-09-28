@@ -87,11 +87,11 @@ function meeting(over: Partial<Meeting> = {}): Meeting {
   };
 }
 
-/** One of Ora's turns. */
+/** One of June's turns. */
 function turn(over: Partial<Turn> = {}): Turn {
   return {
     id: "1",
-    role: "ora",
+    role: "june",
     text: "",
     kind: "ask",
     evidence: [],
@@ -342,27 +342,27 @@ describe("the replies worth a rail beside them", () => {
       {
         ...base,
         id: "t2",
-        role: "ora" as const,
+        role: "june" as const,
         text: "She said Friday.",
         evidence: [{ title: "Meridian call", meta: "meeting", body: "Friday" }],
       },
       {
         ...base,
         id: "t3",
-        role: "ora" as const,
+        role: "june" as const,
         text: "Just answered.",
         tools: ["search_memory"],
       },
       {
         ...base,
         id: "t4",
-        role: "ora" as const,
+        role: "june" as const,
         text: "Nothing read, nothing called.",
       },
       {
         ...base,
         id: "t5",
-        role: "ora" as const,
+        role: "june" as const,
         text: "An empty tool name is not a step.",
         tools: [""],
       },

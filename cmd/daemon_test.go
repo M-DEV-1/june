@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/tracker"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/tracker"
 )
 
 // TestPingHandler_ReturnsBuildIdentity verifies /ping's response body is this process's own build identity, not a static "pong" — the client compares this against its own identity to detect a stale daemon still running an old build (see checkDaemonBuildMismatch in root.go).
@@ -212,7 +212,7 @@ func TestLateRaiser_AnswersUnavailableUntilTheBusDialFinishes(t *testing.T) {
 	}
 }
 
-// TestFirstRunDelay_ResumesTheScheduleAcrossARestart pins when a job that spends a model call on every run makes its first run after startup. Before the marker existed every restart ran the safety-net flush, the note consolidation and the episodic compaction two minutes in, so a day of ora-restart cycles spent several background requests per restart against a 500-a-day budget.
+// TestFirstRunDelay_ResumesTheScheduleAcrossARestart pins when a job that spends a model call on every run makes its first run after startup. Before the marker existed every restart ran the safety-net flush, the note consolidation and the episodic compaction two minutes in, so a day of june-restart cycles spent several background requests per restart against a 500-a-day budget.
 func TestFirstRunDelay_ResumesTheScheduleAcrossARestart(t *testing.T) {
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 

@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"io"
+	"june/internal/config"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"ora/internal/config"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -75,7 +75,7 @@ func TestSecureEnvFile_RestrictsPermissions(t *testing.T) {
 
 // TestFileIdentity_DiffersAfterRebuild verifies calling fileIdentity twice on the same unchanged file returns the same non-"unknown" string — the daemon and a freshly-relaunched client built from the same binary must agree when nothing has actually changed — that it changes when the file is overwritten (a rebuild), which is the whole point: an old daemon process holds an identity captured at ITS startup, while a freshly-relaunched client reads whatever's on disk now — and that a stat failure on a missing file degrades to "unknown" instead of panicking or erroring out, since this is a diagnostic, not something that should ever block startup.
 func TestFileIdentity_DiffersAfterRebuild(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ora-bin")
+	path := filepath.Join(t.TempDir(), "june-bin")
 	if err := os.WriteFile(path, []byte("old build"), 0755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestFileIdentity_DiffersAfterRebuild(t *testing.T) {
 		t.Errorf("expected a real identity for a file that exists, got %q", before)
 	}
 
-	if err := os.WriteFile(path, []byte("a new, longer build of ora"), 0755); err != nil {
+	if err := os.WriteFile(path, []byte("a new, longer build of june"), 0755); err != nil {
 		t.Fatalf("WriteFile (rebuild): %v", err)
 	}
 	after := fileIdentity(path)
@@ -139,13 +139,13 @@ func fakeDaemon(t *testing.T, mux *http.ServeMux) {
 // isolateConfig points config.DataDir (and so ConfigPath) at a fresh temp directory, so LoadConfig/SaveConfig in a test never touch the real machine's config file.
 func isolateConfig(t *testing.T) {
 	t.Helper()
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 }
 
-// A machine with no window built is told exactly where ora looked and how to fix it, and offerWindow leaves the terminal UI as the caller's job.
+// A machine with no window built is told exactly where june looked and how to fix it, and offerWindow leaves the terminal UI as the caller's job.
 func TestOfferWindow_NoWindowBinary_PrintsHintAndDefersToTUI(t *testing.T) {
 	isolateConfig(t)
-	t.Setenv("ORA_WINDOW", filepath.Join(t.TempDir(), "not-here"))
+	t.Setenv("JUNE_WINDOW", filepath.Join(t.TempDir(), "not-here"))
 
 	var took bool
 	out := captureStdout(t, func() { took = offerWindow(false) })
@@ -153,8 +153,8 @@ func TestOfferWindow_NoWindowBinary_PrintsHintAndDefersToTUI(t *testing.T) {
 	if took {
 		t.Error("offerWindow should leave startup to the terminal UI when nothing is built")
 	}
-	if !strings.Contains(out, "ORA_WINDOW") {
-		t.Errorf("expected the hint to mention ORA_WINDOW, got %q", out)
+	if !strings.Contains(out, "JUNE_WINDOW") {
+		t.Errorf("expected the hint to mention JUNE_WINDOW, got %q", out)
 	}
 	if !strings.Contains(out, "not-here") {
 		t.Errorf("expected the hint to name the path it tried, got %q", out)
@@ -164,7 +164,7 @@ func TestOfferWindow_NoWindowBinary_PrintsHintAndDefersToTUI(t *testing.T) {
 // A config with the window turned off runs the terminal UI without printing anything about a window at all — this is the user's own choice, not a missing binary.
 func TestOfferWindow_WindowTurnedOff_SilentlyDefersToTUI(t *testing.T) {
 	isolateConfig(t)
-	if err := config.SaveConfig(config.OraConfig{Window: false}); err != nil {
+	if err := config.SaveConfig(config.JuneConfig{Window: false}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -182,8 +182,8 @@ func TestOfferWindow_WindowTurnedOff_SilentlyDefersToTUI(t *testing.T) {
 // A window binary that exists is shown rather than the terminal UI opened, and the printed line names the binary and the accelerator that brings a hidden window back.
 func TestOfferWindow_WindowFound_ShowsItAndReportsTheHotkey(t *testing.T) {
 	isolateConfig(t)
-	binary := writeExecutable(t, filepath.Join(t.TempDir(), "ora-window"))
-	t.Setenv("ORA_WINDOW", binary)
+	binary := writeExecutable(t, filepath.Join(t.TempDir(), "june-window"))
+	t.Setenv("JUNE_WINDOW", binary)
 
 	var opens int32
 	mux := http.NewServeMux()
@@ -209,7 +209,7 @@ func TestOfferWindow_WindowFound_ShowsItAndReportsTheHotkey(t *testing.T) {
 	if !strings.Contains(out, "Ctrl+Alt+Space") {
 		t.Errorf("expected the line to report the hotkey, got %q", out)
 	}
-	if !strings.Contains(out, "ora --tui") {
+	if !strings.Contains(out, "june --tui") {
 		t.Errorf("expected the line to mention the --tui fallback, got %q", out)
 	}
 	if got := atomic.LoadInt32(&opens); got != 1 {
@@ -220,8 +220,8 @@ func TestOfferWindow_WindowFound_ShowsItAndReportsTheHotkey(t *testing.T) {
 // A daemon this process just spawned may not have its window listening yet, so offerWindow retries the show instruction rather than sending it once and hoping.
 func TestOfferWindow_FreshDaemon_RetriesTheShowInstruction(t *testing.T) {
 	isolateConfig(t)
-	binary := writeExecutable(t, filepath.Join(t.TempDir(), "ora-window"))
-	t.Setenv("ORA_WINDOW", binary)
+	binary := writeExecutable(t, filepath.Join(t.TempDir(), "june-window"))
+	t.Setenv("JUNE_WINDOW", binary)
 
 	oldInterval := openRetryInterval
 	openRetryInterval = time.Millisecond

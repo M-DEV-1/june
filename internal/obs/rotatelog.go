@@ -54,7 +54,7 @@ func (w *RotatingWriter) Write(p []byte) (int, error) {
 	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes {
 		if err := w.rotate(); err != nil {
 			// A rotation that failed is not a reason to lose the line: it still goes to whatever file is open, even if that means the cap is missed this once.
-			fmt.Fprintf(os.Stderr, "ora: could not rotate %s: %v\n", w.path, err)
+			fmt.Fprintf(os.Stderr, "june: could not rotate %s: %v\n", w.path, err)
 		}
 	}
 	n, err := w.file.Write(p)

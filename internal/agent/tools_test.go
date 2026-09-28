@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"june/internal/act"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/memory"
+	"june/internal/tracker"
+	"june/internal/util"
+	"june/internal/window"
 	"maps"
-	"ora/internal/act"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/memory"
-	"ora/internal/tracker"
-	"ora/internal/util"
-	"ora/internal/window"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -369,7 +369,7 @@ func TestRecallBounds(t *testing.T) {
 func TestExecuteTool_QueryMemory_FiltersByApp(t *testing.T) {
 	brain := &toolTestBrain{
 		hybridHits: []db.MemoryHit{
-			{Source: "episode", App: "Slack", Title: "ora", Content: "retrieval thread"},
+			{Source: "episode", App: "Slack", Title: "june", Content: "retrieval thread"},
 			{Source: "episode", App: "Firefox", Title: "Suits", Content: "watching"},
 			{Source: "note", Content: "user likes go"},
 		},
@@ -385,7 +385,7 @@ func TestExecuteTool_Recall_TimelineHonorsApp(t *testing.T) {
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 	brain := &toolTestBrain{
 		windowEpisodes: []db.Episode{
-			{App: "Slack", Title: "ora", ScreenText: "thread", CreatedAt: now},
+			{App: "Slack", Title: "june", ScreenText: "thread", CreatedAt: now},
 			{App: "Code", Title: "main.go", ScreenText: "editing", CreatedAt: now},
 		},
 	}
@@ -725,9 +725,9 @@ func TestExecuteTool_Revise_Thread(t *testing.T) {
 	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
 
 	result := a.executeTool(context.Background(), "revise", map[string]any{
-		"ref": "thread#19", "content": "mf x mdev is a Google Meet call, unrelated to the ORA work",
+		"ref": "thread#19", "content": "mf x mdev is a Google Meet call, unrelated to the June work",
 	})
-	if brain.updatedThreadID != 19 || brain.updatedThreadState != "mf x mdev is a Google Meet call, unrelated to the ORA work" {
+	if brain.updatedThreadID != 19 || brain.updatedThreadState != "mf x mdev is a Google Meet call, unrelated to the June work" {
 		t.Errorf("thread %d updated to %q, want the correction against thread 19", brain.updatedThreadID, brain.updatedThreadState)
 	}
 	if result != "fixed" {
@@ -800,7 +800,7 @@ func TestExecuteTool_NoteTools_BadArgsAndStoreFailures(t *testing.T) {
 
 // --- exfiltration gap: read_file / read_clipboard HITL gating (F1b) ---
 
-// TestIsSensitivePath is table-driven over the patterns read_file gates on: SSH/GPG/AWS credential dirs, .env, private key files (id_rsa/id_ed25519/*.pem/*.key), "credentials", "shadow", and ora's own IPC token — versus ordinary paths that should stay frictionless.
+// TestIsSensitivePath is table-driven over the patterns read_file gates on: SSH/GPG/AWS credential dirs, .env, private key files (id_rsa/id_ed25519/*.pem/*.key), "credentials", "shadow", and june's own IPC token — versus ordinary paths that should stay frictionless.
 func TestIsSensitivePath(t *testing.T) {
 	cases := []struct {
 		path string
@@ -816,7 +816,7 @@ func TestIsSensitivePath(t *testing.T) {
 		{"/home/user/certs/server.pem", true},
 		{"/home/user/keys/api.key", true},
 		{"/etc/shadow", true},
-		{"ora-db/ipc-token", true},
+		{"june-db/ipc-token", true},
 		{"/some/path/credentials.json", true},
 		{"main.go", false},
 		{"README.md", false},
@@ -1330,12 +1330,12 @@ func TestExecuteTool_Recall_BigWindowClimbsToSummaries(t *testing.T) {
 	}
 	brain.windowSummaries = []db.WindowSummary{
 		{CreatedAt: base.UTC(), Content: `{"task_name":"Brightpath Statement Builder VRDS","summary":"scoring vulnerability data"}`},
-		{CreatedAt: base.Add(8 * time.Hour).UTC(), Content: `{"task_name":"Ora Memory Architecture Development","summary":"recall surgery"}`},
+		{CreatedAt: base.Add(8 * time.Hour).UTC(), Content: `{"task_name":"June Memory Architecture Development","summary":"recall surgery"}`},
 		{CreatedAt: base.Add(9 * time.Hour).UTC(), Content: `{"task_name":"Raw Activity Log","summary":"Unknown | Unknown"}`},
 	}
 	a := NewAgent(nil, nil, brain, nil, "FAKE_API_KEY")
 	out := a.ExecuteTool(context.Background(), "recall", map[string]any{"since": "2026-08-28", "until": "2026-08-28"})
-	if !strings.Contains(out, "Brightpath Statement Builder VRDS") || !strings.Contains(out, "Ora Memory Architecture Development") {
+	if !strings.Contains(out, "Brightpath Statement Builder VRDS") || !strings.Contains(out, "June Memory Architecture Development") {
 		t.Errorf("an overflowing window must answer from summaries covering the whole window, got:\n%s", out)
 	}
 	if strings.Contains(out, "late night content") {
@@ -2374,7 +2374,7 @@ type fakeRaiser struct {
 
 func (f *fakeRaiser) Available(ctx context.Context) (bool, error) {
 	if !f.available {
-		return false, errors.New("the ora extension is not loaded in this shell")
+		return false, errors.New("the june extension is not loaded in this shell")
 	}
 	return true, nil
 }
@@ -3047,7 +3047,7 @@ func TestPatchAccessibility_WritesTheFlagIntoTheUserCopyAndItsActions(t *testing
 	}
 }
 
-// Running the patch twice must do nothing the second time, and a file at the destination that Ora did not write - no user hand-edited a copy there, say - must never be overwritten.
+// Running the patch twice must do nothing the second time, and a file at the destination that June did not write - no user hand-edited a copy there, say - must never be overwritten.
 func TestPatchAccessibility_IsIdempotentAndNeverOverwritesAForeignFile(t *testing.T) {
 	src := t.TempDir()
 	home := t.TempDir()
@@ -3079,20 +3079,20 @@ func TestPatchAccessibility_IsIdempotentAndNeverOverwritesAForeignFile(t *testin
 		t.Error("an entry that already carries the flag must not get a patched copy")
 	}
 
-	// A file at the destination that Ora did not write, marked by carrying no Ora marker, must survive untouched.
+	// A file at the destination that June did not write, marked by carrying no June marker, must survive untouched.
 	foreign := filepath.Join(src, "foreign.desktop")
 	os.WriteFile(foreign, []byte("[Desktop Entry]\nName=Foreign\nExec="+bin+" %U\n"), 0o644)
 	foreignDest := filepath.Join(home, ".local/share/applications", "foreign.desktop")
 	os.MkdirAll(filepath.Dir(foreignDest), 0o755)
-	os.WriteFile(foreignDest, []byte("hand-edited by the user, not Ora"), 0o644)
+	os.WriteFile(foreignDest, []byte("hand-edited by the user, not June"), 0o644)
 	// The Teams PWA case: open_app told the model "the application has been patched" whatever happened here, and the model passed the promise on.
 	if patchAccessibility(foreign) {
 		t.Error("a patch that left a foreign file in place reported the application as patched")
 	}
 	if !patchAccessibility(entry) {
-		t.Error("Ora's own patched copy reported as not patched")
+		t.Error("June's own patched copy reported as not patched")
 	}
-	if got, _ := os.ReadFile(foreignDest); string(got) != "hand-edited by the user, not Ora" {
+	if got, _ := os.ReadFile(foreignDest); string(got) != "hand-edited by the user, not June" {
 		t.Errorf("foreign file = %q, want it left untouched", got)
 	}
 }
@@ -3262,7 +3262,7 @@ func TestOpenApp_DoesNotStartASecondCopyWhenTheWindowIsAlreadyOpen(t *testing.T)
 
 // --- revise on a task the user keeps on their list ---
 
-// The last conversation of 2026-09-12 broke on this three times. Ora added a research task, the user asked for the right context to be put on it, then asked for it to be deleted, and every attempt was refused: "revise only handles note and thread refs, not \"task\"". The revise tool's own description had been promising action-item support all along, and an action item is a note; a row on the Tasks screen is not, and nothing could touch one.
+// The last conversation of 2026-09-12 broke on this three times. June added a research task, the user asked for the right context to be put on it, then asked for it to be deleted, and every attempt was refused: "revise only handles note and thread refs, not \"task\"". The revise tool's own description had been promising action-item support all along, and an action item is a note; a row on the Tasks screen is not, and nothing could touch one.
 func TestReviseOnATaskTheUserKeeps(t *testing.T) {
 	t.Run("rewords it", func(t *testing.T) {
 		b := &toolTestBrain{}
@@ -3406,7 +3406,7 @@ func TestExecuteTool_Click_AToggleThatRenamedItselfIsStillTheSameButton(t *testi
 	}
 }
 
-// gemini-3.8-live documents Google Search grounding as supported, but nobody has dialled it with Ora's own handshake, and the failure it would inherit is the 2026-09-02 one: the session closes with "You exceeded your current quota" a quarter second after connecting, before a word is spoken. Grounding stays off until someone probes it, because a missing web search only degrades the session while a 429 ends it.
+// gemini-3.8-live documents Google Search grounding as supported, but nobody has dialled it with June's own handshake, and the failure it would inherit is the 2026-09-02 one: the session closes with "You exceeded your current quota" a quarter second after connecting, before a word is spoken. Grounding stays off until someone probes it, because a missing web search only degrades the session while a 429 ends it.
 func TestLiveToolsFor_NoSearchOnLive38(t *testing.T) {
 	for _, tool := range liveToolsFor("gemini-3.8-live") {
 		if tool.GoogleSearch != nil {

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/actjob"
-	"ora/internal/db/dbtest"
+	"june/internal/act"
+	"june/internal/actjob"
+	"june/internal/db/dbtest"
 )
 
 // jobExec answers every tool from a script, so the routes can be driven end to end without a screen.
@@ -355,7 +355,7 @@ func waitForStep(t *testing.T, r *actjob.Runner, id string) {
 	t.Fatalf("job %s recorded no verified step", id)
 }
 
-// TestSpokenJob_WaitsForTheJobThenHandsBackWhatItSaid covers the way in for the voice session's do tool. The live agent's RunJob is this, so what it returns is what Ora reads out when the chain lands; before it existed a spoken chain of actions never reached the runner at all and was driven one raw tool call at a time inside the conversation.
+// TestSpokenJob_WaitsForTheJobThenHandsBackWhatItSaid covers the way in for the voice session's do tool. The live agent's RunJob is this, so what it returns is what June reads out when the chain lands; before it existed a spoken chain of actions never reached the runner at all and was driven one raw tool call at a time inside the conversation.
 func TestSpokenJob_WaitsForTheJobThenHandsBackWhatItSaid(t *testing.T) {
 	j, _, _ := jobServer(t, &jobExec{}, stepJSON, `{"done":true,"say":"It is playing S16 E8."}`)
 	said, err := j.Spoken(context.Background(), "open netflix and press play")

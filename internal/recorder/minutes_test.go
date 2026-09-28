@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // The prompt states the meeting's own clock in local time, so the screen timeline under it has to be on the same clock: episodes come back from SQLite in UTC, and a row printed straight from CreatedAt reads hours away from the meeting it belongs to.

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/memory"
+	"june/internal/memory"
 )
 
 // maybeBrief delivers the morning brief once the brief hour has passed and the user's first activity of the day shows up — the newest episode inside activityWindow is that signal. Today's kind='brief' diary row is the once-per-day marker.
@@ -46,7 +46,7 @@ func (s *Scheduler) maybeBrief(ctx context.Context) {
 }
 
 // briefInstruction heads the morning brief prompt. The brief is a notification, so brevity is the whole design.
-const briefInstruction = `You are Ora, writing the user's morning brief. It is delivered as a desktop notification, so it must read in a few seconds.
+const briefInstruction = `You are June, writing the user's morning brief. It is delivered as a desktop notification, so it must read in a few seconds.
 
 Principles:
 - At most three short lines, plain text, no markdown, no greeting, no sign-off.
@@ -136,7 +136,7 @@ const staleNoticeKind = "stale"
 
 // askAbout puts one stale action item to the user and applies whatever they answer. Dismissing it changes nothing and the item is simply asked about again another morning. Runs in its own goroutine because it blocks until the question is answered, which can be hours.
 //
-// With a window up the question is a notice of Ora's own carrying its three answers as buttons, and the answer comes back through POST /notices/stale/{note id}/action like every other card button; with no window it is the notify-send banner it has always been. It is deliberately not handed to say, whose fallback posts the five buttons every other notice carries, none of which can answer this question.
+// With a window up the question is a notice of June's own carrying its three answers as buttons, and the answer comes back through POST /notices/stale/{note id}/action like every other card button; with no window it is the notify-send banner it has always been. It is deliberately not handed to say, whose fallback posts the five buttons every other notice carries, none of which can answer this question.
 //
 // ponytail: re-asks every morning until answered. If that grates, stamp the item with the day it was last asked about and leave a gap.
 func (s *Scheduler) askAbout(ctx context.Context, a memory.ActionItem) {

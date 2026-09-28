@@ -12,7 +12,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
 // stateShowing is the AtspiStateType bit for STATE_SHOWING: the node and every ancestor are visible, so it is on screen or scrolled just off it.
@@ -21,7 +21,7 @@ const stateShowing uint = 25
 // observeTimeout bounds one read of a window; a page that has not finished in this time is answered with what was read so far.
 const observeTimeout = 4 * time.Second
 
-// Observe reads the window that has focus (the last one before Ora took it, when Ora has it) into the nodes a model can act on. Input: a context. Output: the app's name, the window's title, one act.Node per node with an actionable role (see act.Actionable) in tree order, and an error when the accessibility bus is unreachable, the focused window has gone, the application in front is on the blocklist, or nothing on the desktop publishes an actionable node. When no window has taken focus since the daemon started it walks the desktop instead (see observeDesktop).
+// Observe reads the window that has focus (the last one before June took it, when June has it) into the nodes a model can act on. Input: a context. Output: the app's name, the window's title, one act.Node per node with an actionable role (see act.Actionable) in tree order, and an error when the accessibility bus is unreachable, the focused window has gone, the application in front is on the blocklist, or nothing on the desktop publishes an actionable node. When no window has taken focus since the daemon started it walks the desktop instead (see observeDesktop).
 func Observe(ctx context.Context) (app, title string, nodes []act.Node, err error) {
 	w := focus()
 	if w == nil {
@@ -34,8 +34,8 @@ func Observe(ctx context.Context) (app, title string, nodes []act.Node, err erro
 	if fref, fapp, found := compositorFront(ctx, w.conn); found {
 		ref, app, ok = fref, fapp, true
 	}
-	if !ok || IsOraWindow(app, getName(ctx, w.conn, ref)) {
-		// The watcher only learns focus from activation events after the daemon starts, so a fresh daemon, or one that has only seen Ora's own hover come and go, has nothing to walk. Fall back to the desktop tree and take the window with the most actionable nodes.
+	if !ok || IsJuneWindow(app, getName(ctx, w.conn, ref)) {
+		// The watcher only learns focus from activation events after the daemon starts, so a fresh daemon, or one that has only seen June's own hover come and go, has nothing to walk. Fall back to the desktop tree and take the window with the most actionable nodes.
 		return observeDesktop(ctx, w.conn)
 	}
 	if Blocklisted(app) {
@@ -125,7 +125,7 @@ func walkWithOwnBudget(ctx context.Context, walk func(visited *int) []act.Node) 
 // registryRoot is the accessible under which every application on the bus hangs.
 var registryRoot = aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
 
-// observeDesktop walks every window of every application on the bus except the shell and Ora's own, and returns the one with the most actionable nodes, which on this desktop is the browser or editor the user is in. Output: like Observe; an error when nothing publishes an actionable node.
+// observeDesktop walks every window of every application on the bus except the shell and June's own, and returns the one with the most actionable nodes, which on this desktop is the browser or editor the user is in. Output: like Observe; an error when nothing publishes an actionable node.
 // ponytail: "most actionable nodes" is a stand-in for "in front", good enough for the seconds after a daemon start; replace with a real active-window read if the desktop ever exposes one.
 func observeDesktop(ctx context.Context, conn *dbus.Conn) (app, title string, nodes []act.Node, err error) {
 	apps, err := getChildren(ctx, conn, registryRoot)
@@ -152,7 +152,7 @@ func observeDesktop(ctx context.Context, conn *dbus.Conn) (app, title string, no
 			if kept <= bestKept {
 				continue
 			}
-			// The title is read only for a window that would win, because it costs a round trip and because it is the only thing that identifies Ora's own window when the compositor owns the frame.
+			// The title is read only for a window that would win, because it costs a round trip and because it is the only thing that identifies June's own window when the compositor owns the frame.
 			winTitle := getName(ctx, conn, win)
 			if skipWindow(name, winTitle) {
 				continue
@@ -168,10 +168,10 @@ func observeDesktop(ctx context.Context, conn *dbus.Conn) (app, title string, no
 	return app, title, nodes, nil
 }
 
-// skipWindow reports whether observeDesktop should leave a window out of the running: the shell's own windows, Ora's, which must never be what Ora describes back to the user, and any application on the blocklist, whose contents — a password manager's entry names reach the listing as ordinary list item labels — must not go to a brain.
-// The title has to be part of the decision. On this desktop Ora's window reaches the accessibility bus twice over: once as the application "ora", and once as "mutter-x11-frames" — the compositor's frame process — with "Ora" as the title. The application name alone identifies only the first of those. Pass "" for the title to make the cheap application-level check before any window is read.
+// skipWindow reports whether observeDesktop should leave a window out of the running: the shell's own windows, June's, which must never be what June describes back to the user, and any application on the blocklist, whose contents — a password manager's entry names reach the listing as ordinary list item labels — must not go to a brain.
+// The title has to be part of the decision. On this desktop June's window reaches the accessibility bus twice over: once as the application "june", and once as "mutter-x11-frames" — the compositor's frame process — with "June" as the title. The application name alone identifies only the first of those. Pass "" for the title to make the cheap application-level check before any window is read.
 func skipWindow(app, title string) bool {
-	return app == "gnome-shell" || IsOraWindow(app, title) || Blocklisted(app)
+	return app == "gnome-shell" || IsJuneWindow(app, title) || Blocklisted(app)
 }
 
 // blockedRead is the refusal a read of a blocklisted application answers with. Input: the application's name. Output: an error saying that application is not read, the same refusal the capture loop's skipReason gives when it answers "blocked".

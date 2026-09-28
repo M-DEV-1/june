@@ -2,7 +2,7 @@
 # Checks whether the running GNOME Shell's major version is one this extension declares support for in metadata.json. A mismatch here is the most common reason "installed but not answering" happens: gnome-shell silently refuses to load an extension whose shell-version list does not name it, with no error dialog. Input: none (reads gnome-shell --version and the metadata.json next to this script). Output: a one-line verdict on stdout; exit 0 if covered, exit 1 if not or if the version could not be determined.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-metadata="$here/ora@ora.local/metadata.json"
+metadata="$here/june@june.local/metadata.json"
 
 detect_major() {
 	if command -v gnome-shell >/dev/null 2>&1; then
@@ -24,7 +24,7 @@ covered() {
 
 major="$(detect_major || true)"
 if [ -z "${major:-}" ]; then
-	echo "could not determine the running GNOME Shell version; install anyway and check with: gnome-extensions info ora@ora.local"
+	echo "could not determine the running GNOME Shell version; install anyway and check with: gnome-extensions info june@june.local"
 	exit 1
 fi
 

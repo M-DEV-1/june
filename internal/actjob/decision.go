@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"ora/internal/act"
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/act"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // stopLineRefusal is what every stop-line refusal begins with (see agent's stopBeforeClick and the type_text and press_key stop lines): the action did not happen and the user has to say go before it can.

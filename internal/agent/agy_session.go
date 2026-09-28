@@ -1,5 +1,5 @@
 // agy_session.go keeps one agy process alive across asks instead of paying agy's own startup cost — login, model list, quota, experiments, a failing Playwright driver install — on every single question. Measured on 2026-09-10, that startup costs about 8 seconds before a 1-2 second model call; `agy --input-format stream-json --output-format stream-json` reads one line per turn from stdin and answers each in about 1-2 seconds once the process is already up.
-// A session is one Agent-wide slot: started lazily on the first ask, reused for the next one, replaced when the model changes, restarted transparently when it has died or a write to it fails, and killed after it sits idle past agyIdleTimeout. Ora runs one ask at a time, so there is no conversation id to key a session by; the slot is simply whichever process last answered, which is what "the same conversation continues" means here.
+// A session is one Agent-wide slot: started lazily on the first ask, reused for the next one, replaced when the model changes, restarted transparently when it has died or a write to it fails, and killed after it sits idle past agyIdleTimeout. June runs one ask at a time, so there is no conversation id to key a session by; the slot is simply whichever process last answered, which is what "the same conversation continues" means here.
 package agent
 
 import (
@@ -191,7 +191,7 @@ func (a *Agent) startAgySessionLocked(sess *agySessionState, newProc func() agyS
 		server.Close()
 		return fmt.Errorf("agy: finding the real home directory to mirror: %w", err)
 	}
-	tempHome, err := os.MkdirTemp(os.TempDir(), "ora-agy-session-")
+	tempHome, err := os.MkdirTemp(os.TempDir(), "june-agy-session-")
 	if err != nil {
 		server.Close()
 		return fmt.Errorf("agy: making the session's own temp home: %w", err)
@@ -306,7 +306,7 @@ func (a *Agent) runAgyTurn(ctx context.Context, newProc func() agySessionRunner,
 		line = agyPromptLine(true, instruction, history, start, injected, reference, question)
 		res, err = sendAgyTurnLocked(ctx, sess, line)
 	}
-	// agy writes its plan allowance to Ora's statusline command during the run, so the payload is there to read by the time the turn is over, win or lose.
+	// agy writes its plan allowance to June's statusline command during the run, so the payload is there to read by the time the turn is over, win or lose.
 	recordAgyQuota(sess.tempHome)
 	hops := sess.server.Hops()
 	capped := sess.server.Capped()

@@ -1,8 +1,8 @@
 package tracker_test
 
 import (
-	"ora/internal/config"
-	"ora/internal/tracker"
+	"june/internal/config"
+	"june/internal/tracker"
 	"testing"
 )
 

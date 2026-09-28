@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/memory"
+	"june/internal/db"
+	"june/internal/memory"
 )
 
 // dayOfSummary walks summary → task → session → day and returns the day node's content for the summary whose text is the given one.
@@ -77,9 +77,9 @@ func TestLogSemanticNode_InterleavedThreadsKeepTheirOwnTasks(t *testing.T) {
 
 	writes := []memory.TaskSummary{
 		{SameTask: false, TaskName: "watching suits", Summary: "started season one"},
-		{SameTask: true, TaskName: "ora compiler", Summary: "fixed the flush floor"},
+		{SameTask: true, TaskName: "june compiler", Summary: "fixed the flush floor"},
 		{SameTask: true, TaskName: "watching suits", Summary: "got to episode four"},
-		{SameTask: true, TaskName: "ora compiler", Summary: "wrote the test for it"},
+		{SameTask: true, TaskName: "june compiler", Summary: "wrote the test for it"},
 	}
 	for _, w := range writes {
 		if err := store.LogSemanticNode(ctx, w); err != nil {

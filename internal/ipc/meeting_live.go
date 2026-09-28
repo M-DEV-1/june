@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"ora/internal/recorder"
-	"ora/internal/util"
+	"june/internal/recorder"
+	"june/internal/util"
 )
 
 // LiveRecorder is the part of *recorder.Recorder this route needs, narrowed so a test can fake it.

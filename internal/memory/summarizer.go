@@ -10,9 +10,9 @@ import (
 
 	"google.golang.org/genai"
 
-	"ora/internal/config"
-	"ora/internal/obs"
-	"ora/internal/tracker"
+	"june/internal/config"
+	"june/internal/obs"
+	"june/internal/tracker"
 )
 
 // GeminiSummarizer implements Summarizer via the genai SDK. Other providers can implement the same interface later.
@@ -128,7 +128,7 @@ func (g *GeminiSummarizer) ReconcileNotes(ctx context.Context, existing []NoteRe
 		return nil, nil
 	}
 
-	tracer := obs.GetTracer(ctx, "ora.memory")
+	tracer := obs.GetTracer(ctx, "june.memory")
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.ReconcileNotes")
 	defer span.End()
 
@@ -188,7 +188,7 @@ const attributionRules = `Rules:
 
 // AttributeThreads maps recent screen activity onto ongoing threads, one update per concurrent throughline (so watching + coding never collapse into one thread) with the SPECIFIC state within each, plus any durable PERSON facts as identity.
 func (g *GeminiSummarizer) AttributeThreads(ctx context.Context, activities []tracker.Activity, existing []Thread) (*ThreadAttribution, error) {
-	tracer := obs.GetTracer(ctx, "ora.memory")
+	tracer := obs.GetTracer(ctx, "june.memory")
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AttributeThreads")
 	defer span.End()
 
@@ -232,7 +232,7 @@ func (g *GeminiSummarizer) AnalyzeScreen(ctx context.Context, png []byte) Screen
 		return ScreenSight{}
 	}
 
-	tracer := obs.GetTracer(ctx, "ora.memory")
+	tracer := obs.GetTracer(ctx, "june.memory")
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.AnalyzeScreen")
 	defer span.End()
 

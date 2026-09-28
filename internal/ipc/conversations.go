@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // conversationsCap bounds the list the window's sidebar draws.
@@ -30,7 +30,7 @@ type ConversationSummary struct {
 	Updated string `json:"updated"`
 }
 
-// TurnView is one thing said in a conversation. Role is "you" or "ora"; Kind is "ask", "dictation", "voice" or "error"; Evidence and Tools are the supporting rows and the tool names behind an answer, both empty lists for a question. Reason is a plain-English summary of what went wrong, set only when Kind is "error" and "" otherwise.
+// TurnView is one thing said in a conversation. Role is "you" or "june"; Kind is "ask", "dictation", "voice" or "error"; Evidence and Tools are the supporting rows and the tool names behind an answer, both empty lists for a question. Reason is a plain-English summary of what went wrong, set only when Kind is "error" and "" otherwise.
 type TurnView struct {
 	ID       string         `json:"id"`
 	Role     string         `json:"role"`

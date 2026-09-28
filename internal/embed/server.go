@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // startState is one in-flight spawn-and-load. err is written before done is closed, so every waiter that observes the close sees it.

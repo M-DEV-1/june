@@ -15,12 +15,12 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/audio"
-	"ora/internal/brain"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/memory"
-	"ora/internal/util"
+	"june/internal/audio"
+	"june/internal/brain"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/memory"
+	"june/internal/util"
 )
 
 // noteKind is the notes.kind written for a meeting, so minutes are distinguishable from the memory compiler's facts.
@@ -50,7 +50,7 @@ type Store interface {
 	AddActionItems(ctx context.Context, items []memory.ActionItem) (int, error)
 	// CloseDoneActionItems closes the open tasks this meeting's own minutes say are finished.
 	CloseDoneActionItems(ctx context.Context, since time.Time) (int, error)
-	// CreateConversation and AddTurn file a meeting prep as a conversation of Ora's own, so the whole brief can be read and answered in the window rather than cut off on a card.
+	// CreateConversation and AddTurn file a meeting prep as a conversation of June's own, so the whole brief can be read and answered in the window rather than cut off on a card.
 	CreateConversation(ctx context.Context, title, brain string) (int64, error)
 	AddTurn(ctx context.Context, conversationID int64, role, text, kind string, evidence json.RawMessage, tools []string) (int64, error)
 }
@@ -61,7 +61,7 @@ type Recorder struct {
 	mainBrain brain.Brain
 	// mainBrainMu guards mainBrain, which the daemon may install while a meeting is already being written up.
 	mainBrainMu sync.RWMutex
-	// onStateChange, when set, is called after a recording starts or stops. The tray menu registers its redraw here, because the label reading "Start meeting recording" is wrong the moment anything other than the tray itself starts one — and since Ora began offering to record when it notices a call, that is the common case rather than a corner of it.
+	// onStateChange, when set, is called after a recording starts or stops. The tray menu registers its redraw here, because the label reading "Start meeting recording" is wrong the moment anything other than the tray itself starts one — and since June began offering to record when it notices a call, that is the common case rather than a corner of it.
 	onStateChange func()
 
 	dataDir string
@@ -385,8 +385,8 @@ func (r *Recorder) Start() error {
 	}
 	r.stateChanged()
 	// Notifying happens outside the lock, as it does on the stop path: notify shells out to notify-send, and holding the recorder's lock across a process spawn stalls anything asking whether a recording is running.
-	r.notify("Recording meeting", "Ora is recording. Stop it from the tray when the call ends.")
-	// The moment recording starts is the moment Ora knows a call is happening, so it is also the moment to look for what matters from the last time these people met. It runs in its own goroutine and is best-effort throughout: Start must return the instant capture is open, and a slow or empty prep must never hold that up. r.live already guards against Start running twice for one meeting, so this fires at most once per recording the same way the "Recording meeting" notice does.
+	r.notify("Recording meeting", "June is recording. Stop it from the tray when the call ends.")
+	// The moment recording starts is the moment June knows a call is happening, so it is also the moment to look for what matters from the last time these people met. It runs in its own goroutine and is best-effort throughout: Start must return the instant capture is open, and a slow or empty prep must never hold that up. r.live already guards against Start running twice for one meeting, so this fires at most once per recording the same way the "Recording meeting" notice does.
 	go r.prepMeeting()
 	return nil
 }
@@ -464,10 +464,10 @@ func (r *Recorder) StopAndProcess(ctx context.Context) (string, error) {
 	// Whisper pins every core for minutes. On battery that empties the laptop and the CPU is throttled while it runs, so the recording is left exactly as it is — no marker, nothing to say it is finished — and the retry loop picks it up once the charger is back in.
 	if !r.onAC() {
 		slog.Info("deferring meeting transcription until the machine is on mains power", "dir", s.dir)
-		r.notify("Recording saved", "Ora will transcribe it once you plug in.")
+		r.notify("Recording saved", "June will transcribe it once you plug in.")
 		return s.dir, nil
 	}
-	r.notify("Transcribing meeting", "Ora is transcribing the recording in the background.")
+	r.notify("Transcribing meeting", "June is transcribing the recording in the background.")
 	go func() {
 		if err := r.process(ctx, s); err != nil {
 			slog.Error("meeting post-processing failed", "dir", s.dir, "error", err)
@@ -541,7 +541,7 @@ func (r *Recorder) process(ctx context.Context, s *session) (err error) {
 	filed := util.Exists(filepath.Join(s.dir, noteIDFile))
 	r.fileMinutes(ctx, s.dir, text, s.startedAt, s.stoppedAt)
 
-	// The meeting may have taught Ora something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
+	// The meeting may have taught June something durable about a person the user works with. This is the only path that writes personal context without the user saying it outright, so the model is held to a strict bar (see personalUpdateInstruction) and every write it makes is logged.
 	// It runs once per meeting, on the run that first files the minutes: re-summarising a meeting already filed would only re-propose the writes it made the first time. The evidence is the note id on disk rather than whether the transcript came off disk, because a meeting whose minutes failed the first time is retried from its own transcript — and gating on that skipped the pass on the only run that ever reached minutes.
 	if !filed {
 		r.updatePersonalContext(ctx, text, s.startedAt, s.stoppedAt)
@@ -563,7 +563,7 @@ func trimPreamble(text string) string {
 
 // fileGivenUp files the note that puts a recording the sweep has stopped retrying into the meetings list, where GET /meetings reads notes of this kind. Without it the only trace of a recording that never became minutes is an hourly error line in the log. Input: the store's own context, the recording's session and the error its last attempt returned. Output: none — the note is best effort, like every other write in this sweep, and filing it through fileMinutes means a later retry that succeeds replaces it in place rather than adding a second note for the same meeting.
 func (r *Recorder) fileGivenUp(ctx context.Context, s *session, cause error) {
-	text := fmt.Sprintf("# Meeting\n\n**Could not be summarised**\n\nOra tried %d times to turn this recording into minutes and has stopped. The audio is still in %s — delete %s in there to have it try again.\n\nLast error: %v\n", maxProcessAttempts, s.dir, failedMarker, cause)
+	text := fmt.Sprintf("# Meeting\n\n**Could not be summarised**\n\nJune tried %d times to turn this recording into minutes and has stopped. The audio is still in %s — delete %s in there to have it try again.\n\nLast error: %v\n", maxProcessAttempts, s.dir, failedMarker, cause)
 	slog.Warn("giving up on a meeting recording after too many failed attempts", "dir", s.dir, "attempts", maxProcessAttempts, "error", cause)
 	r.fileMinutes(ctx, s.dir, text, s.startedAt, s.stoppedAt)
 }
@@ -633,7 +633,7 @@ func (r *Recorder) transcriptFor(ctx context.Context, s *session) (string, error
 		return "", err
 	}
 
-	// Whisper is primed with the words Ora already watched go past on screen during the meeting, which is what gets the domain's own acronyms and the participants' names spelled right instead of guessed at phonetically.
+	// Whisper is primed with the words June already watched go past on screen during the meeting, which is what gets the domain's own acronyms and the participants' names spelled right instead of guessed at phonetically.
 	prompt := r.primingPrompt(ctx, s.startedAt, s.stoppedAt)
 	if prompt != "" {
 		slog.Info("priming whisper with the meeting's screen context", "dir", s.dir, "prompt", prompt)

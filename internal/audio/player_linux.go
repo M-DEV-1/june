@@ -37,7 +37,7 @@ func NewSpeaker() (Speaker, error) {
 		pulse.PlaybackChannels(proto.ChannelMap{proto.ChannelMono}),
 		pulse.PlaybackLatency(0.05),
 	}
-	// Played through the echo-cancel sink when there is one, so the canceller on EchoCancelSource knows what Ora said and can take it back out of the mic (see capture_linux.go).
+	// Played through the echo-cancel sink when there is one, so the canceller on EchoCancelSource knows what June said and can take it back out of the mic (see capture_linux.go).
 	if sink, err := c.SinkByID(EchoCancelSink); err == nil {
 		opts = append(opts, pulse.PlaybackSink(sink))
 	}

@@ -6,7 +6,7 @@ import (
 	"context"
 	"log/slog"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // PictureSender hands one screenshot to the model out of band. Input: the ask's context and the capture. Output: an error when the picture could not be sent, which leaves the session blind rather than pretending it saw something.

@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/act"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // State is where a job has got to. A job is planning until its first decision, stepping while it acts, verifying while it checks what its action did, and then reaches one of the four ends — or waits in paused or stuck for the user.

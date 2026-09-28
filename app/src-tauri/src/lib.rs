@@ -3,30 +3,30 @@ mod overlay;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// The WM_CLASS instance name the overlay window carries. It has to be the StartupWMClass of the hidden ora-overlay.desktop entry the daemon writes (overlayDesktopEntry in cmd/desktop_entry_linux.go), because that match is what files the overlay under an application of its own instead of under Ora's dock entry.
-const OVERLAY_WM_CLASS_INSTANCE: &str = "ora-overlay";
+/// The WM_CLASS instance name the overlay window carries. It has to be the StartupWMClass of the hidden june-overlay.desktop entry the daemon writes (overlayDesktopEntry in cmd/desktop_entry_linux.go), because that match is what files the overlay under an application of its own instead of under June's dock entry.
+const OVERLAY_WM_CLASS_INSTANCE: &str = "june-overlay";
 
-/// Same resolution order as Go's config.DataDir(): ORA_DATA_DIR env var, else XDG_DATA_HOME/ora, else ~/.local/share/ora. Input: none. Output: the data directory path, or None if neither override nor home directory is available.
+/// Same resolution order as Go's config.DataDir(): JUNE_DATA_DIR env var, else XDG_DATA_HOME/june, else ~/.local/share/june. Input: none. Output: the data directory path, or None if neither override nor home directory is available.
 pub(crate) fn data_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("ORA_DATA_DIR") {
+    if let Ok(dir) = std::env::var("JUNE_DATA_DIR") {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir));
         }
     }
     if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
         if !dir.is_empty() {
-            return Some(PathBuf::from(dir).join("ora"));
+            return Some(PathBuf::from(dir).join("june"));
         }
     }
     std::env::var("HOME")
         .ok()
-        .map(|home| PathBuf::from(home).join(".local").join("share").join("ora"))
+        .map(|home| PathBuf::from(home).join(".local").join("share").join("june"))
 }
 
 /// Tauri command: reads the daemon's IPC token file so the window can authenticate its requests. Input: none. Output: the trimmed token string, or an error string if the data dir or file can't be found.
 #[tauri::command]
 fn ipc_token() -> Result<String, String> {
-    let dir = data_dir().ok_or("could not determine ora data directory")?;
+    let dir = data_dir().ok_or("could not determine june data directory")?;
     let contents = std::fs::read_to_string(dir.join("ipc-token")).map_err(|e| e.to_string())?;
     Ok(contents.trim().to_string())
 }
@@ -239,7 +239,7 @@ fn raise(app: AppHandle) {
 
 /// Asks the page to run its show/hide sequence, the same event the hotkey's SIGHUP sends. Showing the window from here instead would skip the page's placement and paint the hover wherever the window manager last left it, so every way of showing the hover deliberately shares one path. Input: the app handle. Output: nothing; a failed emit only means the page has not loaded yet.
 fn toggle(app: &AppHandle) {
-    let _ = app.emit("ora://toggle", ());
+    let _ = app.emit("june://toggle", ());
 }
 
 /// Shows the main app window and puts the focus on it, whether it was hidden or merely behind something. Input: the app handle. Output: nothing; a missing window only means the app is shutting down.
@@ -271,17 +271,17 @@ fn listen_for_toggle_signal(app: AppHandle) {
             .open(&path)
             .and_then(|mut f| f.write_all(std::process::id().to_string().as_bytes()));
         if let Err(e) = written {
-            eprintln!("ora: could not write window.pid: {e}");
+            eprintln!("june: could not write window.pid: {e}");
         }
     }
     let Ok(mut signals) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP]) else {
-        eprintln!("ora: could not listen for SIGHUP");
+        eprintln!("june: could not listen for SIGHUP");
         return;
     };
     std::thread::spawn(move || {
         for _ in signals.forever() {
             // Window calls from this thread crash GTK, so the page does the show/hide: it listens for this event and calls the window API, which marshals to the main loop.
-            let _ = app.emit("ora://toggle", ());
+            let _ = app.emit("june://toggle", ());
         }
     });
 }
@@ -370,12 +370,12 @@ fn overlay_layout(app: AppHandle) -> OverlayLayout {
     let sized = window.as_ref().and_then(|w| w.outer_size().ok());
     if let Some(p) = placed {
         if p.x != union_x || p.y != union_y {
-            eprintln!("ora: overlay window sits at {},{} but the monitors start at {union_x},{union_y}", p.x, p.y);
+            eprintln!("june: overlay window sits at {},{} but the monitors start at {union_x},{union_y}", p.x, p.y);
         }
     }
     if let Some(size) = sized {
         if size.width != union_w || size.height != union_h {
-            eprintln!("ora: overlay window is {}x{} but the monitors cover {union_w}x{union_h}", size.width, size.height);
+            eprintln!("june: overlay window is {}x{} but the monitors cover {union_w}x{union_h}", size.width, size.height);
         }
     }
     let (origin_x, origin_y) = placed.map_or((union_x, union_y), |p| (p.x, p.y));
@@ -441,9 +441,9 @@ fn arm_overlay(app: &AppHandle) {
     let _ = w.set_ignore_cursor_events(true);
 }
 
-/// Gives the overlay window "ora-overlay" as its WM_CLASS instance name, so the desktop files it under the hidden ora-overlay.desktop entry the daemon installs rather than under Ora's own entry. Input: the GTK window behind the overlay. Output: nothing; there is nothing to set off X11, and nothing to set until the window has an X window of its own.
-/// This is what stops the dock from drawing a second dot for Ora. GNOME Shell puts every window of an application in one list whether or not the window asks to skip the taskbar — shell-app.c counts a skip-taskbar window out of the running-or-stopped decision, not out of the list — and a dock that draws one dot per window in that list draws one for this drawing layer, which is mapped the whole time Ora runs, as well as one for the real app window. Skipping the taskbar alone therefore does not remove the dot; the layer has to stop being one of Ora's windows.
-/// Only the instance half of WM_CLASS changes. GNOME matches a window to a .desktop file by the instance name before anything else (get_app_from_window_wmclass in shell-window-tracker.c tries the instance against StartupWMClass, then the class, then the file names, and only after all four the process id), so the instance is the one field that has to move; the class half stays "Ora" because Ora's own activity tracker reads that half to recognise its own windows (IsOraWindow in internal/tracker/tracker.go).
+/// Gives the overlay window "june-overlay" as its WM_CLASS instance name, so the desktop files it under the hidden june-overlay.desktop entry the daemon installs rather than under June's own entry. Input: the GTK window behind the overlay. Output: nothing; there is nothing to set off X11, and nothing to set until the window has an X window of its own.
+/// This is what stops the dock from drawing a second dot for June. GNOME Shell puts every window of an application in one list whether or not the window asks to skip the taskbar — shell-app.c counts a skip-taskbar window out of the running-or-stopped decision, not out of the list — and a dock that draws one dot per window in that list draws one for this drawing layer, which is mapped the whole time June runs, as well as one for the real app window. Skipping the taskbar alone therefore does not remove the dot; the layer has to stop being one of June's windows.
+/// Only the instance half of WM_CLASS changes. GNOME matches a window to a .desktop file by the instance name before anything else (get_app_from_window_wmclass in shell-window-tracker.c tries the instance against StartupWMClass, then the class, then the file names, and only after all four the process id), so the instance is the one field that has to move; the class half stays "June" because June's own activity tracker reads that half to recognise its own windows (IsJuneWindow in internal/tracker/tracker.go).
 /// The matched entry is hidden and its only window skips the taskbar, so that application never reaches the running state and never gets a dock entry of its own.
 #[cfg(target_os = "linux")]
 fn set_overlay_wm_class(gtk_win: &gtk::ApplicationWindow) {
@@ -476,7 +476,7 @@ fn set_overlay_wm_class(gtk_win: &gtk::ApplicationWindow) {
     let xid = unsafe { gdkx11::ffi::gdk_x11_window_get_xid(raw as *mut gdkx11::ffi::GdkX11Window) };
     let (Ok(instance), Ok(class)) = (
         std::ffi::CString::new(OVERLAY_WM_CLASS_INSTANCE),
-        std::ffi::CString::new("Ora"),
+        std::ffi::CString::new("June"),
     ) else {
         return;
     };
@@ -529,7 +529,7 @@ fn hush_overlay(app: &AppHandle) {
     });
 }
 
-/// The type of the daemon event that asks this window to show something. The daemon's tray is the only menu Ora has, so the items that used to sit in this app's own tray reach the window as events on the stream it already reads.
+/// The type of the daemon event that asks this window to show something. The daemon's tray is the only menu June has, so the items that used to sit in this app's own tray reach the window as events on the stream it already reads.
 pub(crate) const WINDOW_EVENT: &str = "window";
 
 /// The action a daemon event is asking this window to take. Input: the JSON text of one event off the daemon's stream, in the shape internal/ipc.Event marshals to. Output: the event's text when its type is "window", which names the action, and None for every other event and for text that is not JSON at all.
@@ -560,9 +560,9 @@ pub(crate) fn window_command(app: &AppHandle, payload: &str) -> bool {
             toggle(app);
             true
         }
-        // The daemon is about to photograph the screen. Ora's own hover is drawn over whatever the user was looking at, so it steps off the screen for the moment the picture is taken and comes back exactly as it was; a hover that was already hidden stays hidden, which the page decides, not this.
+        // The daemon is about to photograph the screen. June's own hover is drawn over whatever the user was looking at, so it steps off the screen for the moment the picture is taken and comes back exactly as it was; a hover that was already hidden stays hidden, which the page decides, not this.
         Some(action @ ("conceal" | "reveal")) => {
-            let _ = app.emit(if action == "conceal" { "ora://conceal" } else { "ora://reveal" }, ());
+            let _ = app.emit(if action == "conceal" { "june://conceal" } else { "june://reveal" }, ());
             true
         }
         _ => false,
@@ -580,7 +580,7 @@ pub fn run() {
             dock_anchor,
             overlay_layout
         ])
-        // Closing a window hides it instead of quitting: Ora keeps running under the daemon, and the same window comes back with its state when the daemon's tray asks for it again.
+        // Closing a window hides it instead of quitting: June keeps running under the daemon, and the same window comes back with its state when the daemon's tray asks for it again.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn the_overlay_s_wm_class_matches_the_desktop_entry_the_daemon_writes() {
-        // Nothing at runtime notices when these two drift apart: the overlay keeps mapping, GNOME falls back to matching it by process id, and it lands back under Ora's dock entry with a dot of its own.
+        // Nothing at runtime notices when these two drift apart: the overlay keeps mapping, GNOME falls back to matching it by process id, and it lands back under June's dock entry with a dot of its own.
         let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cmd/desktop_entry_linux.go");
         let source = std::fs::read_to_string(&entry)

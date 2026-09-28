@@ -19,19 +19,19 @@ require_exec() {
 	fi
 }
 
-require_exec ora
-require_exec ora-window
+require_exec june
+require_exec june-window
 require_exec install.sh
 require_exec uninstall.sh
-require ora.desktop
-require ora.service
-require "gnome-extension/ora@ora.local/metadata.json"
-require "gnome-extension/ora@ora.local/extension.js"
+require june.desktop
+require june.service
+require "gnome-extension/june@june.local/metadata.json"
+require "gnome-extension/june@june.local/extension.js"
 # install.sh runs this before enabling the extension, and only when it is shipped executable.
 require_exec "gnome-extension/check-shell-version.sh"
 
 for size in 16 32 48 64 128 256; do
-	require "icons/hicolor/${size}x${size}/apps/ora.png"
+	require "icons/hicolor/${size}x${size}/apps/june.png"
 done
 
 exit $missing

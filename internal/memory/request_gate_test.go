@@ -3,8 +3,8 @@ package memory_test
 import (
 	"context"
 	"errors"
-	"ora/internal/config"
-	"ora/internal/memory"
+	"june/internal/config"
+	"june/internal/memory"
 	"testing"
 )
 

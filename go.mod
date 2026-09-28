@@ -1,4 +1,4 @@
-module ora
+module june
 
 go 1.25.1
 

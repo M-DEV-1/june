@@ -39,7 +39,7 @@ export type Call = { method: string; path: string; body?: unknown };
 
 /** The settings a screen can read without the test having to fill in every field. */
 const emptySettings: SettingsView = {
-  data_dir: "/home/you/.ora",
+  data_dir: "/home/you/.june",
   store_bytes: 0,
   recordings_bytes: 0,
   models_bytes: 0,
@@ -269,7 +269,7 @@ export const demo: Canned = {
         { id: "t1", role: "you", text: "what did she say about the deadline for the Zurich trip?", kind: "ask", evidence: [], tools: [], when: ago(0, 15, 10), reason: "" },
         {
           id: "t2",
-          role: "ora",
+          role: "june",
           text: "Friday, and she meant end of the working day rather than midnight.\n\nShe also said the flights can wait until the statement is signed off, so there is no need to book before Wednesday.",
           kind: "ask",
           evidence: [
@@ -283,7 +283,7 @@ export const demo: Canned = {
         { id: "t3", role: "you", text: "and are the two I looked at still refundable?", kind: "ask", evidence: [], tools: [], when: ago(0, 15, 12), reason: "" },
         {
           id: "t4",
-          role: "ora",
+          role: "june",
           text: "Both are refundable until the 12th. After that the LX flight keeps half the fare and the BA one keeps all of it.",
           kind: "ask",
           evidence: [{ title: "Browser · Skyscanner", meta: "seen · 3 days ago", body: "Refundable until 12 Sep · after that 50% retained" }],
@@ -293,7 +293,7 @@ export const demo: Canned = {
         },
         {
           id: "t5",
-          role: "ora",
+          role: "june",
           text: '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011CS4"}',
           kind: "error",
           evidence: [],
@@ -304,7 +304,7 @@ export const demo: Canned = {
         { id: "t6", role: "you", text: "put the two fares in a table, and show me the retry you used against the overload", kind: "ask", evidence: [], tools: [], when: ago(0, 15, 21), reason: "" },
         {
           id: "t7",
-          role: "ora",
+          role: "june",
           text: [
             "| Flight | Refundable until | Kept after |",
             "| --- | --- | --- |",
@@ -455,10 +455,10 @@ export const demo: Canned = {
       limits_at: new Date().toISOString(),
     },
     { id: "codex", name: "Codex", signed_in: true, account: "plus", models: ["gpt-5.5", "gpt-5.5-mini"], model: "gpt-5.5", note: "", default: false },
-    { id: "gemini", name: "Gemini", signed_in: false, account: "", models: [], model: "", note: "set GEMINI_API_KEY in ~/.config/ora/env", default: false },
+    { id: "gemini", name: "Gemini", signed_in: false, account: "", models: [], model: "", note: "set GEMINI_API_KEY in ~/.config/june/env", default: false },
   ],
   settings: {
-    data_dir: "/home/you/.ora",
+    data_dir: "/home/you/.june",
     store_bytes: 22020096,
     recordings_bytes: 481247232,
     models_bytes: 1288490188,
@@ -575,13 +575,13 @@ export function wantsMock(search: string): boolean {
   return new URLSearchParams(search).get("mock") === "1";
 }
 
-/** The steps a daemon with none of the four ways to answer set up sends, for ?firstrun=1 to show the panel Settings draws while Ora cannot answer yet. */
+/** The steps a daemon with none of the four ways to answer set up sends, for ?firstrun=1 to show the panel Settings draws while June cannot answer yet. */
 const firstRunSteps = {
   gemini_key: false,
   codex_login: false,
   claude_cli: false,
   local_model: false,
-  steps: ["Set GEMINI_API_KEY in ~/.config/ora/env.", "Or sign in with the Claude CLI: run claude login.", "Or sign in with the Codex CLI: run codex login.", "Or point ORA_LOCAL_MODEL at a model on this machine."],
+  steps: ["Set GEMINI_API_KEY in ~/.config/june/env.", "Or sign in with the Claude CLI: run claude login.", "Or sign in with the Codex CLI: run codex login.", "Or point JUNE_LOCAL_MODEL at a model on this machine."],
 };
 
 /** Puts the fake daemon in fetch's place for a page opened with ?mock=1, so the window can be looked at in a plain browser tab with no daemon running. Input: the page's location. Output: true when the fake was installed. Called once from main.tsx before anything is rendered; on any other URL it does nothing and the window talks to the real daemon as always. ?firstrun=1 on top of ?mock=1 answers /settings and /brains as a daemon that cannot answer yet, so the panels Settings and the chat page only draw in that state can be screenshotted. */

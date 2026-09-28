@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // fakeBrain answers each of the dream prompts with a canned reply, dispatching on the instruction text, and records what it was asked. Safe for the watcher goroutine's world: only Tick's goroutine calls it, but the mutex keeps the record readable after Tick returns.
@@ -681,14 +681,14 @@ func TestEvidenceMaterial_AllFourSectionsPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, content := range []string{
-		`{"task_name": "Ora dreaming loop", "summary": "WORKTEXT built the compactor"}`,
+		`{"task_name": "June dreaming loop", "summary": "WORKTEXT built the compactor"}`,
 		`{"task_name": "Raw Activity Log", "summary": "RAWLOGTEXT app|title noise"}`,
 	} {
 		if _, err := store.DB().Exec(`INSERT INTO nodes (type, content, created_at) VALUES ('summary', ?, datetime('now','-2 hours'))`, content); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.DB().Exec(`INSERT INTO threads (subject, kind, state) VALUES ('THREADTEXT ora', 'project', 'mid-flight')`); err != nil {
+	if _, err := store.DB().Exec(`INSERT INTO threads (subject, kind, state) VALUES ('THREADTEXT june', 'project', 'mid-flight')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.LogNote(ctx, "MEETINGTEXT standup minutes.", "meeting"); err != nil {

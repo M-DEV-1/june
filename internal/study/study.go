@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/brain"
+	"june/internal/brain"
 )
 
 // Lesson is one durable, prompt-usable correction the teacher extracted from the material — a rule a future system prompt can embed, not a one-off critique of a single reply.

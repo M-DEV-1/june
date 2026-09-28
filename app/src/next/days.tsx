@@ -1,4 +1,4 @@
-/** The Days screen: one day's page at a time — the sentences Ora wrote that night, under the day's own date and the one line the daemon writes about what the day held. The day is chosen from the picker in the header, which carries a search and each day's counts; there is no list of days beside the sidebar, because the sidebar is for chats. */
+/** The Days screen: one day's page at a time — the sentences June wrote that night, under the day's own date and the one line the daemon writes about what the day held. The day is chosen from the picker in the header, which carries a search and each day's counts; there is no list of days beside the sidebar, because the sidebar is for chats. */
 
 import { useDayQuery, useDaysQuery } from "./api";
 import { activeDays, dayCounts, dayRailed, dayShort, daysShown, groupDays } from "./format";
@@ -43,7 +43,7 @@ export function DaysScreen() {
             up={!isError}
             loading={isLoading}
             empty="No days written yet."
-            hint="Ora writes a page for the day each night, from what it saw and heard. The first one appears after the first full day it has been running."
+            hint="June writes a page for the day each night, from what it saw and heard. The first one appears after the first full day it has been running."
           />
         )}
       </Scroller>

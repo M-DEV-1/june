@@ -40,7 +40,7 @@ func TestInstallDesktopEntry_WritesEveryIconSizeAndBothDesktopFiles(t *testing.T
 	}
 
 	for _, size := range []int{16, 32, 48, 64, 128, 256} {
-		path := filepath.Join(dir, "icons", "hicolor", fmt.Sprintf("%dx%d", size, size), "apps", "ora.png")
+		path := filepath.Join(dir, "icons", "hicolor", fmt.Sprintf("%dx%d", size, size), "apps", "june.png")
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("expected an icon at %s: %v", path, err)
@@ -68,10 +68,10 @@ func TestInstallDesktopEntry_WritesEveryIconSizeAndBothDesktopFiles(t *testing.T
 		t.Errorf("expected exactly the six icon size directories, got %v", sizeDirs)
 	}
 
-	desktopPath := filepath.Join(dir, "applications", "ora.desktop")
+	desktopPath := filepath.Join(dir, "applications", "june.desktop")
 	data, err := os.ReadFile(desktopPath)
 	if err != nil {
-		t.Fatalf("expected ora.desktop to exist: %v", err)
+		t.Fatalf("expected june.desktop to exist: %v", err)
 	}
 	entry := string(data)
 
@@ -82,13 +82,13 @@ func TestInstallDesktopEntry_WritesEveryIconSizeAndBothDesktopFiles(t *testing.T
 	for _, want := range []string{
 		"[Desktop Entry]",
 		"Type=Application",
-		"Name=Ora",
-		"Comment=Ora",
+		"Name=June",
+		"Comment=June",
 		"Exec=\"" + exe + "\" --daemon",
 		"Path=" + filepath.Dir(exe),
-		"Icon=ora",
+		"Icon=june",
 		"Terminal=false",
-		"StartupWMClass=ora",
+		"StartupWMClass=june",
 		"NoDisplay=false",
 		"Categories=Utility;",
 	} {
@@ -97,15 +97,15 @@ func TestInstallDesktopEntry_WritesEveryIconSizeAndBothDesktopFiles(t *testing.T
 		}
 	}
 
-	overlayData, err := os.ReadFile(filepath.Join(dir, "applications", "ora-overlay.desktop"))
+	overlayData, err := os.ReadFile(filepath.Join(dir, "applications", "june-overlay.desktop"))
 	if err != nil {
-		t.Fatalf("expected ora-overlay.desktop to exist: %v", err)
+		t.Fatalf("expected june-overlay.desktop to exist: %v", err)
 	}
 	overlay := string(overlayData)
 	for _, want := range []string{
-		"StartupWMClass=ora-overlay",
+		"StartupWMClass=june-overlay",
 		"NoDisplay=true",
-		"Icon=ora",
+		"Icon=june",
 		"Exec=\"" + exe + "\" --daemon",
 	} {
 		if !strings.Contains(overlay, want) {
@@ -125,10 +125,10 @@ func TestInstallDesktopEntry_SecondCallRewritesNothing(t *testing.T) {
 	}
 
 	watched := []string{
-		filepath.Join(dir, "icons", "hicolor", "16x16", "apps", "ora.png"),
-		filepath.Join(dir, "icons", "hicolor", "256x256", "apps", "ora.png"),
-		filepath.Join(dir, "applications", "ora.desktop"),
-		filepath.Join(dir, "applications", "ora-overlay.desktop"),
+		filepath.Join(dir, "icons", "hicolor", "16x16", "apps", "june.png"),
+		filepath.Join(dir, "icons", "hicolor", "256x256", "apps", "june.png"),
+		filepath.Join(dir, "applications", "june.desktop"),
+		filepath.Join(dir, "applications", "june-overlay.desktop"),
 	}
 	before := make(map[string]os.FileInfo, len(watched))
 	for _, path := range watched {
@@ -167,8 +167,8 @@ func TestInstallDesktopEntry_RefreshesAgainWhenAnIconChanges(t *testing.T) {
 		t.Fatalf("first installDesktopEntry() returned unexpected error: %v", err)
 	}
 
-	icon := filepath.Join(dir, "icons", "hicolor", "48x48", "apps", "ora.png")
-	if err := os.WriteFile(icon, []byte("not the ora icon"), 0644); err != nil {
+	icon := filepath.Join(dir, "icons", "hicolor", "48x48", "apps", "june.png")
+	if err := os.WriteFile(icon, []byte("not the june icon"), 0644); err != nil {
 		t.Fatalf("overwriting the 48x48 icon failed: %v", err)
 	}
 
@@ -212,7 +212,7 @@ func TestScaleIcon_ShrinksTheMasterToEverySize(t *testing.T) {
 	}
 }
 
-// TestInstallDesktopEntry_LeavesAForeignEntryAlone checks that an ora.desktop already on disk without desktopEntryMarker in it — the shape a package's install.sh leaves behind — is left byte-for-byte untouched, while the icons and the hidden overlay entry, which no package ships, are still written.
+// TestInstallDesktopEntry_LeavesAForeignEntryAlone checks that an june.desktop already on disk without desktopEntryMarker in it — the shape a package's install.sh leaves behind — is left byte-for-byte untouched, while the icons and the hidden overlay entry, which no package ships, are still written.
 func TestInstallDesktopEntry_LeavesAForeignEntryAlone(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
@@ -222,8 +222,8 @@ func TestInstallDesktopEntry_LeavesAForeignEntryAlone(t *testing.T) {
 	if err := os.MkdirAll(appsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	appPath := filepath.Join(appsDir, "ora.desktop")
-	foreign := "[Desktop Entry]\nType=Application\nName=Ora\nExec=ora --daemon\nIcon=ora\nStartupWMClass=ora\n"
+	appPath := filepath.Join(appsDir, "june.desktop")
+	foreign := "[Desktop Entry]\nType=Application\nName=June\nExec=june --daemon\nIcon=june\nStartupWMClass=june\n"
 	if err := os.WriteFile(appPath, []byte(foreign), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -234,21 +234,21 @@ func TestInstallDesktopEntry_LeavesAForeignEntryAlone(t *testing.T) {
 
 	got, err := os.ReadFile(appPath)
 	if err != nil {
-		t.Fatalf("reading ora.desktop back failed: %v", err)
+		t.Fatalf("reading june.desktop back failed: %v", err)
 	}
 	if string(got) != foreign {
-		t.Errorf("expected the foreign ora.desktop to be left untouched, got:\n%s", got)
+		t.Errorf("expected the foreign june.desktop to be left untouched, got:\n%s", got)
 	}
 
-	if _, err := os.Stat(filepath.Join(appsDir, "ora-overlay.desktop")); err != nil {
-		t.Errorf("expected the overlay entry to still be written even when ora.desktop is foreign: %v", err)
+	if _, err := os.Stat(filepath.Join(appsDir, "june-overlay.desktop")); err != nil {
+		t.Errorf("expected the overlay entry to still be written even when june.desktop is foreign: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "icons", "hicolor", "48x48", "apps", "ora.png")); err != nil {
-		t.Errorf("expected icons to still be written even when ora.desktop is foreign: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "icons", "hicolor", "48x48", "apps", "june.png")); err != nil {
+		t.Errorf("expected icons to still be written even when june.desktop is foreign: %v", err)
 	}
 }
 
-// TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry checks that an ora.desktop carrying desktopEntryMarker — the daemon's own past write — is treated as ours and kept up to date, the same as when nothing was there at all.
+// TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry checks that an june.desktop carrying desktopEntryMarker — the daemon's own past write — is treated as ours and kept up to date, the same as when nothing was there at all.
 func TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
@@ -258,8 +258,8 @@ func TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry(t *testing.T)
 	if err := os.MkdirAll(appsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	appPath := filepath.Join(appsDir, "ora.desktop")
-	stale := "[Desktop Entry]\nName=Ora (stale)\n" + desktopEntryMarker + "\n"
+	appPath := filepath.Join(appsDir, "june.desktop")
+	stale := "[Desktop Entry]\nName=June (stale)\n" + desktopEntryMarker + "\n"
 	if err := os.WriteFile(appPath, []byte(stale), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -270,12 +270,12 @@ func TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry(t *testing.T)
 
 	got, err := os.ReadFile(appPath)
 	if err != nil {
-		t.Fatalf("reading ora.desktop back failed: %v", err)
+		t.Fatalf("reading june.desktop back failed: %v", err)
 	}
 	if string(got) == stale {
 		t.Errorf("expected the daemon's own marked entry to be rewritten, got the stale content unchanged")
 	}
-	if !strings.Contains(string(got), "StartupWMClass=ora") {
+	if !strings.Contains(string(got), "StartupWMClass=june") {
 		t.Errorf("expected the rewritten entry to be the real application entry, got:\n%s", got)
 	}
 }

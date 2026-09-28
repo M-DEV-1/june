@@ -68,7 +68,7 @@ describe("token", () => {
     setToken("secret123");
     await ask("q", "ctx");
     const [, opts] = fetchMock.mock.calls[0];
-    expect(opts.headers["X-Ora-Token"]).toBe("secret123");
+    expect(opts.headers["X-June-Token"]).toBe("secret123");
     vi.unstubAllGlobals();
   });
 
@@ -144,7 +144,7 @@ describe("act", () => {
     expect(calls[0].url).toBe("http://127.0.0.1:6942/act");
     expect(calls[0].init?.method).toBe("POST");
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({ goal: "book the venue" });
-    expect((calls[0].init?.headers as Record<string, string>)["X-Ora-Token"]).toBe("secret");
+    expect((calls[0].init?.headers as Record<string, string>)["X-June-Token"]).toBe("secret");
   });
 
   it("actStop, actPauseResume and actAnswer do nothing when the daemon cannot be reached", async () => {

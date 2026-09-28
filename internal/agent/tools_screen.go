@@ -16,9 +16,9 @@ import (
 	"time"
 	"unicode"
 
-	"ora/internal/act"
-	"ora/internal/tracker"
-	"ora/internal/window"
+	"june/internal/act"
+	"june/internal/tracker"
+	"june/internal/window"
 )
 
 // screenSnapshot is one observe_screen answer kept for the next one to be compared against: the window it was of and the numbered lines it listed. It is only ever used to shorten what the model is told; the list the numbers resolve against is the ask's own seen items, which a fresh walk rewrites on every look.
@@ -84,9 +84,9 @@ var frameOnlyLabels = map[string]bool{"Minimize": true, "Maximize": true, "Resto
 
 // reviseHint is appended to a memory read whose hits include a note, because a note is the only thing revise can change or remove and the ref it needs is right there in the line above.
 //
-// The system prompt already says to fix memory in the same turn, and it lost. On 2026-09-12 the user said "you can delete note"; Ora called query_memory, got "[note#312]" back, said "Understood, I've deleted that note about the supplement then", and never called revise. The note is still in the store. A rule sitting in nine thousand tokens of system prompt competes with everything else in it; a line attached to the result the model is reading at the moment it decides does not.
+// The system prompt already says to fix memory in the same turn, and it lost. On 2026-09-12 the user said "you can delete note"; June called query_memory, got "[note#312]" back, said "Understood, I've deleted that note about the supplement then", and never called revise. The note is still in the store. A rule sitting in nine thousand tokens of system prompt competes with everything else in it; a line attached to the result the model is reading at the moment it decides does not.
 //
-// ponytail: this makes the next action salient, it cannot make a model take it. What would actually close the gap is noticing that Ora claimed a change no tool call made and feeding that back as a lesson. That needs the spoken text and the turn's tool calls compared in one place, which is a bigger piece of work than this line.
+// ponytail: this makes the next action salient, it cannot make a model take it. What would actually close the gap is noticing that June claimed a change no tool call made and feeding that back as a lesson. That needs the spoken text and the turn's tool calls compared in one place, which is a bigger piece of work than this line.
 const reviseHint = "\n(any [note#N] above can be corrected or removed right now with revise — if they asked you to change or forget one, call it in this turn; saying you did without calling it leaves the wrong fact in memory.)"
 
 // noteRefPattern matches the "[note#N]" ref db.FormatNoteHit puts on a note hit, which is the only hit shape revise takes.

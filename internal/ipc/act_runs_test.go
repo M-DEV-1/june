@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/db/dbtest"
+	"june/internal/agent"
+	"june/internal/db/dbtest"
 )
 
 // TestRun_RecordsAnActRunWhenAScreenToolRan checks run() files a screen-tool trace as an act run with outcome ok and its step names, and leaves no act run behind for a memory-only trace.

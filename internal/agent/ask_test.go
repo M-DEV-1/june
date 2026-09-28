@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -213,8 +213,8 @@ func textOf(c *genai.Content) string {
 func TestHistoryFromTurns_CarriesBothSidesOldestFirst(t *testing.T) {
 	turns := []db.Turn{
 		{Role: "you", Text: "draw a ring around any one button you can see", Kind: "ask"},
-		{Role: "ora", Text: "I ringed the Pause button.", Kind: "ask", Tools: []string{"observe_screen", "point_at"}, Evidence: json.RawMessage(`[{"title":"screen"}]`)},
-		{Role: "ora", Text: "ask text: generate (iteration 0): 503 UNAVAILABLE", Kind: "error"},
+		{Role: "june", Text: "I ringed the Pause button.", Kind: "ask", Tools: []string{"observe_screen", "point_at"}, Evidence: json.RawMessage(`[{"title":"screen"}]`)},
+		{Role: "june", Text: "ask text: generate (iteration 0): 503 UNAVAILABLE", Kind: "error"},
 		{Role: "you", Text: "   ", Kind: "ask"},
 		{Role: "you", Text: "do it again", Kind: "ask"},
 	}
@@ -241,7 +241,7 @@ func TestHistoryFromTurns_DropsOldestWhenTheThreadIsTooBig(t *testing.T) {
 	for i, label := range []string{"oldest", "second", "third", "fourth", "fifth", "newest"} {
 		role := "you"
 		if i%2 == 1 {
-			role = "ora"
+			role = "june"
 		}
 		turns = append(turns, db.Turn{Role: role, Text: label + " " + big, Kind: "ask"})
 	}
@@ -263,7 +263,7 @@ func TestHistoryFromTurns_DropsOldestWhenTheThreadIsTooBig(t *testing.T) {
 		t.Errorf("the oldest turn should have been dropped first, first kept = %q", util.Runes(textOf(got[0]), 20))
 	}
 
-	long := HistoryFromTurns([]db.Turn{{Role: "ora", Text: strings.Repeat("y", maxHistoryTurnBytes*2), Kind: "ask"}})
+	long := HistoryFromTurns([]db.Turn{{Role: "june", Text: strings.Repeat("y", maxHistoryTurnBytes*2), Kind: "ask"}})
 	if len(long) != 1 {
 		t.Fatalf("one overlong turn must be kept, got %d", len(long))
 	}
@@ -288,7 +288,7 @@ func TestAskTextWith_SendsThePriorTurnsBeforeTheQuestion(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "test-key")
 	history := HistoryFromTurns([]db.Turn{
 		{Role: "you", Text: "draw a ring around any one button you can see", Kind: "ask"},
-		{Role: "ora", Text: "I ringed the Pause button.", Kind: "ask"},
+		{Role: "june", Text: "I ringed the Pause button.", Kind: "ask"},
 	})
 	tr, err := a.AskTextWith(t.Context(), history, "do it again")
 	if err != nil {
@@ -575,9 +575,9 @@ func TestAskText_TrimsThePromptAndTheThreadOnAScreenTask(t *testing.T) {
 	a, _ := observingAgent(t)
 	history := HistoryFromTurns([]db.Turn{
 		{Role: "you", Text: "first question", Kind: "ask"},
-		{Role: "ora", Text: "first answer", Kind: "ask"},
+		{Role: "june", Text: "first answer", Kind: "ask"},
 		{Role: "you", Text: "second question", Kind: "ask"},
-		{Role: "ora", Text: "second answer", Kind: "ask"},
+		{Role: "june", Text: "second answer", Kind: "ask"},
 	})
 	if _, err := a.askText(t.Context(), "gemini-test", history, "what did we settle on for the venue"); err != nil {
 		t.Fatal(err)

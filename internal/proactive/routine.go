@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // Schedule is one routine's parsed schedule. Kind is "daily" (Weekdays true restricts it to Monday-Friday), "interval", or "when" — the last left as free text for the model to judge for itself every time it is checked, since no clock can tell whether Vexil has replied.
@@ -65,7 +65,7 @@ func ParseSchedule(s string) (Schedule, error) {
 		}
 		return Schedule{Kind: "when", Condition: condition}, nil
 	}
-	return Schedule{}, fmt.Errorf("%q is not a schedule Ora understands", s)
+	return Schedule{}, fmt.Errorf("%q is not a schedule June understands", s)
 }
 
 // parseClock reads a clock time as "8", "8:30", "08:00", "8am" or "8:30pm". Input: the text after "at ". Output: the local hour (0-23) and minute.
@@ -87,11 +87,11 @@ func parseClock(s string) (hour, minute int, err error) {
 	}
 	hour, err = strconv.Atoi(h)
 	if err != nil {
-		return 0, 0, fmt.Errorf("%q is not a time Ora understands", orig)
+		return 0, 0, fmt.Errorf("%q is not a time June understands", orig)
 	}
 	minute, err = strconv.Atoi(m)
 	if err != nil {
-		return 0, 0, fmt.Errorf("%q is not a time Ora understands", orig)
+		return 0, 0, fmt.Errorf("%q is not a time June understands", orig)
 	}
 	if pm && hour < 12 {
 		hour += 12

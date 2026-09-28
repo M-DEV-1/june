@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 func contains(ss []string, want string) bool {
@@ -36,7 +36,7 @@ func TestPrepMeeting_Silent(t *testing.T) {
 			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}},
 		},
 		{
-			name:        "ORA_NO_MEETING_PREP=1 is the alpha kill switch",
+			name:        "JUNE_NO_MEETING_PREP=1 is the alpha kill switch",
 			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}},
 			noteContent: "# Meeting minutes\n\nVexil Quorin agreed to send the deck.",
 			killSwitch:  true,
@@ -389,7 +389,7 @@ func TestCollectMeetingNames(t *testing.T) {
 	}
 }
 
-// On 2026-09-08 the prep for a Teams standup reached the window as a card titled "Before you join: Calendar | Daily Platform Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB", with the brief cut off at three lines and an Open button that opened nothing, because the notice named no place. The name is the one section of the title that is not furniture, the brief is filed as a conversation of Ora's own so it can be read in full, and the card opens that conversation.
+// On 2026-09-08 the prep for a Teams standup reached the window as a card titled "Before you join: Calendar | Daily Platform Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB", with the brief cut off at three lines and an Open button that opened nothing, because the notice named no place. The name is the one section of the title that is not furniture, the brief is filed as a conversation of June's own so it can be read in full, and the card opens that conversation.
 func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
 	title := "Calendar | Daily Platform Sprint Standup | Microsoft Teams - Microphone recording - High memory usage - 1.1 GB"
 	if got := meetingName(title); got != "Daily Platform Sprint Standup" {
@@ -412,7 +412,7 @@ func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
 		t.Fatalf("conversations = %v, want one named for the meeting", store.conversations)
 	}
 	if len(store.turns) != 1 || !strings.Contains(store.turns[0], "Bill Eval Studio") {
-		t.Errorf("turns = %v, want the brief filed as Ora's turn", store.turns)
+		t.Errorf("turns = %v, want the brief filed as June's turn", store.turns)
 	}
 	if len(got.sent) != 1 || !strings.HasPrefix(got.sent[0], "Before you join: Daily Platform Sprint Standup: ") || !strings.HasSuffix(got.sent[0], " @chats/1") {
 		t.Errorf("notice = %v, want it to open the conversation in chats", got.sent)

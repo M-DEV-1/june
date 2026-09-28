@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/tracker"
+	"june/internal/act"
+	"june/internal/tracker"
 )
 
 // TestWaitFor_PassesAsSoonAsTheChangeComes checks the tool polls rather than sleeping out its timeout: the title changes on the third look, and wait_for reports the change without waiting the full five seconds.

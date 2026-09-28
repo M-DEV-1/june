@@ -26,11 +26,11 @@ export interface Rect {
 /** Where on the screen the hover opens. All three are centred left to right; they differ only in how far down the screen the window sits. */
 export type HoverPosition = "top" | "center" | "bottom";
 
-/** The position the hover opens at when nothing has been chosen. Centre, where the eye already is when the hotkey is pressed. It was bottom while the hover had to stay clear of whatever the user was reading, because a picture of the screen had Ora's own card in the middle of it; the window now steps off the screen for the moment that picture is taken (see the conceal handler in main.ts), so the hover no longer has to hide from the thing it is being asked about. */
+/** The position the hover opens at when nothing has been chosen. Centre, where the eye already is when the hotkey is pressed. It was bottom while the hover had to stay clear of whatever the user was reading, because a picture of the screen had June's own card in the middle of it; the window now steps off the screen for the moment that picture is taken (see the conceal handler in main.ts), so the hover no longer has to hide from the thing it is being asked about. */
 export const DEFAULT_HOVER_POSITION: HoverPosition = "center";
 
-/** The localStorage key the chosen position is kept under, alongside "ora-theme". Both windows are served from one origin, so the Settings screen in the app window writes it and the hover window reads it. */
-export const HOVER_POSITION_KEY = "ora-hover-position";
+/** The localStorage key the chosen position is kept under, alongside "june-theme". Both windows are served from one origin, so the Settings screen in the app window writes it and the hover window reads it. */
+export const HOVER_POSITION_KEY = "june-hover-position";
 
 /** Which edge of the screen the desktop's dock sits on. */
 type DockEdge = "bottom" | "left" | "right" | "top";
@@ -168,7 +168,7 @@ export async function resolveContext(desk: Desktop, position: HoverPosition): Pr
 /** How far under the top bar a notice-only window starts, in logical pixels. */
 const NOTICE_GAP = 8;
 
-/** Where a window showing nothing but a notice goes: flush with the right edge of the usable area and just under the top bar, beside the tray where Ora's own indicator sits, which is where the user asked for it. The dock is taken off the same way the hover's placement takes it off, so an auto-hiding dock on the right edge does not end up with the card under it, and everything the window cannot fit inside resolves to the top-left of that area. Input: the placement context captured when the window was shown, and the window's logical size. Output: the window's top-left corner in physical desktop coordinates. */
+/** Where a window showing nothing but a notice goes: flush with the right edge of the usable area and just under the top bar, beside the tray where June's own indicator sits, which is where the user asked for it. The dock is taken off the same way the hover's placement takes it off, so an auto-hiding dock on the right edge does not end up with the card under it, and everything the window cannot fit inside resolves to the top-left of that area. Input: the placement context captured when the window was shown, and the window's logical size. Output: the window's top-left corner in physical desktop coordinates. */
 export function noticePlacement(ctx: PlaceContext, logical: { width: number; height: number }): { x: number; y: number } {
   const scale = scaleOf(ctx);
   const win = { width: logical.width * scale, height: logical.height * scale };
@@ -206,7 +206,7 @@ export async function fitWindow(win: WinLike, size: { width: number; height: num
 
 /**
  * Runs the show/hide sequence for the toggle hotkey. The window is sized and moved while it is still hidden and only then shown, so it is never painted at the position it had last time or at whatever position the window manager would have chosen.
- * Focus is requested exactly once per show, via `raise`, immediately after `show()` — never from placement code and never a second time (e.g. a follow-up `setFocus()`), because each focus request GNOME sees carries a fresh user-interaction time and repeating it makes GNOME treat Ora as the ongoing interaction, denying focus to whatever the user opens next. Hiding calls nothing but `hide()`, since anything else risks touching focus.
+ * Focus is requested exactly once per show, via `raise`, immediately after `show()` — never from placement code and never a second time (e.g. a follow-up `setFocus()`), because each focus request GNOME sees carries a fresh user-interaction time and repeating it makes GNOME treat June as the ongoing interaction, denying focus to whatever the user opens next. Hiding calls nothing but `hide()`, since anything else risks touching focus.
  * Input: the window; `beforeShow` (e.g. refreshing daemon context), `openContext` (deciding which monitor, dock and chosen position this open uses) and `sizeToContent` (fitting the window to its content, returning the logical size it settled on) to run before the window is shown; `raise`, the one focus request; `focusInput`, a DOM-level (not OS-level) focus to run last.
  * Output: nothing.
  */
@@ -234,7 +234,7 @@ export async function toggleWindow(
       await win.setPosition(new PhysicalPosition(at.x, at.y));
     }
   } catch (e) {
-    console.error("ora: placing the hover failed", e);
+    console.error("june: placing the hover failed", e);
   }
   await win.show();
   await opts.raise();

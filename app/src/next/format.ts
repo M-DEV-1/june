@@ -42,7 +42,7 @@ export function shortWhen(iso: string, now: Date = new Date()): string {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
-/** How long ago a notice landed, for the line the notice card puts beside "Ora". Input: the moment it arrived, in milliseconds, and the clock to read it against. Output: "now" under a minute, then "5m ago", then "1h ago".
+/** How long ago a notice landed, for the line the notice card puts beside "June". Input: the moment it arrived, in milliseconds, and the clock to read it against. Output: "now" under a minute, then "5m ago", then "1h ago".
  * Minutes and hours only: a notice that has been up for a day is not a live notice any more, and a stamp ahead of the clock — a machine resyncing its time — reads as "now" rather than as a negative count.
  */
 export function noticeAge(at: number, now: Date = new Date()): string {
@@ -146,7 +146,7 @@ export function groupMeetings(
   return groupBy(list, (m) => groupLabel(m.when, now));
 }
 
-/** The days worth listing. Input: the rows GET /days sent. Output: the ones that hold something — a page Ora wrote, screen time recorded, or a meeting kept. A row that reports none of the three counts at all is kept, since a daemon that does not send them has not said the day is empty. */
+/** The days worth listing. Input: the rows GET /days sent. Output: the ones that hold something — a page June wrote, screen time recorded, or a meeting kept. A row that reports none of the three counts at all is kept, since a daemon that does not send them has not said the day is empty. */
 export function activeDays(days: DaySummary[]): DaySummary[] {
   return days.filter((d) => {
     if (d.has_page) return true;
@@ -204,7 +204,7 @@ export function hotkeyKeys(accel: string): string[] {
     );
 }
 
-/** What one of Ora's turns reads as. Input: the turn. Output: its text, replaced for a failed ask by the daemon's own plain sentence, or by one line of the provider's error when the daemon sent none. */
+/** What one of June's turns reads as. Input: the turn. Output: its text, replaced for a failed ask by the daemon's own plain sentence, or by one line of the provider's error when the daemon sent none. */
 export function turnText(turn: Turn): string {
   if (turn.kind !== "error") return turn.text ?? "";
   return (turn.reason ?? "").trim() || truncateAtWord(turn.text).line;
@@ -253,7 +253,7 @@ export function took(ms: number): string {
   return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
 
-/** The second line under a task, when there is one worth showing. Input: the task. Output: its detail, or "" when the detail only repeats the title — GET /tasks sends the whole stored note a noticed task's title was parsed out of, which is not worth a second line. A task Ora noticed says where it came from, since its detail is the meeting or note that raised it. */
+/** The second line under a task, when there is one worth showing. Input: the task. Output: its detail, or "" when the detail only repeats the title — GET /tasks sends the whole stored note a noticed task's title was parsed out of, which is not worth a second line. A task June noticed says where it came from, since its detail is the meeting or note that raised it. */
 export function taskDetail(task: Task): string {
   const detail = (task.detail ?? "").trim();
   if (!detail || !task.title) return "";
@@ -333,7 +333,7 @@ export function minutesLines(minutes: string, title = ""): MinutesLine[] {
   return out;
 }
 
-/** The replies a rail can be built beside. Input: every turn of a conversation. Output: the ones Ora sent that read something or called something, in the order they came; a plain reply is not one, and neither is anything the user said. An empty string in the tools list is not a step, which is what the daemon sends for a turn that called nothing.
+/** The replies a rail can be built beside. Input: every turn of a conversation. Output: the ones June sent that read something or called something, in the order they came; a plain reply is not one, and neither is anything the user said. An empty string in the tools list is not a step, which is what the daemon sends for a turn that called nothing.
  *
  * The Chats page and its composer each have to decide whether there is a rail before either of them is drawn, and they have to reach the same answer or the box you type in does not line up with the words above it. This is that one answer.
  */
@@ -500,7 +500,7 @@ export function taskContext(task?: Task): string {
   const from = (task.detail ?? "").trim();
   const raised =
     task.source === "noticed"
-      ? `Ora noticed it${from ? ` in ${from}` : ""}.`
+      ? `June noticed it${from ? ` in ${from}` : ""}.`
       : "The user set it themselves.";
   return `This is about one thing on the user's list: "${task.title}". ${raised}`;
 }

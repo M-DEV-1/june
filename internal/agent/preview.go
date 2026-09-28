@@ -9,13 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ora/internal/config"
+	"june/internal/config"
 
 	"google.golang.org/genai"
 )
 
 // previewPhrase is spoken back for every /voice preview -- short and fixed, so the one-shot TTS call stays cheap and the user hears the same line regardless of which voice they're trying.
-// It deliberately claims no identity. Measured against the TTS model on 2026-09-07: "Hi, I'm Ora. This is how I sound." and "Hi, I am Ora. This is how I sound." both came back with no candidates and promptFeedback.blockReason PROHIBITED_CONTENT, while this line alone returned audio -- a synthetic voice introducing itself by name reads to the filter as impersonation. Keep any future wording free of "I am <name>".
+// It deliberately claims no identity. Measured against the TTS model on 2026-09-07: "Hi, I'm June. This is how I sound." and "Hi, I am June. This is how I sound." both came back with no candidates and promptFeedback.blockReason PROHIBITED_CONTENT, while this line alone returned audio -- a synthetic voice introducing itself by name reads to the filter as impersonation. Keep any future wording free of "I am <name>".
 const previewPhrase = "This is how I sound."
 
 // PreviewVoice synthesizes previewPhrase with voiceName via a one-shot (non-live) Gemini TTS call and plays it straight through the agent's own speaker.
@@ -89,7 +89,7 @@ func SpeakPreview(ctx context.Context, apiKey, voiceName string, play func([]byt
 }
 
 // noAudioReason says why a TTS response carried no audio, so a refusal is not reported as an empty answer. Input: the response, which may be nil. Output: the safety block reason when the prompt was refused, and a plain sentence otherwise.
-// The two are indistinguishable in the response shape -- both are a response with no usable parts -- and reporting them the same way sent a blocked preview back to the window as "returned no audio", which reads as a bug in Ora rather than a refusal by the model.
+// The two are indistinguishable in the response shape -- both are a response with no usable parts -- and reporting them the same way sent a blocked preview back to the window as "returned no audio", which reads as a bug in June rather than a refusal by the model.
 func noAudioReason(resp *genai.GenerateContentResponse) string {
 	if resp != nil && resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" {
 		return fmt.Sprintf("the model refused the line it was given (%s)", resp.PromptFeedback.BlockReason)
@@ -97,7 +97,7 @@ func noAudioReason(resp *genai.GenerateContentResponse) string {
 	return "the model returned no audio"
 }
 
-// previewDir is where the synthesised previews are kept, one file per voice, under the data directory beside everything else Ora stores.
+// previewDir is where the synthesised previews are kept, one file per voice, under the data directory beside everything else June stores.
 func previewDir() string { return filepath.Join(config.DataDir(), "voice-previews") }
 
 // previewPath is the file one voice's preview audio is kept in. Input: the canonical voice name. Output: the path. The name is a bare word from config.AvailableVoices, so it is used as the filename directly.

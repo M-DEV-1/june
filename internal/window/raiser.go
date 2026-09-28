@@ -1,4 +1,4 @@
-// Package window brings an already-running window belonging to another application to the front, on GNOME/Wayland, where the shell itself refuses this to any ordinary unprivileged caller. It talks over D-Bus to a small GNOME Shell extension (packaging/gnome-extension/ora@ora.local) that runs inside the shell's own process and therefore is not subject to that restriction.
+// Package window brings an already-running window belonging to another application to the front, on GNOME/Wayland, where the shell itself refuses this to any ordinary unprivileged caller. It talks over D-Bus to a small GNOME Shell extension (packaging/gnome-extension/june@june.local) that runs inside the shell's own process and therefore is not subject to that restriction.
 package window
 
 import (
@@ -8,14 +8,14 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// busName, objectPath and ifaceName identify the ora@ora.local extension's exported D-Bus object once it is loaded and enabled in the running shell.
+// busName, objectPath and ifaceName identify the june@june.local extension's exported D-Bus object once it is loaded and enabled in the running shell.
 const (
 	busName    = "org.gnome.Shell"
-	objectPath = dbus.ObjectPath("/org/gnome/Shell/Extensions/Ora")
-	ifaceName  = "org.gnome.Shell.Extensions.Ora"
+	objectPath = dbus.ObjectPath("/org/gnome/Shell/Extensions/June")
+	ifaceName  = "org.gnome.Shell.Extensions.June"
 )
 
-// Raiser calls the ora@ora.local GNOME Shell extension to activate an already-running window. It is safe for concurrent use, since the underlying dbus.Conn is.
+// Raiser calls the june@june.local GNOME Shell extension to activate an already-running window. It is safe for concurrent use, since the underlying dbus.Conn is.
 type Raiser struct {
 	conn *dbus.Conn
 }

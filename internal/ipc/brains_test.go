@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/brain"
-	"ora/internal/config"
+	"june/internal/brain"
+	"june/internal/config"
 )
 
 // TestBrainsReadsTheLoginFiles checks the two signals a brain's row rests on: a login file on disk, and a binary on PATH. The Claude credentials file here carries a token as well as the plan name, so this also checks the token never reaches the response.
@@ -26,7 +26,7 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 		t.Fatalf("write credentials: %v", err)
 	}
 
-	cfg := config.OraConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}}
+	cfg := config.JuneConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}}
 	onPath := func(name string) bool { return name == "grok" }
 
 	list := brainList(context.Background(), cfg, home, onPath, nil)
@@ -88,10 +88,10 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 	}
 }
 
-// TestBrainsPostUnknownID checks POST /brains rejects a brain id that is not one of the five Ora knows, and never touches the config.
+// TestBrainsPostUnknownID checks POST /brains rejects a brain id that is not one of the five June knows, and never touches the config.
 func TestBrainsPostUnknownID(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	cfg := &config.OraConfig{}
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
+	cfg := &config.JuneConfig{}
 	rec := httptest.NewRecorder()
 	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"chatgpt","model":"whatever"}`)))
 	if rec.Code != http.StatusBadRequest {
@@ -107,8 +107,8 @@ func TestBrainsPostUnknownID(t *testing.T) {
 
 // TestBrainsPostPersists checks a valid {"brain","model"} pair comes back marked Default with its Model on the same response, is written to the on-disk config, and is read back correctly by a fresh LoadConfig — the point of the route being that the choice survives a daemon restart.
 func TestBrainsPostPersists(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	cfg := &config.OraConfig{}
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
+	cfg := &config.JuneConfig{}
 	rec := httptest.NewRecorder()
 	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
 	if rec.Code != http.StatusOK {
@@ -141,10 +141,10 @@ func TestBrainsPostPersists(t *testing.T) {
 
 // The model chip in Settings posts the brain it belongs to with the model picked, and POST /brains made that brain the default as well, so choosing a Codex model moved the user's default brain to Codex. A body with "default": false stores the model and leaves the default brain where it was; the header's brain picker sends no such field and still picks the default.
 func TestBrainsPostAModelAloneLeavesTheDefaultBrain(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	cfg := &config.OraConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}}
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
+	cfg := &config.JuneConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}}
 	h := Brains(NewLiveConfig(cfg, config.SaveConfig), nil)
-	post := func(body string) config.OraConfig {
+	post := func(body string) config.JuneConfig {
 		rec := httptest.NewRecorder()
 		h(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(body)))
 		if rec.Code != http.StatusOK {
@@ -168,8 +168,8 @@ func TestBrainsPostAModelAloneLeavesTheDefaultBrain(t *testing.T) {
 
 // TestBrainsPostCodexPersistsItsOwnProvider checks POST /brains {"brain":"codex"} persists config.BrainCodex and comes back with the codex row marked Default, not the gemini row — the bug this covers stored config.BrainGeminiAPI for codex, which made "codex" indistinguishable from "gemini" on disk and on the very next GET.
 func TestBrainsPostCodexPersistsItsOwnProvider(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	cfg := &config.OraConfig{}
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
+	cfg := &config.JuneConfig{}
 	rec := httptest.NewRecorder()
 	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"codex","model":"gpt-5.5"}`)))
 	if rec.Code != http.StatusOK {
@@ -222,7 +222,7 @@ func TestBrainsCarriesTheUsageBars(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	Brains(NewLiveConfig(&config.OraConfig{}, config.SaveConfig), limitsFor)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
+	Brains(NewLiveConfig(&config.JuneConfig{}, config.SaveConfig), limitsFor)(rec, httptest.NewRequest(http.MethodGet, "/brains", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /brains = %d, want 200", rec.Code)
 	}
@@ -266,7 +266,7 @@ func TestBrainsCarriesTheUsageBars(t *testing.T) {
 
 // TestBrains_ConcurrentPostAndRead runs POST /brains against GET /brains under the race detector, which is what a brain pick while the picker refetches looks like; the GET reads the BrainModels map, so a shared map would be caught here.
 func TestBrains_ConcurrentPostAndRead(t *testing.T) {
-	live := NewLiveConfig(&config.OraConfig{}, func(config.OraConfig) error { return nil })
+	live := NewLiveConfig(&config.JuneConfig{}, func(config.JuneConfig) error { return nil })
 	h := Brains(live, nil)
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -292,7 +292,7 @@ func TestBrains_ConcurrentPostAndRead(t *testing.T) {
 // TestBrains_OllamaIsUnavailableWithTheReason checks the Ollama row is never offered as pickable, even with the binary installed and models listed, and says why. internal/brain has no Ollama backend, so picking it used to persist provider "ollama" and then answer every duty on the Gemini API instead — spending the metered free tier the user picked Ollama to avoid and sending the prompt to Google.
 // The window's picker disables a row with signed_in false and prints "Not signed in" in place of the bar (app/src/next/parts.tsx), so the note is what the settings page and a reader of the JSON get; the row stays in the list, and its name, note and models are untouched.
 func TestBrains_OllamaIsUnavailableWithTheReason(t *testing.T) {
-	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(name string) bool { return true }, nil)
+	list := brainList(context.Background(), config.JuneConfig{}, t.TempDir(), func(name string) bool { return true }, nil)
 	byID := map[string]BrainView{}
 	for _, b := range list {
 		byID[b.ID] = b
@@ -315,8 +315,8 @@ func TestBrains_OllamaIsUnavailableWithTheReason(t *testing.T) {
 
 // TestBrainsPostRefusesABrainWithNoBackend checks a pick of a brain internal/brain cannot answer with is refused with the reason, rather than persisted. GET already marks the Ollama row unavailable, but the POST accepted it: the config then held ollama-cli and FromConfig failed every call to it with ErrNoBackend, so every duty pinned to that brain handed on to a provider the user did not choose.
 func TestBrainsPostRefusesABrainWithNoBackend(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
-	cfg := &config.OraConfig{}
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
+	cfg := &config.JuneConfig{}
 	rec := httptest.NewRecorder()
 	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"ollama","model":"llama3"}`)))
 
@@ -354,7 +354,7 @@ func TestFirstFields_ReadsBothTableShapes(t *testing.T) {
 	}
 }
 
-// The Antigravity row reported signed in for as long as the agy binary was on PATH, which says nothing about whether its login still works: on 2026-09-15 the picker drew it as available while every ask to it failed the eligibility check with a 401. `agy models` fails with that same UNAUTHENTICATED check, so the roster Ora already reads for the picker is the health check — it costs no model tokens and is already cached.
+// The Antigravity row reported signed in for as long as the agy binary was on PATH, which says nothing about whether its login still works: on 2026-09-15 the picker drew it as available while every ask to it failed the eligibility check with a 401. `agy models` fails with that same UNAUTHENTICATED check, so the roster June already reads for the picker is the health check — it costs no model tokens and is already cached.
 // Only that refusal is evidence of a dead login. A read that fails for any other reason — offline, the thirty-second timeout, a crash — also came back as an empty roster, and the row was marked signed out on it for the cache's ten minutes.
 func TestBrains_AntigravityIsSignedOutOnlyWhenItsRosterReadIsRefused(t *testing.T) {
 	for _, tc := range []struct {
@@ -374,7 +374,7 @@ func TestBrains_AntigravityIsSignedOutOnlyWhenItsRosterReadIsRefused(t *testing.
 			setAgyRoster(t, nil, false)
 			agyCache.refresh(agyModels)
 
-			row := brainRow(t, brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return true }, nil), "antigravity")
+			row := brainRow(t, brainList(context.Background(), config.JuneConfig{}, t.TempDir(), func(string) bool { return true }, nil), "antigravity")
 			if row.SignedIn != tc.signedIn {
 				t.Errorf("signed in = %v, want %v", row.SignedIn, tc.signedIn)
 			}
@@ -387,7 +387,7 @@ func TestBrains_AntigravityIsSignedOutOnlyWhenItsRosterReadIsRefused(t *testing.
 
 func TestBrains_AntigravityStaysSignedInBeforeTheFirstRosterRead(t *testing.T) {
 	setAgyRoster(t, nil, false)
-	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return true }, nil)
+	list := brainList(context.Background(), config.JuneConfig{}, t.TempDir(), func(string) bool { return true }, nil)
 	if !brainRow(t, list, "antigravity").SignedIn {
 		t.Error("antigravity was marked signed out on a roster nobody has read yet")
 	}
@@ -433,7 +433,7 @@ func TestBrains_ASignedOutLoginShowsOnTheRowBeforeAnythingIsAsked(t *testing.T) 
 		}
 		return brain.UsageSnapshot{SignedOut: true, Note: "the grok login was refused: sign in again with grok", At: time.Now()}, true
 	}
-	list := brainList(context.Background(), config.OraConfig{}, t.TempDir(), func(string) bool { return true }, refused)
+	list := brainList(context.Background(), config.JuneConfig{}, t.TempDir(), func(string) bool { return true }, refused)
 	row := brainRow(t, list, "grok")
 	if row.SignedIn {
 		t.Error("grok reports signed in although its usage reading was refused")

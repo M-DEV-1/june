@@ -1,4 +1,4 @@
-/** One of Ora's replies, rendered as text a person actually reads rather than as one plain paragraph: tables, task lists and strikethrough from GitHub-flavoured markdown, $...$ and $$...$$ as real typeset maths, headings no bigger than the page's own section heading, and a link that opens in the system browser instead of navigating this window away from the chat. No raw HTML ever runs — react-markdown's default turns a stray `<script>` or `<img onerror>` back into the literal text, which is also what keeps a reply safe from anything a tool result or a model slipped into the words. Input: the reply's text, exactly as the daemon sent it. Output: the structured reply. A user's own turn is left as plain text elsewhere — this is only for what Ora said back. */
+/** One of June's replies, rendered as text a person actually reads rather than as one plain paragraph: tables, task lists and strikethrough from GitHub-flavoured markdown, $...$ and $$...$$ as real typeset maths, headings no bigger than the page's own section heading, and a link that opens in the system browser instead of navigating this window away from the chat. No raw HTML ever runs — react-markdown's default turns a stray `<script>` or `<img onerror>` back into the literal text, which is also what keeps a reply safe from anything a tool result or a model slipped into the words. Input: the reply's text, exactly as the daemon sent it. Output: the structured reply. A user's own turn is left as plain text elsewhere — this is only for what June said back. */
 
 import { useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
@@ -17,12 +17,12 @@ function opens(href: string | undefined): boolean {
 }
 
 /** What a link the daemon would refuse is drawn as instead of a link, said in the title so the address is not simply dead under the pointer. */
-const NOT_OPENABLE = "Ora opens http and https links only, so this is shown as text.";
+const NOT_OPENABLE = "June opens http and https links only, so this is shown as text.";
 
 /** How long the copy button says what happened before going back to offering the copy. Long enough to read, short enough that the button is ready again by the time anyone reaches for it twice. */
 const COPIED_MS = 1600;
 
-/** A fenced code block with a way to get its text out. Ora writes prompts, commands and briefs into these for the user to use somewhere else, and selecting one by hand in a narrow column that scrolls sideways is a drag past the edge of the pane.
+/** A fenced code block with a way to get its text out. June writes prompts, commands and briefs into these for the user to use somewhere else, and selecting one by hand in a narrow column that scrolls sideways is a drag past the edge of the pane.
  * The text copied is the block's own textContent read off the DOM, not the markdown behind it: what the reader sees is what lands on the clipboard, with no fence and no language tag.
  * Input: the children react-markdown built for the block. Output: the block, with the button over its top-right corner.
  */
@@ -114,7 +114,7 @@ const components: Components = {
   td: ({ node: _n, ...p }) => <td className="border border-hairline px-2 py-1" {...p} />,
 };
 
-/** Ora's reply, structured. Input: the text. Output: the rendered markdown. */
+/** June's reply, structured. Input: the text. Output: the rendered markdown. */
 export function ReplyMarkdown({ text }: { text: string }) {
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={components}>

@@ -64,7 +64,7 @@ export type ConversationSummary = {
   updated: string;
 };
 
-/** One thing said in a conversation. Mirrors ipc.TurnView. Role is "you" or "ora"; kind is "ask", "dictation", "voice" or "error"; reason is set only for an error turn. */
+/** One thing said in a conversation. Mirrors ipc.TurnView. Role is "you" or "june"; kind is "ask", "dictation", "voice" or "error"; reason is set only for an error turn. */
 export type Turn = {
   id: string;
   role: string;
@@ -82,7 +82,7 @@ export type ConversationView = { id: string; title: string; brain: string; turns
 /** Whose task it is: "me" for the user's own, "them" for one a meeting left with someone else, "unclear" when nobody said — a task merely heard is not automatically owed, which is the whole point of the split. */
 export type TaskOwner = "me" | "them" | "unclear";
 
-/** What POST /tasks/{id}/done may set a task to. "dropped" is only for a task Ora noticed: the daemon answers 400 for a dropped task of the user's own, because user_tasks has no third state to hold it in. */
+/** What POST /tasks/{id}/done may set a task to. "dropped" is only for a task June noticed: the daemon answers 400 for a dropped task of the user's own, because user_tasks has no third state to hold it in. */
 export type TaskStatus = "open" | "done" | "dropped";
 
 /** One thing to do on GET /tasks. Mirrors ipc.Task; source is "you" for a task the user typed in and "noticed" for an action item a meeting raised. detail is where it came from: the meeting it was raised in and the date, for example "Meridian statement pattern analysis, 2026-09-01", or "you said" for one the user typed in. GET /tasks itself takes ?owner=me|them|unclear|all (default "me"), so which of these a given fetch returns depends on how it was called, not on anything in the row itself. */
@@ -139,7 +139,7 @@ export type Meeting = {
   attendees: { name: string; heard_only: boolean }[];
 };
 
-/** SettingsView's "first_run" field on GET /settings. Mirrors ipc.FirstRunView: which of the four ways Ora can answer text are set up on this machine, and the plain one-line steps to fix that — which the daemon fills in only while none of the four works, so an empty steps list means there is nothing left to set up and the window shows no panel. */
+/** SettingsView's "first_run" field on GET /settings. Mirrors ipc.FirstRunView: which of the four ways June can answer text are set up on this machine, and the plain one-line steps to fix that — which the daemon fills in only while none of the four works, so an empty steps list means there is nothing left to set up and the window shows no panel. */
 export type FirstRun = {
   gemini_key: boolean;
   codex_login: boolean;
@@ -172,7 +172,7 @@ export type SettingsView = {
 /** One allowance window a brain's provider reports for the user's own account: a five-hour or weekly subscription window, a daily request ceiling. Mirrors internal/agent.UsageLimit (aliased as brain.UsageLimit). used_fraction is 0 to 1; resets_at is RFC3339. */
 export type UsageLimit = { window: string; used_fraction: number; resets_at: string; source: string };
 
-/** One backend that can answer for Ora on GET /brains. Mirrors ipc.BrainView; model is the one last picked for this brain, "" when none ever was. limits and limits_at are optional so a daemon older than the field still parses; a brain with no allowance data reported sends limits as an empty list rather than leaving it out. */
+/** One backend that can answer for June on GET /brains. Mirrors ipc.BrainView; model is the one last picked for this brain, "" when none ever was. limits and limits_at are optional so a daemon older than the field still parses; a brain with no allowance data reported sends limits as an empty list rather than leaving it out. */
 export type Brain = {
   id: string;
   name: string;
@@ -200,7 +200,7 @@ export type UsageWindow = { providers: UsageProvider[]; models: UsageModel[] };
 /** One day of the week's bars. Mirrors ipc.UsageDay. */
 export type UsageDay = { day: string; calls: number; total_tokens: number };
 
-/** One finished call in the log. Mirrors ipc.UsageCall; channel says which part of Ora made it — "text", "voice", "dream", "eval" or "subtask". */
+/** One finished call in the log. Mirrors ipc.UsageCall; channel says which part of June made it — "text", "voice", "dream", "eval" or "subtask". */
 export type UsageCall = {
   id: number;
   when: string;
@@ -279,8 +279,8 @@ export function errorStatus(e: unknown): number | undefined {
 }
 
 /** Every daemon route the window reads or writes, as one RTK Query API. The daemon wraps its lists in an object named after the list ("conversations", "tasks", "days", "meetings", "brains"), so each list endpoint unwraps that here and components get a plain array. */
-export const oraApi = createApi({
-  reducerPath: "ora",
+export const juneApi = createApi({
+  reducerPath: "june",
   baseQuery: baseQueryWithFreshToken,
   tagTypes: ["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job", "Voice"],
   endpoints: (build) => ({
@@ -370,7 +370,7 @@ export const oraApi = createApi({
           else draft[at].done = status === "done";
         };
         // Both tasks and allTasks hold the same rows the daemon does; patching whichever of the two are actually cached (updateQueryData is a no-op on one that is not) keeps Mine and Theirs on the Tasks screen, and the Days page once it refetches, from showing three different answers to "is this done" between the click and the daemon's own reply.
-        const patches = [dispatch(oraApi.util.updateQueryData("tasks", undefined, move)), dispatch(oraApi.util.updateQueryData("allTasks", undefined, move))];
+        const patches = [dispatch(juneApi.util.updateQueryData("tasks", undefined, move)), dispatch(juneApi.util.updateQueryData("allTasks", undefined, move))];
         try {
           await queryFulfilled;
         } catch {
@@ -387,7 +387,7 @@ export const oraApi = createApi({
           const at = draft.findIndex((t) => t.id === id);
           if (at >= 0) draft.splice(at, 1);
         };
-        const patches = [dispatch(oraApi.util.updateQueryData("tasks", undefined, drop)), dispatch(oraApi.util.updateQueryData("allTasks", undefined, drop))];
+        const patches = [dispatch(juneApi.util.updateQueryData("tasks", undefined, drop)), dispatch(juneApi.util.updateQueryData("allTasks", undefined, drop))];
         try {
           await queryFulfilled;
         } catch {
@@ -440,7 +440,7 @@ export const oraApi = createApi({
       query: (claude_usage_from_login) => ({ url: "/settings", method: "POST", body: { claude_usage_from_login } }),
       invalidatesTags: ["Settings"],
     }),
-    /** The brains Ora can call on this machine and which one is the default. */
+    /** The brains June can call on this machine and which one is the default. */
     brains: build.query<Brain[], void>({
       query: () => "/brains",
       transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
@@ -452,13 +452,13 @@ export const oraApi = createApi({
       transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
       invalidatesTags: ["Brain", "Settings"],
     }),
-    /** The whole voice roster and the Live models beside it: all thirty of Gemini Live's prebuilt voices, one carrying current true, and the models Ora can speak through, one of which also carries current true. */
+    /** The whole voice roster and the Live models beside it: all thirty of Gemini Live's prebuilt voices, one carrying current true, and the models June can speak through, one of which also carries current true. */
     voices: build.query<Voices, void>({
       query: () => "/voices",
       transformResponse: (r: Partial<Voices>) => ({ voices: r.voices ?? [], models: r.models ?? [] }),
       providesTags: [{ type: "Voice" as const, id: "LIST" }],
     }),
-    /** Sets which voice Ora speaks in and persists it; the daemon answers the same body GET /voices would, with the new one marked current. A session already under way keeps the voice it dialled with, so this is heard on the next one, not this one. 400 for a name that is not one of the thirty. */
+    /** Sets which voice June speaks in and persists it; the daemon answers the same body GET /voices would, with the new one marked current. A session already under way keeps the voice it dialled with, so this is heard on the next one, not this one. 400 for a name that is not one of the thirty. */
     setVoice: build.mutation<Voices, string>({
       query: (name) => ({ url: "/voices", method: "POST", body: { name } }),
       transformResponse: (r: Partial<Voices>) => ({ voices: r.voices ?? [], models: r.models ?? [] }),
@@ -571,7 +571,7 @@ export const {
   useStartDictationMutation,
   useStopDictationMutation,
   useOpenUrlMutation,
-} = oraApi;
+} = juneApi;
 
 /** Opens the daemon's SSE stream for this window (see openStream in shared/wire.ts). Input: a callback for each event, and a callback for the stream opening again after it had dropped. Output: a stop function. The first connect reads the token this window already holds; a reconnect reads it again, because a dropped stream is also how a restarted daemon shows itself. */
 export function events(onEvent: (ev: DaemonEvent) => void, onReopen?: () => void): () => void {

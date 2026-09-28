@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/db"
+	"june/internal/agent"
+	"june/internal/db"
 )
 
 // toolRecordTimeout bounds one row's write. The ask that produced the record has usually moved on by the time it lands, so the write cannot borrow the ask's context — it would be cancelled the moment the answer was spoken — and it cannot wait for ever either.

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db/dbtest"
-	"ora/internal/proactive"
+	"june/internal/db/dbtest"
+	"june/internal/proactive"
 )
 
 // TestNotice broadcasts a Notice and checks every field the window reads off it, in one call: the

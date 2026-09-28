@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // undStage rewrites the standing understanding doc, one brain call, committed with the stage token in one transaction. It reads the whole diary pyramid rather than only the last week: every year entry, the last twelve months, the last eight weeks and the recent dailies. The coarse tiers are already compressed, so the whole of the user's record costs a few thousand tokens, and the standing model is then built from all of it instead of from a seven-day window that quietly drops everything older.

@@ -7,19 +7,19 @@ import (
 	"net/http"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/audio"
-	"ora/internal/brain"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/embed"
-	"ora/internal/ipc"
-	"ora/internal/memory"
-	"ora/internal/proactive"
-	"ora/internal/recorder"
-	"ora/internal/tracker"
-	"ora/internal/util"
-	"ora/internal/vector"
+	"june/internal/agent"
+	"june/internal/audio"
+	"june/internal/brain"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/embed"
+	"june/internal/ipc"
+	"june/internal/memory"
+	"june/internal/proactive"
+	"june/internal/recorder"
+	"june/internal/tracker"
+	"june/internal/util"
+	"june/internal/vector"
 )
 
 type routeDependencies struct {
@@ -36,7 +36,7 @@ type routeDependencies struct {
 	scheduler       *proactive.Scheduler
 	liveConfig      *ipc.LiveConfig
 	brainLimits     ipc.BrainLimits
-	appConfig       config.OraConfig
+	appConfig       config.JuneConfig
 	startTime       time.Time
 }
 
@@ -253,7 +253,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, appConfig.ExaMonthlyRequests, brainLimits)))
 }
 
-// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the config accessor (for the Gemini model those requests are metered under, and for whether the Claude read is turned on, both read under its lock since POST /settings writes that flag from another request goroutine) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker (skipped entirely when config.OraConfig.ClaudeUsageFromLogin is off), Grok's read from its billing endpoint at most every ten minutes, Codex's whatever its last response's headers said after a login check at most every ten minutes, and nothing at all for Antigravity and Ollama, which expose no allowance to read.
+// brainLimitsFrom is the allowance lookup GET /brains and GET /usage draw their bars from. Input: the store the Codex and Claude readings land in, the Gemini daily request counter, the config accessor (for the Gemini model those requests are metered under, and for whether the Claude read is turned on, both read under its lock since POST /settings writes that flag from another request goroutine) and the configured ceilings. Output: a lookup taking a brain id and returning that brain's windows — Gemini's computed on the spot from the counter, Claude's read from its usage endpoint at most every ten minutes and only while someone is looking at the picker (skipped entirely when config.JuneConfig.ClaudeUsageFromLogin is off), Grok's read from its billing endpoint at most every ten minutes, Codex's whatever its last response's headers said after a login check at most every ten minutes, and nothing at all for Antigravity and Ollama, which expose no allowance to read.
 func brainLimitsFrom(usage *brain.UsageStore, quota *brain.QuotaState, cfg *ipc.LiveConfig, opts brain.QuotaOptions) ipc.BrainLimits {
 	return func(ctx context.Context, id string) (brain.UsageSnapshot, bool) {
 		switch id {

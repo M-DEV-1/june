@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"time"
 
-	"ora/internal/proactive"
+	"june/internal/proactive"
 )
 
-// A notice is Ora speaking first: the morning brief, the evening close, a meeting prep. It reaches the desktop window as an event on the stream that window is already reading, and the window draws it as its own card. Nothing here waits for the window, and nothing here knows whether it drew anything — see Subscribed for what the caller asks before choosing this over the desktop's own notifications.
+// A notice is June speaking first: the morning brief, the evening close, a meeting prep. It reaches the desktop window as an event on the stream that window is already reading, and the window draws it as its own card. Nothing here waits for the window, and nothing here knows whether it drew anything — see Subscribed for what the caller asks before choosing this over the desktop's own notifications.
 
 // Notice is what one "notice" event carries. Title is the card's bold first line and Body the few lines under it. Place and ID say what a click on the card opens: Place names one of the app window's own screens ("chats", "tasks", "days") and ID the row to select there, both empty when the notice points at nothing in particular and a click should just open the window. Kind names the moment it came from — "brief", "close", "meeting", "day", "task", "routine" — so the window can tell one apart from another without reading the title.
 //

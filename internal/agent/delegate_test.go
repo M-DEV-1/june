@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // fakeRunner is a Runner stub: it records the cwd/systemPrompt/prompt it was called with and returns whatever result/err a test configured, or blocks until ctx is done when block is set (for the timeout test).
@@ -30,7 +30,7 @@ func (f *fakeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt string) 
 	return f.result, f.err
 }
 
-// TestBuildBrief drives BuildBrief once per row and checks what that row's shape of goal/thread/personal-block must do to the page it returns: the goal, the thread rendered as "user:"/"ora:" lines, and the constraints/report footer all land in it, in that order; an empty thread gets a "nothing said yet" line rather than an empty section; a thread over delegateThreadBudget runes keeps its newest lines and drops the oldest; a trailing error-kind turn and an empty turn are left out the way HistoryFromTurns leaves them out; and a secret — in the thread, in the goal, or in the personal-context block — never reaches the brief while the rest of whichever block it was in survives.
+// TestBuildBrief drives BuildBrief once per row and checks what that row's shape of goal/thread/personal-block must do to the page it returns: the goal, the thread rendered as "user:"/"june:" lines, and the constraints/report footer all land in it, in that order; an empty thread gets a "nothing said yet" line rather than an empty section; a thread over delegateThreadBudget runes keeps its newest lines and drops the oldest; a trailing error-kind turn and an empty turn are left out the way HistoryFromTurns leaves them out; and a secret — in the thread, in the goal, or in the personal-context block — never reaches the brief while the rest of whichever block it was in survives.
 func TestBuildBrief(t *testing.T) {
 	oldLine := strings.Repeat("a", delegateThreadBudget)
 	cases := []struct {
@@ -46,11 +46,11 @@ func TestBuildBrief(t *testing.T) {
 			goal: "fix the flaky test in store_test.go",
 			thread: []db.Turn{
 				{Role: "you", Text: "can you fix the flaky test", Kind: "ask"},
-				{Role: "ora", Text: "which one is flaky", Kind: "ask"},
+				{Role: "june", Text: "which one is flaky", Kind: "ask"},
 			},
 			wantContains: []string{
 				"Goal: fix the flaky test in store_test.go",
-				"user: can you fix the flaky test", "ora: which one is flaky",
+				"user: can you fix the flaky test", "june: which one is flaky",
 				"Constraints:", "do not send, publish, pay for or delete",
 				"Where to report:",
 			},
@@ -63,15 +63,15 @@ func TestBuildBrief(t *testing.T) {
 		{
 			name:         "personal-context block included verbatim",
 			goal:         "do the thing",
-			personal:     "Personal context — things known for certain about the user:\n  works on ora",
-			wantContains: []string{"works on ora"},
+			personal:     "Personal context — things known for certain about the user:\n  works on june",
+			wantContains: []string{"works on june"},
 		},
 		{
 			name: "a thread over budget keeps only its newest lines",
 			goal: "goal",
 			thread: []db.Turn{
 				{Role: "you", Text: oldLine, Kind: "ask"},
-				{Role: "ora", Text: "the newest line", Kind: "ask"},
+				{Role: "june", Text: "the newest line", Kind: "ask"},
 			},
 			wantContains:    []string{"the newest line"},
 			wantNotContains: []string{oldLine},
@@ -92,7 +92,7 @@ func TestBuildBrief(t *testing.T) {
 			goal: "goal",
 			thread: []db.Turn{
 				{Role: "you", Text: "  ", Kind: "ask"},
-				{Role: "ora", Text: "something went wrong", Kind: "error"},
+				{Role: "june", Text: "something went wrong", Kind: "error"},
 				{Role: "you", Text: "the real question", Kind: "ask"},
 			},
 			wantContains:    []string{"the real question"},
@@ -106,8 +106,8 @@ func TestBuildBrief(t *testing.T) {
 		{
 			name:            "a secret personal-context line is redacted, the rest survives",
 			goal:            "goal",
-			personal:        "Personal context — things known for certain about the user:\n  password: hunter2\n  works on ora",
-			wantContains:    []string{"works on ora"},
+			personal:        "Personal context — things known for certain about the user:\n  password: hunter2\n  works on june",
+			wantContains:    []string{"works on june"},
 			wantNotContains: []string{"hunter2"},
 		},
 	}

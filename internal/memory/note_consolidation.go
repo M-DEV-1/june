@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"ora/internal/config"
+	"june/internal/config"
 	"strings"
 )
 

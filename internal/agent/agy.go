@@ -1,5 +1,5 @@
-// agy.go answers /ask with Antigravity's `agy` command line on the user's own plan, and offers it Ora's own tools over the same MCP tool server claude.go starts — claudeToolServer is reused as it is, not copied, because it already runs every call through the ask's gate, its step budget and its hop recording.
-// agy has no inline MCP flag and no way to allow a subset of tools for one run: its only MCP surface is `agy mcp add`, which would mutate the user's own global config, and its only per-run permission surface is a grant file under its own HOME. So instead of an MCP config on argv, one run gets a whole throwaway HOME: a mirror of the user's real ~/.gemini with everything but its own two config files symlinked through (which is how agy still finds its own login), and Ora's own mcp_config.json and config.json in their place, granting nothing but the tool server. --dangerously-skip-permissions is never passed, because the point of that grant file is that only Ora's tools are pre-approved — anything else must stay ungranted, and in print mode an ungranted tool cannot be interactively approved, which is exactly the refusal wanted for anything outside Ora's own tools.
+// agy.go answers /ask with Antigravity's `agy` command line on the user's own plan, and offers it June's own tools over the same MCP tool server claude.go starts — claudeToolServer is reused as it is, not copied, because it already runs every call through the ask's gate, its step budget and its hop recording.
+// agy has no inline MCP flag and no way to allow a subset of tools for one run: its only MCP surface is `agy mcp add`, which would mutate the user's own global config, and its only per-run permission surface is a grant file under its own HOME. So instead of an MCP config on argv, one run gets a whole throwaway HOME: a mirror of the user's real ~/.gemini with everything but its own two config files symlinked through (which is how agy still finds its own login), and June's own mcp_config.json and config.json in their place, granting nothing but the tool server. --dangerously-skip-permissions is never passed, because the point of that grant file is that only June's tools are pre-approved — anything else must stay ungranted, and in print mode an ungranted tool cannot be interactively approved, which is exactly the refusal wanted for anything outside June's own tools.
 package agent
 
 import (
@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 const (
@@ -23,19 +23,19 @@ const (
 	agyBinary = "agy"
 	// agyAskTimeout bounds one whole ask, every tool round included, matching claudeAskTimeout.
 	agyAskTimeout = 12 * time.Minute
-	// agyMCPServerName is what Ora calls its own tool server inside the temp HOME an agy run uses, and so is the name a grant of the form mcp(<name>/*) refers to.
-	agyMCPServerName = "ora"
+	// agyMCPServerName is what June calls its own tool server inside the temp HOME an agy run uses, and so is the name a grant of the form mcp(<name>/*) refers to.
+	agyMCPServerName = "june"
 )
 
 // ProviderAgy is the Antigravity command line, which serves Gemini models on the user's own plan.
 const ProviderAgy = "agy"
 
-// agyModel is the model an ask asks for. Input: none. Output: the model last picked for Antigravity in the window, else ORA_AGY_MODEL, else "" — agy has its own default model when none is named, and nothing here has read a fact establishing what that default id is, so it is left to the CLI rather than guessed.
+// agyModel is the model an ask asks for. Input: none. Output: the model last picked for Antigravity in the window, else JUNE_AGY_MODEL, else "" — agy has its own default model when none is named, and nothing here has read a fact establishing what that default id is, so it is left to the CLI rather than guessed.
 func agyModel() string {
-	return pickedModel("antigravity", "ORA_AGY_MODEL", "")
+	return pickedModel("antigravity", "JUNE_AGY_MODEL", "")
 }
 
-// buildAgyHome builds a throwaway HOME for one agy run at tempHome: it symlinks every entry of the real ~/.gemini into place except the config directory, symlinks every entry of the real ~/.gemini/config except mcp_config.json and config.json, and writes Ora's own versions of those two files, naming only the tool server at mcpURL and granting only its tools. Nothing else the user's real home holds is reachable from the run — no other rules, no other MCP servers, no shell grants — while agy still finds its own login because that lives under an entry this function only symlinks through. Input: the real home directory to mirror from, the fresh temp directory to build the mirror in, and the tool server's URL. Output: an error naming what could not be listed, linked or written.
+// buildAgyHome builds a throwaway HOME for one agy run at tempHome: it symlinks every entry of the real ~/.gemini into place except the config directory, symlinks every entry of the real ~/.gemini/config except mcp_config.json and config.json, and writes June's own versions of those two files, naming only the tool server at mcpURL and granting only its tools. Nothing else the user's real home holds is reachable from the run — no other rules, no other MCP servers, no shell grants — while agy still finds its own login because that lives under an entry this function only symlinks through. Input: the real home directory to mirror from, the fresh temp directory to build the mirror in, and the tool server's URL. Output: an error naming what could not be listed, linked or written.
 func buildAgyHome(realHome, tempHome, mcpURL string) error {
 	configDir := filepath.Join(tempHome, ".gemini", "config")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
@@ -66,7 +66,7 @@ func buildAgyHome(realHome, tempHome, mcpURL string) error {
 	return nil
 }
 
-// buildAgyCLIDir mirrors the user's ~/.gemini/antigravity-cli into the run's temp HOME with one file of Ora's own in it: settings.json, carrying every setting the user already had plus Ora's statusline command. That command is the only way to read the plan's own allowance on a machine Ora cannot take the OAuth token from — agy pipes its quota to whatever statusline it is given, on a --print run as much as an interactive one, and reports it nowhere else. The user's real settings.json is never touched. Input: the real ~/.gemini and the temp HOME. Output: an error naming what could not be listed, linked or written.
+// buildAgyCLIDir mirrors the user's ~/.gemini/antigravity-cli into the run's temp HOME with one file of June's own in it: settings.json, carrying every setting the user already had plus June's statusline command. That command is the only way to read the plan's own allowance on a machine June cannot take the OAuth token from — agy pipes its quota to whatever statusline it is given, on a --print run as much as an interactive one, and reports it nowhere else. The user's real settings.json is never touched. Input: the real ~/.gemini and the temp HOME. Output: an error naming what could not be listed, linked or written.
 func buildAgyCLIDir(realGemini, tempHome string) error {
 	tempCLI := filepath.Join(tempHome, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(tempCLI, 0o700); err != nil {
@@ -80,7 +80,7 @@ func buildAgyCLIDir(realGemini, tempHome string) error {
 	settings := map[string]any{}
 	if data, err := os.ReadFile(filepath.Join(realCLI, "settings.json")); err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
-			slog.Warn("agy: the user's settings.json is not JSON, the run gets Ora's statusline alone", "error", err)
+			slog.Warn("agy: the user's settings.json is not JSON, the run gets June's statusline alone", "error", err)
 			settings = map[string]any{}
 		}
 	}
@@ -119,7 +119,7 @@ func symlinkEntries(src, dst string, except ...string) error {
 	return nil
 }
 
-// agyEnv is the environment one agy run gets: the daemon's own environment with HOME replaced by the throwaway mirror, so agy reads its login and Ora's grants from tempHome while everything else about the process (PATH included) stays normal.
+// agyEnv is the environment one agy run gets: the daemon's own environment with HOME replaced by the throwaway mirror, so agy reads its login and June's grants from tempHome while everything else about the process (PATH included) stays normal.
 func agyEnv(tempHome string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, e := range os.Environ() {
@@ -161,7 +161,7 @@ func agyFailure(res agyResult) error {
 	return err
 }
 
-// AskAgy answers a question through the Antigravity command line on the user's own plan, running Ora's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "agy/<model>" (or "agy" when no model was named), or the trace so far and an error.
+// AskAgy answers a question through the Antigravity command line on the user's own plan, running June's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "agy/<model>" (or "agy" when no model was named), or the trace so far and an error.
 func (a *Agent) AskAgy(ctx context.Context, question string) (TurnTrace, error) {
 	return a.AskAgyWith(ctx, nil, question)
 }
@@ -250,7 +250,7 @@ func (b AgyBrain) AskTextWith(ctx context.Context, history History, question str
 // agyBrainID is the id GET /brains publishes this provider under, which is also the key its usage reading is stored against. It differs from ProviderAgy ("agy", the CLI) because the picker names the plan rather than the command line.
 const agyBrainID = "antigravity"
 
-// recordAgyQuota reads the plan allowance Ora's statusline command captured during a run and records it against the Antigravity brain row. Input: the run's throwaway HOME. Output: none — a run whose payload is missing or carries no quota records nothing, which leaves the last good reading on screen rather than replacing it with empty bars.
+// recordAgyQuota reads the plan allowance June's statusline command captured during a run and records it against the Antigravity brain row. Input: the run's throwaway HOME. Output: none — a run whose payload is missing or carries no quota records nothing, which leaves the last good reading on screen rather than replacing it with empty bars.
 func recordAgyQuota(tempHome string) {
 	payload, err := os.ReadFile(filepath.Join(tempHome, agyQuotaFile))
 	if err != nil {
@@ -261,21 +261,21 @@ func recordAgyQuota(tempHome string) {
 	}
 }
 
-// agyQuotaFile is the name, inside one run's throwaway HOME, that Ora's own statusline command writes agy's payload to.
-const agyQuotaFile = "ora-quota.json"
+// agyQuotaFile is the name, inside one run's throwaway HOME, that June's own statusline command writes agy's payload to.
+const agyQuotaFile = "june-quota.json"
 
-// agyStatusLine is the statusline command Ora gives agy in the throwaway HOME: it copies the payload agy pipes in to agyQuotaFile and prints one word, because agy renders whatever the command prints. Input: the temp HOME. Output: the shell command line, with the path quoted so a temp directory with a space in it still works.
+// agyStatusLine is the statusline command June gives agy in the throwaway HOME: it copies the payload agy pipes in to agyQuotaFile and prints one word, because agy renders whatever the command prints. Input: the temp HOME. Output: the shell command line, with the path quoted so a temp directory with a space in it still works.
 func agyStatusLine(tempHome string) string {
 	return "cat > " + shellQuote(filepath.Join(tempHome, agyQuotaFile))
 }
 
-// shellQuote wraps s so a shell reads it as one literal word. Input: any path. Output: the single-quoted form, with each embedded quote closed, escaped and reopened. Go's %q is not this: it is Go string syntax, and a path holding a dollar sign or a backslash — TMPDIR is the user's to set — would come out as something the shell expands rather than the path Ora meant, with no error anywhere and no quota captured.
+// shellQuote wraps s so a shell reads it as one literal word. Input: any path. Output: the single-quoted form, with each embedded quote closed, escaped and reopened. Go's %q is not this: it is Go string syntax, and a path holding a dollar sign or a backslash — TMPDIR is the user's to set — would come out as something the shell expands rather than the path June meant, with no error anywhere and no quota captured.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // agyQuotaLimits reads the plan allowance out of the payload agy pipes to its statusline command. Input: the payload as agy wrote it. Output: one window per entry of its "quota" object, or nothing at all when the payload is not JSON or carries no quota — an empty result must leave the last good reading alone rather than record empty bars.
-// agy reports how much of a window is left and Ora draws how much is spent, so the fractions are inverted here. The window names are agy's own ("gemini-5h", "3p-weekly"): the plan meters the Gemini models and the third-party ones it also carries separately, and collapsing them would hide a family that is spent behind one that is not.
+// agy reports how much of a window is left and June draws how much is spent, so the fractions are inverted here. The window names are agy's own ("gemini-5h", "3p-weekly"): the plan meters the Gemini models and the third-party ones it also carries separately, and collapsing them would hide a family that is spent behind one that is not.
 func agyQuotaLimits(payload []byte) []UsageLimit {
 	var doc struct {
 		Quota map[string]struct {

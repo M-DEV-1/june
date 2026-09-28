@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/memory"
+	"june/internal/db"
+	"june/internal/memory"
 )
 
 // TestDayStart_UTCInstantMapsToLocalDay checks that DayStart uses the local calendar day, not the UTC one, when the daemon's zone is set to IST — a UTC instant whose IST wall-clock time has already rolled past midnight into the next day must land on that later IST day.

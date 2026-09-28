@@ -32,7 +32,7 @@ export type Shape =
   | { kind: "label"; x: number; y: number; text: string; tail: "down" | "up" }
   | { kind: "mark"; x: number; y: number; text: string };
 
-/** What the drawing is for, which is what colours it. Neutral is Ora looking, point is Ora showing you something, act is a press about to happen, done is a thing finished. The pointer and the label pill always carry the same one. */
+/** What the drawing is for, which is what colours it. Neutral is June looking, point is June showing you something, act is a press about to happen, done is a thing finished. The pointer and the label pill always carry the same one. */
 export type Mood = "neutral" | "point" | "act" | "done";
 
 /** A place on the overlay page, in its own CSS pixels. */

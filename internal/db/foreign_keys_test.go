@@ -11,7 +11,7 @@ import (
 // newFileStore opens a throwaway store backed by a real file, closed when the test ends. The file matters: only a file-backed store keeps the full connection pool, which is what the per-connection pragma has to be proved against.
 func newFileStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := New(filepath.Join(t.TempDir(), "ora.db"))
+	store, err := New(filepath.Join(t.TempDir(), "june.db"))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

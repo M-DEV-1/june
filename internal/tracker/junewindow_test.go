@@ -2,21 +2,21 @@ package tracker_test
 
 import (
 	"context"
-	"ora/internal/tracker"
+	"june/internal/tracker"
 	"testing"
 	"time"
 )
 
-// The capture loop must never emit Ora's own window, so it reaches neither the episode store nor the live activity buffer, both of which are fed from this one channel.
-func TestDaemon_SkipsOraOwnWindow(t *testing.T) {
+// The capture loop must never emit June's own window, so it reaches neither the episode store nor the live activity buffer, both of which are fed from this one channel.
+func TestDaemon_SkipsJuneOwnWindow(t *testing.T) {
 	mockEye := &mockTracker{
 		responses: []*tracker.Activity{
-			{App: "ora", Title: "Ora"},
-			{App: "ora", Title: "Ora"},
-			{App: "ora", Title: "Ora"},
-			{App: "mutter-x11-frames", Title: "Ora"},
-			{App: "mutter-x11-frames", Title: "Ora"},
-			{App: "mutter-x11-frames", Title: "Ora"},
+			{App: "june", Title: "June"},
+			{App: "june", Title: "June"},
+			{App: "june", Title: "June"},
+			{App: "mutter-x11-frames", Title: "June"},
+			{App: "mutter-x11-frames", Title: "June"},
+			{App: "mutter-x11-frames", Title: "June"},
 			{App: "Code", Title: "reads.go"},
 			{App: "Code", Title: "reads.go"},
 			{App: "Code", Title: "reads.go"},
@@ -44,6 +44,6 @@ CollectLoop:
 	}
 
 	if len(got) != 1 || got[0].App != "Code" {
-		t.Fatalf("got %+v, want exactly one Code episode and no Ora ones", got)
+		t.Fatalf("got %+v, want exactly one Code episode and no June ones", got)
 	}
 }

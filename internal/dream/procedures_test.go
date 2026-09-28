@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // insertActRun writes one act run through the db package's own insert method, so the stage reads exactly what a real ask files.

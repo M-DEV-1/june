@@ -12,7 +12,7 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// fakeExtension stands in for the ora@ora.local shell extension on a private test bus: it records each call it receives and answers with a canned bool, so the test can prove the Raiser sends the right method name and argument without a real gnome-shell.
+// fakeExtension stands in for the june@june.local shell extension on a private test bus: it records each call it receives and answers with a canned bool, so the test can prove the Raiser sends the right method name and argument without a real gnome-shell.
 type fakeExtension struct {
 	mu       sync.Mutex
 	calls    []string
@@ -81,7 +81,7 @@ func startPrivateBus(t *testing.T) string {
 	}
 }
 
-// serveFakeExtension connects to the private bus as "org.gnome.Shell" and exports the fake extension at the real object path, exactly as the real gnome-shell would once ora@ora.local is enabled.
+// serveFakeExtension connects to the private bus as "org.gnome.Shell" and exports the fake extension at the real object path, exactly as the real gnome-shell would once june@june.local is enabled.
 func serveFakeExtension(t *testing.T, addr string, ext *fakeExtension) {
 	t.Helper()
 	conn, err := dbus.Connect(addr)
@@ -167,7 +167,7 @@ func TestRaiser_ByTitleAndByWmClass(t *testing.T) {
 	}
 }
 
-// TestRaiser_NoExtensionMeansUnavailable proves the argument shapes work end to end even when nothing is exported at the extension's object path: every call must return (false, non-nil error) rather than panicking, matching how the real Raiser behaves before the user has installed or enabled ora@ora.local.
+// TestRaiser_NoExtensionMeansUnavailable proves the argument shapes work end to end even when nothing is exported at the extension's object path: every call must return (false, non-nil error) rather than panicking, matching how the real Raiser behaves before the user has installed or enabled june@june.local.
 func TestRaiser_NoExtensionMeansUnavailable(t *testing.T) {
 	addr := startPrivateBus(t)
 	t.Setenv("DBUS_SESSION_BUS_ADDRESS", addr)

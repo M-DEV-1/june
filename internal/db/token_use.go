@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // questionRuneCap bounds how much of the asked question is kept on a token_use row. Enough to recognise a call in a log view, short enough that a pasted page cannot bloat the ledger.

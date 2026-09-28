@@ -9,14 +9,14 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
-// saved collects what a handler persisted, standing in for writing ora-config.json.
-func savedConfig(t *testing.T) (*LiveConfig, *config.OraConfig) {
+// saved collects what a handler persisted, standing in for writing june-config.json.
+func savedConfig(t *testing.T) (*LiveConfig, *config.JuneConfig) {
 	t.Helper()
-	cfg := &config.OraConfig{}
-	return NewLiveConfig(cfg, func(config.OraConfig) error { return nil }), cfg
+	cfg := &config.JuneConfig{}
+	return NewLiveConfig(cfg, func(config.JuneConfig) error { return nil }), cfg
 }
 
 // GET /voices is the whole roster with the one in use marked, since the picker draws every voice and has to show which is current without a second call.
@@ -122,7 +122,7 @@ func TestVoices_ListsTheLiveModelsAndMarksTheCurrentOne(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(out.Models) != len(config.LiveVoiceModels) {
-		t.Fatalf("models = %d, want the %d Ora can dial", len(out.Models), len(config.LiveVoiceModels))
+		t.Fatalf("models = %d, want the %d June can dial", len(out.Models), len(config.LiveVoiceModels))
 	}
 	var current int
 	for _, m := range out.Models {
@@ -164,7 +164,7 @@ func TestVoices_PostSwitchesTheLiveModel(t *testing.T) {
 	}
 }
 
-// A model Ora cannot dial is refused and changes nothing: stored, every later session would fail at connect rather than this request failing here.
+// A model June cannot dial is refused and changes nothing: stored, every later session would fail at connect rather than this request failing here.
 func TestVoices_PostRefusesAnUnknownModel(t *testing.T) {
 	live, cfg := savedConfig(t)
 	cfg.LiveModel = config.Live25Model

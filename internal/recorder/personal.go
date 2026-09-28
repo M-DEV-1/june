@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // personalUpdateInstruction is the bar the meeting updater has to clear before it writes anything into personal context. The store is small, permanent and read into every conversation, so the default answer is to write nothing.

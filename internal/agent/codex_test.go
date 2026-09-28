@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/db"
+	"june/internal/act"
+	"june/internal/db"
 
 	"google.golang.org/genai"
 )
@@ -614,7 +614,7 @@ func TestAskCodex_SendsThePriorTurnsAsMessageItems(t *testing.T) {
 
 	history := HistoryFromTurns([]db.Turn{
 		{Role: "you", Text: "draw a ring around any one button you can see", Kind: "ask"},
-		{Role: "ora", Text: "I ringed the Pause button.", Kind: "ask"},
+		{Role: "june", Text: "I ringed the Pause button.", Kind: "ask"},
 	})
 	if _, err := a.askCodex(t.Context(), c, history, "do it again"); err != nil {
 		t.Fatal(err)
@@ -867,11 +867,11 @@ func TestAskCodex_ScreenAskSendsOnePrefixOnEveryRound(t *testing.T) {
 
 	history := HistoryFromTurns([]db.Turn{
 		{Role: "you", Text: "first question", Kind: "ask"},
-		{Role: "ora", Text: "first answer", Kind: "ask"},
+		{Role: "june", Text: "first answer", Kind: "ask"},
 		{Role: "you", Text: "second question", Kind: "ask"},
-		{Role: "ora", Text: "second answer", Kind: "ask"},
+		{Role: "june", Text: "second answer", Kind: "ask"},
 		{Role: "you", Text: "third question", Kind: "ask"},
-		{Role: "ora", Text: "third answer", Kind: "ask"},
+		{Role: "june", Text: "third answer", Kind: "ask"},
 	})
 	if _, err := a.askCodex(t.Context(), c, history, "click the merge button"); err != nil {
 		t.Fatal(err)
@@ -926,11 +926,11 @@ func TestAskCodex_CutsTheThreadOnAScreenTask(t *testing.T) {
 
 	history := HistoryFromTurns([]db.Turn{
 		{Role: "you", Text: "first question", Kind: "ask"},
-		{Role: "ora", Text: "first answer", Kind: "ask"},
+		{Role: "june", Text: "first answer", Kind: "ask"},
 		{Role: "you", Text: "second question", Kind: "ask"},
-		{Role: "ora", Text: "second answer", Kind: "ask"},
+		{Role: "june", Text: "second answer", Kind: "ask"},
 		{Role: "you", Text: "third question", Kind: "ask"},
-		{Role: "ora", Text: "third answer", Kind: "ask"},
+		{Role: "june", Text: "third answer", Kind: "ask"},
 	})
 	if _, err := a.askCodex(t.Context(), c, history, "what did we settle on for the venue"); err != nil {
 		t.Fatal(err)
@@ -1290,7 +1290,7 @@ func TestCodexRound_ARefusedRefreshMarksTheLoginSignedOut(t *testing.T) {
 			defer tokens.Close()
 
 			c := codexTestClient(always401.URL, tokens.URL, writeCodexAuth(t, tc.auth))
-			if _, err := c.round(t.Context(), "you are ora", nil, nil, "s1", nil); err == nil {
+			if _, err := c.round(t.Context(), "you are june", nil, nil, "s1", nil); err == nil {
 				t.Fatal("the round answered on a login that could not be refreshed")
 			}
 			rec.mu.Lock()

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/memory"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/memory"
 )
 
 // posted is one notification the fake notifier was asked to show.
@@ -173,7 +173,7 @@ func TestDone_OnTaskNotice_ClosesTheTask(t *testing.T) {
 	assertNoSnoozes(t, ctx, store)
 }
 
-// TestDone_OnRoutineNotice_ClosesNothing checks Done on a routine notice never reaches the task path, since a routine is Ora reporting rather than work owed, and leaves no snooze behind.
+// TestDone_OnRoutineNotice_ClosesNothing checks Done on a routine notice never reaches the task path, since a routine is June reporting rather than work owed, and leaves no snooze behind.
 func TestDone_OnRoutineNotice_ClosesNothing(t *testing.T) {
 	ctx := context.Background()
 	s, store, f := testScheduler(t)
@@ -361,11 +361,11 @@ func TestMaybeTaskNotices_WindowUp_SendsOnlyToTheWindow(t *testing.T) {
 		t.Errorf("task notice carried %d actions, want all %d", len(sent[0].Actions), len(noticeActions))
 	}
 
-	// Everything else reaching a window carries the one button it can answer. A routine's report is Ora saying what it found: nothing to complete, nowhere to push it to, and its card offered Done and three snoozes that all came back "Could not do that".
+	// Everything else reaching a window carries the one button it can answer. A routine's report is June saying what it found: nothing to complete, nowhere to push it to, and its card offered Done and three snoozes that all came back "Could not do that".
 	sent = nil
 	s.say(Notice{Title: "Routine", Body: "The window in front is Discord.", Kind: "routine"})
 	if len(sent) != 1 || len(sent[0].Actions) != 1 || sent[0].Actions[0].Key != actionOpen {
-		t.Errorf("routine notice carried %+v, want just Open in Ora", sent)
+		t.Errorf("routine notice carried %+v, want just Open in June", sent)
 	}
 	if f.count() != 0 {
 		t.Errorf("desktop got %d notifications, want none while a window is up", f.count())
@@ -400,7 +400,7 @@ func TestAct_DoesNotCloseABannerOnABadAction(t *testing.T) {
 	}
 }
 
-// TestNotify_CarriesOnlyOpen checks that a moment posted through proactive.Notify offers one button, "Open in Ora", on both surfaces it can reach: the bus notifier when no window is listening, and the window's own card when one is. Nothing posted this way has a task behind it, so Done and the three snoozes have nothing to act on — a "Transcribing meeting" card that offered them answered "Could not do that" when one was pressed.
+// TestNotify_CarriesOnlyOpen checks that a moment posted through proactive.Notify offers one button, "Open in June", on both surfaces it can reach: the bus notifier when no window is listening, and the window's own card when one is. Nothing posted this way has a task behind it, so Done and the three snoozes have nothing to act on — a "Transcribing meeting" card that offered them answered "Could not do that" when one was pressed.
 func TestNotify_CarriesOnlyOpen(t *testing.T) {
 	s, _, f := testScheduler(t)
 	opened := 0
@@ -417,12 +417,12 @@ func TestNotify_CarriesOnlyOpen(t *testing.T) {
 		t.Errorf("posted %q / %q, want the notice's own text", f.sent[0].title, f.sent[0].body)
 	}
 	if len(f.sent[0].actions) != 1 || f.sent[0].actions[0].Key != actionOpen {
-		t.Errorf("actions = %+v, want just Open in Ora", f.sent[0].actions)
+		t.Errorf("actions = %+v, want just Open in June", f.sent[0].actions)
 	}
 
 	f.press(t, 0, actionOpen)
 	if opened != 1 {
-		t.Errorf("pressing Open in Ora opened the window %d times, want 1", opened)
+		t.Errorf("pressing Open in June opened the window %d times, want 1", opened)
 	}
 }
 

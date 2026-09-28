@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // A four-hour meeting produces more screens than a prompt can carry. Truncating takes the first N and drops the rest, so the minutes are written as though the meeting ended early — the decisions, which land at the end, never reach the model. Sampling keeps the whole span.

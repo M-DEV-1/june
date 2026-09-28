@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // TestStore_SetDiaryEntry_ReplacesByDayAndKind verifies upsert semantics: writing the same (day, kind) twice yields one row holding the second content, which is what lets the understanding doc be rewritten in place.
@@ -160,7 +160,7 @@ func TestSetDiaryEntry_WatermarkIsNeverSearchable(t *testing.T) {
 
 // TestNew_ClearsAWatermarkAlreadyInTheIndex pins the migration for a store written before the watermark was kept out of the index: its rows are still mirrored, and opening the store again drops them.
 func TestNew_ClearsAWatermarkAlreadyInTheIndex(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ora.db")
+	path := filepath.Join(t.TempDir(), "june.db")
 	store, err := db.New(path)
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
@@ -211,7 +211,7 @@ func TestSetDiaryEntry_JobMarkerIsNeverSearchable(t *testing.T) {
 
 // TestNew_ClearsAJobMarkerAlreadyInTheIndex pins the migration for a store written before the job markers were kept out of the index: their timestamps are still mirrored, and opening the store again drops them.
 func TestNew_ClearsAJobMarkerAlreadyInTheIndex(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ora.db")
+	path := filepath.Join(t.TempDir(), "june.db")
 	store, err := db.New(path)
 	if err != nil {
 		t.Fatalf("db.New: %v", err)

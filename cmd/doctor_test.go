@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // The report ends with the first blocker's own fix, so a desk that cannot place clicks says "log out and in" rather than leaving the reader to work it out from five lines.
@@ -14,7 +14,7 @@ func TestDoctorReport_NamesTheFirstBlockerAndItsFix(t *testing.T) {
 	got := doctorReport([]doctorCheck{
 		{Name: "accessibility bus", Detail: "reachable", OK: true},
 		{Name: "window frames", Detail: "3 windows listed, none with a frame", Fix: "log out and in"},
-		{Name: "daemon", Detail: "not answering", Fix: "run ora"},
+		{Name: "daemon", Detail: "not answering", Fix: "run june"},
 	})
 	for _, want := range []string{"ok    accessibility bus", "FAIL  window frames", "not ready: window frames, daemon", "next: log out and in"} {
 		if !strings.Contains(got, want) {
@@ -26,7 +26,7 @@ func TestDoctorReport_NamesTheFirstBlockerAndItsFix(t *testing.T) {
 	}
 }
 
-// A clean install reported "ready" and then could not answer a single question, because every check was about the desk and none about whether Ora had anything to think with. The check names the brain it found, and a desk with none says how to give it one.
+// A clean install reported "ready" and then could not answer a single question, because every check was about the desk and none about whether June had anything to think with. The check names the brain it found, and a desk with none says how to give it one.
 func TestBrainCheck_SaysWhetherThereIsAnythingToThinkWith(t *testing.T) {
 	withLogin := func(t *testing.T, rel string) string {
 		t.Helper()
@@ -67,7 +67,7 @@ func TestBrainCheck_SaysWhetherThereIsAnythingToThinkWith(t *testing.T) {
 	}
 }
 
-// ora doctor read the environment as the shell handed it over and nothing else, so a key sitting in the env file the first-run panel tells the user to write — the file the daemon itself reads — was invisible, and doctor told a user who had a brain that they had none.
+// june doctor read the environment as the shell handed it over and nothing else, so a key sitting in the env file the first-run panel tells the user to write — the file the daemon itself reads — was invisible, and doctor told a user who had a brain that they had none.
 func TestLoadEnvFiles_ReadsTheKeyTheDaemonReads(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -93,11 +93,11 @@ func TestLoadEnvFiles_ReadsTheKeyTheDaemonReads(t *testing.T) {
 	}
 }
 
-// A clean machine has none of the pieces Ora runs locally, and doctor used to name only the Silero model, so the first sign of a missing whisper-cli was a meeting that never turned into minutes. Every piece is reported missing with the exact path it was looked for at and the feature that is off without it, and reported present once it is there.
+// A clean machine has none of the pieces June runs locally, and doctor used to name only the Silero model, so the first sign of a missing whisper-cli was a meeting that never turned into minutes. Every piece is reported missing with the exact path it was looked for at and the feature that is off without it, and reported present once it is there.
 func TestLocalPieceChecks_NamesEveryMissingPieceAndWhereItGoes(t *testing.T) {
 	dataDir, runtimeDir, pathDir := t.TempDir(), t.TempDir(), t.TempDir()
-	t.Setenv("ORA_WHISPER_CPP", "")
-	t.Setenv("ORA_SHERPA", "")
+	t.Setenv("JUNE_WHISPER_CPP", "")
+	t.Setenv("JUNE_SHERPA", "")
 	t.Setenv("PULSE_SERVER", "")
 	t.Setenv("PATH", pathDir)
 	whisper := filepath.Join(dataDir, "whispercpp")

@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 
 	"github.com/godbus/dbus/v5"
 )

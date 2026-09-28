@@ -1,4 +1,4 @@
-// This file is the storage behind user-authored routines: scheduled instructions Ora checks on its own, such as "every weekday at 8, tell me the one thing I must do today" or "when Vexil replies about the venue, tell me". Schedule is kept as the free text the user typed — internal/proactive is what parses it into when to check. Not memory: never indexed, never searched, never fed to a model as context; a routine's own text goes into a prompt only when internal/proactive or a run-now request builds one to run it.
+// This file is the storage behind user-authored routines: scheduled instructions June checks on its own, such as "every weekday at 8, tell me the one thing I must do today" or "when Vexil replies about the venue, tell me". Schedule is kept as the free text the user typed — internal/proactive is what parses it into when to check. Not memory: never indexed, never searched, never fed to a model as context; a routine's own text goes into a prompt only when internal/proactive or a run-now request builds one to run it.
 package db
 
 import (

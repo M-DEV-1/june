@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
-// TestMicUsers covers micUsers's shape rules through one table: a stream needs a name and to be running to count at all, Ora's own streams are dropped by either the "Ora "-prefixed app name or the "ora" process, and a stream that only captures (no matching running output) is quiet rather than a call.
+// TestMicUsers covers micUsers's shape rules through one table: a stream needs a name and to be running to count at all, June's own streams are dropped by either the "June "-prefixed app name or the "june" process, and a stream that only captures (no matching running output) is quiet rather than a call.
 func TestMicUsers(t *testing.T) {
 	realDump, err := os.ReadFile("testdata/pw-dump.json")
 	if err != nil {
@@ -30,10 +30,10 @@ func TestMicUsers(t *testing.T) {
 			wantQuiet: []string{"pw-cat"},
 		},
 		{
-			// Ora holds the microphone itself for the whole of a recording, so without this it would see its own stream, decide a meeting had started, and ask about the meeting it is already recording.
-			name: "Ora's own recorder stream is dropped by its app-name prefix",
+			// June holds the microphone itself for the whole of a recording, so without this it would see its own stream, decide a meeting had started, and ask about the meeting it is already recording.
+			name: "June's own recorder stream is dropped by its app-name prefix",
 			dump: []byte(`[
-			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Ora meeting recorder"}}},
+			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"June meeting recorder"}}},
 			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Google Chrome"}}},
 			  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"Google Chrome"}}}
 			]`),
@@ -41,12 +41,12 @@ func TestMicUsers(t *testing.T) {
 			wantQuiet: nil,
 		},
 		{
-			// Ora's voice assistant holds the microphone for as long as the user is talking to it, and live voice mode speaks back through the same process, so it looks exactly like a call unless both of its streams — by app-name prefix and by process binary — are excluded.
-			name: "Ora's voice-mode streams are dropped by either app name or process binary",
+			// June's voice assistant holds the microphone for as long as the user is talking to it, and live voice mode speaks back through the same process, so it looks exactly like a call unless both of its streams — by app-name prefix and by process binary — are excluded.
+			name: "June's voice-mode streams are dropped by either app name or process binary",
 			dump: []byte(`[
-			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"ora","application.process.binary":"/home/user/Desktop/Code/projects/ora/ora"}}},
-			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"Ora voice","application.process.binary":"./ora"}}},
-			  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"Ora voice","application.process.binary":"./ora"}}},
+			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"june","application.process.binary":"/home/user/Desktop/Code/projects/june/june"}}},
+			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"June voice","application.process.binary":"./june"}}},
+			  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"June voice","application.process.binary":"./june"}}},
 			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}},
 			  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","application.name":"WEBRTC VoiceEngine","application.process.binary":"Discord"}}}
 			]`),
@@ -79,7 +79,7 @@ func TestMicUsers(t *testing.T) {
 	}
 }
 
-// A recording Ora started on its own has to end on its own, the moment it started is asked about once and left alone, and a recording the user started from the tray is never one Ora may stop. Each case below is one meetingWatch driven through a sequence of polls, checking what it decides to ask or to stop at each step.
+// A recording June started on its own has to end on its own, the moment it started is asked about once and left alone, and a recording the user started from the tray is never one June may stop. Each case below is one meetingWatch driven through a sequence of polls, checking what it decides to ask or to stop at each step.
 func TestMeetingWatch(t *testing.T) {
 	chrome := []string{"Google Chrome"}
 	type step struct {
@@ -107,7 +107,7 @@ func TestMeetingWatch(t *testing.T) {
 			},
 		},
 		{
-			// While Ora is recording there is nothing to ask, and the state must come back clean so the next call is asked about normally once the recording ends.
+			// While June is recording there is nothing to ask, and the state must come back clean so the next call is asked about normally once the recording ends.
 			name: "silent while already recording, resumes asking once it stops",
 			steps: []step{
 				{users: chrome, recording: true},
@@ -132,7 +132,7 @@ func TestMeetingWatch(t *testing.T) {
 			},
 		},
 		{
-			// The recording Ora started is stopped from the tray, and the user then starts one of their own. That one is not Ora's to end: what makes a recording the watcher's is having started it, and the last one it started is over.
+			// The recording June started is stopped from the tray, and the user then starts one of their own. That one is not June's to end: what makes a recording the watcher's is having started it, and the last one it started is over.
 			name: "forgets its recording once that recording has ended",
 			steps: []step{
 				{start: true, users: nil},
@@ -171,11 +171,11 @@ func TestMeetingWatch(t *testing.T) {
 	}
 }
 
-// A recording the user started from the tray is theirs to stop: they may be recording something that never opens a call stream at all, and having it end itself under them is worse than a recording left running. This is covered above by "forgets its recording once that recording has ended", which reaches the same !ours guard by way of a recording Ora did start and then lost.
+// A recording the user started from the tray is theirs to stop: they may be recording something that never opens a call stream at all, and having it end itself under them is worse than a recording left running. This is covered above by "forgets its recording once that recording has ended", which reaches the same !ours guard by way of a recording June did start and then lost.
 
 // windowFor and describe are read off the same real window titles this machine has recorded, so one table covers both: the process/window matching windowFor does, and the trimming and length cap describe adds on top of it.
 func TestWindowFor_PrefersTheWindowOverTheProcess(t *testing.T) {
-	// A call in a browser tab is the case the process name cannot describe: the process is "chrome" whether the tab is a meeting, a spreadsheet or a video. The window title is the only thing that says which, and Ora already records it every couple of seconds. Reading the most recent one matters because an app can have more than one window on record: the wrong pick here would report a stale screen instead of the meeting itself.
+	// A call in a browser tab is the case the process name cannot describe: the process is "chrome" whether the tab is a meeting, a spreadsheet or a video. The window title is the only thing that says which, and June already records it every couple of seconds. Reading the most recent one matters because an app can have more than one window on record: the wrong pick here would report a stale screen instead of the meeting itself.
 	eps := []db.Episode{
 		{App: "Google Chrome", Title: "Inbox (12)"},
 		{App: "Google Chrome", Title: "Calendar | Trelvo Kordis | Microsoft Teams"},
@@ -210,12 +210,12 @@ func TestDescribe(t *testing.T) {
 					t.Errorf("got[0] = %q, want the window title", got[0])
 				}
 				if got[1] != "Discord" {
-					t.Errorf("got[1] = %q, want the process name when Ora saw no window", got[1])
+					t.Errorf("got[1] = %q, want the process name when June saw no window", got[1])
 				}
 			},
 		},
 		{
-			// A browser appends its own status to the end of a window title, after " - ": the microphone indicator, the memory warning, its own name. Both titles here are ones Ora recorded on this machine. Without this trim, a bug that stopped withoutBrowserStatus from doing anything would still pass a prefix check, so this pins the exact trimmed value.
+			// A browser appends its own status to the end of a window title, after " - ": the microphone indicator, the memory warning, its own name. Both titles here are ones June recorded on this machine. Without this trim, a bug that stopped withoutBrowserStatus from doing anything would still pass a prefix check, so this pins the exact trimmed value.
 			name:  "cuts the browser's own status off the end",
 			users: []string{"Brave", "Chrome"},
 			eps: []db.Episode{

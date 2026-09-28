@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/recorder"
+	"june/internal/recorder"
 )
 
 // fakeLiveRecorder stands in for *recorder.Recorder: it answers LiveSnapshot with whatever a test seeded.

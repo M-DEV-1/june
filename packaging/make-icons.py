@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draws Ora's face as an icon and writes every size the repo ships.
+"""Draws June's face as an icon and writes every size the repo ships.
 
 The face is set in type, not drawn. The design sheets of 2026-09-12 show a kaomoji whose parentheses, hyphens and undertie are all glyphs a type designer already drew, with the optical weight and the round terminals that come with that; the two earlier versions of this script tried to reproduce them from arcs and rounded rectangles and read, in the user's words, like a coded SVG. Setting the real characters in JetBrains Mono gets that craft for nothing, and it makes the icon the same artefact as the face the window shows, which is also this text in the same family.
 
@@ -52,7 +52,7 @@ SQUIRCLE_N = 4.2
 # Where each PNG goes and which treatment it gets. The tray is not here: its sizes are written into cmd/tray/, which cmd/tray_linux.go embeds whole. app/src-tauri/icons/icon.png is what packaging/release.sh resizes the installed hicolor icons from, and the three beside it are the ones tauri.conf.json names.
 TARGETS = {
     "cmd/app_icon_linux.png": (512, "app"),
-    "app/src/assets/ora.png": (128, "app"),
+    "app/src/assets/june.png": (128, "app"),
     "app/src-tauri/icons/icon.png": (512, "app"),
     "app/src-tauri/icons/128x128.png": (128, "app"),
     "app/src-tauri/icons/128x128@2x.png": (256, "app"),

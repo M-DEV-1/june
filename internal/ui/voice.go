@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // voiceAction is the result of parsing a "/voice ..." input: either show the list of available voices, or attempt to set a specific one.

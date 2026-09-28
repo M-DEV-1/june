@@ -41,7 +41,7 @@ func TestWhisperCPPBinary(t *testing.T) {
 
 // whisper-medium on the GPU takes about 2.2 GB of this machine's 4 GB card, so the two streams of a call cannot be decoded at the same time — the second run would fail to allocate. A whisper.cpp run therefore has to wait for any other whisper.cpp run to finish, even though transcriptFor starts both at once.
 func TestTranscribeWAV_SerialisesWhisperCPPRuns(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	dir := t.TempDir()
 	bin := filepath.Join(dir, whisperCPPBinaryName)
 	// The script records that it is running, holds for a moment, and clears the marker, so an overlap leaves the marker behind for the other run to find.
@@ -73,7 +73,7 @@ func TestTranscribeWAV_SerialisesWhisperCPPRuns(t *testing.T) {
 
 // A GPU decode waits for the embedding server to yield the card instead of falling back to the CPU: the releaser is retried until it reports the server is down, and only then does whisper run.
 func TestTranscribeWAV_WaitsForTheGPUUntilTheEmbedderYields(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	dir := t.TempDir()
 	bin := filepath.Join(dir, whisperCPPBinaryName)
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -99,7 +99,7 @@ func TestTranscribeWAV_WaitsForTheGPUUntilTheEmbedderYields(t *testing.T) {
 
 // The wait honours cancellation: a shutdown must not leave a transcription loop spinning against a pinned embedder.
 func TestTranscribeWAV_GPUWaitStopsOnContextCancel(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	dir := t.TempDir()
 	bin := filepath.Join(dir, whisperCPPBinaryName)
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -123,7 +123,7 @@ func TestTranscribeWAV_GPUWaitStopsOnContextCancel(t *testing.T) {
 
 // Five of eleven dictations in the six days to 2026-09-13 died for want of card memory and were redone on the CPU, costing 12.9 to 20.7 seconds each while the user waited. The releaser that asks the embedding server off the card existed the whole time and only the meeting path called it, so a dictation walked onto a full card, crashed, and paid for the retry. Asking is the first thing a run does now, whoever started it.
 func TestRunWhisper_AsksTheCardsOtherTenantToLeaveFirst(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "stub")
 	// The stub records that it ran, so the order of the ask and the run can be checked rather than assumed.

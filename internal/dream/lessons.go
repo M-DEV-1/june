@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // lessonsReport is what the lessons stage did: how many apps it read, how many lessons it merged away, and how many it dropped.

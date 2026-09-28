@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"google.golang.org/genai"
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 const (
@@ -186,7 +186,7 @@ func RenderLessonBlock(lessons []db.Lesson) (string, []int64) {
 }
 
 // WithActReference adds the reference block to a turn's content as a part of its own, ahead of the user's own words and behind the turn context, and returns the content unchanged when there is nothing to add. Input: ctx, the clock, the question being asked and the content buildTurnContent produced. Output: the same content with at most one part added to its first entry, and the ids of any lessons the block named (see RenderLessonBlock), for the caller to carry on the trace and score once the run ends.
-// It is one call so that wiring this into an ask path is one line, and so the block stays a part of its own rather than being folded into the user's text, which would blur the line between what the user said and what Ora merely did once.
+// It is one call so that wiring this into an ask path is one line, and so the block stays a part of its own rather than being folded into the user's text, which would blur the line between what the user said and what June merely did once.
 func (a *Agent) WithActReference(ctx context.Context, now time.Time, question string, contents []*genai.Content) ([]*genai.Content, []int64) {
 	if len(contents) == 0 || contents[0] == nil || len(contents[0].Parts) == 0 {
 		return contents, nil

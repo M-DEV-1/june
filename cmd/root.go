@@ -16,19 +16,19 @@ import (
 	"syscall"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/ipctoken"
-	"ora/internal/obs"
+	"june/internal/config"
+	"june/internal/ipctoken"
+	"june/internal/obs"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
-// rootCmd is the base command, run when ora is invoked with no subcommand.
+// rootCmd is the base command, run when june is invoked with no subcommand.
 var rootCmd = &cobra.Command{
-	Use:   "ora",
-	Short: "Ora is a native OS companion for all everyday needs.",
-	Long:  `Ora is an ambient AI agent designed for power users. It operates as a thin, standalone Go binary that silently tracks your digital workspace activity locally. By maintaining a private memory of your day, Ora provides instant, context-aware assistance.`,
+	Use:   "june",
+	Short: "June is a native OS companion for all everyday needs.",
+	Long:  `June is an ambient AI agent designed for power users. It operates as a thin, standalone Go binary that silently tracks your digital workspace activity locally. By maintaining a private memory of your day, June provides instant, context-aware assistance.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		isDaemon, _ := cmd.Flags().GetBool("daemon")
 		autostart, _ := cmd.Flags().GetString("autostart")
@@ -42,8 +42,8 @@ var rootCmd = &cobra.Command{
 var exitCode int
 
 // Execute runs the root command. Called once by main.main().
-// loadEnvFiles reads the two files a key may live in, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way ora is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
-// It runs for every command, not just the daemon. ora doctor used to read only the environment the shell handed over, so a key in the file the first-run panel tells the user to write was invisible to it, and doctor reported no brain on a machine that had one.
+// loadEnvFiles reads the two files a key may live in, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way june is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
+// It runs for every command, not just the daemon. june doctor used to read only the environment the shell handed over, so a key in the file the first-run panel tells the user to write was invisible to it, and doctor reported no brain on a machine that had one.
 func loadEnvFiles() {
 	cwdEnv := godotenv.Load()
 	dataEnv := godotenv.Load(filepath.Join(config.DataDir(), "env"))
@@ -68,13 +68,13 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().Bool("daemon", false, "Run as background daemon")
 	rootCmd.PersistentFlags().String("autostart", "", "Turn start-on-login on or off, persist it to the config, and exit (on|off)")
-	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because ORA loads .env relative to the working directory and a session manager launches from an arbitrary one")
+	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because June loads .env relative to the working directory and a session manager launches from an arbitrary one")
 	rootCmd.PersistentFlags().Bool("tui", false, "Force the terminal UI even when a desktop window is available")
 }
 
-// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows Ora's desktop window if one is built and wanted, falling back to the terminal UI otherwise; --tui forces the terminal UI regardless; --daemon runs the background daemon itself; --autostart flips start-on-login and returns.
+// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows June's desktop window if one is built and wanted, falling back to the terminal UI otherwise; --tui forces the terminal UI regardless; --daemon runs the background daemon itself; --autostart flips start-on-login and returns.
 func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
-	// Must happen before anything reads a relative path (.env — every ora-db/data path now resolves through config.DataDir(), independent of cwd).
+	// Must happen before anything reads a relative path (.env — every june-db/data path now resolves through config.DataDir(), independent of cwd).
 	if workdir != "" {
 		if err := os.Chdir(workdir); err != nil {
 			fmt.Fprintf(os.Stderr, "fatal: could not change to %s: %v\n", workdir, err)
@@ -89,8 +89,8 @@ func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 		return
 	}
 
-	// Two places, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way ora is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
-	// Without the second, the key had exactly one source and it was relative to the process's working directory: start ora from anywhere but the checkout and GEMINI_API_KEY was empty, which is voice failing completely with nothing in the log to say why. The first-run panel has been telling the user to put the key in this file all along, and nothing read it.
+	// Two places, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way june is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
+	// Without the second, the key had exactly one source and it was relative to the process's working directory: start june from anywhere but the checkout and GEMINI_API_KEY was empty, which is voice failing completely with nothing in the log to say why. The first-run panel has been telling the user to put the key in this file all along, and nothing read it.
 	loadEnvFiles()
 	// global context that listens for sigint
 	// SIGTERM as well as SIGINT: kill, a logout and a system shutdown all send SIGTERM, and catching only SIGINT meant every one of those killed the process outright with no cleanup — abandoning a meeting recording mid-call.
@@ -107,7 +107,7 @@ func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 
 	if isDaemon {
 		if err := runDaemon(ctx, shutdownObs); err != nil {
-			// Non-zero, so a supervisor calls the start a failure. The commonest cause is a second daemon finding the port held by the first, and exiting 0 there meant systemd and ora-restart both reported a restart that never happened.
+			// Non-zero, so a supervisor calls the start a failure. The commonest cause is a second daemon finding the port held by the first, and exiting 0 there meant systemd and june-restart both reported a restart that never happened.
 			// The code is recorded rather than exited on, so the deferred telemetry shutdown and signal-context cancel below still run. os.Exit here skipped both, which was harmless only while the sole error this could return was the port bind, before anything had been traced.
 			slog.Error("daemon crashed", "error", err)
 			exitCode = 1
@@ -169,7 +169,7 @@ const freshDaemonOpenAttempts = 5
 // openRetryInterval is the pause between those retries. A var, not a const, so a test can shrink it instead of actually waiting out four real pauses.
 var openRetryInterval = 400 * time.Millisecond
 
-// offerWindow decides whether this invocation of `ora` should show the desktop window instead of the terminal UI, and does so when it can. Input: freshDaemon is true when this same process just spawned the daemon (as opposed to finding one already running) — its window child, if any, was only just started and needs a moment to launch and subscribe to the daemon's event stream before it can act on the show instruction. Output: true when it took over startup and there is nothing left for the caller to do (it already printed a line explaining what happened); false when the caller should still open the terminal UI, because the config has the window turned off or no window is built.
+// offerWindow decides whether this invocation of `june` should show the desktop window instead of the terminal UI, and does so when it can. Input: freshDaemon is true when this same process just spawned the daemon (as opposed to finding one already running) — its window child, if any, was only just started and needs a moment to launch and subscribe to the daemon's event stream before it can act on the show instruction. Output: true when it took over startup and there is nothing left for the caller to do (it already printed a line explaining what happened); false when the caller should still open the terminal UI, because the config has the window turned off or no window is built.
 func offerWindow(freshDaemon bool) bool {
 	appConfig := config.LoadConfig()
 	if !appConfig.Window {
@@ -177,7 +177,7 @@ func offerWindow(freshDaemon bool) bool {
 	}
 	path, tried, err := windowBinary()
 	if err != nil {
-		fmt.Printf("No desktop window binary found (looked at: %s). Set ORA_WINDOW=/path/to/it, or build one in app/, and `ora` will open it instead of the terminal UI.\n", strings.Join(tried, ", "))
+		fmt.Printf("No desktop window binary found (looked at: %s). Set JUNE_WINDOW=/path/to/it, or build one in app/, and `june` will open it instead of the terminal UI.\n", strings.Join(tried, ", "))
 		return false
 	}
 
@@ -195,9 +195,9 @@ func offerWindow(freshDaemon bool) bool {
 
 	hotkey := formatHotkey(fetchWindowHotkey())
 	if hotkey == "" {
-		hotkey = "your Ora shortcut"
+		hotkey = "your June shortcut"
 	}
-	fmt.Printf("Ora is running (window: %s). It starts hidden — showing it now; if it doesn't appear, press %s or run `ora --tui` for the terminal UI instead.\n", path, hotkey)
+	fmt.Printf("June is running (window: %s). It starts hidden — showing it now; if it doesn't appear, press %s or run `june --tui` for the terminal UI instead.\n", path, hotkey)
 	return true
 }
 
@@ -285,7 +285,7 @@ func checkDaemonBuildMismatch(client *http.Client, url string) string {
 	if daemonID == "" || daemonID == buildIdentity {
 		return ""
 	}
-	return "daemon is running an older build — quit it from the tray or `pkill ora`, then relaunch"
+	return "daemon is running an older build — quit it from the tray or `pkill june`, then relaunch"
 }
 
 // secureEnvFile restricts path (the .env file, which holds the Gemini API key) to 0600 if it exists — it commonly defaults to whatever umask created it (often 0644, world-readable on a multi-user machine). Best-effort and silent on a missing file (env vars set directly, the common case) or on Windows, where these POSIX bits don't apply.

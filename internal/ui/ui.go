@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/config"
-	"ora/internal/ipctoken"
+	"june/internal/agent"
+	"june/internal/config"
+	"june/internal/ipctoken"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -60,10 +60,10 @@ type model struct {
 	// quitConfirmArmed/quitConfirmArmedAt back the Ctrl+C double-press-to-quit confirmation: the first press arms it and shows a hint instead of quitting; a second press within quitConfirmWindow actually quits. Auto-cleared by the tickMsg handler once the window lapses, same shape as staleActivityTimeout.
 	quitConfirmArmed   bool
 	quitConfirmArmedAt time.Time
-	// closeOraBlock is set by a TurnBoundary chunk and consumed by the next ora chunk streamLine sees — it forces that chunk to start a fresh message block instead of merging into whatever the finished turn left behind.
-	closeOraBlock bool
-	// oraBlockIdx points at the ora message the current answer is streaming into, or -1 when no block is open. Tracked by index rather than "is the last message ora?" because a voice transcript, a system notice or a tool-log line can land in the middle of an answer — when that broke the merge chain, the next chunk started a new block and the same sentence appeared twice, once partial and once whole.
-	oraBlockIdx int
+	// closeJuneBlock is set by a TurnBoundary chunk and consumed by the next june chunk streamLine sees — it forces that chunk to start a fresh message block instead of merging into whatever the finished turn left behind.
+	closeJuneBlock bool
+	// juneBlockIdx points at the june message the current answer is streaming into, or -1 when no block is open. Tracked by index rather than "is the last message june?" because a voice transcript, a system notice or a tool-log line can land in the middle of an answer — when that broke the merge chain, the next chunk started a new block and the same sentence appeared twice, once partial and once whole.
+	juneBlockIdx int
 	// preToolMode is the mode to return to once a HITL approval resolves. Dropping back to ModeBoth unconditionally put a text-only session back in voice+text in the footer while the mic stayed muted, and made the next /mute switch the mic ON.
 	preToolMode AgentMode
 }
@@ -176,21 +176,21 @@ func NewModel(a *agent.Agent, daemonStatus, buildMismatch string) model {
 	sp.Style = s.StatusLine
 
 	return model{
-		agent:       a,
-		styles:      s,
-		textarea:    ta,
-		viewport:    vp,
-		messages:    []Message{introMsg},
-		micWave:     NewWaveform(40),
-		speakerWave: NewWaveform(40),
-		mode:        ModeBoth,
-		preToolMode: ModeBoth,
-		oraBlockIdx: -1,
-		cmdList:     newCommandList(s),
-		hitlList:    newHitlList(s),
-		isConnected: true,
-		daemonOK:    daemonOK,
-		spinner:     sp,
+		agent:        a,
+		styles:       s,
+		textarea:     ta,
+		viewport:     vp,
+		messages:     []Message{introMsg},
+		micWave:      NewWaveform(40),
+		speakerWave:  NewWaveform(40),
+		mode:         ModeBoth,
+		preToolMode:  ModeBoth,
+		juneBlockIdx: -1,
+		cmdList:      newCommandList(s),
+		hitlList:     newHitlList(s),
+		isConnected:  true,
+		daemonOK:     daemonOK,
+		spinner:      sp,
 	}
 }
 
@@ -532,22 +532,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case responseMsg:
 		if msg.TurnBoundary {
-			m.closeOraBlock = true
+			m.closeJuneBlock = true
 			return m, m.waitForResponse()
 		}
-		sender := "ora"
+		sender := "june"
 		switch msg.Sender {
 		case agent.SenderYou:
 			sender = "you"
 		case agent.SenderSystem:
 			sender = "system"
 		}
-		// Only ora/you chunks prove real server traffic — a system notice (e.g. "connection lost — reconnecting…") must not flip the header pill to live while the link is actually down.
+		// Only june/you chunks prove real server traffic — a system notice (e.g. "connection lost — reconnecting…") must not flip the header pill to live while the link is actually down.
 		if sender != "system" {
 			m.isConnected = true
 		}
-		// Only an actual ora reply clears the thinking spinner — a "you" transcription or a system notice isn't a reply arriving.
-		if sender == "ora" {
+		// Only an actual june reply clears the thinking spinner — a "you" transcription or a system notice isn't a reply arriving.
+		if sender == "june" {
 			m.activity = nil
 			m.recalcViewportHeight()
 		}
@@ -668,7 +668,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // activateToolRequest makes req the pending approval the user is deciding on: opens the ModeToolConfirm
-// menu, appends the "Ora wants to:" transcript line, and clears any live-status spinner since the approval
+// menu, appends the "June wants to:" transcript line, and clears any live-status spinner since the approval
 // menu already says "paused, waiting on you" — a spinner behind it would misleadingly read as "still running".
 func (m *model) activateToolRequest(req agent.ToolRequest) {
 	m.activeToolReq = &req
@@ -681,7 +681,7 @@ func (m *model) activateToolRequest(req agent.ToolRequest) {
 	m.hitlList.SetItems(items)
 	// Sized to the actual item count (3-4), not list.New's DefaultListHeight=8 default — with title/status/help/filtering all disabled, the list renders exactly item-count rows, so the fixed default was reserving 4-5 rows nobody used and could overflow a short terminal (see the WP7 finding this fixes).
 	m.hitlList.SetHeight(len(items))
-	m.messages = append(m.messages, Message{Sender: "tool", Content: "Ora wants to:\n  " + req.Description, IsTool: true})
+	m.messages = append(m.messages, Message{Sender: "tool", Content: "June wants to:\n  " + req.Description, IsTool: true})
 	m.updateViewport(false)
 	m.activity = nil
 	m.recalcViewportHeight()
@@ -743,22 +743,22 @@ func (m *model) recalcViewportHeight() {
 
 // handles the real-time streaming logic, keeps the viewport updated. isThought comes straight from genai's own Part.Thought (via agent.ResponseChunk) — never inferred from content, since any real reply that happens to contain markdown bold would desync a content-sniffing heuristic permanently.
 func (m *model) streamLine(sender, content string, isThought bool) {
-	// Only ora's own text merges across calls (it's a token-by-token stream); "you" and "system" chunks are complete discrete units — merging them runs consecutive utterances/notices together with no separator. A pending closeOraBlock (a turn boundary since the last ora chunk) also forces a fresh block even though sender/thought-state match — see its own doc comment.
-	sameBlock := sender == "ora" && !m.closeOraBlock && m.oraBlockIdx >= 0 && m.oraBlockIdx < len(m.messages) && m.messages[m.oraBlockIdx].IsThought == isThought
+	// Only june's own text merges across calls (it's a token-by-token stream); "you" and "system" chunks are complete discrete units — merging them runs consecutive utterances/notices together with no separator. A pending closeJuneBlock (a turn boundary since the last june chunk) also forces a fresh block even though sender/thought-state match — see its own doc comment.
+	sameBlock := sender == "june" && !m.closeJuneBlock && m.juneBlockIdx >= 0 && m.juneBlockIdx < len(m.messages) && m.messages[m.juneBlockIdx].IsThought == isThought
 	if sameBlock && !isThought {
-		mergeOraChunk(&m.messages[m.oraBlockIdx], content)
+		mergeJuneChunk(&m.messages[m.juneBlockIdx], content)
 	} else if sameBlock {
 		// append to the open block if it's the same thought-state
-		m.messages[m.oraBlockIdx].Content += content
+		m.messages[m.juneBlockIdx].Content += content
 	} else {
 		// start a new message block
 		m.messages = append(m.messages, Message{Sender: sender, Content: content, IsThought: isThought})
-		if sender == "ora" {
-			m.oraBlockIdx = len(m.messages) - 1
+		if sender == "june" {
+			m.juneBlockIdx = len(m.messages) - 1
 		}
 	}
-	if sender == "ora" {
-		m.closeOraBlock = false
+	if sender == "june" {
+		m.closeJuneBlock = false
 	}
 
 	// throttle viewport updates so it doesn't flicker too much
@@ -806,13 +806,13 @@ func (m *model) executeCommand(input string) tea.Cmd {
 		}
 	case "/clear":
 		m.messages = []Message{}
-		m.oraBlockIdx = -1
+		m.juneBlockIdx = -1
 	case "/help":
 		helpText := `Available Commands:
   /voice          - Switch to Voice-Only mode
   /voice list     - List available TTS voices and show the current one
   /voice preview <name> - Hear a sample of a voice without changing it
-  /voice <name>   - Change Ora's speaking voice (e.g. /voice Kore)
+  /voice <name>   - Change June's speaking voice (e.g. /voice Kore)
   /text           - Switch to Text-Only mode
   /both           - Switch to Voice + Text mode
   /mute           - Toggle global microphone mute
@@ -919,7 +919,7 @@ func (m *model) handleVoiceCommand(arg string) {
 
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
-		return "Initializing Ora..."
+		return "Initializing June..."
 	}
 
 	// Built as a slice so ModeText's empty signal field is OMITTED, not joined as a blank row — JoinVertical would otherwise count "" as one line same as recalcViewportHeight's chrome measurement doesn't, a 1-row version of the same overflow-past-the-terminal bug 2b fixed.

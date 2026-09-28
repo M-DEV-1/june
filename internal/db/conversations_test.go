@@ -23,8 +23,8 @@ func TestConversationsAndTurns(t *testing.T) {
 	if _, err := store.AddTurn(ctx, id, "you", "what did vexil ask about", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn you: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, id, "ora", "she asked about shipping factors", "ask", evidence, []string{"query_memory", "recall"}); err != nil {
-		t.Fatalf("AddTurn ora: %v", err)
+	if _, err := store.AddTurn(ctx, id, "june", "she asked about shipping factors", "ask", evidence, []string{"query_memory", "recall"}); err != nil {
+		t.Fatalf("AddTurn june: %v", err)
 	}
 
 	list, err := store.ListConversations(ctx, 50)
@@ -56,8 +56,8 @@ func TestConversationsAndTurns(t *testing.T) {
 	if len(turns) != 2 {
 		t.Fatalf("ConversationTurns returned %d turns, want 2", len(turns))
 	}
-	if turns[0].Role != "you" || turns[1].Role != "ora" {
-		t.Errorf("turn roles = %q, %q, want you then ora", turns[0].Role, turns[1].Role)
+	if turns[0].Role != "you" || turns[1].Role != "june" {
+		t.Errorf("turn roles = %q, %q, want you then june", turns[0].Role, turns[1].Role)
 	}
 	if len(turns[0].Tools) != 0 {
 		t.Errorf("a turn stored with no tools came back with %v, want none", turns[0].Tools)
@@ -206,7 +206,7 @@ func TestListConversationsLastKind(t *testing.T) {
 	if _, err := store.AddTurn(ctx, id, "you", "when does it leave", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn you: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, id, "ora", "Error 503, high demand", "error", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, id, "june", "Error 503, high demand", "error", nil, nil); err != nil {
 		t.Fatalf("AddTurn error: %v", err)
 	}
 
@@ -218,7 +218,7 @@ func TestListConversationsLastKind(t *testing.T) {
 		t.Fatalf("ListConversations = %+v, want the newest turn's kind 'error'", list)
 	}
 
-	if _, err := store.AddTurn(ctx, id, "ora", "half past four", "ask", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, id, "june", "half past four", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn ask: %v", err)
 	}
 	list, err = store.ListConversations(ctx, 50)
@@ -436,7 +436,7 @@ func TestTurnTimeComesBackAsTheInstantItWasWritten(t *testing.T) {
 
 // TestAddTurnUnderConcurrentWriters checks that wrapping AddTurn's two writes in one transaction did not turn a busy database into a failed write. A file-backed store is used deliberately: the in-memory pool is pinned to one connection, so only a real file exercises WAL and the DSN's busy_timeout.
 func TestAddTurnUnderConcurrentWriters(t *testing.T) {
-	store, err := New(t.TempDir() + "/ora.db")
+	store, err := New(t.TempDir() + "/june.db")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestDeleteConversation_UnlinksTheTasksThatPointedAtIt(t *testing.T) {
 	}
 }
 
-// On 2026-09-12 the user asked three times to change and then delete a task Ora had just made for him, and every attempt was refused: a row in user_tasks could be created and ticked and nothing else, ever, by any part of the product. Correcting its words and getting rid of it are the two things he actually asked for.
+// On 2026-09-12 the user asked three times to change and then delete a task June had just made for him, and every attempt was refused: a row in user_tasks could be created and ticked and nothing else, ever, by any part of the product. Correcting its words and getting rid of it are the two things he actually asked for.
 func TestUserTaskCanBeRewordedAndRemoved(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)

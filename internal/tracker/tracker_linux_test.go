@@ -5,7 +5,7 @@ package tracker_test
 import (
 	"testing"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // New picks a backend from the session env (sway/hyprland/AT-SPI/X11/none) and GetActiveWindow must return an Activity through whichever one it picked, never an error, even on a bare session where the app and title are unknown.

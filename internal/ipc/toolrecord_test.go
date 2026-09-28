@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/db/dbtest"
+	"june/internal/agent"
+	"june/internal/db/dbtest"
 )
 
 // Until this was wired, nothing anywhere kept what the model reached for: act_runs only ever held the runs that touched the screen, the activity feed is thrown away when the window closes, and the voice session recorded nothing at all — so a voice turn that used look and draw was, in the store, indistinguishable from one that used no tools (2026-09-07). This drives one real tool through the real agent with the daemon's own recorder on the context and reads the row back out.

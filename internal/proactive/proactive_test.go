@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/memory"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/memory"
 )
 
 // notification is one captured notify call.
@@ -29,7 +29,7 @@ func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
 
-	if _, err := store.LogEpisode(ctx, "code", "ora — diary.go", "building the diary seam"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june — diary.go", "building the diary seam"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna."); err != nil {
@@ -93,7 +93,7 @@ func TestScheduler_Close_WritesDiaryUnderstandingAndNotifies(t *testing.T) {
 func TestScheduler_Close_WaitsForCloseHour(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -134,7 +134,7 @@ func TestScheduler_Close_RequiresActivityToday(t *testing.T) {
 func TestScheduler_Close_RetriesAfterBrainFailure(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestScheduler_Brief_DeliversOncePerDay(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
 
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 	if _, err := store.LogNote(ctx, "Minutes: Zemna to send the deck by Friday", "meeting"); err != nil {
@@ -246,7 +246,7 @@ func TestScheduler_WeeklyStudy_FiresOnceOnSunday(t *testing.T) {
 	store := dbtest.Open(t)
 
 	sunday := lastSunday(time.Now())
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -286,7 +286,7 @@ func TestScheduler_WeeklyStudy_NeverFiresOnANonSunday(t *testing.T) {
 	store := dbtest.Open(t)
 
 	monday := lastSunday(time.Now()).AddDate(0, 0, 1)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -309,7 +309,7 @@ func TestScheduler_WeeklyStudy_BacksOffOnFailureWithoutMarking(t *testing.T) {
 	store := dbtest.Open(t)
 
 	sunday := lastSunday(time.Now())
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -362,7 +362,7 @@ func openItem(t *testing.T, store *db.Store, owner, text string, priority string
 func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatal(err)
 	}
 	openItem(t, store, "Me", "carry PR #13 through CI and merge.", memory.PriorityHigh, 9)
@@ -390,7 +390,7 @@ func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatal(err)
 	}
 	openItem(t, store, "Me", "finish the acme-basics setup.", memory.PriorityNormal, 3)
@@ -416,7 +416,7 @@ func TestScheduler_Brief_DropsClosedItems(t *testing.T) {
 func TestScheduler_Brief_AsksAboutStaleItems(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatal(err)
 	}
 	openItem(t, store, "Me", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
@@ -444,7 +444,7 @@ func TestScheduler_Brief_AsksAboutStaleItems(t *testing.T) {
 func TestScheduler_Brief_AsksAboutAStaleItemAndAppliesTheAnswer(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatal(err)
 	}
 	openItem(t, store, "Me", "improve capture resolution in the screen-frame tool.", memory.PriorityLow, 12)
@@ -490,7 +490,7 @@ func TestScheduler_Brief_AsksAboutAStaleItemAndAppliesTheAnswer(t *testing.T) {
 func TestScheduler_Brief_NoQuestionWhenNothingIsStale(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatal(err)
 	}
 	openItem(t, store, "Me", "settle the payment.", memory.PriorityNormal, 1)
@@ -516,7 +516,7 @@ func TestScheduler_Brief_NoQuestionWhenNothingIsStale(t *testing.T) {
 func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatal(err)
 	}
 	openItem(t, store, "Melvorn", "reply on WhatsApp during his leave.", memory.PriorityLow, 12)
@@ -544,13 +544,13 @@ func TestScheduler_Brief_DropsSomebodyElsesItemEntirely(t *testing.T) {
 	}
 }
 
-// The four moments go to Ora's own card in the desktop window AND to the desktop notification, always: GNOME's banner cut every one of them off after two lines with nothing to click, but a window that has been closed all day still needs the notification's own buttons, and a notification answered from the message tray still needs the window's rail line to update — whichever surface the user is looking at has to work.
+// The four moments go to June's own card in the desktop window AND to the desktop notification, always: GNOME's banner cut every one of them off after two lines with nothing to click, but a window that has been closed all day still needs the notification's own buttons, and a notification answered from the message tray still needs the window's rail line to update — whichever surface the user is looking at has to work.
 
 // TestScheduler_Brief_GoesToTheWindow checks the morning brief is handed to the window as a notice — title, body, the place a click opens and the moment it came from — and that no desktop notification is posted alongside it, since the window's card is the only surface while a window is up.
 func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -580,7 +580,7 @@ func TestScheduler_Brief_GoesToTheWindow(t *testing.T) {
 func TestScheduler_Brief_FallsBackToNotifySend(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "morning start"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -603,7 +603,7 @@ func TestScheduler_Brief_FallsBackToNotifySend(t *testing.T) {
 func TestScheduler_Close_GoesToTheWindow(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "an evening on the diary seam"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "an evening on the diary seam"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -638,12 +638,12 @@ func TestNotify_PrefersTheWindow(t *testing.T) {
 	t.Cleanup(func() { SetNoticeSender(nil) })
 
 	Notify("audio-input-microphone", "Before you join: standup", "Last time you owed the deck.")
-	Notify("x-office-calendar", "Recording saved", "Ora will transcribe it once you plug in.")
+	Notify("x-office-calendar", "Recording saved", "June will transcribe it once you plug in.")
 
 	// The card is drawn from the notice's own actions, so a moment with no task behind it has to carry its one Open button rather than leave the window to guess: a "Transcribing meeting" card that offered Done and the snoozes answered "Could not do that" when one was pressed.
 	want := []Notice{
 		{Title: "Before you join: standup", Body: "Last time you owed the deck.", Kind: "meeting", Actions: openOnlyActions},
-		{Title: "Recording saved", Body: "Ora will transcribe it once you plug in.", Kind: "day", Actions: openOnlyActions},
+		{Title: "Recording saved", Body: "June will transcribe it once you plug in.", Kind: "day", Actions: openOnlyActions},
 	}
 	if len(sent) != len(want) {
 		t.Fatalf("notices = %+v, want %+v", sent, want)
@@ -691,7 +691,7 @@ func (s *stubStore) SetRoutineRun(ctx context.Context, id int64, when time.Time,
 func TestTick_HungDutyDoesNotStopTheNext(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -716,7 +716,7 @@ func TestTick_HungDutyDoesNotStopTheNext(t *testing.T) {
 func TestTick_StoreOnlyDutiesRunBeforeTheBrainOnes(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 	if _, err := store.AddSnooze(ctx, "task", "42", "Still open", "Send the invoice", time.Now().Add(-time.Minute)); err != nil {
@@ -744,7 +744,7 @@ func TestTick_StoreOnlyDutiesRunBeforeTheBrainOnes(t *testing.T) {
 func TestScheduler_Close_BacksOffAfterAFailure(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
-	if _, err := store.LogEpisode(ctx, "code", "ora", "working"); err != nil {
+	if _, err := store.LogEpisode(ctx, "code", "june", "working"); err != nil {
 		t.Fatalf("LogEpisode: %v", err)
 	}
 
@@ -872,7 +872,7 @@ func openCount(t *testing.T, store *db.Store) int {
 	return len(open)
 }
 
-// The daily "Still open" question used to go straight to notify-send, which is why it kept appearing as a GNOME banner while every other moment had moved to Ora's own card. With a window up it is now a notice carrying its own three answers, and the answer comes back through the same POST /notices/{kind}/{id}/action route the card's other buttons use.
+// The daily "Still open" question used to go straight to notify-send, which is why it kept appearing as a GNOME banner while every other moment had moved to June's own card. With a window up it is now a notice carrying its own three answers, and the answer comes back through the same POST /notices/{kind}/{id}/action route the card's other buttons use.
 func TestAskAbout_WindowUp_AsksOnTheCardAndAppliesTheAnswer(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)

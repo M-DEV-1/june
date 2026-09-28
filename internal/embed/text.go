@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"time"
 
-	"ora/internal/brain"
-	"ora/internal/config"
+	"june/internal/brain"
+	"june/internal/config"
 )
 
-// TextEngine owns the local text-generation llama-server as a child process, the same way Engine owns the embedding one, so ORA's unattended text jobs answer from a local model instead of spending metered API quota.
+// TextEngine owns the local text-generation llama-server as a child process, the same way Engine owns the embedding one, so June's unattended text jobs answer from a local model instead of spending metered API quota.
 // Lifecycle: spawned on the first Generate, killed once idle past idle with no Generate, respawned on the next Generate if it died or was reaped, and killed unconditionally on Close. Unlike Engine there is no client-presence concept — only the idle timer decides when the server goes down.
 type TextEngine struct {
 	*serverProcess
@@ -45,7 +45,7 @@ func (e *TextEngine) StopIfIdle() bool {
 }
 
 // NewTextEngine returns the engine for the local text model cfg names, or nil when no local text model is configured (LocalText.Enabled is false). Input: the whole app config, for the fallbacks LocalTextConfig resolves against. Output: the engine, or nil. Nothing is spawned until the first Generate.
-func NewTextEngine(cfg config.OraConfig) *TextEngine {
+func NewTextEngine(cfg config.JuneConfig) *TextEngine {
 	if !cfg.LocalText.Enabled(cfg) {
 		return nil
 	}

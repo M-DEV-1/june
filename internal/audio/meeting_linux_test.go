@@ -40,13 +40,13 @@ func TestActiveSinkIndex(t *testing.T) {
 			inputs: []*proto.GetSinkInputInfoReply{input(7, true, "4242")},
 		},
 		{
-			name:   "Ora's own speech is not the meeting, so its sink must not be picked over a real one",
+			name:   "June's own speech is not the meeting, so its sink must not be picked over a real one",
 			inputs: []*proto.GetSinkInputInfoReply{input(1, false, "999"), input(7, false, "4242")},
 			want:   7,
 			wantOK: true,
 		},
 		{
-			name:   "Ora talking to itself with nothing else playing leaves the default sink alone",
+			name:   "June talking to itself with nothing else playing leaves the default sink alone",
 			inputs: []*proto.GetSinkInputInfoReply{input(1, false, "999")},
 		},
 	}

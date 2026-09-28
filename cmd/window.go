@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // The daemon owns the desktop window's lifetime, so a user starts and stops one thing rather than two. The login entry launches the daemon (see autostart.go), the daemon launches the window, and quitting the daemon takes the window with it.
@@ -26,7 +26,7 @@ const windowStopGrace = 3 * time.Second
 // errNoWindow says the desktop window binary could not be found, which is normal on a machine running only the daemon.
 var errNoWindow = errors.New("no desktop window binary found")
 
-// windowBinary finds the desktop window to run. Input: none; it reads ORA_WINDOW, the daemon's own location, and the current working directory. Output: the path to run, the full list of candidates it checked (so a caller with nothing to run can tell the user exactly where it looked), and errNoWindow when there is none. It looks at ORA_WINDOW first so a developer can point at any build, then beside the daemon binary as an installed copy would sit, then at the two paths a checkout builds into, then at those same two paths under the working directory — `go build -o ora . && ./ora` from the repo root leaves the daemon binary sitting next to nothing, but app/src-tauri/target still hangs off the checkout's own working directory.
+// windowBinary finds the desktop window to run. Input: none; it reads JUNE_WINDOW, the daemon's own location, and the current working directory. Output: the path to run, the full list of candidates it checked (so a caller with nothing to run can tell the user exactly where it looked), and errNoWindow when there is none. It looks at JUNE_WINDOW first so a developer can point at any build, then beside the daemon binary as an installed copy would sit, then at the two paths a checkout builds into, then at those same two paths under the working directory — `go build -o june . && ./june` from the repo root leaves the daemon binary sitting next to nothing, but app/src-tauri/target still hangs off the checkout's own working directory.
 func windowBinary() (string, []string, error) {
 	var candidates []string
 	seen := map[string]bool{}
@@ -37,19 +37,19 @@ func windowBinary() (string, []string, error) {
 		seen[path] = true
 		candidates = append(candidates, path)
 	}
-	if set := os.Getenv("ORA_WINDOW"); set != "" {
+	if set := os.Getenv("JUNE_WINDOW"); set != "" {
 		add(set)
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		add(filepath.Join(dir, "ora-window"))
-		add(filepath.Join(dir, "app", "src-tauri", "target", "release", "ora"))
-		add(filepath.Join(dir, "app", "src-tauri", "target", "debug", "ora"))
+		add(filepath.Join(dir, "june-window"))
+		add(filepath.Join(dir, "app", "src-tauri", "target", "release", "june"))
+		add(filepath.Join(dir, "app", "src-tauri", "target", "debug", "june"))
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		add(filepath.Join(cwd, "app", "src-tauri", "target", "release", "ora"))
-		add(filepath.Join(cwd, "app", "src-tauri", "target", "debug", "ora"))
-		if matches, err := filepath.Glob(filepath.Join(cwd, "dist", "*", "ora-window")); err == nil {
+		add(filepath.Join(cwd, "app", "src-tauri", "target", "release", "june"))
+		add(filepath.Join(cwd, "app", "src-tauri", "target", "debug", "june"))
+		if matches, err := filepath.Glob(filepath.Join(cwd, "dist", "*", "june-window")); err == nil {
 			for _, m := range matches {
 				add(m)
 			}
@@ -60,7 +60,7 @@ func windowBinary() (string, []string, error) {
 		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
 			continue
 		}
-		// The daemon binary is named "ora" too, so a candidate resolving back to this very process would fork the daemon endlessly.
+		// The daemon binary is named "june" too, so a candidate resolving back to this very process would fork the daemon endlessly.
 		if same, err := sameFile(path); err == nil && same {
 			continue
 		}
@@ -90,12 +90,12 @@ func sameFile(path string) (bool, error) {
 func startWindow(ctx context.Context, path string) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, path)
 	cmd.Dir = filepath.Dir(path)
-	// The window is told which process is running it, so quitting from its tray can stop the daemon too and "Quit" means quitting Ora rather than leaving a headless daemon with no way back.
-	cmd.Env = append(os.Environ(), fmt.Sprintf("ORA_SUPERVISOR_PID=%d", os.Getpid()))
+	// The window is told which process is running it, so quitting from its tray can stop the daemon too and "Quit" means quitting June rather than leaving a headless daemon with no way back.
+	cmd.Env = append(os.Environ(), fmt.Sprintf("JUNE_SUPERVISOR_PID=%d", os.Getpid()))
 	// The window is asked to close rather than killed outright, so it can hide its windows and release the microphone before it goes.
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = windowStopGrace
-	// Whatever the window prints, above all the overlay's "event stream" lines, goes to window.log beside ora.log; without this it went to /dev/null and a drawing that never appeared left nothing to read.
+	// Whatever the window prints, above all the overlay's "event stream" lines, goes to window.log beside june.log; without this it went to /dev/null and a drawing that never appeared left nothing to read.
 	if f, err := windowLog(config.DataDir()); err == nil {
 		cmd.Stdout = f
 		cmd.Stderr = f
@@ -109,7 +109,7 @@ func startWindow(ctx context.Context, path string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-// windowLog opens the file the window's own output is appended to. Input: the directory the log lives in. Output: the open file, created 0600 like ora.log because the window prints whatever the page logs, or an error when it could not be opened.
+// windowLog opens the file the window's own output is appended to. Input: the directory the log lives in. Output: the open file, created 0600 like june.log because the window prints whatever the page logs, or an error when it could not be opened.
 func windowLog(dir string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
@@ -146,7 +146,7 @@ func superviseWindow(ctx context.Context, path string, start func(context.Contex
 			slog.Info("the desktop window closed itself, leaving it stopped", "path", path, "ran_for", ranFor.Round(time.Millisecond))
 			return
 		}
-		// "exit status 1" on its own says nothing, and this fired 28 times in a week. What the window actually printed is in window.log, and in every one of those cases it was the same Rust panic: tao could not initialise GTK because the process had no X11 authorisation. The reason travels with the restart line now, so the next person reading ora.log does not have to know window.log exists.
+		// "exit status 1" on its own says nothing, and this fired 28 times in a week. What the window actually printed is in window.log, and in every one of those cases it was the same Rust panic: tao could not initialise GTK because the process had no X11 authorisation. The reason travels with the restart line now, so the next person reading june.log does not have to know window.log exists.
 		slog.Warn("the desktop window exited, starting it again", "ran_for", ranFor.Round(time.Millisecond), "wait", wait, "failures", failures, "error", waitErr, "said", lastWindowWords(config.DataDir()))
 		select {
 		case <-time.After(wait):
@@ -186,7 +186,7 @@ func runWindow(ctx context.Context, want bool) {
 	}
 	path, _, err := windowBinary()
 	if err != nil {
-		slog.Info("no desktop window to run, running the daemon alone", "hint", "build it in app/ or point ORA_WINDOW at it")
+		slog.Info("no desktop window to run, running the daemon alone", "hint", "build it in app/ or point JUNE_WINDOW at it")
 		return
 	}
 	go superviseWindow(ctx, path, startWindow)

@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"slices"
 
-	"ora/internal/agent"
+	"june/internal/agent"
 )
 
 // Routed answers a prompt on the first provider agent.RouteDuty offers that can answer it, handing on when one is spent or logged out and marking that provider so the next duty skips it. Input: how to build the backend for one config provider name, which the daemon closes over its API key and per-job model. Output: a Brain that answers through whichever provider did.

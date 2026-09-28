@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Claude answers on the user's own subscription, and that subscription includes a web search Ora was throwing away: --tools "" dropped the whole built-in set, so an ask that fell back to Claude had no way to look anything up and said so ("I don't actually have web access wired up right now", 2026-09-07).
+// Claude answers on the user's own subscription, and that subscription includes a web search June was throwing away: --tools "" dropped the whole built-in set, so an ask that fell back to Claude had no way to look anything up and said so ("I don't actually have web access wired up right now", 2026-09-07).
 // Verified against the real CLI on 2026-09-07: `claude -p --restricted --tools WebSearch --allowed-tools WebSearch` searched and answered with source URLs.
 func TestClaudeArgs_KeepsWebSearch(t *testing.T) {
 	args := claudeArgs("sonnet", "/tmp/mcp.json", "/tmp/prompt.txt", []string{"recall", "save_note"})
@@ -19,9 +19,9 @@ func TestClaudeArgs_KeepsWebSearch(t *testing.T) {
 	if !slices.Contains(allowed, "WebSearch") {
 		t.Errorf("--allowed-tools = %v, want WebSearch among them", allowed)
 	}
-	// Ora's own tools still have to be there, each under the MCP server's prefix.
+	// June's own tools still have to be there, each under the MCP server's prefix.
 	if !slices.Contains(allowed, "mcp__"+claudeMCPServerName+"__recall") {
-		t.Errorf("--allowed-tools = %v, want Ora's own recall among them", allowed)
+		t.Errorf("--allowed-tools = %v, want June's own recall among them", allowed)
 	}
 	// --restricted still drops the command and code-running tools and WebFetch, which is what keeps a prompt carrying unvetted text from running anything on this machine.
 	if !slices.Contains(args, "--restricted") {
@@ -29,7 +29,7 @@ func TestClaudeArgs_KeepsWebSearch(t *testing.T) {
 	}
 }
 
-// TestStripSourcesBlock_WithSourcesBlock checks that a trailing "Sources:" block — what Claude's built-in WebSearch tool appends, since it runs outside Ora's own MCP server and so leaves no source tag in the tool hops evidenceFromToolHops reads — is removed from the answer text and turned into one Evidence entry per link, in the order they appeared.
+// TestStripSourcesBlock_WithSourcesBlock checks that a trailing "Sources:" block — what Claude's built-in WebSearch tool appends, since it runs outside June's own MCP server and so leaves no source tag in the tool hops evidenceFromToolHops reads — is removed from the answer text and turned into one Evidence entry per link, in the order they appeared.
 func TestStripSourcesBlock_WithSourcesBlock(t *testing.T) {
 	answer := "The RTX 3050 is the laptop GPU in that model.\n\nSources:\n- [GPU specs](https://example.com/gpu)\n- [Laptop review](https://example.com/review)"
 

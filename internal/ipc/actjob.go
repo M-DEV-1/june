@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/actjob"
-	"ora/internal/util"
+	"june/internal/actjob"
+	"june/internal/util"
 )
 
 // ActEventType is the Event.Type every job event carries, so a client can pick them out of the same stream that carries asks. Its Event.ID is the job's id, and Event.Detail is the whole actjob.Event as JSON — the step number, the state, the expected change, whether it checked out, and, on the last one, what the job cost.
@@ -89,8 +89,8 @@ var spokenJobPoll = 250 * time.Millisecond
 
 // Spoken runs a whole job for the voice session and comes back when it has ended, which is what the live agent's do tool calls (see Agent.RunJob).
 // The job is started the same way POST /act starts one and runs in the daemon rather than inside this call, so the session hanging up does not take the job with it. The waiting is here rather than in the agent because the agent cannot import the runner: the runner's own executor is an agent.
-// Input: a context to bound the waiting, and the goal in the user's own words. Output: the sentence for Ora to say, or an error when the runner would not open the job at all.
-// A job that gets stuck asks the user one question and waits: that comes back as the question, so Ora asks it out loud, and the job is left standing where the window's running-now strip shows it waiting.
+// Input: a context to bound the waiting, and the goal in the user's own words. Output: the sentence for June to say, or an error when the runner would not open the job at all.
+// A job that gets stuck asks the user one question and waits: that comes back as the question, so June asks it out loud, and the job is left standing where the window's running-now strip shows it waiting.
 // ponytail: no way back in from speech yet — answering a stuck job means POST /act/{id}/answer from the window. Give do an answer form when a real run needs it.
 func (j *ActJobs) Spoken(ctx context.Context, goal string) (string, error) {
 	id, err := j.runner.Start(ctx, goal, actjob.Opts{})

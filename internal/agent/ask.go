@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 
-	"ora/internal/config"
-	"ora/internal/db"
+	"june/internal/config"
+	"june/internal/db"
 
 	"google.golang.org/genai"
 )
@@ -278,7 +278,7 @@ const stopLineText = `Never click anything that sends, pays, deletes or submits 
 // screenTaskInstruction is the system prompt a turn sends from the round after its first screen tool onwards. It is the screen-task guidance, the stop line, and one sentence saying who is talking — nothing else. The handshake an ask opens with teaches how to talk, what memory is for, and who the people in the user's life are; a round spent deciding which numbered button to press needs none of it, and on the 2026-09-05 runs it was about 7,800 of the roughly 9,800 input tokens every such round paid for. It takes no arguments on purpose: the same bytes on every screen round of every ask are what a prompt cache can match.
 // Input: none. Output: the prompt text.
 func screenTaskInstruction() string {
-	return "You're Ora, working the user's screen for them. When done, say so in one or two plain spoken sentences, no markdown.\n\n" + screenTaskGuidance + "\n\n" + stopLineText
+	return "You're June, working the user's screen for them. When done, say so in one or two plain spoken sentences, no markdown.\n\n" + screenTaskGuidance + "\n\n" + stopLineText
 }
 
 // screenTaskStarted reports whether a turn has committed to working on the screen, which is what lets an ask cut its prompt and its thread down to what a screen round actually needs. Input: the turn'"'"'s tool hops in call order. Output: true once any of them called a tool that looks at or acts on the screen.
@@ -739,7 +739,7 @@ func lastAction(hops []ToolHop) string {
 	return ""
 }
 
-// StepCapError is what an ask returns when its tool loop spends every step. Msg is written for the user: where the turn got to, what it last did there, and an offer to carry on. The daemon files it as Ora's answer rather than as a failure, so a "continue" that follows has the task and where it stopped in its history.
+// StepCapError is what an ask returns when its tool loop spends every step. Msg is written for the user: where the turn got to, what it last did there, and an offer to carry on. The daemon files it as June's answer rather than as a failure, so a "continue" that follows has the task and where it stopped in its history.
 type StepCapError struct{ Msg string }
 
 func (e *StepCapError) Error() string { return e.Msg }

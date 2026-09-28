@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/config"
+	"june/internal/agent"
+	"june/internal/config"
 )
 
 // fakeCLI writes a stub executable that records how it was called and then runs body, so the CLI brain can be tested without running the real claude.
@@ -150,7 +150,7 @@ func TestClaudeCLI_invocation(t *testing.T) {
 	}
 }
 
-// FromConfig is the only thing the daemon calls: an absent or unrecognised brain block must keep ORA on the Gemini API exactly as it was before this package existed.
+// FromConfig is the only thing the daemon calls: an absent or unrecognised brain block must keep June on the Gemini API exactly as it was before this package existed.
 func TestFromConfig(t *testing.T) {
 	claudeBin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"from claude"}'`)
 

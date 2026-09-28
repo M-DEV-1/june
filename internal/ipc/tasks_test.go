@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/memory"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/memory"
 )
 
 // TestTasksListsBothSources checks that /tasks shows the action items a meeting raised as "noticed" and the tasks the user typed in as "you".

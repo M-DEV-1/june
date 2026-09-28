@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // insertSummaryNode writes one 'summary' node with a controlled created_at, JSON-shaped the way the compiler writes them, for the replay stage to read back through SummaryTimeline.
@@ -102,10 +102,10 @@ func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testin
 
 	base := at(10, 0)
 	insertSummaryNode(t, store, "Raw Activity Log", "app|title noise, must never be read", base.Add(-1*time.Minute))
-	insertSummaryNode(t, store, "Ora dreaming loop", "shipped the API", base)
-	insertSummaryNode(t, store, "Ora dreaming loop", "shipped the API again", base.Add(time.Minute))
+	insertSummaryNode(t, store, "June dreaming loop", "shipped the API", base)
+	insertSummaryNode(t, store, "June dreaming loop", "shipped the API again", base.Add(time.Minute))
 	insertSummaryNode(t, store, "Reading", "read chapter 3", base.Add(2*time.Minute))
-	insertSummaryNode(t, store, "Ora dreaming loop", "a nothing moment", base.Add(3*time.Minute))
+	insertSummaryNode(t, store, "June dreaming loop", "a nothing moment", base.Add(3*time.Minute))
 	insertSummaryNode(t, store, "Elsewhere", "wandered off topic", base.Add(4*time.Minute))
 
 	shadow := &fakeShadowSeq{replies: []string{

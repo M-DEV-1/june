@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-/** Tests for Settings: the theme control, the hotkey the daemon reports, the switches over what Ora is allowed to watch, the brains and their models, what the daemon says about this machine, and the token ledger at the foot. */
+/** Tests for Settings: the theme control, the hotkey the daemon reports, the switches over what June is allowed to watch, the brains and their models, what the daemon says about this machine, and the token ledger at the foot. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 const settings: Partial<SettingsView> = {
-  data_dir: "/home/you/.ora",
+  data_dir: "/home/you/.june",
   store_bytes: 22020096,
   recordings_bytes: 0,
   models_bytes: 0,
@@ -45,9 +45,9 @@ const usage: Usage = {
 
 describe("the first run", () => {
   it("lists the daemon's own steps while nothing can answer, and re-reads /settings when Check again is clicked", async () => {
-    const steps = ["Set GEMINI_API_KEY in /home/you/.local/share/ora/env.", "Or sign in with the Claude CLI: run claude login."];
+    const steps = ["Set GEMINI_API_KEY in /home/you/.local/share/june/env.", "Or sign in with the Claude CLI: run claude login."];
     const { calls } = renderApp({ settings: { ...settings, first_run: { gemini_key: false, codex_login: false, claude_cli: false, local_model: false, steps } } }, { place: "settings" });
-    expect(await screen.findByText("Ora cannot answer yet")).toBeDefined();
+    expect(await screen.findByText("June cannot answer yet")).toBeDefined();
     // Each step reads verbatim as the daemon's own sentence — the tokens in it a person would actually type are just marked as code inside it.
     const drawn = Array.from(document.querySelectorAll("li")).map((li) => li.textContent);
     for (const step of steps) expect(drawn).toContain(step);
@@ -59,21 +59,21 @@ describe("the first run", () => {
   it("draws nothing once the daemon has no steps left, and nothing at all for a daemon too old to send the field", async () => {
     renderApp({ settings: { ...settings, first_run: { gemini_key: true, codex_login: false, claude_cli: false, local_model: false, steps: [] } } }, { place: "settings" });
     await screen.findByText("This machine");
-    expect(screen.queryByText("Ora cannot answer yet")).toBeNull();
+    expect(screen.queryByText("June cannot answer yet")).toBeNull();
     cleanup();
     renderApp({ settings }, { place: "settings" });
     await screen.findByText("This machine");
-    expect(screen.queryByText("Ora cannot answer yet")).toBeNull();
+    expect(screen.queryByText("June cannot answer yet")).toBeNull();
   });
 });
 
 describe("Settings", () => {
   it("opens on the position stored under the key the hover reads, and writes back there when another is picked", async () => {
-    localStorage.setItem("ora-hover-position", "top");
+    localStorage.setItem("june-hover-position", "top");
     renderApp({ settings }, { place: "settings" });
     expect(await screen.findByRole("tab", { name: "Top", selected: true })).toBeDefined();
     await userEvent.click(screen.getByRole("tab", { name: "Center" }));
-    expect(localStorage.getItem("ora-hover-position")).toBe("center");
+    expect(localStorage.getItem("june-hover-position")).toBe("center");
   });
 
   it("draws the accelerator the daemon reports, key by key", async () => {
@@ -83,7 +83,7 @@ describe("Settings", () => {
     expect(screen.getByText("Space")).toBeDefined();
   });
 
-  it("pauses and resumes what Ora is allowed to watch", async () => {
+  it("pauses and resumes what June is allowed to watch", async () => {
     const { calls } = renderApp({ settings }, { place: "settings" });
     const watching = await screen.findByLabelText("Watching the screen");
     await waitFor(() => expect(watching.getAttribute("aria-checked")).toBe("true"));

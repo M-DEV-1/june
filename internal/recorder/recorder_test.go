@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/memory"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/memory"
+	"june/internal/util"
 )
 
 type fakeCapture struct{ stopped bool }
@@ -409,7 +409,7 @@ func (n *notifications) contains(s string) bool {
 	return false
 }
 
-// A meeting playing to a sink Ora is not recording writes an unbroken run of zero samples, which looks exactly like a working recording until the transcript comes back empty hours later. The user has to be told while the call is still running.
+// A meeting playing to a sink June is not recording writes an unbroken run of zero samples, which looks exactly like a working recording until the transcript comes back empty hours later. The user has to be told while the call is still running.
 func TestRecorder_WarnsWhenSystemAudioStaysSilent(t *testing.T) {
 	r, _, _ := newTestRecorder(t, &fakeStore{})
 	var got notifications
@@ -763,7 +763,7 @@ func TestRecorder_RegeneratesMinutesFromAnExistingTranscript(t *testing.T) {
 		return "# Meeting minutes\n\n## Attendees\n", nil
 	}
 
-	// note-id.txt is what says this meeting was filed once already, which is what deleting minutes.md asks Ora to do again.
+	// note-id.txt is what says this meeting was filed once already, which is what deleting minutes.md asks June to do again.
 	regen := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
 		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
 		"note-id.txt":   "1",
@@ -784,7 +784,7 @@ func TestRecorder_RegeneratesMinutesFromAnExistingTranscript(t *testing.T) {
 	if got := store.logged(noteKind); len(got) != 1 {
 		t.Errorf("regenerating minutes should file exactly one note, got %v", got)
 	}
-	// The meeting already had its one chance to teach Ora something durable about a person when it was first summarised. Regenerating minutes from the same transcript must not run the updater again and re-propose the same writes.
+	// The meeting already had its one chance to teach June something durable about a person when it was first summarised. Regenerating minutes from the same transcript must not run the updater again and re-propose the same writes.
 	if sawPersonalPass {
 		t.Error("regenerating minutes ran the personal context updater again")
 	}
@@ -1138,7 +1138,7 @@ func TestFileMinutes_DurationMarker(t *testing.T) {
 	if len(store.notes) != 1 {
 		t.Fatalf("want 1 note filed, got %d", len(store.notes))
 	}
-	want := "<!--ora:duration start=2026-09-04T09:00:00Z stop=2026-09-04T09:10:00Z-->"
+	want := "<!--june:duration start=2026-09-04T09:00:00Z stop=2026-09-04T09:10:00Z-->"
 	if !strings.Contains(store.notes[0], want) {
 		t.Errorf("filed note missing duration marker %q, got %q", want, store.notes[0])
 	}
@@ -1152,7 +1152,7 @@ func TestFileMinutes_DurationMarker(t *testing.T) {
 	if len(store.notes) != 1 {
 		t.Fatalf("correcting the same recording must not file a second note, got %d", len(store.notes))
 	}
-	want = "<!--ora:duration start=2026-09-04T09:05:00Z stop=2026-09-04T09:25:00Z-->"
+	want = "<!--june:duration start=2026-09-04T09:05:00Z stop=2026-09-04T09:25:00Z-->"
 	if !strings.Contains(store.notes[0], want) {
 		t.Errorf("corrected note missing updated duration marker %q, got %q", want, store.notes[0])
 	}
@@ -1416,7 +1416,7 @@ func TestProcess_UpdatesPersonalContextOnTheRetryThatFirstFilesTheMinutes(t *tes
 		t.Fatalf("process: %v", err)
 	}
 	if got := store.personalWrites["vexil-quorin"]; got == "" {
-		t.Error("a meeting whose first attempt failed never updated personal context, so what it taught Ora is lost for good")
+		t.Error("a meeting whose first attempt failed never updated personal context, so what it taught June is lost for good")
 	}
 }
 

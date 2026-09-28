@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/agent"
-	"ora/internal/config"
+	"june/internal/agent"
+	"june/internal/config"
 )
 
 // fakeAsker is a CodexAsker whose answer, or error, is fixed in advance, so FromAsker and FromConfig can be tested without a real ChatGPT login.

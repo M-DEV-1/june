@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/db"
-	"ora/internal/tracker"
+	"june/internal/agent"
+	"june/internal/db"
+	"june/internal/tracker"
 )
 
 // Asker is the one method /ask needs from an *agent.Agent, narrowed so this package's tests run against a fake instead of the real model and store.
@@ -418,7 +418,7 @@ func conversationIDString(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
-// run asks the question through asker (the default, or the brain the request named) and broadcasts its progress under id: a status event first (AskText reports no earlier progress hook, so this is the only point one can fire), then one tool event per tool call as askText's own loop makes it — via the ToolObserver wrapped onto the ask context below, which fires live, twice per hop (once with its argument summary before it runs, once with its result summary after), rather than only after AskText returns — then the answer, then done. allowGo carries the request's "go" flag onto the context (see agent.WithGo) so a guarded click or Enter-with-a-message this question asks for can actually run. A failed AskText stores the failure as an "ora" turn of kind "error" (when convID is not 0) and broadcasts error instead of answer and done. When convID is not 0 the answer is also stored as a turn in that conversation, with its evidence and the names of the tools behind it, and the answer event carries the conversation's id. Either way, a trace whose tool hops include a screen tool is also filed as an act run (see recordActRun), win or lose, so the later "watch me once" replay learning has data to study, and what the turn cost in tokens is filed too (see recordTokenUse), win or lose, so the user can see what each provider is costing them. The ask is registered as running for the whole call (see startAsk and DrawingAsk), so any ring or marks its screen tools draw are broadcast under this same id.
+// run asks the question through asker (the default, or the brain the request named) and broadcasts its progress under id: a status event first (AskText reports no earlier progress hook, so this is the only point one can fire), then one tool event per tool call as askText's own loop makes it — via the ToolObserver wrapped onto the ask context below, which fires live, twice per hop (once with its argument summary before it runs, once with its result summary after), rather than only after AskText returns — then the answer, then done. allowGo carries the request's "go" flag onto the context (see agent.WithGo) so a guarded click or Enter-with-a-message this question asks for can actually run. A failed AskText stores the failure as an "june" turn of kind "error" (when convID is not 0) and broadcasts error instead of answer and done. When convID is not 0 the answer is also stored as a turn in that conversation, with its evidence and the names of the tools behind it, and the answer event carries the conversation's id. Either way, a trace whose tool hops include a screen tool is also filed as an act run (see recordActRun), win or lose, so the later "watch me once" replay learning has data to study, and what the turn cost in tokens is filed too (see recordTokenUse), win or lose, so the user can see what each provider is costing them. The ask is registered as running for the whole call (see startAsk and DrawingAsk), so any ring or marks its screen tools draw are broadcast under this same id.
 // askerWithHistory is an Asker that can also be given the conversation so far. Both production askers have it; the test fakes need not, so it is asked for rather than required.
 type askerWithHistory interface {
 	AskTextWith(ctx context.Context, history agent.History, question string) (agent.TurnTrace, error)
@@ -470,7 +470,7 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 		trace, err = asker.AskText(ctx, q)
 	}
 	outcome, errMsg := "ok", ""
-	// Running out of steps is where the work got to, not a failure to answer: it is filed as Ora's answer so a "continue" after it has the task in its history (error turns are left out of history), while the act run still records it as a run that did not finish.
+	// Running out of steps is where the work got to, not a failure to answer: it is filed as June's answer so a "continue" after it has the task in its history (error turns are left out of history), while the act run still records it as a run that did not finish.
 	var capped *agent.StepCapError
 	if errors.As(err, &capped) {
 		trace.Answer = capped.Msg
@@ -481,9 +481,9 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 		s.recordTokenUse(trace, question, "text")
 		s.afterScreenRun(asker, trace, "error")
 		if convID != 0 {
-			// Filed as Ora's turn of kind "error" so the thread never shows a question with nothing under it.
+			// Filed as June's turn of kind "error" so the thread never shows a question with nothing under it.
 			storeCtx, storeCancel := context.WithTimeout(context.Background(), storeTurnTimeout)
-			if _, storeErr := s.store.AddTurn(storeCtx, convID, "ora", err.Error(), "error", nil, nil); storeErr != nil {
+			if _, storeErr := s.store.AddTurn(storeCtx, convID, "june", err.Error(), "error", nil, nil); storeErr != nil {
 				slog.Error("ask: could not store the failure", "conversation_id", convID, "error", storeErr)
 			}
 			storeCancel()
@@ -510,7 +510,7 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 		if err != nil {
 			body = nil
 		}
-		if _, err := s.store.AddTurn(storeCtx, convID, "ora", trace.Answer, "ask", body, tools); err != nil {
+		if _, err := s.store.AddTurn(storeCtx, convID, "june", trace.Answer, "ask", body, tools); err != nil {
 			slog.Error("ask: could not store the answer", "conversation_id", convID, "error", err)
 		}
 		storeCancel()

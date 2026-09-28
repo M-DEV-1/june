@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// autostartDesktopPath returns the path of ORA's XDG autostart entry: $XDG_CONFIG_HOME/autostart/ora.desktop, falling back to ~/.config when XDG_CONFIG_HOME is unset.
+// autostartDesktopPath returns the path of June's XDG autostart entry: $XDG_CONFIG_HOME/autostart/june.desktop, falling back to ~/.config when XDG_CONFIG_HOME is unset.
 // A .desktop file here is honoured by GNOME, KDE and XFCE alike, which a systemd user unit is not.
 // Returns "" when neither XDG_CONFIG_HOME nor a home directory can be determined.
 func autostartDesktopPath() string {
@@ -21,7 +21,7 @@ func autostartDesktopPath() string {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "autostart", "ora.desktop")
+	return filepath.Join(dir, "autostart", "june.desktop")
 }
 
 // autostartEnabled reports whether the autostart .desktop entry exists on disk.
@@ -36,7 +36,7 @@ func autostartEnabled() bool {
 
 // setAutostart writes the autostart .desktop entry when on is true, and removes it when false.
 // Removing an entry that isn't there is not an error.
-// Exec= uses the absolute path from os.Executable and Path= pins the working directory to the binary's own directory, because ORA loads .env relative to the working directory and a session manager launches autostart entries from an arbitrary one. (The database, vector index, config and IPC token no longer depend on cwd — see config.DataDir.)
+// Exec= uses the absolute path from os.Executable and Path= pins the working directory to the binary's own directory, because June loads .env relative to the working directory and a session manager launches autostart entries from an arbitrary one. (The database, vector index, config and IPC token no longer depend on cwd — see config.DataDir.)
 func setAutostart(on bool) error {
 	path := autostartDesktopPath()
 	if path == "" {
@@ -66,8 +66,8 @@ func setAutostart(on bool) error {
 func desktopEntry(exe, dir string) string {
 	return fmt.Sprintf(`[Desktop Entry]
 Type=Application
-Name=Ora
-Comment=Ora context runtime
+Name=June
+Comment=June context runtime
 Exec=%s --daemon
 Path=%s
 Terminal=false

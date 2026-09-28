@@ -10,11 +10,11 @@ import (
 const (
 	// DefaultVoiceModel is the bidirectional Live API model a config that names none runs on. The 3.x models close with "You exceeded your current quota" when Google Search grounding is sent beside the function tools, so liveToolsFor drops it for them. Anything that only one generation supports (proactive audio, the thinking budget versus thinking level) is gated on the model name where it is used, not here.
 	DefaultVoiceModel = Live31Model
-	// Live31Model is Gemini 3.1 Flash Live: fast to first word, and without affective dialog or proactive audio. Measured 2026-09-03 with the same spoken question and Ora's real handshake: first audio at 1.9 s.
+	// Live31Model is Gemini 3.1 Flash Live: fast to first word, and without affective dialog or proactive audio. Measured 2026-09-03 with the same spoken question and June's real handshake: first audio at 1.9 s.
 	Live31Model = "gemini-3.1-flash-live-preview"
 	// Live25Model is the 2.5 native-audio model: slower to answer, and the only one that carries affective dialog and proactive audio. Measured the same day and the same way: first audio at 5.4 to 7.9 s, and 8.1 s with proactive audio on.
 	Live25Model = "gemini-2.5-flash-native-audio-preview-12-2025"
-	// Live38Model is Gemini 3.8 Live. The id carries no "flash" and no "-preview", unlike the other two. It supports Google Search grounding and interleaved thinking; it does not take a thinking level or a thinking budget, affective dialog has been removed from the API for it, and proactive audio is permanently on with no field to switch it off — so it always decides for itself whether audio was aimed at it. All of that is what ai.google.dev/gemini-api/docs/models/gemini-3.8-live said on 2026-09-17; none of it has been probed against Ora's own handshake, and grounding is left off in liveToolsFor until it is.
+	// Live38Model is Gemini 3.8 Live. The id carries no "flash" and no "-preview", unlike the other two. It supports Google Search grounding and interleaved thinking; it does not take a thinking level or a thinking budget, affective dialog has been removed from the API for it, and proactive audio is permanently on with no field to switch it off — so it always decides for itself whether audio was aimed at it. All of that is what ai.google.dev/gemini-api/docs/models/gemini-3.8-live said on 2026-09-17; none of it has been probed against June's own handshake, and grounding is left off in liveToolsFor until it is.
 	Live38Model = "gemini-3.8-live"
 
 	// for background tasks like memory compiler.
@@ -33,7 +33,7 @@ const (
 	TTSModel = "gemini-3.1-flash-tts-preview"
 )
 
-// LiveVoiceModels are the Live models Ora can speak through, in the order the picker draws them, each with what choosing it costs and buys. The trade is real and no one answer is right for everyone: 3.1 answers in about two seconds but hears the room flatly and has one tone, while 2.5 takes five to eight seconds and can decline audio that was not aimed at it.
+// LiveVoiceModels are the Live models June can speak through, in the order the picker draws them, each with what choosing it costs and buys. The trade is real and no one answer is right for everyone: 3.1 answers in about two seconds but hears the room flatly and has one tone, while 2.5 takes five to eight seconds and can decline audio that was not aimed at it.
 // The order is DefaultVoiceModel first so the picker opens on the model a fresh config actually dials, then 3.8 beside the other gemini-3 entry, then 2.5 last as the one with the measured multi-second wait.
 var LiveVoiceModels = []struct {
 	Name  string
@@ -48,7 +48,7 @@ var LiveVoiceModels = []struct {
 // voiceModel is the Live model chosen in the config, read by VoiceModel. Empty means DefaultVoiceModel.
 var voiceModel atomic.Value
 
-// SetVoiceModel installs the Live model every voice session dials, normally from OraConfig.LiveModel at daemon startup and again whenever the user picks one. Input: a model name; "" and any name that is not one of LiveVoiceModels put it back on DefaultVoiceModel, so a typo in the config file cannot leave the daemon dialling a model that does not exist. Output: whether the name was one Ora knows.
+// SetVoiceModel installs the Live model every voice session dials, normally from JuneConfig.LiveModel at daemon startup and again whenever the user picks one. Input: a model name; "" and any name that is not one of LiveVoiceModels put it back on DefaultVoiceModel, so a typo in the config file cannot leave the daemon dialling a model that does not exist. Output: whether the name was one June knows.
 func SetVoiceModel(name string) bool {
 	if !ValidVoiceModel(name) {
 		voiceModel.Store("")
@@ -67,7 +67,7 @@ func VoiceModel() string {
 	return DefaultVoiceModel
 }
 
-// ValidVoiceModel reports whether name is one of the Live models Ora can speak through.
+// ValidVoiceModel reports whether name is one of the Live models June can speak through.
 func ValidVoiceModel(name string) bool {
 	for _, m := range LiveVoiceModels {
 		if m.Name == name {
@@ -77,7 +77,7 @@ func ValidVoiceModel(name string) bool {
 	return false
 }
 
-// The background job names accepted as keys in OraConfig.BackgroundModels, one per unattended duty that reaches a metered model. They are strings rather than an enum so a user can pin a model per job in the config file by name.
+// The background job names accepted as keys in JuneConfig.BackgroundModels, one per unattended duty that reaches a metered model. They are strings rather than an enum so a user can pin a model per job in the config file by name.
 const (
 	// JobWorkingState is the five-minute working-state derive in internal/memory.DeriveState.
 	JobWorkingState = "working_state"
@@ -97,7 +97,7 @@ const (
 	JobDream = "dream"
 )
 
-// DefaultBackgroundModel is the model every unattended job runs on unless the config pins another. It is the lite model on purpose, and the reason is a per-day request count rather than a price: the 429 bodies in ora.log name a free-tier limit of 500 requests a day for gemini-3.5-flash-lite against 20 a day for gemini-3.5-flash, so one unattended job left on the latter can spend the user's whole day before they ask anything.
+// DefaultBackgroundModel is the model every unattended job runs on unless the config pins another. It is the lite model on purpose, and the reason is a per-day request count rather than a price: the 429 bodies in june.log name a free-tier limit of 500 requests a day for gemini-3.5-flash-lite against 20 a day for gemini-3.5-flash, so one unattended job left on the latter can spend the user's whole day before they ask anything.
 // TextModel stays on gemini-3.5-flash for the asks the user actually makes and waits on, where the lite model's 503s during the evening of 2026-09-04 would be felt.
 const DefaultBackgroundModel = "gemini-3.5-flash-lite"
 
@@ -107,7 +107,7 @@ var backgroundModels map[string]string
 // backgroundModelsMu guards backgroundModels, which the daemon writes once at startup and several background goroutines then read.
 var backgroundModelsMu sync.RWMutex
 
-// SetBackgroundModels installs the per-job model map that BackgroundModel reads, normally from OraConfig.BackgroundModels at daemon startup. Input: job name to model name; a nil or empty map puts every job back on DefaultBackgroundModel.
+// SetBackgroundModels installs the per-job model map that BackgroundModel reads, normally from JuneConfig.BackgroundModels at daemon startup. Input: job name to model name; a nil or empty map puts every job back on DefaultBackgroundModel.
 func SetBackgroundModels(models map[string]string) {
 	backgroundModelsMu.Lock()
 	defer backgroundModelsMu.Unlock()

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/agent"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // newRoutinesServer wires a Server behind a real HTTP server with just the routines routes registered, under the same patterns cmd/daemon.go gives them.

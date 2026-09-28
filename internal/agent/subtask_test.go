@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"ora/internal/db"
+	"june/internal/db"
 	"strings"
 	"testing"
 	"time"

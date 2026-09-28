@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"ora/internal/ipctoken"
+	"june/internal/ipctoken"
 )
 
 func TestGenerate_RestrictsFilePermissions(t *testing.T) {
@@ -54,7 +54,7 @@ func TestGenerate_EachCallProducesADifferentToken(t *testing.T) {
 
 // The token file is 0600, but the directory it sits in was created 0755 here, so whoever created the data directory first decided whether anyone else on the machine could list it. It is the user's own directory and is created as such.
 func TestGenerate_CreatesTheTokenDirectoryPrivateToTheUser(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "ora")
+	dir := filepath.Join(t.TempDir(), "june")
 	if _, err := ipctoken.Generate(filepath.Join(dir, "ipc-token")); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}

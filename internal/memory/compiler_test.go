@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"june/internal/memory"
+	"june/internal/tracker"
 	"log/slog"
-	"ora/internal/memory"
-	"ora/internal/tracker"
 	"strings"
 	"sync"
 	"testing"
@@ -337,7 +337,7 @@ func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
 		return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{
 			{ID: 0, Subject: "Suits", Kind: "entertainment", State: "s1e3", Summary: "watched ep 3", Novel: true},
-			{ID: 5, Subject: "ORA project", Kind: "work", State: "writing tests", Summary: "added thread tests"},
+			{ID: 5, Subject: "June project", Kind: "work", State: "writing tests", Summary: "added thread tests"},
 		}}, nil
 	}}
 	store := &fakeStorage{}
@@ -357,8 +357,8 @@ func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	if store.semantic[0].SameTask || store.semantic[0].TaskName != "Suits" {
 		t.Errorf("thread id=0: got SameTask=%v TaskName=%q, want false/\"Suits\"", store.semantic[0].SameTask, store.semantic[0].TaskName)
 	}
-	if !store.semantic[1].SameTask || store.semantic[1].TaskName != "ORA project" {
-		t.Errorf("thread id=5: got SameTask=%v TaskName=%q, want true/\"ORA project\"", store.semantic[1].SameTask, store.semantic[1].TaskName)
+	if !store.semantic[1].SameTask || store.semantic[1].TaskName != "June project" {
+		t.Errorf("thread id=5: got SameTask=%v TaskName=%q, want true/\"June project\"", store.semantic[1].SameTask, store.semantic[1].TaskName)
 	}
 }
 
@@ -479,7 +479,7 @@ func TestCompiler_FlushLinksTheBuffersEpisodesToEachThread(t *testing.T) {
 	store := &fakeStorage{}
 	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
 		return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{
-			{Subject: "code review of ora", Kind: "work", Summary: "eleven findings"},
+			{Subject: "code review of june", Kind: "work", Summary: "eleven findings"},
 			{Subject: "reading the diff", Kind: "work", Summary: "walked the changes"},
 		}}, nil
 	}}
@@ -522,7 +522,7 @@ func TestCompiler_LinkWindowClosesBeforeTheAttributionCall(t *testing.T) {
 	}
 }
 
-// The compiler writes summaries from screen text that names the user in the third person — a calendar entry "Meeting with Zemna Braxen" became "participated in a scheduled meeting with Zemna Braxen" on 2026-09-01, and Ora then told the user about their meetings with Zemna. The prompt has to say who the user is.
+// The compiler writes summaries from screen text that names the user in the third person — a calendar entry "Meeting with Zemna Braxen" became "participated in a scheduled meeting with Zemna Braxen" on 2026-09-01, and June then told the user about their meetings with Zemna. The prompt has to say who the user is.
 func TestAttributePrompt_NamesTheUser(t *testing.T) {
 	prompt := memory.AttributePrompt(nil, nil, "The user is Zemna Braxen — goes by Zemna.")
 	if !strings.Contains(prompt, "Zemna Braxen") {

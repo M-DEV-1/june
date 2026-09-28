@@ -2,7 +2,7 @@ package tracker_test
 
 import (
 	"context"
-	"ora/internal/tracker"
+	"june/internal/tracker"
 	"testing"
 	"time"
 )
@@ -74,10 +74,10 @@ CollectLoop:
 	}
 }
 
-// A window the user comes straight back to must still be recorded. The tracker skips Ora's own window, an application on the blocklist, and a window nothing could name; each of those cleared the pending activity, and since the window the user returns to is the one the loop last saw, nothing then counts as changed — and only a pending activity can be emitted. So a window with a steady title was never recorded for as long as the user stayed in it. Hovering Ora fires this, which is the product's main interaction.
+// A window the user comes straight back to must still be recorded. The tracker skips June's own window, an application on the blocklist, and a window nothing could name; each of those cleared the pending activity, and since the window the user returns to is the one the loop last saw, nothing then counts as changed — and only a pending activity can be emitted. So a window with a steady title was never recorded for as long as the user stayed in it. Hovering June fires this, which is the product's main interaction.
 func TestDaemon_ASkippedWindowKeepsThePendingActivity(t *testing.T) {
 	skips := map[string]tracker.Activity{
-		"Ora's own window":            {App: "ora", Title: "Ora"},
+		"June's own window":           {App: "june", Title: "June"},
 		"a blocked application":       {App: "1Password", Title: "Vault"},
 		"a window nothing could name": {App: "Unknown", Title: "Unknown"},
 	}

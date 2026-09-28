@@ -3,11 +3,11 @@ package recorder
 import (
 	"context"
 	"encoding/json"
+	"june/internal/db"
+	"june/internal/proactive"
+	"june/internal/tracker"
+	"june/internal/util"
 	"log/slog"
-	"ora/internal/db"
-	"ora/internal/proactive"
-	"ora/internal/tracker"
-	"ora/internal/util"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,22 +18,22 @@ import (
 const (
 	// micPollInterval is how often the microphone is checked. A full PipeWire graph dump measures 0.01s and 6.8MB of peak memory on this machine, so five seconds is a 0.2% duty cycle and the cost is not what sets this — the wait before the question is.
 	micPollInterval = 5 * time.Second
-	// asksAfterPolls is how many consecutive polls must find the microphone held before Ora asks. Two is the fewest that can tell a sustained hold from a momentary one, since a single poll catches a two-second voice note as readily as a call.
+	// asksAfterPolls is how many consecutive polls must find the microphone held before June asks. Two is the fewest that can tell a sustained hold from a momentary one, since a single poll catches a two-second voice note as readily as a call.
 	// Two polls five seconds apart puts the question on screen between five and ten seconds after the microphone opens, depending on where in the cycle it opened, and that window is the meeting's opening that goes unrecorded. Ten seconds is short enough that what is lost is people saying hello.
 	asksAfterPolls = 2
-	// oraStreamPrefix is how Ora's own capture streams name themselves to the audio server: "Ora meeting recorder" while recording a call, "Ora voice" while the user is talking to the assistant. The trailing space keeps it from matching an unrelated application whose name merely starts with those three letters.
-	oraStreamPrefix = "Ora "
-	// oraBinary is this program's own executable name. It is compared against the last element of the stream's process path, not the whole path: the audio library reports application.process.binary as os.Args[0], which is "/home/user/.../ora" or "./ora" and never the bare word — so comparing the raw value matched nothing, and Ora's voice assistant holding the microphone read as somebody else being in a call.
-	oraBinary = "ora"
+	// juneStreamPrefix is how June's own capture streams name themselves to the audio server: "June meeting recorder" while recording a call, "June voice" while the user is talking to the assistant. The trailing space keeps it from matching an unrelated application whose name merely starts with those four letters.
+	juneStreamPrefix = "June "
+	// juneBinary is this program's own executable name. It is compared against the last element of the stream's process path, not the whole path: the audio library reports application.process.binary as os.Args[0], which is "/home/user/.../june" or "./june" and never the bare word — so comparing the raw value matched nothing, and June's voice assistant holding the microphone read as somebody else being in a call.
+	juneBinary = "june"
 	// maxNameRunes is how much of a window title the prompt shows. A page names its own window and some run very long, while the prompt is one line.
 	maxNameRunes = 60
-	// windowLookback is how far back Ora looks for the window belonging to whatever took the microphone.
-	// Half an hour rather than a minute, because the tracker only records a window when its title changes: a meeting window opened and then left alone writes one episode and nothing more. On 2026-09-01 a call was named eight minutes before Ora asked about it, and a one-minute lookback found nothing and fell back to calling the meeting "Brave".
+	// windowLookback is how far back June looks for the window belonging to whatever took the microphone.
+	// Half an hour rather than a minute, because the tracker only records a window when its title changes: a meeting window opened and then left alone writes one episode and nothing more. On 2026-09-01 a call was named eight minutes before June asked about it, and a one-minute lookback found nothing and fell back to calling the meeting "Brave".
 	// The risk of reaching too far back is small, because only windows belonging to the application currently holding the microphone are considered — the worst case is naming the last thing that application was showing, which still says more than its process name does.
 	windowLookback = 30 * time.Minute
 	// windowLookbackRows caps the episodes read for that lookup, and is sized for the lookback above rather than for how often the tracker writes.
 	windowLookbackRows = 400
-	// notifyWait is how long the meeting question is left on screen before Ora stops waiting for an answer. Fifteen seconds: the question is only worth asking while the call is starting, and a card that outlives its own waiter is a button that does nothing. A prompt nobody answered is not a no — the next poll simply finds the call still running and the state already marked as asked, so it stays quiet.
+	// notifyWait is how long the meeting question is left on screen before June stops waiting for an answer. Fifteen seconds: the question is only worth asking while the call is starting, and a card that outlives its own waiter is a button that does nothing. A prompt nobody answered is not a no — the next poll simply finds the call still running and the state already marked as asked, so it stays quiet.
 	notifyWait = 15 * time.Second
 )
 
@@ -49,7 +49,7 @@ type pwNode struct {
 	} `json:"info"`
 }
 
-// micUsers returns the applications capturing from a microphone right now, excluding Ora's own recorder, split into those that are in a call and those that are not.
+// micUsers returns the applications capturing from a microphone right now, excluding June's own recorder, split into those that are in a call and those that are not.
 //
 // Input: the JSON pw-dump writes. Output: the names of the applications that capture and also play audio back, then the names of those that only capture; each list is in the order the dump listed them and without repeats, since a browser opens a separate stream per tab.
 //
@@ -74,7 +74,7 @@ func micUsers(dump []byte) (calls, captureOnly []string) {
 		if p.MediaClass != "Stream/Input/Audio" || n.Info.State != "running" {
 			continue
 		}
-		if strings.HasPrefix(p.AppName, oraStreamPrefix) || strings.EqualFold(filepath.Base(p.Binary), oraBinary) {
+		if strings.HasPrefix(p.AppName, juneStreamPrefix) || strings.EqualFold(filepath.Base(p.Binary), juneBinary) {
 			continue
 		}
 		name := streamName(p.Binary, p.AppName)
@@ -109,9 +109,9 @@ func streamName(binary, appName string) string {
 	return appName
 }
 
-// windowFor returns the title of the window Ora last saw for a capturing application, or empty when it saw none.
+// windowFor returns the title of the window June last saw for a capturing application, or empty when it saw none.
 //
-// Input: the application's process name, and the episodes Ora recorded recently, oldest first. Output: the most recent window title belonging to that application.
+// Input: the application's process name, and the episodes June recorded recently, oldest first. Output: the most recent window title belonging to that application.
 //
 // This is what the process name cannot say. A call in a browser tab is "chrome" whether it is a meeting, a spreadsheet or a video, and a web app installed as its own window is "chrome" too — so Google Meet, Teams and a shopping tab are one name. The window title is the only thing on the machine that tells them apart, and the tracker already writes it down every couple of seconds.
 //
@@ -149,9 +149,9 @@ func withoutBrowserStatus(title string) string {
 	return title
 }
 
-// describe names each capturing application the way a person would recognise it: by the window it has open, falling back to the process when Ora has seen no window for it.
+// describe names each capturing application the way a person would recognise it: by the window it has open, falling back to the process when June has seen no window for it.
 //
-// Input: the process names holding the microphone, and the episodes Ora recorded recently. Output: one display name each, cut to one line's worth.
+// Input: the process names holding the microphone, and the episodes June recorded recently. Output: one display name each, cut to one line's worth.
 func describe(users []string, eps []db.Episode) []string {
 	named := make([]string, 0, len(users))
 	for _, u := range users {
@@ -204,9 +204,9 @@ func (w *meetingWatch) started() {
 
 // step folds one poll into the watch and reports what to do about it.
 //
-// Input: the applications holding the microphone, and whether Ora is already recording. Output: ask, true exactly once per call, on the poll where the microphone has been held long enough to be a call and no question has been asked yet; and stop, true once for a recording this watcher started after asksAfterPolls consecutive polls with no call.
+// Input: the applications holding the microphone, and whether June is already recording. Output: ask, true exactly once per call, on the poll where the microphone has been held long enough to be a call and no question has been asked yet; and stop, true once for a recording this watcher started after asksAfterPolls consecutive polls with no call.
 //
-// Releasing the microphone is what ends a call, so the next one is asked about again — and it is also what ends a recording Ora started on its own. The evidence is the same in both directions, and so is the number of polls: one poll without a call stream is a browser reopening its capture, and two is the call being over.
+// Releasing the microphone is what ends a call, so the next one is asked about again — and it is also what ends a recording June started on its own. The evidence is the same in both directions, and so is the number of polls: one poll without a call stream is a browser reopening its capture, and two is the call being over.
 func (w *meetingWatch) step(users []string, recording bool) (ask, stop bool) {
 	if recording || len(users) == 0 {
 		w.held, w.asked = 0, false
@@ -244,7 +244,7 @@ func askBody(users []string) string {
 // recordNoticeKind is the kind the meeting question is raised under, on the window's card and in the answer registry alike.
 const recordNoticeKind = "meeting"
 
-// askToRecord puts the question to the user and reports whether they said to record. It goes to the desktop window's own card when a window is listening and to a desktop notification only when none is, which is the rule every other question Ora asks already followed — this one posted a GNOME banner even with the window open, so the answer sat on a surface the settled design does not use.
+// askToRecord puts the question to the user and reports whether they said to record. It goes to the desktop window's own card when a window is listening and to a desktop notification only when none is, which is the rule every other question June asks already followed — this one posted a GNOME banner even with the window open, so the answer sat on a surface the settled design does not use.
 func askToRecord(ctx context.Context, users []string) bool {
 	n := proactive.Notice{
 		Title:   "In a meeting?",
@@ -256,7 +256,7 @@ func askToRecord(ctx context.Context, users []string) bool {
 	return proactive.Ask(n, notifyWait, proactive.NotifySendAsk, nil) == "record"
 }
 
-// WatchForMeetings asks whether to record whenever an application other than Ora holds the microphone for long enough to be a call, and starts recording if the answer is yes. It returns when ctx is cancelled.
+// WatchForMeetings asks whether to record whenever an application other than June holds the microphone for long enough to be a call, and starts recording if the answer is yes. It returns when ctx is cancelled.
 //
 // The microphone is the signal rather than a meeting app's window, because it is the one thing every call has in common: it needs no list of which applications count, and it does not fire for a meeting tab that is merely open. Playback from the same application is what tells a call from dictation or a voice note. What the two together cannot tell is a call from, say, a voice message being listened to and answered, which is why the default is to ask rather than to record.
 //
@@ -291,9 +291,9 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 			users := readMicUsers(ctx)
 			ask, stop := w.step(users, rec.Active())
 			if stop {
-				slog.Info("the call Ora was recording has released the microphone, stopping the recording")
+				slog.Info("the call June was recording has released the microphone, stopping the recording")
 				if _, err := rec.StopAndProcess(ctx); err != nil {
-					slog.Error("failed to stop the meeting recording Ora started", "error", err)
+					slog.Error("failed to stop the meeting recording June started", "error", err)
 				}
 				continue
 			}
@@ -301,7 +301,7 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 				continue
 			}
 			// The prompt names the window rather than the process wherever one can be found, since a call in a browser tab is "chrome" and so is everything else in that browser.
-			// The desktop is asked before Ora's own history, because history is always behind here: the microphone opens as the call is joined and the tracker does not record the window for another minute or so, which is well after the question has been asked and answered.
+			// The desktop is asked before June's own history, because history is always behind here: the microphone opens as the call is joined and the tracker does not record the window for another minute or so, which is well after the question has been asked and answered.
 			var eps []db.Episode
 			if recent, err := rec.store.EpisodesInWindow(ctx, time.Now().Add(-windowLookback), time.Now(), windowLookbackRows); err == nil {
 				eps = recent
@@ -317,7 +317,7 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 				continue
 			}
 			if err := rec.Start(); err != nil {
-				slog.Error("failed to start the meeting recording Ora offered", "error", err)
+				slog.Error("failed to start the meeting recording June offered", "error", err)
 				continue
 			}
 			// Only a recording that actually started is one this watcher will stop again when the call goes away.

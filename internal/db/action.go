@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/memory"
+	"june/internal/memory"
 )
 
 // ActionItem is one thing somebody agreed to do, stored as a notes row. Alias of the memory type for the reason given on db.Thread.

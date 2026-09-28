@@ -2,7 +2,7 @@ package agent
 
 // End-to-end tests for the screen loop: a question goes to a scripted model, the model's tool calls run through the real dispatch, and those tools read and move a stand-in desktop that behaves the way the real ones did on the days these failures were logged.
 //
-// What makes these different from the tests beside them: nothing here reaches into one function. Each case names a dated incident from ora.log, replays the tool calls that session actually made, and asserts the task got done. Every failure in the 2026-09 audit lived at a seam — the accessibility read against the numbered list, the pointer against the compositor, the look budget against the step budget — and a test that drives one side of a seam cannot see any of them. The fakes stop at the process boundary: the accessibility bus, the screenshot camera, the portal, and the model's HTTP endpoint. Everything between them is the real code.
+// What makes these different from the tests beside them: nothing here reaches into one function. Each case names a dated incident from june.log, replays the tool calls that session actually made, and asserts the task got done. Every failure in the 2026-09 audit lived at a seam — the accessibility read against the numbered list, the pointer against the compositor, the look budget against the step budget — and a test that drives one side of a seam cannot see any of them. The fakes stop at the process boundary: the accessibility bus, the screenshot camera, the portal, and the model's HTTP endpoint. Everything between them is the real code.
 
 import (
 	"bytes"
@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/act"
-	"ora/internal/input"
-	"ora/internal/tracker"
+	"june/internal/act"
+	"june/internal/input"
+	"june/internal/tracker"
 )
 
 // flatPNG is a plain grey picture, the shape the camera hands back. The screen tests here are about the accessibility seam, not the pixels, so every capture is the same picture and the press check has nothing to judge either way — which is the "cannot say" answer it passes through.

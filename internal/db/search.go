@@ -13,8 +13,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
-	"ora/internal/obs"
-	"ora/internal/util"
+	"june/internal/obs"
+	"june/internal/util"
 )
 
 // MemoryHit is one FTS5 row — either a summary or a note.
@@ -219,7 +219,7 @@ END)`
 
 // searchMemoryWindow is SearchMemory constrained to rows whose timestamp falls in [since, until] and, when source is not "", to that one source; limit caps the rows returned. Both the window and the source are part of the WHERE clause, before the LIMIT, so a sparse window or a single-source caller still yields its rows instead of being crowded out by rows that rank higher — filtering after a cross-source LIMIT 10 returned nothing whenever ten other rows outranked the best note.
 func (s *Store) searchMemoryWindow(ctx context.Context, query, source string, since, until time.Time, limit int) ([]MemoryHit, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.SearchMemory")
 	defer span.End()
 
@@ -361,7 +361,7 @@ type rankedEpisodeCandidate struct {
 //
 // recency = recencyHalfLifeFactor^hoursSinceCreated (higher = more recent), importance is the stored episodes.importance column, and relevance is the FTS5 bm25 score inverted (bm25 is "lower is better") then normalized so the best match in the pool scores 1.0.
 func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]MemoryHit, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.RankedEpisodes")
 	defer span.End()
 
@@ -535,7 +535,7 @@ func (s *Store) leadWithUnderstanding(ctx context.Context, branch []string) []st
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	// init tracer to db module
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 
 	// starts the span, and will inherit a trace id from context
 	ctx, span := tracer.Start(ctx, "GetImplicitContext")

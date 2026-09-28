@@ -1,6 +1,6 @@
 //! The daemon's event stream, read in Rust and handed to the overlay window.
 //!
-//! The obvious place to read the stream is the page itself, with EventSource or a fetch body, and that is what every other Ora client does. It does not work here. Measured on this machine on 2026-09-04: the daemon flushed a ring nine milliseconds after the POST that made it, and the overlay page's fetch reader had received zero bytes thirteen seconds later, then 124 bytes of a 230 byte event, then the whole event only once a second ring had been sent. WebKitGTK holds a small trickle of response body back in its network process, so an event that is the only thing on the wire waits for the next one. A three second ring is over before it is drawn.
+//! The obvious place to read the stream is the page itself, with EventSource or a fetch body, and that is what every other June client does. It does not work here. Measured on this machine on 2026-09-04: the daemon flushed a ring nine milliseconds after the POST that made it, and the overlay page's fetch reader had received zero bytes thirteen seconds later, then 124 bytes of a 230 byte event, then the whole event only once a second ring had been sent. WebKitGTK holds a small trickle of response body back in its network process, so an event that is the only thing on the wire waits for the next one. A three second ring is over before it is drawn.
 //!
 //! So the stream is read here instead, straight off a socket, and each event is handed to the overlay window as a Tauri event. The daemon speaks plain HTTP on 127.0.0.1, so this needs no HTTP client library: a GET, the response headers thrown away, and the chunked body decoded by hand.
 
@@ -10,12 +10,12 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-/// Where the daemon listens. The same address every other Ora client uses.
+/// Where the daemon listens. The same address every other June client uses.
 const DAEMON_HOST: &str = "127.0.0.1";
 const DAEMON_PORT: u16 = 6942;
 
 /// The Tauri event the overlay page listens for. Its payload is the text of one event off the daemon's stream, exactly as the daemon wrote it.
-pub const PAGE_EVENT: &str = "ora://daemon-event";
+pub const PAGE_EVENT: &str = "june://daemon-event";
 
 /// The window the events are handed to.
 const OVERLAY_LABEL: &str = "overlay";
@@ -54,7 +54,7 @@ fn push(tx: &mpsc::SyncSender<String>, payload: String, dropping: &mut bool) -> 
         Err(mpsc::TrySendError::Full(_)) => {
             if !*dropping {
                 *dropping = true;
-                eprintln!("ora: overlay is behind; dropping events until it catches up");
+                eprintln!("june: overlay is behind; dropping events until it catches up");
             }
             Ok(())
         }
@@ -72,7 +72,7 @@ fn hand_over(app: AppHandle) -> mpsc::SyncSender<String> {
         for payload in rx {
             crate::window_command(&app, &payload);
             if let Err(e) = app.emit_to(OVERLAY_LABEL, PAGE_EVENT, payload) {
-                eprintln!("ora: overlay could not hand an event to the page: {e}");
+                eprintln!("june: overlay could not hand an event to the page: {e}");
             }
         }
     });
@@ -128,7 +128,7 @@ fn read_chunk<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(body))
 }
 
-/// Reads the daemon's IPC token. Input: none; it reads <data dir>/ipc-token, the same file every Ora client reads. Output: the token with surrounding whitespace stripped, or None when the daemon has not written one yet.
+/// Reads the daemon's IPC token. Input: none; it reads <data dir>/ipc-token, the same file every June client reads. Output: the token with surrounding whitespace stripped, or None when the daemon has not written one yet.
 fn read_token() -> Option<String> {
     let dir = crate::data_dir()?;
     let text = std::fs::read_to_string(dir.join("ipc-token")).ok()?;
@@ -149,7 +149,7 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
     let mut socket = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT)?;
     write!(
         socket,
-        "GET /events HTTP/1.1\r\nHost: {address}\r\nX-Ora-Token: {token}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+        "GET /events HTTP/1.1\r\nHost: {address}\r\nX-June-Token: {token}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
     )?;
     socket.flush()?;
 
@@ -183,7 +183,7 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
     }
 
     // One line per successful dial, so the window's log shows whether the drawing layer was ever subscribed when a drawing seems not to have appeared.
-    eprintln!("ora: overlay event stream: connected");
+    eprintln!("june: overlay event stream: connected");
 
     let handing = hand_over(app.clone());
 
@@ -209,7 +209,7 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
             // One line per event off the wire, bar the voice waveform's, so a drawing that never appeared can be placed: logged here and not drawn is the page's problem, never logged here is the daemon's or the connection's. The kind is only parsed out for an event that is going to be logged, so nothing on this thread parses a level tick.
             if worth_logging(&payload) {
                 eprintln!(
-                    "ora: overlay event: kind={} bytes={}",
+                    "june: overlay event: kind={} bytes={}",
                     payload_kind(&payload),
                     payload.len()
                 );
@@ -226,10 +226,10 @@ pub fn stream_events(app: AppHandle) {
         match read_token() {
             Some(token) => {
                 if let Err(e) = read_stream(&app, &token) {
-                    eprintln!("ora: overlay event stream: {e}");
+                    eprintln!("june: overlay event stream: {e}");
                 }
             }
-            None => eprintln!("ora: overlay event stream: no ipc token yet"),
+            None => eprintln!("june: overlay event stream: no ipc token yet"),
         }
         std::thread::sleep(RECONNECT);
     });

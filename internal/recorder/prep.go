@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode"
 
-	"ora/internal/db"
-	"ora/internal/tracker"
+	"june/internal/db"
+	"june/internal/tracker"
 )
 
 // defaultPrepTimeout bounds the whole meeting-prep flow, the brain call included. A prep that lands after the meeting has already got going is worse than none — it is noise mid-call rather than a heads-up before it — so a prep not ready within this window is dropped rather than delivered late.
@@ -22,7 +22,7 @@ const defaultPrepTimeout = 60 * time.Second
 const prepLookback = 5 * time.Minute
 
 // noMeetingPrepEnv, set to "1", turns meeting prep off without a rebuild. It is read at the moment prep would fire rather than once at startup, so toggling it takes effect on the very next meeting.
-const noMeetingPrepEnv = "ORA_NO_MEETING_PREP"
+const noMeetingPrepEnv = "JUNE_NO_MEETING_PREP"
 
 // prepInstruction tells the brain what to make of a past meeting's minutes when the same meeting is about to happen again. It is principles only — no worked example, no sample sentence to imitate — because a model shown one sentence to copy tends to hand it back with only the names changed.
 const prepInstruction = `You are preparing the user for a meeting that is about to start, using the minutes of the last time they met with the same people.
@@ -91,11 +91,11 @@ func (r *Recorder) prepMeeting() {
 	}
 	// Logged in full so a prep that turns out to be about the wrong meeting can be traced to the minutes it was written from.
 	slog.Info("meeting prep", "title", title, "from_note", note.ID, "text", text)
-	// The brief is filed as a conversation of Ora's own, so the card's Open lands on the whole text and the user can ask about it; a card shows three lines, and a prep is longer than that.
+	// The brief is filed as a conversation of June's own, so the card's Open lands on the whole text and the user can ask about it; a card shows three lines, and a prep is longer than that.
 	place, id := "", ""
 	if convID, err := r.store.CreateConversation(ctx, head, ""); err != nil {
 		slog.Warn("meeting prep: could not open a conversation for it, the card will open nothing", "error", err)
-	} else if _, err := r.store.AddTurn(ctx, convID, "ora", text, "ask", nil, nil); err != nil {
+	} else if _, err := r.store.AddTurn(ctx, convID, "june", text, "ask", nil, nil); err != nil {
 		slog.Warn("meeting prep: could not file the brief in its conversation", "error", err)
 	} else {
 		place, id = "chats", strconv.FormatInt(convID, 10)
@@ -127,7 +127,7 @@ func meetingTitle(eps []db.Episode) string {
 }
 
 // meetingParticipants pulls candidate names for who is on the call out of recent screen text, using the same pattern primingPrompt mines a chat sender's name from in transcribe.go: a name written immediately before a colon at the start of its own line, which is how a chat window labels who is talking. Unlike primingPrompt, which runs after the meeting to prime whisper, this runs the moment the meeting is detected, against whatever the tracker has already captured, before a single word of transcript exists.
-// known is who Ora already knows about the user's life, from personal context; a candidate matching one of these names is kept even if its shape or wording would otherwise get it dropped as interface chrome.
+// known is who June already knows about the user's life, from personal context; a candidate matching one of these names is kept even if its shape or wording would otherwise get it dropped as interface chrome.
 func meetingParticipants(eps []db.Episode, known []string) []string {
 	return collectMeetingNames(eps, true, known)
 }
@@ -234,7 +234,7 @@ func caselessRuns(line string) []string {
 	return out
 }
 
-// collectMeetingNames pulls people's names off the meeting's own window. withTitle includes the window title as a source, which is right when the names are only a hint to search past minutes with and wrong when they are counted. known is who Ora already knows about from personal context; a candidate already known by that name is kept regardless of shape, since a real name Ora has already confirmed outranks a heuristic guessing whether something is one.
+// collectMeetingNames pulls people's names off the meeting's own window. withTitle includes the window title as a source, which is right when the names are only a hint to search past minutes with and wrong when they are counted. known is who June already knows about from personal context; a candidate already known by that name is kept regardless of shape, since a real name June has already confirmed outranks a heuristic guessing whether something is one.
 func collectMeetingNames(eps []db.Episode, withTitle bool, known []string) []string {
 	knownSet := map[string]bool{}
 	for _, k := range known {
@@ -358,7 +358,7 @@ func meetingTitleFragments(title string) []string {
 // titleHistoryLimit is how many distinct past window titles are read to judge which words in a title identify a meeting. A few thousand covers months of use and costs one indexed scan.
 const titleHistoryLimit = 2000
 
-// rarestFragments keeps only the least common words of a window title, measured across every window title Ora has recorded.
+// rarestFragments keeps only the least common words of a window title, measured across every window title June has recorded.
 //
 // Input: the fragments read from the current title, and the distinct titles seen before. Output: the fragments tied for least common, or all of them when there is no history to judge by.
 //

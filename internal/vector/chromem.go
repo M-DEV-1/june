@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 
 	chromem "github.com/philippgille/chromem-go"
 )
@@ -27,7 +27,7 @@ type ChromemIndex struct {
 	createdAt   map[string]time.Time // id -> createdAt, for oldest-first eviction
 }
 
-// collectionName is the single chromem collection ORA keeps its vectors in.
+// collectionName is the single chromem collection June keeps its vectors in.
 const collectionName = "memory"
 
 // loadSidecar reads the sidecar file at path. A missing, unreadable, or corrupt file (e.g. truncated JSON left by a crash mid-write, before persistSidecar wrote atomically) just means starting from an empty map rather than failing — the sidecar only holds recoverable createdAt bookkeeping for eviction ordering, not the vectors themselves, so refusing to construct the index over it would silently and permanently disable semantic search instead (see FINDING 5: the caller only logs a warning and leaves the index nil, with nothing to repair the file afterward).

@@ -12,32 +12,32 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/actjob"
-	"ora/internal/agent"
-	"ora/internal/brain"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/dream"
-	"ora/internal/embed"
-	"ora/internal/ipc"
-	"ora/internal/ipctoken"
-	"ora/internal/memory"
-	"ora/internal/proactive"
-	"ora/internal/recorder"
-	"ora/internal/study"
-	"ora/internal/tally"
-	"ora/internal/tracker"
-	"ora/internal/vector"
-	"ora/internal/window"
+	"june/internal/act"
+	"june/internal/actjob"
+	"june/internal/agent"
+	"june/internal/brain"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/dream"
+	"june/internal/embed"
+	"june/internal/ipc"
+	"june/internal/ipctoken"
+	"june/internal/memory"
+	"june/internal/proactive"
+	"june/internal/recorder"
+	"june/internal/study"
+	"june/internal/tally"
+	"june/internal/tracker"
+	"june/internal/vector"
+	"june/internal/window"
 )
 
 // meetingRecorder is the tray's handle on the meeting recorder. startDaemonServices assigns it once the store exists, before registerSNI runs; it stays nil if the daemon never got that far, and every read of it is nil-safe.
 var meetingRecorder *recorder.Recorder
 
-// DaemonPort is the loopback port the daemon binds and every client in this package dials. Overridable via ORA_PORT so a second daemon (a test, a dry run) can run beside the live one without fighting it for the port. Defaults to 6942.
+// DaemonPort is the loopback port the daemon binds and every client in this package dials. Overridable via JUNE_PORT so a second daemon (a test, a dry run) can run beside the live one without fighting it for the port. Defaults to 6942.
 var DaemonPort = func() string {
-	if p := os.Getenv("ORA_PORT"); p != "" {
+	if p := os.Getenv("JUNE_PORT"); p != "" {
 		return p
 	}
 	return "6942"
@@ -90,13 +90,13 @@ const maxDeriveStateNotes = 10
 const maxDeriveStateEpisodes = 200
 
 func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) error {
-	slog.Info("Starting Ora Daemon...")
+	slog.Info("Starting June Daemon...")
 
 	// port binding instance lock to prevent double spawning
 	listener, err := net.Listen("tcp", "127.0.0.1:"+DaemonPort)
 	if err != nil {
 		// A bind failure means another daemon already holds the port, and this one must say so on stderr and exit non-zero. Returning nil made the process exit 0, so systemd called a restart a success and the /ping that followed was answered by the old daemon still running the old build.
-		fmt.Fprintf(os.Stderr, "ora: port %s is already in use, so another daemon is still running: %v\n", DaemonPort, err)
+		fmt.Fprintf(os.Stderr, "june: port %s is already in use, so another daemon is still running: %v\n", DaemonPort, err)
 		slog.Error("failed to bind daemon port", "port", DaemonPort, "error", err)
 		return fmt.Errorf("bind daemon port %s: %w", DaemonPort, err)
 	}
@@ -149,7 +149,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	geminiQuota := brain.NewQuotaState(config.DataDir())
 	geminiQuotaOpts := brain.DefaultQuotaOptions()
 
-	// brainUsage keeps what each provider says about the user's own allowance, so the brain picker can draw a bar per brain. Codex fills it from the rate-limit headers of every response Ora already makes; Claude is read from its OAuth usage endpoint when the picker is opened; Gemini's is computed from geminiQuota below. It persists under the data dir beside brain_quota.json, so the bars are there the moment the window opens after a restart.
+	// brainUsage keeps what each provider says about the user's own allowance, so the brain picker can draw a bar per brain. Codex fills it from the rate-limit headers of every response June already makes; Claude is read from its OAuth usage endpoint when the picker is opened; Gemini's is computed from geminiQuota below. It persists under the data dir beside brain_quota.json, so the bars are there the moment the window opens after a restart.
 	brainUsage := brain.NewUsageStore(config.DataDir())
 	agent.SetUsageRecorder(brainUsage)
 
@@ -164,7 +164,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	meetingRecorder = recorder.New(ctx, config.DataDir(), store, apiKey)
 
-	// Ora watches the microphone rather than the meeting apps: a call is the one thing that always takes it, and watching it needs no list of which applications count as a meeting.
+	// June watches the microphone rather than the meeting apps: a call is the one thing that always takes it, and watching it needs no list of which applications count as a meeting.
 	if appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord {
 		go recorder.WatchForMeetings(ctx, meetingRecorder, appConfig.Meetings.AutoRecord)
 	}
@@ -307,7 +307,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		// recompute the working-state cache from recent summaries + notes.
 		// The tick stays at five minutes, but memory.StateGate decides whether the call is actually made: at least ten minutes since the last derive, and either a window the user was not in before or enough new summaries to be worth re-reading. Before this gate every tick that found a single new summary made an API call, which is how one unattended job spent a 500-request day by noon on 2026-09-04.
 		var gate memory.StateGate
-		// The ten-minute floor belongs to the store, not to this process: an empty gate let the first tick of every restart through however recently the state had been derived, so a day of ora-restart cycles bought a derive call each. The working state's own updated_at is when the last derive succeeded, so the loop starts from there and the first tick inside the floor records it in the gate instead of calling the model.
+		// The ten-minute floor belongs to the store, not to this process: an empty gate let the first tick of every restart through however recently the state had been derived, so a day of june-restart cycles bought a derive call each. The working state's own updated_at is when the last derive succeeded, so the loop starts from there and the first tick inside the floor records it in the gate instead of calling the model.
 		var lastDerive time.Time
 		if at, err := store.MemoryAsOf(ctx, "working_state"); err != nil {
 			slog.Warn("could not read when the working state was last derived, the first tick will derive", "error", err)
@@ -376,7 +376,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		})
 	}
 
-	// proactive seams: the evening close writes Ora's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
+	// proactive seams: the evening close writes June's diary for the day and the morning brief meets the first activity after the configured hour. One goroutine, per-minute condition checks, everything best-effort.
 	// These duties are unattended, so they run on the background model like every other one: config.TextModel's free tier allows 20 requests a day against DefaultBackgroundModel's 500, and dreaming alone ticks every five minutes all night. No Job* name exists for the proactive duties yet, and BackgroundModel degrades a name it does not know to DefaultBackgroundModel, which is the model wanted here — naming it "proactive" means a later entry in background_models pins it without another change here.
 	// askAgent answers /ask questions the same way the CLI's text-eval path does: no mic/speaker (text only), the daemon's own store as the ContextReader, no compiler (buffer context isn't needed here).
 	askAgent := agent.NewAgent(nil, nil, store, nil, apiKey)
@@ -427,9 +427,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	scheduler.SetBrainTimeout(appConfig.Brain.Timeout())
 	// One-click answers to the morning brief's question about an item that has gone quiet. The notification blocks until it is answered, so the scheduler asks from its own goroutine.
 	scheduler.SetAsk(proactive.NotifySendAsk)
-	// Every other notice is posted straight to the desktop's notification service, carrying the buttons a macOS reminder carries: Open in Ora, Done, In an hour, This evening, Tomorrow. Presses arrive back over the session bus, so nothing blocks waiting for one, and a machine with no session bus falls back to notify-send.
+	// Every other notice is posted straight to the desktop's notification service, carrying the buttons a macOS reminder carries: Open in June, Done, In an hour, This evening, Tomorrow. Presses arrive back over the session bus, so nothing blocks waiting for one, and a machine with no session bus falls back to notify-send.
 	scheduler.SetNotifier(proactive.NewNotifier(ctx))
-	// "Open in Ora", and a click on the notification body itself, do what the tray's own Open Ora item does.
+	// "Open in June", and a click on the notification body itself, do what the tray's own Open June item does.
 	scheduler.SetOpenWindow(func() {
 		authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
 	})
@@ -564,13 +564,13 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 		return *a, true
 	})
-	// Ora's own hover is drawn over whatever the user was looking at, so a picture of the screen taken while it is up has Ora's card sitting in the middle of the thing the question was about. The window takes itself off the screen for the moment the picture is taken and puts itself back exactly as it was — a window already hidden stays hidden, so this costs nothing when the hover is not up.
+	// June's own hover is drawn over whatever the user was looking at, so a picture of the screen taken while it is up has June's card sitting in the middle of the thing the question was about. The window takes itself off the screen for the moment the picture is taken and puts itself back exactly as it was — a window already hidden stays hidden, so this costs nothing when the hover is not up.
 	// ponytail: a fixed settle wait rather than an acknowledgement from the window. The instruction reaches it over the event stream in a millisecond or two and the compositor needs a frame to redraw; if that ever proves too short the window should answer that it is hidden and this should wait for that instead.
 	tracker.SetScreenGuard(func() func() {
 		if !ipcServer.Subscribed(time.Minute) {
 			return nil
 		}
-		// Every capture pays the settle wait, not only the ones taken while Ora's window is in front: during a computer-use job the target application holds the focus while the hover stays up over it with its live steps, and a guard keyed on focus left the hover in every picture the job took (found 2026-09-10). A window already hidden ignores the instruction, so the cost when the hover is down is the wait alone.
+		// Every capture pays the settle wait, not only the ones taken while June's window is in front: during a computer-use job the target application holds the focus while the hover stays up over it with its live steps, and a guard keyed on focus left the hover in every picture the job took (found 2026-09-10). A window already hidden ignores the instruction, so the cost when the hover is down is the wait alone.
 		ipcServer.Tell("conceal")
 		time.Sleep(concealSettle)
 		return func() { ipcServer.Tell("reveal") }
@@ -581,7 +581,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	})
 	dreamer.OnNight = func(running bool) { ipcServer.Announce("dreaming", onOff(running)) }
 
-	// A proactive moment goes to Ora's own card in the hover window when a window is there to show it, and falls back to the desktop's notifications only when none has been listening for a minute. Returning false is what makes that fallback happen, so a window that has just gone away does not swallow the notice.
+	// A proactive moment goes to June's own card in the hover window when a window is there to show it, and falls back to the desktop's notifications only when none has been listening for a minute. Returning false is what makes that fallback happen, so a window that has just gone away does not swallow the notice.
 	proactive.SetNoticeSender(func(n proactive.Notice) bool {
 		if !ipcServer.Subscribed(time.Minute) {
 			return false
@@ -658,9 +658,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}()
 	// Codex answers asks the window routes to it by calling the ChatGPT backend directly with the user's own login, running the same tools through the same gate as the Gemini text path.
 	ipcServer.AddBrain("codex", agent.CodexBrain{Agent: askAgent})
-	// Claude answers through the Claude Code command line on the user's own subscription, with Ora's tools offered to it over MCP, so working on the screen does not depend on Codex's smaller monthly allowance.
+	// Claude answers through the Claude Code command line on the user's own subscription, with June's tools offered to it over MCP, so working on the screen does not depend on Codex's smaller monthly allowance.
 	ipcServer.AddBrain("claude", agent.ClaudeBrain{Agent: askAgent})
-	// Antigravity answers through the agy command line on the user's own Google plan, with Ora's tools offered to it over MCP the same way Claude gets them. The brain id is "antigravity" because that is the id GET /brains publishes and the window's picker posts back; the CLI it runs is called agy.
+	// Antigravity answers through the agy command line on the user's own Google plan, with June's tools offered to it over MCP the same way Claude gets them. The brain id is "antigravity" because that is the id GET /brains publishes and the window's picker posts back; the CLI it runs is called agy.
 	ipcServer.AddBrain("antigravity", agent.AgyBrain{Agent: askAgent})
 	// Gemini is the default asker's own first choice, so naming it routes through that same path; without this line GET /brains offers Gemini while POST /ask refuses the name with a 400, which is what the window's picker hit on 2026-09-05.
 	ipcServer.AddBrain("gemini", askAgent)
@@ -751,7 +751,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 				}
 			}
 		})
-		// The compiler's activity buffer is written out next, before the store it writes into is closed. It is otherwise flushed only on the hourly tick, so a logout or an ora-restart lost up to an hour of activity — the same loss the recorder above was given a shutdown step for on 2026-09-01.
+		// The compiler's activity buffer is written out next, before the store it writes into is closed. It is otherwise flushed only on the hourly tick, so a logout or an june-restart lost up to an hour of activity — the same loss the recorder above was given a shutdown step for on 2026-09-01.
 		// The context is not the root one: SIGTERM has already cancelled the root context by the time stop() runs, and a flush started with it would fail on its first query. It carries the same deadline as the bound, so a flush that runs out of time stops at its next call rather than being left behind writing into a store this function is about to close.
 		within("flushing the activity buffer", shutdownFlushBound, func() {
 			if compiler != nil {
@@ -774,7 +774,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			}
 		})
 		// Five seconds: database/sql's Close waits for every connection in use to come back, and the daemon's background sweeps — vector reconciliation, note consolidation, episodic compaction — hold one for the length of their query. Five is long enough for a statement to finish and short enough that a sweep caught mid-flight does not keep the port bound.
-		// The Antigravity process an ask keeps alive is this daemon's child too; left running it would hold Ora's tool server and answer nobody. Three seconds: the kill is immediate and the reap runs in the background.
+		// The Antigravity process an ask keeps alive is this daemon's child too; left running it would hold June's tool server and answer nobody. Three seconds: the kill is immediate and the reap runs in the background.
 		within("stopping the agy session", 3*time.Second, askAgent.CloseAgySession)
 		within("closing the store", 5*time.Second, func() { store.Close() })
 		// The window raiser's session-bus connection is this process's too, so it is released here rather than left to process exit. Two seconds: closing a D-Bus connection is local and takes microseconds; the bound is there for a wedged bus, not for the work.

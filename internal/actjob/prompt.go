@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"ora/internal/act"
-	"ora/internal/util"
+	"june/internal/act"
+	"june/internal/util"
 )
 
 // What one round's prompt is allowed to carry. The whole trail of a forty-step job lives in the checkpoint, not here: a round deciding which button to press next needs the plan, where the job has got to, what the screen looks like now and what the last few tools said, and nothing else. Sized so that the prompt of a job forty steps in is about the same as the prompt of a job one step in, which is what makes a long job affordable on a subscription.
@@ -39,7 +39,7 @@ func pushCapped(list []string, entry string, keep, cap int) []string {
 }
 
 // systemPrompt is the fixed instruction every round of every job opens with: one action per round, the change it must produce written down first, and the JSON to reply in. It takes no arguments, so the same bytes open every round of every job and a provider's prompt cache can match them.
-var systemPrompt = `You are Ora, working through one task on the user's screen, one checked step at a time.
+var systemPrompt = `You are June, working through one task on the user's screen, one checked step at a time.
 
 Each round you are shown the goal, your own plan, where you have got to, the last two readings of the screen and the last few tool results. Decide exactly ONE action, and write down the change it should produce before you take it. Something else checks whether that change actually came, so the check has to be a real, visible thing, not "the page loads".
 

@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"ora/internal/util"
+	"june/internal/util"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -26,16 +26,16 @@ func collapsedThoughtPreview(content string) string {
 	return util.Runes(util.OneLine(content), collapsedThoughtRunes) + "… (ctrl+e expands)"
 }
 
-// restartDetectionMinRunes is the minimum rune length an incoming ora chunk must have to be treated as a restarted utterance (see mergeOraChunk) rather than appended. The Live API's native-audio models are documented to sometimes restart an utterance from the beginning — often triggered by the model's own voice echoing into a hot mic — getting a little further each time, with no interrupted:true between attempts. A short chunk that happens to coincide with the block's own opening (a legitimately repeated short word) is common enough that a low threshold would misfire on it; ~10 runes is well past what any real short word collides on.
+// restartDetectionMinRunes is the minimum rune length an incoming june chunk must have to be treated as a restarted utterance (see mergeJuneChunk) rather than appended. The Live API's native-audio models are documented to sometimes restart an utterance from the beginning — often triggered by the model's own voice echoing into a hot mic — getting a little further each time, with no interrupted:true between attempts. A short chunk that happens to coincide with the block's own opening (a legitimately repeated short word) is common enough that a low threshold would misfire on it; ~10 runes is well past what any real short word collides on.
 const restartDetectionMinRunes = 10
 
-// mergeOraChunk folds an incoming non-thought ora chunk into the block's existing content, handling three ways OutputTranscription can resend text instead of cleanly continuing it:
+// mergeJuneChunk folds an incoming non-thought june chunk into the block's existing content, handling three ways OutputTranscription can resend text instead of cleanly continuing it:
 //  1. Restart: the chunk is itself a prefix of the block so far (>= restartDetectionMinRunes) — the model restarted its utterance from the beginning, so the block resets to the new chunk instead of appending, collapsing a restart loop down to its final, longest attempt.
 //  2. Cumulative snapshot: the block so far is a prefix of the chunk — the chunk is the whole utterance-to-date rather than a delta, so the block is replaced wholesale. Kept as defense even though OutputTranscription is documented as incremental fragments in practice.
 //  3. Exact resend: the block already ends with the chunk — a duplicate re-send, dropped as a no-op.
 //
 // Anything else is a normal incremental fragment and is appended as-is.
-func mergeOraChunk(msg *Message, content string) {
+func mergeJuneChunk(msg *Message, content string) {
 	switch {
 	case len([]rune(content)) >= restartDetectionMinRunes && strings.HasPrefix(msg.Content, content):
 		msg.Content = content
@@ -57,7 +57,7 @@ func (m *model) renderMessage(msg Message, width int) string {
 
 	rowStyle := lipgloss.NewStyle().Width(width)
 
-	// Trimmed only here, at render time — streamLine's own accumulation keeps the raw content untouched (a restart/snapshot merge in mergeOraChunk still needs the real trailing bytes). Thought parts commonly end in one or more blank lines, which otherwise render as empty bordered rows inside the thought box.
+	// Trimmed only here, at render time — streamLine's own accumulation keeps the raw content untouched (a restart/snapshot merge in mergeJuneChunk still needs the real trailing bytes). Thought parts commonly end in one or more blank lines, which otherwise render as empty bordered rows inside the thought box.
 	displayContent := strings.TrimRight(msg.Content, "\n \t")
 
 	var prefix, content string
@@ -72,7 +72,7 @@ func (m *model) renderMessage(msg Message, width int) string {
 	case "you":
 		prefix = m.styles.PrefixYou.Render("you")
 		content = m.styles.TextYou.Width(contentWidth).Render(displayContent)
-	case "ora":
+	case "june":
 		if msg.IsThought {
 			prefix = m.styles.PrefixThought.Render("thought")
 			if m.expandThoughts {
@@ -82,8 +82,8 @@ func (m *model) renderMessage(msg Message, width int) string {
 				content = collapsedStyle.Width(contentWidth).Render(collapsedThoughtPreview(displayContent))
 			}
 		} else {
-			prefix = m.styles.PrefixOra.Render("ora")
-			content = m.styles.TextOra.Width(contentWidth).Render(displayContent)
+			prefix = m.styles.PrefixJune.Render("june")
+			content = m.styles.TextJune.Width(contentWidth).Render(displayContent)
 		}
 	case "tool":
 		// Center the dot in the gutter
@@ -115,7 +115,7 @@ func (m *model) renderBanner(content string, width int) string {
 		if strings.Contains(l, "██") {
 			// center the ascii logo lines
 			padding := max(0, (width-lipgloss.Width(l))/2)
-			centeredLines = append(centeredLines, strings.Repeat(" ", padding)+m.styles.OraLogo.Render(l))
+			centeredLines = append(centeredLines, strings.Repeat(" ", padding)+m.styles.JuneLogo.Render(l))
 		} else if strings.TrimSpace(l) != "" {
 			// center and style the tagline
 			padding := max(0, (width-lipgloss.Width(l))/2)

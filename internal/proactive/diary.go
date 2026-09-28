@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // maybeClose writes the day's diary entry once the close hour has passed, provided the day has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
@@ -99,7 +99,7 @@ func (s *Scheduler) closeDay(ctx context.Context, now time.Time, day string) err
 }
 
 // diaryInstruction is the head of the evening diary prompt; composeDiaryPrompt appends the day's material after it.
-const diaryInstruction = `You are Ora, an ambient companion that watches the user's day through their screen and keeps a private diary in its own voice. Write today's entry, in the first person, about the user's day.
+const diaryInstruction = `You are June, an ambient companion that watches the user's day through their screen and keeps a private diary in its own voice. Write today's entry, in the first person, about the user's day.
 
 Principles:
 - Ground everything in the material below. If the material does not say it, the entry does not say it — no invented events, names, times, or motives.
@@ -166,7 +166,7 @@ func (s *Scheduler) composeDiaryPrompt(ctx context.Context, now time.Time) (stri
 }
 
 // understandingInstruction heads the second, short close call that rewrites the bounded model-of-the-user document in place.
-const understandingInstruction = `You are Ora. Below are your current understanding of the user — your standing model of who they are, what they are working toward, their habits, and the people around them — and today's diary entry. Rewrite the understanding so it stays current.
+const understandingInstruction = `You are June. Below are your current understanding of the user — your standing model of who they are, what they are working toward, their habits, and the people around them — and today's diary entry. Rewrite the understanding so it stays current.
 
 Principles:
 - Fold in only durable shifts: things that will still be true and still matter weeks from now. A one-day event does not belong unless it changed something lasting.

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // TestSetAutostart_WritesAndRemovesDesktopEntry drives the whole enable/disable cycle against a throwaway XDG_CONFIG_HOME so the real ~/.config/autostart is never touched.
@@ -27,9 +27,9 @@ func TestSetAutostart_WritesAndRemovesDesktopEntry(t *testing.T) {
 		t.Error("expected autostart to report enabled after setAutostart(true)")
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "autostart", "ora.desktop"))
+	data, err := os.ReadFile(filepath.Join(dir, "autostart", "june.desktop"))
 	if err != nil {
-		t.Fatalf("expected ora.desktop to exist: %v", err)
+		t.Fatalf("expected june.desktop to exist: %v", err)
 	}
 	entry := string(data)
 
@@ -56,8 +56,8 @@ func TestSetAutostart_WritesAndRemovesDesktopEntry(t *testing.T) {
 	if autostartEnabled() {
 		t.Error("expected autostart to report disabled after setAutostart(false)")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "autostart", "ora.desktop")); !os.IsNotExist(err) {
-		t.Errorf("expected ora.desktop to be removed, stat err = %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "autostart", "june.desktop")); !os.IsNotExist(err) {
+		t.Errorf("expected june.desktop to be removed, stat err = %v", err)
 	}
 
 	// disabling again on an already-absent entry is not an error
@@ -68,12 +68,12 @@ func TestSetAutostart_WritesAndRemovesDesktopEntry(t *testing.T) {
 
 // TestDesktopEntry_EscapesSpecialCharacters verifies a path containing a space and a backslash is escaped per the Desktop Entry Specification's quoting rules (FINDING 11): Exec= is Go's strconv.Quote today, which is not Desktop Entry quoting, and Path= is emitted raw with no escaping at all — an install path with either character produces an entry a spec-compliant parser reads wrong or silently fails to launch.
 func TestDesktopEntry_EscapesSpecialCharacters(t *testing.T) {
-	exe := `/home/user/My Apps/back\slash/ora`
+	exe := `/home/user/My Apps/back\slash/june`
 	dir := filepath.Dir(exe)
 
 	entry := desktopEntry(exe, dir)
 
-	wantExec := `Exec="/home/user/My Apps/back\\slash/ora" --daemon`
+	wantExec := `Exec="/home/user/My Apps/back\\slash/june" --daemon`
 	if !strings.Contains(entry, wantExec) {
 		t.Errorf("expected entry to contain %q, got:\n%s", wantExec, entry)
 	}
@@ -83,10 +83,10 @@ func TestDesktopEntry_EscapesSpecialCharacters(t *testing.T) {
 	}
 }
 
-// TestApplyAutostart_WritesConfigAndEntry checks the --autostart flag path: it persists the choice to ora-config.json and installs or removes the login entry to match, and rejects anything that isn't on or off.
+// TestApplyAutostart_WritesConfigAndEntry checks the --autostart flag path: it persists the choice to june-config.json and installs or removes the login entry to match, and rejects anything that isn't on or off.
 func TestApplyAutostart_WritesConfigAndEntry(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 
 	if err := applyAutostart("off"); err != nil {
 		t.Fatalf("applyAutostart(off) returned unexpected error: %v", err)

@@ -413,7 +413,7 @@ func TestModelCallsOnHeaviestFirst(t *testing.T) {
 
 // TestAddTokenUseUnderConcurrentWriters files calls from many goroutines at once against a file-backed store, so the DSN's WAL and busy_timeout are really exercised — the in-memory pool is pinned to one connection and would never see a busy database. Every write must land: a dropped row is a call the user is charged for and cannot see.
 func TestAddTokenUseUnderConcurrentWriters(t *testing.T) {
-	store, err := New(t.TempDir() + "/ora.db")
+	store, err := New(t.TempDir() + "/june.db")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // fakeWhisper writes a shell script that stands in for whisper-cli: it prints script to stdout, complaint to stderr, and exits 0. Returns its path.
@@ -373,7 +373,7 @@ func TestRenderTranscript(t *testing.T) {
 	}
 }
 
-// The priming prompt is built out of what Ora already saw on screen during the meeting: it carries the domain's own acronyms, proper nouns and participant names within budget and readable as sentences, leaves out browser chrome, produces nothing at all when there is no context, orders names after terms so truncation can't reach them, takes participants only from the meeting's own window, and includes the people the personal-context store already knows.
+// The priming prompt is built out of what June already saw on screen during the meeting: it carries the domain's own acronyms, proper nouns and participant names within budget and readable as sentences, leaves out browser chrome, produces nothing at all when there is no context, orders names after terms so truncation can't reach them, takes participants only from the meeting's own window, and includes the people the personal-context store already knows.
 func TestPrimingPrompt(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -602,7 +602,7 @@ func TestWhisperThreads_AGPURunGetsMoreThanACPURunBecauseItIsAlone(t *testing.T)
 		t.Errorf("a GPU run asked for %d threads on %d cores, want no more than %d", gpu, runtime.NumCPU(), max)
 	}
 
-	t.Setenv("ORA_TRANSCRIBE_THREADS", "6")
+	t.Setenv("JUNE_TRANSCRIBE_THREADS", "6")
 	if cpu, gpu := whisperThreads(false), whisperThreads(true); cpu != 6 || gpu != 6 {
 		t.Errorf("whisperThreads = %d on the CPU and %d on the GPU, want the configured 6 either way", cpu, gpu)
 	}

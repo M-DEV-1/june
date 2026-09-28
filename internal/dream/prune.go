@@ -5,8 +5,8 @@ import (
 	"context"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/db"
+	"june/internal/config"
+	"june/internal/db"
 )
 
 // pruneReport is what the pruning stage hands the night's log: how many rows each pass removed, and how many rows the policy held back, split by the rule that held them. Every number is a count of rows in the store, so a person reading the log sees the policy working instead of guessing at it.

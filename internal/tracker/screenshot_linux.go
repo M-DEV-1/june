@@ -31,11 +31,11 @@ const (
 )
 
 // screenshotApps are the app-ids a stored screenshot decision can land under for us: "" because we run unsandboxed, plus our own name as a defensive fallback.
-var screenshotApps = []string{"", "ora"}
+var screenshotApps = []string{"", "june"}
 
 // gnome-shell's own screenshot API, which takes a flash flag the xdg-desktop-portal API does not expose. The portal on GNOME just calls this method with flash=true, which is where the full-screen white flash on every vision capture comes from.
 // gnome-shell only accepts this call from a short list of well-known bus names (settings-daemon media keys, the GNOME and GTK portal backends, and org.gnome.Screenshot). org.gnome.Screenshot is the one we can claim: it belongs to the standalone gnome-screenshot tool, which is not installed on a default GNOME 46 desktop.
-// Tradeoff: while ORA runs, gnome-screenshot would fail to take the name and refuse to start. We ask with DoNotQueue so we never steal it from a running instance, and fall back to the portal if it is already owned.
+// Tradeoff: while June runs, gnome-screenshot would fail to take the name and refuse to start. We ask with DoNotQueue so we never steal it from a running instance, and fall back to the portal if it is already owned.
 const (
 	shellScreenshotName   = "org.gnome.Screenshot"
 	shellScreenshotPath   = "/org/gnome/Shell/Screenshot"
@@ -89,7 +89,7 @@ func screenshotShell(ctx context.Context) ([]byte, error) {
 // shotTempPath makes a private directory for gnome-shell to write one screenshot into. Input: none. Output: the path to hand the shell, a function that removes the file and the directory, and an error when the directory cannot be made.
 // The mode has to sit on the directory rather than the file: gnome-shell creates the PNG itself, under its own umask, so a file we pre-created 0600 can come back 0644 and a picture of the whole desktop is readable by every other account on the machine for as long as it is on disk.
 func shotTempPath() (string, func(), error) {
-	dir, err := os.MkdirTemp("", "ora-shot-")
+	dir, err := os.MkdirTemp("", "june-shot-")
 	if err != nil {
 		return "", nil, fmt.Errorf("temp dir: %w", err)
 	}
@@ -226,7 +226,7 @@ func screenshotPortal(ctx context.Context) ([]byte, error) {
 	// where SENDER is our unique name sans leading ':' with '.' -> '_'.
 	sender := strings.TrimPrefix(conn.Names()[0], ":")
 	sender = strings.ReplaceAll(sender, ".", "_")
-	token := fmt.Sprintf("ora_shot_%d", screenshotSeq.Add(1))
+	token := fmt.Sprintf("june_shot_%d", screenshotSeq.Add(1))
 	handlePath := dbus.ObjectPath(
 		"/org/freedesktop/portal/desktop/request/" + sender + "/" + token,
 	)

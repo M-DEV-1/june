@@ -51,7 +51,7 @@ function DayDocument({ text, briefInPage }: { text: string; briefInPage: boolean
           </p>
         ))
       ) : (
-        <p className="text-muted-foreground">Ora wrote nothing for this day.</p>
+        <p className="text-muted-foreground">June wrote nothing for this day.</p>
       )}
     </div>
   );
@@ -71,7 +71,7 @@ export function Page({ page, wide }: { page: DayView; wide: boolean }) {
         <h2 className="text-title text-foreground">{pageHeading(page.date)}</h2>
         {/* In a wide pane the rail carries the daemon's own line about the day, so it is not printed twice. */}
         {heading && !wide ? <p className="mt-2 text-meta text-muted-foreground">{heading}</p> : null}
-        {/* The morning brief is what Ora said at the start of the day; the sentences under it are what it wrote at the end, so the brief goes first and is marked as its own part of the page rather than run together with the evening's account. */}
+        {/* The morning brief is what June said at the start of the day; the sentences under it are what it wrote at the end, so the brief goes first and is marked as its own part of the page rather than run together with the evening's account. */}
         {briefInPage ? (
           <div className="document mt-8">
             <h3 id="day-brief">The morning brief</h3>

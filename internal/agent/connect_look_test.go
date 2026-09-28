@@ -8,7 +8,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // A live voice session's tool calls must share one screen state, or every one of them gets a throwaway and draw can never tell that look ran at all.

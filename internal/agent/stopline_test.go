@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
 // irreversible is the code-level backstop for the user's stop-line rule ("never click or type into anything that sends, pays, deletes or submits unless I said go"): a description in the system prompt is something a model can talk itself out of, this is not.
@@ -176,7 +176,7 @@ func TestExecuteTool_Click_RemembersTheFieldForTypeText(t *testing.T) {
 	}
 }
 
-// A field is refused outright, with no consent phrase able to unlock it, either because its own label names a secret — the whole point is that Ora never types a password, a card number or a code on the user's behalf — or because a password box carries no label at all (the accessibility walk blanks it), so its role alone tells type_text to refuse it.
+// A field is refused outright, with no consent phrase able to unlock it, either because its own label names a secret — the whole point is that June never types a password, a card number or a code on the user's behalf — or because a password box carries no label at all (the accessibility walk blanks it), so its role alone tells type_text to refuse it.
 func TestExecuteTool_TypeText_RefusesSecretFieldOutright(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -229,7 +229,7 @@ func TestExecuteTool_TypeText_RefusesSecretFieldOutright(t *testing.T) {
 // Before any click has happened, type_text has no field to blame — it must fall through to typing rather than refuse something it cannot describe.
 func TestExecuteTool_TypeText_WithNoFocusedFieldYetTypes(t *testing.T) {
 	a, f := actingAgent(t)
-	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "ora"})
+	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "june"})
 	if len(f.typed) != 1 || !strings.Contains(got, "typed") {
 		t.Errorf("typed=%v got=%q, want it to type with nothing known about focus", f.typed, got)
 	}
@@ -259,7 +259,7 @@ func TestExecuteTool_TypeText_RefusesWhenTheFieldNoLongerHoldsTheKeyboard(t *tes
 	a.executeTool(context.Background(), "observe_screen", map[string]any{})
 	a.executeTool(context.Background(), "click", map[string]any{"n": float64(2)})
 
-	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "ora"})
+	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "june"})
 
 	if len(f.typed) != 0 {
 		t.Errorf("typed = %v, want nothing typed when the field definitely does not hold the keyboard", f.typed)
@@ -278,7 +278,7 @@ func TestExecuteTool_TypeText_TypesWhenTheFocusCannotBeRead(t *testing.T) {
 	a.executeTool(context.Background(), "observe_screen", map[string]any{})
 	a.executeTool(context.Background(), "click", map[string]any{"n": float64(2)})
 
-	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "ora"})
+	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "june"})
 
 	if len(f.typed) != 1 || !strings.Contains(got, "typed") {
 		t.Errorf("typed = %v, result = %q, want the text typed on an unreadable focus rather than a refusal", f.typed, got)
@@ -292,21 +292,21 @@ func TestExecuteTool_TypeText_AfterAPointClickTypesIntoWhatHoldsTheKeyboard(t *t
 	a, f := actingAgent(t)
 	holdsKeyboard(t, act.Node{Role: "entry", Label: "Search", Ref: "r-search"}, true)
 	a.focusLost(ctx)
-	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "ora"}); len(f.typed) != 1 {
+	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "june"}); len(f.typed) != 1 {
 		t.Errorf("typed = %v, result %q; want the text typed into the entry that holds the keyboard", f.typed, got)
 	}
 
 	a, f = actingAgent(t)
 	holdsKeyboard(t, act.Node{Role: "push button", Label: "Send", Ref: "r-send"}, true)
 	a.focusLost(ctx)
-	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "ora"}); len(f.typed) != 0 || !strings.Contains(got, "Send") {
+	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "june"}); len(f.typed) != 0 || !strings.Contains(got, "Send") {
 		t.Errorf("typed = %v, result %q; want a refusal naming the button that holds the keyboard", f.typed, got)
 	}
 
 	a, f = actingAgent(t)
 	holdsKeyboard(t, act.Node{}, false)
 	a.focusLost(ctx)
-	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "ora"}); len(f.typed) != 1 {
+	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "june"}); len(f.typed) != 1 {
 		t.Errorf("typed = %v, result %q; want the text typed on the click alone when nothing readable holds the keyboard", f.typed, got)
 	}
 }

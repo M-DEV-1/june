@@ -15,7 +15,7 @@ func TestClassify(t *testing.T) {
 		{"Slack app is work", "Slack", "general", DomainWork},
 		{"VS Code (Code) app is work", "Code", "main.go", DomainWork},
 		{"Zoom with a meeting title is work", "Zoom", "Weekly Sync Meeting", DomainWork},
-		{"a terminal app is work", "iTerm2", "~/projects/ora", DomainWork},
+		{"a terminal app is work", "iTerm2", "~/projects/june", DomainWork},
 		{"Outlook app is work", "Outlook", "Inbox", DomainWork},
 
 		// --- clearly personal ---

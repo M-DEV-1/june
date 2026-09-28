@@ -15,10 +15,10 @@ import (
 
 	"google.golang.org/genai"
 
-	"ora/internal/agent"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/tracker"
+	"june/internal/agent"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/tracker"
 )
 
 // fakeAsker is a test double for Asker: before returning its canned trace or error, it reports one live tool event per hop in that trace through agent.ObserveTool, standing in for what askText's real tool loop reports live as it runs (see ObserveTool's doc comment in internal/agent/ask.go).
@@ -417,7 +417,7 @@ func (h *historyAsker) AskTextWith(ctx context.Context, history agent.History, q
 	return agent.TurnTrace{Answer: "answer to " + question}, nil
 }
 
-// A follow-up question is given the thread it belongs to. On 2026-09-04 the user asked Ora to ring a button, then typed "do it again" and was asked "What do you want repeated?", because the turns were stored and shown but never sent to the model.
+// A follow-up question is given the thread it belongs to. On 2026-09-04 the user asked June to ring a button, then typed "do it again" and was asked "What do you want repeated?", because the turns were stored and shown but never sent to the model.
 func TestAsk_HandsTheConversationSoFarToTheModel(t *testing.T) {
 	store, err := db.New(":memory:")
 	if err != nil {

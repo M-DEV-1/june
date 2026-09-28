@@ -121,7 +121,7 @@ describe("the overlay page", () => {
     const said = vi.spyOn(console, "log").mockImplementation(() => {});
     await startPage();
     expect(listenedBeforeLayout).toBe(true);
-    expect(said.mock.calls.flat().join(" ")).toContain("ora: overlay page listening");
+    expect(said.mock.calls.flat().join(" ")).toContain("june: overlay page listening");
   });
 
   it("keeps a second drawing from the same ask that lands while the first is fading", async () => {
@@ -169,7 +169,7 @@ describe("the overlay page", () => {
     await vi.waitFor(() => expect(complained).toHaveBeenCalled());
 
     expect(layoutCalls).toBe(before + 1);
-    expect(complained.mock.calls.flat().join(" ")).toContain("ora: overlay");
+    expect(complained.mock.calls.flat().join(" ")).toContain("june: overlay");
   });
   it("holds the pointer while screen-driving tools keep coming, and lets it go once the ask is done", async () => {
     await startPage();

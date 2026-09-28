@@ -1,7 +1,7 @@
-Ora desktop surface - first mock
+June desktop surface - first mock
 ================================
 
-This is a Tauri v2 app (vanilla TypeScript, no UI framework) that draws the Ora
+This is a Tauri v2 app (vanilla TypeScript, no UI framework) that draws the June
 popup. It talks to nothing. Every word on the screen comes from src/mock.ts.
 
 
@@ -19,7 +19,7 @@ The window starts hidden. Two ways to bring it up:
 
 To have it visible the moment it starts, set the env var:
 
-  VITE_ORA_SHOW=1 pnpm tauri dev
+  VITE_JUNE_SHOW=1 pnpm tauri dev
 
 Production build:
 
@@ -29,7 +29,7 @@ Note on the global shortcut: on GNOME Wayland the grab goes through XWayland.
 On this machine Ctrl+Shift+Space was already taken by another client, so the
 registration fails and the app prints
 
-  ora: global shortcut ctrl+shift+space unavailable: HotKey already registered
+  june: global shortcut ctrl+shift+space unavailable: HotKey already registered
 
 and carries on. The failure is not fatal by design - the tray toggle is the
 path that always works. To pick a different combination, change the accelerator

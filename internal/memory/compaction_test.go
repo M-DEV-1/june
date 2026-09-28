@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/memory"
+	"june/internal/memory"
 )
 
 // --- fakes ---

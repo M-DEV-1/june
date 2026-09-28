@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
-// observeDesktop is the fallback for a daemon that has not yet seen a window take focus; on this desktop it must find the browser or editor rather than the shell or Ora's own windows.
+// observeDesktop is the fallback for a daemon that has not yet seen a window take focus; on this desktop it must find the browser or editor rather than the shell or June's own windows.
 func TestObserveDesktop_FindsARealWindow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -24,23 +24,23 @@ func TestObserveDesktop_FindsARealWindow(t *testing.T) {
 	if err != nil {
 		t.Skip("nothing publishes on this desktop:", err)
 	}
-	if app == "gnome-shell" || IsOraWindow(app, title) {
+	if app == "gnome-shell" || IsJuneWindow(app, title) {
 		t.Errorf("observeDesktop picked %q · %q, want a real application window", app, title)
 	}
 	t.Logf("%s · %s: %d nodes, %d kept", app, title, len(nodes), len(act.Filter(nodes)))
 }
 
-// Ora's window reaches the accessibility bus under two application names: "ora", and "mutter-x11-frames" when the compositor owns the frame, which is the shape the stored episodes show ({App: "mutter-x11-frames", Title: "Ora"}). Only the title tells the second one apart from any other framed window, so observeDesktop has to read a candidate window's title before it can leave Ora's own out. Checking the application name against an empty title, as it did, lets Ora's own hover into the running and, on a desktop whose real window publishes little, win it — Ora would then describe its own buttons back to the user and click them.
-func TestSkipWindow_CatchesOraUnderTheCompositorsFrame(t *testing.T) {
+// June's window reaches the accessibility bus under two application names: "june", and "mutter-x11-frames" when the compositor owns the frame, which is the shape the stored episodes show ({App: "mutter-x11-frames", Title: "June"}). Only the title tells the second one apart from any other framed window, so observeDesktop has to read a candidate window's title before it can leave June's own out. Checking the application name against an empty title, as it did, lets June's own hover into the running and, on a desktop whose real window publishes little, win it — June would then describe its own buttons back to the user and click them.
+func TestSkipWindow_CatchesJuneUnderTheCompositorsFrame(t *testing.T) {
 	if skipWindow("mutter-x11-frames", "") {
-		t.Fatal("the premise no longer holds: the application name alone now identifies Ora's framed window")
+		t.Fatal("the premise no longer holds: the application name alone now identifies June's framed window")
 	}
 	cases := []struct {
 		app, title string
 		want       bool
 	}{
-		{"mutter-x11-frames", "Ora", true},
-		{"ora", "Ora", true},
+		{"mutter-x11-frames", "June", true},
+		{"june", "June", true},
 		{"gnome-shell", "", true},
 		{"mutter-x11-frames", "Slack", false},
 		{"brave", "PR #13 · GitHub", false},
@@ -88,7 +88,7 @@ func TestKeptCountDoesNotSaturateAtTheListCap(t *testing.T) {
 	}
 }
 
-// The blocklist is what keeps a password manager out of everything Ora records, and it was applied on the capture loop and on the /context read but nowhere near the act engine: a focused KeePassXC or 1Password window was walked and its list item labels — the names of the entries in the vault — went to the brain as an observe_screen listing. observeDesktop picks the window with the most actionable nodes, so a blocked application could also be picked when nothing had focus yet.
+// The blocklist is what keeps a password manager out of everything June records, and it was applied on the capture loop and on the /context read but nowhere near the act engine: a focused KeePassXC or 1Password window was walked and its list item labels — the names of the entries in the vault — went to the brain as an observe_screen listing. observeDesktop picks the window with the most actionable nodes, so a blocked application could also be picked when nothing had focus yet.
 func TestObserve_RefusesABlocklistedApplication(t *testing.T) {
 	SetBlocklist([]string{"keepassxc"})
 	t.Cleanup(func() { SetBlocklist(nil) })

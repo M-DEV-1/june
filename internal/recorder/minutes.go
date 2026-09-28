@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/brain"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/tracker"
-	"ora/internal/util"
+	"june/internal/brain"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/tracker"
+	"june/internal/util"
 )
 
 // CoveredHeading is the minutes heading for the section that says what the meeting was about. app/src/next/task-about.tsx reads this same heading (as its own COVERED constant) to pull that section back out of the minutes for a task's detail pane, so the two must always read the same six words; TestCoveredHeadingMatchesFrontend checks that.
@@ -46,7 +46,7 @@ Rules for naming:
   - When you genuinely cannot name someone, never leave them as a bare label. Describe them in a sentence or two that would let the reader work out who it was: what they were responsible for, what they talked about, who they answered to or were answering, when in the meeting they spoke, whether they were presenting. "The person who demoed the shipping upload and kept asking about custom shipping factors" is useful. "A second participant" is not — it tells the reader nothing they could act on or recognise.
   - The transcript comes from speech recognition, so names in it may be misspelled. Where the screen context has the same name spelled properly, use that spelling.
   - A name or acronym that appears only in the transcript, with no match on screen and none in "About the person recording", is a guess by the recogniser. Write it once as heard and marked so, for example a contact (heard as "Oshveln") or the (heard as "TSL") task, and do not turn it into a fact about who someone is. On 2026-09-03 the recogniser turned Sorrek into Oshveln and TDL into TSL, and both were written into memory as true.
-  - For the [me] speaker: this is always the same one person, the owner of this computer. What the user has told Ora about themselves is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
+  - For the [me] speaker: this is always the same one person, the owner of this computer. What the user has told June about themselves is given below under "About the person recording" — if it names them, that is who [me] is, and it outranks anything on screen. Failing that, use a name they are addressed by in the call. Nothing else identifies whose machine this is — not the code on screen, not the accounts signed in. Otherwise call them "the person recording". Never write "[me]" in the minutes.
 
 A section with nothing to report is a section you omit — heading and all — rather than fill in with a sentence that says so. Never write "Nothing recoverable", "Nothing was decided", "None beyond the above" or anything to that effect: a reader learns nothing from being told a section is empty that they would not already conclude from its absence. This applies to every section below, including a bullet inside "Your part" that would otherwise have nothing to fill it.
 
@@ -112,7 +112,7 @@ func (r *Recorder) buildPrompt(ctx context.Context, transcript string, startedAt
 		startedAt.Format("Mon 2 Jan 2006 15:04"), stoppedAt.Format("15:04"), stoppedAt.Sub(startedAt).Round(time.Minute))
 
 	if about := r.aboutTheUser(ctx); about != "" {
-		b.WriteString("\nAbout the person recording — what the user has told Ora for certain about themselves and the people in their life. This is the [me] speaker, the same person in every meeting. It is background, not speech: never quote it as something someone said.\n")
+		b.WriteString("\nAbout the person recording — what the user has told June for certain about themselves and the people in their life. This is the [me] speaker, the same person in every meeting. It is background, not speech: never quote it as something someone said.\n")
 		b.WriteString(about)
 	}
 

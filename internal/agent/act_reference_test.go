@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // refNow is the clock every test in this file renders against, so the ages in the expected strings are fixed rather than whatever the machine says today.

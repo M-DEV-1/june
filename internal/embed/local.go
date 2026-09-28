@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // EmbeddingGemma is trained with these instruction prefixes and measurably loses retrieval quality without them, so they are applied here rather than left to callers. Source: the model card's "Prompt instructions" table (Retrieval-query and Retrieval-document rows).

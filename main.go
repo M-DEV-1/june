@@ -1,7 +1,7 @@
 package main
 
 import (
-	"ora/cmd"
+	"june/cmd"
 )
 
 func main() {

@@ -21,7 +21,7 @@ type Conversation struct {
 	Updated  time.Time
 }
 
-// Turn is one thing said in a conversation. Role is "you" or "ora"; Kind is "ask", "dictation", "voice" or "error" (an answer that failed, filed so the thread never shows a question with nothing under it); Evidence is the JSON array of supporting rows behind an answer, nil when there is none; Tools names the tools the agent called for that answer.
+// Turn is one thing said in a conversation. Role is "you" or "june"; Kind is "ask", "dictation", "voice" or "error" (an answer that failed, filed so the thread never shows a question with nothing under it); Evidence is the JSON array of supporting rows behind an answer, nil when there is none; Tools names the tools the agent called for that answer.
 type Turn struct {
 	ID             int64
 	ConversationID int64
@@ -160,7 +160,7 @@ func scanTurns(rows *sql.Rows) ([]Turn, error) {
 	return out, rows.Err()
 }
 
-// AddTurn records one thing said in a conversation and marks the conversation as touched. Input: the conversation, the role ("you" or "ora"), the text, the kind ("ask", "dictation", "voice" or "error"), the evidence JSON behind an answer (nil when there is none) and the tool names behind it. Output: the new turn's id, or an error when no conversation has that id.
+// AddTurn records one thing said in a conversation and marks the conversation as touched. Input: the conversation, the role ("you" or "june"), the text, the kind ("ask", "dictation", "voice" or "error"), the evidence JSON behind an answer (nil when there is none) and the tool names behind it. Output: the new turn's id, or an error when no conversation has that id.
 // The two writes go in one transaction and the touch's row count is what checks the conversation exists. conversation_turns' foreign key on conversation_id is enforced: PRAGMA foreign_keys(1) rides in the store's DSN, so the driver replays it on every connection it opens and SQLite itself refuses an insert against an id that names no conversation. The row-count check is kept in front of that key because it gives the better error — "no conversation with id 42" instead of the driver's bare FOREIGN KEY constraint failed — and because it does not depend on how the connection happened to be opened. Same reasoning as SetUserTaskDone below — a write the store never really took must not be reported as taken.
 func (s *Store) AddTurn(ctx context.Context, conversationID int64, role, text, kind string, evidence json.RawMessage, tools []string) (int64, error) {
 	toolsJSON := ""
@@ -239,7 +239,7 @@ func (s *Store) UserTasks(ctx context.Context) ([]UserTask, error) {
 
 // SetUserTaskTitle rewrites one of the user's own tasks. Input: the task's id and its new title. Output: an error when nothing matched the id, on the same rule SetUserTaskDone holds to.
 //
-// A task could be created and ticked and nothing else until 2026-09-12, when the user asked three times to put the right context on one Ora had just made for him and was refused every time. A task whose words cannot be corrected is a task that has to be made again from scratch.
+// A task could be created and ticked and nothing else until 2026-09-12, when the user asked three times to put the right context on one June had just made for him and was refused every time. A task whose words cannot be corrected is a task that has to be made again from scratch.
 func (s *Store) SetUserTaskTitle(ctx context.Context, id int64, title string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE user_tasks SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, strings.TrimSpace(title), id)
 	if err != nil {
@@ -257,7 +257,7 @@ func (s *Store) SetUserTaskTitle(ctx context.Context, id int64, title string) er
 
 // DeleteUserTask removes one of the user's own tasks outright. Input: the task's id. Output: an error when nothing matched it.
 //
-// Ticking a task done is not the same as never having wanted it: a task Ora added by mistake, or one the user asks it to get rid of, has to go rather than sit on the list struck through. Nothing in the product could remove one before 2026-09-12.
+// Ticking a task done is not the same as never having wanted it: a task June added by mistake, or one the user asks it to get rid of, has to go rather than sit on the list struck through. Nothing in the product could remove one before 2026-09-12.
 func (s *Store) DeleteUserTask(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM user_tasks WHERE id = ?`, id)
 	if err != nil {
@@ -289,7 +289,7 @@ func (s *Store) SetUserTaskDone(ctx context.Context, id int64, done bool) error 
 	return nil
 }
 
-// ActiveDays returns the local calendar days at or after since that have anything in them — a capture, a meeting, or a diary entry Ora wrote — newest day first, as 'YYYY-MM-DD' strings. Episode and note times are stored in UTC and converted to local here; diary days are already local.
+// ActiveDays returns the local calendar days at or after since that have anything in them — a capture, a meeting, or a diary entry June wrote — newest day first, as 'YYYY-MM-DD' strings. Episode and note times are stored in UTC and converted to local here; diary days are already local.
 func (s *Store) ActiveDays(ctx context.Context, since time.Time) ([]string, error) {
 	sinceDay := since.Format("2006-01-02")
 	rows, err := s.db.QueryContext(ctx, `

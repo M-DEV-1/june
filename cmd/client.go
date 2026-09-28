@@ -8,15 +8,15 @@ import (
 	"path/filepath"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/audio"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/ui"
+	"june/internal/agent"
+	"june/internal/audio"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/ui"
 )
 
 func runClient(ctx context.Context, shutdownObs func(context.Context) error, daemonStatus, buildMismatch string) error {
-	slog.Info("Starting Ora Client...")
+	slog.Info("Starting June Client...")
 
 	// Parallel hardware & DB init
 	var (

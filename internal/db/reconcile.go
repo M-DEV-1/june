@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/memory"
+	"june/internal/memory"
 )
 
 // ReconcileReport counts what one ReconcileVectors sweep did — logged by the caller (cmd/daemon.go), not returned as an error since a sweep is a maintenance pass, not a request that can fail outright.

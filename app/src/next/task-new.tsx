@@ -29,8 +29,8 @@ export function NewTask() {
       <Plus className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
       <Input
         value={draft}
-        placeholder="Give Ora something to do"
-        aria-label="Give Ora something to do"
+        placeholder="Give June something to do"
+        aria-label="Give June something to do"
         className="h-8 rounded-none border-none bg-transparent pl-8 text-ui text-muted-foreground shadow-none focus-visible:text-foreground focus-visible:ring-0"
         onChange={(e) => dispatch(ui.taskTyped(e.target.value))}
         onKeyDown={(e) => {

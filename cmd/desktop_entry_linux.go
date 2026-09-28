@@ -12,26 +12,26 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
-// appIconPNG is ORA's logo at 512x512, the largest raster the repo has (app/src-tauri/icons/icon.png, the same art the Tauri bundle ships). It is the source every dock icon size is scaled down from; there is no SVG of the logo anywhere in the repo, so no scalable icon is installed.
+// appIconPNG is June's logo at 512x512, the largest raster the repo has (app/src-tauri/icons/icon.png, the same art the Tauri bundle ships). It is the source every dock icon size is scaled down from; there is no SVG of the logo anywhere in the repo, so no scalable icon is installed.
 //
 //go:embed app_icon_linux.png
 var appIconPNG []byte
 
-// dockIconSizes are the square pixel sizes ORA's icon is written at, one per standard hicolor directory a desktop looks in. A theme lookup picks the nearest size to what it is drawing, so a dock asking for 22 or 96 pixels now scales a nearby real file instead of the 128 pixel one that used to be the only file on disk.
+// dockIconSizes are the square pixel sizes June's icon is written at, one per standard hicolor directory a desktop looks in. A theme lookup picks the nearest size to what it is drawing, so a dock asking for 22 or 96 pixels now scales a nearby real file instead of the 128 pixel one that used to be the only file on disk.
 var dockIconSizes = []int{16, 32, 48, 64, 128, 256}
 
 // iconCacheRefresh runs gtk-update-icon-cache over an icon theme directory. It is a variable so the tests can record the call instead of shelling out to the real program.
 var iconCacheRefresh = runGTKUpdateIconCache
 
-// desktopEntryMarker is a comment line this daemon writes into every ora.desktop it owns, so a later run can tell its own dev-time entry apart from a real one a package's install.sh put there instead. A comment is invisible to every Desktop Entry parser, so its presence changes nothing about how the entry behaves.
-const desktopEntryMarker = "# Written by the ora daemon itself; delete this file to use an installed package's entry instead."
+// desktopEntryMarker is a comment line this daemon writes into every june.desktop it owns, so a later run can tell its own dev-time entry apart from a real one a package's install.sh put there instead. A comment is invisible to every Desktop Entry parser, so its presence changes nothing about how the entry behaves.
+const desktopEntryMarker = "# Written by the june daemon itself; delete this file to use an installed package's entry instead."
 
-// installDesktopEntry writes ORA's dock icon at every size a desktop asks for and the .desktop entries naming it, so GNOME shows the ORA logo instead of the theme's missing-image mark for the Tauri window (WM_CLASS "ora"/"Ora").
-// It writes the logo to $XDG_DATA_HOME/icons/hicolor/<size>/apps/ora.png for each size in dockIconSizes, an entry naming Icon=ora and StartupWMClass=ora to $XDG_DATA_HOME/applications/ora.desktop, and a hidden entry claiming StartupWMClass=ora-overlay to ora-overlay.desktop; StartupWMClass is what lets GNOME match a running window to an entry, and the second entry is what keeps the always-mapped overlay window out of ORA's own dock entry (see overlayDesktopEntry).
-// The application entry is skipped entirely when one already exists there without desktopEntryMarker in it: that means a real package (see packaging/ora.desktop, installed by install.sh) put its own entry down, and a dev build must never overwrite it.
+// installDesktopEntry writes June's dock icon at every size a desktop asks for and the .desktop entries naming it, so GNOME shows the June logo instead of the theme's missing-image mark for the Tauri window (WM_CLASS "june"/"June").
+// It writes the logo to $XDG_DATA_HOME/icons/hicolor/<size>/apps/june.png for each size in dockIconSizes, an entry naming Icon=june and StartupWMClass=june to $XDG_DATA_HOME/applications/june.desktop, and a hidden entry claiming StartupWMClass=june-overlay to june-overlay.desktop; StartupWMClass is what lets GNOME match a running window to an entry, and the second entry is what keeps the always-mapped overlay window out of June's own dock entry (see overlayDesktopEntry).
+// The application entry is skipped entirely when one already exists there without desktopEntryMarker in it: that means a real package (see packaging/june.desktop, installed by install.sh) put its own entry down, and a dev build must never overwrite it.
 // Each file that is written is written only when its content differs from what is already on disk, so a daemon restart does not rewrite any of them. When an icon file did change, or when the theme has no icon-theme.cache at all, gtk-update-icon-cache is run over the hicolor directory, because a desktop that reads that cache never sees a file the cache does not list.
 // Output: an error from a directory create, a stat, a decode, os.Executable, a write, or the cache refresh; the caller logs it and continues, since a missing dock icon should never stop the daemon.
 func installDesktopEntry() error {
@@ -52,13 +52,13 @@ func installDesktopEntry() error {
 	}
 	dir := filepath.Dir(exe)
 	appsDir := filepath.Join(dataHome, "applications")
-	appPath := filepath.Join(appsDir, "ora.desktop")
+	appPath := filepath.Join(appsDir, "june.desktop")
 	if desktopEntryIsOurs(appPath) {
 		if _, err := writeFileIfChanged(appPath, []byte(applicationDesktopEntry(exe, dir))); err != nil {
 			return err
 		}
 	}
-	if _, err := writeFileIfChanged(filepath.Join(appsDir, "ora-overlay.desktop"), []byte(overlayDesktopEntry(exe, dir))); err != nil {
+	if _, err := writeFileIfChanged(filepath.Join(appsDir, "june-overlay.desktop"), []byte(overlayDesktopEntry(exe, dir))); err != nil {
 		return err
 	}
 
@@ -68,7 +68,7 @@ func installDesktopEntry() error {
 	return iconCacheRefresh(themeDir)
 }
 
-// installDockIcons writes ORA's logo into themeDir at every size in dockIconSizes, as themeDir/<size>x<size>/apps/ora.png, scaling the embedded 512 pixel master down to each one.
+// installDockIcons writes June's logo into themeDir at every size in dockIconSizes, as themeDir/<size>x<size>/apps/june.png, scaling the embedded 512 pixel master down to each one.
 // Input: the hicolor theme directory. Output: whether any file on disk changed, and an error from decoding the master, encoding a size, or writing a file.
 func installDockIcons(themeDir string) (bool, error) {
 	master, err := png.Decode(bytes.NewReader(appIconPNG))
@@ -82,7 +82,7 @@ func installDockIcons(themeDir string) (bool, error) {
 		if err := png.Encode(&encoded, scaleIcon(master, size)); err != nil {
 			return changed, fmt.Errorf("encode %dx%d app icon: %w", size, size, err)
 		}
-		path := filepath.Join(themeDir, fmt.Sprintf("%dx%d", size, size), "apps", "ora.png")
+		path := filepath.Join(themeDir, fmt.Sprintf("%dx%d", size, size), "apps", "june.png")
 		wrote, err := writeFileIfChanged(path, encoded.Bytes())
 		if err != nil {
 			return changed, err
@@ -137,7 +137,7 @@ func scaleIcon(src image.Image, size int) *image.NRGBA {
 	return dst
 }
 
-// desktopEntryIsOurs reports whether the daemon may write its own ora.desktop at path: true when nothing is there yet, or when what is there already carries desktopEntryMarker. False means something else — a package's own install — put a real entry there, which the daemon must leave alone.
+// desktopEntryIsOurs reports whether the daemon may write its own june.desktop at path: true when nothing is there yet, or when what is there already carries desktopEntryMarker. False means something else — a package's own install — put a real entry there, which the daemon must leave alone.
 func desktopEntryIsOurs(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -182,36 +182,36 @@ func writeFileIfChanged(path string, data []byte) (bool, error) {
 	return true, nil
 }
 
-// applicationDesktopEntry renders the .desktop file body that names ORA's dock icon and lets GNOME match the running window to this entry via StartupWMClass, escaping exe and dir per the Desktop Entry Specification's quoting rules (see desktopEntryQuoteExec, desktopEntryEscapeString in autostart_linux.go).
+// applicationDesktopEntry renders the .desktop file body that names June's dock icon and lets GNOME match the running window to this entry via StartupWMClass, escaping exe and dir per the Desktop Entry Specification's quoting rules (see desktopEntryQuoteExec, desktopEntryEscapeString in autostart_linux.go).
 func applicationDesktopEntry(exe, dir string) string {
 	return fmt.Sprintf(`[Desktop Entry]
 Type=Application
-Name=Ora
-Comment=Ora
+Name=June
+Comment=June
 Exec=%s --daemon
 Path=%s
-Icon=ora
+Icon=june
 Terminal=false
-StartupWMClass=ora
+StartupWMClass=june
 NoDisplay=false
 Categories=Utility;
 %s
 `, desktopEntryQuoteExec(exe), desktopEntryEscapeString(dir), desktopEntryMarker)
 }
 
-// overlayDesktopEntry renders the hidden .desktop file that claims the overlay window's WM_CLASS instance name, "ora-overlay" (set in app/src-tauri/src/lib.rs), so GNOME files that window under an application of its own rather than under ORA's.
-// This is what keeps the dock's window count honest. GNOME Shell puts every window of an application in one list whether or not the window asks to skip the taskbar (shell-app.c only counts skip-taskbar windows out of the running/stopped decision, not out of the list), and a dock that draws one dot per window in that list therefore draws a dot for the full-screen drawing layer that is mapped the whole time ORA runs. Matched to this entry instead, the layer becomes an application whose only window skips the taskbar, which never reaches the running state and so never gets a dock entry of its own.
-// NoDisplay keeps it out of the app grid and out of search. Without a file whose name matches the window's instance name, GNOME would fall back to matching the window by process id and file it under ORA again.
+// overlayDesktopEntry renders the hidden .desktop file that claims the overlay window's WM_CLASS instance name, "june-overlay" (set in app/src-tauri/src/lib.rs), so GNOME files that window under an application of its own rather than under June's.
+// This is what keeps the dock's window count honest. GNOME Shell puts every window of an application in one list whether or not the window asks to skip the taskbar (shell-app.c only counts skip-taskbar windows out of the running/stopped decision, not out of the list), and a dock that draws one dot per window in that list therefore draws a dot for the full-screen drawing layer that is mapped the whole time June runs. Matched to this entry instead, the layer becomes an application whose only window skips the taskbar, which never reaches the running state and so never gets a dock entry of its own.
+// NoDisplay keeps it out of the app grid and out of search. Without a file whose name matches the window's instance name, GNOME would fall back to matching the window by process id and file it under June again.
 func overlayDesktopEntry(exe, dir string) string {
 	return fmt.Sprintf(`[Desktop Entry]
 Type=Application
-Name=Ora overlay
-Comment=Ora's on-screen drawing layer
+Name=June overlay
+Comment=June's on-screen drawing layer
 Exec=%s --daemon
 Path=%s
-Icon=ora
+Icon=june
 Terminal=false
-StartupWMClass=ora-overlay
+StartupWMClass=june-overlay
 NoDisplay=true
 Categories=Utility;
 `, desktopEntryQuoteExec(exe), desktopEntryEscapeString(dir))

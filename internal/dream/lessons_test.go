@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db/dbtest"
+	"june/internal/db/dbtest"
 )
 
 // The lesson loop writes a line after every screen run, and by 2026-09-23 one browser held 34 of them, several saying the same thing twice ("click the tab's Close button" and "click the tab's close button directly") and some overtaken by a later one. The night merges each app's lessons that say the same thing into one line that keeps their record, and drops the ones a newer lesson overrides.

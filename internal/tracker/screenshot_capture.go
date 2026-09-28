@@ -81,8 +81,8 @@ func encodeCapture(img image.Image, region image.Rectangle) (Capture, error) {
 	return Capture{Data: bytes.Clone(buf.Bytes()), Mime: "image/jpeg", X: region.Min.X, Y: region.Min.Y, W: nw, H: nh, Scale: scale}, nil
 }
 
-// screenGuard is what takes Ora's own hover window off the screen for the moment a picture of it is taken. The daemon wires it to a call that tells the window to conceal itself and hands back the call that puts it where it was.
-// It exists because the compositor has only one screen to photograph: the hover is drawn over whatever the user was looking at, so a question asked from the hover about the window behind it came back with a picture of Ora's own card sitting in the middle of the answer.
+// screenGuard is what takes June's own hover window off the screen for the moment a picture of it is taken. The daemon wires it to a call that tells the window to conceal itself and hands back the call that puts it where it was.
+// It exists because the compositor has only one screen to photograph: the hover is drawn over whatever the user was looking at, so a question asked from the hover about the window behind it came back with a picture of June's own card sitting in the middle of the answer.
 var screenGuard func() func()
 
 // SetScreenGuard wires screenGuard; the daemon calls it once at startup. Passing nil takes the guard away, which leaves every capture taking the screen exactly as it is.

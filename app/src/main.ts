@@ -127,7 +127,7 @@ let jobId: string | undefined;
 /** How many columns wide the live-voice waveform is: the centrepiece grid of the voice-mode surface that takes over the whole card while a session runs (see cardHtml's v.voice branch), not a sliver beside the input any more. Roughly the terminal client's own width (see internal/ui/waveform.go) at the larger 16px type the surface reads at. */
 const VOICE_WAVE_WIDTH = 40;
 
-/** The speaker's smoothed amplitude for the live-voice waveform (Ora's voice, not the user's mic — see voiceWaveInnerHtml), owned here rather than in the view: it updates up to 20 times a second off the daemon's "level" events (see voiceEvent in state.ts), and running that through the full reducer-and-render path on every tick would rebuild the whole card that often for nothing. Reset to a fresh (silent) instance every time a session starts, in dispatch's "voiceOn" case, so a new session never shows the tail end of the last one's bar. */
+/** The speaker's smoothed amplitude for the live-voice waveform (June's voice, not the user's mic — see voiceWaveInnerHtml), owned here rather than in the view: it updates up to 20 times a second off the daemon's "level" events (see voiceEvent in state.ts), and running that through the full reducer-and-render path on every tick would rebuild the whole card that often for nothing. Reset to a fresh (silent) instance every time a session starts, in dispatch's "voiceOn" case, so a new session never shows the tail end of the last one's bar. */
 let speakerWave = new Waveform(VOICE_WAVE_WIDTH);
 
 /** How many probes in a row have gone unanswered. The probe gives the daemon 500ms (see probe in daemon.ts), and a daemon mid-whisper-decode or mid-AT-SPI-read can miss that and still be there, so one miss is not enough to call it gone: the last known-good answer stands until a second miss in a row. */
@@ -156,10 +156,10 @@ async function connect(): Promise<void> {
     if (!eventsStarted) {
       eventsStarted = true;
       events((ev) => {
-        // Ora speaking first, which is nobody's answer and belongs to no session: taken before every filter below, all of which are about matching an event to something this window asked for.
+        // June speaking first, which is nobody's answer and belongs to no session: taken before every filter below, all of which are about matching an event to something this window asked for.
         if (ev.type === "notice" && ev.notice) {
           void showNotice(ev.notice).catch((e) =>
-            console.error("ora: showing the notice failed", e),
+            console.error("june: showing the notice failed", e),
           );
           return;
         }
@@ -194,8 +194,8 @@ async function connect(): Promise<void> {
 /** Fills the card in from the daemon after the window is already up: the context chip, the matters behind it, and whatever live voice session the daemon is running. Input: none. Output: nothing, and nothing is awaited by the caller — /context reads the focused window through AT-SPI and can take seconds, and the hover must not wait on it (each of the three reads gives up after its own deadline, see readJson in daemon.ts). */
 function hydrate(): void {
   if (!daemonUp) return;
-  contextRead = loadFromDaemon().catch((e) => console.error("ora: context read failed", e));
-  void syncVoice().catch((e) => console.error("ora: voice status read failed", e));
+  contextRead = loadFromDaemon().catch((e) => console.error("june: context read failed", e));
+  void syncVoice().catch((e) => console.error("june: voice status read failed", e));
 }
 
 /** Matches the window to whatever live session the daemon is actually running. Hiding this window does not end a session, and neither does reloading it, so every time the window comes back it joins a session it was not part of, picks up the state that session moved to while nothing was on screen, and drops one that has already ended — by the spoken "stop", or from another window. Input: none. Output: nothing. */
@@ -226,7 +226,7 @@ void connect()
     hydrate();
     runDevSwitches();
   })
-  .catch((e) => console.error("ora: first connect failed", e));
+  .catch((e) => console.error("june: first connect failed", e));
 
 /** Runs the dev-only URL switches once the daemon is connected: the queued ?q= questions, a four-second dictation, a live voice session. Input: none. Output: nothing. */
 function runDevSwitches(): void {
@@ -320,7 +320,7 @@ function render(v: View): void {
 
 /** Resizes the OS window to the card that was just drawn, without anyone waiting on it. Input: none. Output: nothing; a window call that fails is logged rather than left as an unhandled rejection, which is all a page with no window to resize can do about it. */
 function fit(): void {
-  void fitWindow().catch((e) => console.error("ora: resizing the window failed", e));
+  void fitWindow().catch((e) => console.error("june: resizing the window failed", e));
 }
 
 /** Makes one of the card's two fold-out headers — the evidence line and the collapsed step summary — a control rather than a div with a click handler: reachable by Tab, operable with Enter and Space, and announced with whether it is open. Input: the header element (or null when the card has none), whether its fold is open, and what to run when it is pressed. Output: nothing. */
@@ -372,7 +372,7 @@ function renderNotice(v: View): void {
     closeHtml(n) +
     (actionLine !== undefined
       ? `<div class="nt">${esc(actionLine)}</div>`
-      : `<div class="nh">Ora</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml(n)}${countdownHtml(n)}`);
+      : `<div class="nh">June</div><div class="nt">${esc(n.title)}</div><div class="nb">${esc(n.body)}</div>${noticeButtonsHtml(n)}${countdownHtml(n)}`);
 }
 
 /** The card's own close cross. Input: the notice, named in the label because a cross read on its own says nothing about what it closes. Output: the button's HTML. */
@@ -472,7 +472,7 @@ function stopStepTicker(): void {
   stepTicker = undefined;
 }
 
-/** The four-row braille bar for Ora's voice, read straight off the speaker Waveform. Input: the Waveform to render. Output: the row markup, one ".vw-row" span per line. */
+/** The four-row braille bar for June's voice, read straight off the speaker Waveform. Input: the Waveform to render. Output: the row markup, one ".vw-row" span per line. */
 function voiceWaveRowsHtml(w: Waveform): string {
   return w
     .render()
@@ -480,17 +480,17 @@ function voiceWaveRowsHtml(w: Waveform): string {
     .join("");
 }
 
-/** The live-voice waveform's inner content: Ora's own four rows, always — the silent centreline while she listens, animated once she speaks — split out from voiceWaveHtml so a level event can patch just this in place (see scheduleVoiceWaveRepaint) instead of tearing down and rebuilding the ".vwave" span, title attribute included, on every one of up to 20 ticks a second. There is no user-microphone grid: this is a hands-free session, so only Ora's voice is drawn, and it stays on screen for the session's whole length rather than appearing only once she starts speaking (gating it on speakerWave.smoothed > 0 made the row jump in and out). Input: none, reads the module's own speakerWave. Output: the inner HTML. */
+/** The live-voice waveform's inner content: June's own four rows, always — the silent centreline while she listens, animated once she speaks — split out from voiceWaveHtml so a level event can patch just this in place (see scheduleVoiceWaveRepaint) instead of tearing down and rebuilding the ".vwave" span, title attribute included, on every one of up to 20 ticks a second. There is no user-microphone grid: this is a hands-free session, so only June's voice is drawn, and it stays on screen for the session's whole length rather than appearing only once she starts speaking (gating it on speakerWave.smoothed > 0 made the row jump in and out). Input: none, reads the module's own speakerWave. Output: the inner HTML. */
 function voiceWaveInnerHtml(): string {
   return `<span class="vw-spk">${voiceWaveRowsHtml(speakerWave)}</span>`;
 }
 
-/** The live transcript under the voice-mode grid: the last thing the user said and the last thing Ora said, one line each. Both come straight off the current matter's last turn — a live session's "heard" and "said" events already fold into a turn's q and a the same way a typed question and its answer do (see the voiceEvent case in state.ts) — so there is nothing new to store here, only to read. Input: the matter the session's turns are landing in. Output: the two lines' HTML, either one left out while it has nothing yet, or "" while neither does. */
+/** The live transcript under the voice-mode grid: the last thing the user said and the last thing June said, one line each. Both come straight off the current matter's last turn — a live session's "heard" and "said" events already fold into a turn's q and a the same way a typed question and its answer do (see the voiceEvent case in state.ts) — so there is nothing new to store here, only to read. Input: the matter the session's turns are landing in. Output: the two lines' HTML, either one left out while it has nothing yet, or "" while neither does. */
 function voiceTranscriptHtml(m: Matter): string {
   const last = m.turns[m.turns.length - 1];
   const you = last?.q ? `<div class="vs-you">${esc(last.q)}</div>` : "";
-  const ora = last?.a ? `<div class="vs-ora">${esc(last.a)}</div>` : "";
-  return you || ora ? `<div class="vs-transcript">${you}${ora}</div>` : "";
+  const june = last?.a ? `<div class="vs-june">${esc(last.a)}</div>` : "";
+  return you || june ? `<div class="vs-transcript">${you}${june}</div>` : "";
 }
 
 /** The stop control's icon: a filled square, the universal "stop" glyph a recorder uses in place of its round record dot. Input: none. Output: the svg's HTML. */
@@ -498,7 +498,7 @@ function voiceStopIcon(): string {
   return `<svg viewBox="0 0 16 16" width="12" height="12"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>`;
 }
 
-/** The whole card while a live voice session runs, replacing the input and the thread entirely — the way Gemini Live and ChatGPT's own voice mode take over the screen instead of sharing it with the composer. Ora's braille rows (see voiceWaveInnerHtml) sit centred as the surface's centrepiece; the state word and transcript above and below it read off the same view and matter the resting card would; the state word is bare, because the wave already says Ora is there; the stop control ends the session the same way Shift+Space does (see the click handler in render()). Input: the view and the matter the session's turns are landing in. Output: the surface's HTML. */
+/** The whole card while a live voice session runs, replacing the input and the thread entirely — the way Gemini Live and ChatGPT's own voice mode take over the screen instead of sharing it with the composer. June's braille rows (see voiceWaveInnerHtml) sit centred as the surface's centrepiece; the state word and transcript above and below it read off the same view and matter the resting card would; the state word is bare, because the wave already says June is there; the stop control ends the session the same way Shift+Space does (see the click handler in render()). Input: the view and the matter the session's turns are landing in. Output: the surface's HTML. */
 function voiceSurfaceHtml(v: View, m: Matter): string {
   return `
     <div class="voicebox">
@@ -516,16 +516,16 @@ function voiceSurfaceHtml(v: View, m: Matter): string {
 /** The words shown after the shortcuts in the input's placeholder used to be the only way a user with the input empty and nothing running learned that Space and Shift+Space did anything at all. They now live permanently beside the input instead, in the same slot the window's context chip uses once the daemon reports one, at DESIGN.md's text-micro (11px/1.3/500/+0.02em) rather than the chip's own size, so they read as a quiet legend rather than a second copy of what the chip says. */
 const HINT_TEXT = "⎵ dictate · ⇧⎵ voice";
 
-/** What the input's placeholder actually renders. Same as state.ts's placeholder(v), except at rest, where the full RESTING_PLACEHOLDER sentence (which used to carry the two shortcut hints inline) shortens to "Ask Ora" now that the hints live beside the input instead (see HINT_TEXT and cardHtml). Input: the view. Output: the placeholder text to render. */
+/** What the input's placeholder actually renders. Same as state.ts's placeholder(v), except at rest, where the full RESTING_PLACEHOLDER sentence (which used to carry the two shortcut hints inline) shortens to "Ask June" now that the hints live beside the input instead (see HINT_TEXT and cardHtml). Input: the view. Output: the placeholder text to render. */
 function displayPlaceholder(v: View): string {
   const p = placeholder(v);
-  return p === RESTING_PLACEHOLDER ? "Ask Ora" : p;
+  return p === RESTING_PLACEHOLDER ? "Ask June" : p;
 }
 
 /** The whole card: the input line, the thread of what has been asked so far — or, for the whole length of a live voice session, the voice-mode surface instead (see voiceSurfaceHtml). The input carries a fixed aria-label rather than leaning on its placeholder for a name: the placeholder is also this window's status line ("Listening…", "Live voice on"), so it changes under a user who is part way through typing, and a control whose name moves has no name. Input: the view and the matter the turns belong to. Output: the card's HTML. */
 function cardHtml(v: View, m: Matter): string {
   if (v.voice) return voiceSurfaceHtml(v, m);
-  // Ora's face sits where a status dot used to: the same states, told apart by a face rather than by a colour nobody can name. When the daemon is down the words "Not connected" take its place in the "something wrong" colour, since a sleeping face alone would read as idle. A state with several faces alternates on re-render, which the level and state events drive often enough while anything is happening.
+  // June's face sits where a status dot used to: the same states, told apart by a face rather than by a colour nobody can name. When the daemon is down the words "Not connected" take its place in the "something wrong" colour, since a sleeping face alone would read as idle. A state with several faces alternates on re-render, which the level and state events drive often enough while anything is happening.
   const status = daemonUp
     ? `<span class="face" role="img" title="${esc(dotLabel(v, daemonUp))}" aria-label="${esc(dotLabel(v, daemonUp))}">${esc(face(faceState(v, daemonUp), Math.floor(Date.now() / FACE_TICK_MS)))}</span>`
     : `<span role="status" style="flex:none;color:var(--bad);font:400 12px/1.4 var(--body);">${esc(dotLabel(v, daemonUp))}</span>`;
@@ -537,7 +537,7 @@ function cardHtml(v: View, m: Matter): string {
   return `
     <div class="in${v.dictating ? " holding" : ""}">
       ${status}
-      <input class="q" value="${esc(v.input)}" aria-label="Ask Ora" placeholder="${esc(displayPlaceholder(v))}" />
+      <input class="q" value="${esc(v.input)}" aria-label="Ask June" placeholder="${esc(displayPlaceholder(v))}" />
       <span class="wave"><i></i><i></i><i></i></span>
       ${ctx}
     </div>
@@ -587,7 +587,7 @@ function syncBreath(voiceOn: boolean): void {
   }
 }
 
-/** The amplitude fed to the voice-mode grid's Waveform for one "level" tick. A real reading above the noise floor drives it as-is; below that — Ora listening rather than speaking, which is most of a session — a small deterministic sine (0.05-0.12 at 0.4Hz, so one full breath takes about 2.5s) takes over instead, the same idle "breathing" a voice orb does, so the grid still reads as alive instead of flatlining the moment she stops talking. Input: the level event's speaker reading (0-1). Output: the amplitude to update the Waveform with. */
+/** The amplitude fed to the voice-mode grid's Waveform for one "level" tick. A real reading above the noise floor drives it as-is; below that — June listening rather than speaking, which is most of a session — a small deterministic sine (0.05-0.12 at 0.4Hz, so one full breath takes about 2.5s) takes over instead, the same idle "breathing" a voice orb does, so the grid still reads as alive instead of flatlining the moment she stops talking. Input: the level event's speaker reading (0-1). Output: the amplitude to update the Waveform with. */
 function voiceGridAmplitude(speaker: number): number {
   const BREATH_FLOOR = 0.02;
   if (speaker > BREATH_FLOOR) return speaker;
@@ -601,7 +601,7 @@ function markSvg(kind: "ok" | "err"): string {
   return `<svg class="mark-svg" viewBox="0 0 16 16" width="12" height="12"><path d="${d}"/></svg>`;
 }
 
-/** One row of the live step list: an icon by tool kind (breathing while the step runs), the plain-English label (shimmering while it runs), a check or cross that draws itself once it finishes, and how many seconds it has run — ticked live for a step still running (see startStepTicker), fixed once it finishes. A failed step also gets the daemon's error text under it, since that is the one row an "Ora stopped" answer alone does not explain. Input: the step and the current time. Output: the row's HTML (plus its error line, if any). */
+/** One row of the live step list: an icon by tool kind (breathing while the step runs), the plain-English label (shimmering while it runs), a check or cross that draws itself once it finishes, and how many seconds it has run — ticked live for a step still running (see startStepTicker), fixed once it finishes. A failed step also gets the daemon's error text under it, since that is the one row an "June stopped" answer alone does not explain. Input: the step and the current time. Output: the row's HTML (plus its error line, if any). */
 function stepRowHtml(s: ToolStep, now: number): string {
   const seconds = stepSeconds(s, now);
   const cls = s.error ? "err" : s.finishedAt !== undefined ? "ok" : "run";
@@ -617,7 +617,7 @@ function stepRowHtml(s: ToolStep, now: number): string {
 /** How many braille cells wide the live row's working grid is drawn. */
 const WORKING_CELLS = 24;
 
-/** What the live row shows before the first tool call starts, and what it falls back to between one tool call finishing and the next starting: one row of the same braille dot grid live voice draws, which is Ora's single signature for "listening or working". It replaces the words that used to sit here. Input: none, reads the clock. Output: the row's characters — a fixed first frame under reduced motion, since nothing repaints it there. */
+/** What the live row shows before the first tool call starts, and what it falls back to between one tool call finishing and the next starting: one row of the same braille dot grid live voice draws, which is June's single signature for "listening or working". It replaces the words that used to sit here. Input: none, reads the clock. Output: the row's characters — a fixed first frame under reduced motion, since nothing repaints it there. */
 function workingGridText(): string {
   return workingRow(WORKING_CELLS, reduce ? 0 : Date.now());
 }
@@ -975,25 +975,25 @@ function startAsk(q: string, conversation: string | undefined): void {
           dispatch({ kind: "asked", conversationId: res.conversationId });
       })
       .catch(() =>
-        offline("Ora's daemon stopped answering, so I could not look this up."),
+        offline("June's daemon stopped answering, so I could not look this up."),
       );
   } else if (mockMode) {
     scheduleAnswer(m.id);
   } else {
-    offline("Ora's daemon is not running, so I cannot look anything up.");
+    offline("June's daemon is not running, so I cannot look anything up.");
   }
 }
 
 /** Starts a computer-use job for a goal, the "do:" counterpart to startAsk. Input: the goal in the user's own words. Output: nothing; the job's progress arrives later as "act" daemon events, matched against jobId once the POST /act reply names it. */
 function startJob(goal: string): void {
   if (!daemonUp) {
-    offline("Ora's daemon is not running, so I cannot start that.");
+    offline("June's daemon is not running, so I cannot start that.");
     return;
   }
   jobId = undefined;
   void actStart(goal).then((id) => {
     if (!id) {
-      offline("Ora's daemon would not start that job.");
+      offline("June's daemon would not start that job.");
       return;
     }
     jobId = id;
@@ -1166,15 +1166,15 @@ function hideWindow(): void {
   syncBreath(false);
   clearDeferredWrites();
   // showNotice waits on this before asking whether the window is visible, so a hide that failed has to settle rather than reject there.
-  hidden = hide().catch((e) => console.error("ora: hiding the window failed", e));
+  hidden = hide().catch((e) => console.error("june: hiding the window failed", e));
 }
-/** Shows the hover so it can say one of Ora's own moments, and takes no focus doing it: the notice arrives while the user is working in another window, so the window is placed and shown exactly as the hotkey path places and shows it but with no raise() and nothing else that asks GNOME for focus. Input: the notice off the daemon's stream. Output: a promise for when the window is up. */
+/** Shows the hover so it can say one of June's own moments, and takes no focus doing it: the notice arrives while the user is working in another window, so the window is placed and shown exactly as the hotkey path places and shows it but with no raise() and nothing else that asks GNOME for focus. Input: the notice off the daemon's stream. Output: a promise for when the window is up. */
 let showNotice: (n: Notice) => Promise<void> = async () => {};
 /** How wide the hover is, in logical pixels: the width of the ask card. */
 const HOVER_WIDTH = 720;
 /** How wide a window showing nothing but a notice is, in logical pixels: the notice card's own 420 maximum (see .N in styles.css) plus the 18 of body padding on each side. The window is transparent and paints nothing outside the card, but it still takes the pointer, so a window any wider than this would sit as an invisible band over the top right of the screen swallowing clicks meant for whatever is under it. */
 const NOTICE_WIDTH = 456;
-/** How wide the hover is while a live voice session runs, in logical pixels. A voice session has no composer and no thread — a state word, Ora's forty braille columns, two clipped transcript lines and the stop control — and all of that sits centred, so at the ask card's own 720 the sides were empty.
+/** How wide the hover is while a live voice session runs, in logical pixels. A voice session has no composer and no thread — a state word, June's forty braille columns, two clipped transcript lines and the stop control — and all of that sits centred, so at the ask card's own 720 the sides were empty.
  * The wave is what sets this rather than the transcript: measured off a screenshot of a live session, forty braille columns at 16px came to about 460 logical pixels, so ~430 at the 15px they are drawn at now. 500 clears that plus the 18 of body padding each side with room to spare; anything near the transcript's own 420 maximum would cut the ends off the wave, which does not wrap. */
 const VOICE_WIDTH = 580;
 
@@ -1193,7 +1193,7 @@ export interface Shell {
   desktop: Desktop;
   raise: () => Promise<void>;
   onToggle: (run: () => void) => void;
-  /** Called with true when the daemon is about to photograph the screen and false once it has. Ora's hover is drawn over whatever the user was looking at, so a picture taken while it is up has Ora's own card in the middle of the thing the question was about. Optional: a shell that cannot listen for it simply never steps out of the picture. */
+  /** Called with true when the daemon is about to photograph the screen and false once it has. June's hover is drawn over whatever the user was looking at, so a picture taken while it is up has June's own card in the middle of the thing the question was about. Optional: a shell that cannot listen for it simply never steps out of the picture. */
   onConceal?: (run: (hiding: boolean) => void) => void;
 }
 
@@ -1264,7 +1264,7 @@ export function wireWindow(shell: Shell): void {
 
   // The hover is a dock-type window so that it stacks above ordinary windows without the always-on-top flag that stops other windows being focused (see arm_hover in lib.rs). Mutter never gives a dock the keyboard on its own and a click on one moves no focus at all, so a press inside the hover has to ask for it, or everything typed after clicking the card would go to whatever window had the keyboard before.
   root.addEventListener("pointerdown", () => {
-    void shell.raise().catch((e) => console.error("ora: could not take the keyboard", e));
+    void shell.raise().catch((e) => console.error("june: could not take the keyboard", e));
   });
   noticeEl.addEventListener("pointerdown", () => {
     void shell.raise().catch(() => {});
@@ -1283,7 +1283,7 @@ export function wireWindow(shell: Shell): void {
       if (!concealed) return;
       concealed = false;
       await win.show();
-    })().catch((e) => console.error("ora: could not step out of the picture", e));
+    })().catch((e) => console.error("june: could not step out of the picture", e));
   });
 
   // The desktop hotkey signals the Rust side, which emits an event the shell passes on here; showing and hiding from here keeps every window call on the main loop.
@@ -1302,7 +1302,7 @@ export function wireWindow(shell: Shell): void {
       sizeToContent: fitWindow,
       raise: shell.raise,
       focusInput: () => root.querySelector<HTMLInputElement>(".q")?.focus(),
-    }).catch((e) => console.error("ora: the toggle failed", e));
+    }).catch((e) => console.error("june: the toggle failed", e));
   });
 }
 
@@ -1323,16 +1323,16 @@ try {
     },
     raise: () => invoke("raise"),
     onToggle: (run) => {
-      void listen("ora://toggle", run).catch((e) =>
-        console.error("ora: the toggle listener would not attach", e),
+      void listen("june://toggle", run).catch((e) =>
+        console.error("june: the toggle listener would not attach", e),
       );
     },
     onConceal: (run) => {
-      void listen("ora://conceal", () => run(true)).catch((e) =>
-        console.error("ora: the conceal listener would not attach", e),
+      void listen("june://conceal", () => run(true)).catch((e) =>
+        console.error("june: the conceal listener would not attach", e),
       );
-      void listen("ora://reveal", () => run(false)).catch((e) =>
-        console.error("ora: the reveal listener would not attach", e),
+      void listen("june://reveal", () => run(false)).catch((e) =>
+        console.error("june: the reveal listener would not attach", e),
       );
     },
   });

@@ -153,7 +153,7 @@ export function MeetingsScreen() {
             up={!isError}
             loading={isLoading}
             empty="No meetings recorded yet."
-            hint="Ora writes minutes for a call once it has recorded one. Turn recording on in the config file and the next call lands here."
+            hint="June writes minutes for a call once it has recorded one. Turn recording on in the config file and the next call lands here."
           />
         )}
       </Scroller>

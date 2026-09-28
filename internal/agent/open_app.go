@@ -161,9 +161,9 @@ func isChromiumUnder(root string) bool {
 }
 
 // desktopEntryMarker is the first line patchAccessibility writes into a copy it makes, so a later run can tell its own copy from a file it did not write and must never overwrite.
-const desktopEntryMarker = "# Ora added " + accessibilityFlag + " to Exec below; see internal/agent/open_app.go"
+const desktopEntryMarker = "# June added " + accessibilityFlag + " to Exec below; see internal/agent/open_app.go"
 
-// patchAccessibility gives a Chromium-based desktop entry a copy in the user's own applications directory with accessibilityFlag appended to every Exec line, main entry and desktop actions alike, so the application reads on every future launch, however the user starts it: XDG looks in the user's own directory before /usr/share, /var/lib/snapd and /var/lib/flatpak. Input: the entry's path. Output: true when the application will start with support from now on (Ora's copy is written or already there, or the entry already carries the flag); false when it will not: a read or write failure, an entry that is not Chromium-based, or a destination file this function did not write, all of which leave the filesystem as it was.
+// patchAccessibility gives a Chromium-based desktop entry a copy in the user's own applications directory with accessibilityFlag appended to every Exec line, main entry and desktop actions alike, so the application reads on every future launch, however the user starts it: XDG looks in the user's own directory before /usr/share, /var/lib/snapd and /var/lib/flatpak. Input: the entry's path. Output: true when the application will start with support from now on (June's copy is written or already there, or the entry already carries the flag); false when it will not: a read or write failure, an entry that is not Chromium-based, or a destination file this function did not write, all of which leave the filesystem as it was.
 func patchAccessibility(entry string) bool {
 	if entry == "" {
 		return false
@@ -192,7 +192,7 @@ func patchAccessibility(entry string) bool {
 	out := desktopEntryMarker + "\n" + strings.Join(lines, "\n")
 	if existing, err := os.ReadFile(dest); err == nil {
 		if !strings.HasPrefix(string(existing), desktopEntryMarker) {
-			return false // a file Ora did not write: never overwrite it
+			return false // a file June did not write: never overwrite it
 		}
 		if string(existing) == out {
 			return true // already patched, nothing to do
@@ -291,7 +291,7 @@ func (a *Agent) treelessNote(entry, how string, patched bool) string {
 	}
 	note := "; it was started without accessibility support, so observe_screen will list nothing inside this window: work from look and click_at for now"
 	if !patched {
-		return note + "; Ora could not set it up to start with support, so this will stay true after a relaunch"
+		return note + "; June could not set it up to start with support, so this will stay true after a relaunch"
 	}
 	return note + "; the application has been patched to start with support, so it will read the next time it is launched, once the user closes this window and opens it again"
 }
@@ -321,7 +321,7 @@ func nearEntries(entries map[string]string, app string) string {
 			words[w] = true
 		}
 	}
-	// One application can ship two desktop entries — a snap puts one in /var/lib/snapd/desktop/applications and Ora patches a copy into ~/.local/share/applications — and the entries are keyed by path, so both survive. Suggesting the same name twice ("Brave Web Browser, Brave Web Browser") reads as two different applications to pick between.
+	// One application can ship two desktop entries — a snap puts one in /var/lib/snapd/desktop/applications and June patches a copy into ~/.local/share/applications — and the entries are keyed by path, so both survive. Suggesting the same name twice ("Brave Web Browser, Brave Web Browser") reads as two different applications to pick between.
 	seen := map[string]bool{}
 	var near []string
 	for _, name := range entries {

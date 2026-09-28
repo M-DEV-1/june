@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // pickedModel is the model an ask on the named brain should ask for. Input: the brain id GET /brains publishes ("claude", "antigravity"), the name of that brain's environment override, and the model to use when neither names one. Output: the model name, or "" when there is nothing to name and the caller passed no default, which leaves the CLI on its own default.

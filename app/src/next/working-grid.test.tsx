@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-/** Tests for the one row of braille dots that says "Ora is working": that it moves, that it stops moving when it leaves the page, and that it holds still for someone who asked for less motion. */
+/** Tests for the one row of braille dots that says "June is working": that it moves, that it stops moving when it leaves the page, and that it holds still for someone who asked for less motion. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
@@ -42,7 +42,7 @@ describe("the working grid", () => {
   it("moves as time passes", async () => {
     vi.useFakeTimers();
     render(<WorkingGrid />);
-    const row = screen.getByRole("img", { name: "Ora is working" });
+    const row = screen.getByRole("img", { name: "June is working" });
     const first = row.textContent;
     await act(async () => {
       vi.advanceTimersByTime(600);
@@ -60,14 +60,14 @@ describe("the working grid", () => {
     await act(async () => {
       vi.advanceTimersByTime(1000);
     });
-    expect(screen.queryByRole("img", { name: "Ora is working" })).toBeNull();
+    expect(screen.queryByRole("img", { name: "June is working" })).toBeNull();
   });
 
   it("holds one frame when the reader asked for less motion", async () => {
     stubReducedMotion(true);
     vi.useFakeTimers();
     render(<WorkingGrid />);
-    const row = screen.getByRole("img", { name: "Ora is working" });
+    const row = screen.getByRole("img", { name: "June is working" });
     const first = row.textContent;
     expect(allBraille(first ?? "")).toBe(true);
     await act(async () => {

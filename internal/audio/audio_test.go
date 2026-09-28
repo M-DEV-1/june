@@ -2,7 +2,7 @@ package audio_test
 
 import (
 	"context"
-	"ora/internal/audio"
+	"june/internal/audio"
 	"testing"
 	"time"
 )

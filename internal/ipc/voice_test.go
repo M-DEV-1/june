@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/act"
-	"ora/internal/agent"
-	"ora/internal/audio"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/act"
+	"june/internal/agent"
+	"june/internal/audio"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // voiceFakeMic is a Microphone that hands out a channel nobody writes to and records that it was closed, so a test can assert Stop frees the real device without opening one. Its amplitude is settable under a mutex (sync/atomic has no Float64) so the level-ticker tests can drive what CurrentAmplitude reports without touching real hardware.
@@ -314,7 +314,7 @@ func TestVoiceEvents_HeardSaidAndStateReachASubscriber(t *testing.T) {
 
 // TestVoiceHeard_StopEndsTheSession covers the spoken way out: the window can be hidden while a session runs, so "stop" has to end it from the daemon's side rather than from a key the hidden window never sees.
 func TestVoiceHeard_StopEndsTheSession(t *testing.T) {
-	for _, said := range []string{"stop", "Stop.", "Ora, stop!", "ORA STOP"} {
+	for _, said := range []string{"stop", "Stop.", "June, stop!", "June STOP"} {
 		t.Run(said, func(t *testing.T) {
 			srv, _, mic, spk, run := newVoiceServer(t)
 
@@ -416,7 +416,7 @@ func TestVoiceStatus_ReportsIdleAfterEveryEnding(t *testing.T) {
 
 // TestNewVoiceAgent_WiresTheScreenDrawing covers what the voice session could not do before: the live agent it builds gets the same Point and Marks callbacks cmd/daemon.go gives the typed /ask agent, so point_at and show_marks draw on the screen instead of answering that this session cannot draw.
 func TestNewVoiceAgent_WiresTheScreenDrawing(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	s := New(nil, nil, nil, nil)
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)

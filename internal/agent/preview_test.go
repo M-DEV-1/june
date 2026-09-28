@@ -7,7 +7,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// A TTS response that refused the prompt and one that simply came back empty have the same shape — no usable parts — so a refusal was reported to the window as "returned no audio", which reads as a bug in Ora rather than a decision by the model. Measured on 2026-09-07: "Hi, I'm Ora. This is how I sound." is blocked PROHIBITED_CONTENT, because a synthetic voice introducing itself by name reads to the filter as impersonation.
+// A TTS response that refused the prompt and one that simply came back empty have the same shape — no usable parts — so a refusal was reported to the window as "returned no audio", which reads as a bug in June rather than a decision by the model. Measured on 2026-09-07: "Hi, I'm June. This is how I sound." is blocked PROHIBITED_CONTENT, because a synthetic voice introducing itself by name reads to the filter as impersonation.
 func TestNoAudioReason_TellsARefusalFromAnEmptyAnswer(t *testing.T) {
 	blocked := &genai.GenerateContentResponse{PromptFeedback: &genai.GenerateContentResponsePromptFeedback{BlockReason: genai.BlockedReasonProhibitedContent}}
 	if got := noAudioReason(blocked); !strings.Contains(got, "refused") || !strings.Contains(got, "PROHIBITED_CONTENT") {

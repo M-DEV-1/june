@@ -2,9 +2,9 @@ package agent_test
 
 import (
 	"context"
-	"ora/internal/agent"
-	"ora/internal/db"
-	"ora/internal/memory"
+	"june/internal/agent"
+	"june/internal/db"
+	"june/internal/memory"
 	"testing"
 	"time"
 )

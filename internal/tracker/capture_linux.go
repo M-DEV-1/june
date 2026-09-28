@@ -65,48 +65,48 @@ type focusState struct {
 	mu     sync.Mutex
 	ref    aref
 	app    string
-	ora    bool // whether the window in ref is Ora's own
-	prev   aref // the last activated window that was not Ora's own
+	june   bool // whether the window in ref is June's own
+	prev   aref // the last activated window that was not June's own
 	prevAp string
 	seen   bool
 }
 
 // apply records one AT-SPI window signal. Input: the signal's member name, the window accessible it names, and that window's application name and title (both read only for activations). An activate replaces whatever was remembered; a deactivate clears the memory only when it names the remembered window, so a late deactivate from a window already left cannot blank the current one. The member is compared case-insensitively because Chromium emits "Activate" and GTK4 emits "activate".
-// Activating a window that is not Ora's own also records it as the previous window, which is what get hands back while Ora itself holds focus.
+// Activating a window that is not June's own also records it as the previous window, which is what get hands back while June itself holds focus.
 func (s *focusState) apply(member string, ref aref, app, title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seen = true
 	switch {
 	case strings.EqualFold(member, "activate"):
-		s.ref, s.app, s.ora = ref, app, IsOraWindow(app, title)
-		if !s.ora {
+		s.ref, s.app, s.june = ref, app, IsJuneWindow(app, title)
+		if !s.june {
 			s.prev, s.prevAp = ref, app
 		}
 	case strings.EqualFold(member, "deactivate"):
 		if s.ref != ref {
 			return
 		}
-		// Ora's own window closing hands focus back to the window it was opened over, and that window sent its activate before Ora took focus, so it sends no other one. Restoring it here is the only way back: blanking the state left nothing focused until the user next switched applications, which meant no episodes and every screen tool answering that nothing is on screen.
-		if s.ora && s.prev.Name != "" {
-			s.ref, s.app, s.ora = s.prev, s.prevAp, false
+		// June's own window closing hands focus back to the window it was opened over, and that window sent its activate before June took focus, so it sends no other one. Restoring it here is the only way back: blanking the state left nothing focused until the user next switched applications, which meant no episodes and every screen tool answering that nothing is on screen.
+		if s.june && s.prev.Name != "" {
+			s.ref, s.app, s.june = s.prev, s.prevAp, false
 			return
 		}
-		s.ref, s.app, s.ora = aref{}, "", false
+		s.ref, s.app, s.june = aref{}, "", false
 	}
 }
 
-// get returns the window to report and its application name. While Ora's own window holds focus it returns the last window the user was in instead, because the hover is opened to ask about what is behind it. ok is false when nothing holds focus, either because no signal has arrived yet or because the last one was the deactivation of the window we were holding.
+// get returns the window to report and its application name. While June's own window holds focus it returns the last window the user was in instead, because the hover is opened to ask about what is behind it. ok is false when nothing holds focus, either because no signal has arrived yet or because the last one was the deactivation of the window we were holding.
 func (s *focusState) get() (aref, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ora && s.prev.Name != "" {
+	if s.june && s.prev.Name != "" {
 		return s.prev, s.prevAp, true
 	}
 	return s.ref, s.app, s.ref.Name != ""
 }
 
-// previous returns the last window that took focus and was not Ora's own, together with its application name. Unlike get it still answers after that window has been deactivated with nothing else taking focus, which is what happens whenever focus moves to an application that publishes no accessibility tree. ok is false when no such window has been seen, or when the one remembered has left the bus. Callers that must know what holds focus right now use get; this one answers "what was the user last in".
+// previous returns the last window that took focus and was not June's own, together with its application name. Unlike get it still answers after that window has been deactivated with nothing else taking focus, which is what happens whenever focus moves to an application that publishes no accessibility tree. ok is false when no such window has been seen, or when the one remembered has left the bus. Callers that must know what holds focus right now use get; this one answers "what was the user last in".
 func (s *focusState) previous() (aref, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -118,7 +118,7 @@ func (s *focusState) clear(ref aref) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ref == ref {
-		s.ref, s.app, s.ora = aref{}, "", false
+		s.ref, s.app, s.june = aref{}, "", false
 	}
 	if s.prev == ref {
 		s.prev, s.prevAp = aref{}, ""
@@ -347,8 +347,8 @@ func activeOrFallback(ref aref, app, title string, active, focused bool, scan fu
 	found, ok := scan()
 	switch {
 	case !ok:
-	// Ora's own window holding focus is the one case the remembered window exists to hide, so a scan that finds it changes nothing.
-	case IsOraWindow(found.app, found.title):
+	// June's own window holding focus is the one case the remembered window exists to hide, so a scan that finds it changes nothing.
+	case IsJuneWindow(found.app, found.title):
 	case found.ref == ref:
 		return ref, app, title, true
 	// A window that claims the keyboard beats a remembered window that has only kept STATE_ACTIVE. When nothing claims the keyboard, another merely-active window is no better evidence than the remembered one, so it only wins if the remembered window has lost its own active bit as well.
@@ -552,7 +552,7 @@ func scanForActive(ctx context.Context, conn *dbus.Conn) (activeWindow, bool) {
 //
 // Input: the application's process name, such as "brave" or "chrome". Output: the title of one of its windows, preferring the longest, or empty when nothing matches.
 //
-// This asks the desktop rather than Ora's own history, because history lags: a call is joined seconds before the tracker next records a window. It is best-effort and often returns nothing — an application publishes an accessibility tree only if it was built or launched to, and Brave installed as a snap frequently publishes none at all even when launched with --force-renderer-accessibility. The caller falls back to history, which is why this failing is not a failure.
+// This asks the desktop rather than June's own history, because history lags: a call is joined seconds before the tracker next records a window. It is best-effort and often returns nothing — an application publishes an accessibility tree only if it was built or launched to, and Brave installed as a snap frequently publishes none at all even when launched with --force-renderer-accessibility. The caller falls back to history, which is why this failing is not a failure.
 // X11 would list every window regardless, but this desktop is Wayland and XWayland reports an empty _NET_CLIENT_LIST, so there is nothing to read there.
 // The longest title is preferred because a browser's several windows include short utility ones and the call is the window that names itself fully. Nothing here knows which applications host meetings; it answers only "what is this program showing".
 func WindowTitleFor(ctx context.Context, app string) string {

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
-	"ora/internal/memory"
+	"june/internal/db"
+	"june/internal/db/dbtest"
+	"june/internal/memory"
 )
 
 // TestDaysListsActiveDays checks that a day with a meeting on it shows up, and that a day with a diary entry is marked as having a page.
@@ -98,7 +98,7 @@ func TestDayPage(t *testing.T) {
 	if _, err := store.AddTurn(ctx, convID, "you", "when does it leave", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn: %v", err)
 	}
-	if _, err := store.AddTurn(ctx, convID, "ora", "half past four", "ask", nil, nil); err != nil {
+	if _, err := store.AddTurn(ctx, convID, "june", "half past four", "ask", nil, nil); err != nil {
 		t.Fatalf("AddTurn: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestDayHeading(t *testing.T) {
 	}
 	start := time.Now().Add(-time.Hour)
 	stop := start.Add(28 * time.Minute)
-	minutesWithDuration := fmt.Sprintf("%s\n\n<!--ora:duration start=%s stop=%s-->\n", sampleMinutes, start.UTC().Format(time.RFC3339), stop.UTC().Format(time.RFC3339))
+	minutesWithDuration := fmt.Sprintf("%s\n\n<!--june:duration start=%s stop=%s-->\n", sampleMinutes, start.UTC().Format(time.RFC3339), stop.UTC().Format(time.RFC3339))
 	if _, err := store.LogNote(ctx, minutesWithDuration, meetingNoteKind); err != nil {
 		t.Fatalf("seed meeting: %v", err)
 	}

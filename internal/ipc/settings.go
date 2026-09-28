@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/agent"
-	"ora/internal/config"
-	"ora/internal/util"
+	"june/internal/agent"
+	"june/internal/config"
+	"june/internal/util"
 )
 
 // noVersion is reported when the build carries no injected version string (see cmd/root.go's buildIdentity: there is no ldflags version injection in this repo).
@@ -42,11 +42,11 @@ type SettingsView struct {
 	Version         string       `json:"version"`
 	Hotkey          string       `json:"hotkey"`
 	FirstRun        FirstRunView `json:"first_run"`
-	// ClaudeUsageFromLogin mirrors config.OraConfig.ClaudeUsageFromLoginEnabled: whether GET /brains is allowed to read the Claude row's usage bars from the undocumented Anthropic endpoint. POST /settings with this field set writes it back to the config.
+	// ClaudeUsageFromLogin mirrors config.JuneConfig.ClaudeUsageFromLoginEnabled: whether GET /brains is allowed to read the Claude row's usage bars from the undocumented Anthropic endpoint. POST /settings with this field set writes it back to the config.
 	ClaudeUsageFromLogin bool `json:"claude_usage_from_login"`
 }
 
-// FirstRunView is SettingsView's "first_run" field: which of the ways Ora can answer text are already set up on this machine, and — only when none of them are — plain one-line steps to fix that. Every signal is read live off the machine (an env var, a login file, the config) rather than a stored "setup complete" flag, so a first run that was interrupted keeps asking.
+// FirstRunView is SettingsView's "first_run" field: which of the ways June can answer text are already set up on this machine, and — only when none of them are — plain one-line steps to fix that. Every signal is read live off the machine (an env var, a login file, the config) rather than a stored "setup complete" flag, so a first run that was interrupted keeps asking.
 type FirstRunView struct {
 	GeminiKey  bool     `json:"gemini_key"`
 	CodexLogin bool     `json:"codex_login"`
@@ -56,7 +56,7 @@ type FirstRunView struct {
 }
 
 // firstRun builds FirstRunView for cfg, reading login files under home (os.UserHomeDir() at the call site; a parameter here so a test can point it at a temporary directory instead of this machine's real one — the same pattern brainList uses).
-func firstRun(cfg config.OraConfig, home string) FirstRunView {
+func firstRun(cfg config.JuneConfig, home string) FirstRunView {
 	v := FirstRunView{
 		GeminiKey:  os.Getenv("GEMINI_API_KEY") != "",
 		CodexLogin: util.Exists(agent.CodexAuthPath(home)),
@@ -67,7 +67,7 @@ func firstRun(cfg config.OraConfig, home string) FirstRunView {
 	return v
 }
 
-// firstRunSteps names what is missing, one plain sentence per way of answering text, only when none of them works yet — Ora needs just one, not all four.
+// firstRunSteps names what is missing, one plain sentence per way of answering text, only when none of them works yet — June needs just one, not all four.
 func firstRunSteps(v FirstRunView) []string {
 	if v.GeminiKey || v.CodexLogin || v.ClaudeCLI || v.LocalModel {
 		return []string{}
@@ -76,24 +76,24 @@ func firstRunSteps(v FirstRunView) []string {
 		"Set GEMINI_API_KEY in " + filepath.Join(config.DataDir(), "env") + ".",
 		"Or sign in with the Claude CLI: run claude login.",
 		"Or sign in with the Codex CLI: run codex login.",
-		"Or point ora-config.json at a local model.",
+		"Or point june-config.json at a local model.",
 	}
 }
 
 // LiveConfig is the daemon's loaded config as the request goroutines see it: every read hands back a copy of the struct taken under the lock, and the one field a request can change is written under that same lock, so POST /settings and the GET /brains and GET /usage handlers reading the same setting are not touching one struct from several goroutines at once. ponytail: one mutex over the whole config, not per-field — these are a handful of requests a minute.
 type LiveConfig struct {
 	mu   sync.Mutex
-	cfg  *config.OraConfig
-	save func(config.OraConfig) error
+	cfg  *config.JuneConfig
+	save func(config.JuneConfig) error
 }
 
 // NewLiveConfig wraps the daemon's config for use from request goroutines. Input: a pointer to the loaded config and the function that persists one to disk (config.SaveConfig in production, a stub in tests). Output: the accessor to hand Settings, and to read the config through anywhere else a request goroutine needs it.
-func NewLiveConfig(cfg *config.OraConfig, save func(config.OraConfig) error) *LiveConfig {
+func NewLiveConfig(cfg *config.JuneConfig, save func(config.JuneConfig) error) *LiveConfig {
 	return &LiveConfig{cfg: cfg, save: save}
 }
 
 // Get returns a copy of the config taken under the lock, so the caller reads a consistent struct rather than one another request may be part-way through writing. Input: none. Output: the config by value.
-func (c *LiveConfig) Get() config.OraConfig {
+func (c *LiveConfig) Get() config.JuneConfig {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return *c.cfg
@@ -141,7 +141,7 @@ func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaus
 }
 
 // writeSettings writes SettingsView as JSON, the body both GET and POST /settings answer with.
-func writeSettings(w http.ResponseWriter, dataDir string, cfg config.OraConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) {
+func writeSettings(w http.ResponseWriter, dataDir string, cfg config.JuneConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) {
 	capture := true
 	if capturePaused != nil {
 		capture = !capturePaused()
@@ -192,10 +192,10 @@ const mediaKeysSchema = "org.gnome.settings-daemon.plugins.media-keys"
 // customKeybindingSchemaPrefix, plus a keybinding's own D-Bus path, names the per-keybinding schema its command and binding live under.
 const customKeybindingSchemaPrefix = mediaKeysSchema + ".custom-keybinding:"
 
-// windowToggleCommand is the command the ora-window-hotkey wiring registers, which marks a custom keybinding as ours among however many others GNOME holds.
-const windowToggleCommand = "ora-window-toggle"
+// windowToggleCommand is the command the june-window-hotkey wiring registers, which marks a custom keybinding as ours among however many others GNOME holds.
+const windowToggleCommand = "june-window-toggle"
 
-// windowHotkey reads the GNOME accelerator that opens the window, live off gsettings. Output: the binding string (for example "<Control><Alt>space"), or "" when no keybinding runs ora-window-toggle, gsettings is unavailable, or the platform is not Linux — GNOME's custom-keybindings mechanism is what internal/window wires the hotkey through, and there is nothing else to fall back to.
+// windowHotkey reads the GNOME accelerator that opens the window, live off gsettings. Output: the binding string (for example "<Control><Alt>space"), or "" when no keybinding runs june-window-toggle, gsettings is unavailable, or the platform is not Linux — GNOME's custom-keybindings mechanism is what internal/window wires the hotkey through, and there is nothing else to fall back to.
 func windowHotkey() string {
 	if hotkeyGOOS != "linux" {
 		return ""
@@ -238,7 +238,7 @@ func gvariantStrings(literal string) []string {
 	return out
 }
 
-// gvariantString strips the single quotes gsettings wraps a string value in. Input: a literal like "'ora-window-toggle'". Output: the value alone, or the input unchanged if it carries no quotes to strip.
+// gvariantString strips the single quotes gsettings wraps a string value in. Input: a literal like "'june-window-toggle'". Output: the value alone, or the input unchanged if it carries no quotes to strip.
 func gvariantString(literal string) string {
 	return strings.Trim(strings.TrimSpace(literal), "'")
 }
@@ -280,7 +280,7 @@ func dirBytes(dir string) int64 {
 	return total
 }
 
-// describeBrain names the backend that answers Ora's one-shot text duties. Input: the brain config. Output: "<cli> <model>" for one of the CLI-backed providers (or just the CLI name when no model is pinned), otherwise the Gemini model name that will actually be called (the configured one, or config.TextModel when none is set).
+// describeBrain names the backend that answers June's one-shot text duties. Input: the brain config. Output: "<cli> <model>" for one of the CLI-backed providers (or just the CLI name when no model is pinned), otherwise the Gemini model name that will actually be called (the configured one, or config.TextModel when none is set).
 func describeBrain(cfg config.BrainConfig) string {
 	switch cfg.Provider {
 	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI:

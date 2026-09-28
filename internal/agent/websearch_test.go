@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // TestExaSearch_ParsesResultsIntoNormalizedForm verifies exaSearch sends the query and API key correctly and maps Exa's title/text fields into searchResult without needing a real Exa account.
@@ -110,7 +110,7 @@ func TestTavilyUsage_ParsesAccountPlanUsage(t *testing.T) {
 	}
 }
 
-// Exa takes its content options nested under "contents", not as a top-level "text" field. Ora asked the top-level way, so on 2026-09-12 all eight branch calls came back as a title, a colon and nothing at all — the titles decoded and the bodies never arrived.
+// Exa takes its content options nested under "contents", not as a top-level "text" field. June asked the top-level way, so on 2026-09-12 all eight branch calls came back as a title, a colon and nothing at all — the titles decoded and the bodies never arrived.
 func TestExaSearch_AsksForTextTheWayExaWants(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,7 @@ func TestExaSearch_AsksForTextTheWayExaWants(t *testing.T) {
 	}
 }
 
-// A result's URL is the one thing branch() has to hand back and never did. Without it Ora told the user it had no links, then invented one — boards.greenhouse.io/emergentlabs/jobs/4011400008, which 404'd. Both providers mark url as a required field on every result.
+// A result's URL is the one thing branch() has to hand back and never did. Without it June told the user it had no links, then invented one — boards.greenhouse.io/emergentlabs/jobs/4011400008, which 404'd. Both providers mark url as a required field on every result.
 func TestSearchProvidersKeepTheResultURL(t *testing.T) {
 	exa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -165,7 +165,7 @@ func TestSearchProvidersKeepTheResultURL(t *testing.T) {
 	}
 }
 
-// The model only ever sees formatSearchResult's string, so a URL kept by the decoder and dropped here is still a URL Ora cannot give the user or hand to open_url.
+// The model only ever sees formatSearchResult's string, so a URL kept by the decoder and dropped here is still a URL June cannot give the user or hand to open_url.
 func TestFormatSearchResult_CarriesTheURLs(t *testing.T) {
 	t.Run("beside each result when there is no answer", func(t *testing.T) {
 		got := formatSearchResult(searchResponse{Results: []searchResult{
@@ -178,7 +178,7 @@ func TestFormatSearchResult_CarriesTheURLs(t *testing.T) {
 		}
 	})
 
-	// Tavily's synthesized answer used to win outright and take the results with it, so the one path that produced the best prose was also the one that left Ora with no link to open.
+	// Tavily's synthesized answer used to win outright and take the results with it, so the one path that produced the best prose was also the one that left June with no link to open.
 	t.Run("under the answer, which used to swallow them", func(t *testing.T) {
 		got := formatSearchResult(searchResponse{
 			Answer:  "Brightpath is hiring remotely.",
@@ -201,7 +201,7 @@ func TestFormatSearchResult_CarriesTheURLs(t *testing.T) {
 	})
 }
 
-// On 2026-09-12 Ora answered every web search twice. The log is unambiguous: branch was called at 16:10:46 and in the same instant Ora said "Let me check for you... Right, it looks like there are about one hundred and forty thousand neurons in that map", the search came back at 16:10:47, and at 16:10:53 Ora said the same sentence again.
+// On 2026-09-12 June answered every web search twice. The log is unambiguous: branch was called at 16:10:46 and in the same instant June said "Let me check for you... Right, it looks like there are about one hundred and forty thousand neurons in that map", the search came back at 16:10:47, and at 16:10:53 June said the same sentence again.
 //
 // The prompt was asking for it. Among the holding lines it offered as examples was "from what I know it's X, but let me check", which is an instruction to answer from memory before the search returns, and it sat two sentences above "Never answer such a question from memory". "Then keep talking" did the rest: the model ran straight from its holding line into a full answer it had invented, and then gave that answer again when the real result landed.
 func TestVoicePromptDoesNotInviteAnsweringBeforeTheSearchReturns(t *testing.T) {

@@ -1,6 +1,6 @@
 /** The daemon's event stream, declared once for both clients that read it: the hover (src/daemon.ts, src/state.ts) and the React window (src/next/api.ts, src/next/store.ts). Holds the shapes of what arrives on it and the one reader that opens it and reconnects it. */
 
-/** One thing Ora read to answer with, carried both on a stored turn and on the answer event. Mirrors ipc.EvidenceItem. */
+/** One thing June read to answer with, carried both on a stored turn and on the answer event. Mirrors ipc.EvidenceItem. */
 export type Evidence = { title: string; meta: string; body: string };
 
 /** One round's tokens, filed under the model that served it. Mirrors actjob.Usage. */
@@ -9,7 +9,7 @@ export type ModelUsage = { model: string; input: number; cached: number; output:
 /** What a whole job has cost: the rounds it took, the tokens on each side, and the same counts again per model, so two brains can be compared on the same task. Mirrors actjob.Spend. */
 export type Spend = { rounds: number; input: number; cached: number; output: number; by_model?: Record<string, ModelUsage> };
 
-/** One of Ora's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep, a task or routine raised on its own. The shape is fixed by the Go side, see internal/ipc/notice.go.
+/** One of June's own moments, sent by the daemon rather than asked for: the morning brief, the evening close, a meeting prep, a task or routine raised on its own. The shape is fixed by the Go side, see internal/ipc/notice.go.
  * title is the card's bold first line and body the few lines under it; body is the routine's or task's own text for those two kinds (see internal/proactive/routine.go and proactive.go).
  * place names the app window's screen a click opens ("tasks", "days") and id the row to select there, both empty when the moment points at nothing in particular.
  * kind is "task", "routine", "brief", "close", "meeting" or "note".
@@ -30,7 +30,7 @@ export type Notice = {
 };
 
 /** One message off the daemon's SSE stream.
- * The first five types belong to an ask; "dictation" carries a finished transcript; "heard", "said", "state" and "level" belong to a live voice session; "notice" is Ora speaking first; "act" is one line of a computer-use job's progress; "overlay" and "window" tell the on-screen accessories and the app window what to do; "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way.
+ * The first five types belong to an ask; "dictation" carries a finished transcript; "heard", "said", "state" and "level" belong to a live voice session; "notice" is June speaking first; "act" is one line of a computer-use job's progress; "overlay" and "window" tell the on-screen accessories and the app window what to do; "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way.
  * id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it.
  */
 export type DaemonEvent = {

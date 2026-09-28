@@ -1,4 +1,4 @@
-// routines.go holds GET/POST/DELETE /routines and POST /routines/{id}/run: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today" — and the one-click way to run one right now instead of waiting for its schedule. internal/proactive is what actually checks the schedules on a tick; this file is the window's read/write surface on the routines table, plus the immediate run, which asks through the same Asker /ask uses.
+// routines.go holds GET/POST/DELETE /routines and POST /routines/{id}/run: user-authored scheduled instructions June checks on its own — "every weekday at 8, tell me the one thing I must do today" — and the one-click way to run one right now instead of waiting for its schedule. internal/proactive is what actually checks the schedules on a tick; this file is the window's read/write surface on the routines table, plus the immediate run, which asks through the same Asker /ask uses.
 package ipc
 
 import (
@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // RoutineView is one routine on GET /routines. LastRun is "" until it has fired at least once.

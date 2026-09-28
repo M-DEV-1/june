@@ -2,11 +2,11 @@ package agent
 
 import (
 	"context"
-	"ora/internal/act"
-	"ora/internal/audio"
-	"ora/internal/db"
-	"ora/internal/memory"
-	"ora/internal/tracker"
+	"june/internal/act"
+	"june/internal/audio"
+	"june/internal/db"
+	"june/internal/memory"
+	"june/internal/tracker"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,7 +40,7 @@ type ContextReader interface {
 	// A conversation is opened for the task the same way the window's own createTask does it, so the row on the Tasks screen leads somewhere when it is clicked.
 	CreateConversation(ctx context.Context, title, brain string) (int64, error)
 	AddUserTask(ctx context.Context, title string, conversationID int64) (int64, error)
-	// SetUserTaskTitle, SetUserTaskDone and DeleteUserTask back the "revise" tool's task path (tools.go). A row on the Tasks screen is not a note, so the note path cannot reach it, and until 2026-09-12 nothing could: Ora added a task, the user asked three times to correct its wording and then to delete it, and every attempt came back "revise only handles note and thread refs". Ticking one done was the only thing the whole product could do to a task it had created.
+	// SetUserTaskTitle, SetUserTaskDone and DeleteUserTask back the "revise" tool's task path (tools.go). A row on the Tasks screen is not a note, so the note path cannot reach it, and until 2026-09-12 nothing could: June added a task, the user asked three times to correct its wording and then to delete it, and every attempt came back "revise only handles note and thread refs". Ticking one done was the only thing the whole product could do to a task it had created.
 	SetUserTaskTitle(ctx context.Context, id int64, title string) error
 	SetUserTaskDone(ctx context.Context, id int64, done bool) error
 	DeleteUserTask(ctx context.Context, id int64) error
@@ -64,13 +64,13 @@ type ContextReader interface {
 	ConsumeFold(ctx context.Context, id int64) error
 }
 
-// ResponseChunk is one piece of text bound for the UI transcript: model output (ora), a finished voice utterance (you), or a system notice. Carries genai's own Part.Thought bit end to end so the UI never has to infer which kind of text it received.
+// ResponseChunk is one piece of text bound for the UI transcript: model output (june), a finished voice utterance (you), or a system notice. Carries genai's own Part.Thought bit end to end so the UI never has to infer which kind of text it received.
 type ResponseChunk struct {
 	Text      string
 	IsThought bool
-	// Sender routes the chunk to the right transcript speaker: "" (zero value) is ora, or one of SenderYou/SenderSystem below.
+	// Sender routes the chunk to the right transcript speaker: "" (zero value) is june, or one of SenderYou/SenderSystem below.
 	Sender string
-	// TurnBoundary marks the end of one model turn (Text is empty on this chunk) — the UI closes the current ora message block on receipt so the next ora chunk starts a fresh one instead of merging into whatever came before.
+	// TurnBoundary marks the end of one model turn (Text is empty on this chunk) — the UI closes the current june message block on receipt so the next june chunk starts a fresh one instead of merging into whatever came before.
 	TurnBoundary bool
 }
 

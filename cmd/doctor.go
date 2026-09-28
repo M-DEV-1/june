@@ -13,10 +13,10 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/spf13/cobra"
 
-	"ora/internal/config"
-	"ora/internal/recorder"
-	"ora/internal/util"
-	"ora/internal/window"
+	"june/internal/config"
+	"june/internal/recorder"
+	"june/internal/util"
+	"june/internal/window"
 )
 
 // doctorCheck is one line of the readiness report: what was checked, whether it is ready, what was found, and what to do when it is not.
@@ -25,10 +25,10 @@ type doctorCheck struct {
 	OK                bool
 }
 
-// doctorCmd is "ora doctor": one report over everything computer use stands on and every piece Ora runs locally, with the first blocker and its fix named at the end, so a desk where clicks do not land or a meeting that never transcribes can be read in one go instead of from the log.
+// doctorCmd is "june doctor": one report over everything computer use stands on and every piece June runs locally, with the first blocker and its fix named at the end, so a desk where clicks do not land or a meeting that never transcribes can be read in one go instead of from the log.
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Report whether this desk is ready for Ora to see and drive the screen, and which local pieces are missing",
+	Short: "Report whether this desk is ready for June to see and drive the screen, and which local pieces are missing",
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -98,7 +98,7 @@ func runDoctor(ctx context.Context) []doctorCheck {
 		windows, err := r.List(ctx)
 		switch {
 		case err != nil:
-			out = append(out, doctorCheck{Name: "window frames", Detail: "extension not answering: " + err.Error(), Fix: "enable the ora@ora.local extension and log in again"})
+			out = append(out, doctorCheck{Name: "window frames", Detail: "extension not answering: " + err.Error(), Fix: "enable the june@june.local extension and log in again"})
 		case !anyFrame(windows):
 			out = append(out, doctorCheck{Name: "window frames", Detail: fmt.Sprintf("%d windows listed, none with a frame", len(windows)), Fix: "the installed extension predates window frames: log out and in to load the new one"})
 		default:
@@ -112,7 +112,7 @@ func runDoctor(ctx context.Context) []doctorCheck {
 	out = append(out, localPieceChecks(config.DataDir(), os.Getenv("XDG_RUNTIME_DIR"), config.LoadConfig().Embed)...)
 	// Daemon: everything above is driven by it.
 	if resp, err := http.Get("http://127.0.0.1:" + DaemonPort + "/ping"); err != nil {
-		out = append(out, doctorCheck{Name: "daemon", Detail: "not answering on " + DaemonPort, Fix: "run ora"})
+		out = append(out, doctorCheck{Name: "daemon", Detail: "not answering on " + DaemonPort, Fix: "run june"})
 	} else {
 		resp.Body.Close()
 		out = append(out, doctorCheck{Name: "daemon", Detail: "answering", OK: true})
@@ -149,12 +149,12 @@ func monitorCount(ctx context.Context, conn *dbus.Conn) int {
 	return len(monitors)
 }
 
-// localPieceChecks reports every piece Ora runs locally and a clean machine may not have: whisper-cli and its model, the Silero voice-activity model, the sherpa-onnx diarizer and its models, the embedding llama-server and its GGUF, the PipeWire pulse socket and pw-dump. Nothing downloads any of them. Each line names the exact path it was looked for at and the feature that is off without it.
+// localPieceChecks reports every piece June runs locally and a clean machine may not have: whisper-cli and its model, the Silero voice-activity model, the sherpa-onnx diarizer and its models, the embedding llama-server and its GGUF, the PipeWire pulse socket and pw-dump. Nothing downloads any of them. Each line names the exact path it was looked for at and the feature that is off without it.
 // Input: the data directory, $XDG_RUNTIME_DIR, and the embed block of the config. Output: one check per piece, in that order.
 func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []doctorCheck {
 	var out []doctorCheck
 	if bin, err := recorder.WhisperCPPBinary(dataDir); err != nil {
-		out = append(out, doctorCheck{Name: "meeting transcription", Detail: err.Error() + "; meeting transcription is off", Fix: "install whisper.cpp's whisper-cli with ggml-medium.bin beside it at the path above, or point ORA_WHISPER_CPP at one"})
+		out = append(out, doctorCheck{Name: "meeting transcription", Detail: err.Error() + "; meeting transcription is off", Fix: "install whisper.cpp's whisper-cli with ggml-medium.bin beside it at the path above, or point JUNE_WHISPER_CPP at one"})
 	} else {
 		out = append(out, doctorCheck{Name: "meeting transcription", Detail: "whisper-cli at " + bin, OK: true})
 	}
@@ -164,7 +164,7 @@ func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []do
 		out = append(out, doctorCheck{Name: "voice activity model", Detail: "installed at " + vad, OK: true})
 	}
 	if bin, err := recorder.SherpaBinary(dataDir); err != nil {
-		out = append(out, doctorCheck{Name: "speaker diarization", Detail: err.Error() + "; splitting the call into speakers is off", Fix: "install sherpa-onnx's diarizer, its lib directory and both models at the paths above, or point ORA_SHERPA at one"})
+		out = append(out, doctorCheck{Name: "speaker diarization", Detail: err.Error() + "; splitting the call into speakers is off", Fix: "install sherpa-onnx's diarizer, its lib directory and both models at the paths above, or point JUNE_SHERPA at one"})
 	} else {
 		out = append(out, doctorCheck{Name: "speaker diarization", Detail: "diarizer at " + bin, OK: true})
 	}
@@ -199,7 +199,7 @@ func embedCheck(embed config.EmbedConfig) doctorCheck {
 	return doctorCheck{Name: "local memory search", Detail: "llama-server at " + embed.LlamaServer + ", model at " + embed.ModelPath, OK: true}
 }
 
-// brainCheck reports whether Ora has anything to think with. Everything else doctor checks is about the desk — the buses, the screen, the pointer — and a machine can pass all of it and still not answer a single question, which is exactly what a clean install does before a key or a login is in place. Input: the home directory the CLI login files live under, and the Gemini API key as the environment gives it. Output: the check, naming every brain it found, or saying how to give it one.
+// brainCheck reports whether June has anything to think with. Everything else doctor checks is about the desk — the buses, the screen, the pointer — and a machine can pass all of it and still not answer a single question, which is exactly what a clean install does before a key or a login is in place. Input: the home directory the CLI login files live under, and the Gemini API key as the environment gives it. Output: the check, naming every brain it found, or saying how to give it one.
 func brainCheck(home, apiKey string) doctorCheck {
 	var found []string
 	if strings.TrimSpace(apiKey) != "" {
@@ -244,7 +244,7 @@ func doctorReport(checks []doctorCheck) string {
 		fmt.Fprintf(&b, "%s  %-22s %s\n", mark, c.Name, c.Detail)
 	}
 	if len(blockers) == 0 {
-		b.WriteString("\nready: everything Ora needs is in place\n")
+		b.WriteString("\nready: everything June needs is in place\n")
 		return b.String()
 	}
 	names := make([]string, len(blockers))

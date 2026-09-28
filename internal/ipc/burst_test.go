@@ -3,7 +3,7 @@ package ipc
 import (
 	"testing"
 
-	"ora/internal/agent"
+	"june/internal/agent"
 )
 
 // One drawing is many events: the draw tool resolves each shape against the screen and broadcasts it on its own, up to agent.MaxDrawShapes of them, inside the same millisecond. The client's buffer has to hold that whole burst, or the overlay window is dropped part-way through and the drawing lands half-finished.

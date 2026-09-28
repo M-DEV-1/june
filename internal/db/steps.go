@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"ora/internal/act"
-	"ora/internal/util"
+	"june/internal/act"
+	"june/internal/util"
 )
 
 // stepLabelRunes caps an element label inside a rendered step, so one absurd button label cannot stretch the line.

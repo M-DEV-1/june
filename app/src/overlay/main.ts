@@ -36,16 +36,16 @@ import {
 } from "./draw";
 
 /** The Tauri event Rust hands each daemon event over as. Its payload is the text of one event off the daemon's stream. */
-const DAEMON_EVENT = "ora://daemon-event";
+const DAEMON_EVENT = "june://daemon-event";
 
 /** How long the whole drawing takes to fade away, in milliseconds. Clicky's OverlayWindow.swift:819 fades its own overlay window out over the same 400 ms. */
 const FADE_MS = 400;
 
-/** The colour of each mood. Neutral is Ora's own accent, halfway between the purple the app uses on a light theme and the one it uses on a dark one, so it reads on either. Point is the warm orange everything Ora shows you is drawn in, act is the red of a press about to happen, and done is the green of a thing finished. */
+/** The colour of each mood. Neutral is June's own accent, halfway between the purple the app uses on a light theme and the one it uses on a dark one, so it reads on either. Point is the warm orange everything June shows you is drawn in, act is the same purple, for a press about to happen, and done is the green of a thing finished. */
 const MOODS: Record<Mood, string> = {
   neutral: "#7b68f5",
   point: "#fb7a1e",
-  act: "#e5484d",
+  act: "#7b68f5",
   done: "#2fb46e",
 };
 
@@ -338,7 +338,7 @@ async function draw(text: string, askID: string): Promise<void> {
     await readLayout();
     shapes = shapesFor(spec, layout);
     if (shapes.length === 0) {
-      console.error("ora: overlay drew nothing", {
+      console.error("june: overlay drew nothing", {
         kind: spec.kind,
         monitors: layout.monitors.length,
         origin: [layout.origin_x, layout.origin_y],
@@ -425,7 +425,7 @@ async function start(): Promise<void> {
       else waiting.push(e.payload);
     });
     // One line, so the window's log shows the moment the page could first have drawn anything.
-    console.log("ora: overlay page listening");
+    console.log("june: overlay page listening");
   } catch {
     /* Not running inside Tauri: a page opened in a plain browser draws its ?demo= and nothing else. */
   }

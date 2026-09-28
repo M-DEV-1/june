@@ -9,24 +9,24 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
-// Version is Ora's release number, the one source of truth for every place that reports it: internal/obs/telemetry.go tags telemetry with it plainly, and internal/ui/ui.go wraps it as "v0.1.1-alpha" for the terminal banner.
+// Version is June's release number, the one source of truth for every place that reports it: internal/obs/telemetry.go tags telemetry with it plainly, and internal/ui/ui.go wraps it as "v0.1.1-alpha" for the terminal banner.
 const Version = "0.1.1"
 
-type OraConfig struct {
+type JuneConfig struct {
 	Tracker TrackerConfig `json:"tracker"`
 	// Voice is the Gemini Live prebuilt voice name used for the assistant's spoken output (see AvailableVoices).
 	// Defaults to DefaultVoice when unset.
 	Voice string `json:"voice"`
-	// LiveModel is the bidirectional Live API model the voice session dials, one of config.LiveVoiceModels. Empty, or a name Ora does not know, runs on DefaultVoiceModel. It is a choice rather than a constant because the two models trade tone against latency and neither answer is right for everyone: see LiveVoiceModels in gemini.go for the measured numbers.
+	// LiveModel is the bidirectional Live API model the voice session dials, one of config.LiveVoiceModels. Empty, or a name June does not know, runs on DefaultVoiceModel. It is a choice rather than a constant because the two models trade tone against latency and neither answer is right for everyone: see LiveVoiceModels in gemini.go for the measured numbers.
 	LiveModel string `json:"live_model,omitempty"`
 	// Autostart is whether the daemon should be launched when the user logs in. Defaults to false — an upgrading user must opt in to a screen-recording daemon starting at login, not get one installed silently — and the daemon reconciles the on-disk autostart entry to match this field on every startup.
 	Autostart bool `json:"autostart"`
-	// Window is whether the daemon also runs the desktop window, so the login entry starts one thing and gets both. Defaults to true; set it to false in ora-config.json to run the daemon headless, and see cmd/window.go for where the window binary is looked for.
+	// Window is whether the daemon also runs the desktop window, so the login entry starts one thing and gets both. Defaults to true; set it to false in june-config.json to run the daemon headless, and see cmd/window.go for where the window binary is looked for.
 	Window bool `json:"window"`
-	// ProactiveAudio turns on the Gemini Live "proactive audio" feature, which lets the model stay silent when what the mic picked up wasn't addressed to it — a room conversation, a video, the user talking to someone else. Defaults to on; set it to false in ora-config.json to have the model answer everything it hears.
+	// ProactiveAudio turns on the Gemini Live "proactive audio" feature, which lets the model stay silent when what the mic picked up wasn't addressed to it — a room conversation, a video, the user talking to someone else. Defaults to on; set it to false in june-config.json to have the model answer everything it hears.
 	// A pointer, not a plain bool, so a config file written before this field existed (no key at all) is distinguishable from one where the user explicitly turned it off. Use ProactiveAudioEnabled rather than reading it directly.
 	ProactiveAudio *bool `json:"proactive_audio,omitempty"`
 	// Embed selects which embedding engine backs hybrid search. Zero value means the Gemini API, as before.
@@ -39,7 +39,7 @@ type OraConfig struct {
 	Proactive ProactiveConfig `json:"proactive"`
 	// Dream schedules the overnight dreaming loop. Zero value means the defaults; a negative hour disables dreaming.
 	Dream DreamConfig `json:"dream"`
-	// Meetings sets what Ora does when it notices a call. Zero value means it offers to record and never records on its own.
+	// Meetings sets what June does when it notices a call. Zero value means it offers to record and never records on its own.
 	Meetings MeetingsConfig `json:"meetings"`
 	// BrainModels remembers the model last picked for each brain from POST /brains (see internal/ipc/brains.go), keyed by brain id ("claude", "codex", "gemini", "grok", "ollama"). It lives here rather than inside BrainConfig because BrainConfig is compared with == in tests, which a map field would break.
 	BrainModels map[string]string `json:"brain_models,omitempty"`
@@ -57,12 +57,12 @@ type OraConfig struct {
 	DailyTokenBudget map[string]int `json:"daily_token_budget,omitempty"`
 	// ClaudeUsageFromLogin is whether GET /brains reads the Claude row's usage bars from the undocumented https://api.anthropic.com/api/oauth/usage endpoint, using the access token Claude Code's own login already wrote to ~/.claude/.credentials.json. Defaults to on; a pointer, like ProactiveAudio, so a config written before this field existed is distinguishable from one where the user explicitly turned it off. Read it through ClaudeUsageFromLoginEnabled rather than directly.
 	ClaudeUsageFromLogin *bool `json:"claude_usage_from_login,omitempty"`
-	// ExaMonthlyRequests is the request ceiling of the user's own Exa plan, so GET /usage can show calls-this-month against it as a fraction. Exa's own usage endpoint needs a team-management key Ora does not hold (see internal/agent/websearch.go), so this is the only ceiling there is, and it is never guessed: 0 means unset, and the usage view then shows the call count with no bar.
+	// ExaMonthlyRequests is the request ceiling of the user's own Exa plan, so GET /usage can show calls-this-month against it as a fraction. Exa's own usage endpoint needs a team-management key June does not hold (see internal/agent/websearch.go), so this is the only ceiling there is, and it is never guessed: 0 means unset, and the usage view then shows the call count with no bar.
 	ExaMonthlyRequests int `json:"exa_monthly_requests,omitempty"`
 }
 
 // ClaudeUsageFromLoginEnabled reports whether the Claude usage endpoint should be read. Unset means on.
-func (cfg OraConfig) ClaudeUsageFromLoginEnabled() bool {
+func (cfg JuneConfig) ClaudeUsageFromLoginEnabled() bool {
 	return cfg.ClaudeUsageFromLogin == nil || *cfg.ClaudeUsageFromLogin
 }
 
@@ -70,7 +70,7 @@ func (cfg OraConfig) ClaudeUsageFromLoginEnabled() bool {
 const DefaultActRunKeep = 2000
 
 // ActRunsKept returns the act run cap to hand db.Store.PruneActRuns: the number the user set, DefaultActRunKeep when they set none, and the negative number unchanged when they turned the cap off.
-func (cfg OraConfig) ActRunsKept() int {
+func (cfg JuneConfig) ActRunsKept() int {
 	if cfg.ActRunKeep == 0 {
 		return DefaultActRunKeep
 	}
@@ -81,7 +81,7 @@ func (cfg OraConfig) ActRunsKept() int {
 const DefaultActRunFailedKeepDays = 30
 
 // FailedActRunsKeptDays returns the failed-run grace in days to hand db.Store.PruneActRuns: the number the user set, DefaultActRunFailedKeepDays when they set none, and the negative number unchanged when they turned the grace off.
-func (cfg OraConfig) FailedActRunsKeptDays() int {
+func (cfg JuneConfig) FailedActRunsKeptDays() int {
 	if cfg.ActRunFailedKeepDays == 0 {
 		return DefaultActRunFailedKeepDays
 	}
@@ -89,13 +89,13 @@ func (cfg OraConfig) FailedActRunsKeptDays() int {
 }
 
 // DailyTokenBudgetFor returns the daily token budget set for provider, or 0 when none was set — reading a nil map the zero value the same way an empty one does, so a config file written before this field existed behaves exactly like one that set no budgets at all. Zero always means off; there is no default to fall back to, unlike ActRunsKept.
-func (cfg OraConfig) DailyTokenBudgetFor(provider string) int {
+func (cfg JuneConfig) DailyTokenBudgetFor(provider string) int {
 	return cfg.DailyTokenBudget[provider]
 }
 
-// MeetingsConfig sets how Ora reacts to another application taking the microphone, which is how it notices a call is happening.
+// MeetingsConfig sets how June reacts to another application taking the microphone, which is how it notices a call is happening.
 type MeetingsConfig struct {
-	// Offer is whether Ora asks "in a meeting?" when another application has held the microphone long enough to be a call. Defaults to on, since noticing a call and then saying nothing about it is no use.
+	// Offer is whether June asks "in a meeting?" when another application has held the microphone long enough to be a call. Defaults to on, since noticing a call and then saying nothing about it is no use.
 	// A pointer, not a plain bool, so a config file written before this field existed is distinguishable from one where the user explicitly turned the prompt off. Use OfferEnabled rather than reading it directly.
 	Offer *bool `json:"offer,omitempty"`
 	// AutoRecord starts recording on the same signal without asking first. Off by default: the microphone says a call is likely, not that it is certain, and a recording nobody asked for is the wrong way to be wrong about that.
@@ -178,7 +178,7 @@ type TranscribeConfig struct {
 	SpeakerCountFromScreen bool `json:"speaker_count_from_screen"`
 }
 
-// BrainConfig chooses which backend answers ORA's one-shot text duties — the meeting minutes and the personal context updater. The zero value is the Gemini API on TextModel, which is what ORA did before this block existed, so a config file written without it behaves exactly as it always has.
+// BrainConfig chooses which backend answers June's one-shot text duties — the meeting minutes and the personal context updater. The zero value is the Gemini API on TextModel, which is what June did before this block existed, so a config file written without it behaves exactly as it always has.
 // The voice assistant is not covered by this: that is a Gemini Live session, not a one-shot call.
 type BrainConfig struct {
 	// Provider is BrainGeminiAPI (the default) or BrainClaudeCLI to run `claude -p` under whatever Claude Code login the machine already has. Anything else falls back to the Gemini API.
@@ -214,9 +214,9 @@ const (
 // DefaultBrainTimeoutSeconds caps one CLI run. Measured on this machine: `claude -p` answered a trivial prompt in 3.6 seconds, and a meeting transcript is a far bigger input than that. A CLI with no terminal attached can also sit forever, so the cap is generous but finite: five minutes.
 const DefaultBrainTimeoutSeconds = 300
 
-// EmbedConfig points ORA at a local llama.cpp llama-server running EmbeddingGemma instead of the Gemini embeddings API. The daemon owns the server process: it spawns it on the first embed, reaps it after IdleTimeout with no embeds, and kills it on shutdown.
+// EmbedConfig points June at a local llama.cpp llama-server running EmbeddingGemma instead of the Gemini embeddings API. The daemon owns the server process: it spawns it on the first embed, reaps it after IdleTimeout with no embeds, and kills it on shutdown.
 type EmbedConfig struct {
-	// LlamaServer is the absolute path to the llama-server binary. Empty (or ModelPath empty) keeps ORA on the Gemini API.
+	// LlamaServer is the absolute path to the llama-server binary. Empty (or ModelPath empty) keeps June on the Gemini API.
 	LlamaServer string `json:"llama_server"`
 	// ModelPath is the absolute path to the EmbeddingGemma GGUF the server loads.
 	ModelPath string `json:"model_path"`
@@ -273,7 +273,7 @@ func (e EmbedConfig) BaseURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", e.Port)
 }
 
-// LocalTextConfig points ORA's unattended text jobs at a local llama.cpp llama-server running an instruction-tuned model, so they spend no metered per-day request allowance at all. The daemon owns the server process the same way it owns the embedding one: spawned on first use, reaped after IdleTimeout, killed on shutdown.
+// LocalTextConfig points June's unattended text jobs at a local llama.cpp llama-server running an instruction-tuned model, so they spend no metered per-day request allowance at all. The daemon owns the server process the same way it owns the embedding one: spawned on first use, reaped after IdleTimeout, killed on shutdown.
 type LocalTextConfig struct {
 	// LlamaServer is the absolute path to the llama-server binary. Empty falls back to EmbedConfig.LlamaServer, and then to "llama-server" on PATH.
 	LlamaServer string `json:"llama_server"`
@@ -299,12 +299,12 @@ const DefaultLocalTextIdleTimeout = time.Duration(15 * 60 * 1000)
 const DefaultLocalTextTimeoutSeconds = 180
 
 // Enabled reports whether the local text path should be used, resolving ModelPath against the dream block so a machine that already names a local GGUF there needs no new configuration. Input: the whole config, for those fallbacks. Output: true when a model file is named somewhere.
-func (l LocalTextConfig) Enabled(cfg OraConfig) bool {
+func (l LocalTextConfig) Enabled(cfg JuneConfig) bool {
 	return l.ResolvedModelPath(cfg) != ""
 }
 
 // ResolvedModelPath returns the GGUF to load: this block's own, else the dream block's, else empty.
-func (l LocalTextConfig) ResolvedModelPath(cfg OraConfig) string {
+func (l LocalTextConfig) ResolvedModelPath(cfg JuneConfig) string {
 	if l.ModelPath != "" {
 		return l.ModelPath
 	}
@@ -312,7 +312,7 @@ func (l LocalTextConfig) ResolvedModelPath(cfg OraConfig) string {
 }
 
 // ResolvedBinary returns the llama-server binary to run: this block's own, else the embed block's, else "llama-server" from PATH.
-func (l LocalTextConfig) ResolvedBinary(cfg OraConfig) string {
+func (l LocalTextConfig) ResolvedBinary(cfg JuneConfig) string {
 	if l.LlamaServer != "" {
 		return l.LlamaServer
 	}
@@ -323,7 +323,7 @@ func (l LocalTextConfig) ResolvedBinary(cfg OraConfig) string {
 }
 
 // ResolvedDevice returns the llama.cpp device to pin the server to: this block's own, else the dream block's, else empty for llama-server's own choice.
-func (l LocalTextConfig) ResolvedDevice(cfg OraConfig) string {
+func (l LocalTextConfig) ResolvedDevice(cfg JuneConfig) string {
 	if l.Device != "" {
 		return l.Device
 	}
@@ -360,7 +360,7 @@ func (l LocalTextConfig) BaseURL() string {
 }
 
 // ProactiveAudioEnabled reports whether proactive audio should be requested at the next Live API handshake. Unset means on.
-func (cfg OraConfig) ProactiveAudioEnabled() bool {
+func (cfg JuneConfig) ProactiveAudioEnabled() bool {
 	return cfg.ProactiveAudio == nil || *cfg.ProactiveAudio
 }
 
@@ -440,30 +440,30 @@ var DefaultBlocklist = []string{
 	"seahorse",
 }
 
-// DataDir returns the directory ORA stores all of its local state in: the sqlite database, the vector index, the IPC token and the config file. Resolution order: the ORA_DATA_DIR environment variable if set (a test/override hook, never itself subject to migration below), otherwise $XDG_DATA_HOME/ora, falling back to ~/.local/share/ora when XDG_DATA_HOME is unset.
-// Every one of those paths used to be resolved relative to the process's working directory ("ora-db/..."), which meant a daemon launched by the login autostart entry (cwd = the binary's own directory) and a client launched from a terminal (cwd = wherever the user happened to be) opened entirely different files. This is the fix: one directory, independent of cwd.
-// On first resolution, if this directory doesn't exist yet but a legacy "ora-db" directory exists in the current working directory, its contents are moved here so existing installs aren't orphaned by the change.
+// DataDir returns the directory June stores all of its local state in: the sqlite database, the vector index, the IPC token and the config file. Resolution order: the JUNE_DATA_DIR environment variable if set (a test/override hook, never itself subject to migration below), otherwise $XDG_DATA_HOME/june, falling back to ~/.local/share/june when XDG_DATA_HOME is unset.
+// Every one of those paths used to be resolved relative to the process's working directory ("june-db/..."), which meant a daemon launched by the login autostart entry (cwd = the binary's own directory) and a client launched from a terminal (cwd = wherever the user happened to be) opened entirely different files. This is the fix: one directory, independent of cwd.
+// On first resolution, if this directory doesn't exist yet but a legacy "june-db" directory exists in the current working directory, its contents are moved here so existing installs aren't orphaned by the change.
 func DataDir() string {
-	if dir := os.Getenv("ORA_DATA_DIR"); dir != "" {
+	if dir := os.Getenv("JUNE_DATA_DIR"); dir != "" {
 		return dir
 	}
 
 	dir := util.DataHome()
 	if dir == "" {
-		slog.Error("failed to determine home directory, falling back to relative ora-db")
-		return "ora-db"
+		slog.Error("failed to determine home directory, falling back to relative june-db")
+		return "june-db"
 	}
-	return filepath.Join(dir, "ora")
+	return filepath.Join(dir, "june")
 }
 
 // ConfigPath is the on-disk location of the persisted app config.
 func ConfigPath() string {
-	return filepath.Join(DataDir(), "ora-config.json")
+	return filepath.Join(DataDir(), "june-config.json")
 }
 
 // get or create
-func LoadConfig() OraConfig {
-	cfg := OraConfig{
+func LoadConfig() JuneConfig {
+	cfg := JuneConfig{
 		Tracker: TrackerConfig{
 			Blocklist: DefaultBlocklist,
 			// 3s is too less to be a dwell time, so 15s sounded better. honestly, it has to be tab switching + dwell, and im not sure what the right number is?
@@ -523,7 +523,7 @@ func LoadConfig() OraConfig {
 }
 
 // SaveConfig persists cfg to disk, creating the data directory if needed.
-func SaveConfig(cfg OraConfig) error {
+func SaveConfig(cfg JuneConfig) error {
 	// 0700, matching the legacy-migration path above: the same directory holds the store, the IPC token and the log, so it is the user's alone and must not depend on which of the three writers happened to create it first.
 	if err := os.MkdirAll(DataDir(), 0700); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
@@ -540,7 +540,7 @@ func SaveConfig(cfg OraConfig) error {
 
 // SetVoice validates name against AvailableVoices, updates cfg in place with the canonical spelling, and persists the change to disk.
 // Invalid names are rejected and leave cfg/disk untouched.
-func (cfg *OraConfig) SetVoice(name string) error {
+func (cfg *JuneConfig) SetVoice(name string) error {
 	canonical, ok := NormalizeVoice(name)
 	if !ok {
 		return fmt.Errorf("invalid voice: %q (see AvailableVoices)", name)

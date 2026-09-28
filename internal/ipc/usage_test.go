@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db/dbtest"
+	"june/internal/db/dbtest"
 )
 
 // fakeLedger stands in for the store's token ledger: it answers with whatever rows a test seeded, and can be made to fail.

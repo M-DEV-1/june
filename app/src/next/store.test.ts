@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ConversationSummary, DaemonEvent } from "./api";
-import { events, oraApi } from "./api";
+import { events, juneApi } from "./api";
 import { conversationsUi, DRAFT_CHAT, escaped, makeStore, progress, ui } from "./store";
 
 describe("what the window is showing", () => {
@@ -328,18 +328,18 @@ describe("a computer-use job in flight", () => {
     const store = makeStore();
     const rows: ConversationSummary[] = [{ id: "c1", title: "Reordering the slide deck", brain: "claude", last: "", updated: new Date().toISOString() }];
     // upsertQueryData is a thunk that writes the cache asynchronously, unlike every plain action above.
-    await store.dispatch(oraApi.util.upsertQueryData("conversations", undefined, rows));
+    await store.dispatch(juneApi.util.upsertQueryData("conversations", undefined, rows));
 
     store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
-    expect(oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0].last).toBe("Planning…");
+    expect(juneApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0].last).toBe("Planning…");
 
     store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4" }) }));
-    expect(oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0].last).toBe("Working…");
+    expect(juneApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0].last).toBe("Working…");
 
     // A job with nothing tying it to a row in the list — a fresh draft's, before its first message opened one — patches nothing.
-    const untouched = oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0];
+    const untouched = juneApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0];
     store.dispatch(progress.jobSent({ conversationId: "__draft__", goal: "x" }));
-    expect(oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0]).toEqual(untouched);
+    expect(juneApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0]).toEqual(untouched);
   });
 
   it("writes a finished job's word once and then leaves that row to the daemon", async () => {
@@ -348,8 +348,8 @@ describe("a computer-use job in flight", () => {
       { id: "c1", title: "Reordering the slide deck", brain: "claude", last: "", updated: new Date().toISOString() },
       { id: "c2", title: "Flights", brain: "claude", last: "", updated: new Date().toISOString() },
     ];
-    await store.dispatch(oraApi.util.upsertQueryData("conversations", undefined, rows));
-    const rowLast = (id: string) => oraApi.endpoints.conversations.select(undefined)(store.getState()).data?.find((c) => c.id === id)?.last;
+    await store.dispatch(juneApi.util.upsertQueryData("conversations", undefined, rows));
+    const rowLast = (id: string) => juneApi.endpoints.conversations.select(undefined)(store.getState()).data?.find((c) => c.id === id)?.last;
 
     store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
     store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
@@ -357,7 +357,7 @@ describe("a computer-use job in flight", () => {
     expect(rowLast("c1")).toBe("Done");
 
     // What GET /conversations says about that chat once the job is over is the daemon's to say, and every later event of every other chat used to put the job's own word back over it.
-    await store.dispatch(oraApi.util.upsertQueryData("conversations", undefined, rows.map((r) => (r.id === "c1" ? { ...r, last: "reordered the deck" } : r))));
+    await store.dispatch(juneApi.util.upsertQueryData("conversations", undefined, rows.map((r) => (r.id === "c1" ? { ...r, last: "reordered the deck" } : r))));
     store.dispatch(progress.jobSent({ conversationId: "c2", goal: "book the flight" }));
     expect(rowLast("c1")).toBe("reordered the deck");
     expect(rowLast("c2")).toBe("Planning…");
@@ -399,7 +399,7 @@ describe("a notice's action reaching the window", () => {
   });
 
   it("tells the Tasks cache to read the list again for a task closed this way", () => {
-    const invalidate = vi.spyOn(oraApi.util, "invalidateTags");
+    const invalidate = vi.spyOn(juneApi.util, "invalidateTags");
     const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
     const store = makeStore(undefined, open);
     store.dispatch(progress.streamOpened());
@@ -420,7 +420,7 @@ describe("a notice's action reaching the window", () => {
     // The label says "until 18:00" only while the snooze lands on the same calendar day as the clock, so the clock is pinned to that day rather than left to roll past midnight mid-run.
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-05T12:00:00"));
-    const invalidate = vi.spyOn(oraApi.util, "invalidateTags");
+    const invalidate = vi.spyOn(juneApi.util, "invalidateTags");
     const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
     const store = makeStore(undefined, open);
     store.dispatch(progress.streamOpened());
@@ -522,7 +522,7 @@ describe("the stream coming back", () => {
   });
 
   it("tells the cache to read every screen again once the stream is back", async () => {
-    const invalidate = vi.spyOn(oraApi.util, "invalidateTags");
+    const invalidate = vi.spyOn(juneApi.util, "invalidateTags");
     let reopen: (() => void) | undefined;
     const store = makeStore(undefined, (_onEvent, onReopen) => {
       reopen = onReopen;

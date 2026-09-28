@@ -282,7 +282,7 @@ var migrations = []Migration{
 		INSERT INTO episodes_fts(rowid, screen_text) VALUES (NEW.id, NEW.screen_text);
 	END;
 
-	-- diary: Ora's own first-person record. kind 'day' holds one entry per local
+	-- diary: June's own first-person record. kind 'day' holds one entry per local
 	-- calendar day (day = 'YYYY-MM-DD'); kind 'understanding' is the single bounded
 	-- current-model-of-the-user document (day = ''), rewritten in place each evening;
 	-- kind 'brief' records the morning brief delivered that day and doubles as its
@@ -304,7 +304,7 @@ var migrations = []Migration{
 	);
 
 	-- Mirrored into memory_fts exactly like threads, so diary entries surface through the existing query_memory path with no agent changes.
-	-- Two sorts of kind are left out, both bare markers rewritten on a schedule rather than anything Ora wrote: TaskNoticeWatermarkKind, whose content is a note id the proactive loop rewrites on most ticks (see diary.go), and every JobMarkerKindPrefix kind, whose content is the RFC 3339 moment one metered background job last ran (see cmd/daemon.go).
+	-- Two sorts of kind are left out, both bare markers rewritten on a schedule rather than anything June wrote: TaskNoticeWatermarkKind, whose content is a note id the proactive loop rewrites on most ticks (see diary.go), and every JobMarkerKindPrefix kind, whose content is the RFC 3339 moment one metered background job last ran (see cmd/daemon.go).
 	-- The insert is written as INSERT ... SELECT ... WHERE rather than a trigger-level WHEN so the update trigger's DELETE still runs for every kind, which is what clears a marker row an older database had already mirrored.
 	-- Dropped first so a database created before the watermark was excluded picks up the new bodies.
 	DROP TRIGGER IF EXISTS diary_ai;
@@ -379,7 +379,7 @@ var migrations = []Migration{
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
-	-- routines: user-authored scheduled instructions Ora checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Vexil replies about the venue, tell me". schedule is left as the free text the user typed; internal/proactive parses it into when to check. last_answer holds what the model said the last time it ran, "NOTHING" included, so the window can show what happened without re-running it. Not memory — never indexed, never searched.
+	-- routines: user-authored scheduled instructions June checks on its own — "every weekday at 8, tell me the one thing I must do today", "when Vexil replies about the venue, tell me". schedule is left as the free text the user typed; internal/proactive parses it into when to check. last_answer holds what the model said the last time it ran, "NOTHING" included, so the window can show what happened without re-running it. Not memory — never indexed, never searched.
 	CREATE TABLE IF NOT EXISTS routines (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		text TEXT NOT NULL,

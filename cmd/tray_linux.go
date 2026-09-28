@@ -17,7 +17,7 @@ import (
 	"sort"
 	"sync/atomic"
 
-	"ora/internal/recorder"
+	"june/internal/recorder"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
@@ -73,7 +73,7 @@ var (
 	dotPaused = statusDotPNG(color.RGBA{R: 0xd2, G: 0x99, B: 0x22, A: 0xff}) // amber: paused
 )
 
-// trayIconPixmaps decodes every embedded size of the ORA logo into one SNI icon pixmap each.
+// trayIconPixmaps decodes every embedded size of the June logo into one SNI icon pixmap each.
 // SNI pixmaps are ARGB32 in network byte order: A,R,G,B per pixel.
 // One entry per size because IconPixmap is an array and the host picks the one closest to its own panel height: handed a single large pixmap it scales that down itself, which is what left the face blurred. The files are drawn at these exact sizes rather than resampled from one master (see packaging/make-icons.py).
 // Output: the pixmaps, smallest first, or an error if the embedded directory cannot be read or holds something that is not an image.
@@ -153,11 +153,11 @@ type dbusMenuLayout struct {
 //	0 = root
 //	1 = Status indicator  (disabled; label reflects tracking state)
 //	2 = separator
-//	7 = Open Ora  (brings the desktop window to the front)
+//	7 = Open June  (brings the desktop window to the front)
 //	3 = Pause / Resume Tracking  (label toggled by paused flag)
 //	6 = Start / Stop meeting recording  (label toggled by the recorder's own state)
 //	4 = separator
-//	5 = Quit Ora
+//	5 = Quit June
 type dbusMenu struct {
 	// The daemon's own context, handed to a stop from the tray so the transcription it starts ends with the daemon instead of outliving it on the GPU.
 	ctx     context.Context
@@ -220,11 +220,11 @@ func (m *dbusMenu) items() []dbusMenuItemProps {
 		status,
 		sep(menuSep1),
 		// The window has no tray icon of its own, so opening it lives here, on the one icon. The hover is not in the menu: it is what the keyboard shortcut is for, and a menu item for it would be a second name for the same thing.
-		item(menuOpen, "Open Ora", true),
+		item(menuOpen, "Open June", true),
 		item(menuPause, pauseLabel, true),
 		item(menuMeeting, meetingLabel(m.recording()), true),
 		sep(menuSep2),
-		item(menuQuit, "Quit Ora", true),
+		item(menuQuit, "Quit June", true),
 	}
 }
 
@@ -354,7 +354,7 @@ type dbusMenuItemProps struct {
 	Properties map[string]dbus.Variant
 }
 
-// runDaemonSupervisor on Linux registers an SNI tray icon via D-Bus and provides menu items: Open Ora, Pause/Resume Tracking, and Quit Ora.
+// runDaemonSupervisor on Linux registers an SNI tray icon via D-Bus and provides menu items: Open June, Pause/Resume Tracking, and Quit June.
 // If SNI registration fails it falls back to headless mode.
 func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
 	stop, _, err := startDaemonServices(ctx, listener)
@@ -420,8 +420,8 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	tooltip := sniToolTip{
 		IconName:    "",
 		IconPixmaps: []sniPixmap{},
-		Title:       "Ora",
-		Description: "Ora Context Runtime is active",
+		Title:       "June",
+		Description: "June Context Runtime is active",
 	}
 	menuPath := dbus.ObjectPath("/MenuBar")
 
@@ -436,8 +436,8 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	propsSpec := prop.Map{
 		"org.kde.StatusNotifierItem": {
 			"Category":   {Value: "ApplicationStatus", Writable: false, Emit: prop.EmitConst},
-			"Id":         {Value: "ora", Writable: false, Emit: prop.EmitConst},
-			"Title":      {Value: "Ora", Writable: false, Emit: prop.EmitFalse},
+			"Id":         {Value: "june", Writable: false, Emit: prop.EmitConst},
+			"Title":      {Value: "June", Writable: false, Emit: prop.EmitFalse},
 			"Status":     {Value: "Active", Writable: false, Emit: prop.EmitFalse},
 			"IconName":   {Value: iconName, Writable: false, Emit: prop.EmitFalse},
 			"IconPixmap": {Value: pixmaps, Writable: false, Emit: prop.EmitFalse},

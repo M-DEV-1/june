@@ -9,13 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/brain"
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/embed"
-	"ora/internal/tracker"
-	"ora/internal/vector"
-	"ora/internal/window"
+	"june/internal/brain"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/embed"
+	"june/internal/tracker"
+	"june/internal/vector"
+	"june/internal/window"
 )
 
 // codexFallbackBrain holds the hand-over brain the unattended jobs use when Gemini answers 429 or 503. It is published once the daemon has built the ask agent, which happens after those jobs are wired, so it is read through an atomic rather than captured directly.
@@ -154,7 +154,7 @@ func drainEpisodes(ctx context.Context, events <-chan tracker.Activity, write fu
 // ingestQueueDepth is how many activities may wait for the compiler before the drain starts dropping them. At the tracker's sampling rate this is roughly ten minutes of screens, which is longer than any attribution call that is going to come back at all.
 const ingestQueueDepth = 256
 
-// weeklyStudyMaterial finds what the Sunday distillation pass reads. Input: the data directory. Output: the replay transcripts and the dream traces, either of which may be empty. Replays are looked for in two places because the working directory is not the repo on every install: ora-restart pins it there, but the login autostart entry pins it to the binary's own directory and a packaged install has no evals/ at all, so <data>/replays is where a packaged install keeps them.
+// weeklyStudyMaterial finds what the Sunday distillation pass reads. Input: the data directory. Output: the replay transcripts and the dream traces, either of which may be empty. Replays are looked for in two places because the working directory is not the repo on every install: june-restart pins it there, but the login autostart entry pins it to the binary's own directory and a packaged install has no evals/ at all, so <data>/replays is where a packaged install keeps them.
 func weeklyStudyMaterial(dataDir string) (replays, traces []string) {
 	repoReplays, _ := filepath.Glob("evals/replays/*.md")
 	installedReplays, _ := filepath.Glob(filepath.Join(dataDir, "replays", "*.md"))
@@ -308,7 +308,7 @@ func firstRunDelay(lastRun time.Time, interval, floor time.Duration, now time.Ti
 }
 
 // everyMetered is every for a job that spends a model call on every run: same interval, but its last run is remembered in the store, so a restart does not buy another call two minutes in. Input: ctx, the store the marker row lives in, the interval, the job's name, and the job. Output: none — it returns when ctx is done.
-// The plain first run exists because a 12 h or 24 h interval never fires on a machine restarted through the day, and that reasoning holds for the jobs that only read and write the store. For the ones that call the model it inverted the cost: on a day of ora-restart cycles the daemon paid for a flush attribution, a note consolidation and a compaction digest on every start.
+// The plain first run exists because a 12 h or 24 h interval never fires on a machine restarted through the day, and that reasoning holds for the jobs that only read and write the store. For the ones that call the model it inverted the cost: on a day of june-restart cycles the daemon paid for a flush attribution, a note consolidation and a compaction digest on every start.
 func everyMetered(ctx context.Context, store jobMarkerStore, interval time.Duration, name string, fn func()) {
 	everyMeteredAfter(ctx, store, jobFirstRunDelay, interval, name, fn)
 }

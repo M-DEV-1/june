@@ -10,27 +10,27 @@ import (
 	"os"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/embed"
-	"ora/internal/ipctoken"
-	"ora/internal/tracker"
+	"june/internal/db"
+	"june/internal/embed"
+	"june/internal/ipctoken"
+	"june/internal/tracker"
 )
 
 // This file is the daemon<->client wire. The daemon owns the sqlite store, the chromem vector index and the activity buffer; the client process owns the TUI and the live Gemini session. Anything the client needs from that state travels over local HTTP on 127.0.0.1:<DaemonPort>, authenticated with a shared token file. Server side is requireIPCToken; client side is ipctoken.Attach plus the three callers below.
 
-// windowOrigins are the origins the packaged desktop window's webview sends. The Vite dev server used while working on the window is not in this list: a release daemon must never let a page on some local port read the store, so that origin is only honoured when ORA_DEV_ORIGIN names it (see windowOriginAllowed).
+// windowOrigins are the origins the packaged desktop window's webview sends. The Vite dev server used while working on the window is not in this list: a release daemon must never let a page on some local port read the store, so that origin is only honoured when JUNE_DEV_ORIGIN names it (see windowOriginAllowed).
 var windowOrigins = map[string]bool{
 	"tauri://localhost":       true,
 	"http://tauri.localhost":  true,
 	"https://tauri.localhost": true,
 }
 
-// windowOriginAllowed reports whether origin may read IPC responses from a browser context: the packaged window's origins always, plus exactly the origin named in the ORA_DEV_ORIGIN environment variable (for example http://localhost:1420 while developing the window). Input: the request's Origin header. Output: true when CORS headers should name it back.
+// windowOriginAllowed reports whether origin may read IPC responses from a browser context: the packaged window's origins always, plus exactly the origin named in the JUNE_DEV_ORIGIN environment variable (for example http://localhost:1420 while developing the window). Input: the request's Origin header. Output: true when CORS headers should name it back.
 func windowOriginAllowed(origin string) bool {
 	if windowOrigins[origin] {
 		return true
 	}
-	dev := os.Getenv("ORA_DEV_ORIGIN")
+	dev := os.Getenv("JUNE_DEV_ORIGIN")
 	return dev != "" && origin == dev
 }
 

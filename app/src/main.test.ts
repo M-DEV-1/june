@@ -194,7 +194,7 @@ describe("live voice mode", () => {
     expect(document.querySelector(".q")).toBeTruthy();
   });
 
-  it("breathes gently while Ora is silent, and lets a real level take over once she speaks", async () => {
+  it("breathes gently while June is silent, and lets a real level take over once she speaks", async () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
 
@@ -231,13 +231,13 @@ describe("live voice mode", () => {
     expect(rowText()[1]).not.toBe(breathingNearTop);
   });
 
-  it("shows the last thing the user said and the last thing Ora said", async () => {
+  it("shows the last thing the user said and the last thing June said", async () => {
     const { dispatch } = await import("./main");
     await new Promise((r) => setTimeout(r, 0));
 
     dispatch({ kind: "voiceOn", id: "voice-1" });
     expect(document.querySelector(".vs-you")).toBeNull();
-    expect(document.querySelector(".vs-ora")).toBeNull();
+    expect(document.querySelector(".vs-june")).toBeNull();
 
     dispatch({
       kind: "voiceEvent",
@@ -246,13 +246,13 @@ describe("live voice mode", () => {
     expect(document.querySelector(".vs-you")?.textContent).toBe(
       "what's the weather",
     );
-    expect(document.querySelector(".vs-ora")).toBeNull();
+    expect(document.querySelector(".vs-june")).toBeNull();
 
     dispatch({
       kind: "voiceEvent",
       ev: { id: "voice-1", type: "said", text: "Sunny today." },
     });
-    expect(document.querySelector(".vs-ora")?.textContent).toBe(
+    expect(document.querySelector(".vs-june")?.textContent).toBe(
       "Sunny today.",
     );
   });
@@ -260,7 +260,7 @@ describe("live voice mode", () => {
 
 // What the daemon puts on a task notice: the same five buttons its desktop banner offers, in the same order (noticeActions in internal/proactive/notify.go). A card draws the actions its notice names and nothing else, so a fixture that presses a button has to carry them.
 const TASK_ACTIONS = [
-  { key: "default", label: "Open in Ora" },
+  { key: "default", label: "Open in June" },
   { key: "done", label: "Done" },
   { key: "hour", label: "In an hour" },
   { key: "evening", label: "This evening" },
@@ -304,7 +304,7 @@ describe("a notice answered with a button of its own", () => {
     dispatch({ kind: "notice", notice: { ...question, actions: [{ key: "dropped", label: "Not happening" }] }, hoverOpen: true });
     expect(document.getElementById("n")?.hidden).toBe(false);
 
-    dispatch({ kind: "notice", notice: { ...question, action: "dropped", actions: [{ key: "default", label: "Open in Ora" }] }, hoverOpen: true });
+    dispatch({ kind: "notice", notice: { ...question, action: "dropped", actions: [{ key: "default", label: "Open in June" }] }, hoverOpen: true });
 
     expect(document.getElementById("n")?.hidden).toBe(true);
   });
@@ -462,11 +462,11 @@ describe("a notice card carries its own buttons", () => {
         kind: "notice",
         notice: {
           title: "Transcribing meeting",
-          body: "Ora is transcribing the recording in the background.",
+          body: "June is transcribing the recording in the background.",
           place: "",
           id: "",
           kind: "note",
-          actions: [{ key: "default", label: "Open in Ora" }],
+          actions: [{ key: "default", label: "Open in June" }],
         },
         hoverOpen: true,
       });
@@ -479,7 +479,7 @@ describe("a notice card carries its own buttons", () => {
 
       dispatch({
         kind: "notice",
-        notice: { title: "Recording saved", body: "Ora will transcribe it once you plug in.", place: "", id: "", kind: "note" },
+        notice: { title: "Recording saved", body: "June will transcribe it once you plug in.", place: "", id: "", kind: "note" },
         hoverOpen: true,
       });
       expect(document.querySelectorAll("#n button.na").length).toBe(0);

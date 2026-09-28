@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // rpcPost sends one JSON-RPC request to the tool server and returns the decoded reply. Input: the server, the method, the id and the params. Output: the whole reply object.
@@ -162,7 +162,7 @@ func TestClaudeToolServer_TwoConcurrentCallsAtTheCapOnlyOneRuns(t *testing.T) {
 	}
 }
 
-// A request that is not a POST to the tool path is refused, so nothing but the CLI Ora started can drive Ora's tools.
+// A request that is not a POST to the tool path is refused, so nothing but the CLI June started can drive June's tools.
 func TestClaudeToolServer_RefusesAnythingButAPostToItsOwnPath(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	s, err := a.startClaudeToolServer(t.Context())
@@ -207,7 +207,7 @@ func claudeStub(callNames []string, result string, usage string) claudeRunner {
 				if err := json.Unmarshal(raw, &cfg); err != nil {
 					return nil, err
 				}
-				url = cfg.MCPServers["ora"].URL
+				url = cfg.MCPServers["june"].URL
 			}
 		}
 		if url == "" {
@@ -270,9 +270,9 @@ func TestAskClaude_RunsToolsAndFillsTheTrace(t *testing.T) {
 	}
 }
 
-// The arguments the CLI is run with keep the subscription login, offer only Ora's own tools, and shut out the user's own settings, hooks, skills and MCP servers, because the prompt carries text nobody vetted.
-// One askClaude call has to get the CLI invocation right in three unrelated ways at once: run under the subscription with only Ora's tools allowed, and do it through a temp dir that exists while the CLI is meant to be reading it and is gone once the ask ends (see TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv for what that dir must hold).
-func TestAskClaude_RunsTheCLIUnderTheSubscriptionWithOnlyOraTools(t *testing.T) {
+// The arguments the CLI is run with keep the subscription login, offer only June's own tools, and shut out the user's own settings, hooks, skills and MCP servers, because the prompt carries text nobody vetted.
+// One askClaude call has to get the CLI invocation right in three unrelated ways at once: run under the subscription with only June's tools allowed, and do it through a temp dir that exists while the CLI is meant to be reading it and is gone once the ask ends (see TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv for what that dir must hold).
+func TestAskClaude_RunsTheCLIUnderTheSubscriptionWithOnlyJuneTools(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	var seen []string
 	var prompt, dir string
@@ -302,8 +302,8 @@ func TestAskClaude_RunsTheCLIUnderTheSubscriptionWithOnlyOraTools(t *testing.T) 
 	if strings.Contains(joined, "--bare") {
 		t.Errorf("--bare would bill the API key instead of the subscription: %s", joined)
 	}
-	if !strings.Contains(joined, "mcp__ora__observe_screen") {
-		t.Errorf("Ora's tools were not allowed: %s", joined)
+	if !strings.Contains(joined, "mcp__june__observe_screen") {
+		t.Errorf("June's tools were not allowed: %s", joined)
 	}
 	if !strings.HasSuffix(prompt, "hello") {
 		t.Errorf("the question is not the last thing the model reads: %q", prompt)
@@ -360,7 +360,7 @@ func TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Claude is a text ask, so its instruction is the lean prompt (see LeanPrompt in ask.go): the persona and the tool guidance, but not the personal-context store.
-		if !strings.Contains(string(instruction), "You are Ora.") {
+		if !strings.Contains(string(instruction), "You are June.") {
 			t.Errorf("system prompt file = %q, want the lean instruction in it", instruction)
 		}
 		if strings.Contains(string(instruction), "42 Example Street") {
@@ -392,7 +392,7 @@ func TestAskClaudeWith_SendsThePriorTurns(t *testing.T) {
 		prompt = stdin
 		return []byte(`{"result":"done","is_error":false}`), nil
 	}
-	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Vexil"}})
+	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "june", Text: "Vexil"}})
 	if _, err := a.askClaude(t.Context(), run, "sonnet", history, "when"); err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,7 @@ func claudeCapturingRun(t *testing.T, systemPrompt *string, toolNames *[]string)
 				if err := json.Unmarshal(raw, &cfg); err != nil {
 					return nil, err
 				}
-				url = cfg.MCPServers["ora"].URL
+				url = cfg.MCPServers["june"].URL
 			}
 		}
 		body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -631,7 +631,7 @@ func TestClaudeUsage_ReadsTheOAuthUsageEndpoint(t *testing.T) {
 	}
 }
 
-// TestRefreshClaudeUsage_NeverLogsTheToken checks the failure path says what went wrong without the access token in it: this is the one place in Ora that reads ~/.claude/.credentials.json, and a token in ora.log would outlive the run.
+// TestRefreshClaudeUsage_NeverLogsTheToken checks the failure path says what went wrong without the access token in it: this is the one place in June that reads ~/.claude/.credentials.json, and a token in june.log would outlive the run.
 func TestRefreshClaudeUsage_NeverLogsTheToken(t *testing.T) {
 	const token = "sk-ant-oat-do-not-leak"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

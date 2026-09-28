@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // Open creates a file-backed store in a fresh temp directory that is closed automatically when the test ends.

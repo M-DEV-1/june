@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/proactive"
-	"ora/internal/util"
+	"june/internal/proactive"
+	"june/internal/util"
 )
 
 // noSpeechMarker is the file left in a recording directory whose transcription ran fine but produced no speech at all. It tells the user why the audio is still there, and it stops the startup sweep from transcribing that directory again on every daemon start.
@@ -215,9 +215,9 @@ func markOutcome(dir string, err error) int {
 		return 0
 	}
 	attempts := failedAttempts(dir) + 1
-	next := "Ora will try again in about an hour. Delete this file to have it try again straight away."
+	next := "June will try again in about an hour. Delete this file to have it try again straight away."
 	if attempts >= maxProcessAttempts {
-		next = fmt.Sprintf("Ora has stopped retrying after %d attempts. Delete this file to have it try once more.", attempts)
+		next = fmt.Sprintf("June has stopped retrying after %d attempts. Delete this file to have it try once more.", attempts)
 	}
 	note := fmt.Sprintf("%s%d\n\nProcessing this recording failed at %s:\n\n%v\n\n%s\n", failedAttemptsPrefix, attempts, time.Now().Format(time.RFC3339), err, next)
 	if wErr := os.WriteFile(path, []byte(note), 0o644); wErr != nil {
@@ -227,7 +227,7 @@ func markOutcome(dir string, err error) int {
 }
 
 // meetingDurationPrefix opens the machine-readable line fileMinutes appends to a meeting note's stored content, after the minutes text. GET /meetings (internal/ipc/reads.go) parses it back out and strips it before the minutes ever reach the window, so the user never sees it.
-const meetingDurationPrefix = "<!--ora:duration "
+const meetingDurationPrefix = "<!--june:duration "
 
 // meetingDurationLine renders the wall-clock start and stop of a recording as the machine-readable line fileMinutes appends to a note's content. This is the one place that knows how long a meeting actually ran — the model writing the minutes is never asked to compute or report it, so it cannot be trusted to get it right — and it survives a restart because it travels with the note rather than living only in the recorder's own memory.
 func meetingDurationLine(startedAt, stoppedAt time.Time) string {

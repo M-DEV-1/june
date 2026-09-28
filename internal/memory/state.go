@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"june/internal/config"
+	"june/internal/obs"
 	"log/slog"
-	"ora/internal/config"
-	"ora/internal/obs"
 	"sort"
 	"strings"
 	"sync"
@@ -142,7 +142,7 @@ func (g *GeminiSummarizer) DeriveState(ctx context.Context, recentSummaries []st
 		return "", nil
 	}
 
-	tracer := obs.GetTracer(ctx, "ora.memory")
+	tracer := obs.GetTracer(ctx, "june.memory")
 	ctx, span := tracer.Start(ctx, "GeminiSummarizer.DeriveState")
 	defer span.End()
 

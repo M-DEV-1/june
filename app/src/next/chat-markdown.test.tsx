@@ -44,27 +44,27 @@ describe("ReplyMarkdown", () => {
     const store = makeStore();
     render(
       <Provider store={store}>
-        <ReplyMarkdown text="[Ora](https://ora.example/about)" />
+        <ReplyMarkdown text="[June](https://june.example/about)" />
       </Provider>,
     );
-    await userEvent.click(screen.getByRole("link", { name: "Ora" }));
-    expect(calls).toContainEqual({ method: "POST", path: "/open", body: { url: "https://ora.example/about" } });
+    await userEvent.click(screen.getByRole("link", { name: "June" }));
+    expect(calls).toContainEqual({ method: "POST", path: "/open", body: { url: "https://june.example/about" } });
     expect(openSpy).not.toHaveBeenCalled();
     expect(window.location.href).toBe(originalHref);
     openSpy.mockRestore();
   });
 });
 
-// A code block is something Ora produced to be used elsewhere — a prompt to paste into another tool, a command to run — and there was no way to get it out of the pane but to select it by hand, which in a narrow chat column with a horizontal scrollbar means dragging past the edge.
+// A code block is something June produced to be used elsewhere — a prompt to paste into another tool, a command to run — and there was no way to get it out of the pane but to select it by hand, which in a narrow chat column with a horizontal scrollbar means dragging past the edge.
 describe("ReplyMarkdown code blocks", () => {
   it("copies the block's text to the clipboard on its own button", async () => {
     const written: string[] = [];
     Object.assign(navigator, { clipboard: { writeText: (t: string) => { written.push(t); return Promise.resolve(); } } });
-    render(<ReplyMarkdown text={"```\nDesign brief: Logo for Ora\n```"} />);
+    render(<ReplyMarkdown text={"```\nDesign brief: Logo for June\n```"} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Copy" }));
 
-    expect(written).toEqual(["Design brief: Logo for Ora"]);
+    expect(written).toEqual(["Design brief: Logo for June"]);
     // Saying it went is the whole confirmation: a clipboard has nothing to show for itself.
     expect(await screen.findByRole("button", { name: "Copied" })).toBeDefined();
   });

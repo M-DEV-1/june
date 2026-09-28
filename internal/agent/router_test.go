@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"ora/internal/config"
+	"june/internal/config"
 	"slices"
 	"testing"
 	"time"

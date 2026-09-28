@@ -3,7 +3,7 @@ package memory
 import (
 	"strings"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // Domain partitions memory into work vs. personal; used by hybrid search's domain filter/boost (internal/db's HybridSearch).

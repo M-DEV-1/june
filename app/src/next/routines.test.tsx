@@ -43,7 +43,7 @@ describe("the list", () => {
   it("shows a thinking face and holds back the empty line while the first fetch is still in flight", () => {
     renderApp({}, { place: "routines" });
     // Not awaited: the fake daemon's answer has not landed yet on this very first render, so the query is still loading. getAllByRole rather than getByRole because the sidebar shows its own permanent "watching" chip alongside it.
-    expect(screen.getAllByRole("img", { name: "ora is thinking" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("img", { name: "june is thinking" }).length).toBeGreaterThan(0);
     expect(screen.queryByText("No routines yet. Write one above.")).toBeNull();
   });
 });

@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	"ora/internal/agent"
+	"june/internal/agent"
 )
 
 // CodexAsker is what an already-built *agent.Agent offers through its CodexBrain wrapper: ask one question, get back the full turn trace. FromConfig accepts one of these as an optional argument because building an *agent.Agent needs a microphone, a speaker and a memory compiler that FromConfig's own inputs (a BrainConfig and a Gemini API key) do not carry — only a caller that already holds an *Agent, such as the daemon, can supply one.

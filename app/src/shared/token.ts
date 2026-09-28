@@ -1,7 +1,7 @@
 /** The IPC token header name and the dev-server escape hatch for it, shared by the hover's daemon.ts and the React window's api.ts so the two clients that talk to the same daemon never drift on either spelling. */
 
 /** The header every daemon request carries its token in. Mirrors ipctoken.HeaderName on the Go side. */
-export const TOKEN_HEADER = "X-Ora-Token";
+export const TOKEN_HEADER = "X-June-Token";
 
 /** The port the Vite dev server runs on, which is the only origin devToken will hand a token to. */
 const DEV_PORT = "1420";

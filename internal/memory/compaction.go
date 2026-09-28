@@ -3,8 +3,8 @@ package memory
 import (
 	"context"
 	"fmt"
+	"june/internal/config"
 	"log/slog"
-	"ora/internal/config"
 	"strings"
 	"time"
 )

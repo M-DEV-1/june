@@ -24,7 +24,7 @@ import {
 import { useActOnNoticeMutation, useConversationsQuery, type ConversationSummary } from "./api";
 import { chatsShown, groupConversations, noticeAge, shortWhen } from "./format";
 import { useFollowSelection } from "./parts";
-import { Face, useOraState } from "./face";
+import { Face, useJuneState } from "./face";
 import { RunningNow } from "./running-now";
 import { conversationsUi, ui, useAppDispatch, useAppSelector, type LiveNotice, type Place } from "./store";
 
@@ -129,7 +129,7 @@ function ChatGroup({ group, conversationId, onChats, now }: { group: { label: st
 
 /** The card the live notice is said on, between the search field and the list of chats. Input: the notice and the moment its age is read against. Output: the card.
  *
- * A card rather than loose text: a bare sentence with four buttons under it reads as part of neither of its neighbours. Laid out the way the design sheets of 2026-09-12 draw a notification: the face, then "Ora" with how long ago it landed, then the line, then the detail under it. Said by someone, in other words, rather than posted by the window — which is the whole difference between a notice and a banner. The body is held to three lines for the same reason the hover card holds it to three: a morning brief is a paragraph, and unclamped it pushed the chat list down the rail.
+ * A card rather than loose text: a bare sentence with four buttons under it reads as part of neither of its neighbours. Laid out the way the design sheets of 2026-09-12 draw a notification: the face, then "June" with how long ago it landed, then the line, then the detail under it. Said by someone, in other words, rather than posted by the window — which is the whole difference between a notice and a banner. The body is held to three lines for the same reason the hover card holds it to three: a morning brief is a paragraph, and unclamped it pushed the chat list down the rail.
  *
  * The daemon's answer to a press comes back as the same "notice" event a desktop press produces (see reactToNotice in store.ts), which is what replaces these buttons with the rail line's plain text. A refusal sends no such event — the daemon answers 404 for a notice whose task has already been closed elsewhere and returns before it would echo anything — so it is said as one quiet line on the card itself (DESIGN.md rule 18), which stays up with its buttons: the press is what failed, not the notice, and the hover window keeps its own card up for the same reason (noticeFailed in src/main.ts). The card is mounted under the notice's own key, so that line belongs to the notice it was said about and to no other.
  */
@@ -151,12 +151,12 @@ function NoticeCard({ notice, now }: { notice: LiveNotice; now: Date }) {
       .catch(() => setPressFailed(true));
   };
   return (
-    <div role="group" aria-label="Notice from Ora" className="relative flex gap-2 rounded-lg border bg-card px-2.5 py-2 group-data-[collapsible=icon]:hidden">
+    <div role="group" aria-label="Notice from June" className="relative flex gap-2 rounded-lg border bg-card px-2.5 py-2 group-data-[collapsible=icon]:hidden">
       <Face state={notice.kind === "error" ? "refused" : "noticed"} className="mt-0.5 text-meta" />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         {/* The sender line. The cross sits in the same row rather than floating over the corner, so nothing has to be padded clear of it. */}
         <div className="flex items-baseline gap-2">
-          <span className="text-meta font-medium text-foreground">Ora</span>
+          <span className="text-meta font-medium text-foreground">June</span>
           <span className="ml-auto text-micro text-muted-foreground">{noticeAge(notice.at, now)}</span>
           <button
             type="button"
@@ -238,7 +238,7 @@ export function AppSidebar() {
   const dispatch = useAppDispatch();
   const { place, conversationId, query, notice, liveNotice } = useAppSelector((s) => s.ui);
   const { data: convs = [], isFetching, isLoading, isError } = useConversationsQuery();
-  const oraState = useOraState(!isError);
+  const juneState = useJuneState(!isError);
   const list = useRef<HTMLDivElement>(null);
 
   const now = new Date();
@@ -252,12 +252,12 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="gap-2 p-2">
-        {/* Ora itself, first: its face and what it is doing, so the rail opens on who is here rather than on a button. */}
+        {/* June itself, first: its face and what it is doing, so the rail opens on who is here rather than on a button. */}
         <div className="flex items-center gap-2.5 px-2 pt-1 pb-2 group-data-[collapsible=icon]:hidden">
-          <Face state={oraState} />
+          <Face state={juneState} />
           <div className="flex min-w-0 flex-col">
-            <span className="text-ui font-medium">ora</span>
-            <span className="text-micro text-muted-foreground">{oraState}</span>
+            <span className="text-ui font-medium">june</span>
+            <span className="text-micro text-muted-foreground">{juneState}</span>
           </div>
         </div>
         <SidebarMenu>

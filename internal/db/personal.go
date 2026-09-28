@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode"
 
-	"ora/internal/obs"
+	"june/internal/obs"
 )
 
 // PersonalEntry is one thing known for certain about the user: who they are, a person in their life, a preference they stated. Keyed by subject, edited in place, and only ever written from something the user said themselves.
@@ -21,7 +21,7 @@ type PersonalEntry struct {
 // SetPersonalContext writes content under subject, replacing whatever was there before. The subject is the key, so saying the same thing twice edits one row instead of adding a second — that is the whole point of the table.
 // Input: a short plain or kebab-case subject ("identity", "vexil-quorin") and the entry's prose. Output: an error if either is blank or the write fails.
 func (s *Store) SetPersonalContext(ctx context.Context, subject, content string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.SetPersonalContext")
 	defer span.End()
 
@@ -45,7 +45,7 @@ func (s *Store) SetPersonalContext(ctx context.Context, subject, content string)
 
 // DeletePersonalContext removes the entry under subject. Deleting one that isn't there is not an error.
 func (s *Store) DeletePersonalContext(ctx context.Context, subject string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.DeletePersonalContext")
 	defer span.End()
 
@@ -59,7 +59,7 @@ func (s *Store) DeletePersonalContext(ctx context.Context, subject string) error
 
 // PersonalContext returns every entry, ordered by subject. There is no search over this table and there never should be: it is small enough to inject whole into every prompt, which is why nothing here can go stale or be missed by a query.
 func (s *Store) PersonalContext(ctx context.Context) ([]PersonalEntry, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.PersonalContext")
 	defer span.End()
 

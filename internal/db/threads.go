@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"june/internal/memory"
+	"june/internal/obs"
 	"log/slog"
-	"ora/internal/memory"
-	"ora/internal/obs"
 	"strings"
 	"time"
 )
@@ -22,7 +22,7 @@ type ThreadUpdate = memory.ThreadUpdate
 
 // UpsertThread creates or refreshes a thread, returning its id. For an existing id it bumps salience/recency in place; for a new one it upserts on (subject, kind) so the same throughline is recognized over time.
 func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.UpsertThread")
 	defer span.End()
 
@@ -70,7 +70,7 @@ func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64,
 // The FTS5 mirror is kept in sync by the threads_au trigger. The stale vector is deleted and the corrected text re-embedded async/best-effort, same non-blocking pattern as UpdateNote — a vector-index error never fails the SQL update. The embed text is "subject — state", matching the threads_ai trigger so both halves of hybrid search see the same thread.
 // Input: the thread's id and the corrected state. Output: an error if no thread carries that id.
 func (s *Store) UpdateThreadState(ctx context.Context, id int64, state string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.UpdateThreadState")
 	defer span.End()
 	span.SetAttributes(attribute.Int64("db.thread_id", id))
@@ -130,7 +130,7 @@ func (s *Store) UpdateThreadState(ctx context.Context, id int64, state string) e
 
 // GetLiveThreads returns threads touched in the last 2 days, newest-first. This is the "what's going on in their life right now" view; concurrent threads coexist here.
 func (s *Store) GetLiveThreads(ctx context.Context, limit int) ([]memory.Thread, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.GetLiveThreads")
 	defer span.End()
 
@@ -141,7 +141,7 @@ func (s *Store) GetLiveThreads(ctx context.Context, limit int) ([]memory.Thread,
 
 // ActiveThreads returns up to limit status='active' threads, most recently seen first. No recency window on purpose: the dreaming loop wants the standing picture of what is going on in the user's life, not just the last two days of it.
 func (s *Store) ActiveThreads(ctx context.Context, limit int) ([]memory.Thread, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.ActiveThreads")
 	defer span.End()
 
@@ -152,7 +152,7 @@ func (s *Store) ActiveThreads(ctx context.Context, limit int) ([]memory.Thread, 
 
 // ThreadsForAttribution returns threads touched in the last 14 days, newest-first. Wider window than GetLiveThreads so the compiler can reattach to a throughline the user picked back up after a few days away.
 func (s *Store) ThreadsForAttribution(ctx context.Context, limit int) ([]memory.Thread, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.ThreadsForAttribution")
 	defer span.End()
 

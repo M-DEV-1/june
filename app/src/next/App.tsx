@@ -21,7 +21,7 @@ import {
   AlertDialogTitle,
 } from "./alert-dialog";
 import {
-  oraApi,
+  juneApi,
   refreshToken,
   useConversationsQuery,
   useDaysQuery,
@@ -102,7 +102,7 @@ export default function App() {
   useEffect(() => {
     const onShown = () => {
       if (document.visibilityState !== "visible") return;
-      void refreshToken().then(() => dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker"])));
+      void refreshToken().then(() => dispatch(juneApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker"])));
     };
     document.addEventListener("visibilitychange", onShown);
     window.addEventListener("focus", onShown);

@@ -8,31 +8,31 @@ import (
 	"time"
 )
 
-// DataDir resolves in a fixed order: the ORA_DATA_DIR override verbatim (what the tests and any scripted/portable install use), then $XDG_DATA_HOME/ora, then ~/.local/share/ora.
+// DataDir resolves in a fixed order: the JUNE_DATA_DIR override verbatim (what the tests and any scripted/portable install use), then $XDG_DATA_HOME/june, then ~/.local/share/june.
 func TestDataDir_ResolutionOrder(t *testing.T) {
-	t.Run("ORA_DATA_DIR override wins", func(t *testing.T) {
+	t.Run("JUNE_DATA_DIR override wins", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("ORA_DATA_DIR", dir)
+		t.Setenv("JUNE_DATA_DIR", dir)
 		if got := DataDir(); got != dir {
 			t.Errorf("DataDir() = %q, want override %q", got, dir)
 		}
 	})
 
 	t.Run("XDG_DATA_HOME", func(t *testing.T) {
-		t.Setenv("ORA_DATA_DIR", "")
+		t.Setenv("JUNE_DATA_DIR", "")
 		xdg := t.TempDir()
 		t.Setenv("XDG_DATA_HOME", xdg)
-		if got, want := DataDir(), filepath.Join(xdg, "ora"); got != want {
+		if got, want := DataDir(), filepath.Join(xdg, "june"); got != want {
 			t.Errorf("DataDir() = %q, want %q", got, want)
 		}
 	})
 
 	t.Run("home fallback", func(t *testing.T) {
-		t.Setenv("ORA_DATA_DIR", "")
+		t.Setenv("JUNE_DATA_DIR", "")
 		t.Setenv("XDG_DATA_HOME", "")
 		home := t.TempDir()
 		t.Setenv("HOME", home)
-		if got, want := DataDir(), filepath.Join(home, ".local", "share", "ora"); got != want {
+		if got, want := DataDir(), filepath.Join(home, ".local", "share", "june"); got != want {
 			t.Errorf("DataDir() = %q, want %q", got, want)
 		}
 	})
@@ -41,8 +41,8 @@ func TestDataDir_ResolutionOrder(t *testing.T) {
 // TestEmbedConfigDefaults verifies a config file with no "embed" key at all (every install before the local embedder existed) still comes back with the local port and idle timeout filled in, so the daemon never spawns llama-server on port 0 or reaps it instantly. It also checks that a half-written embed block — a binary named with no model path — leaves LocalEnabled false too: a half-written config must not take embeddings down.
 func TestEmbedConfigDefaults(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ORA_DATA_DIR", dir)
-	if err := os.WriteFile(filepath.Join(dir, "ora-config.json"), []byte(`{"voice":"Iapetus"}`), 0644); err != nil {
+	t.Setenv("JUNE_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "june-config.json"), []byte(`{"voice":"Iapetus"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,8 +58,8 @@ func TestEmbedConfigDefaults(t *testing.T) {
 	}
 
 	dir2 := t.TempDir()
-	t.Setenv("ORA_DATA_DIR", dir2)
-	if err := os.WriteFile(filepath.Join(dir2, "ora-config.json"), []byte(`{"embed":{"llama_server":"/opt/llama-server"}}`), 0644); err != nil {
+	t.Setenv("JUNE_DATA_DIR", dir2)
+	if err := os.WriteFile(filepath.Join(dir2, "june-config.json"), []byte(`{"embed":{"llama_server":"/opt/llama-server"}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if LoadConfig().Embed.LocalEnabled() {
@@ -95,7 +95,7 @@ func TestBackgroundBrainConfig_PinsGeminiOnlyWhenUnset(t *testing.T) {
 
 // TestLoadConfig_KeepsClaudeUsageFromLoginDisabled checks an explicit off survives a save and a reload, because an absent field reads as on.
 func TestLoadConfig_KeepsClaudeUsageFromLoginDisabled(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 
 	cfg := LoadConfig()
 	off := false
@@ -111,10 +111,10 @@ func TestLoadConfig_KeepsClaudeUsageFromLoginDisabled(t *testing.T) {
 
 // The config sits beside the IPC token and the store in a directory that is the user's alone, and SaveConfig used to write it 0644 into a directory it created 0755.
 func TestSaveConfig_WritesTheConfigAndItsDirectoryPrivateToTheUser(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "ora")
-	t.Setenv("ORA_DATA_DIR", dir)
+	dir := filepath.Join(t.TempDir(), "june")
+	t.Setenv("JUNE_DATA_DIR", dir)
 
-	if err := SaveConfig(OraConfig{Voice: DefaultVoice}); err != nil {
+	if err := SaveConfig(JuneConfig{Voice: DefaultVoice}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
@@ -137,8 +137,8 @@ func TestSaveConfig_WritesTheConfigAndItsDirectoryPrivateToTheUser(t *testing.T)
 // A config written before a field existed leaves it out and json.Unmarshal keeps the default, but one that carries the field with a zero value overwrites it. A zero dwell samples every window the pointer crosses, and a null blocklist turns off the password-manager list that keeps 1Password and KeePassXC out of capture, so both fall back to their defaults.
 func TestLoadConfig_ZeroTrackerFieldsFallBackToTheDefaults(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ORA_DATA_DIR", dir)
-	if err := os.WriteFile(filepath.Join(dir, "ora-config.json"), []byte(`{"tracker":{"dwell_time_ms":0,"blocklist":null}}`), 0600); err != nil {
+	t.Setenv("JUNE_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "june-config.json"), []byte(`{"tracker":{"dwell_time_ms":0,"blocklist":null}}`), 0600); err != nil {
 		t.Fatalf("write the config: %v", err)
 	}
 
@@ -155,8 +155,8 @@ func TestLoadConfig_ZeroTrackerFieldsFallBackToTheDefaults(t *testing.T) {
 // TestTrackerDwellTime_IsMilliseconds pins the unit the dwell time is stored in, because the field was typed time.Duration while holding 15000 milliseconds — as a Duration that number reads as 15 microseconds, and it was only ever right because the one call site multiplied by time.Millisecond a second time. A plain int cannot be handed to a Duration parameter by mistake.
 func TestTrackerDwellTime_IsMilliseconds(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ORA_DATA_DIR", dir)
-	if err := os.WriteFile(filepath.Join(dir, "ora-config.json"), []byte(`{"tracker":{"dwell_time_ms":2500}}`), 0600); err != nil {
+	t.Setenv("JUNE_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "june-config.json"), []byte(`{"tracker":{"dwell_time_ms":2500}}`), 0600); err != nil {
 		t.Fatalf("write the config: %v", err)
 	}
 

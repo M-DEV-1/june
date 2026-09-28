@@ -3,7 +3,7 @@
 import { configureStore, createAction, createListenerMiddleware, createSlice, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
 import { useDispatch, useSelector } from "react-redux";
 
-import { events, oraApi } from "./api";
+import { events, juneApi } from "./api";
 import type { DaemonEvent, Evidence, Notice, Spend } from "../shared/wire";
 import { isJobLive, parseActDetail } from "../shared/job";
 import { jobStateWord, noticeActionMessage } from "./format";
@@ -39,7 +39,7 @@ type UiState = {
   newTask: string;
   /** The ids of the turns whose sources are unfolded; every other reply shows the one closed line. */
   openRails: string[];
-  /** The conversation opened for a task that had none of its own, by task id. A task Ora noticed in a meeting is a note, not a row the daemon can hang a conversation off, and there is no route that ties the two together, so the window remembers the pairing for as long as it is open and reuses it rather than opening a second conversation on the next question. */
+  /** The conversation opened for a task that had none of its own, by task id. A task June noticed in a meeting is a note, not a row the daemon can hang a conversation off, and there is no route that ties the two together, so the window remembers the pairing for as long as it is open and reuses it rather than opening a second conversation on the next question. */
   taskChats: Record<string, string>;
   paletteOpen: boolean;
   /** What the sidebar's notice line says, and whether it reads as a failure (red, "text-destructive") or as plain status (the normal muted foreground). */
@@ -441,7 +441,7 @@ function reactToNotice(n: Notice, api: { dispatch: AppDispatch }): void {
   const msg = noticeActionMessage(n);
   if (msg !== undefined) api.dispatch(uiSlice.actions.noticed({ text: msg, kind: "info" }));
   if (n.kind === "task" && n.action === "done")
-    api.dispatch(oraApi.util.invalidateTags(["Task"]));
+    api.dispatch(juneApi.util.invalidateTags(["Task"]));
 }
 
 /** Opens the daemon's SSE stream the first time progress.streamOpened is dispatched and feeds every message into the progress slice. A second streamOpened is ignored, so the window never ends up with two streams answering the same ask. Input: the function that opens a stream, which the window leaves as the real one and a test replaces. Output: the middleware. */
@@ -452,7 +452,7 @@ async function finishRun(api: { dispatch: AppDispatch; getState: () => RootState
     api.dispatch(progressSlice.actions.runFinished());
     return;
   }
-  const read = api.dispatch(oraApi.endpoints.conversation.initiate(run.conversationId, { forceRefetch: true }));
+  const read = api.dispatch(juneApi.endpoints.conversation.initiate(run.conversationId, { forceRefetch: true }));
   try {
     await read;
   } finally {
@@ -477,14 +477,14 @@ export function streamMiddleware(open: typeof events = events) {
           // A finished ask is what changes the conversation list, the turns inside it and what has been spent, so the cache is told to read them again rather than polling on a timer. The conversation the question landed in is read back first and the run given up only then: the thread draws the question and the streamed answer out of the run alone, so giving it up on the event itself blanks the exchange until the refetch lands.
           await finishRun(api as unknown as { dispatch: AppDispatch; getState: () => RootState });
           // The list is named by its own id rather than by the bare type: the type alone matches every open conversation as well, including the one finishRun has just read, which would read it a second time for nothing.
-          api.dispatch(oraApi.util.invalidateTags([{ type: "Conversation", id: "LIST" }, "Task", "Usage"]));
+          api.dispatch(juneApi.util.invalidateTags([{ type: "Conversation", id: "LIST" }, "Task", "Usage"]));
         },
         async () => {
           // The stream opening again is this window's one signal that the daemon it had lost is answering, so everything that failed while it was gone is read once more. Without it a window left open across a daemon restart keeps showing "Nothing is answering" until something happens to focus it.
           // A question in flight across the drop is given up the way a finished one is: a restarted daemon will never send its "done", and the composer holds Send disabled until one arrives.
           const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
           if (typed.getState().progress.run) await finishRun(typed);
-          api.dispatch(oraApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]));
+          api.dispatch(juneApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]));
         },
       );
     },
@@ -513,7 +513,7 @@ export function streamMiddleware(open: typeof events = events) {
       if (!jobs.length) return;
       const before = api.getOriginalState().progress.jobs;
       api.dispatch(
-        oraApi.util.updateQueryData("conversations", undefined, (draft) => {
+        juneApi.util.updateQueryData("conversations", undefined, (draft) => {
           const rows = new Map(draft.map((c) => [c.id, c]));
           for (const job of jobs) {
             // A job that has ended writes its last word once, on the event that ended it, and never again: what the row says after that is the daemon's, and rewriting it on every later event of every other chat put long-finished words back over whatever GET /conversations last said.
@@ -536,7 +536,7 @@ export function makeStore(preloaded?: { ui?: Partial<UiState>; settings?: Partia
       conversations: conversationsSlice.reducer,
       settings: settingsSlice.reducer,
       progress: progressSlice.reducer,
-      [oraApi.reducerPath]: oraApi.reducer,
+      [juneApi.reducerPath]: juneApi.reducer,
     },
     preloadedState: preloaded
       ? {
@@ -544,7 +544,7 @@ export function makeStore(preloaded?: { ui?: Partial<UiState>; settings?: Partia
           settings: { theme: "system" as Theme, resolved: "light" as const, ...preloaded.settings },
         }
       : undefined,
-    middleware: (getDefault) => getDefault().prepend(streamMiddleware(open).middleware).concat(oraApi.middleware),
+    middleware: (getDefault) => getDefault().prepend(streamMiddleware(open).middleware).concat(juneApi.middleware),
   });
 }
 

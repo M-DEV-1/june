@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // stageReport is what the hypothesis stage hands the morning report: counts plus the sentences worth repeating.

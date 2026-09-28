@@ -15,8 +15,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -56,7 +56,7 @@ func newDelegateCmd(ctx context.Context, cwd, promptPath string) *exec.Cmd {
 
 // Run starts one `claude -p` process in cwd. The system prompt goes to a 0600 file in a fresh temp directory rather than argv, the same reason writeClaudeAskFiles does it in claude.go: a single argv entry is capped at 128 KB on Linux and any local process can read another's argv via /proc/<pid>/cmdline. The prompt goes on stdin. Output: stdout, trimmed, as the result.
 func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt string) (string, error) {
-	dir, err := os.MkdirTemp("", "ora-delegate-")
+	dir, err := os.MkdirTemp("", "june-delegate-")
 	if err != nil {
 		return "", fmt.Errorf("delegate: making the system prompt's temp dir: %w", err)
 	}
@@ -87,7 +87,7 @@ func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt strin
 // delegateThreadBudget bounds how much of the conversation thread a brief carries, in runes, newest kept — sized for a one-page brief rather than a full model prompt (compare maxHistoryBytes in ask.go, which bounds an ask's own thread the same way).
 const delegateThreadBudget = 4000
 
-// BuildBrief writes the one page handed to a delegate. Input: the goal in the user's own words, the conversation thread it grew out of (oldest first, as db.Store.ConversationTurns returns it — nil for none), and the personal-context block to include (as personalContextBlock renders it, "" for none). Output: the brief text: the goal, what Ora knows of the thread so far (the newest lines that fit delegateThreadBudget runes), the personal-context block, the constraints every delegate call carries, and where to report. Every one of those three sources — goal, thread, personal context — is filtered line by line through redactLine before it is written; see that function's own comment for exactly what it catches and what still gets through.
+// BuildBrief writes the one page handed to a delegate. Input: the goal in the user's own words, the conversation thread it grew out of (oldest first, as db.Store.ConversationTurns returns it — nil for none), and the personal-context block to include (as personalContextBlock renders it, "" for none). Output: the brief text: the goal, what June knows of the thread so far (the newest lines that fit delegateThreadBudget runes), the personal-context block, the constraints every delegate call carries, and where to report. Every one of those three sources — goal, thread, personal context — is filtered line by line through redactLine before it is written; see that function's own comment for exactly what it catches and what still gets through.
 func BuildBrief(goal string, thread []db.Turn, personal string) string {
 	var b strings.Builder
 	b.WriteString("Goal: " + strings.TrimSpace(redactBlock(goal)) + "\n")
@@ -101,7 +101,7 @@ func BuildBrief(goal string, thread []db.Turn, personal string) string {
 		if text == "" {
 			continue
 		}
-		who := "ora:"
+		who := "june:"
 		if t.Role == "you" {
 			who = "user:"
 		}
@@ -113,7 +113,7 @@ func BuildBrief(goal string, thread []db.Turn, personal string) string {
 	}
 	lines = keepNewestRunes(lines, delegateThreadBudget)
 
-	b.WriteString("\nWhat Ora knows:\n")
+	b.WriteString("\nWhat June knows:\n")
 	if len(lines) == 0 {
 		b.WriteString("(nothing said in this conversation yet)\n")
 	} else {
@@ -180,7 +180,7 @@ func (a *Agent) delegate(ctx context.Context, run Runner, d Delegation, thread [
 		return "", errors.New("delegate: needs a brief")
 	}
 	if d.To != "" && d.To != "claude" {
-		return "", fmt.Errorf("delegate: %q is not a delegate Ora can run", d.To)
+		return "", fmt.Errorf("delegate: %q is not a delegate June can run", d.To)
 	}
 	if d.CWD != "" {
 		info, err := os.Stat(d.CWD)
@@ -222,7 +222,7 @@ var delegateTool = &genai.FunctionDeclaration{
 	Behavior: genai.BehaviorNonBlocking,
 	Name:     "delegate",
 	Description: "Hand a bounded piece of work to Claude Code running as a real collaborator in a project directory, and wait for its plain-text answer. Use this for actual coding or shell work in a project, not a memory question — query_memory/recall/branch answer those instead. " +
-		"The delegate sees the user's personal context and nothing else; it cannot see this conversation, the screen or the rest of Ora's memory, so the brief has to carry everything it needs.",
+		"The delegate sees the user's personal context and nothing else; it cannot see this conversation, the screen or the rest of June's memory, so the brief has to carry everything it needs.",
 	Parameters: &genai.Schema{
 		Type: genai.TypeObject,
 		Properties: map[string]*genai.Schema{

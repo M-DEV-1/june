@@ -1,4 +1,4 @@
-// Package ipctoken generates and reads the shared secret that authenticates ORA's local daemon<->client IPC (127.0.0.1:6942) — without it, /vector/add, /vector/delete, /pause, /resume, /status, and /buffer are reachable (and, per the same-origin-less nature of localhost, reachable from any webpage the user has open) by any local process with no proof it's actually part of ORA.
+// Package ipctoken generates and reads the shared secret that authenticates June's local daemon<->client IPC (127.0.0.1:6942) — without it, /vector/add, /vector/delete, /pause, /resume, /status, and /buffer are reachable (and, per the same-origin-less nature of localhost, reachable from any webpage the user has open) by any local process with no proof it's actually part of June.
 package ipctoken
 
 import (
@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
 // HeaderName is the HTTP header IPC clients must set to the token value.
-const HeaderName = "X-Ora-Token"
+const HeaderName = "X-June-Token"
 
 // DefaultPath is where the daemon writes the token and where every IPC client (the TUI, httpVectorIndex, the tray) reads it from — inside config.DataDir(), so it resolves to the same file regardless of the process's working directory (the daemon and a terminal-launched client otherwise disagree on cwd and silently open different token files).
 var DefaultPath = filepath.Join(config.DataDir(), "ipc-token")

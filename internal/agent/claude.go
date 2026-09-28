@@ -1,4 +1,4 @@
-// claude.go answers /ask with Anthropic models on the user's own Claude subscription by running the Claude Code CLI, and offers it Ora's own tools — the screen tools and the memory tools — as an MCP server the daemon holds open for the length of one ask.
+// claude.go answers /ask with Anthropic models on the user's own Claude subscription by running the Claude Code CLI, and offers it June's own tools — the screen tools and the memory tools — as an MCP server the daemon holds open for the length of one ask.
 // The CLI is the only way to reach the subscription: a third-party login billed through the API key is extra usage on top of what the user already pays for, which is why --bare is never passed here (it makes the CLI read ANTHROPIC_API_KEY instead of the login).
 package agent
 
@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 
 	"google.golang.org/genai"
 )
@@ -35,8 +35,8 @@ const (
 	claudeDefaultModel = "sonnet"
 	// claudeAskTimeout bounds one whole ask, every tool round included, and matches what the Codex path allows itself.
 	claudeAskTimeout = 12 * time.Minute
-	// claudeMCPServerName is what the CLI calls Ora's tool server, and so is the prefix on every tool name the model sees: mcp__ora__observe_screen.
-	claudeMCPServerName = "ora"
+	// claudeMCPServerName is what the CLI calls June's tool server, and so is the prefix on every tool name the model sees: mcp__june__observe_screen.
+	claudeMCPServerName = "june"
 	// claudeProtocolVersion is the MCP version the server falls back to when the client names none of its own.
 	claudeProtocolVersion = "2025-11-25"
 )
@@ -44,12 +44,12 @@ const (
 // ProviderClaude is the Claude Code command line, which serves Anthropic models on the user's own subscription rather than on an API key.
 const ProviderClaude = "claude"
 
-// claudeWebTool is the one built-in tool Ora keeps: the CLI's own web search, which runs on the user's subscription and costs nothing extra. Named once because it goes in both --tools and --allowed-tools, and the two disagreeing means no search and no error saying so.
+// claudeWebTool is the one built-in tool June keeps: the CLI's own web search, which runs on the user's subscription and costs nothing extra. Named once because it goes in both --tools and --allowed-tools, and the two disagreeing means no search and no error saying so.
 const claudeWebTool = "WebSearch"
 
-// claudeModel is the model an ask asks for. Input: none. Output: the model last picked for Claude in the window, else ORA_CLAUDE_MODEL, else claudeDefaultModel.
+// claudeModel is the model an ask asks for. Input: none. Output: the model last picked for Claude in the window, else JUNE_CLAUDE_MODEL, else claudeDefaultModel.
 func claudeModel() string {
-	return pickedModel("claude", "ORA_CLAUDE_MODEL", claudeDefaultModel)
+	return pickedModel("claude", "JUNE_CLAUDE_MODEL", claudeDefaultModel)
 }
 
 // claudeLoggedIn reports whether this machine has a Claude Code login to run under, which is what makes Claude worth handing a question to.
@@ -62,7 +62,7 @@ func claudeLoggedIn() bool {
 	return err == nil
 }
 
-// claudeToolServer offers Ora's own tools to one `claude -p` run over MCP's HTTP transport, running each call through the same gate as every other ask and keeping the calls it ran so the turn's trace can carry them.
+// claudeToolServer offers June's own tools to one `claude -p` run over MCP's HTTP transport, running each call through the same gate as every other ask and keeping the calls it ran so the turn's trace can carry them.
 // It listens on the loopback interface at an unguessable path, which is what stops anything else on the machine from driving the user's screen through it. The listener lives only as long as the ask.
 // ponytail: one server per ask on a fresh port; if asks ever run often enough for that to matter, one long-lived server with a per-ask path would do.
 type claudeToolServer struct {
@@ -255,7 +255,7 @@ func claudeTools(decls []*genai.FunctionDeclaration) []any {
 
 // writeClaudeAskFiles writes the MCP config and the system prompt to two 0600 files inside a fresh temp directory of their own, so neither ever sits in argv: any local process can read another process's argv for the life of a run, on Linux via /proc/<pid>/cmdline, and the config carries the tool server's own unguessable URL while the system prompt carries the user's personal context. Input: where the tool server is listening and the system prompt to send. Output: the directory — the caller removes it once the ask ends — and the two file paths, or an error naming what could not be written.
 func writeClaudeAskFiles(mcpURL, instruction string) (dir, mcpConfigPath, systemPromptPath string, err error) {
-	dir, err = os.MkdirTemp(os.TempDir(), "ora-claude-ask-")
+	dir, err = os.MkdirTemp(os.TempDir(), "june-claude-ask-")
 	if err != nil {
 		return "", "", "", fmt.Errorf("claude: making the ask's own temp dir: %w", err)
 	}
@@ -275,8 +275,8 @@ func writeClaudeAskFiles(mcpURL, instruction string) (dir, mcpConfigPath, system
 
 // claudeArgs is the argument list for one `claude -p` run.
 // Input: the model to ask for, the files writeClaudeAskFiles wrote (the MCP config and the system prompt — the CLI reads both from disk, keeping the tool server's URL and the user's personal context off argv), and the tools to allow. Output: the arguments.
-// The user's own settings, hooks, skills, plugins and MCP servers are all shut out, because the prompt carries text nobody vetted — a meeting transcript, whatever was on the user's screens — and because a hook or a skill of the user's own would change what Ora's answers are made of without Ora knowing. --restricted drops the built-in command-running tools, WebFetch, and the settings files; --tools names the only built-in kept, leaving the model with Ora's tools and that one.
-// WebSearch is the exception, and it is the whole reason an ask that falls back to Claude can look something up: Gemini's grounding is the only web access Ora otherwise has, and on 2026-09-07 its free-tier allowance was spent while the models themselves still answered, so every fallback answered from memory and said it had no web access. This is a deliberate widening — a prompt carrying text nobody vetted can shape a search query, and a query goes to a search engine — accepted because the alternative is an assistant that cannot look anything up whenever one provider's allowance runs out.
+// The user's own settings, hooks, skills, plugins and MCP servers are all shut out, because the prompt carries text nobody vetted — a meeting transcript, whatever was on the user's screens — and because a hook or a skill of the user's own would change what June's answers are made of without June knowing. --restricted drops the built-in command-running tools, WebFetch, and the settings files; --tools names the only built-in kept, leaving the model with June's tools and that one.
+// WebSearch is the exception, and it is the whole reason an ask that falls back to Claude can look something up: Gemini's grounding is the only web access June otherwise has, and on 2026-09-07 its free-tier allowance was spent while the models themselves still answered, so every fallback answered from memory and said it had no web access. This is a deliberate widening — a prompt carrying text nobody vetted can shape a search query, and a query goes to a search engine — accepted because the alternative is an assistant that cannot look anything up whenever one provider's allowance runs out.
 func claudeArgs(model, mcpConfigPath, systemPromptPath string, toolNames []string) []string {
 	allowed := make([]string, 0, len(toolNames)+1)
 	for _, name := range toolNames {
@@ -345,7 +345,7 @@ func runClaudeCLI(binary string) claudeRunner {
 // claudeSourceLinkPattern matches one "[Title](url)" markdown link inside a Sources block.
 var claudeSourceLinkPattern = regexp.MustCompile(`\[([^\]]*)\]\(([^)]+)\)`)
 
-// stripSourcesBlock splits off Claude's own trailing "Sources:" block — the plain-text list of markdown links its built-in WebSearch tool appends after an answer that used it — since that tool runs outside Ora's own MCP server and so leaves nothing in tr.ToolHops for evidenceFromToolHops to read a citation from. Input: the raw answer text. Output: the answer with the block (and the blank line before it) removed, and one Evidence entry per link found in the block, kind "web", in the order they appeared. Both are returned unchanged when the text carries no such block: "Sources:" must open a line of its own (not just occur inside the prose) and that line's block must contain at least one markdown link, or nothing is stripped.
+// stripSourcesBlock splits off Claude's own trailing "Sources:" block — the plain-text list of markdown links its built-in WebSearch tool appends after an answer that used it — since that tool runs outside June's own MCP server and so leaves nothing in tr.ToolHops for evidenceFromToolHops to read a citation from. Input: the raw answer text. Output: the answer with the block (and the blank line before it) removed, and one Evidence entry per link found in the block, kind "web", in the order they appeared. Both are returned unchanged when the text carries no such block: "Sources:" must open a line of its own (not just occur inside the prose) and that line's block must contain at least one markdown link, or nothing is stripped.
 func stripSourcesBlock(answer string) (string, []Evidence) {
 	idx := strings.LastIndex(answer, "Sources:")
 	if idx == -1 || (idx > 0 && answer[idx-1] != '\n') {
@@ -380,7 +380,7 @@ func unionToolSets(sets ...map[string]bool) map[string]bool {
 	return out
 }
 
-// AskClaude answers a question through the Claude Code command line on the user's own subscription, running Ora's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "claude/<model>", or the trace so far and an error.
+// AskClaude answers a question through the Claude Code command line on the user's own subscription, running June's tools through the same gate and trace as every other ask. Output: the turn trace with the answer, tool hops, evidence and model "claude/<model>", or the trace so far and an error.
 func (a *Agent) AskClaude(ctx context.Context, question string) (TurnTrace, error) {
 	return a.AskClaudeWith(ctx, nil, question)
 }
@@ -406,7 +406,7 @@ func claudeThread(history History) string {
 		if text.Len() == 0 {
 			continue
 		}
-		who := "Ora"
+		who := "June"
 		if c.Role == genai.RoleUser {
 			who = "The user"
 		}

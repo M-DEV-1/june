@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./docs/images/logo.png" width="600" alt="ORA Logo">
+  <img src="./docs/images/logo.png" width="600" alt="JUNE Logo">
 
   <p align="center">
     <img alt="Go Version" src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go">
@@ -7,13 +7,13 @@
     <img alt="License" src="https://img.shields.io/badge/license-GPLv3-white?style=flat-square">
   </p>
 
-# ORA
+# JUNE
 
 from Latin _orare_. To speak, to ask.
 
 </div>
 
-Ora is a memory for the person using this computer. It watches what is on screen, listens to the meetings you record, keeps what happened, and answers questions about it later. It is not a coding assistant and not a search engine: if you want general knowledge, use a browser.
+June is a memory for the person using this computer. It watches what is on screen, listens to the meetings you record, keeps what happened, and answers questions about it later. It is not a coding assistant and not a search engine: if you want general knowledge, use a browser.
 
 It runs as one Go daemon on your own machine, with a SQLite store beside it. Nothing is sent anywhere except the prompts you or its own duties send to whichever model you pick.
 
@@ -37,17 +37,17 @@ Rough edges, plainly: diarization still mislabels speakers in a crowded call, th
 
 | Surface | What it is | How you reach it |
 | --- | --- | --- |
-| Daemon | Go, HTTP on `127.0.0.1:6942`, SQLite store | `ora --daemon`, or the systemd user unit |
+| Daemon | Go, HTTP on `127.0.0.1:6942`, SQLite store | `june --daemon`, or the systemd user unit |
 | Window | Tauri + React desktop app: chats, meetings, days, tasks, routines, settings | starts with the daemon |
 | Hover | one small always-there card: ask, dictate, live voice, notices | `Ctrl+Alt+Space` |
 | Overlay | click-through layer the act engine draws on | drawn only while a job runs |
-| Terminal | the original TUI client | `ora --tui` |
+| Terminal | the original TUI client | `june --tui` |
 
 ## Running it
 
 ```bash
-git clone https://github.com/M-DEV-1/ora.git
-cd ora
+git clone https://github.com/M-DEV-1/june.git
+cd june
 ```
 
 Put your key in `.env` at the repo root:
@@ -59,14 +59,14 @@ GEMINI_API_KEY=your_key_here
 Then:
 
 ```bash
-go build -o ora . && ./ora
+go build -o june . && ./june
 ```
 
-`ora` brings up the daemon and the window together and says so. The build is CGO-free and Linux-only: the Windows and macOS build files were removed once the target became one machine.
+`june` brings up the daemon and the window together and says so. The build is CGO-free and Linux-only: the Windows and macOS build files were removed once the target became one machine.
 
 ## Which model answers
 
-Ora keeps several backends and lets you pick per duty, because they are billed differently and only some of them are metered.
+June keeps several backends and lets you pick per duty, because they are billed differently and only some of them are metered.
 
 - **Antigravity** (`agy`) — Gemini under your own Google plan login. Nothing is charged against an API key.
 - **Gemini API** — the metered key in `.env`. Fast, and the only backend the live voice session and the screen agent can use, because they need streaming and tool calls.
@@ -78,11 +78,11 @@ Embeddings are local: EmbeddingGemma-300M served by Ollama, called over HTTP so 
 
 ## Where your data is
 
-Everything lives under `~/.local/share/ora`: the SQLite store, the config, recordings, screenshots. Config is `ora-config.json` in that directory. Retention is set there — how many days of audio and images to keep before they are aged out.
+Everything lives under `~/.local/share/june`: the SQLite store, the config, recordings, screenshots. Config is `june-config.json` in that directory. Retention is set there — how many days of audio and images to keep before they are aged out.
 
 ## Tracing
 
-Ora exports OpenTelemetry traces over OTLP/gRPC. Run Jaeger and they appear at `http://localhost:16686`:
+June exports OpenTelemetry traces over OTLP/gRPC. Run Jaeger and they appear at `http://localhost:16686`:
 
 ```bash
 docker run cr.jaegertracing.io/jaegertracing/jaeger:2.17.0

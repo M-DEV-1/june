@@ -1675,6 +1675,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "june"
+version = "0.1.0"
+dependencies = [
+ "gdkx11",
+ "gtk",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tauri",
+ "tauri-build",
+ "x11",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2121,20 +2135,6 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
-
-[[package]]
-name = "ora"
-version = "0.1.0"
-dependencies = [
- "gdkx11",
- "gtk",
- "serde",
- "serde_json",
- "signal-hook",
- "tauri",
- "tauri-build",
- "x11",
-]
 
 [[package]]
 name = "pango"

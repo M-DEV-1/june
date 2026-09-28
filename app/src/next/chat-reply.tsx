@@ -1,4 +1,4 @@
-/** What sits under one of Ora's replies in the thread: the grey line saying when it was said and what it read, folded away behind a click. */
+/** What sits under one of June's replies in the thread: the grey line saying when it was said and what it read, folded away behind a click. */
 
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
@@ -145,7 +145,7 @@ function AnswerMeta({ turn, folded }: { turn: Turn; folded: boolean }) {
   );
 }
 
-/** What sits under one of Ora's replies: the grey line saying when it was said and which tools it called, and the fold holding what it read. Input: the turn. Output: the line and the fold. A failed ask gets the same shape, except that what the fold holds is the provider's whole message rather than what was read. */
+/** What sits under one of June's replies: the grey line saying when it was said and which tools it called, and the fold holding what it read. Input: the turn. Output: the line and the fold. A failed ask gets the same shape, except that what the fold holds is the provider's whole message rather than what was read. */
 export function ReplyMeta({ turn, folded = true }: { turn: Turn; folded?: boolean }) {
   return turn.kind === "error" ? <ErrorMeta turn={turn} folded={folded} /> : <AnswerMeta turn={turn} folded={folded} />;
 }

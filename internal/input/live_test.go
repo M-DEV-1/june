@@ -11,10 +11,10 @@ import (
 
 // TestLivePortalShiftTap opens a real RemoteDesktop session against the user's own session bus and taps Shift (press then release), which is harmless on its own. It pops the portal's consent dialog the first time it runs on a machine with no saved restore_token.
 //
-// Guarded behind ORA_PORTAL_INPUT=1 and skipped otherwise: this is the one test in the package that touches the live desktop and must only run in an announced, coordinator-driven slot, never as part of a normal `go test ./...`.
+// Guarded behind JUNE_PORTAL_INPUT=1 and skipped otherwise: this is the one test in the package that touches the live desktop and must only run in an announced, coordinator-driven slot, never as part of a normal `go test ./...`.
 func TestLivePortalShiftTap(t *testing.T) {
-	if os.Getenv("ORA_PORTAL_INPUT") != "1" {
-		t.Skip("set ORA_PORTAL_INPUT=1 to run the live portal test (opens a real session, may show a consent dialog)")
+	if os.Getenv("JUNE_PORTAL_INPUT") != "1" {
+		t.Skip("set JUNE_PORTAL_INPUT=1 to run the live portal test (opens a real session, may show a consent dialog)")
 	}
 
 	dataDir := t.TempDir()

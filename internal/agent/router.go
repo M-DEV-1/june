@@ -10,9 +10,9 @@ package agent
 
 import (
 	"errors"
+	"june/internal/config"
 	"log/slog"
 	"net/http"
-	"ora/internal/config"
 	"os/exec"
 	"slices"
 	"strings"

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // neverAnswering is a summarizer that records the deadline it was called with and then refuses to answer. It stands in for the hung HTTP connection the genai client has no timeout of its own against.

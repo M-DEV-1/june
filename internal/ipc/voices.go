@@ -1,12 +1,12 @@
-// voices.go holds GET/POST /voices and POST /voices/preview: which voice Ora speaks in during a live session, and hearing one before adopting it. The roster is Gemini's own thirty prebuilt voices (config.AvailableVoices); the trait beside each name is what the picker shows, because thirty star names say nothing about how any of them sounds.
+// voices.go holds GET/POST /voices and POST /voices/preview: which voice June speaks in during a live session, and hearing one before adopting it. The roster is Gemini's own thirty prebuilt voices (config.AvailableVoices); the trait beside each name is what the picker shows, because thirty star names say nothing about how any of them sounds.
 package ipc
 
 import (
 	"context"
 	"net/http"
 
-	"ora/internal/config"
-	"ora/internal/util"
+	"june/internal/config"
+	"june/internal/util"
 )
 
 // LiveModelView is one of the Live models on GET or POST /voices. Trait is what choosing it costs and buys, in one line, because the trade between them — tone against about four seconds of latency, and whether the model decides for itself that audio was aimed at it — is the whole reason there is a choice.
@@ -48,7 +48,7 @@ func Voices(cfg *LiveConfig, _ VoicePreviewer) http.HandlerFunc {
 					http.Error(w, "unknown live model: "+req.Model, http.StatusBadRequest)
 					return
 				}
-				if err := cfg.Update(func(c *config.OraConfig) { c.LiveModel = req.Model }); err != nil {
+				if err := cfg.Update(func(c *config.JuneConfig) { c.LiveModel = req.Model }); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
@@ -61,7 +61,7 @@ func Voices(cfg *LiveConfig, _ VoicePreviewer) http.HandlerFunc {
 				http.Error(w, "unknown voice: "+req.Name, http.StatusBadRequest)
 				return
 			}
-			if err := cfg.Update(func(c *config.OraConfig) { c.Voice = canonical }); err != nil {
+			if err := cfg.Update(func(c *config.JuneConfig) { c.Voice = canonical }); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -103,7 +103,7 @@ func VoicePreview(cfg *LiveConfig, preview VoicePreviewer) http.HandlerFunc {
 }
 
 // writeVoices writes the roster for cfg as JSON, the body both GET and POST /voices answer with. The voice marked current is the configured one, or config.DefaultVoice when nothing has ever been chosen — which is the voice a session would actually speak in, so the picker opens on it rather than on nothing.
-func writeVoices(w http.ResponseWriter, cfg config.OraConfig) {
+func writeVoices(w http.ResponseWriter, cfg config.JuneConfig) {
 	current, ok := config.NormalizeVoice(cfg.Voice)
 	if !ok {
 		current = config.DefaultVoice

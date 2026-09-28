@@ -19,17 +19,17 @@ afterEach(cleanup);
 describe("Nothing's face", () => {
   it("is thinking on the first fetch, holding back the empty line so it cannot flash before the data does", () => {
     render(<Nothing up empty="Nothing to do." loading />);
-    expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
+    expect(screen.getByRole("img", { name: "june is thinking" })).toBeDefined();
     expect(screen.queryByText("Nothing to do.")).toBeNull();
   });
 });
 
 describe("Blank's face", () => {
   it("is thinking on the first fetch, holding back the hint so it cannot flash before the data does", () => {
-    render(<Blank up empty="No meetings recorded yet." hint="Ora writes minutes once it has recorded one." loading />);
-    expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
+    render(<Blank up empty="No meetings recorded yet." hint="June writes minutes once it has recorded one." loading />);
+    expect(screen.getByRole("img", { name: "june is thinking" })).toBeDefined();
     expect(screen.queryByText("No meetings recorded yet.")).toBeNull();
-    expect(screen.queryByText("Ora writes minutes once it has recorded one.")).toBeNull();
+    expect(screen.queryByText("June writes minutes once it has recorded one.")).toBeNull();
   });
 });
 

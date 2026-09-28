@@ -34,7 +34,7 @@ describe("the arrow keys that walk a list", () => {
 
   it("leaves the caret in the composer alone rather than walking the chat list underneath it", async () => {
     const { store } = renderApp({ conversations: summary, turns: { c1: view } }, { conversationId: "c1" });
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(box, "hello");
     await userEvent.keyboard("{ArrowUp}{ArrowUp}{ArrowDown}");
     // The composer is a multi-line textarea, not an <input>, so a caret move in it must not also walk the conversation list open behind it.
@@ -45,7 +45,7 @@ describe("the arrow keys that walk a list", () => {
 describe("the jump-to palette", () => {
   it("opens on Ctrl+K even with the caret in the composer, and keeps what was half-typed there", async () => {
     const { store } = renderApp({ conversations: summary, turns: { c1: view } }, { conversationId: "c1" });
-    const box = await screen.findByLabelText("Ask Ora");
+    const box = await screen.findByLabelText("Ask June");
     await userEvent.type(box, "a half-typed question");
     await userEvent.keyboard("{Control>}k{/Control}");
     expect(store.getState().ui.paletteOpen).toBe(true);

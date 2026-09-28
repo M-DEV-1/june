@@ -641,7 +641,7 @@ describe("chipLabel", () => {
     ],
     ["Google Chrome", "Q3 hiring plan — Docs", "Q3 hiring plan · Docs"],
     ["Thunderbird", "Inbox (3) - Mail", "Inbox · Mail"],
-    ["Code", "upload.go — ora — Visual Studio Code", "upload.go · Code"],
+    ["Code", "upload.go — june — Visual Studio Code", "upload.go · Code"],
     [
       "Brave-browser",
       "Meet - abc-defg-hij - Microphone recording - Brave",
@@ -736,7 +736,7 @@ describe("voice", () => {
     expect(v.voiceLevel).toEqual({ mic: 0, speaker: 0 });
   });
 
-  // The session outlives the window: hiding it is not a way to end it, because the user hides the window to get on with what they were doing while Ora is still listening.
+  // The session outlives the window: hiding it is not a way to end it, because the user hides the window to get on with what they were doing while June is still listening.
   it("escape hides the window and leaves the session running", () => {
     const { view: next, effect } = step(live(), { kind: "escape" });
     expect(effect).toEqual({ kind: "close" });
@@ -841,7 +841,7 @@ describe("stepsCollapsed", () => {
   });
 });
 
-// The notice card: one of Ora's own moments — the morning brief, the evening close, a meeting prep — arriving on the daemon's event stream and shown as a speech bubble above the hover. It is not an answer to anything, so it has to leave whatever the user was in the middle of exactly as it was.
+// The notice card: one of June's own moments — the morning brief, the evening close, a meeting prep — arriving on the daemon's event stream and shown as a speech bubble above the hover. It is not an answer to anything, so it has to leave whatever the user was in the middle of exactly as it was.
 describe("notice", () => {
   const brief: Notice = {
     title: "Morning brief",
@@ -1010,11 +1010,11 @@ describe("following a theme change through the storage event", () => {
 
   it("ignores a write to any other key the two windows share", () => {
     expect(
-      themeFromStorage({ key: "ora-hover-position", newValue: "top" }),
+      themeFromStorage({ key: "june-hover-position", newValue: "top" }),
     ).toBeUndefined();
     expect(
       themeFromStorage({
-        key: "ora-open-at",
+        key: "june-open-at",
         newValue: '{"place":"tasks","id":"k1"}',
       }),
     ).toBeUndefined();

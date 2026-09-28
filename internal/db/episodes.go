@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
+	"june/internal/memory"
+	"june/internal/obs"
+	"june/internal/util"
 	"log/slog"
 	"math"
-	"ora/internal/memory"
-	"ora/internal/obs"
-	"ora/internal/util"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,7 +89,7 @@ func (s *Store) LogEpisode(ctx context.Context, app, title, screenText string) (
 
 // WriteEpisode is LogEpisode plus structured moment fields and an optional vision JPEG.
 func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.LogEpisode")
 	defer span.End()
 
@@ -210,7 +210,7 @@ func (s *Store) EpisodesInWindow(ctx context.Context, since, until time.Time, li
 
 // ListEpisodes returns moments matching q. This is the SQL payload filter: app + time range + recency, without going through FTS or chromem.
 func (s *Store) ListEpisodes(ctx context.Context, q EpisodeQuery) ([]Episode, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.ListEpisodes")
 	defer span.End()
 
@@ -329,7 +329,7 @@ func diverseSimilarity(a, b diverseEpisodeCandidate) float64 {
 
 // DiverseEpisodes selects up to limit episodes matching focus via MMR-lite (maximal marginal relevance): pull a candidate pool from RankedEpisodes, then iteratively pick the argmax of mmrLambda*rel - (1-mmrLambda)*maxSim, where rel is the candidate's normalized rank position and maxSim is its highest similarity (diverseSimilarity) to any already-chosen result. This avoids the near-duplicate pile-up a plain top-N would produce (e.g. 5 visits to the same app+title with near-identical text all scoring high).
 func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([]MemoryHit, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.DiverseEpisodes")
 	defer span.End()
 
@@ -414,7 +414,7 @@ func (s *Store) DiverseEpisodes(ctx context.Context, focus string, limit int) ([
 
 // RecallSubject fuses a thread's arc with episode specifics for "what do you know about X" recall: (a) matching thread(s) for subject via SearchMemory filtered to Source=="thread", formatted "[thread#N] <content>"; then (b) a diverse spread of matching episodes via DiverseEpisodes, formatted "[episode] <excerpt≤200 runes>". Threads (the throughline) come first, episodes (the specifics) after — narration should say "you've been doing X" before "specifically, Y and Z".
 func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([]string, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.RecallSubject")
 	defer span.End()
 
@@ -452,7 +452,7 @@ func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, 
 
 // searchEpisodesWindow is SearchEpisodes constrained to episodes whose created_at falls in [since, until]; a zero bound is open on that side. The window sits in the WHERE clause, before the LIMIT — see searchMemoryWindow for why.
 func (s *Store) searchEpisodesWindow(ctx context.Context, query string, since, until time.Time) ([]MemoryHit, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.SearchEpisodes")
 	defer span.End()
 
@@ -530,7 +530,7 @@ func parseSQLiteTime(s string) time.Time {
 
 // AgeEpisodeImages deletes vision JPEGs older than keepFor and clears image_path. Descriptions, app/title, and the row stay. This is the storage cap for screenshots — 14 days of thumbnails, not a year of them.
 func (s *Store) AgeEpisodeImages(ctx context.Context, keepFor time.Duration) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.AgeEpisodeImages")
 	defer span.End()
 

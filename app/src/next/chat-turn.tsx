@@ -22,7 +22,7 @@ import { JobTurn } from "./chat-job";
 import { WorkingGrid } from "./working-grid";
 import { Face } from "./face";
 
-/** What the question in flight shows while it runs: the tools called so far as a list of steps down a rule, and under them the dot grid — the one shape that means Ora is busy, whether nothing has arrived yet or the answer is still streaming in. Input: the run. Output: the block. A tool step already says what it did, so the run's status words are left off when they only repeat the last one. */
+/** What the question in flight shows while it runs: the tools called so far as a list of steps down a rule, and under them the dot grid — the one shape that means June is busy, whether nothing has arrived yet or the answer is still streaming in. Input: the run. Output: the block. A tool step already says what it did, so the run's status words are left off when they only repeat the last one. */
 function Working({ run }: { run: Run }) {
   const last = run.steps[run.steps.length - 1];
   const line = run.status && run.status !== last?.detail ? run.status : "";
@@ -89,7 +89,7 @@ function lastReplyAnnouncement(turns: Turn[]): string {
   return last.kind === "error" ? "Could not answer that." : turnText(last);
 }
 
-/** What the user said, as it sits in the thread. Input: the words. Output: the bubble. Your own message is the only surface in the thread; Ora's reply is prose on the page. The surface is a neutral one, because the accent is kept for the focus ring and the one action. */
+/** What the user said, as it sits in the thread. Input: the words. Output: the bubble. Your own message is the only surface in the thread; June's reply is prose on the page. The surface is a neutral one, because the accent is kept for the focus ring and the one action. */
 function Said({ text }: { text: string }) {
   return <div className="max-w-[85%] self-end rounded-xl bg-secondary px-3.5 py-2.5 whitespace-pre-wrap">{text}</div>;
 }
@@ -105,7 +105,7 @@ function DayLine({ heading }: { heading: string }) {
   );
 }
 
-/** One turn as it reads in the thread: the user's own words in a bubble, or Ora's reply as prose with the grey line under it. Input: the turn, and whether what the reply read is folded under it rather than shown in the rail beside the thread. Output: the turn. */
+/** One turn as it reads in the thread: the user's own words in a bubble, or June's reply as prose with the grey line under it. Input: the turn, and whether what the reply read is folded under it rather than shown in the rail beside the thread. Output: the turn. */
 function ThreadTurn({ turn, folded }: { turn: Turn; folded: boolean }) {
   if (turn.role === "you") return <Said text={turn.text} />;
   return (

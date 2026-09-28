@@ -1,4 +1,4 @@
-// notify.go is how one of Ora's moments reaches the desktop as a notification the user can act on without opening anything: Open in Ora, Done, and three ways to be reminded later. The buttons are the reason this talks to org.freedesktop.Notifications itself rather than shelling out — notify-send can only offer buttons by blocking a whole process for as long as the notification is on screen, and everything here has to survive being answered hours later or not at all.
+// notify.go is how one of June's moments reaches the desktop as a notification the user can act on without opening anything: Open in June, Done, and three ways to be reminded later. The buttons are the reason this talks to org.freedesktop.Notifications itself rather than shelling out — notify-send can only offer buttons by blocking a whole process for as long as the notification is on screen, and everything here has to survive being answered hours later or not at all.
 package proactive
 
 import (
@@ -14,8 +14,8 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"ora/internal/db"
-	"ora/internal/memory"
+	"june/internal/db"
+	"june/internal/memory"
 )
 
 // The keys the desktop reports back when a button is pressed. "default" is the one the notification body itself carries: clicking the banner rather than a button sends it.
@@ -29,7 +29,7 @@ const (
 
 // noticeActions are the buttons every notice carries, in the order they are offered. One list, so a snooze that comes back can be dealt with exactly like the first posting.
 var noticeActions = []Action{
-	{actionOpen, "Open in Ora"},
+	{actionOpen, "Open in June"},
 	{actionDone, "Done"},
 	{actionHour, "In an hour"},
 	{actionEvening, "This evening"},
@@ -65,7 +65,7 @@ func noticeKey(n Notice) string {
 	return n.Kind + "|" + n.ID
 }
 
-// The desktop notification service every Linux desktop provides, and the icon Ora's own moments are posted with.
+// The desktop notification service every Linux desktop provides, and the icon June's own moments are posted with.
 const (
 	notifyDest  = "org.freedesktop.Notifications"
 	notifyIface = "org.freedesktop.Notifications"
@@ -118,7 +118,7 @@ func NewBusNotifier(ctx context.Context) (*BusNotifier, error) {
 	return n, nil
 }
 
-// Notify posts one notification with the given buttons, at normal urgency and under the ora desktop entry, and never expires it: a snooze button nobody is there to press is worth nothing, so the banner stays until the user deals with it.
+// Notify posts one notification with the given buttons, at normal urgency and under the june desktop entry, and never expires it: a snooze button nobody is there to press is worth nothing, so the banner stays until the user deals with it.
 func (n *BusNotifier) Notify(noticeKey, title, body string, actions []Action, chose func(string)) error {
 	flat := make([]string, 0, len(actions)*2)
 	for _, a := range actions {
@@ -143,12 +143,12 @@ func (n *BusNotifier) Notify(noticeKey, title, body string, actions []Action, ch
 func (n *BusNotifier) callBus(title, body string, actions []string) (uint32, error) {
 	hints := map[string]dbus.Variant{
 		"urgency":       dbus.MakeVariant(byte(1)),
-		"desktop-entry": dbus.MakeVariant("ora"),
+		"desktop-entry": dbus.MakeVariant("june"),
 	}
 	var id uint32
 	// The zero replaces_id posts a new notification rather than replacing an existing one; the zero expire_timeout means it never times out.
 	if err := n.conn.Object(notifyDest, notifyPath).Call(notifyIface+".Notify", 0,
-		"Ora", uint32(0), noticeIcon, title, body, actions, hints, int32(0)).Store(&id); err != nil {
+		"June", uint32(0), noticeIcon, title, body, actions, hints, int32(0)).Store(&id); err != nil {
 		return 0, fmt.Errorf("notify: %w", err)
 	}
 	return id, nil
@@ -238,7 +238,7 @@ func (sendNotifier) Notify(noticeKey, title, body string, actions []Action, chos
 // Close is a no-op: notify-send is a blocking process per banner with no id this notifier can reach back into, so a window press cannot also dismiss the notify-send fallback's own banner. A machine on this fallback has no session bus, which is the same reason it has no other way to close one either.
 func (sendNotifier) Close(string) error { return nil }
 
-// noticeNotifier and noticeOpen are the desktop notifier and the "Open in Ora" callback the package-level Notify below posts through — wired by SetNotifier and SetOpenWindow alongside the Scheduler's own copies, and guarded by noticeMu, the same lock sendNotice uses. Nil means neither has been wired yet (or the daemon never calls SetNotifier), in which case Notify falls back to raw notify-send.
+// noticeNotifier and noticeOpen are the desktop notifier and the "Open in June" callback the package-level Notify below posts through — wired by SetNotifier and SetOpenWindow alongside the Scheduler's own copies, and guarded by noticeMu, the same lock sendNotice uses. Nil means neither has been wired yet (or the daemon never calls SetNotifier), in which case Notify falls back to raw notify-send.
 var (
 	noticeNotifier Notifier
 	noticeOpen     func()
@@ -252,7 +252,7 @@ func (s *Scheduler) SetNotifier(n Notifier) {
 	noticeMu.Unlock()
 }
 
-// SetOpenWindow wires what "Open in Ora", and a click on the notification body itself, does: the same thing the tray's own Open Ora item does. Unset, those clicks do nothing. Also wires the package-level Notify below's own "Open in Ora" button onto the same func.
+// SetOpenWindow wires what "Open in June", and a click on the notification body itself, does: the same thing the tray's own Open June item does. Unset, those clicks do nothing. Also wires the package-level Notify below's own "Open in June" button onto the same func.
 func (s *Scheduler) SetOpenWindow(fn func()) {
 	s.openWindow = fn
 	noticeMu.Lock()
@@ -296,7 +296,7 @@ func (s *Scheduler) chose(ctx context.Context, n Notice, key string) {
 			slog.Warn("could not apply a notification's own button", "kind", n.Kind, "id", n.ID, "key", key, "error", err)
 		}
 	default:
-		slog.Debug("a notification came back with a button Ora does not offer", "key", key)
+		slog.Debug("a notification came back with a button June does not offer", "key", key)
 	}
 }
 
@@ -312,7 +312,7 @@ func (s *Scheduler) snooze(ctx context.Context, n *Notice, key string) error {
 	return nil
 }
 
-// markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is Ora reporting, not work owed — so all this records is that the user cleared it. Either way, any snooze still pending for this notice is cancelled, so a Done pressed while a snooze is in flight — from the original notice or from a re-fired one, both carrying the same kind and id — stops it firing again. Input: the notice. Output: whatever closing the task returned when that failed — ErrTaskGone when the id no longer names one — otherwise nil; cancelling the pending snooze is best-effort and only logged on failure, since the notice itself is already closed by then.
+// markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is June reporting, not work owed — so all this records is that the user cleared it. Either way, any snooze still pending for this notice is cancelled, so a Done pressed while a snooze is in flight — from the original notice or from a re-fired one, both carrying the same kind and id — stops it firing again. Input: the notice. Output: whatever closing the task returned when that failed — ErrTaskGone when the id no longer names one — otherwise nil; cancelling the pending snooze is best-effort and only logged on failure, since the notice itself is already closed by then.
 func (s *Scheduler) markDone(ctx context.Context, n Notice) error {
 	if n.Kind == "task" && n.ID != "" && s.taskDone != nil {
 		if err := s.taskDone(ctx, n.ID); err != nil {
@@ -474,7 +474,7 @@ var noticePlaces = map[string]string{
 	"close":   "days",
 }
 
-// taskNoticeWatermarkKind is the diary-table row maybeTaskNotices keeps purely as a marker, on the empty day the same way the understanding doc is: the highest action-item note id already turned into a task notice, so a daemon restart never re-announces work it has already surfaced. The kind itself is declared in the store (db.TaskNoticeWatermarkKind), because the diary's search-index triggers name it too: a bare number rewritten on most ticks is the one diary row that must never come back from a search as if Ora had written it.
+// taskNoticeWatermarkKind is the diary-table row maybeTaskNotices keeps purely as a marker, on the empty day the same way the understanding doc is: the highest action-item note id already turned into a task notice, so a daemon restart never re-announces work it has already surfaced. The kind itself is declared in the store (db.TaskNoticeWatermarkKind), because the diary's search-index triggers name it too: a bare number rewritten on most ticks is the one diary row that must never come back from a search as if June had written it.
 const taskNoticeWatermarkKind = db.TaskNoticeWatermarkKind
 
 // maxTaskNoticesPerMeeting caps how many task notices one meeting's newly-lifted action items raise at once. Five bullets from one meeting would otherwise be five banners in a row; the rest are folded into the last one's body as a count instead.

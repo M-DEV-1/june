@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"ora/internal/tracker"
+	"june/internal/tracker"
 )
 
 // Drawing needs the picture's frame, not the picture. A live voice session is told the frame in words — "here is the picture, 1280 wide and 698 high … one of its pixels is 1.50 screen pixels" — even though the image itself is never delivered, so a point it works out from that description maps onto the screen exactly as a sighted session's would.

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 func TestWriteEpisode_StoresStructureAndJPEG(t *testing.T) {
@@ -62,7 +62,7 @@ func TestListEpisodes_FiltersAppAndRecency(t *testing.T) {
 	store := memStore(t)
 	ctx := context.Background()
 
-	if _, err := store.LogEpisode(ctx, "Slack", "ora", "thread about retrieval"); err != nil {
+	if _, err := store.LogEpisode(ctx, "Slack", "june", "thread about retrieval"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.LogEpisode(ctx, "Firefox", "Suits", "watching a show"); err != nil {

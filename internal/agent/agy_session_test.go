@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
-// fakeAgySession is a scripted agySessionRunner: each Send call consumes the next entry of responses (making it that turn's "result" event) unless sendErr is armed, in which case that one Send fails instead, as a broken pipe would. toolCalls, when set, names the ora tools to call over MCP before a given turn's response — index-aligned with responses — so a test can check that hops still get recorded through a session's long-lived tool server.
+// fakeAgySession is a scripted agySessionRunner: each Send call consumes the next entry of responses (making it that turn's "result" event) unless sendErr is armed, in which case that one Send fails instead, as a broken pipe would. toolCalls, when set, names the june tools to call over MCP before a given turn's response — index-aligned with responses — so a test can check that hops still get recorded through a session's long-lived tool server.
 type fakeAgySession struct {
 	mu        sync.Mutex
 	startErr  error
@@ -86,7 +86,7 @@ func (f *fakeAgySession) wasKilled() bool {
 	return f.killed
 }
 
-// callFakeAgyTool calls one ora tool over MCP against the server named in env's HOME's mcp config, the way the real agy CLI would from inside a turn.
+// callFakeAgyTool calls one june tool over MCP against the server named in env's HOME's mcp config, the way the real agy CLI would from inside a turn.
 func callFakeAgyTool(env []string, name string) error {
 	home := ""
 	for _, e := range env {
@@ -111,7 +111,7 @@ func callFakeAgyTool(env []string, name string) error {
 	}
 	url := cfg.MCPServers[agyMCPServerName].URL
 	if url == "" {
-		return errors.New("fakeAgySession: no ora server in the mcp config")
+		return errors.New("fakeAgySession: no june server in the mcp config")
 	}
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": map[string]any{"purpose": "looking"}}})
 	resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
@@ -138,7 +138,7 @@ func agyLineText(t *testing.T, line string) string {
 }
 
 // A second ask on the same conversation reuses the process: only one session gets started, and the second send carries just the new question, none of the instruction or the first turn's thread.
-// A different Ora conversation must not inherit a live process that remembers another one: the process is reused only when the history handed in is the one it has already been told, and the second ask of a conversation carries the first turn as history.
+// A different June conversation must not inherit a live process that remembers another one: the process is reused only when the history handed in is the one it has already been told, and the second ask of a conversation carries the first turn as history.
 func TestAskAgy_ADifferentConversationStartsANewProcess(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
 	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"hi there"}`, `{"status":"SUCCESS","response":"again"}`, `{"status":"SUCCESS","response":"fresh"}`}}
@@ -187,10 +187,10 @@ func TestAskAgy_SecondAskReusesTheProcess(t *testing.T) {
 	if len(fake.sends) != 2 {
 		t.Fatalf("sends = %d, want 2", len(fake.sends))
 	}
-	if !strings.Contains(fake.sends[0], "You are Ora.") {
+	if !strings.Contains(fake.sends[0], "You are June.") {
 		t.Errorf("the first send is missing the instruction: %q", fake.sends[0])
 	}
-	if strings.Contains(fake.sends[1], "You are Ora.") || strings.Contains(fake.sends[1], "hello") {
+	if strings.Contains(fake.sends[1], "You are June.") || strings.Contains(fake.sends[1], "hello") {
 		t.Errorf("the second send should carry only the new question, not the instruction or the first turn: %q", fake.sends[1])
 	}
 	if !strings.Contains(fake.sends[1], "again") {
@@ -225,7 +225,7 @@ func TestAskAgy_ModelChangeStartsANewProcess(t *testing.T) {
 	if !fake1.wasKilled() {
 		t.Errorf("the old model's process was not killed")
 	}
-	if !strings.Contains(fake2.sends[0], "You are Ora.") {
+	if !strings.Contains(fake2.sends[0], "You are June.") {
 		t.Errorf("the new process's first send must carry the instruction again: %q", fake2.sends[0])
 	}
 }
@@ -244,7 +244,7 @@ func TestAskAgy_RestartsADeadProcessWithInstructionAndHistory(t *testing.T) {
 	}
 	t.Cleanup(a.CloseAgySession)
 
-	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "ora", Text: "Vexil"}})
+	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "june", Text: "Vexil"}})
 	if _, err := a.askAgy(t.Context(), newProc, "", history, "hello"); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestAskAgy_RestartsADeadProcessWithInstructionAndHistory(t *testing.T) {
 	if i != 2 {
 		t.Errorf("newProc was called %d times, want 2 — the dead process must be replaced", i)
 	}
-	if !strings.Contains(fresh.sends[0], "You are Ora.") || !strings.Contains(fresh.sends[0], "who did I meet") {
+	if !strings.Contains(fresh.sends[0], "You are June.") || !strings.Contains(fresh.sends[0], "who did I meet") {
 		t.Errorf("the restarted process's first send must carry the instruction and history again: %q", fresh.sends[0])
 	}
 }

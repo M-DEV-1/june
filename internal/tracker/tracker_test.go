@@ -3,7 +3,7 @@
 package tracker_test
 
 import (
-	"ora/internal/tracker"
+	"june/internal/tracker"
 	"testing"
 )
 

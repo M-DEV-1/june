@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/memory"
+	"june/internal/memory"
 )
 
-// rrfK is Reciprocal Rank Fusion's smoothing constant. ORA's small corpus (thousands, not millions, of items) favors a lower k (~40-60) than the textbook default (60-100) — sharpens the gap between an item both retrievers agree on and one only a single retriever found. See the worked example in docs/ora-memory-deck.html §02.
+// rrfK is Reciprocal Rank Fusion's smoothing constant. June's small corpus (thousands, not millions, of items) favors a lower k (~40-60) than the textbook default (60-100) — sharpens the gap between an item both retrievers agree on and one only a single retriever found. See the worked example in docs/june-memory-deck.html §02.
 const rrfK = 50
 
 // domainBoostFactor multiplies the fused score of a candidate whose domain matches the inferred current domain, applied only when the caller didn't pass an explicit domain filter. A mis-tagged/unset item still surfaces, just lower — boost, not a wall.
@@ -311,7 +311,7 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	}
 
 	// Relevance floor for multi-term queries: buildFTSMatch ORs every significant term together, so FTS5 alone returns any row matching even one of them. A candidate matching a small fraction of a long query is coincidental noise, not a real match — this is what "10 junk rows for an absent-topic query" traces back to.
-	// The floor is half the query's terms, capped at two, so it scales with the question instead of turning short queries into a strict AND: two-term queries need one term (unchanged from plain FTS5, since "ora daemon" must still find "the daemon crashed"), three or more need two.
+	// The floor is half the query's terms, capped at two, so it scales with the question instead of turning short queries into a strict AND: two-term queries need one term (unchanged from plain FTS5, since "june daemon" must still find "the daemon crashed"), three or more need two.
 	if queryTerms := tokenizeQuery(query); len(queryTerms) >= 3 {
 		need := (len(queryTerms) + 1) / 2
 		if need > 2 {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // TestWriteEpisode_StoresSecondMonitorFrames proves the frames from every other monitor land next to the primary as {id}-b.jpg, {id}-c.jpg and are reachable by EpisodeExtraImages. A meeting on one screen with notes on the other is one episode, so both screens must survive the write.

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/config"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 const (
@@ -293,11 +293,11 @@ func TestPruneStageLeavesTheTokenOffWhenItFails(t *testing.T) {
 
 // A config edit takes effect on the very next night, with no restart: r.retention is configRetention, which calls config.LoadConfig fresh every time it is called rather than reading a value cached at Runner construction. This test proves that end to end on one live Runner — write the config once, read retention, edit the config file on disk, read retention again on the same Runner — rather than trusting the wiring by inspection.
 func TestRetention_SeesAConfigEditWithoutRestart(t *testing.T) {
-	t.Setenv("ORA_DATA_DIR", t.TempDir())
+	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	store := dbtest.Open(t)
 	r := New(store, (&fakeBrain{}).fn, yesProbes(), 23, 9)
 
-	if err := config.SaveConfig(config.OraConfig{ActRunKeep: 500, ActRunFailedKeepDays: 10}); err != nil {
+	if err := config.SaveConfig(config.JuneConfig{ActRunKeep: 500, ActRunFailedKeepDays: 10}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 	keep, grace := r.retention()
@@ -306,7 +306,7 @@ func TestRetention_SeesAConfigEditWithoutRestart(t *testing.T) {
 	}
 
 	// The same Runner, no restart: only the file on disk changes.
-	if err := config.SaveConfig(config.OraConfig{ActRunKeep: 7, ActRunFailedKeepDays: 3}); err != nil {
+	if err := config.SaveConfig(config.JuneConfig{ActRunKeep: 7, ActRunFailedKeepDays: 3}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 	keep, grace = r.retention()

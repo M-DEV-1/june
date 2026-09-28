@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Half of every character Ora ever captured has no vector: an episode is embedded as one document capped at maxEmbedRunes, so a 96,061-character screen is represented by its first 4,000 and the rest is unreachable by meaning. Chunking makes the whole capture addressable.
+// Half of every character June ever captured has no vector: an episode is embedded as one document capped at maxEmbedRunes, so a 96,061-character screen is represented by its first 4,000 and the rest is unreachable by meaning. Chunking makes the whole capture addressable.
 func TestChunkText_CoversTheWholeCaptureNotJustItsHead(t *testing.T) {
 	// A long screen whose answer sits near the end — the shape that made "what were the eleven findings" unanswerable.
 	body := strings.Repeat("navigation chrome and boilerplate. ", 400)

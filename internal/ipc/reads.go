@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/memory"
-	"ora/internal/tracker"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/memory"
+	"june/internal/tracker"
+	"june/internal/util"
 )
 
 // meetingNoteKind is the notes.kind a meeting's minutes are filed under by internal/recorder.
@@ -180,29 +180,29 @@ func contextViewFrom(a tracker.Activity) ContextView {
 	return ContextView{App: a.App, Title: a.Title, Text: util.Runes(text, maxContextText)}
 }
 
-// Context handles GET /context: the app, window title and text of the window in focus right now. It reads the window in focus synchronously first (see readFocused), so the hotkey never names a stale window; that read applies the same refusals the tracker's own capture loop applies, Ora's own window and the app blocklist, so the hotkey cannot hand the model a window the episode store would never have held; falls back to the tracker's live buffer — the same buffer /buffer serves — when the live read fails, times out, or names Ora itself; and falls back to the newest stored episode when the buffer has just been flushed or no tracker is wired at all. Text is trimmed to 600 runes.
+// Context handles GET /context: the app, window title and text of the window in focus right now. It reads the window in focus synchronously first (see readFocused), so the hotkey never names a stale window; that read applies the same refusals the tracker's own capture loop applies, June's own window and the app blocklist, so the hotkey cannot hand the model a window the episode store would never have held; falls back to the tracker's live buffer — the same buffer /buffer serves — when the live read fails, times out, or names June itself; and falls back to the newest stored episode when the buffer has just been flushed or no tracker is wired at all. Text is trimmed to 600 runes.
 func (s *Server) Context(w http.ResponseWriter, r *http.Request) {
-	if a, ok := readFocused(r.Context(), s.focused); ok && !tracker.IsOraWindow(a.App, a.Title) && !tracker.Blocklisted(a.App) {
+	if a, ok := readFocused(r.Context(), s.focused); ok && !tracker.IsJuneWindow(a.App, a.Title) && !tracker.Blocklisted(a.App) {
 		util.WriteJSON(w, contextViewFrom(a))
 		return
 	}
 
 	if s.screen != nil {
-		// The newest capture is often the Ora window itself, since the tracker sees it the moment it takes focus; the context the user means is the newest capture of anything else.
-		if a, ok := newestOtherThanOra(s.screen()); ok {
+		// The newest capture is often the June window itself, since the tracker sees it the moment it takes focus; the context the user means is the newest capture of anything else.
+		if a, ok := newestOtherThanJune(s.screen()); ok {
 			util.WriteJSON(w, contextViewFrom(a))
 			return
 		}
 	}
 
-	// Several episodes back, not one: the tracker no longer files Ora's own window, but episodes recorded before that change are still in the store and answering with one of them tells the user what Ora was showing rather than what they were doing.
+	// Several episodes back, not one: the tracker no longer files June's own window, but episodes recorded before that change are still in the store and answering with one of them tells the user what June was showing rather than what they were doing.
 	eps, err := s.store.ListEpisodes(r.Context(), db.EpisodeQuery{Limit: 10, NewestFirst: true})
 	if err != nil {
 		fail(w, err, http.StatusInternalServerError)
 		return
 	}
 	for _, e := range eps {
-		if tracker.IsOraWindow(e.App, e.Title) {
+		if tracker.IsJuneWindow(e.App, e.Title) {
 			continue
 		}
 		text := e.ScreenText
@@ -321,7 +321,7 @@ func (s *Server) Today(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, sum := range summaries {
-		text, source := sum.Content, "Ora"
+		text, source := sum.Content, "June"
 		var task memory.TaskSummary
 		if json.Unmarshal([]byte(sum.Content), &task) == nil && task.Summary != "" {
 			text, source = task.Summary, task.TaskName
@@ -394,7 +394,7 @@ func (s *Server) Meetings(w http.ResponseWriter, r *http.Request) {
 
 // Meeting handles DELETE /meetings/{id}: it removes one meeting's write-up, for a call whose minutes are not worth keeping. Output: 204 with nothing, 404 for an id that names no meeting, 405 for any other method.
 //
-// The note's kind is checked before it is deleted, because meetings are notes and notes share one id space: without the check, an id typed or invented against this route would remove a diary entry or something the user told Ora to remember, and the meetings screen would have no way of knowing it had.
+// The note's kind is checked before it is deleted, because meetings are notes and notes share one id space: without the check, an id typed or invented against this route would remove a diary entry or something the user told June to remember, and the meetings screen would have no way of knowing it had.
 //
 // The recording itself is left on disk. Deleting the write-up says the minutes were bad, not that the call never happened, and the audio is what a second attempt at them would have to read.
 func (s *Server) Meeting(w http.ResponseWriter, r *http.Request) {
@@ -423,7 +423,7 @@ func (s *Server) Meeting(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// MemorySearch handles GET /memory/search?q=: 20 hybrid-search hits over notes, summaries, episodes and threads, filled up to that same total with archived notes whose text contains the query. A blank q is 400 — an empty search would otherwise read as "everything Ora knows".
+// MemorySearch handles GET /memory/search?q=: 20 hybrid-search hits over notes, summaries, episodes and threads, filled up to that same total with archived notes whose text contains the query. A blank q is 400 — an empty search would otherwise read as "everything June knows".
 func (s *Server) MemorySearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -530,7 +530,7 @@ func (s *Server) People(w http.ResponseWriter, r *http.Request) {
 }
 
 // meetingDurationPrefix opens the machine-readable line internal/recorder appends to a meeting note's stored content, after the minutes text — see fileMinutes in internal/recorder/recorder.go. It carries the recording's actual wall-clock start and stop, the one thing on the note that could never be recovered from the minutes text itself.
-const meetingDurationPrefix = "<!--ora:duration "
+const meetingDurationPrefix = "<!--june:duration "
 
 // meetingStart is when a note's meeting actually ran. Input: one meeting note. Output: the recording's own start from its duration marker, falling back to when the note was filed for a note written before the marker existed — the window groups the meetings list by this, so a call written up the next morning would otherwise read as "today".
 func meetingStart(n db.Note) time.Time {
@@ -683,10 +683,10 @@ func attendeeFromBullet(bullet string) (Attendee, bool) {
 	return Attendee{Name: name}, true
 }
 
-// newestOtherThanOra returns the newest activity in buf whose app is not Ora's own window, and false when there is none. Input: the tracker buffer, oldest first. Output: the activity and whether one was found.
-func newestOtherThanOra(buf []tracker.Activity) (tracker.Activity, bool) {
+// newestOtherThanJune returns the newest activity in buf whose app is not June's own window, and false when there is none. Input: the tracker buffer, oldest first. Output: the activity and whether one was found.
+func newestOtherThanJune(buf []tracker.Activity) (tracker.Activity, bool) {
 	for i := len(buf) - 1; i >= 0; i-- {
-		if !tracker.IsOraWindow(buf[i].App, buf[i].Title) {
+		if !tracker.IsJuneWindow(buf[i].App, buf[i].Title) {
 			return buf[i], true
 		}
 	}

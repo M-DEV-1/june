@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // LlamaServer answers by posting to a local llama-server's OpenAI-compatible /v1/chat/completions endpoint. It exists for the dream package's shadow brain: a second, local model that shadows the primary dream brain on the same prompts for offline comparison and never itself decides anything.

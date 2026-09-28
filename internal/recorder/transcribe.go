@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/tracker"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/tracker"
+	"june/internal/util"
 )
 
 // Segment is one span of speech from one side of the call, with its start and end measured from the beginning of the recording (not from the beginning of its own stream).
@@ -145,9 +145,9 @@ const promptEchoWindow = 5 * time.Second
 // whisperThreads is how many threads one whisper run may use. Input: whether this run decodes on the GPU. Output: the thread count, never less than one.
 //
 // A GPU run holds GPURun for the whole decode, so the two streams of a call run one after the other however they were started — that run has the machine to itself and takes whisper's own default of half the logical CPUs. On the CPU path the two runs really do overlap, and each takes a quarter so they add up to the same load rather than fighting over the same cores.
-// An explicit $ORA_TRANSCRIBE_THREADS wins on either path, since the right number is a property of the machine.
+// An explicit $JUNE_TRANSCRIBE_THREADS wins on either path, since the right number is a property of the machine.
 func whisperThreads(gpu bool) int {
-	if !gpu || os.Getenv("ORA_TRANSCRIBE_THREADS") != "" {
+	if !gpu || os.Getenv("JUNE_TRANSCRIBE_THREADS") != "" {
 		return transcribeThreads()
 	}
 	if n := runtime.NumCPU() / 2; n > 0 {
@@ -157,10 +157,10 @@ func whisperThreads(gpu bool) int {
 }
 
 // transcribeThreads is how many threads one background transcription run may use when it shares the machine with the other runs a meeting starts: a quarter of the logical CPUs, since whisper's own default is half and two runs at a quarter each add up to the same load. Never less than one. It is what the diarizer takes, and what a whisper run that decodes on the CPU takes.
-// $ORA_TRANSCRIBE_THREADS overrides it. The right number is a property of the machine and not of the code: on a hybrid CPU the logical count is a poor guide to how many threads actually run at full speed, and the only way to know is to time a real recording both ways.
+// $JUNE_TRANSCRIBE_THREADS overrides it. The right number is a property of the machine and not of the code: on a hybrid CPU the logical count is a poor guide to how many threads actually run at full speed, and the only way to know is to time a real recording both ways.
 // ponytail: a quarter of the logical CPUs is a safe guess that never oversubscribes, not a tuned one. The knob is there so a machine that wants more can have it without a rebuild.
 func transcribeThreads() int {
-	if v := os.Getenv("ORA_TRANSCRIBE_THREADS"); v != "" {
+	if v := os.Getenv("JUNE_TRANSCRIBE_THREADS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}

@@ -5,10 +5,10 @@ import (
 	"log/slog"
 	"strings"
 
-	"ora/internal/config"
+	"june/internal/config"
 )
 
-// applyAutostart handles the --autostart=on|off flag: it records the choice in the config file and immediately makes the on-disk login entry match, so the user never has to hand-edit ora-config.json.
+// applyAutostart handles the --autostart=on|off flag: it records the choice in the config file and immediately makes the on-disk login entry match, so the user never has to hand-edit june-config.json.
 // Input: "on" or "off" (case-insensitive). Output: an error for an unrecognised value, or for a config write or login-entry write that failed.
 func applyAutostart(value string) error {
 	var on bool

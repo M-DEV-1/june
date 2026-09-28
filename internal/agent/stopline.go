@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
 // actionPattern matches the words and short phrases a control's own label or window title uses when pressing it, or typing into what it names, commits to something that cannot be undone from the screen: sending, submitting, posting, publishing, paying, buying, confirming or placing an order, checking out, deleting, removing, unsubscribing, signing out, or transferring. It is checked against the label a control carries as observe_screen showed it, not against free speech, so the phrases are the exact words a button or a page title actually uses ("Confirm Order"), not the looser way a person says the same thing ("confirm the order") — consentPattern below is the loosened form of the same list, for reading that back out of what the user said. \b anchors only the left edge of each word, not the right, so "Sender" and "posting" still trip it — deliberately: catching a compound like that costs nothing but an extra question, where missing one risks an unwanted send.

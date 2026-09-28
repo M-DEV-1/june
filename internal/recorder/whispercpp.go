@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/config"
-	"ora/internal/util"
+	"june/internal/config"
+	"june/internal/util"
 )
 
 // The transcription engine is whisper-medium through a whisper.cpp build, which decodes on the GPU through its Vulkan backend and falls back to the CPU on its own when no GPU is there. It is installed into <data dir>/whispercpp: the whisper-cli binary and the ggml model beside it.
@@ -27,7 +27,7 @@ const (
 	whisperVADModelName = "ggml-silero-v6.2.0.bin"
 )
 
-// WhisperCPPBinary returns the path to the whisper.cpp build: $ORA_WHISPER_CPP if set, otherwise <dataDir>/whispercpp/whisper-cli, but only when the model is present beside it. The error names the exact path of each missing file, which is also what ora doctor prints.
+// WhisperCPPBinary returns the path to the whisper.cpp build: $JUNE_WHISPER_CPP if set, otherwise <dataDir>/whispercpp/whisper-cli, but only when the model is present beside it. The error names the exact path of each missing file, which is also what june doctor prints.
 func WhisperCPPBinary(dataDir string) (string, error) {
 	bin := whisperCPPPath(dataDir)
 	model := filepath.Join(filepath.Dir(bin), whisperCPPModelName)
@@ -40,14 +40,14 @@ func WhisperCPPBinary(dataDir string) (string, error) {
 	return bin, nil
 }
 
-// WhisperVADModel returns where the Silero voice-activity model is looked for: beside whisper-cli, so in $ORA_WHISPER_CPP's directory when that is set and in <dataDir>/whispercpp otherwise.
+// WhisperVADModel returns where the Silero voice-activity model is looked for: beside whisper-cli, so in $JUNE_WHISPER_CPP's directory when that is set and in <dataDir>/whispercpp otherwise.
 func WhisperVADModel(dataDir string) string {
 	return filepath.Join(filepath.Dir(whisperCPPPath(dataDir)), whisperVADModelName)
 }
 
-// whisperCPPPath returns where whisper-cli is looked for, whether or not it is there: $ORA_WHISPER_CPP if set, otherwise <dataDir>/whispercpp/whisper-cli.
+// whisperCPPPath returns where whisper-cli is looked for, whether or not it is there: $JUNE_WHISPER_CPP if set, otherwise <dataDir>/whispercpp/whisper-cli.
 func whisperCPPPath(dataDir string) string {
-	if p := os.Getenv("ORA_WHISPER_CPP"); p != "" {
+	if p := os.Getenv("JUNE_WHISPER_CPP"); p != "" {
 		return p
 	}
 	return filepath.Join(dataDir, "whispercpp", whisperCPPBinaryName)

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The Linux tray must advertise the ORA logo as an icon pixmap, not a theme icon name. SNI pixmaps are ARGB32 in network byte order (A,R,G,B per pixel).
+// The Linux tray must advertise the June logo as an icon pixmap, not a theme icon name. SNI pixmaps are ARGB32 in network byte order (A,R,G,B per pixel).
 // IconPixmap is an array, a(iiay), and the host picks whichever entry is closest to its panel height. Until 2026-09-12 one 128x128 entry was all it had, so every shell scaled that down to around 22px with its own scaler and the face came out blurred and grey. Every panel size is now drawn at its own size (see packaging/make-icons.py) and offered, so a host with a 22px bar finds 22px and resamples nothing.
 func TestTrayIconPixmap(t *testing.T) {
 	pixmaps, err := trayIconPixmaps()

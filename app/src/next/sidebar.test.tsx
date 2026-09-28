@@ -78,12 +78,12 @@ describe("the rail", () => {
     expect(store.getState().ui.place).toBe("chats");
   });
 
-  it("shows Ora's face at the head of the rail, watching while nothing is in flight and thinking during an ask", async () => {
+  it("shows June's face at the head of the rail, watching while nothing is in flight and thinking during an ask", async () => {
     const { store } = renderApp({ conversations: conversations() }, { conversationId: "c1" });
-    expect(await screen.findByRole("img", { name: "ora is watching" })).toBeDefined();
+    expect(await screen.findByRole("img", { name: "june is watching" })).toBeDefined();
     store.dispatch(progress.askSent({ conversationId: "c1", question: "and the flights?" }));
     // Two thinking faces: the rail's and the one beside the run in the thread.
-    await waitFor(() => expect(screen.getAllByRole("img", { name: "ora is thinking" })).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "june is thinking" })).toHaveLength(2));
   });
 
   it("opens an unsaved draft when New chat is clicked, posting nothing and adding nothing to the list", async () => {
@@ -91,7 +91,7 @@ describe("the rail", () => {
     await row("Flights to Zurich");
     await userEvent.click(screen.getByRole("button", { name: "New chat" }));
     expect(store.getState().ui.chatDraft).toBe(true);
-    expect(screen.getByRole("heading", { name: "Ora" })).toBeDefined();
+    expect(screen.getByRole("heading", { name: "June" })).toBeDefined();
     expect(calls.some((c) => c.method === "POST" && c.path === "/conversations")).toBe(false);
   });
 });
@@ -139,7 +139,7 @@ describe("the menu on a row", () => {
     await userEvent.click(within(asked).getByRole("button", { name: "Delete" }));
     // Clearing conversationId is not enough: App's own "keep some chat picked" effect puts the deleted id straight back off the list RTK Query has not refetched yet. The draft is what makes the composer post no conversation_id at all.
     await waitFor(() => expect(store.getState().ui.chatDraft).toBe(true));
-    expect(await screen.findByRole("heading", { name: "Ora" })).toBeDefined();
+    expect(await screen.findByRole("heading", { name: "June" })).toBeDefined();
   });
 
   it("leaves the row where it is and says so when a delete does not go through", async () => {
@@ -178,7 +178,7 @@ describe("the jump-to-a-chat palette", () => {
 
 // What the daemon puts on a task notice: the same five buttons its desktop banner offers (noticeActions in internal/proactive/notify.go). A card draws the actions its notice names, so a fixture that presses a button has to carry them.
 const TASK_ACTIONS = [
-  { key: "default", label: "Open in Ora" },
+  { key: "default", label: "Open in June" },
   { key: "done", label: "Done" },
   { key: "hour", label: "In an hour" },
   { key: "evening", label: "This evening" },
@@ -209,8 +209,8 @@ describe("a live notice's own buttons", () => {
     );
   });
 
-  // The design sheets of 2026-09-12 draw a notice as a face tile, then "Ora" with how long ago it landed, then the line, then the detail under it in muted grey. The card said only the title and the body, so it read as a loose paragraph with buttons rather than as something Ora said.
-  it("reads as a notification from Ora: the face, the name, how long ago, then the words", async () => {
+  // The design sheets of 2026-09-12 draw a notice as a face tile, then "June" with how long ago it landed, then the line, then the detail under it in muted grey. The card said only the title and the body, so it read as a loose paragraph with buttons rather than as something June said.
+  it("reads as a notification from June: the face, the name, how long ago, then the words", async () => {
     const { store } = renderApp({ conversations: conversations() });
     await row("Flights to Zurich");
     store.dispatch(
@@ -221,12 +221,12 @@ describe("a live notice's own buttons", () => {
       }),
     );
 
-    const card = await screen.findByRole("group", { name: "Notice from Ora" });
-    expect(within(card).getByText("Ora")).toBeDefined();
+    const card = await screen.findByRole("group", { name: "Notice from June" });
+    expect(within(card).getByText("June")).toBeDefined();
     expect(within(card).getByText("now")).toBeDefined();
     expect(within(card).getByText("Your daily brief is ready.")).toBeDefined();
     expect(within(card).getByText("3 key things, 2 decisions, 1 follow-up.")).toBeDefined();
-    expect(within(card).getByRole("img", { name: /^ora is/ })).toBeDefined();
+    expect(within(card).getByRole("img", { name: /^june is/ })).toBeDefined();
   });
 
   it("closes on its own cross, telling the daemon nothing", async () => {
@@ -281,7 +281,7 @@ describe("a live notice's own buttons", () => {
     expect(store.getState().ui.liveNotice).toBeDefined();
   });
 
-  // The daemon says what each notice can answer and the window draws that, rather than each window deciding for itself. A task can be completed or pushed to later; a routine's report is Ora saying what it found, with nothing to complete and nowhere to push it to, and the four buttons it used to get all came back "Could not do that".
+  // The daemon says what each notice can answer and the window draws that, rather than each window deciding for itself. A task can be completed or pushed to later; a routine's report is June saying what it found, with nothing to complete and nowhere to push it to, and the four buttons it used to get all came back "Could not do that".
   it("draws the buttons the notice names, and none for a routine that names only Open", async () => {
     const { store } = renderApp({ conversations: conversations() });
     await row("Flights to Zurich");
@@ -299,7 +299,7 @@ describe("a live notice's own buttons", () => {
       progress.eventArrived({
         id: "",
         type: "notice",
-        notice: { title: "Routine", body: "Vexil replied about the venue.", place: "", id: "7", kind: "routine", actions: [{ key: "default", label: "Open in Ora" }] },
+        notice: { title: "Routine", body: "Vexil replied about the venue.", place: "", id: "7", kind: "routine", actions: [{ key: "default", label: "Open in June" }] },
       }),
     );
     // Open is the one button the app window drops: it is already the thing Open would open.

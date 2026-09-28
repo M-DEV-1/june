@@ -59,7 +59,7 @@ export function ChatsScreen() {
     <div ref={pane} data-pane className="flex h-full min-h-0 flex-col">
       <PageHeader wide={wide} railed={railed}>
         <h1 className="truncate text-ui font-medium" title={current?.title}>
-          {current?.title ?? "Ora"}
+          {current?.title ?? "June"}
         </h1>
         <div className="ml-auto">
           <BrainPicker
@@ -73,11 +73,11 @@ export function ChatsScreen() {
           view={view}
           up={!isError}
           loading={isLoading || listLoading}
-          // A chat that exists and is empty says so. A fresh draft is the front door instead: the time of day, one line saying Ora has been keeping track, and a few things it can do.
+          // A chat that exists and is empty says so. A fresh draft is the front door instead: the time of day, one line saying June has been keeping track, and a few things it can do.
           empty={shownId ? "Nothing said in this chat yet." : greeting()}
           hint={
             shownId
-              ? "Ask a question below and Ora answers from what it has seen and heard."
+              ? "Ask a question below and June answers from what it has seen and heard."
               : "I have been keeping track. What would you like to do?"
           }
           action={shownId ? undefined : <ChatSuggestions />}
@@ -89,7 +89,7 @@ export function ChatsScreen() {
       ) : (
         <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
           <div className={MEASURE}>
-            <NoBrainPanel dataDir={daemon?.data_dir ?? "~/.local/share/ora"} />
+            <NoBrainPanel dataDir={daemon?.data_dir ?? "~/.local/share/june"} />
           </div>
         </Scroller>
       )}

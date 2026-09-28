@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/db"
-	"ora/internal/db/dbtest"
+	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // people is the gazetteer every test below tears against: two known people whose personal_context subjects overlap on the first name "Vexil", so the longest-match rule has something to decide.
 func people() []db.PersonalEntry {
 	return []db.PersonalEntry{
-		{Subject: "identity", Content: "the user, works on ORA"},
+		{Subject: "identity", Content: "the user, works on June"},
 		{Subject: "preferences-food", Content: "no mushrooms"},
 		{Subject: "vexil-quorin", Content: "his partner, lives in Bangalore"},
 		{Subject: "vexil-quorin-mother", Content: "her mother, calls on Sundays"},

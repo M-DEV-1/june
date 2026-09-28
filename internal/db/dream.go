@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"ora/internal/obs"
+	"june/internal/obs"
 )
 
 // This file is the overnight dreaming loop's storage: the per-night run bookkeeping and the hypotheses table. Both are private working state with no FTS mirror — a deliberate anti-pollution decision, so an unvetted guess can never be retrieved into a prompt. Each stage of a night commits through one method here, in one transaction that writes the stage's outputs and its stages_done token together, which is what makes a preempted stage leave nothing behind.
@@ -200,7 +200,7 @@ func markStageDone(ctx context.Context, e execer, night, token string) error {
 
 // CommitHypothesisStage writes one night's hypothesis work in a single transaction: every verdict, every adopted new hypothesis, and the 'hyp' token in stages_done. All or nothing — a cancelled stage leaves no partial verdicts, and the token's absence is what tells the next wake to redo the stage.
 func (s *Store) CommitHypothesisStage(ctx context.Context, night string, verdicts []HypothesisVerdict, adopted []NewHypothesis) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.CommitHypothesisStage")
 	defer span.End()
 
@@ -221,7 +221,7 @@ func (s *Store) CommitHypothesisStage(ctx context.Context, night string, verdict
 
 // CommitUnderstandingStage upserts the rewritten understanding doc and the 'und' token in one transaction.
 func (s *Store) CommitUnderstandingStage(ctx context.Context, night, understanding string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.CommitUnderstandingStage")
 	defer span.End()
 
@@ -245,7 +245,7 @@ type DiaryCompaction struct {
 // CommitCompactStage writes one tier of the night's diary compaction in a single transaction: every coarse entry upserted, its constituents reparented under it, and — when done is set — the 'compact' token in stages_done. The runner calls this once per tier and sets done only on the last call, so the token lands exactly once; a night with nothing to compact is one call with no compactions that still commits the token.
 // The constituents are kept, not deleted. The coarse entry is a model rewrite of seven day pages and there is no other copy of what those days said, so this follows ReplaceSummariesWithDigest and ReplaceAllNotes in keeping the source of a compaction. DiaryEntriesThrough skips a reparented row, which is what stops the next night rolling the same week up again.
 func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []DiaryCompaction, done bool) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.CommitCompactStage")
 	defer span.End()
 
@@ -275,7 +275,7 @@ func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []Di
 
 // CommitReplayStage marks the night's 'replay' token done in its own transaction. The replay stage's deliverable is a markdown artifact on disk, not a database row, so unlike the other stages there is nothing else to write here — the token alone is what tells the next wake the night's replay (full or partial) is not to be redone.
 func (s *Store) CommitReplayStage(ctx context.Context, night string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.CommitReplayStage")
 	defer span.End()
 
@@ -286,7 +286,7 @@ func (s *Store) CommitReplayStage(ctx context.Context, night string) error {
 
 // CommitProceduresStage marks the night's procedures token done so the stage runs once a night. The procedures stage's deliverable is the "How I did X" notes it writes directly through LogNote, not a row this transaction owns, so like CommitReplayStage there is nothing else to write here — the token alone is what tells the next wake the night's procedures stage is not to be redone.
 func (s *Store) CommitProceduresStage(ctx context.Context, night string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.CommitProceduresStage")
 	defer span.End()
 
@@ -297,7 +297,7 @@ func (s *Store) CommitProceduresStage(ctx context.Context, night string) error {
 
 // FinishDreamRun closes the night in one transaction: the morning report becomes the diary kind='dream' row (FTS-indexed via the diary triggers on purpose — "what did you dream last night" must find it), and the run row gets its one-line report and finished_at stamp.
 func (s *Store) FinishDreamRun(ctx context.Context, night, entry, line string) error {
-	tracer := obs.GetTracer(ctx, "ora.db")
+	tracer := obs.GetTracer(ctx, "june.db")
 	ctx, span := tracer.Start(ctx, "DB.FinishDreamRun")
 	defer span.End()
 

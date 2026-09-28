@@ -19,17 +19,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
-// The direct Codex brain answers /ask with OpenAI models on the user's ChatGPT subscription by calling the Codex Responses backend with the tokens Codex CLI keeps in ~/.codex/auth.json, running Ora's own tools through the same gate and trace as the Gemini text path.
+// The direct Codex brain answers /ask with OpenAI models on the user's ChatGPT subscription by calling the Codex Responses backend with the tokens Codex CLI keeps in ~/.codex/auth.json, running June's own tools through the same gate and trace as the Gemini text path.
 const (
 	codexResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
 	codexTokenURL     = "https://auth.openai.com/oauth/token"
 	codexClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexDefaultModel = "gpt-5.5"
 	codexOriginator   = "codex_cli_rs"
-	// codexClientVersion is the Codex CLI version Ora claims, because the backend gates which models an account may use on the codex_cli_rs/<version> user agent.
+	// codexClientVersion is the Codex CLI version June claims, because the backend gates which models an account may use on the codex_cli_rs/<version> user agent.
 	codexClientVersion = "0.144.0"
 	// codexAskTimeout bounds one whole ask, every tool round included, and is generous because a reasoning model can spend a minute on a single round.
 	codexAskTimeout = 12 * time.Minute
@@ -61,10 +61,10 @@ var (
 	defaultCodex     *codexClient
 )
 
-// defaultCodexClient returns the process-wide client for the real backend, using ORA_CODEX_MODEL when set and gpt-5.5 otherwise.
+// defaultCodexClient returns the process-wide client for the real backend, using JUNE_CODEX_MODEL when set and gpt-5.5 otherwise.
 func defaultCodexClient() *codexClient {
 	defaultCodexOnce.Do(func() {
-		model := os.Getenv("ORA_CODEX_MODEL")
+		model := os.Getenv("JUNE_CODEX_MODEL")
 		if model == "" {
 			model = codexDefaultModel
 		}
@@ -169,7 +169,7 @@ func (c *codexClient) round(ctx context.Context, instructions string, input []an
 		}
 	}
 	defer resp.Body.Close()
-	// Every response carries the account's allowance windows in its headers, the refusals included, so the picker's bars come from the calls Ora already makes rather than a call of their own.
+	// Every response carries the account's allowance windows in its headers, the refusals included, so the picker's bars come from the calls June already makes rather than a call of their own.
 	recordUsage(ProviderCodex, codexRateLimits(resp.Header, time.Now()))
 	if resp.StatusCode/100 != 2 {
 		wait, _ := util.ParseRetryAfter(resp.Header, time.Now())
@@ -520,7 +520,7 @@ var usageRecorder struct {
 	to UsageRecorder
 }
 
-// SetUsageRecorder tells this package where to record the usage windows providers report on the calls Ora already makes. Input: the store, or nil to record nothing. Output: none.
+// SetUsageRecorder tells this package where to record the usage windows providers report on the calls June already makes. Input: the store, or nil to record nothing. Output: none.
 func SetUsageRecorder(r UsageRecorder) {
 	usageRecorder.Lock()
 	defer usageRecorder.Unlock()

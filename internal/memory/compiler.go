@@ -2,10 +2,10 @@ package memory
 
 import (
 	"context"
+	"june/internal/obs"
+	"june/internal/tracker"
+	"june/internal/util"
 	"log/slog"
-	"ora/internal/obs"
-	"ora/internal/tracker"
-	"ora/internal/util"
 	"strings"
 	"sync"
 	"time"
@@ -224,7 +224,7 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, sin
 		return
 	}
 
-	tracer := obs.GetTracer(ctx, "ora.memory")
+	tracer := obs.GetTracer(ctx, "june.memory")
 	ctx, span := tracer.Start(ctx, "Compiler.FlushBuffer")
 	defer span.End()
 

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"ora/internal/act"
+	"june/internal/act"
 )
 
 // A provider's prompt cache matches a prefix, so a forty-round job pays full price on every round unless the front of its prompt is the same bytes each time. Everything a round changes — where the job has got to, the screen, the tool results, the budget — has to sit behind everything it does not: the instruction, the goal, the window, the user's answers and the plan. This walks a job through the rounds it actually takes and checks the head of the prompt never moves.

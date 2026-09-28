@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ora/internal/obs"
+	"june/internal/obs"
 
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -165,7 +165,7 @@ func normalizeAppIdentifier(s string) string {
 	return s
 }
 
-// skipReason names why the window just polled is not the user's activity, or "" when it is one to record. The three cases: a window nothing could identify, which carries zero information and would pollute every later summary with "Unknown | Unknown" lines; Ora's own window, because recording the hover files the assistant as an episode and pushes the window the user came from out of the live buffer, so /context answers with Ora itself; and an application on the blocklist.
+// skipReason names why the window just polled is not the user's activity, or "" when it is one to record. The three cases: a window nothing could identify, which carries zero information and would pollute every later summary with "Unknown | Unknown" lines; June's own window, because recording the hover files the assistant as an episode and pushes the window the user came from out of the live buffer, so /context answers with June itself; and an application on the blocklist.
 // screenLocked reports whether the session's lock screen is up, giving the probe d.bounds.lock to answer. Input: none. Output: true only when the probe answered and said locked; a probe that has not answered in time reads as unlocked, because wrongly refusing to capture is the harmful direction to fail in.
 func (d *Daemon) screenLocked() bool {
 	if sessionLocked == nil {
@@ -180,8 +180,8 @@ func (d *Daemon) skipReason(act Activity) string {
 	switch {
 	case act.App == "Unknown" && act.Title == "Unknown":
 		return "unidentified"
-	case IsOraWindow(act.App, act.Title):
-		return "ora"
+	case IsJuneWindow(act.App, act.Title):
+		return "june"
 	case MatchesBlocklist(act.App, d.blocklist):
 		return "blocked"
 	}
@@ -227,7 +227,7 @@ func (d *Daemon) Start(ctx context.Context) {
 		return d.tieredCapture(ctx, act, &lastA11yText, &lastVisionText, &lastVisionTime)
 	}
 
-	tracer := obs.GetTracer(ctx, "ora.tracker")
+	tracer := obs.GetTracer(ctx, "june.tracker")
 
 	// The call is read on its own goroutine, not on this loop. One AT-SPI walk is allowed 2.5 seconds and this loop ticks every two, so doing it inline would stall window polling for longer than its own interval — and a big meeting window, the case this exists for, is exactly the slow walk.
 	if d.capturer == nil {
@@ -261,7 +261,7 @@ func (d *Daemon) Start(ctx context.Context) {
 			}
 			d.noteWindow(*activity)
 
-			// A window that is not the user's activity is a transient skip, and the pending activity is deliberately left as it was. The user is glancing at Ora's hover or a password manager and comes straight back to the window they were in; the loop then sees that window as unchanged, and only a pending activity can be emitted, so clearing it here meant a window with a steady title was never recorded for as long as the user stayed in it.
+			// A window that is not the user's activity is a transient skip, and the pending activity is deliberately left as it was. The user is glancing at June's hover or a password manager and comes straight back to the window they were in; the loop then sees that window as unchanged, and only a pending activity can be emitted, so clearing it here meant a window with a steady title was never recorded for as long as the user stayed in it.
 			if reason := d.skipReason(*activity); reason != "" {
 				span.SetAttributes(attribute.String("tracker.skipped", reason))
 				span.End()
@@ -388,7 +388,7 @@ func (d *Daemon) watchMeetingWindow(ctx context.Context) {
 			}
 			slog.Debug("read the call's window", "app", app, "runes", len([]rune(text)))
 			// The title is captured even when the body is empty, which is the normal case rather than an edge one: a Chromium window exposes no accessibility text unless the browser was launched with --force-renderer-accessibility, and a meeting in a browser tab is how most calls happen here. The title alone is what names the other person — a Teams tab reads "Chat | Vexil Quorin | Microsoft Teams" — so requiring body text threw away the only thing on the machine that answers "who was in the room".
-			// The watcher emits onto the same channel the tick loop does, so it goes through the same two calls the tick loop makes before a window becomes an episode: Normalize, so a window with no application name is still filed under one rather than reaching the store with App and Title both empty, and skipReason, which is where the blocklist, Ora's own window and an unidentifiable window are refused.
+			// The watcher emits onto the same channel the tick loop does, so it goes through the same two calls the tick loop makes before a window becomes an episode: Normalize, so a window with no application name is still filed under one rather than reaching the store with App and Title both empty, and skipReason, which is where the blocklist, June's own window and an unidentifiable window are refused.
 			act := *Normalize(app, title)
 			act.ScreenText = text
 			if reason := d.skipReason(act); reason != "" {
@@ -470,7 +470,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 	visionCtx, cancelVision := context.WithTimeout(ctx, d.bounds.vision)
 	sight := withBudget(visionCtx, func() Sight { return d.visionFn(visionCtx, png) })
 	cancelVision()
-	// Vision capture: drop a11y entirely. Browser/TUI chrome is why screenshots of Ora itself polluted memory.
+	// Vision capture: drop a11y entirely. Browser/TUI chrome is why screenshots of June itself polluted memory.
 	// Searchable text is only the model's structured description (or the window title if the model returned nothing).
 	desc := sight.Text()
 	if desc == "" {

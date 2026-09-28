@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// The meeting watcher puts activities on the same channel the tick loop does, without a tick loop's gate in front of them: it checked the blocklist and nothing else, so Ora's own window and a window nothing could name went straight to the store, and an activity with no application name at all reached WriteEpisode. Every case below is one the tick loop already refuses, and the watcher must refuse it too.
+// The meeting watcher puts activities on the same channel the tick loop does, without a tick loop's gate in front of them: it checked the blocklist and nothing else, so June's own window and a window nothing could name went straight to the store, and an activity with no application name at all reached WriteEpisode. Every case below is one the tick loop already refuses, and the watcher must refuse it too.
 func TestWatchMeetingWindow_SkipsWhatTheTickLoopSkips(t *testing.T) {
 	cases := map[string]struct {
 		app, title, text string
@@ -16,8 +16,8 @@ func TestWatchMeetingWindow_SkipsWhatTheTickLoopSkips(t *testing.T) {
 		"a call in a blocked application": {
 			app: "zoom", title: "Zoom Meeting", text: "the standup", blocklist: []string{"zoom"}, want: false,
 		},
-		"Ora's own window matching the meeting words": {
-			app: "ora", title: "Zoom Meeting", text: "a summary of the call", want: false,
+		"June's own window matching the meeting words": {
+			app: "june", title: "Zoom Meeting", text: "a summary of the call", want: false,
 		},
 		"a window nothing could name": {
 			app: "", title: "", text: "", want: false,

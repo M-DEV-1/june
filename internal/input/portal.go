@@ -440,7 +440,7 @@ type realPortal struct {
 // createSessionOptions builds CreateSession's options. The portal refuses the call with "Missing token" unless session_handle_token names the session object it should create; handle_token for the request itself is added by portalRequest.
 func createSessionOptions() map[string]dbus.Variant {
 	return map[string]dbus.Variant{
-		"session_handle_token": dbus.MakeVariant(fmt.Sprintf("ora_session_%d", reqSeq.Add(1))),
+		"session_handle_token": dbus.MakeVariant(fmt.Sprintf("june_session_%d", reqSeq.Add(1))),
 	}
 }
 
@@ -576,7 +576,7 @@ func parseResponse(body []interface{}) (map[string]dbus.Variant, error) {
 
 // portalRequest calls a portal method that follows the Request pattern (the method returns a Request object path, and the actual result arrives asynchronously as that object's Response signal), and returns the response's results dict. It adds handle_token to options itself so the predicted subscription path always matches the one the portal replies to.
 func portalRequest(ctx context.Context, conn *dbus.Conn, method string, args []interface{}, options map[string]dbus.Variant) (map[string]dbus.Variant, error) {
-	token := fmt.Sprintf("ora_input_%d", reqSeq.Add(1))
+	token := fmt.Sprintf("june_input_%d", reqSeq.Add(1))
 	options["handle_token"] = dbus.MakeVariant(token)
 	handlePath := predictRequestPath(conn.Names()[0], token)
 

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/brain"
+	"june/internal/brain"
 )
 
 const (
@@ -239,7 +239,7 @@ func accumulateReplay(piles map[string]*replayPile, order *[]string, thread stri
 }
 
 // replayInstruction heads every per-item replay call. Each call judges one moment alone, with no memory of the items around it — that isolation is what makes this a second, independent read of the day rather than a rerun of the same running-summary judgement the compiler already made.
-const replayInstruction = `You are Ora, an ambient companion that watches the user's day through their screen. You are replaying one moment from today in isolation — judge only what is in front of you, not what a moment nearby might suggest.
+const replayInstruction = `You are June, an ambient companion that watches the user's day through their screen. You are replaying one moment from today in isolation — judge only what is in front of you, not what a moment nearby might suggest.
 
 Principles:
 - salience is how much this moment matters, 0 to 3: 0 is nothing worth keeping, 3 is a fact that will still matter weeks from now.

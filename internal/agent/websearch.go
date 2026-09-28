@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // exaSearchURL and tavilySearchURL are the two search providers branch() tries, in order: Exa first (20,000 free requests/month, no card), Tavily second (1,000 free/month, no card, a different vendor so the two running dry at once is unlikely).
@@ -34,7 +34,7 @@ const exaTextChars = 1200
 
 // searchResult is one hit from either provider, normalized to the same shape so formatSearchResult doesn't need to know which one answered.
 //
-// URL is the page the hit came from. It is not a nicety: branch() is the only way Ora reaches the web, so a hit with no URL is a page Ora can describe and never open. On 2026-09-12 that cost a whole conversation — asked for the job links it had just found, Ora said it had none, then invented boards.greenhouse.io/emergentlabs/jobs/4011400008, which 404'd in front of the user. Both providers mark url required on every result, so keeping it costs nothing.
+// URL is the page the hit came from. It is not a nicety: branch() is the only way June reaches the web, so a hit with no URL is a page June can describe and never open. On 2026-09-12 that cost a whole conversation — asked for the job links it had just found, June said it had none, then invented boards.greenhouse.io/emergentlabs/jobs/4011400008, which 404'd in front of the user. Both providers mark url required on every result, so keeping it costs nothing.
 type searchResult struct {
 	Title   string
 	URL     string
@@ -157,7 +157,7 @@ func tavilySearch(ctx context.Context, client *http.Client, url, apiKey, query s
 // formatSearchResult turns a normalized search response into the plain-text string branch() hands back to the live model as the tool's result — the only thing the model ever sees of the search.
 // Tavily's synthesized Answer, when present, is the best prose to hand over, so it leads. The top few Results follow either way as "Title — url: content", capped at 3 so a broad query doesn't dump an essay's worth of extracted page text into the conversation. Zero Results and no answer still returns a real sentence, not silence, since branch() is mid-conversation and the model needs something to say.
 //
-// The answer used to win outright and return on its own, which meant the one path that produced the best prose was also the one that left Ora with no link. Asked for the job pages it had just described on 2026-09-12, it said it had none and then made one up. The URLs now ride along underneath the answer instead of being replaced by it.
+// The answer used to win outright and return on its own, which meant the one path that produced the best prose was also the one that left June with no link. Asked for the job pages it had just described on 2026-09-12, it said it had none and then made one up. The URLs now ride along underneath the answer instead of being replaced by it.
 func formatSearchResult(resp searchResponse) string {
 	results := resp.Results
 	const maxResults = 3

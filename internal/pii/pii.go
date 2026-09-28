@@ -4,9 +4,9 @@
 //
 // The order of the passes is the order of how much is actually known:
 //
-//  1. A gazetteer of the people ORA already knows, keyed on the personal_context subjects. For these people a dictionary lookup is exact, reversible by construction, and needs no model at all.
+//  1. A gazetteer of the people June already knows, keyed on the personal_context subjects. For these people a dictionary lookup is exact, reversible by construction, and needs no model at all.
 //  2. Regex rules for structured PII -- email, phone, long digit runs -- which regex gets essentially right and a model gets wrong.
-//  3. A seam for names ORA has never seen, with nothing behind it. See UnknownNames.
+//  3. A seam for names June has never seen, with nothing behind it. See UnknownNames.
 package pii
 
 import (
@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	"ora/internal/db"
+	"june/internal/db"
 )
 
 // Entity is one thing that was torn out of the text.
@@ -61,7 +61,7 @@ func (t Torn) Stitch(s string) string {
 }
 
 // UnknownNames finds spans of text that name a person the gazetteer has never heard of. It is the seam, and NoUnknownNames is deliberately the only implementation.
-// A stranger's name carries no association to preserve: there is no personal_context row to file the memory under, so there is nothing a stable id could be derived from and nothing later retrieval could join it back to. Tearing it out would only cost the model context it needs to answer. When that changes -- when ORA starts minting rows for people it meets -- a model call or an NER pass is the upgrade path, and it plugs in here. This package holds no model of its own, which is a statement about what it is rather than a rule about what may be added: cgo is enabled on this project and nothing is stopped by the toolchain, and github.com/ebitengine/purego is already in the module graph if a native library is ever wanted without it. What a native runtime really costs is a shared library to ship inside the downloadable package.
+// A stranger's name carries no association to preserve: there is no personal_context row to file the memory under, so there is nothing a stable id could be derived from and nothing later retrieval could join it back to. Tearing it out would only cost the model context it needs to answer. When that changes -- when June starts minting rows for people it meets -- a model call or an NER pass is the upgrade path, and it plugs in here. This package holds no model of its own, which is a statement about what it is rather than a rule about what may be added: cgo is enabled on this project and nothing is stopped by the toolchain, and github.com/ebitengine/purego is already in the module graph if a native library is ever wanted without it. What a native runtime really costs is a shared library to ship inside the downloadable package.
 type UnknownNames interface {
 	Find(text string) []Span
 }

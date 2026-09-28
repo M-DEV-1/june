@@ -21,16 +21,16 @@ type Styles struct {
 	InputWrap   lipgloss.Style
 
 	// 4. Component Identities
-	OraLogo    lipgloss.Style
+	JuneLogo   lipgloss.Style
 	HeaderPath lipgloss.Style
 
 	PrefixSystem  lipgloss.Style
 	PrefixYou     lipgloss.Style
-	PrefixOra     lipgloss.Style
+	PrefixJune    lipgloss.Style
 	PrefixThought lipgloss.Style
 	TextSystem    lipgloss.Style
 	TextYou       lipgloss.Style
-	TextOra       lipgloss.Style
+	TextJune      lipgloss.Style
 	TextThought   lipgloss.Style
 
 	ToolDot  lipgloss.Style
@@ -43,7 +43,7 @@ type Styles struct {
 	StatusLine        lipgloss.Style
 
 	WaveUser lipgloss.Style
-	WaveOra  lipgloss.Style
+	WaveJune lipgloss.Style
 
 	InputPrefix lipgloss.Style
 	KbdKey      lipgloss.Style
@@ -86,7 +86,7 @@ func DefaultStyles() Styles {
 		Padding(1, 4)
 
 	// branding and status bits
-	s.OraLogo = lipgloss.NewStyle().Foreground(s.Purple).Bold(true)
+	s.JuneLogo = lipgloss.NewStyle().Foreground(s.Purple).Bold(true)
 	s.HeaderPath = lipgloss.NewStyle().Foreground(s.Muted)
 
 	// chat block prefixes and colors — transparent (no Background): the terminal's own background shows through, like every native TUI, instead of the transcript painting its own (see message.go's renderMessage doc comment for why that approach was killed rather than patched further).
@@ -104,8 +104,8 @@ func DefaultStyles() Styles {
 	s.PrefixYou = lipgloss.NewStyle().Foreground(s.Green).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
 	s.TextYou = lipgloss.NewStyle().Foreground(lipgloss.Color("#a3e635"))
 
-	s.PrefixOra = lipgloss.NewStyle().Foreground(s.Purple).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
-	s.TextOra = lipgloss.NewStyle().Foreground(s.White)
+	s.PrefixJune = lipgloss.NewStyle().Foreground(s.Purple).Bold(true).Width(gutterWidth).Align(lipgloss.Right).PaddingRight(2)
+	s.TextJune = lipgloss.NewStyle().Foreground(s.White)
 
 	s.ToolDot = lipgloss.NewStyle().Foreground(s.Purple)
 	s.ToolText = lipgloss.NewStyle().Foreground(s.Gray).Italic(true)
@@ -149,7 +149,7 @@ func DefaultStyles() Styles {
 
 	// waveforms - anchored to the input deck's background
 	s.WaveUser = lipgloss.NewStyle().Foreground(s.Green).Background(s.BgInput)
-	s.WaveOra = lipgloss.NewStyle().Foreground(s.Purple).Background(s.BgInput)
+	s.WaveJune = lipgloss.NewStyle().Foreground(s.Purple).Background(s.BgInput)
 
 	return s
 }

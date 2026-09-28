@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type Theme = "light" | "dark" | "system";
 
 /** The localStorage key the theme choice is kept under. */
-export const THEME_KEY = "ora-theme";
+export const THEME_KEY = "june-theme";
 
 /** Turns a stored value into a Theme. Input: whatever was read back from THEME_KEY, including null when nothing was ever stored or storage was blocked. Output: "light" or "dark" when that is exactly what was stored, and "system" for everything else, including the word "system" itself, garbage, or nothing at all. */
 export function themeChoice(stored: string | null | undefined): Theme {

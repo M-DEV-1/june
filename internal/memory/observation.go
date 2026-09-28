@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // Kind classifies a memory item for retrieval policy.

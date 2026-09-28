@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ora",
+  "productName": "june",
   "version": "0.1.0",
-  "identifier": "dev.ora.app",
+  "identifier": "dev.june.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Ora",
+        "title": "June",
         "width": 720,
         "height": 520,
         "resizable": false,
@@ -28,7 +28,7 @@
       {
         "label": "app",
         "url": "next.html",
-        "title": "Ora",
+        "title": "June",
         "width": 1140,
         "height": 760,
         "resizable": true,
@@ -39,7 +39,7 @@
       {
         "label": "overlay",
         "url": "overlay.html",
-        "title": "Ora",
+        "title": "June",
         "width": 640,
         "height": 480,
         "x": 0,

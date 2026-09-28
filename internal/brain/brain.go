@@ -1,4 +1,4 @@
-// Package brain is ORA's one-shot text seam: one prompt in, one answer out, with a choice of backend behind it.
+// Package brain is June's one-shot text seam: one prompt in, one answer out, with a choice of backend behind it.
 // It exists so the duties that only need a prompt answered — the meeting minutes and the personal context updater — can run on the Gemini API or on the Claude Code login the machine already has, without either of them knowing which. The voice assistant is not one of these duties: that is a bidirectional Gemini Live session and stays on genai.
 package brain
 
@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"time"
 
-	"ora/internal/config"
+	"june/internal/config"
 
 	"google.golang.org/genai"
 )
@@ -29,7 +29,7 @@ func failing(err error) Brain {
 // NoBackendNote says why this package cannot answer for a provider, in the voice GET /brains uses for a row's limits_note. Input: a config.Brain* provider string. Output: the reason, or "" when that provider does have a backend here.
 func NoBackendNote(provider string) string {
 	if provider == config.BrainOllama {
-		return "Ora has no Ollama backend yet, so this brain cannot answer its duties"
+		return "June has no Ollama backend yet, so this brain cannot answer its duties"
 	}
 	return ""
 }
@@ -77,7 +77,7 @@ func geminiModel(cfg config.BrainConfig) string {
 	return cmp.Or(cfg.Model, config.TextModel)
 }
 
-// GeminiAPI answers with one non-streaming GenerateContent call, the same shape memory.GeminiSummarizer uses for its background summaries. This is what ORA has always done and stays the default.
+// GeminiAPI answers with one non-streaming GenerateContent call, the same shape memory.GeminiSummarizer uses for its background summaries. This is what June has always done and stays the default.
 // Input: the API key, the model name, and a hard timeout in seconds — passed to the SDK as HTTPOptions.Timeout, which is what it puts on the request's own context. Output: the answer text.
 // The timeout is not optional comfort: the caller's context is the daemon's root context, which never ends, and the SDK's own http.Client has no timeout, so a connection that dies silently (a suspend, a Wi-Fi drop mid-TLS) used to block the proactive scheduler's single goroutine until the daemon was restarted.
 func GeminiAPI(apiKey, model string, timeoutSeconds int) Brain {

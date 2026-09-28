@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"strings"
 
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // verdictInstruction heads the judging call. Principles and field contracts only — no worked examples, so the model judges the material instead of pattern-matching a sample.
-const verdictInstruction = `You are Ora, an ambient companion that watches the user's day through their screen. Tonight, while the user is away, you are testing your private hypotheses about them against the week's evidence.
+const verdictInstruction = `You are June, an ambient companion that watches the user's day through their screen. Tonight, while the user is away, you are testing your private hypotheses about them against the week's evidence.
 
 Principles:
 - Judge each hypothesis strictly against the evidence below; when the evidence does not speak to it, the verdict is "unclear", never a guess.
@@ -33,7 +33,7 @@ func verdictPrompt(open []db.Hypothesis, material string) string {
 }
 
 // extractInstruction heads the extraction call that mines the dailies' labelled Hypotheses sections for new ones.
-const extractInstruction = `You are Ora. Your recent diary entries each end with a labelled "Hypotheses:" section. Pull out the ones worth tracking that you are not tracking yet.
+const extractInstruction = `You are June. Your recent diary entries each end with a labelled "Hypotheses:" section. Pull out the ones worth tracking that you are not tracking yet.
 
 Principles:
 - Draw only from the entries' Hypotheses sections; the narrative above them is context, not a source of new hypotheses.
@@ -61,7 +61,7 @@ func extractPrompt(open []db.Hypothesis, material string) string {
 }
 
 // understandingInstruction heads the nightly rewrite of the bounded model-of-the-user document.
-const understandingInstruction = `You are Ora. Rewrite your standing understanding of the user — who they are, what they are working toward, their habits, and the people around them — so it reflects what this week settled.
+const understandingInstruction = `You are June. Rewrite your standing understanding of the user — who they are, what they are working toward, their habits, and the people around them — so it reflects what this week settled.
 
 Principles:
 - The promoted and high-confidence hypotheses below are your hardest-won conclusions; the rewrite must carry them.
@@ -107,7 +107,7 @@ func understandingPrompt(current string, strong []db.Hypothesis, past []coarseEn
 }
 
 // compactInstruction heads the diary compaction call that folds a run of finer diary entries into one coarser entry covering the whole period.
-const compactInstruction = `You are Ora, an ambient companion keeping a first-person diary about the user's days. Collapse the diary entries below into one entry covering the whole period, written as if you sat down at the period's end to remember it.
+const compactInstruction = `You are June, an ambient companion keeping a first-person diary about the user's days. Collapse the diary entries below into one entry covering the whole period, written as if you sat down at the period's end to remember it.
 
 Principles:
 - First person, the same voice the entries below are written in.
@@ -130,7 +130,7 @@ func compactPrompt(period string, entries []db.DiaryDay) string {
 }
 
 // diaryInstruction heads the nightly diary-writing call: the same brain that spent the night judging turns the night's real material into the diary entry itself, in its own words, instead of a template filling numbers into fixed sentences.
-const diaryInstruction = `You are Ora. You just spent the night dreaming about the user. Write tonight's diary entry in first person — what you turned over in your mind, what you decided to believe, what you let go of and how that felt, what stood out from replaying their day, what you're still wondering. Plain prose, under 250 words, no lists, no numbers-report, no markdown. This is a diary, not a log.`
+const diaryInstruction = `You are June. You just spent the night dreaming about the user. Write tonight's diary entry in first person — what you turned over in your mind, what you decided to believe, what you let go of and how that felt, what stood out from replaying their day, what you're still wondering. Plain prose, under 250 words, no lists, no numbers-report, no markdown. This is a diary, not a log.`
 
 // diaryPrompt assembles the diary-writing call: the instruction, then the night's real material grounding it — which hypotheses were tested and how they came out, what was retired or adopted and why (the judge's own reasoning where the mechanics kept it), whether the standing understanding changed, what compaction found, and the top piles from tonight's replay of the day. Every section renders something, "(...)" placeholders included, so the model never has to guess whether material is missing or just wasn't given.
 func diaryPrompt(hyp *stageReport, undRan bool, comp *compactReport, replay *replayReport, notes []string) string {

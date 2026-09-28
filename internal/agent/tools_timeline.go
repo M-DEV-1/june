@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ora/internal/db"
-	"ora/internal/util"
+	"june/internal/db"
+	"june/internal/util"
 )
 
 // recallSubjectLimit bounds how many lines RecallSubject contributes to the "recall" tool's subject path.

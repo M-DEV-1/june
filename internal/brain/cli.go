@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"ora/internal/util"
+	"june/internal/util"
 )
 
 // ClaudeCLI answers by running `claude -p`, which uses whatever Claude Code login the machine already has — a subscription, billed as a subscription, not per-token API calls.

@@ -15,7 +15,7 @@ const defaultSilenceAfter = 3 * time.Minute
 // silenceFloor is the sample magnitude below which a stream counts as silent. A stream recorded from a sink nothing plays into is exact zeros; a real room floor with nobody speaking still sits above this.
 const silenceFloor = 64
 
-// silenceWatch passes samples through to the real writer while remembering when sound last came through. A meeting playing to a sink Ora is not recording writes an unbroken run of zeros, which is indistinguishable from a working recording until the transcript comes back empty.
+// silenceWatch passes samples through to the real writer while remembering when sound last came through. A meeting playing to a sink June is not recording writes an unbroken run of zeros, which is indistinguishable from a working recording until the transcript comes back empty.
 type silenceWatch struct {
 	w    io.Writer
 	last atomic.Int64 // unix nanoseconds of the last sample above the noise floor
