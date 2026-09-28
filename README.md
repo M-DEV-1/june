@@ -12,8 +12,6 @@ An open-source, local-first AI assistant that remembers your screen and your mee
   <img alt="License" src="https://img.shields.io/badge/license-GPLv3-white?style=flat-square">
 </p>
 
-<img src="docs/images/hero.jpg" alt="June answering a question from an email it read that morning, with the lines it used highlighted" width="100%">
-
 </div>
 
 ## What June does
