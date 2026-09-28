@@ -45,8 +45,11 @@ install -m 0755 packaging/gnome-extension/check-shell-version.sh "$dist/gnome-ex
 
 # The thing a person downloads is one file, not a directory, and the tar has to carry the executable bits install.sh relies on.
 echo "packing the archive..."
-tar -czf "$root/dist/june-$version.tar.gz" -C "$root/dist" "june-$version"
+# The name carries no version, so releases/latest/download/<name> is a link that never changes; the root install.sh fetches exactly that name.
+archive="june-linux-$(uname -m).tar.gz"
+tar -czf "$root/dist/$archive" -C "$root/dist" "june-$version"
+( cd "$root/dist" && sha256sum "$archive" > SHA256SUMS )
 
 echo "staged: $dist"
-echo "archive: $root/dist/june-$version.tar.gz"
+echo "archive: $root/dist/$archive"
 du -ah "$dist" | sort -k2
