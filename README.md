@@ -4,37 +4,36 @@
 
 **Your computer's memory, on Linux.**
 
-June keeps what was on your screen and in your meetings, answers when you ask, and can use the computer for you. Everything is stored on your machine.
+An open-source, local-first AI assistant that remembers your screen and your meetings, answers from them, and uses your computer for you.
+
+<p>
+  <img alt="Go Version" src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-0078D6?style=flat-square">
+  <img alt="License" src="https://img.shields.io/badge/license-GPLv3-white?style=flat-square">
+</p>
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/M-DEV-1/june/main/install.sh | bash
 ```
 
-<sub>GNOME on Wayland · x86_64 · GPLv3</sub>
-
-<br>
-
-<img src="docs/images/hero.jpg" alt="June answering a question from an email it read that morning, with the passages it used highlighted" width="100%">
+<img src="docs/images/hero.jpg" alt="June answering a question from an email it read that morning, with the lines it used highlighted" width="100%">
 
 </div>
 
-## What it does
+## What June does
 
-- **Remembers your screen.** It reads the focused window through the accessibility bus, and takes a screenshot only when an app will not say what is in it.
-- **Answers from memory.** Ask what was said in yesterday's call or what the email said this morning. The answer shows the passages it came from.
-- **Takes meeting notes.** It records calls, transcribes and separates speakers on your machine, and writes what was decided and who owes what.
-- **Keeps your promises in one list.** Work you took on in a meeting becomes a task, with the meeting it came from beside it.
-- **Talks.** Press `Ctrl+Alt+Space` to ask. Space dictates, Shift+Space starts a live voice conversation.
-- **Uses the computer.** It opens apps, finds things and clicks them, checks each step, and stops to ask before anything it cannot undo.
+- **Screen memory.** Reads the window you're in. Ask about it later and see the lines it used.
+- **Meeting notes.** Records calls and transcribes them on your machine. You get decisions and who owes what.
+- **Tasks.** Promises from calls, with the call they came from.
+- **Voice.** `Ctrl+Alt+Space` opens the bar. Space dictates, Shift+Space talks.
+- **Computer use.** Opens apps and clicks through them. Asks before anything it can't undo.
+- **Local-first.** Data stays in `~/.local/share/june`. Bring your own Gemini, Claude or ChatGPT.
 
-<img src="docs/images/meetings.jpg" alt="June's notes from a meeting: what you owe, what was decided, what was said" width="100%">
+<div align="center">
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/tasks.jpg" alt="Tasks June took from meetings"></td>
-    <td width="50%"><img src="docs/images/days.jpg" alt="A day written up by June"></td>
-  </tr>
-</table>
+**[Install](#getting-started)** · **[Architecture](docs/architecture.md)** · **[Star on GitHub](https://github.com/M-DEV-1/june)**
+
+</div>
 
 ## Getting started
 
