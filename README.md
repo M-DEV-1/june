@@ -1,6 +1,6 @@
 <div align="center">
 
-# June
+<img src="docs/images/banner.jpg" alt="June: Let June handle it." width="100%">
 
 **Your computer's memory, on Linux.**
 
