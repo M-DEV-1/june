@@ -7,8 +7,6 @@
 
 # JUNE
 
-from Latin _orare_. To speak, to ask.
-
 </div>
 
 June is a memory for the person using this computer. It watches what is on screen, listens to the meetings you record, keeps what happened, and answers questions about it later. It is not a coding assistant and not a search engine: if you want general knowledge, use a browser.
