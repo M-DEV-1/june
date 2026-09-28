@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +22,14 @@ type Store struct {
 	mu              sync.RWMutex
 	currentParentID int64 // bookmark for session
 	currentTaskID   int64 // bookmark for task
+	// currentTaskName is the content of the node currentTaskID points at, so LogSemanticNode can tell "the same thread as the last write" from "a different thread that happened to be written next". Without it SameTask files a summary under whichever task was touched last.
+	currentTaskName string
+	// userID is the root node every day node hangs off, kept so a day can be created after New has returned.
+	userID int64
+	// daySessions maps a local calendar day ("2006-01-02") to the session node under that day, so LogSemanticNode resolves the day per write instead of pinning the one the process started on. Guarded by mu.
+	daySessions map[string]int64
+	// clock is the source of "now" for day resolution, overridable by SetClock so a test can write across a midnight boundary. Nil means time.Now.
+	clock func() time.Time
 
 	// embedder/vectorIndex back HybridSearch's semantic half (see hybrid.go). Both nilable, wired via SetEmbedder/SetVectorIndex — a Store with neither set runs lexical-only.
 	embedder    embedder
@@ -29,6 +38,10 @@ type Store struct {
 	embedsAreFree bool
 	// vectorSimilarityFloor overrides minVectorSimilarity for embedders whose cosine scale differs from Gemini's. Zero means use the default. See SetVectorSimilarityFloor.
 	vectorSimilarityFloor float32
+	// actRunSimilarityFloor overrides DefaultActRunSimilarity, the cosine a past screen run's question must reach to be offered as reference. Zero means use the default. See SetActRunSimilarityFloor.
+	actRunSimilarityFloor float64
+	// actRunBackfilling is held for the length of one background pass that embeds act run questions written before they were embedded, so several asks in a row start one pass between them rather than one each. See backfillActRunVectors.
+	actRunBackfilling atomic.Bool
 
 	// framesDir is ora-db/frames next to the sqlite file. Empty for :memory: stores — vision JPEGs are skipped.
 	framesDir string
@@ -39,12 +52,17 @@ type Store struct {
 	roOnce sync.Once
 	roDB   *sql.DB
 	roErr  error
+
+	// routineMu guards routineRunning, the in-flight set TryStart/Finish use so the scheduler tick and a POST /routines/{id}/run landing on the same routine at once don't both ask and both write its result. See routines.go.
+	routineMu      sync.Mutex
+	routineRunning map[int64]bool
 }
 
 // constructor, return pointer to struct and err
 func New(path string) (*Store, error) {
 	// WAL lets multiple connections read/write concurrently (daemon LogEpisode + tool HybridSearch); busy_timeout makes them wait instead of erroring SQLITE_BUSY immediately.
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	// foreign_keys is off by default in SQLite and is a property of a connection, not of the database, so it has to be in the DSN: the driver replays every _pragma here on each connection the pool opens, which a one-off Exec after sql.Open would not. Without it every ON DELETE CASCADE below is dead text — deleting a conversation left its turns behind, deleting an episode or a thread left dangling rows in episode_threads, and a turn could be written against a conversation id that names nothing. See foreign_keys_test.go.
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 
 	if path != ":memory:" {
 		dir := filepath.Dir(path)
@@ -104,12 +122,16 @@ func New(path string) (*Store, error) {
 
 	s.mu.Lock()
 	s.currentParentID = sessionID // bookmark
+	s.userID = userID
+	s.daySessions = map[string]int64{today: sessionID}
 
 	// rehydrate the latest task ID for continuity
 	var taskID int64
-	err = db.QueryRow("SELECT id FROM nodes WHERE parent_id = ? AND type = 'task' ORDER BY id DESC LIMIT 1", sessionID).Scan(&taskID)
+	var taskName string
+	err = db.QueryRow("SELECT id, content FROM nodes WHERE parent_id = ? AND type = 'task' ORDER BY id DESC LIMIT 1", sessionID).Scan(&taskID, &taskName)
 	if err == nil {
 		s.currentTaskID = taskID
+		s.currentTaskName = taskName
 	}
 	s.mu.Unlock()
 
@@ -131,349 +153,47 @@ func securePermissions(dir, dbPath string) {
 	}
 }
 
-func (s *Store) createSchema() error {
-	query := `
-	CREATE TABLE IF NOT EXISTS nodes (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		parent_id INTEGER REFERENCES nodes(id),
-		type TEXT NOT NULL,
-		content TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		domain TEXT NOT NULL DEFAULT ''
-	);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_unique ON nodes(IFNULL(parent_id, 0), type, content);
-	CREATE INDEX IF NOT EXISTS idx_parent_id ON nodes(parent_id);
-
-	-- notes: explicit user-stated facts. always-on, small, forever.
-	-- separate from nodes/tree because they're not temporal events.
-	CREATE TABLE IF NOT EXISTS notes (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		content TEXT NOT NULL,
-		kind TEXT NOT NULL DEFAULT 'fact',
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_unique ON notes(content, kind);
-
-	-- personal_context: the small set of things known for certain about the
-	-- user -- who they are, the people in their life, preferences they stated.
-	-- Keyed by subject and edited in place, never appended to, and only ever
-	-- written from something the user said themselves. No FTS, no vectors: it
-	-- is injected whole into every prompt rather than retrieved, so there is
-	-- nothing to rank and nothing to miss. Its own table so that no compaction
-	-- or consolidation path can reach it.
-	CREATE TABLE IF NOT EXISTS personal_context (
-		id INTEGER PRIMARY KEY,
-		subject TEXT UNIQUE NOT NULL,
-		content TEXT NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	-- folds: a branch() subtask's result that couldn't be delivered into the
-	-- live session that requested it. Staged here to surface at the next
-	-- session's handshake instead of being silently dropped. Deliberately
-	-- separate from notes -- a fold is a one-off task result, not a durable
-	-- user fact, and belongs nowhere near ReconcileNotes' identity-fact
-	-- reconciliation pass.
-	CREATE TABLE IF NOT EXISTS folds (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		task TEXT NOT NULL,
-		result TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		consumed_at DATETIME
-	);
-
-	-- single-row cache: synthesized "what is the user doing right now" summary.
-	-- recomputed on a cadence by the daemon, disposable, replaced in full each time.
-	CREATE TABLE IF NOT EXISTS working_state (
-		id INTEGER PRIMARY KEY CHECK (id = 1),
-		content TEXT NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	-- FTS5 over summary content + note content.
-	-- triggers below keep it in sync. tokenizer 'unicode61' is FTS5 default.
-	CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-		content,
-		source UNINDEXED,
-		ref_id UNINDEXED,
-		tokenize = 'unicode61'
-	);
-
-	-- Drop the old trigger so existing dev DBs pick up the updated WHEN clause and the $.summary extraction below.
-	DROP TRIGGER IF EXISTS nodes_ai_summary;
-	-- A summary node's content is the whole marshalled TaskSummary (see LogSemanticNode), so indexing it verbatim made its JSON keys ('same_task', 'task_name') live search terms that matched every summary ever written. Index the summary prose instead. Digest nodes store plain prose and fall through unchanged, same expression SearchMemory uses on the read path.
-	CREATE TRIGGER IF NOT EXISTS nodes_ai_summary AFTER INSERT ON nodes
-	WHEN NEW.type IN ('summary','digest')
-	BEGIN
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (
-			CASE WHEN json_valid(NEW.content)
-				THEN IFNULL(NULLIF(json_extract(NEW.content, '$.summary'), ''), NEW.content)
-				ELSE NEW.content
-			END, NEW.type, NEW.id);
-	END;
-
-	CREATE TRIGGER IF NOT EXISTS nodes_ad_summary AFTER DELETE ON nodes
-	WHEN OLD.type IN ('summary','digest')
-	BEGIN
-		DELETE FROM memory_fts WHERE source IN ('summary','digest') AND ref_id = OLD.id;
-	END;
-
-	CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes
-	BEGIN
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'note', NEW.id);
-	END;
-
-	CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes
-	BEGIN
-		DELETE FROM memory_fts WHERE source = 'note' AND ref_id = OLD.id;
-	END;
-
-	CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes
-	BEGIN
-		DELETE FROM memory_fts WHERE source = 'note' AND ref_id = OLD.id;
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'note', NEW.id);
-	END;
-
-	-- threads: ongoing throughlines in the user's life (a show, a project, a
-	-- person), each with a current state = where the user is *within* it.
-	-- concurrent threads coexist; they are never collapsed into one another.
-	CREATE TABLE IF NOT EXISTS threads (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		subject TEXT NOT NULL,
-		kind TEXT NOT NULL DEFAULT 'work',
-		state TEXT,
-		salience REAL NOT NULL DEFAULT 0.5,
-		times_seen INTEGER NOT NULL DEFAULT 1,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		status TEXT NOT NULL DEFAULT 'active'
-	);
-	-- episode_threads: which captures belong to which ongoing piece of work.
-	-- The compiler already decides this on every flush — it hands a buffer of
-	-- activities to the model and gets back the threads they belong to — and
-	-- until this table existed that decision was thrown away each time. The
-	-- result was a store holding thousands of episodes and hundreds of threads
-	-- with nothing joining them: a thread could say "reviewed the code, eleven
-	-- findings" and no query could reach the screens the findings were on.
-	-- ON DELETE CASCADE both ways: an edge to a thread or episode that no
-	-- longer exists is not a fact about anything.
-	CREATE TABLE IF NOT EXISTS episode_threads (
-		episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
-		thread_id  INTEGER NOT NULL REFERENCES threads(id)  ON DELETE CASCADE,
-		PRIMARY KEY (episode_id, thread_id)
-	);
-	CREATE INDEX IF NOT EXISTS idx_episode_threads_thread ON episode_threads(thread_id);
-
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_subject ON threads(subject, kind);
-	CREATE INDEX IF NOT EXISTS idx_threads_last_seen ON threads(last_seen_at);
-
-	CREATE TRIGGER IF NOT EXISTS threads_ai AFTER INSERT ON threads BEGIN
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.subject || ' — ' || IFNULL(NEW.state,''), 'thread', NEW.id);
-	END;
-	CREATE TRIGGER IF NOT EXISTS threads_ad AFTER DELETE ON threads BEGIN
-		DELETE FROM memory_fts WHERE source='thread' AND ref_id = OLD.id;
-	END;
-	CREATE TRIGGER IF NOT EXISTS threads_au AFTER UPDATE ON threads BEGIN
-		DELETE FROM memory_fts WHERE source='thread' AND ref_id = OLD.id;
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.subject || ' — ' || IFNULL(NEW.state,''), 'thread', NEW.id);
-	END;
-
-	-- episodes: append-only, NON-deduped time series of dwell-confirmed
-	-- captures. Deliberately NOT part of the nodes tree: nodes' unique index
-	-- on (parent_id,type,content) would collapse repeat visits to the same
-	-- app|title into one row, which is exactly wrong here — the whole point
-	-- is to keep every visit, including its (possibly different) screen_text.
-	CREATE TABLE IF NOT EXISTS episodes (
-		id INTEGER PRIMARY KEY,
-		created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-		app TEXT NOT NULL,
-		title TEXT NOT NULL,
-		screen_text TEXT NOT NULL DEFAULT '',
-		importance REAL NOT NULL DEFAULT 0,
-		domain TEXT NOT NULL DEFAULT '',
-		user_activity TEXT NOT NULL DEFAULT '',
-		visible_text TEXT NOT NULL DEFAULT '',
-		image_path TEXT NOT NULL DEFAULT ''
-	);
-	CREATE INDEX IF NOT EXISTS idx_episodes_created_at ON episodes(created_at);
-	CREATE INDEX IF NOT EXISTS idx_episodes_app_title ON episodes(app, title);
-
-	-- separate FTS5 index (not memory_fts) so raw screen captures don't dilute
-	-- summary/note/thread relevance ranking; SearchEpisodes queries it directly.
-	CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
-		screen_text,
-		content = 'episodes',
-		content_rowid = 'id',
-		tokenize = 'unicode61'
-	);
-
-	CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
-		INSERT INTO episodes_fts(rowid, screen_text) VALUES (NEW.id, NEW.screen_text);
-	END;
-
-	-- episodes_fts is an EXTERNAL CONTENT fts5 table (content='episodes'): it
-	-- has no content of its own, only the index. Removing/updating an index
-	-- entry therefore requires the special 'delete' command with the OLD
-	-- column values passed explicitly — a plain DELETE FROM episodes_fts
-	-- WHERE rowid=? silently fails to update the postings list, leaving
-	-- stale content searchable. See https://sqlite.org/fts5.html#the_delete_command.
-	CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
-		INSERT INTO episodes_fts(episodes_fts, rowid, screen_text) VALUES ('delete', OLD.id, OLD.screen_text);
-	END;
-
-	-- AgeEpisodes (Cycle 5) updates screen_text in place to reclaim space; this
-	-- trigger keeps the FTS mirror from continuing to surface the cleared text.
-	CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
-		INSERT INTO episodes_fts(episodes_fts, rowid, screen_text) VALUES ('delete', OLD.id, OLD.screen_text);
-		INSERT INTO episodes_fts(rowid, screen_text) VALUES (NEW.id, NEW.screen_text);
-	END;
-
-	-- diary: Ora's own first-person record. kind 'day' holds one entry per local
-	-- calendar day (day = 'YYYY-MM-DD'); kind 'understanding' is the single bounded
-	-- current-model-of-the-user document (day = ''), rewritten in place each evening;
-	-- kind 'brief' records the morning brief delivered that day and doubles as its
-	-- once-per-day marker; kind 'dream' is a night's morning report. The dreaming
-	-- loop's compaction collapses old 'day' rows into 'week' (day = the Monday) and
-	-- old 'week' rows into 'month' (day = 'YYYY-MM-01'). Upserted by (day, kind) —
-	-- see SetDiaryEntry.
-	CREATE TABLE IF NOT EXISTS diary (
-		id INTEGER PRIMARY KEY,
-		day TEXT NOT NULL,
-		kind TEXT NOT NULL DEFAULT 'day',
-		content TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(day, kind)
-	);
-
-	-- Mirrored into memory_fts exactly like threads, so diary entries surface
-	-- through the existing query_memory path with no agent changes.
-	CREATE TRIGGER IF NOT EXISTS diary_ai AFTER INSERT ON diary BEGIN
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'diary', NEW.id);
-	END;
-	CREATE TRIGGER IF NOT EXISTS diary_ad AFTER DELETE ON diary BEGIN
-		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
-	END;
-	CREATE TRIGGER IF NOT EXISTS diary_au AFTER UPDATE ON diary BEGIN
-		DELETE FROM memory_fts WHERE source='diary' AND ref_id = OLD.id;
-		INSERT INTO memory_fts(content, source, ref_id) VALUES (NEW.content, 'diary', NEW.id);
-	END;
-
-	-- dream_runs: one row per night of the overnight dreaming loop, keyed by the
-	-- night's local date. The PRIMARY KEY is the single-run-per-night guarantee;
-	-- stages_done lets an interrupted night resume only what is missing.
-	CREATE TABLE IF NOT EXISTS dream_runs (
-		night TEXT PRIMARY KEY,
-		started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		finished_at DATETIME,
-		stages_done TEXT NOT NULL DEFAULT '',
-		grinder TEXT NOT NULL DEFAULT '',
-		report TEXT NOT NULL DEFAULT ''
-	);
-
-	-- hypotheses: the dreaming loop's private guesses about the user, tracked
-	-- across nights until promoted or retired. Deliberately NO FTS triggers on
-	-- this table or dream_runs: hypotheses are unvetted working state and must
-	-- never surface through retrieval into a prompt — only the finished dream
-	-- report enters the (indexed) diary.
-	CREATE TABLE IF NOT EXISTS hypotheses (
-		id INTEGER PRIMARY KEY,
-		statement TEXT NOT NULL UNIQUE,
-		confidence TEXT NOT NULL DEFAULT 'low',
-		status TEXT NOT NULL DEFAULT 'open',
-		born TEXT NOT NULL,
-		last_tested TEXT,
-		times_tested INTEGER NOT NULL DEFAULT 0,
-		evidence TEXT NOT NULL DEFAULT '',
-		reason TEXT NOT NULL DEFAULT ''
-	);
-
-	-- tally: self-accounting counters, one row per local calendar day per provider.
-	-- "provider" is either a brain backend name ("claude-cli", "gemini", ...) or one
-	-- of two vector-contribution pseudo-providers written by hybrid.go's fusion
-	-- counter: "vector-queries" (one row per HybridSearch call) and "vector-hits"
-	-- (one row per call where a vector-arm candidate survived into the final top-k).
-	-- For real brain providers, total_ms accumulates call latency in milliseconds;
-	-- for "vector-hits" that column is repurposed to accumulate the raw count of
-	-- surviving vector candidates instead (see recordVectorContribution) rather than
-	-- add a second table for one integer. See internal/tally for the reader/writer.
-	CREATE TABLE IF NOT EXISTS tally (
-		day TEXT NOT NULL,
-		provider TEXT NOT NULL,
-		calls INTEGER NOT NULL DEFAULT 0,
-		failures INTEGER NOT NULL DEFAULT 0,
-		total_ms INTEGER NOT NULL DEFAULT 0,
-		-- Characters in and out, not tokens: the Brain seam carries no usage metadata and the CLI providers report none, so characters are what every provider can actually be measured in. A token estimate is a read-time division, kept out of the stored data.
-		prompt_chars INTEGER NOT NULL DEFAULT 0,
-		reply_chars INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (day, provider)
-	);
-	`
-	// db struc: USER --> DAY --> SESSION --> ACTIVITY
-	// TODO: salience score to prioritize important activities and not track menial activities
-	// i.e. what do we choose to remember
-	if _, err := s.db.Exec(query); err != nil {
-		return err
-	}
-
-	// Migration for pre-existing DBs from before the domain column existed. modernc.org/sqlite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS (confirmed empirically — syntax error, not a no-op), so ensureColumn checks via PRAGMA table_info instead. Safe to run on every startup, including brand-new DBs where CREATE TABLE already added the column.
-	if err := s.ensureColumn("nodes", "domain", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("episodes", "domain", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("episodes", "user_activity", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("episodes", "visible_text", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("episodes", "image_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-
-	// Migration for DBs written before nodes_ai_summary extracted $.summary: their summary rows still hold the raw marshalled TaskSummary, so the JSON keys stay searchable until the text is rewritten. Idempotent — a rewritten row is no longer JSON, so the guard skips it on every later run.
-	if _, err := s.db.Exec(`
-		UPDATE memory_fts SET content = json_extract(content, '$.summary')
-		WHERE source IN ('summary','digest')
-			AND json_valid(content)
-			AND NULLIF(json_extract(content, '$.summary'), '') IS NOT NULL`); err != nil {
-		return fmt.Errorf("rebuild summary fts content: %w", err)
-	}
-
-	return s.migrateIdentityNote()
+// SetClock replaces the source of "now" used to decide which calendar day a summary is filed under. Input: a function returning the current time. Output: none. Only tests call this; production leaves it nil and gets time.Now.
+func (s *Store) SetClock(fn func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clock = fn
 }
 
-// ensureColumn adds column to table (with the given SQL type/constraint) if it doesn't already exist, checked via PRAGMA table_info since modernc.org/sqlite doesn't support ALTER TABLE ADD COLUMN IF NOT EXISTS.
-func (s *Store) ensureColumn(table, column, coldef string) error {
-	rows, err := s.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+// now returns the current time from the installed clock, or time.Now when none is installed. Caller must hold s.mu (either mode).
+func (s *Store) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
+// sessionForDay returns the session node id for the calendar day containing at, creating that day node and its session the first time anything is written to the day. Input: ctx and the instant the write is filed under. Output: the session node's id, or an error from the node writes. Caller must hold s.mu for writing.
+func (s *Store) sessionForDay(ctx context.Context, at time.Time) (int64, error) {
+	day := DayStart(at).Format("2006-01-02")
+	if id, ok := s.daySessions[day]; ok {
+		return id, nil
+	}
+	dayID, err := s.ensureNode(ctx, s.userID, "day", day)
 	if err != nil {
-		return fmt.Errorf("ensure column %s.%s: pragma table_info: %w", table, column, err)
+		return 0, fmt.Errorf("failed to ensure day: %w", err)
 	}
-	defer rows.Close()
+	sessionID, err := s.ensureNode(ctx, dayID, "session", "Active Session")
+	if err != nil {
+		return 0, fmt.Errorf("failed to ensure session: %w", err)
+	}
+	if s.daySessions == nil {
+		s.daySessions = map[string]int64{}
+	}
+	s.daySessions[day] = sessionID
+	return sessionID, nil
+}
 
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
-			return fmt.Errorf("ensure column %s.%s: scan pragma row: %w", table, column, err)
-		}
-		if name == column {
-			return nil // already present
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("ensure column %s.%s: iterate pragma rows: %w", table, column, err)
-	}
+// JobMarkerKindPrefix is what every diary kind recording a metered background job's last run starts with, the whole kind being this plus the job's name (cmd/daemon.go's jobMarkerKind is the only writer). It lives here because the diary FTS triggers below name it: the content of such a row is a bare RFC 3339 timestamp rewritten every time that job runs, so like the task-notice watermark it is deliberately never mirrored into memory_fts and never comes back from a search as if it were something Ora wrote.
+const JobMarkerKindPrefix = "job-last-run:"
 
-	if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, coldef)); err != nil {
-		return fmt.Errorf("ensure column %s.%s: alter table: %w", table, column, err)
-	}
-	return nil
+func (s *Store) createSchema() error {
+	return s.runMigrations(context.Background())
 }
 
 func (s *Store) Close() error {

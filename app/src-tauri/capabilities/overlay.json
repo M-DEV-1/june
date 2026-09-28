@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "The click-through drawing layer over the whole desktop: it only needs the core IPC so its page can read the daemon token and ask where the monitors are.",
+  "windows": [
+    "overlay"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

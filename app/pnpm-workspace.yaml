@@ -1,0 +1,6 @@
+allowBuilds:
+  esbuild: true
+# A version published in the last seven days is not installed, so a compromised release that gets caught and unpublished within hours never reaches this machine.
+minimumReleaseAge: 10080
+# pnpm refuses a package whose provenance or signature is weaker than the one it resolved last time.
+trustPolicy: no-downgrade

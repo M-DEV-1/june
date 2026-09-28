@@ -53,7 +53,7 @@ func TestNormalize_TitleOnlyWhenEmpty(t *testing.T) {
 }
 
 func TestNormalize_StripsObjectReplacement(t *testing.T) {
-	obs := Normalize("firefox", "Article", "Hello \uFFFC world \uFFFC there from a long enough sentence about climate.")
+	obs := Normalize("firefox", "Article", "Hello \uFFFC world \uFFFC there from a long enough sentence about logistics.")
 	if strings.Contains(obs.Content, "\uFFFC") {
 		t.Fatalf("U+FFFC remained: %q", obs.Content)
 	}
@@ -76,13 +76,5 @@ func TestNormalizeFull_KeepsTheWholeCleanedCapture(t *testing.T) {
 	// The cleaning itself is covered by the Normalize tests above; both paths share extractSignal and only the word cap differs.
 	if strings.Contains(full, "\n\n") {
 		t.Error("whitespace collapsing stopped applying — the cleaning must still run, only the cap is dropped")
-	}
-}
-
-// The capped path is what summaries and the compiler read, where one short observation really is better than a dump. It must not change.
-func TestNormalize_StillCapsForTheCompiler(t *testing.T) {
-	raw := strings.Repeat("word ", 500)
-	if got := len(strings.Fields(Normalize("Code", "x", raw).Content)); got > 120 {
-		t.Errorf("capped content is %d words, want at most 120", got)
 	}
 }

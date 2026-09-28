@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"ora/internal/util"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -22,11 +23,7 @@ const collapsedThoughtRunes = 60
 
 // collapsedThoughtPreview renders a thought's first collapsedThoughtRunes runes as one flattened line (streamed content can carry its own newlines) plus a fixed expand hint — always appended, even for a thought shorter than the cap, since it's also the affordance telling the user Ctrl+E exists.
 func collapsedThoughtPreview(content string) string {
-	flat := strings.Join(strings.Fields(content), " ")
-	if runes := []rune(flat); len(runes) > collapsedThoughtRunes {
-		flat = string(runes[:collapsedThoughtRunes])
-	}
-	return flat + "… (ctrl+e expands)"
+	return util.Runes(util.OneLine(content), collapsedThoughtRunes) + "… (ctrl+e expands)"
 }
 
 // restartDetectionMinRunes is the minimum rune length an incoming ora chunk must have to be treated as a restarted utterance (see mergeOraChunk) rather than appended. The Live API's native-audio models are documented to sometimes restart an utterance from the beginning — often triggered by the model's own voice echoing into a hot mic — getting a little further each time, with no interrupted:true between attempts. A short chunk that happens to coincide with the block's own opening (a legitimately repeated short word) is common enough that a low threshold would misfire on it; ~10 runes is well past what any real short word collides on.

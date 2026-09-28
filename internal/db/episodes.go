@@ -8,10 +8,12 @@ import (
 	"math"
 	"ora/internal/memory"
 	"ora/internal/obs"
+	"ora/internal/util"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // richnessWordCap is the word count at which screen_text richness saturates to 1.0 in computeImportance — beyond this point more words don't add signal.
@@ -48,6 +50,28 @@ func (s *Store) computeImportance(ctx context.Context, app, title, screenText st
 	return 0.5*richness + 0.5*revisitation, nil
 }
 
+// fallbackMaxWords is the word cap on the raw-capture fallback in WriteEpisode. It is memory.Normalize's own signalMaxWords, repeated here because that constant is not exported: the fallback stores a capture the normalizer emptied, and it must not be free to store more than a capture the normalizer kept.
+const fallbackMaxWords = 120
+
+// cleanFallback prepares a raw capture for storage when memory.Normalize found no content in it. Input: the raw screen text of one capture. Output: the same text with object-replacement and control characters removed, whitespace collapsed to single spaces, and at most fallbackMaxWords words kept.
+// The chrome filter is not applied here: dropping every chrome line is what emptied the normalized content in the first place, so re-running it would leave nothing at all.
+func cleanFallback(raw string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '￼' || r == '�' {
+			return -1
+		}
+		if unicode.IsControl(r) && !unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, raw)
+	words := strings.Fields(cleaned)
+	if len(words) > fallbackMaxWords {
+		words = words[:fallbackMaxWords]
+	}
+	return strings.Join(words, " ")
+}
+
 // EpisodeWrite is one capture to persist. LogEpisode fills only App/Title/ScreenText; the daemon uses WriteEpisode when vision produced activity, visible chunks, or a JPEG.
 type EpisodeWrite struct {
 	App, Title, ScreenText string
@@ -70,18 +94,18 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 	defer span.End()
 
 	obs := memory.Normalize(w.App, w.Title, w.ScreenText)
-	// Prefer normalized content; if normalize emptied a non-empty raw capture of only chrome, fall back to raw so we never invent empty rows that tests and AgeEpisodes still treat as real observations. The fallback passes through StripObjectChars so a titleless capture of pure U+FFFC placeholders cannot smuggle uncleaned text into storage.
+	// Prefer normalized content; if normalize emptied a non-empty raw capture of only chrome, fall back to raw so we never store an empty row as if it were a real observation.
 	content := obs.Content
 	if content == "" {
-		content = memory.StripObjectChars(w.ScreenText)
+		content = cleanFallback(w.ScreenText)
 	}
 	if structured := memory.ComposeMoment(w.UserActivity, w.VisibleText, ""); structured != "" {
 		content = structured
 	}
 
+	// The title stays off the span: a window title is often the subject line of a mail or the name of a document, and traces are kept in a less guarded place than the store.
 	span.SetAttributes(
 		attribute.String("db.app", obs.Context.App),
-		attribute.String("db.window_title", obs.Context.Title),
 		attribute.String("db.signal_kind", string(obs.Context.SignalKind)),
 	)
 
@@ -138,7 +162,7 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 				"domain":     string(domain),
 				"source":     "episode",
 				"kind":       string(memory.KindMoment),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": nowStamp(),
 			}
 			// One vector per passage, not per screen. A capture longer than the embedder's cap used to be represented by its first 4,000 runes and nothing else; a capture shorter than one chunk still produces exactly one, under the same id it always had.
 			for i, chunk := range chunkText(text, chunkRunes, chunkOverlap) {
@@ -205,7 +229,8 @@ func (s *Store) ListEpisodes(ctx context.Context, q EpisodeQuery) ([]Episode, er
 		args = append(args, sqliteUTC(q.Until))
 	}
 	if app := strings.TrimSpace(q.App); app != "" {
-		clauses = append(clauses, "LOWER(app) LIKE '%' || LOWER(?) || '%'")
+		// instr rather than LIKE: the filter reaches this from the query tool, so a model can put a '%' or '_' in it, and under LIKE those are wildcards rather than the characters the caller typed.
+		clauses = append(clauses, "instr(LOWER(app), LOWER(?)) > 0")
 		args = append(args, app)
 	}
 	where := ""
@@ -398,16 +423,14 @@ func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([
 		return nil, nil
 	}
 
-	hits, err := s.SearchMemory(ctx, subject)
+	hits, err := s.searchMemoryWindow(ctx, subject, "thread", time.Time{}, time.Time{}, limit)
 	if err != nil {
 		return nil, err
 	}
 
 	var out []string
 	for _, h := range hits {
-		if h.Source == "thread" {
-			out = append(out, fmt.Sprintf("[thread#%d] %s", h.RefID, h.Content))
-		}
+		out = append(out, fmt.Sprintf("[thread#%d] %s", h.RefID, h.Content))
 	}
 
 	episodes, err := s.DiverseEpisodes(ctx, subject, limit)
@@ -415,11 +438,7 @@ func (s *Store) RecallSubject(ctx context.Context, subject string, limit int) ([
 		return nil, err
 	}
 	for _, h := range episodes {
-		excerpt := h.Content
-		if runes := []rune(excerpt); len(runes) > maxEpisodeExcerpt {
-			excerpt = string(runes[:maxEpisodeExcerpt])
-		}
-		out = append(out, fmt.Sprintf("[episode] %s", excerpt))
+		out = append(out, fmt.Sprintf("[episode] %s", util.Runes(h.Content, maxEpisodeExcerpt)))
 	}
 
 	span.SetAttributes(attribute.Int("db.recall_subject_lines", len(out)))
@@ -509,72 +528,6 @@ func parseSQLiteTime(s string) time.Time {
 	return time.Time{}
 }
 
-// AgeEpisodes is the pre-vector tiering step for the episode substrate: for episodes older than keepRawFor whose importance is below importanceFloor, screen_text is emptied to reclaim space while the row itself (ts/app/title/importance) is kept — a thin record, not a deletion. Recent or high-importance episodes are left untouched. Rows are NEVER deleted; only screen_text is cleared (re-clearing an already-empty row is just a no-op). Returns the number of rows aged.
-func (s *Store) AgeEpisodes(ctx context.Context, keepRawFor time.Duration, importanceFloor float64) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
-	ctx, span := tracer.Start(ctx, "DB.AgeEpisodes")
-	defer span.End()
-
-	secs := int64(keepRawFor.Seconds())
-
-	// Select the affected ids first (instead of one set-based UPDATE) so their vectors can be deleted too — AgeEpisodes clears screen_text specifically to reclaim that content, so leaving it live in the vector index would defeat the point.
-	idRows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM episodes
-		 WHERE created_at < datetime('now', '-' || ? || ' seconds')
-		   AND importance < ?
-		   AND screen_text != ''`,
-		secs, importanceFloor)
-	if err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("age episodes: select candidates: %w", err)
-	}
-	var ids []int64
-	for idRows.Next() {
-		var id int64
-		if err := idRows.Scan(&id); err != nil {
-			idRows.Close()
-			span.RecordError(err)
-			return 0, fmt.Errorf("age episodes: scan candidate: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	idRows.Close()
-	if err := idRows.Err(); err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("age episodes: iterate candidates: %w", err)
-	}
-	if len(ids) == 0 {
-		return 0, nil
-	}
-
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE episodes SET screen_text = '', image_path = '' WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
-		args...)
-	if err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("age episodes: %w", err)
-	}
-
-	n, err := res.RowsAffected()
-	if err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("age episodes rows affected: %w", err)
-	}
-	span.SetAttributes(attribute.Int64("db.aged_rows", n))
-
-	s.deleteEpisodeVectors(ids)
-	for _, id := range ids {
-		s.removeEpisodeJPEG(id)
-	}
-	return n, nil
-}
-
 // AgeEpisodeImages deletes vision JPEGs older than keepFor and clears image_path. Descriptions, app/title, and the row stay. This is the storage cap for screenshots — 14 days of thumbnails, not a year of them.
 func (s *Store) AgeEpisodeImages(ctx context.Context, keepFor time.Duration) (int64, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
@@ -584,12 +537,13 @@ func (s *Store) AgeEpisodeImages(ctx context.Context, keepFor time.Duration) (in
 	if keepFor <= 0 {
 		return 0, nil
 	}
-	secs := int64(keepFor.Seconds())
+	// One cutoff computed here and bound to both statements, rather than datetime('now') evaluated twice: a row that crossed the boundary between the two would otherwise have its image_path cleared without its JPEG being deleted, leaving the file on disk with nothing left pointing at it.
+	cutoff := sqliteUTC(time.Now().Add(-keepFor))
 	idRows, err := s.db.QueryContext(ctx,
 		`SELECT id FROM episodes
-		 WHERE created_at < datetime('now', '-' || ? || ' seconds')
+		 WHERE created_at < ?
 		   AND image_path != ''`,
-		secs)
+		cutoff)
 	if err != nil {
 		span.RecordError(err)
 		return 0, fmt.Errorf("age episode images: select: %w", err)
@@ -613,15 +567,12 @@ func (s *Store) AgeEpisodeImages(ctx context.Context, keepFor time.Duration) (in
 		return 0, nil
 	}
 
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
+	// The UPDATE repeats the SELECT's own WHERE clause rather than naming each id: one bound parameter per aged row runs into SQLITE_MAX_VARIABLE_NUMBER (32766 by default) on a store that missed several aging runs, and after that no image is ever aged again. The ids are still needed, but only to delete the files.
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE episodes SET image_path = '' WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
-		args...)
+		`UPDATE episodes SET image_path = ''
+		 WHERE created_at < ?
+		   AND image_path != ''`,
+		cutoff)
 	if err != nil {
 		span.RecordError(err)
 		return 0, fmt.Errorf("age episode images: update: %w", err)
@@ -635,94 +586,6 @@ func (s *Store) AgeEpisodeImages(ctx context.Context, keepFor time.Duration) (in
 		s.removeEpisodeJPEG(id)
 	}
 	span.SetAttributes(attribute.Int64("db.aged_images", n))
-	return n, nil
-}
-
-// deleteEpisodeVectors deletes each id's "episode:N" vector async/best-effort, same non-blocking pattern as LogNote's embed goroutine — a vector-index error never fails the SQL op that reclaimed the row's raw text.
-func (s *Store) deleteEpisodeVectors(ids []int64) {
-	s.mu.RLock()
-	vidx := s.vectorIndex
-	s.mu.RUnlock()
-	if vidx == nil {
-		return
-	}
-	go func(ids []int64) {
-		delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		for _, id := range ids {
-			if err := vidx.Delete(delCtx, fmt.Sprintf("episode:%d", id)); err != nil {
-				slog.Error("async episode vector delete failed", "episode_id", id, "error", err)
-			}
-		}
-	}(ids)
-}
-
-// PruneAncientEpisodes is the coarse, long-horizon cap AgeEpisodes doesn't provide: AgeEpisodes only ever empties screen_text, so the episodes table's row count grows forever even once the expensive column is thinned. This deletes the row itself for episodes older than olderThan, but ONLY if screen_text is already empty — i.e. only rows that already went through AgeEpisodes (or were logged empty). Rows that still carry raw screen_text are never deleted here regardless of age, so this can never destroy text that hasn't already been through the aging pass.
-//
-// episodes_fts stays in sync via the existing episodes_ad AFTER DELETE trigger — no separate FTS cleanup needed here, since an already-thinned row's index entry was already collapsed to empty when AgeEpisodes ran.
-//
-// Returns the number of rows deleted.
-func (s *Store) PruneAncientEpisodes(ctx context.Context, olderThan time.Duration) (int64, error) {
-	tracer := obs.GetTracer(ctx, "ora.db")
-	ctx, span := tracer.Start(ctx, "DB.PruneAncientEpisodes")
-	defer span.End()
-
-	secs := int64(olderThan.Seconds())
-
-	// Select the affected ids first (instead of one set-based DELETE) so any leftover vector for an already-thinned row gets cleaned up too.
-	idRows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM episodes
-		 WHERE created_at < datetime('now', '-' || ? || ' seconds')
-		   AND screen_text = ''`,
-		secs)
-	if err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("prune ancient episodes: select candidates: %w", err)
-	}
-	var ids []int64
-	for idRows.Next() {
-		var id int64
-		if err := idRows.Scan(&id); err != nil {
-			idRows.Close()
-			span.RecordError(err)
-			return 0, fmt.Errorf("prune ancient episodes: scan candidate: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	idRows.Close()
-	if err := idRows.Err(); err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("prune ancient episodes: iterate candidates: %w", err)
-	}
-	if len(ids) == 0 {
-		return 0, nil
-	}
-
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM episodes WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
-		args...)
-	if err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("prune ancient episodes: %w", err)
-	}
-
-	n, err := res.RowsAffected()
-	if err != nil {
-		span.RecordError(err)
-		return 0, fmt.Errorf("prune ancient episodes rows affected: %w", err)
-	}
-	span.SetAttributes(attribute.Int64("db.pruned_rows", n))
-
-	s.deleteEpisodeVectors(ids)
-	for _, id := range ids {
-		s.removeEpisodeJPEG(id)
-	}
 	return n, nil
 }
 

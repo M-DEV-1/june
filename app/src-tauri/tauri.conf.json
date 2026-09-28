@@ -1,0 +1,75 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ora",
+  "version": "0.1.0",
+  "identifier": "dev.ora.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Ora",
+        "width": 720,
+        "height": 520,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "transparent": true,
+        "shadow": false
+      },
+      {
+        "label": "app",
+        "url": "next.html",
+        "title": "Ora",
+        "width": 1140,
+        "height": 760,
+        "resizable": true,
+        "decorations": true,
+        "visible": false,
+        "center": true
+      },
+      {
+        "label": "overlay",
+        "url": "overlay.html",
+        "title": "Ora",
+        "width": 640,
+        "height": 480,
+        "x": 0,
+        "y": 0,
+        "resizable": true,
+        "decorations": false,
+        "alwaysOnTop": false,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "visible": false,
+        "transparent": true,
+        "shadow": false,
+        "acceptFirstMouse": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

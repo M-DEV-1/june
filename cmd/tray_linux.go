@@ -5,7 +5,7 @@ package cmd
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"fmt"
 	"image"
 	"image/color"
@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sort"
 	"sync/atomic"
 
 	"ora/internal/recorder"
@@ -22,8 +23,8 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 )
 
-//go:embed tray_icon_linux.png
-var trayIconPNG []byte
+//go:embed tray
+var trayIcons embed.FS
 
 // statusDotSize is the side length of the rendered status indicator (px).
 const statusDotSize = 16
@@ -72,26 +73,44 @@ var (
 	dotPaused = statusDotPNG(color.RGBA{R: 0xd2, G: 0x99, B: 0x22, A: 0xff}) // amber: paused
 )
 
-// trayIconPixmaps decodes the embedded ORA logo into a single SNI icon pixmap.
+// trayIconPixmaps decodes every embedded size of the ORA logo into one SNI icon pixmap each.
 // SNI pixmaps are ARGB32 in network byte order: A,R,G,B per pixel.
+// One entry per size because IconPixmap is an array and the host picks the one closest to its own panel height: handed a single large pixmap it scales that down itself, which is what left the face blurred. The files are drawn at these exact sizes rather than resampled from one master (see packaging/make-icons.py).
+// Output: the pixmaps, smallest first, or an error if the embedded directory cannot be read or holds something that is not an image.
 func trayIconPixmaps() ([]sniPixmap, error) {
-	img, _, err := image.Decode(bytes.NewReader(trayIconPNG))
+	entries, err := trayIcons.ReadDir("tray")
 	if err != nil {
 		return nil, err
 	}
-	b := img.Bounds()
-	w, h := b.Dx(), b.Dy()
-	rgba := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(rgba, rgba.Bounds(), img, b.Min, draw.Src)
+	pixmaps := make([]sniPixmap, 0, len(entries))
+	for _, entry := range entries {
+		raw, err := trayIcons.ReadFile("tray/" + entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		img, _, err := image.Decode(bytes.NewReader(raw))
+		if err != nil {
+			return nil, fmt.Errorf("tray icon %s: %w", entry.Name(), err)
+		}
+		b := img.Bounds()
+		w, h := b.Dx(), b.Dy()
+		rgba := image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(rgba, rgba.Bounds(), img, b.Min, draw.Src)
 
-	data := make([]byte, w*h*4)
-	for i, p := 0, 0; i < len(rgba.Pix); i, p = i+4, p+4 {
-		data[p] = rgba.Pix[i+3]   // A
-		data[p+1] = rgba.Pix[i]   // R
-		data[p+2] = rgba.Pix[i+1] // G
-		data[p+3] = rgba.Pix[i+2] // B
+		data := make([]byte, w*h*4)
+		for i, p := 0, 0; i < len(rgba.Pix); i, p = i+4, p+4 {
+			data[p] = rgba.Pix[i+3]   // A
+			data[p+1] = rgba.Pix[i]   // R
+			data[p+2] = rgba.Pix[i+1] // G
+			data[p+3] = rgba.Pix[i+2] // B
+		}
+		pixmaps = append(pixmaps, sniPixmap{Width: int32(w), Height: int32(h), Data: data})
 	}
-	return []sniPixmap{{Width: int32(w), Height: int32(h), Data: data}}, nil
+	if len(pixmaps) == 0 {
+		return nil, fmt.Errorf("no tray icons are embedded")
+	}
+	sort.Slice(pixmaps, func(i, j int) bool { return pixmaps[i].Width < pixmaps[j].Width })
+	return pixmaps, nil
 }
 
 // sniToolTip matches the D-Bus signature (s a(iiay) s s) for StatusNotifierItem ToolTip.
@@ -134,11 +153,14 @@ type dbusMenuLayout struct {
 //	0 = root
 //	1 = Status indicator  (disabled; label reflects tracking state)
 //	2 = separator
+//	7 = Open Ora  (brings the desktop window to the front)
 //	3 = Pause / Resume Tracking  (label toggled by paused flag)
 //	6 = Start / Stop meeting recording  (label toggled by the recorder's own state)
 //	4 = separator
 //	5 = Quit Ora
 type dbusMenu struct {
+	// The daemon's own context, handed to a stop from the tray so the transcription it starts ends with the daemon instead of outliving it on the GPU.
+	ctx     context.Context
 	quitCh  chan<- struct{}
 	conn    *dbus.Conn // needed to emit LayoutUpdated when pause label changes
 	rec     *recorder.Recorder
@@ -150,6 +172,7 @@ type dbusMenu struct {
 const (
 	menuStatus  int32 = 1
 	menuSep1    int32 = 2
+	menuOpen    int32 = 7
 	menuPause   int32 = 3
 	menuMeeting int32 = 6
 	menuSep2    int32 = 4
@@ -171,9 +194,9 @@ func (m *dbusMenu) recording() bool {
 
 // items is the single source of truth for the menu: every property of every item, in display order. GetLayout, GetGroupProperties and GetProperty all read from here so the three views can never disagree about a label.
 func (m *dbusMenu) items() []dbusMenuItemProps {
-	pauseLabel := "Pause Tracking"
+	pauseLabel := "Pause Observation"
 	if m.paused.Load() {
-		pauseLabel = "Resume Tracking"
+		pauseLabel = "Resume Observation"
 	}
 	item := func(id int32, label string, enabled bool) dbusMenuItemProps {
 		return dbusMenuItemProps{ID: id, Properties: map[string]dbus.Variant{
@@ -196,6 +219,8 @@ func (m *dbusMenu) items() []dbusMenuItemProps {
 	return []dbusMenuItemProps{
 		status,
 		sep(menuSep1),
+		// The window has no tray icon of its own, so opening it lives here, on the one icon. The hover is not in the menu: it is what the keyboard shortcut is for, and a menu item for it would be a second name for the same thing.
+		item(menuOpen, "Open Ora", true),
 		item(menuPause, pauseLabel, true),
 		item(menuMeeting, meetingLabel(m.recording()), true),
 		sep(menuSep2),
@@ -213,9 +238,9 @@ func (m *dbusMenu) refresh() {
 
 func (m *dbusMenu) statusLabel() string {
 	if m.paused.Load() {
-		return "Tracking paused"
+		return "Paused"
 	}
-	return "Ora is tracking"
+	return "Observing"
 }
 
 // statusIcon returns the rendered status dot (PNG bytes) matching the current tracking state, for the menu item's icon-data property.
@@ -244,6 +269,8 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 		return nil
 	}
 	switch id {
+	case menuOpen:
+		go authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
 	case menuPause:
 		var endpoint string
 		if m.paused.Load() {
@@ -275,7 +302,7 @@ func (m *dbusMenu) toggleMeeting() {
 		return
 	}
 	if m.rec.Active() {
-		if _, err := m.rec.StopAndProcess(context.Background()); err != nil {
+		if _, err := m.rec.StopAndProcess(m.ctx); err != nil {
 			slog.Error("failed to stop meeting recording", "error", err)
 		}
 		return
@@ -425,7 +452,7 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	}
 
 	// Export dbusmenu at /MenuBar.
-	menu := &dbusMenu{quitCh: quitCh, conn: conn, rec: meetingRecorder}
+	menu := &dbusMenu{ctx: ctx, quitCh: quitCh, conn: conn, rec: meetingRecorder}
 	// The menu's own clicks redraw it themselves; this covers a recording started or stopped by anything else, which since the microphone watcher landed is how most of them begin.
 	if meetingRecorder != nil {
 		meetingRecorder.SetOnStateChange(menu.refresh)

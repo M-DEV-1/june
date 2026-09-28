@@ -1,6 +1,10 @@
 package memory
 
-import "strings"
+import (
+	"strings"
+
+	"ora/internal/util"
+)
 
 // Domain partitions memory into work vs. personal; used by hybrid search's domain filter/boost (internal/db's HybridSearch).
 type Domain string
@@ -32,16 +36,6 @@ var personalApps = []string{
 	"whatsapp", "snapchat", "reddit", "pinterest", "tinder",
 }
 
-// containsAny reports whether text (already lowercased) contains any of the given lowercased substrings.
-func containsAny(text string, substrs []string) bool {
-	for _, s := range substrs {
-		if strings.Contains(text, s) {
-			return true
-		}
-	}
-	return false
-}
-
 // Classify is a lookup, not a model call, so it's cheap enough to run on every write.
 // It matches app/title against curated work/personal substring lists (workAppOnly terms match the app name only, never the free-text title).
 // Ambiguous signal — matches neither list or both — resolves to DomainUnset rather than guessing.
@@ -52,8 +46,8 @@ func Classify(app, title string) Domain {
 		return DomainUnset
 	}
 
-	isWork := containsAny(combined, workApps) || containsAny(app, workAppOnly)
-	isPersonal := containsAny(combined, personalApps)
+	isWork := util.ContainsAny(combined, workApps...) || util.ContainsAny(app, workAppOnly...)
+	isPersonal := util.ContainsAny(combined, personalApps...)
 
 	switch {
 	case isWork && isPersonal:

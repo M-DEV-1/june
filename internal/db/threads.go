@@ -27,14 +27,19 @@ func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64,
 	defer span.End()
 
 	if u.ID > 0 {
-		if _, err := s.db.ExecContext(ctx,
+		res, err := s.db.ExecContext(ctx,
 			`UPDATE threads SET state=?, last_seen_at=CURRENT_TIMESTAMP, times_seen=times_seen+1, salience=MIN(1.0, salience+0.05), status='active' WHERE id=?`,
-			u.State, u.ID); err != nil {
+			u.State, u.ID)
+		if err != nil {
 			span.RecordError(err)
 			return 0, fmt.Errorf("update thread: %w", err)
 		}
-		span.SetAttributes(attribute.Int64("db.thread_id", u.ID))
-		return u.ID, nil
+		// The id comes from the model, which can name a thread that never existed or one since deleted. Returning it anyway makes the caller link this flush's episodes and file its summary against nothing, so an id that matched no row falls through to the insert-by-subject path below.
+		if n, rerr := res.RowsAffected(); rerr == nil && n == 1 {
+			span.SetAttributes(attribute.Int64("db.thread_id", u.ID))
+			return u.ID, nil
+		}
+		slog.Warn("thread id from attribution matched no row, creating by subject instead", "thread_id", u.ID, "subject", u.Subject)
 	}
 
 	// new throughline: bias salience up slightly when the model flags it novel.
@@ -61,7 +66,7 @@ func (s *Store) UpsertThread(ctx context.Context, u memory.ThreadUpdate) (int64,
 	return id, nil
 }
 
-// UpdateThreadState overwrites an existing thread's state — the one-line summary of where that throughline stands — leaving its subject and kind alone. This is the repair path for a thread whose summary merged two unrelated things or recorded a wrong fact; the model can see that from a "[thread#N]" hit but had no way to act on it, since update_note only reaches the notes table.
+// UpdateThreadState overwrites an existing thread's state — the one-line summary of where that throughline stands — leaving its subject and kind alone. This is the repair path for a thread whose summary merged two unrelated things or recorded a wrong fact; the model can see that from a "[thread#N]" hit but had no way to act on it, since revise's note path only reaches the notes table.
 // The FTS5 mirror is kept in sync by the threads_au trigger. The stale vector is deleted and the corrected text re-embedded async/best-effort, same non-blocking pattern as UpdateNote — a vector-index error never fails the SQL update. The embed text is "subject — state", matching the threads_ai trigger so both halves of hybrid search see the same thread.
 // Input: the thread's id and the corrected state. Output: an error if no thread carries that id.
 func (s *Store) UpdateThreadState(ctx context.Context, id int64, state string) error {
@@ -114,7 +119,7 @@ func (s *Store) UpdateThreadState(ctx context.Context, id int64, state string) e
 		meta := map[string]string{
 			"source":     "thread",
 			"kind":       string(memory.KindArc),
-			"created_at": time.Now().UTC().Format(time.RFC3339),
+			"created_at": nowStamp(),
 		}
 		if err := vidx.Add(vecCtx, vecID, text, vec, meta); err != nil {
 			slog.Error("async thread vector re-add failed", "thread_id", id, "error", err)

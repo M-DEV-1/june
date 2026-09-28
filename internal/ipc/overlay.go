@@ -1,0 +1,177 @@
+// overlay.go holds POST /overlay: the daemon telling the GNOME Shell extension to draw on the screen — a ring around one rectangle, numbered marks on several, or a clear.
+package ipc
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+)
+
+// defaultOverlayTTLMs is how long a drawing stays up when the caller names no ttl.
+const defaultOverlayTTLMs = 3000
+
+// maxOverlayTTLMs is the longest a drawing may stay up; a larger ttl is capped to this so a bad caller cannot leave the screen marked for ever.
+const maxOverlayTTLMs = 15000
+
+// overlayTTLFromInk is the ttl the five shapes the draw tool dispatches to send instead of a number of their own: it leaves the reading time to the overlay, which counts the ink actually on screen and gives a ten-shape diagram longer to be read than a single box. A drawing is several shapes that arrive one after another and keep the ones before them, so only the overlay knows how much is standing there by the time the last one lands. A caller that names its own ttl through POST /overlay still gets exactly that, since the handler fills a zero in with defaultOverlayTTLMs before broadcasting; zero therefore reaches the overlay only from a draw.
+const overlayTTLFromInk = 0
+
+// overlayNoAsk is the id an overlay event carries when no question drew it: a POST /overlay straight from another program, or a voice session's own ring. It is deliberately not of the "ask-N" shape newID mints, so a client reading /events can see at once that there is no question to trace this drawing back to, instead of being handed an id that names an ask it never saw.
+const overlayNoAsk = "overlay"
+
+// OverlayRect is one rectangle in screen coordinates, with the label drawn beside it.
+type OverlayRect struct {
+	X     int    `json:"x"`
+	Y     int    `json:"y"`
+	W     int    `json:"w"`
+	H     int    `json:"h"`
+	Label string `json:"label"`
+}
+
+// OverlayRequest is the body of POST /overlay and, once validated, exactly what the extension receives as the text of the overlay event. Kind is "ring" (a rounded rectangle with a short label), "tap" (the pointer flying to one of Points and pressing there, no ink), "marks" (a red numbered circle per rectangle), "arrow" or "line" (a path through Points, which the extension smooths and animates, with an arrowhead for "arrow" and without one for "line"), "path" (a free-form smooth stroke through at least three Points, no arrowhead), "box" (a dashed rectangle per Rect, to mark a region), "circle" (a dashed circle inscribed in one Rect, to spotlight one control) or "clear" (erase whatever is drawn).
+type OverlayRequest struct {
+	Kind   string        `json:"kind"`
+	Label  string        `json:"label"`
+	Rects  []OverlayRect `json:"rects"`
+	Points [][2]int      `json:"points"`
+	TTLMs  int           `json:"ttl_ms"`
+	// Group names the one draw call this shape came from, so the overlay keeps every shape of a drawing on screen together instead of letting each replace the last. Empty for a drawing that came from somewhere with no call to name it, such as POST /overlay or a ring.
+	Group string `json:"group,omitempty"`
+}
+
+// OverlayResult is the body of a 202 from POST /overlay. Drawn is true when at least one client was reading the event stream at the moment the drawing went out, and false when none was, in which case Reason says so. A 202 on its own only ever meant the request validated, so a drawing that reached nobody was indistinguishable from one that reached the screen; this is the difference, said out loud.
+type OverlayResult struct {
+	Drawn  bool   `json:"drawn"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// overlayNoWindow is the reason a drawing was not drawn: nothing was reading the daemon's event stream, so there was no overlay window to draw it.
+const overlayNoWindow = "no overlay window"
+
+// ErrNoOverlayWindow is what every drawing call returns when nothing was reading the event stream at the moment it went out. The drawing was still broadcast; there was simply nobody there to put it on the screen. Callers that report back to a person or a model must say so rather than claiming the drawing was made (see errors.Is).
+var ErrNoOverlayWindow = errors.New("the drawing reached no window, so nothing appeared on the screen")
+
+// Overlay handles POST /overlay. Input: an OverlayRequest as JSON. Output: 202 and an OverlayResult saying whether anything was listening, once the request has been broadcast on the hub as an event of type "overlay" whose text is the validated request re-encoded as JSON, or 400 when the body is not JSON, names a kind other than ring, marks, arrow, line, path, box, circle or clear, carries no rectangles for a ring, marks or box, carries a rectangle count other than one for a circle, carries a rectangle with a width or height that is not positive, carries fewer than two points for an arrow or line, carries fewer than three points for a path, or carries a point with a negative coordinate. A ttl above maxOverlayTTLMs is capped rather than refused, and a missing one becomes defaultOverlayTTLMs.
+func (s *Server) Overlay(w http.ResponseWriter, r *http.Request) {
+	var req OverlayRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+
+	switch req.Kind {
+	case "ring", "marks", "box":
+		if len(req.Rects) == 0 {
+			http.Error(w, "kind "+req.Kind+" needs at least one rect", http.StatusBadRequest)
+			return
+		}
+	case "circle":
+		if len(req.Rects) != 1 {
+			http.Error(w, "kind circle needs exactly one rect", http.StatusBadRequest)
+			return
+		}
+	case "arrow", "line":
+		if len(req.Points) < 2 {
+			http.Error(w, "kind "+req.Kind+" needs at least two points", http.StatusBadRequest)
+			return
+		}
+	case "path":
+		if len(req.Points) < 3 {
+			http.Error(w, "kind path needs at least three points", http.StatusBadRequest)
+			return
+		}
+	case "tap":
+		if len(req.Points) != 1 {
+			http.Error(w, "kind tap needs exactly one point", http.StatusBadRequest)
+			return
+		}
+	case "clear":
+		req.Rects = nil
+		req.Points = nil
+	default:
+		http.Error(w, "kind must be ring, marks, arrow, line, path, box, circle, tap or clear", http.StatusBadRequest)
+		return
+	}
+
+	for _, rect := range req.Rects {
+		if rect.W <= 0 || rect.H <= 0 {
+			http.Error(w, "every rect needs a positive w and h", http.StatusBadRequest)
+			return
+		}
+	}
+
+	for _, p := range req.Points {
+		if p[0] < 0 || p[1] < 0 {
+			http.Error(w, "every point needs non-negative coordinates", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if req.TTLMs <= 0 {
+		req.TTLMs = defaultOverlayTTLMs
+	}
+	if req.TTLMs > maxOverlayTTLMs {
+		req.TTLMs = maxOverlayTTLMs
+	}
+
+	drawn := s.draw(overlayNoAsk, req)
+	result := OverlayResult{Drawn: drawn}
+	if !drawn {
+		result.Reason = overlayNoWindow
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// Ring draws one ring around a rectangle on the screen for the default time, the way POST /overlay would. Input: the id of the ask whose point_at asked for the ring (empty, or overlayNoAsk, when no ask did — see DrawingAsk), the rectangle in screen pixels and the label drawn beside it. Output: nil once the drawing has been broadcast on the hub for the extension, stamped with that ask's id, or ErrNoOverlayWindow when nothing was listening for it.
+func (s *Server) Ring(askID string, x, y, w, h int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "ring", Label: label, Rects: []OverlayRect{{X: x, Y: y, W: w, H: h}}, TTLMs: defaultOverlayTTLMs})
+}
+
+// Tap shows a press about to land at one screen point: the overlay's pointer flies there and ripples, with no ink left behind. It is what click, click_at and scroll_at send just before they drive the real pointer, so the user sees where the press is going. Input: the id of the ask acting (empty, or overlayNoAsk, when none is), the point in screen pixels, and the label of what is there when known. Output: nil once broadcast, or ErrNoOverlayWindow when nothing was listening.
+func (s *Server) Tap(askID string, x, y int, label string) error {
+	return s.drew(askID, OverlayRequest{Kind: "tap", Label: label, Points: [][2]int{{x, y}}, TTLMs: defaultOverlayTTLMs})
+}
+
+// Marks draws a numbered mark over every rect for the default time, the way POST /overlay with kind marks would. Input: the id of the ask whose show_marks asked for them (empty, or overlayNoAsk, when no ask did) and the rectangles in screen pixels, in the order they should be numbered. Output: nil once the drawing has been broadcast on the hub for the extension, stamped with that ask's id, or ErrNoOverlayWindow when nothing was listening for it.
+func (s *Server) Marks(askID string, rects []OverlayRect) error {
+	return s.drew(askID, OverlayRequest{Kind: "marks", Rects: rects, TTLMs: defaultOverlayTTLMs})
+}
+
+// Draw puts one shape of a drawing on the screen, for the agent's draw tool to call without knowing which ask is running. Input: the name of the draw call this shape belongs to, so the overlay keeps the call's shapes together (empty when the caller has no call to name); the shape, which is one of arrow, line, path, box or circle; the points to draw through (arrow, line, path — ignored otherwise); the rectangle to draw around or inscribe within (box, circle — ignored otherwise); and the label drawn beside it. Output: nil once the drawing has been broadcast on the hub under the ask DrawingAsk names, ErrNoOverlayWindow when nothing was listening for it, or an error naming the bad shape when it is none of the five.
+// The ttl is left to the overlay for all five, because a drawing is several shapes arriving one after another and only the overlay knows how much ink is standing there by the time the last one lands.
+func (s *Server) Draw(group, shape string, points [][2]int, x, y, w, h int, label string) error {
+	req := OverlayRequest{Kind: shape, Label: label, Group: group, TTLMs: overlayTTLFromInk}
+	switch shape {
+	case "arrow", "line", "path":
+		req.Points = points
+	case "box", "circle":
+		req.Rects = []OverlayRect{{X: x, Y: y, W: w, H: h}}
+	default:
+		return fmt.Errorf("shape must be arrow, line, path, box or circle, got %q", shape)
+	}
+	return s.drew(s.DrawingAsk(), req)
+}
+
+// drew is draw with its answer turned into an error, for the callers that hand one back. Input: the ask's id and the request. Output: nil once the drawing went out to at least one client, ErrNoOverlayWindow when it went to nobody.
+func (s *Server) drew(askID string, req OverlayRequest) error {
+	if !s.draw(askID, req) {
+		return ErrNoOverlayWindow
+	}
+	return nil
+}
+
+// draw broadcasts a validated overlay request as an event of type "overlay" whose text is the request as JSON, under the id of the ask that drew it. Input: that ask's id, and the request. Output: true when at least one client was subscribed to the hub, false when the drawing went to nobody. An empty id becomes overlayNoAsk, so every overlay event has an id and no drawing is ever given one of the ask ids newID hands out.
+// Every drawing is logged with the number of clients it went to, because a drawing that never appeared on screen is otherwise silent at every step: a line reading clients=0 says the drawing was never on the wire and separates a daemon that did nothing from a window that did nothing.
+func (s *Server) draw(askID string, req OverlayRequest) bool {
+	if askID == "" {
+		askID = overlayNoAsk
+	}
+	body, _ := json.Marshal(req)
+	clients := s.hub.clientCount()
+	slog.Info("overlay: drawing", "ask", askID, "kind", req.Kind, "rects", len(req.Rects), "points", len(req.Points), "ttl_ms", req.TTLMs, "clients", clients)
+	s.hub.broadcast(Event{ID: askID, Type: "overlay", Text: string(body), Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
+	return clients > 0
+}

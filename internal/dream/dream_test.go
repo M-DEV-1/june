@@ -13,29 +13,22 @@ import (
 	"time"
 
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 )
-
-// testStore opens a throwaway store on a per-test temp file, closed with the test. File-backed rather than ":memory:" because the preemption watcher queries concurrently with the stages, and plain :memory: is per-connection in database/sql + modernc/sqlite — a second pool connection would see an empty database.
-func testStore(t *testing.T) *db.Store {
-	t.Helper()
-	store, err := db.New(filepath.Join(t.TempDir(), "dream-test.db"))
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
 
 // fakeBrain answers each of the dream prompts with a canned reply, dispatching on the instruction text, and records what it was asked. Safe for the watcher goroutine's world: only Tick's goroutine calls it, but the mutex keeps the record readable after Tick returns.
 type fakeBrain struct {
-	mu        sync.Mutex
-	verdicts  string
-	extract   string
-	und       string
-	compact   string
-	report    string
-	reportErr error
-	asked     []string
+	mu       sync.Mutex
+	verdicts string
+	extract  string
+	und      string
+	compact  string
+	// compactFailAfter, when above zero, makes every compact call past that number return an error, so a test can fail one week of a multi-week compaction.
+	compactFailAfter int
+	compacts         int
+	report           string
+	reportErr        error
+	asked            []string
 }
 
 func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
@@ -53,6 +46,10 @@ func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
 		return f.und, nil
 	case strings.Contains(prompt, "Collapse the diary entries below"):
 		f.asked = append(f.asked, "compact")
+		f.compacts++
+		if f.compactFailAfter > 0 && f.compacts > f.compactFailAfter {
+			return "", fmt.Errorf("the brain refused compact call %d", f.compacts)
+		}
 		return f.compact, nil
 	case strings.Contains(prompt, "You just spent the night dreaming about the user"):
 		f.asked = append(f.asked, "report")
@@ -76,11 +73,12 @@ func yesProbes() Probes {
 	}
 }
 
-// newRunner builds a Runner on the fake brain with the clock pinned to now.
+// newRunner builds a Runner on the fake brain with the clock pinned to now. The retention numbers are pinned too, so no test reads or writes the machine's real config file on its way through the pruning stage.
 func newRunner(store *db.Store, b *fakeBrain, probes Probes, now time.Time) *Runner {
 	r := New(store, b.fn, probes, 23, 9)
 	r.now = func() time.Time { return now }
 	r.watchEvery = time.Hour
+	r.retention = func() (int, time.Duration) { return testActRunKeep, testFailedGrace }
 	return r
 }
 
@@ -99,42 +97,9 @@ func insertEpisodeAt(t *testing.T, store *db.Store, ts time.Time) {
 	}
 }
 
-// The night key folds the small hours back onto the evening's date, and the window is [dreamHour, briefHour) across midnight.
-func TestNightKeyAndWindow(t *testing.T) {
-	r := &Runner{dreamHour: 23, briefHour: 9}
-	base := time.Date(2026, 8, 30, 0, 0, 0, 0, time.Local)
-	cases := []struct {
-		hour     int
-		inWindow bool
-		night    string
-	}{
-		{22, false, "2026-08-29"},
-		{23, true, "2026-08-30"},
-		{0, true, "2026-08-29"},
-		{8, true, "2026-08-29"},
-		{9, false, "2026-08-29"},
-		{12, false, "2026-08-29"},
-	}
-	for _, c := range cases {
-		now := base.Add(time.Duration(c.hour) * time.Hour)
-		if got := r.inWindow(now.Hour()); got != c.inWindow {
-			t.Errorf("inWindow(%02d:00) = %v, want %v", c.hour, got, c.inWindow)
-		}
-		if got := r.nightKey(now); got != c.night {
-			t.Errorf("nightKey(%02d:00) = %q, want %q", c.hour, got, c.night)
-		}
-	}
-
-	// A window that does not wrap midnight still works.
-	r = &Runner{dreamHour: 1, briefHour: 9}
-	if r.inWindow(0) || !r.inWindow(1) || !r.inWindow(8) || r.inWindow(9) {
-		t.Error("non-wrapping window [1,9) misbehaves")
-	}
-}
-
 // Each start condition individually blocks the run: no brain call, no run row. The final case proves the same setup does dream once nothing blocks.
 func TestTick_ConditionsGate(t *testing.T) {
-	night := at(23, 30).Format(dayFormat)
+	night := at(23, 30).Format(time.DateOnly)
 
 	cases := []struct {
 		name  string
@@ -172,7 +137,7 @@ func TestTick_ConditionsGate(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
-			store := testStore(t)
+			store := dbtest.Open(t)
 			brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
 			r := newRunner(store, brain, yesProbes(), at(23, 30))
 			// The evening close's entry exists by default; the missing-diary case skips writing it and, at 23:30, is still inside the two-hour grace.
@@ -201,8 +166,8 @@ func TestTick_ConditionsGate(t *testing.T) {
 // A resumed night runs only the stages missing from stages_done: with 'hyp' already committed, only the understanding rewrite and the closing diary-writing call are asked for, and the night still finishes.
 func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +186,7 @@ func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 		t.Errorf("asked = %v, want the understanding rewrite followed by the diary-writing call", asked)
 	}
 	run, _, _ := store.DreamRun(ctx, night)
-	if !run.Finished || run.StagesDone != "hyp und compact" {
+	if !run.Finished || run.StagesDone != "hyp und compact procedures lessons prune" {
 		t.Errorf("run = %+v, want finished with the remaining stages done", run)
 	}
 	if entry, _ := store.DiaryEntry(ctx, night, "dream"); !strings.Contains(entry, "already committed on an earlier wake") {
@@ -268,8 +233,8 @@ func TestDecideMechanics(t *testing.T) {
 // The full hypothesis stage against a real store: garbage verdicts are dropped, valid ones apply, the adoption list is capped at five valid statements, and a never-tested thirty-day-old hypothesis retires without a verdict.
 func TestHypStage_ValidationCapsAndStale(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nplenty (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -339,8 +304,8 @@ func TestHypStage_ValidationCapsAndStale(t *testing.T) {
 // A verdict reply that never parses is re-asked once, then the stage is skipped but still committed and journaled, and the night carries on to a finish.
 func TestTick_WhollyInvalidReplySkipsJudging(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -377,8 +342,8 @@ func TestTick_WhollyInvalidReplySkipsJudging(t *testing.T) {
 // The morning report: a full happy-path night lands the diary kind='dream' row, stamps finished_at, files the one-line report, and rewrites the understanding.
 func TestTick_DreamReportLands(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "The user built the dreaming loop.\n\nHypotheses:\nHe ships at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -413,8 +378,8 @@ func TestTick_DreamReportLands(t *testing.T) {
 // Preemption: when the watcher cancels mid-stage (the session unlocked), the stage's transaction never commits — no verdicts, no stage token, no finish.
 func TestTick_PreemptionCommitsNothing(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -457,10 +422,10 @@ func TestTick_PreemptionCommitsNothing(t *testing.T) {
 // The fallback: with no evening diary entry and the grace period spent, the night dreams from the day's summaries and says so in the report.
 func TestTick_MissingDiaryFallsBackAfterGrace(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	// 01:30 belongs to yesterday's night, two and a half hours past a 23:00 dream hour.
 	now := at(1, 30)
-	night := now.AddDate(0, 0, -1).Format(dayFormat)
+	night := now.AddDate(0, 0, -1).Format(time.DateOnly)
 	if err := store.InsertHypothesis(ctx, "He codes at night.", "low", nightMinus(night, 10)); err != nil {
 		t.Fatal(err)
 	}
@@ -507,8 +472,8 @@ func (p *idleProbe) get() (time.Duration, error) {
 // A healthy input-idle probe reporting idleAfter or more opens the away-gate even though the newest episode is a minute old — the fix for autoplay/unread-count title changes wrongly reading as presence.
 func TestTick_InputIdleOpensAwayGateDespiteFreshEpisode(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -532,8 +497,8 @@ func TestTick_InputIdleOpensAwayGateDespiteFreshEpisode(t *testing.T) {
 // A probe that errors on every call (as if the D-Bus service is unreachable) falls back to the episode heuristic exactly like a nil probe.
 func TestTick_InputIdleErrorFallsBackToEpisodeHeuristic(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -557,8 +522,8 @@ func TestTick_InputIdleErrorFallsBackToEpisodeHeuristic(t *testing.T) {
 // While the input-idle probe stays healthy and idle, a new episode arriving mid-run (a title changing on its own) must not preempt the night — that is the whole point of the fix.
 func TestWatcher_DoesNotPreemptOnEpisodeWhileInputStaysIdle(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -582,6 +547,7 @@ func TestWatcher_DoesNotPreemptOnEpisodeWhileInputStaysIdle(t *testing.T) {
 	r := New(store, wrapped, probes, 23, 9)
 	r.now = func() time.Time { return at(23, 30) }
 	r.watchEvery = time.Millisecond
+	r.retention = func() (int, time.Duration) { return testActRunKeep, testFailedGrace }
 
 	r.Tick(ctx)
 
@@ -594,8 +560,8 @@ func TestWatcher_DoesNotPreemptOnEpisodeWhileInputStaysIdle(t *testing.T) {
 // The regression this replaces: with InputIdle nil, a new episode arriving mid-run still preempts, exactly as before the fix.
 func TestWatcher_NilInputIdlePreemptsOnEpisode(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -629,8 +595,8 @@ func TestWatcher_NilInputIdlePreemptsOnEpisode(t *testing.T) {
 // When the input-idle probe reports fresh input (below inputFreshAfter), the watcher preempts — real input, not a title change, is what should wake the night.
 func TestWatcher_PreemptsWhenInputIdleDropsFresh(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -666,8 +632,8 @@ func TestWatcher_PreemptsWhenInputIdleDropsFresh(t *testing.T) {
 
 // The force marker makes a tick dream immediately with the away-gates bypassed, and is consumed so one touch means one run.
 func TestTick_ForceMarkerBypassesGates(t *testing.T) {
-	store := testStore(t)
-	if err := store.SetDiaryEntry(context.Background(), at(23, 30).Format(dayFormat), "day", "A day."); err != nil {
+	store := dbtest.Open(t)
+	if err := store.SetDiaryEntry(context.Background(), at(23, 30).Format(time.DateOnly), "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
 	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
@@ -691,8 +657,8 @@ func TestTick_ForceMarkerBypassesGates(t *testing.T) {
 
 // Past the Claude curfew (03:25) an unforced dream must not start: an overnight five-hour usage window opened after it would bleed into the user's 08:30 workday window.
 func TestTick_CurfewHoldsTheNight(t *testing.T) {
-	store := testStore(t)
-	night := at(4, 0).AddDate(0, 0, -1).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(4, 0).AddDate(0, 0, -1).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(context.Background(), night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -709,8 +675,8 @@ func TestTick_CurfewHoldsTheNight(t *testing.T) {
 // The grounded evidence carries all four labelled sections — the diary, the week's work summaries (with the compiler's raw-log fallback buckets skipped), the active threads, and the week's meeting minutes — and the extraction view keeps only the diary.
 func TestEvidenceMaterial_AllFourSectionsPresent(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "DIARYTEXT about the day."); err != nil {
 		t.Fatal(err)
 	}
@@ -753,8 +719,8 @@ func TestEvidenceMaterial_AllFourSectionsPresent(t *testing.T) {
 // The evidence budget holds: when the week's material overflows ~24KB, the oldest items fall away and the newest survive.
 func TestEvidenceMaterial_BudgetDropsOldestFirst(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	big := strings.Repeat("filler sentence to bloat the entry. ", 280)
 	if err := store.SetDiaryEntry(ctx, nightMinus(night, 3), "day", "OLDESTMARK "+big); err != nil {
 		t.Fatal(err)
@@ -798,7 +764,7 @@ func setDiary(t *testing.T, store *db.Store, day, kind, content string) {
 // The week tier: a complete Mon-Sun week of dailies older than the horizon collapses into one kind='week' entry on the Monday and its dailies are deleted, while an incomplete week, recent dailies, and the diary's other kinds are all left alone.
 func TestCompactStage_CompleteWeekCollapses(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := "2026-08-30"
 	// 2026-08-03 is a Monday; the full week 03..09 is complete and old. The week of the 10th misses its Sunday (the 16th) and must wait.
 	for d := 0; d < 7; d++ {
@@ -827,10 +793,16 @@ func TestCompactStage_CompleteWeekCollapses(t *testing.T) {
 	if got, _ := store.DiaryEntry(ctx, "2026-08-03", "week"); got != "A remembered week." {
 		t.Errorf("week entry = %q", got)
 	}
+	// The dailies are kept and reparented under the week rather than deleted, so they stay readable; DiaryEntriesThrough is what puts them out of the next night's reach.
 	for d := 0; d < 7; d++ {
-		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-03", -d), "day"); got != "" {
-			t.Errorf("constituent daily %d survived the compaction: %q", d, got)
+		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-03", -d), "day"); got == "" {
+			t.Errorf("constituent daily %d was destroyed by the compaction", d)
 		}
+	}
+	if left, err := store.DiaryEntriesThrough(ctx, "day", "2026-08-09"); err != nil {
+		t.Fatal(err)
+	} else if len(left) != 0 {
+		t.Errorf("a compacted week's dailies are still offered for compaction: %+v", left)
 	}
 	for d := 0; d < 6; d++ {
 		if got, _ := store.DiaryEntry(ctx, nightMinus("2026-08-10", -d), "day"); got == "" {
@@ -854,7 +826,7 @@ func TestCompactStage_CompleteWeekCollapses(t *testing.T) {
 // The month tier: once every Monday of a month holds a week entry older than ten weeks, the weeks collapse into one kind='month' entry on the first; a month missing one of its Mondays waits.
 func TestCompactStage_MonthTierCollapsesCompleteMonths(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := "2026-08-30"
 	// March 2026's Mondays are the 2nd, 9th, 16th, 23rd and 30th, all beyond the ten-week horizon. April misses the 27th, so it waits.
 	march := []string{"2026-03-02", "2026-03-09", "2026-03-16", "2026-03-23", "2026-03-30"}
@@ -881,9 +853,14 @@ func TestCompactStage_MonthTierCollapsesCompleteMonths(t *testing.T) {
 		t.Errorf("month entry = %q", got)
 	}
 	for _, m := range march {
-		if got, _ := store.DiaryEntry(ctx, m, "week"); got != "" {
-			t.Errorf("constituent week %s survived the compaction: %q", m, got)
+		if got, _ := store.DiaryEntry(ctx, m, "week"); got == "" {
+			t.Errorf("constituent week %s was destroyed by the compaction", m)
 		}
+	}
+	if left, err := store.DiaryEntriesThrough(ctx, "week", "2026-03-31"); err != nil {
+		t.Fatal(err)
+	} else if len(left) != 0 {
+		t.Errorf("a compacted month's weeks are still offered for compaction: %+v", left)
 	}
 	if got, _ := store.DiaryEntry(ctx, "2026-04-01", "month"); got != "" {
 		t.Error("an incomplete month was compacted")
@@ -896,8 +873,8 @@ func TestCompactStage_MonthTierCollapsesCompleteMonths(t *testing.T) {
 // A quiet night — nothing old enough to compact — makes no brain calls and still commits the stage token with zero diary writes.
 func TestCompactStage_QuietNightCommitsToken(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	setDiary(t, store, night, "day", "Tonight's entry.")
 
 	brain := &fakeBrain{}
@@ -924,8 +901,8 @@ func TestCompactStage_QuietNightCommitsToken(t *testing.T) {
 // Night traces: every brain call the dream makes appends one JSONL line — kind and raw reply — to the run's session.jsonl under <DataDir>/dreams/<night>/.
 func TestTraces_OneLinePerBrainCall(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -979,8 +956,8 @@ func TestTraces_OneLinePerBrainCall(t *testing.T) {
 // A trace directory that cannot be created never fails a stage: the night still finishes.
 func TestTraces_FailureIsBestEffort(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -999,8 +976,8 @@ func TestTraces_FailureIsBestEffort(t *testing.T) {
 
 // A model that says a sentence and then answers still gets its JSON read: the payload between the outermost brackets is the answer.
 func TestAskJSON_RecoversPaddedArrays(t *testing.T) {
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(context.Background(), night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -1021,8 +998,8 @@ func TestAskJSON_RecoversPaddedArrays(t *testing.T) {
 // A shadow brain gets fired alongside every primary call and its reply lands under kind+"-shadow" in the same night's trace file — but a shadow that errors out never fails a stage, since it never feeds anything the night acts on.
 func TestShadow_TracesAlongsidePrimaryAndNeverFailsAStage(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
 		t.Fatal(err)
 	}
@@ -1074,8 +1051,8 @@ func TestShadow_TracesAlongsidePrimaryAndNeverFailsAStage(t *testing.T) {
 // A lifecycle whose Start fails leaves the night running without a shadow: no -shadow trace lines appear, and the primary stages still complete normally.
 func TestShadowLifecycle_StartFailureRunsShadowless(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -1110,11 +1087,11 @@ func TestShadowLifecycle_StartFailureRunsShadowless(t *testing.T) {
 	}
 }
 
-// A lifecycle whose Start succeeds is stopped exactly once, after the night's stages, whether or not a Shadow ever answered anything useful.
+// A lifecycle whose Start succeeds is stopped exactly once, after the night's stages, whether or not a Shadow ever answered anything useful. GPUReleaser is asked to free the card before the shadow lifecycle starts, since the embedding server may still be sitting on the GPU the shadow needs.
 func TestShadowLifecycle_StartSucceeds_StopRunsAfterNight(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
 	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
 		t.Fatal(err)
 	}
@@ -1123,12 +1100,18 @@ func TestShadowLifecycle_StartSucceeds_StopRunsAfterNight(t *testing.T) {
 	r.DataDir = t.TempDir()
 	r.Shadow = func(ctx context.Context, prompt string) (string, error) { return "ok", nil }
 
+	released, startedAfterReleased := false, false
+	r.GPUReleaser = func() bool {
+		released = true
+		return true
+	}
 	started, stopped := false, false
 	r.ShadowLifecycle = ShadowLifecycle{
 		Start: func(ctx context.Context) error {
 			if stopped {
 				t.Error("Start observed after Stop already ran")
 			}
+			startedAfterReleased = released
 			started = true
 			return nil
 		},
@@ -1145,36 +1128,6 @@ func TestShadowLifecycle_StartSucceeds_StopRunsAfterNight(t *testing.T) {
 	if !started || !stopped {
 		t.Errorf("started=%v stopped=%v, want both true", started, stopped)
 	}
-}
-
-// GPUReleaser is asked to free the card before the shadow lifecycle starts, since the embedding server may still be sitting on the GPU the shadow needs.
-func TestGPUReleaser_CalledBeforeShadowLifecycleStart(t *testing.T) {
-	ctx := context.Background()
-	store := testStore(t)
-	night := at(23, 30).Format(dayFormat)
-	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
-		t.Fatal(err)
-	}
-	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
-	r := newRunner(store, primary, yesProbes(), at(23, 30))
-	r.DataDir = t.TempDir()
-	r.Shadow = func(ctx context.Context, prompt string) (string, error) { return "ok", nil }
-
-	released, startedAfterReleased := false, false
-	r.GPUReleaser = func() bool {
-		released = true
-		return true
-	}
-	r.ShadowLifecycle = ShadowLifecycle{
-		Start: func(ctx context.Context) error {
-			startedAfterReleased = released
-			return nil
-		},
-		Stop: func() {},
-	}
-
-	r.Tick(ctx)
-
 	if !released {
 		t.Error("GPUReleaser was never called")
 	}
@@ -1186,7 +1139,7 @@ func TestGPUReleaser_CalledBeforeShadowLifecycleStart(t *testing.T) {
 // When the diary-writing call succeeds, the diary entry is the model's own prose plus a compact audit footer carrying the real numbers — so eval/recall code that greps for facts still finds them even though the prose above is free-form.
 func TestFinish_ModelWritesDiaryEntryWithAuditFooter(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := "2026-08-30"
 	brain := &fakeBrain{report: "Tonight I turned over what the user believes about their own mornings."}
 	r := newRunner(store, brain, yesProbes(), at(23, 30))
@@ -1216,7 +1169,7 @@ func TestFinish_ModelWritesDiaryEntryWithAuditFooter(t *testing.T) {
 // When the diary-writing call errors, the night still gets its old templated entry — a night must never end without a diary entry.
 func TestFinish_FallsBackToTemplateOnBrainError(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t)
+	store := dbtest.Open(t)
 	night := "2026-08-30"
 	brain := &fakeBrain{reportErr: errors.New("the model choked")}
 	r := newRunner(store, brain, yesProbes(), at(23, 30))
@@ -1231,24 +1184,6 @@ func TestFinish_FallsBackToTemplateOnBrainError(t *testing.T) {
 	}
 }
 
-// When the diary-writing call comes back empty, the night still gets its old templated entry.
-func TestFinish_FallsBackToTemplateOnEmptyReply(t *testing.T) {
-	ctx := context.Background()
-	store := testStore(t)
-	night := "2026-08-30"
-	brain := &fakeBrain{report: "   "}
-	r := newRunner(store, brain, yesProbes(), at(23, 30))
-	hyp := &stageReport{tested: 1, adopted: 1, lines: []string{"Adopted: He ships at night."}}
-
-	if err := r.finish(ctx, night, time.Minute, hyp, true, &compactReport{}, &replayReport{}, nil); err != nil {
-		t.Fatalf("finish: %v", err)
-	}
-	entry, _ := store.DiaryEntry(ctx, night, "dream")
-	if !strings.Contains(entry, "judge-only") || !strings.Contains(entry, "Adopted: He ships at night.") {
-		t.Errorf("entry did not fall back to the template on an empty reply: %q", entry)
-	}
-}
-
 // A meeting's minutes end with what people agreed to do. Carrying only the leading lines of one dropped that section entirely — on a real 48-line minutes file the 40-line cap reached Attendees, Key points and Decisions, and cut Action items off the end. The evidence budget already bounds the assembly by dropping whole items oldest-first, which is the right shape: a meeting is included or it is not, never included headless.
 func TestBuildEvidence_CarriesAMeetingsActionItems(t *testing.T) {
 	var b strings.Builder
@@ -1256,11 +1191,139 @@ func TestBuildEvidence_CarriesAMeetingsActionItems(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		b.WriteString(fmt.Sprintf("- attendee %d — spoke throughout\n", i))
 	}
-	b.WriteString("\n## Action items\n- Alex: push the value chain branch\n")
+	b.WriteString("\n## Action items\n- Zemna: push the route planning branch\n")
 
 	got := meetingEvidenceBody(b.String())
 
-	if !strings.Contains(got, "push the value chain branch") {
+	if !strings.Contains(got, "push the route planning branch") {
 		t.Error("the action items were cut off the end of the minutes")
+	}
+}
+
+// A week that fails used to take every week already compacted down with it: compactEntry's error returned before CommitCompactStage ran, so the brain calls for the earlier weeks were paid for and thrown away, every night, forever. The weeks already built are now committed before the error goes up.
+func TestCompactStage_CommitsTheWeeksBuiltBeforeAFailure(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := "2026-08-30"
+	// Two complete, old weeks: 2026-07-06 and 2026-07-13, both Mondays. The compaction of the second one fails.
+	for _, monday := range []string{"2026-07-06", "2026-07-13"} {
+		for d := 0; d < 7; d++ {
+			setDiary(t, store, nightMinus(monday, -d), "day", fmt.Sprintf("A day of the week of %s.", monday))
+		}
+	}
+
+	brain := &fakeBrain{compact: "A remembered week.", compactFailAfter: 1}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+	if err := store.StartDreamRun(ctx, night); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := r.compactStage(ctx, night)
+	if err == nil {
+		t.Fatal("compactStage swallowed the failing week")
+	}
+	if rep.weeks != 1 {
+		t.Errorf("report says %d weeks compacted, want the one that succeeded", rep.weeks)
+	}
+	if got, _ := store.DiaryEntry(ctx, "2026-07-06", "week"); got != "A remembered week." {
+		t.Errorf("the week compacted before the failure was thrown away: %q", got)
+	}
+}
+
+// TestShadow_AnswersTheNightWhenThePrimaryBrainIsDown is the real failure this machine hit: the dream brain (grok) returned "402 Payment Required" on every call from 2026-09-03 onward, so every stage aborted and four nights in a row committed nothing — while the local shadow model answered all 174 of those calls and its replies were thrown away by design. When the primary is down and a shadow is running, the shadow's reply is what the night uses.
+func TestShadow_AnswersTheNightWhenThePrimaryBrainIsDown(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	down := &fakeBrain{}
+	r := newRunner(store, down, yesProbes(), at(23, 30))
+	r.brain = func(ctx context.Context, prompt string) (string, error) {
+		return "", errors.New("API error (status 402 Payment Required)")
+	}
+	local := &fakeBrain{verdicts: "[]", extract: `[{"statement":"He reads the changelog before upgrading anything.","confidence":"medium"}]`, und: "An understanding the local model wrote.", compact: "A week.", report: "The night, in one line."}
+	r.Shadow = local.fn
+
+	r.Tick(ctx)
+
+	run, ok, err := store.DreamRun(ctx, night)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !run.Finished {
+		t.Fatalf("the night must finish on the shadow's answers when the primary brain is down: %+v ok=%v", run, ok)
+	}
+	open, err := store.OpenHypotheses(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adopted bool
+	for _, h := range open {
+		if strings.Contains(h.Statement, "changelog") {
+			adopted = true
+		}
+	}
+	if !adopted {
+		t.Errorf("the shadow's adopted hypothesis never landed: %+v", open)
+	}
+	doc, err := store.DiaryEntry(ctx, "", "understanding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc, "local model wrote") {
+		t.Errorf("the understanding doc was not rewritten from the shadow's reply, got %q", doc)
+	}
+}
+
+// TestShadow_PrimaryStillWinsWhenItAnswers keeps the fallback from quietly demoting the dream brain: a working primary's reply is the night's, and the shadow stays a traced spectator.
+func TestShadow_PrimaryStillWinsWhenItAnswers(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "The primary's understanding.", compact: "A week.", report: "One line."}
+	r := newRunner(store, primary, yesProbes(), at(23, 30))
+	local := &fakeBrain{verdicts: "[]", extract: "[]", und: "The shadow's understanding.", compact: "A week.", report: "One line."}
+	r.Shadow = local.fn
+
+	r.Tick(ctx)
+
+	doc, err := store.DiaryEntry(ctx, "", "understanding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc, "primary's") {
+		t.Errorf("a working primary must still write the night, got %q", doc)
+	}
+}
+
+// TestDream_StopsRetryingANightWhoseBrainKeepsFailing bounds the retry storm behind the same outage: the daemon ticks every five minutes, so a stage that aborts on a dead brain was re-attempted 76 times in one night (2026-09-03's trace). After failedAttemptCap aborts the night is left for tomorrow.
+func TestDream_StopsRetryingANightWhoseBrainKeepsFailing(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day."); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	down := &fakeBrain{}
+	r := newRunner(store, down, yesProbes(), at(23, 30))
+	r.brain = func(ctx context.Context, prompt string) (string, error) {
+		calls++
+		return "", errors.New("API error (status 402 Payment Required)")
+	}
+
+	for i := 0; i < 12; i++ {
+		r.Tick(ctx)
+	}
+
+	if calls > failedAttemptCap {
+		t.Errorf("a dead brain cost %d calls across 12 ticks, want no more than %d", calls, failedAttemptCap)
+	}
+	if calls == 0 {
+		t.Error("the night never tried at all")
 	}
 }

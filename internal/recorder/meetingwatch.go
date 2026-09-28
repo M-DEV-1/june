@@ -1,15 +1,17 @@
 package recorder
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"ora/internal/db"
+	"ora/internal/proactive"
 	"ora/internal/tracker"
+	"ora/internal/util"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,8 +33,8 @@ const (
 	windowLookback = 30 * time.Minute
 	// windowLookbackRows caps the episodes read for that lookup, and is sized for the lookback above rather than for how often the tracker writes.
 	windowLookbackRows = 400
-	// notifyWait is how long a prompt is left on screen before Ora stops waiting for an answer. A prompt nobody answered is not a no — the next poll simply finds the call still running and the state already marked as asked, so it stays quiet.
-	notifyWait = 10 * time.Minute
+	// notifyWait is how long the meeting question is left on screen before Ora stops waiting for an answer. Fifteen seconds: the question is only worth asking while the call is starting, and a card that outlives its own waiter is a button that does nothing. A prompt nobody answered is not a no — the next poll simply finds the call still running and the state already marked as asked, so it stays quiet.
+	notifyWait = 15 * time.Second
 )
 
 // pwNode is the part of a PipeWire node that says whether it is an application capturing audio. pw-dump prints every object in the graph; everything not described here is ignored.
@@ -47,17 +49,25 @@ type pwNode struct {
 	} `json:"info"`
 }
 
-// micUsers returns the applications capturing from a microphone right now, excluding Ora's own recorder.
+// micUsers returns the applications capturing from a microphone right now, excluding Ora's own recorder, split into those that are in a call and those that are not.
 //
-// Input: the JSON pw-dump writes. Output: one name per application, in the order the dump listed them and without repeats, since a browser opens a separate stream per tab.
+// Input: the JSON pw-dump writes. Output: the names of the applications that capture and also play audio back, then the names of those that only capture; each list is in the order the dump listed them and without repeats, since a browser opens a separate stream per tab.
 //
 // A stream counts only when it is running and names an application. The audio server's own echo canceller is always present as an input stream and names no application, so requiring a name is what keeps it out; requiring "running" is what distinguishes a microphone being read from one merely being open.
-func micUsers(dump []byte) []string {
+//
+// A call plays the other side back through the same application that captures, so an application with a running input stream and a running output stream is in a call. One that only captures is dictating, recording or transcribing: Handy, a push-to-talk dictation tool, opens the microphone for every dictation and plays nothing back, and on 2026-09-03 it was asked about as a meeting five times in fifteen minutes.
+func micUsers(dump []byte) (calls, captureOnly []string) {
 	var nodes []pwNode
 	if err := json.Unmarshal(dump, &nodes); err != nil {
-		return nil
+		return nil, nil
 	}
-	var users []string
+	playing := map[string]bool{}
+	for _, n := range nodes {
+		p := n.Info.Props
+		if p.MediaClass == "Stream/Output/Audio" && n.Info.State == "running" {
+			playing[streamName(p.Binary, p.AppName)] = true
+		}
+	}
 	seen := map[string]bool{}
 	for _, n := range nodes {
 		p := n.Info.Props
@@ -72,9 +82,13 @@ func micUsers(dump []byte) []string {
 			continue
 		}
 		seen[name] = true
-		users = append(users, name)
+		if playing[name] {
+			calls = append(calls, name)
+		} else {
+			captureOnly = append(captureOnly, name)
+		}
 	}
-	return users
+	return calls, captureOnly
 }
 
 // streamName is the name to show a person for one capturing stream.
@@ -147,45 +161,79 @@ func describe(users []string, eps []db.Episode) []string {
 		} else {
 			name = withoutBrowserStatus(name)
 		}
-		if r := []rune(name); len(r) > maxNameRunes {
-			name = strings.TrimSpace(string(r[:maxNameRunes-1])) + "\u2026"
+		// A name over the cap keeps one rune of the budget for the ellipsis, and is trimmed before it so the marker does not follow a space.
+		if len([]rune(name)) > maxNameRunes {
+			name = strings.TrimSpace(util.Runes(name, maxNameRunes-1)) + "…"
 		}
 		named = append(named, name)
 	}
 	return named
 }
 
-// readMicUsers asks the audio server which applications are capturing. It returns nothing when pw-dump is missing or fails, which is also what a machine with no PipeWire reports, so the watcher simply never fires there.
+// readMicUsers asks the audio server which applications are in a call, and logs any that hold the microphone without playing anything back so the rule can be checked against the log. It returns nothing when pw-dump is missing or fails, which is also what a machine with no PipeWire reports, so the watcher simply never fires there.
 func readMicUsers(ctx context.Context) []string {
 	out, err := exec.CommandContext(ctx, "pw-dump").Output()
 	if err != nil {
 		return nil
 	}
-	return micUsers(out)
+	calls, captureOnly := micUsers(out)
+	if len(captureOnly) > 0 {
+		slog.Debug("holding the microphone without playing anything back, not a call", "processes", captureOnly)
+	}
+	return calls
 }
 
-// meetingWatch remembers enough between polls to ask about a call once and then leave it alone. The zero value is ready to use.
+// meetingWatch remembers enough between polls to ask about a call once, then leave it alone, and then end the recording it started when the call goes away. The zero value is ready to use.
 type meetingWatch struct {
+	// mu guards ours, which the poll loop and a press on the notice's own button both write.
+	mu    sync.Mutex
 	held  int
 	asked bool
+	// ours is true while a recording this watcher started is still running, which is the only kind it may stop. A recording the user started from the tray is theirs to stop, since it may be recording something that never opens a call stream at all.
+	ours bool
+	// gone counts the consecutive polls that have found no call while a recording of ours is running.
+	gone int
 }
 
-// step folds one poll into the watch and reports whether this is the moment to ask about a meeting.
+// started records that the watcher's own Start succeeded, which is what makes the recording one this watcher may stop again. It takes the lock because a press on the notice's own button starts a recording from the HTTP goroutine while the poll loop is reading the same field.
+func (w *meetingWatch) started() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.ours = true
+}
+
+// step folds one poll into the watch and reports what to do about it.
 //
-// Input: the applications holding the microphone, and whether Ora is already recording. Output: true exactly once per call, on the poll where the microphone has been held long enough to be a call and no question has been asked yet.
+// Input: the applications holding the microphone, and whether Ora is already recording. Output: ask, true exactly once per call, on the poll where the microphone has been held long enough to be a call and no question has been asked yet; and stop, true once for a recording this watcher started after asksAfterPolls consecutive polls with no call.
 //
-// Releasing the microphone is what ends a call, so the next one is asked about again.
-func (w *meetingWatch) step(users []string, recording bool) bool {
+// Releasing the microphone is what ends a call, so the next one is asked about again — and it is also what ends a recording Ora started on its own. The evidence is the same in both directions, and so is the number of polls: one poll without a call stream is a browser reopening its capture, and two is the call being over.
+func (w *meetingWatch) step(users []string, recording bool) (ask, stop bool) {
 	if recording || len(users) == 0 {
 		w.held, w.asked = 0, false
-		return false
 	}
-	w.held++
-	if w.held < asksAfterPolls || w.asked {
-		return false
+	if !recording {
+		// Nothing is recording, so the watcher has no recording of its own left to stop — whatever starts next is the user's until this watcher starts one itself.
+		w.gone, w.ours = 0, false
+		if len(users) == 0 {
+			return false, false
+		}
+		w.held++
+		if w.held < asksAfterPolls || w.asked {
+			return false, false
+		}
+		w.asked = true
+		return true, false
 	}
-	w.asked = true
-	return true
+	if !w.ours || len(users) > 0 {
+		w.gone = 0
+		return false, false
+	}
+	w.gone++
+	if w.gone < asksAfterPolls {
+		return false, false
+	}
+	w.ours, w.gone = false, 0
+	return false, true
 }
 
 // askBody is the line under the prompt's title. It names the application holding the microphone, because "Chrome is using your microphone" is a question a person can answer and "in a meeting?" on its own is a guess.
@@ -193,26 +241,24 @@ func askBody(users []string) string {
 	return strings.Join(users, ", ") + " is using your microphone."
 }
 
-// askToRecord puts the question on screen with a button on it and reports whether the button was pressed. notify-send prints the name of the action the user chose, and prints nothing when the prompt is dismissed or times out.
-func askToRecord(ctx context.Context, users []string) bool {
-	ctx, cancel := context.WithTimeout(ctx, notifyWait)
-	defer cancel()
+// recordNoticeKind is the kind the meeting question is raised under, on the window's card and in the answer registry alike.
+const recordNoticeKind = "meeting"
 
-	cmd := exec.CommandContext(ctx, "notify-send",
-		"--app-name=Ora",
-		"--action=record=Start recording",
-		"In a meeting?",
-		askBody(users))
-	out, err := cmd.Output()
-	if err != nil {
-		return false
+// askToRecord puts the question to the user and reports whether they said to record. It goes to the desktop window's own card when a window is listening and to a desktop notification only when none is, which is the rule every other question Ora asks already followed — this one posted a GNOME banner even with the window open, so the answer sat on a surface the settled design does not use.
+func askToRecord(ctx context.Context, users []string) bool {
+	n := proactive.Notice{
+		Title:   "In a meeting?",
+		Body:    askBody(users),
+		Kind:    recordNoticeKind,
+		Actions: []proactive.Action{{Key: "record", Label: "Start recording"}},
 	}
-	return strings.TrimSpace(string(bytes.TrimSpace(out))) == "record"
+	// apply is nil: the watcher registers what Start recording does for as long as it is running, which outlives this one question and is what lets a press land after it has timed out.
+	return proactive.Ask(n, notifyWait, proactive.NotifySendAsk, nil) == "record"
 }
 
 // WatchForMeetings asks whether to record whenever an application other than Ora holds the microphone for long enough to be a call, and starts recording if the answer is yes. It returns when ctx is cancelled.
 //
-// The microphone is the signal rather than a meeting app's window, because it is the one thing every call has in common: it needs no list of which applications count, and it does not fire for a meeting tab that is merely open. What it cannot tell on its own is a call from any other use of the microphone, which is why the default is to ask rather than to record.
+// The microphone is the signal rather than a meeting app's window, because it is the one thing every call has in common: it needs no list of which applications count, and it does not fire for a meeting tab that is merely open. Playback from the same application is what tells a call from dictation or a voice note. What the two together cannot tell is a call from, say, a voice message being listened to and answered, which is why the default is to ask rather than to record.
 //
 // With autoRecord set the question is skipped and recording starts on the same signal.
 func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
@@ -223,13 +269,35 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 	defer ticker.Stop()
 
 	var w meetingWatch
+	// The notice's "Start recording" button works whether or not askToRecord is still waiting on it: a press that lands after the question timed out, after a daemon restart, or on a second surface runs this instead, and the recording it starts is still one this watcher will stop when the call ends. Registered only while the watcher is running, so nothing starts a recording there is nobody left to stop.
+	proactive.SetNoticeAction(recordNoticeKind, "record", func() error {
+		if rec.Active() {
+			return nil
+		}
+		if err := rec.Start(); err != nil {
+			return err
+		}
+		w.started()
+		slog.Info("started the meeting recording from the notice's own button")
+		return nil
+	})
+	defer proactive.SetNoticeAction(recordNoticeKind, "record", nil)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			users := readMicUsers(ctx)
-			if !w.step(users, rec.Active()) {
+			ask, stop := w.step(users, rec.Active())
+			if stop {
+				slog.Info("the call Ora was recording has released the microphone, stopping the recording")
+				if _, err := rec.StopAndProcess(ctx); err != nil {
+					slog.Error("failed to stop the meeting recording Ora started", "error", err)
+				}
+				continue
+			}
+			if !ask {
 				continue
 			}
 			// The prompt names the window rather than the process wherever one can be found, since a call in a browser tab is "chrome" and so is everything else in that browser.
@@ -250,7 +318,10 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 			}
 			if err := rec.Start(); err != nil {
 				slog.Error("failed to start the meeting recording Ora offered", "error", err)
+				continue
 			}
+			// Only a recording that actually started is one this watcher will stop again when the call goes away.
+			w.started()
 		}
 	}
 }

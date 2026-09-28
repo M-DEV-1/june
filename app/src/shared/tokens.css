@@ -1,0 +1,83 @@
+/* The raw colour and shadow tokens, shared by src/next/index.css (the main window, Tailwind) and src/styles.css (the hover, plain CSS), so the two windows are built from one ramp rather than two copies that can drift apart. DESIGN.md documents what each token is for and where its numbers came from; nothing outside this file names a colour. */
+
+:root {
+    --background: #ffffff;
+    --foreground: #17181c;
+    --card: #ffffff;
+    --card-foreground: #17181c;
+    --popover: #ffffff;
+    --popover-foreground: #17181c;
+    --primary: #5a45ea;
+    --primary-foreground: #ffffff;
+    --secondary: #f2f2f4;
+    --secondary-foreground: #17181c;
+    --muted: rgba(0, 0, 0, .035);
+    --muted-foreground: #61646d;
+    --accent: rgba(0, 0, 0, .045);
+    --accent-foreground: #17181c;
+    --destructive: #c3372b;
+    /* #a3660a read at 4.40:1 against the sidebar's #f7f7f9, under the 4.5:1 AA floor for normal text; this shade clears it (4.87:1) while staying the same amber. */
+    --work: #996009;
+    --border: rgba(0, 0, 0, .075);
+    --border-strong: rgba(0, 0, 0, .13);
+    --input: rgba(0, 0, 0, .13);
+    --ring: #5a45ea;
+    --hover: rgba(0, 0, 0, .045);
+    --selected: rgba(0, 0, 0, .075);
+    --sunken: rgba(0, 0, 0, .035);
+    --shade-1: rgba(0, 0, 0, .06);
+    --shade-2: rgba(0, 0, 0, .10);
+    --shade-3: rgba(0, 0, 0, .20);
+    --radius: 12px;
+    --sidebar: #f7f7f9;
+    --sidebar-foreground: #17181c;
+    --sidebar-primary: #5a45ea;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: rgba(0, 0, 0, .045);
+    --sidebar-accent-foreground: #17181c;
+    --sidebar-border: rgba(0, 0, 0, .075);
+    --sidebar-ring: #5a45ea;
+}
+
+[data-theme="dark"] {
+    /* Midnight black: the page is near-black with a hint of blue rather than graphite, the sidebar a step darker still, and every raised surface a step lighter, so depth comes from the ramp and not from borders alone. */
+    --background: #0a0a0d;
+    --foreground: #ededf0;
+    --card: #131317;
+    --card-foreground: #ededf0;
+    --popover: #19191e;
+    --popover-foreground: #ededf0;
+    --primary: #9d90ff;
+    --primary-foreground: #17142e;
+    --secondary: #1c1c22;
+    --secondary-foreground: #ededf0;
+    --muted: rgba(255, 255, 255, .05);
+    --muted-foreground: #8e919b;
+    --accent: rgba(255, 255, 255, .06);
+    --accent-foreground: #ededf0;
+    --destructive: #f08279;
+    --work: #e0b341;
+    --border: rgba(255, 255, 255, .08);
+    --border-strong: rgba(255, 255, 255, .14);
+    --input: rgba(255, 255, 255, .14);
+    --ring: #9d90ff;
+    --hover: rgba(255, 255, 255, .06);
+    --selected: rgba(255, 255, 255, .11);
+    --sunken: rgba(255, 255, 255, .04);
+    --shade-1: rgba(0, 0, 0, .4);
+    --shade-2: rgba(0, 0, 0, .55);
+    --shade-3: rgba(0, 0, 0, .7);
+    /* Dark elevation needs more than one bigger shadow alpha: a soft top highlight (light source from above) stacked with the drop shadow, growing at each step, plus a hairline ring on md and lg to separate a floating surface from a background that is barely darker than it. */
+    --shadow-sm: inset 0 1px 0 rgba(255, 255, 255, .05), 0 1px 2px rgba(0, 0, 0, .45);
+    --shadow-md: inset 0 1px 0 rgba(255, 255, 255, .06), 0 6px 16px -4px rgba(0, 0, 0, .65), 0 0 0 1px rgba(255, 255, 255, .07);
+    --shadow-lg: inset 0 1px 0 rgba(255, 255, 255, .07), 0 20px 44px -12px rgba(0, 0, 0, .8), 0 0 0 1px rgba(255, 255, 255, .09);
+    --shadow-xl: var(--shadow-lg);
+    --sidebar: #050507;
+    --sidebar-foreground: #ededf0;
+    --sidebar-primary: #9d90ff;
+    --sidebar-primary-foreground: #17142e;
+    --sidebar-accent: rgba(255, 255, 255, .06);
+    --sidebar-accent-foreground: #ededf0;
+    --sidebar-border: rgba(255, 255, 255, .08);
+    --sidebar-ring: #9d90ff;
+}

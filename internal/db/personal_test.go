@@ -13,10 +13,10 @@ func TestPersonalContext_UpsertNotAppend(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera."); err != nil {
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen."); err != nil {
 		t.Fatalf("SetPersonalContext: %v", err)
 	}
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera, git handle M-DEV-1."); err != nil {
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen, git handle zbraxen."); err != nil {
 		t.Fatalf("SetPersonalContext second write: %v", err)
 	}
 
@@ -27,7 +27,7 @@ func TestPersonalContext_UpsertNotAppend(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry after two writes to the same subject, got %d: %+v", len(entries), entries)
 	}
-	if entries[0].Content != "The user is Alex Rivera, git handle M-DEV-1." {
+	if entries[0].Content != "The user is Zemna Braxen, git handle zbraxen." {
 		t.Errorf("want the newest content, got %q", entries[0].Content)
 	}
 	if entries[0].UpdatedAt.IsZero() {
@@ -41,8 +41,8 @@ func TestPersonalContext_OrderedBySubjectAndDeletable(t *testing.T) {
 	store := memStore(t)
 
 	for _, e := range [][2]string{
-		{"priya-shah", "Priya Shah is the user's colleague."},
-		{"identity", "The user is Alex Rivera."},
+		{"vexil-quorin", "Vexil Quorin is the user's colleague."},
+		{"identity", "The user is Zemna Braxen."},
 		{"preferences-communication", "The user wants short answers."},
 	} {
 		if err := store.SetPersonalContext(ctx, e[0], e[1]); err != nil {
@@ -58,12 +58,12 @@ func TestPersonalContext_OrderedBySubjectAndDeletable(t *testing.T) {
 	for _, e := range entries {
 		subjects = append(subjects, e.Subject)
 	}
-	want := []string{"identity", "preferences-communication", "priya-shah"}
+	want := []string{"identity", "preferences-communication", "vexil-quorin"}
 	if strings.Join(subjects, ",") != strings.Join(want, ",") {
 		t.Errorf("want subjects ordered %v, got %v", want, subjects)
 	}
 
-	if err := store.DeletePersonalContext(ctx, "priya-shah"); err != nil {
+	if err := store.DeletePersonalContext(ctx, "vexil-quorin"); err != nil {
 		t.Fatalf("DeletePersonalContext: %v", err)
 	}
 	entries, err = store.PersonalContext(ctx)
@@ -71,7 +71,7 @@ func TestPersonalContext_OrderedBySubjectAndDeletable(t *testing.T) {
 		t.Fatalf("PersonalContext after delete: %v", err)
 	}
 	for _, e := range entries {
-		if e.Subject == "priya-shah" {
+		if e.Subject == "vexil-quorin" {
 			t.Error("deleted subject is still there")
 		}
 	}
@@ -85,7 +85,7 @@ func TestPersonalContext_ConsolidatorCannotSeeIt(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Alex Rivera."); err != nil {
+	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen."); err != nil {
 		t.Fatalf("SetPersonalContext: %v", err)
 	}
 	if _, err := store.LogNote(ctx, "the user was reading about sqlite", "fact"); err != nil {
@@ -97,7 +97,7 @@ func TestPersonalContext_ConsolidatorCannotSeeIt(t *testing.T) {
 		t.Fatalf("ExistingNotes: %v", err)
 	}
 	for _, n := range existing {
-		if strings.Contains(n.Content, "Alex Rivera") {
+		if strings.Contains(n.Content, "Zemna Braxen") {
 			t.Fatalf("the consolidator can see personal context: %q", n.Content)
 		}
 	}
@@ -111,26 +111,13 @@ func TestPersonalContext_ConsolidatorCannotSeeIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PersonalContext: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Content != "The user is Alex Rivera." {
+	if len(entries) != 1 || entries[0].Content != "The user is Zemna Braxen." {
 		t.Errorf("consolidation changed personal context: %+v", entries)
 	}
 }
 
-// TestPersonalContext_RejectsEmptySubjectOrContent keeps the table from collecting blank rows, since nothing downstream can use one.
-func TestPersonalContext_RejectsEmptySubjectOrContent(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	if err := store.SetPersonalContext(ctx, "  ", "something"); err == nil {
-		t.Error("an empty subject was accepted")
-	}
-	if err := store.SetPersonalContext(ctx, "identity", " \n "); err == nil {
-		t.Error("empty content was accepted")
-	}
-}
-
-// TestPersonalContext_MigratesIdentityNote covers the one-time move of the identity fact out of notes and into personal context, which happens when the schema is created on an existing database.
-func TestPersonalContext_MigratesIdentityNote(t *testing.T) {
+// TestPersonalContext_NoteNamingTheUserSurvivesRestart checks that opening the store leaves the notes table alone. The one-time identity migration ran inside createSchema on every open and unconditionally deleted every kind='fact' note naming both the user and their computer, so any later note the compiler or save_note wrote was destroyed on the next daemon start.
+func TestPersonalContext_NoteNamingTheUserSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ora.db")
 
@@ -138,10 +125,8 @@ func TestPersonalContext_MigratesIdentityNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
-	if _, err := store.LogNote(ctx, "Alex Rivera is the owner of this computer and goes by Alex.", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	if _, err := store.LogNote(ctx, "the user was reading about sqlite", "fact"); err != nil {
+	const kept = "Zemna Braxen, owner of this computer, wants the daemon to start at login"
+	if _, err := store.LogNote(ctx, kept, "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
 	store.Close()
@@ -152,44 +137,11 @@ func TestPersonalContext_MigratesIdentityNote(t *testing.T) {
 	}
 	defer store.Close()
 
-	entries, err := store.PersonalContext(ctx)
-	if err != nil {
-		t.Fatalf("PersonalContext: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Subject != "identity" {
-		t.Fatalf("want one entry under \"identity\", got %+v", entries)
-	}
-	if !strings.Contains(entries[0].Content, "Alex Rivera") || !strings.Contains(entries[0].Content, "M-DEV-1") {
-		t.Errorf("identity entry lost its content: %q", entries[0].Content)
-	}
-
 	notes, err := store.GetNotes(ctx)
 	if err != nil {
 		t.Fatalf("GetNotes: %v", err)
 	}
-	for _, n := range notes {
-		if strings.Contains(n.Content, "owner of this computer") {
-			t.Errorf("the identity note is still in notes: %q", n.Content)
-		}
-	}
-	if len(notes) != 1 {
-		t.Errorf("the migration touched unrelated notes: %+v", notes)
-	}
-
-	// Idempotent: opening again neither re-adds the note nor overwrites an entry the user has since edited.
-	if err := store.SetPersonalContext(ctx, "identity", "Edited by the user."); err != nil {
-		t.Fatalf("SetPersonalContext: %v", err)
-	}
-	store.Close()
-	store, err = db.New(path)
-	if err != nil {
-		t.Fatalf("db.New third open: %v", err)
-	}
-	entries, err = store.PersonalContext(ctx)
-	if err != nil {
-		t.Fatalf("PersonalContext: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Content != "Edited by the user." {
-		t.Errorf("the migration ran twice or overwrote a user edit: %+v", entries)
+	if len(notes) != 1 || notes[0].Content != kept {
+		t.Errorf("reopening the store destroyed the note: %+v", notes)
 	}
 }

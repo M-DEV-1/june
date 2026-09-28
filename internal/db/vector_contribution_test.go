@@ -1,9 +1,6 @@
 package db
 
-// This file tests recordVectorContribution (see hybrid.go), the self-accounting
-// fusion counter: whether a vector-arm candidate survived fusion into
-// HybridSearch's final top-k, written into the tally table under the
-// "vector-queries" / "vector-hits" pseudo-providers.
+// This file tests recordVectorContribution (see hybrid.go), the self-accounting fusion counter: whether a vector-arm candidate survived fusion into HybridSearch's final top-k, written into the tally table under the "vector-queries" / "vector-hits" pseudo-providers.
 
 import (
 	"context"

@@ -1,0 +1,6 @@
+{
+    "uuid": "ora@ora.local",
+    "name": "Ora Window Raiser",
+    "description": "Exposes four D-Bus methods Ora's own daemon uses to list the open windows and bring one of them to the front: ActivateByPid, ActivateByTitle, ActivateByWmClass and List. They answer Ora's own daemon and refuse every other caller. Does nothing visible on its own.",
+    "shell-version": ["46", "47", "48", "49", "50"]
+}

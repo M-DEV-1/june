@@ -3,6 +3,7 @@ package tracker
 import (
 	"regexp"
 	"strings"
+	"sync/atomic"
 )
 
 type Activity struct {
@@ -12,7 +13,7 @@ type Activity struct {
 	UserActivity string
 	VisibleText  []string
 	// ImageJPEG is the frame for the monitor the user is on, and ExtraJPEG holds one frame per other monitor at the same moment — a meeting on one screen while notes sit on the other is one activity, not two.
-	// Both persist: writeEpisodeJPEG stores the primary as frames/{id}.jpg and each extra as frames/{id}-b.jpg, {id}-c.jpg (internal/db/image.go), read back with Store.EpisodeExtraImages. The vision call still only sees the primary — tieredCapture in internal/tracker/daemon.go passes one PNG to visionFn.
+	// Both persist: writeEpisodeJPEG stores the primary as frames/{id}.jpg and each extra as frames/{id}-b.jpg, {id}-c.jpg (internal/db/image.go), read back with Store.EpisodeExtraImages. The vision call sees the whole canvas, not the primary monitor: tieredCapture in internal/tracker/daemon.go passes visionFn the one PNG grabScreen returned, which spans every monitor, and screenFrames only splits that same PNG per monitor afterwards for storage. What is captured is gated by the blocklist and by Ora's own window, not by which monitor a window sits on — skipReason runs before any capture starts, so it covers the vision tier and the accessibility tier alike.
 	ImageJPEG []byte
 	ExtraJPEG [][]byte
 }
@@ -40,6 +41,27 @@ func (s Sight) Text() string {
 // defines standard interface for all os implementations
 type Tracker interface {
 	GetActiveWindow() (*Activity, error)
+}
+
+// IsOraWindow reports whether a window is Ora's own desktop window: the app is named ora, or it is the XWayland frame process (mutter-x11-frames) carrying the exact title "Ora". A terminal titled "ora" because it sits in the repo is not the window, so the title alone never decides.
+// Input: an application name and a window title. Output: true when the window is Ora itself.
+// Ora looking at Ora is never the user's activity, so this is the one rule the tracker, the capture loop and the /context reads all filter by.
+func IsOraWindow(app, title string) bool {
+	app = strings.TrimSpace(app)
+	return strings.EqualFold(app, "ora") || (app == "mutter-x11-frames" && strings.TrimSpace(title) == "Ora")
+}
+
+// blocklist is the app blocklist the daemon in this process was built with. It is package-level because a read outside the tracker has no daemon to ask: the /context handler answers the hotkey from a live window read (internal/ipc/reads.go), and that read has to refuse the same applications the capture loop refuses or the hotkey hands the model a window the episode store would never hold.
+// ponytail: one process runs one tracker, so a package variable is the whole of what this needs. Give the Daemon's blocklist a home the ipc server can be constructed with if a second tracker ever exists.
+var blocklist atomic.Pointer[[]string]
+
+// SetBlocklist records the app blocklist every reader in this process should apply. Input: the list of application names to refuse, which may be nil. Output: none. NewDaemon calls it, so ordinary callers never have to.
+func SetBlocklist(list []string) { blocklist.Store(&list) }
+
+// Blocklisted reports whether an application is one this machine refuses to record. Input: an application name. Output: true when the tracker would drop that window, false when it would keep it or when no blocklist has been set. It matches the same way the capture loop does, so the two cannot drift apart.
+func Blocklisted(app string) bool {
+	list := blocklist.Load()
+	return list != nil && MatchesBlocklist(app, *list)
 }
 
 func Normalize(app, title string) *Activity {

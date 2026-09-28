@@ -6,7 +6,8 @@ package memory
 import (
 	"strings"
 	"unicode"
-	"unicode/utf8"
+
+	"ora/internal/util"
 )
 
 // Kind classifies a memory item for retrieval policy.
@@ -143,10 +144,12 @@ func extractSignal(raw, title string, maxWords int) (string, SignalKind) {
 		kept = append(kept, line)
 	}
 	text := strings.Join(kept, "\n")
-	text = strings.Join(strings.Fields(text), " ")
 	// maxWords of 0 means keep everything: the caller is the embedding path, where a capture is split into passages rather than truncated.
+	// capWords splits on whitespace and rejoins with single spaces, so it already flattens the text; running a separate collapsing pass first split and rejoined a hundred-kilobyte capture for nothing.
 	if maxWords > 0 {
 		text = capWords(text, maxWords)
+	} else {
+		text = util.OneLine(text)
 	}
 
 	if text == "" {
@@ -172,7 +175,11 @@ func preferVisionTail(raw string) string {
 	}
 	last := blocks[len(blocks)-1]
 	lastWords := wordCount(last)
-	headWords := wordCount(strings.Join(blocks[:len(blocks)-1], "\n"))
+	// Counted block by block rather than over their join: the separator is a newline, which is whitespace either way, so the totals agree while the whole head no longer has to be copied into a fresh hundred-kilobyte string just to be measured.
+	headWords := 0
+	for _, b := range blocks[:len(blocks)-1] {
+		headWords += wordCount(b)
+	}
 	if lastWords >= 8 && lastWords <= signalMaxWords && headWords > signalMaxWords && looksLikeVision(last) {
 		return last
 	}
@@ -252,17 +259,17 @@ func isChromeLine(line string) bool {
 	if float64(letters)/float64(total) < 0.25 && total > 8 {
 		return true
 	}
-	// Common a11y junk
-	lower := strings.ToLower(line)
-	for _, junk := range []string{
-		"skip to main content", "skip to content", "cookie", "accept all",
-	} {
-		if lower == junk {
+	// Common a11y junk. Compared case-insensitively in place rather than against a lowercased copy: a capture is tens of thousands of lines and each copy was allocated only to be compared against these four fixed strings and thrown away.
+	for _, junk := range chromeJunkLines {
+		if strings.EqualFold(line, junk) {
 			return true
 		}
 	}
 	return false
 }
+
+// chromeJunkLines are the whole-line accessibility artefacts that carry no content, matched case-insensitively against a captured line in full.
+var chromeJunkLines = []string{"skip to main content", "skip to content", "cookie", "accept all"}
 
 // isObjectChar reports whether r is an object replacement (U+FFFC) or unknown replacement (U+FFFD) character. AT-SPI reports every image, video, and icon as U+FFFC, so a screenful of thumbnails captures as nothing but these \u2014 they carry no meaning, but they tokenize and embed as if they did.
 func isObjectChar(r rune) bool {
@@ -315,8 +322,19 @@ func capWords(s string, max int) string {
 	return strings.Join(words[:max], " ")
 }
 
+// wordCount counts the whitespace-separated words in s. Input: any string. Output: the number of words, counted the same way strings.Fields splits them but without allocating the slice of every word, which on a hundred-kilobyte capture was megabytes of string headers built only to be measured.
 func wordCount(s string) int {
-	return len(strings.Fields(s))
+	n := 0
+	inWord := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			inWord = false
+		} else if !inWord {
+			inWord = true
+			n++
+		}
+	}
+	return n
 }
 
 // isUIGlyph reports braille/box-drawing/block/geometric noise common in TUI and accessibility trees — not natural language content.
@@ -335,15 +353,4 @@ func isUIGlyph(r rune) bool {
 	default:
 		return false
 	}
-}
-
-func truncateRunes(s string, max int) string {
-	if max <= 0 || utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	runes := []rune(s)
-	if max < 1 {
-		return ""
-	}
-	return string(runes[:max]) + "…"
 }

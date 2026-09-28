@@ -2,12 +2,10 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"ora/internal/db"
-	"ora/internal/memory"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,12 +13,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"google.golang.org/genai"
+	"ora/internal/act"
+	"ora/internal/db"
+	"ora/internal/memory"
+	"ora/internal/tracker"
+	"ora/internal/util"
 )
 
-// maxToolRows caps how many rows any one tool result may carry. A tool result is prompt text, and action_items and thread_evidence both read from stores that grow without bound — open action items never expire by design, and a long-running thread accumulates captures forever. query_memory has queryMemoryHits for the same reason.
+// maxToolRows caps how many rows any one tool result may carry. A tool result is prompt text, and action_items reads from a store that grows without bound — open action items never expire by design. query_memory has queryMemoryHits for the same reason.
 const maxToolRows = 40
 
 func shellName() string {
@@ -30,656 +33,6 @@ func shellName() string {
 	return "sh"
 }
 
-// toolDefinitions returns ORA's own function declarations for the Live API.
-// Every declaration is NON_BLOCKING. An unset Behavior means BLOCKING, which tells the Live API to freeze the conversation for the whole duration of a tool call — the model stops speaking and stops listening until the result lands, so a two-second memory lookup becomes two seconds of dead air on a voice call. NON_BLOCKING keeps the model talking and listening while the call runs; the result is folded back in later, at the moment picked by toolResponseScheduling in connect.go. Ora's own tool execution was already off the receive loop (see runToolCall), so this changes nothing about the transport — only the model-level contract.
-func toolDefinitions() []*genai.Tool {
-	return []*genai.Tool{{
-		FunctionDeclarations: []*genai.FunctionDeclaration{
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				// TODO: need an approve/suggest feature for these tools
-				Name:        "shell_exec",
-				Description: "Execute a shell command on the user's system. Use powershell syntax on windows, sh on linux/mac. ALWAYS ask for confirmation before running destructive commands (rm, del, format, etc).",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"command": {Type: genai.TypeString, Description: "The shell command to execute"},
-					},
-					Required: []string{"command"},
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "read_clipboard",
-				Description: "Read the current contents of the user's clipboard",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "read_file",
-				Description: "Read the contents of a file on the user's filesystem. Use this to inspect code, configs, or any text file.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"path": {Type: genai.TypeString, Description: "Absolute or relative file path to read"},
-					},
-					Required: []string{"path"},
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "list_files",
-				Description: "List files and directories at a given path. Returns names with [dir] or [file] prefix.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"path": {Type: genai.TypeString, Description: "Directory path to list. Defaults to current directory if empty."},
-					},
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "open_url",
-				Description: "Open a URL in the user's default browser.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"url": {Type: genai.TypeString, Description: "The URL to open"},
-					},
-					Required: []string{"url"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "query_memory",
-				Description: "Topical search over memory (moments, facts, arcs, period summaries). " +
-					"Moments (screen observations) rank with recency; facts/notes do not expire. " +
-					"Use app to restrict to one application (Slack, Firefox, Code). " +
-					"Whenever the question is anchored to a time — a day, a part of a day, a range — pass since/until: " +
-					"the search then runs and ranks entirely inside that window, whereas without it the best matches can all come from the wrong day, and one busy stretch can drown out the rest of its own day. " +
-					"A part of a day gets timestamp bounds, not the whole day: morning is roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that. " +
-					"When a question narrows the time, run a fresh narrower query — do not answer a narrow question from a wider fetch you already have. " +
-					"For pure day/timeline questions use recall. For 'what was I just doing' use get_recent.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"query":  {Type: genai.TypeString, Description: "What to search for — topic, project, show, person, etc. Never put a time word here ('today', 'yesterday', 'last week') — it will match text instead of dates; use since/until for that."},
-						"domain": {Type: genai.TypeString, Description: "Optional. Restrict to 'work' or 'personal' memories only. Omit to search everything, weighted toward whichever domain you're currently in."},
-						"app":    {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring, e.g. slack, firefox, code)."},
-						"since":  {Type: genai.TypeString, Description: "Optional. Start of the time window results must fall in. 'today', 'yesterday', a bare date (2026-07-05) meaning its start, or a timestamp (2026-07-05T09:30:00). You know the current date/time — convert other phrases into a concrete date yourself. Omit for no lower bound."},
-						"until":  {Type: genai.TypeString, Description: "Optional. End of the time window (same formats as 'since'; a bare date covers through the end of that day). Omit to mean up to now. For a single day, set since and until to that same date."},
-					},
-					Required: []string{"query"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "query_store",
-				Description: "Run one read-only SQL query straight against Ora's sqlite store, for structural and aggregate questions that a relevance-ranked search cannot answer — counts, group-bys, joins, \"which meetings did I attend today\", \"what hour do I usually stop working\". " +
-					"query_memory searches by meaning and ranks by relevance; this reads the tables directly, so use it whenever the real answer is a COUNT, a GROUP BY, a MIN/MAX, or a join across tables rather than the ten most-relevant rows. " +
-					"The connection itself is read-only — INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA-writes fail at the database, not by a filter on your text — so only SELECT, PRAGMA table_info(...), and EXPLAIN can do anything. " +
-					"Exactly one statement per call, no trailing statements after a semicolon. " +
-					"Every *_at/*_time column is UTC text — for anything the user would call \"today\" or an hour of day, wrap it: datetime(created_at,'localtime') BETWEEN ... " +
-					"Results render as a header line of column names, then one line per row with values separated by a TAB — window titles routinely contain pipes and spaces, so a tab is the only separator that stays unambiguous. A query matching nothing says \"no rows matched\" plainly. Output is capped in rows and characters — add LIMIT or aggregate rather than pulling raw rows if you hit the cap. " +
-					"Schema (table: columns — type):\n" +
-					"nodes: id INTEGER, parent_id INTEGER, type TEXT, content TEXT, created_at DATETIME, domain TEXT\n" +
-					"threads: id INTEGER, subject TEXT, kind TEXT, state TEXT, salience REAL, times_seen INTEGER, created_at DATETIME, last_seen_at DATETIME, status TEXT\n" +
-					"episode_threads: episode_id INTEGER, thread_id INTEGER — join table linking episodes to the threads they were summarised into\n" +
-					"episodes: id INTEGER, created_at DATETIME, app TEXT, title TEXT, screen_text TEXT, importance REAL, domain TEXT, user_activity TEXT, visible_text TEXT, image_path TEXT\n" +
-					"notes: id INTEGER, content TEXT, kind TEXT, created_at DATETIME, updated_at DATETIME — kind is exactly one of 'action', 'fact', 'meeting', 'system-log'\n" +
-					"  A meeting's minutes are a note with kind='meeting'. Meetings are NOT episodes: episodes are screen captures, so searching them for an app called Teams or Zoom finds the window, never the meeting. Count or read meetings from notes.\n" +
-					"  An action note carries its state as a [state/priority] prefix at the start of content, such as '[open/normal] ...', so items still owed are kind='action' AND content LIKE '[open/%'.\n" +
-					"diary: id INTEGER, day TEXT, kind TEXT, content TEXT, created_at DATETIME, updated_at DATETIME\n" +
-					"folds: id INTEGER, task TEXT, result TEXT, created_at DATETIME, consumed_at DATETIME\n" +
-					"personal_context: id INTEGER, subject TEXT, content TEXT, updated_at DATETIME\n" +
-					"hypotheses: id INTEGER, statement TEXT, confidence TEXT, status TEXT, born TEXT, last_tested TEXT, times_tested INTEGER, evidence TEXT, reason TEXT\n" +
-					"tally: day TEXT, provider TEXT, calls INTEGER, failures INTEGER, total_ms INTEGER\n" +
-					"working_state: id INTEGER, content TEXT, updated_at DATETIME\n" +
-					"dream_runs: night TEXT, started_at DATETIME, finished_at DATETIME, stages_done TEXT, grinder TEXT, report TEXT\n" +
-					"episodes_fts(screen_text) — full-text search over episodes.screen_text; use \"episodes_fts MATCH 'word'\" and join its rowid to episodes.id\n" +
-					"memory_fts(content, source, ref_id) — full-text search over notes/threads/diary/summaries combined; use \"memory_fts MATCH 'word'\", source tells you which table ref_id points into",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"query": {Type: genai.TypeString, Description: "One read-only SQL statement, no trailing statements."},
-					},
-					Required: []string{"query"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "recall",
-				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
-					"A part of a day gets timestamp bounds rather than the whole day — morning roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that — and a question that narrows the time deserves a fresh narrower call, not an answer read off a wider fetch. " +
-					"Use subject for an ongoing arc. Use app to keep only that application's moments. " +
-					"Returns short content+context lines, not raw screen dumps.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"subject": {Type: genai.TypeString, Description: "Optional. A subject/topic to recall (fuses the matching thread's arc with diverse episode specifics). Cannot be combined with app, since, or until — use one or the other."},
-						"since":   {Type: genai.TypeString, Description: "Optional. Start of the timeline window: 'today', 'yesterday', a bare date (2026-07-05), or a timestamp (2026-07-05T00:00:00). You know the current date/time — convert other phrases like 'July 5th' or 'last week' into a concrete date yourself. Defaults to the start of today."},
-						"until":   {Type: genai.TypeString, Description: "Optional. End of the timeline window (same formats as 'since'). A bare date covers the whole day. Defaults to now. For a single day, set since and until to that same date."},
-						"app":     {Type: genai.TypeString, Description: "Optional. Restrict moments to this application name (case-insensitive substring)."},
-					},
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "get_recent",
-				Description: "The most recent screen moments, newest first. Use for 'what was I just doing', 'what have I been looking at', or the last few captures in an app. Not a topical search.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"limit": {Type: genai.TypeInteger, Description: "How many moments to return (default 10, max 50)."},
-						"app":   {Type: genai.TypeString, Description: "Optional. Restrict to this application name (case-insensitive substring)."},
-					},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "branch",
-				Description: "Resolve one open-ended question or research task that needs cross-referencing " +
-					"several searches to build a complete answer (e.g. \"catch me up on everything about the " +
-					"Riddler project\", or a question spanning multiple topics/timeframes) — instead of calling " +
-					"query_memory/recall repeatedly yourself. Runs an internal multi-step search in the " +
-					"background and returns only the final synthesized answer; you will not see, and must not " +
-					"need, its intermediate steps. Prefer query_memory/recall directly for a single simple lookup.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"task": {Type: genai.TypeString, Description: "The open-ended question or research task to resolve."},
-					},
-					Required: []string{"task"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "save_note",
-				Description: "Save a durable fact the user tells you directly in conversation — identity, " +
-					"preferences, plans, relationships, ongoing projects. Use this the moment they say something " +
-					"worth remembering long-term (\"remember I have a dentist appointment Friday\", \"I prefer " +
-					"terse replies\"). This is the ONLY way something said in conversation reaches long-term " +
-					"memory — screen activity is captured separately and automatically, but nothing spoken or " +
-					"typed to you here is remembered unless you save it. Don't use it for transient task chatter.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"content": {Type: genai.TypeString, Description: "The fact to remember, written as a durable statement, not a command to you."},
-					},
-					Required: []string{"content"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "personal_context",
-				Description: "The small store of things known for CERTAIN about the user: who they are, the people in their life " +
-					"(family, colleagues, friends), and preferences they have stated. Every entry goes into every conversation you " +
-					"have with them, so it stays small and it stays true. " +
-					"action \"set\" is only for something the user said about themselves, or confirmed when you asked them. Never " +
-					"put in something you inferred, guessed, or read off their screen — an observation belongs in save_note instead. " +
-					"Call action \"view\" before writing: subjects you already have come back with it, and if one of them covers what " +
-					"you were about to add, edit that subject rather than making a near-duplicate. " +
-					"action \"delete\" is for an entry the user says is wrong or no longer true.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"action":  {Type: genai.TypeString, Description: "\"view\" to read everything stored, \"set\" to write or edit one subject, \"delete\" to remove one."},
-						"subject": {Type: genai.TypeString, Description: "Short key for the entry, lowercase and hyphenated: \"identity\", \"priya-shah\", \"preferences-communication\". Required for set and delete. Reuse an existing subject to edit it."},
-						"content": {Type: genai.TypeString, Description: "For set: the whole entry, written as plain prose about the user or that person. It replaces the subject's previous content, so include what still holds, not just the new part."},
-					},
-					Required: []string{"action"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "update_note",
-				Description: "Correct a previously saved note whose content was wrong (misheard, misunderstood, " +
-					"or the user says it's outdated) — look the note up first with query_memory to get its id " +
-					"from the \"[note#N]\" prefix, then call this with the corrected content. Use this instead of " +
-					"just apologizing out loud and leaving the wrong fact in memory.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"id":      {Type: genai.TypeInteger, Description: "The note's id, from a \"[note#N]\" query_memory result."},
-						"content": {Type: genai.TypeString, Description: "The corrected fact, written as a durable statement."},
-					},
-					Required: []string{"id", "content"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "update_action",
-				Description: "Mark something the user owes as done or dropped, or change how much it matters. " +
-					"Action items are the things somebody agreed to do in a meeting; they are what the morning " +
-					"brief leads with. Look one up with query_memory to get its id from the \"[note#N]\" prefix, " +
-					"then call this. Use it whenever the user says a task is finished, is not happening, or is " +
-					"more or less urgent than you implied — never leave a task the user says is done still open.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"id":       {Type: genai.TypeInteger, Description: "The action item's id, from a \"[note#N]\" result."},
-						"status":   {Type: genai.TypeString, Description: "open, done, or dropped. Omit to leave the status alone."},
-						"priority": {Type: genai.TypeString, Description: "high, normal, or low. Omit to leave the priority alone."},
-					},
-					Required: []string{"id"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "action_items",
-				Description: "List what the user still owes — the things they agreed to do in a meeting and have not " +
-					"closed. Use this for any question about outstanding work, owed tasks, commitments, what is on " +
-					"their plate, or what they need to do. Do not use query_memory for those: an action item's text " +
-					"is the task itself and shares no words with the question, so searching for it finds meetings " +
-					"about meetings instead. This reads the list directly. Each result carries its id, so update_action " +
-					"can close one straight afterwards.",
-				Parameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{}},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "thread_evidence",
-				Description: "Show the captures behind an ongoing thread — the actual screens, in order, that the " +
-					"thread was summarised from. A thread's state is one line; this is what it was written from. " +
-					"Use it whenever the user asks for detail a thread only gestures at: what the findings actually " +
-					"were, what the error said, which files were touched. Get the id from a \"[thread#N]\" result.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"id":    {Type: genai.TypeInteger, Description: "The thread's id, from a \"[thread#N]\" result."},
-						"limit": {Type: genai.TypeInteger, Description: "Optional. How many captures to show, newest first. Defaults to 10."},
-					},
-					Required: []string{"id"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "fix_thread",
-				Description: "Correct an ongoing thread whose summary is wrong — it merged two unrelated things, " +
-					"or records a fact the user says is not true. Look it up first with query_memory or recall to " +
-					"get its id from the \"[thread#N]\" prefix, then call this with what the thread actually is. " +
-					"Threads are separate from notes: update_note cannot reach them.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"id":         {Type: genai.TypeInteger, Description: "The thread's id, from a \"[thread#N]\" result."},
-						"correction": {Type: genai.TypeString, Description: "What this thread actually is, written as a durable one-line summary — it replaces the wrong one."},
-					},
-					Required: []string{"id", "correction"},
-				},
-			},
-			{
-				Behavior: genai.BehaviorNonBlocking,
-				Name:     "delete_note",
-				Description: "Permanently remove a previously saved note the user says is wrong, irrelevant, or " +
-					"should be forgotten — look the note up first with query_memory to get its id from the " +
-					"\"[note#N]\" prefix, then call this. Use this instead of just apologizing out loud and " +
-					"leaving the wrong fact in memory.",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"id": {Type: genai.TypeInteger, Description: "The note's id, from a \"[note#N]\" query_memory result."},
-					},
-					Required: []string{"id"},
-				},
-			},
-		},
-	}}
-}
-
-// liveTools returns every tool exposed to the Live API session: ORA's own FunctionDeclarations (shell_exec, query_memory, save_note, etc.) plus Gemini's native GoogleSearch grounding tool, so Ora can look something up instead of guessing from memory.
-// Verified live (2026-07-25) that both tool types work together on config.VoiceModel (gemini-2.5-flash-native-audio-preview-12-2025) — not guaranteed on every Gemini model/endpoint.
-// GoogleSearch calls are grounded server-side by Gemini and never surface as a ToolCall, so they don't show up in the TUI's live tool status line the way the FunctionDeclarations tools do.
-func liveTools() []*genai.Tool {
-	tools := toolDefinitions()
-	tools = append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
-	return tools
-}
-
-// ToolDeclarations returns the function declarations the live session exposes, the same list liveTools builds. Gemini's native search tool is not included because it has no declaration to hand a non-live model. The trajectory eval in evals/ uses it to give a text-mode model the identical tool surface the voice session has. Input: none. Output: the declarations, in the order the live session sends them.
-func ToolDeclarations() []*genai.FunctionDeclaration {
-	tools := liveTools()
-	if len(tools) == 0 {
-		return nil
-	}
-	return tools[0].FunctionDeclarations
-}
-
-// recallSubjectLimit bounds how many lines RecallSubject contributes to the "recall" tool's subject path.
-const recallSubjectLimit = 6
-
-// recallEpisodeCap is how many raw episodes one recall window may return, and recallSummaryCap how many summary lines. Together they implement one rule with no span constants in it: a window is answered from the finest tier whose entire content fits — episodes when they all fit, every task summary when those fit, and a per-day-per-task rollup when even the summaries overflow. Coverage is by construction at every tier; nothing is ever cut to the newest slice.
-const (
-	recallEpisodeCap = 50
-	recallSummaryCap = 60
-)
-
-// summaryTimeline renders the summary tier for a recall window, oldest first. Returns nil when the window has no summaries, which sends the caller back to raw episodes.
-func (a *Agent) summaryTimeline(ctx context.Context, since, until time.Time) []string {
-	sums, err := a.brain.SummaryTimeline(ctx, since, until)
-	if err != nil {
-		slog.Warn("recall: summary tier read failed, falling back to episodes", "error", err)
-		return nil
-	}
-	kept := make([]db.WindowSummary, 0, len(sums))
-	for _, s := range sums {
-		if task, _ := parseTaskSummary(s.Content); task == "Raw Activity Log" {
-			// The compiler's fallback bucket for windows it could not read — noise, not a stretch of work.
-			continue
-		}
-		kept = append(kept, s)
-	}
-	if len(kept) == 0 {
-		return nil
-	}
-	if len(kept) <= recallSummaryCap {
-		lines := make([]string, 0, len(kept))
-		for _, s := range kept {
-			lines = append(lines, "["+s.CreatedAt.Local().Format("Jan 2 15:04")+"] "+summaryLine(s.Content))
-		}
-		return lines
-	}
-	return rollupByDayAndTask(kept)
-}
-
-// parseTaskSummary reads the compiler's JSON summary shape. ok is false for anything else — a digest's plain prose, or a malformed row.
-func parseTaskSummary(content string) (task string, summary string) {
-	var s struct {
-		Task    string `json:"task_name"`
-		Summary string `json:"summary"`
-	}
-	if err := json.Unmarshal([]byte(content), &s); err == nil {
-		return s.Task, s.Summary
-	}
-	return "", ""
-}
-
-// summaryLine renders one summary node as prose: the compiler's JSON becomes "task — what happened", a digest's plain prose passes through untouched.
-func summaryLine(content string) string {
-	if task, summary := parseTaskSummary(content); task != "" {
-		return task + " — " + oneLineExcerpt(summary)
-	}
-	return oneLineExcerpt(content)
-}
-
-// rollupByDayAndTask collapses an over-long summary timeline to one line per task per day, carrying how many stretches it covered and the first stretch's description — the tier above task summaries, computed at read time because stored digests only exist once compaction has retired a day's summaries.
-func rollupByDayAndTask(sums []db.WindowSummary) []string {
-	type slot struct {
-		day, task, first string
-		count            int
-		order            int
-	}
-	slots := map[string]*slot{}
-	var ordered []*slot
-	for _, s := range sums {
-		task, summary := parseTaskSummary(s.Content)
-		if task == "" {
-			task, summary = oneLineExcerpt(s.Content), ""
-		}
-		day := s.CreatedAt.Local().Format("Jan 2")
-		key := day + "\x00" + task
-		if sl, ok := slots[key]; ok {
-			sl.count++
-			continue
-		}
-		sl := &slot{day: day, task: task, first: oneLineExcerpt(summary), count: 1, order: len(ordered)}
-		slots[key] = sl
-		ordered = append(ordered, sl)
-	}
-	lines := make([]string, 0, len(ordered))
-	for _, sl := range ordered {
-		line := "[" + sl.day + "] " + sl.task
-		if sl.count > 1 {
-			line += fmt.Sprintf(" (%d stretches)", sl.count)
-		}
-		if sl.first != "" {
-			line += " — " + sl.first
-		}
-		lines = append(lines, line)
-	}
-	return lines
-}
-
-// recallExcerpt caps how much of an episode's screen_text is surfaced per line in the "recall" tool's window (timeline) path — shorter than maxEpisodeExcerpt since a whole day's timeline is many lines at once.
-const recallExcerpt = 160
-
-// blankField reports whether an episode field carries no information. Empty counts, and so does the literal "Unknown" the tracker writes when it cannot read the focused window's app or title (see the "activity tracked" log lines) — the string is a placeholder, not a value.
-func blankField(s string) bool {
-	t := strings.TrimSpace(s)
-	return t == "" || strings.EqualFold(t, "unknown")
-}
-
-// idleEpisode reports whether an episode has nothing to say: no app, no title, no screen text and no described activity. A recall over a night at an idle machine returned 25 such rows out of 40, each rendering as "Unknown — Unknown: Unknown" and each costing tokens the real rows needed.
-func idleEpisode(e db.Episode) bool {
-	return blankField(e.App) && blankField(e.Title) && blankField(e.ScreenText) && blankField(e.UserActivity)
-}
-
-// idleGapPrefix opens the line standing in for a run of idle captures. capRealRows keys on it to tell an accounting line from a real moment.
-const idleGapPrefix = "nothing on screen for"
-
-// humanSpan renders a duration the way a person says it out loud: "2h 10m", "12m", or "a moment" for anything under a minute.
-func humanSpan(d time.Duration) string {
-	if d < time.Minute {
-		return "a moment"
-	}
-	if h := int(d.Hours()); h > 0 {
-		return fmt.Sprintf("%dh %dm", h, int(d.Minutes())%60)
-	}
-	return fmt.Sprintf("%dm", int(d.Minutes()))
-}
-
-// appendIdleGap adds one line saying how long a run of idle captures covered, so a mostly-empty window reads as time passing rather than as a count of rows the tool threw away — "(19 idle omitted)" is what made a real user answer "are you serious?". An empty run is a no-op.
-// Input: the lines so far and the consecutive idle episodes. Output: the lines with the gap line appended.
-func appendIdleGap(lines []string, run []db.Episode) []string {
-	if len(run) == 0 {
-		return lines
-	}
-	// The run is a contiguous slice in whatever order the caller got its episodes (newest-first, in practice), so the span is the distance between its ends either way round.
-	span := run[0].CreatedAt.Sub(run[len(run)-1].CreatedAt)
-	if span < 0 {
-		span = -span
-	}
-	return append(lines, idleGapPrefix+" "+humanSpan(span))
-}
-
-// wrapperProcesses are process names that own a window without being the program the user actually sees: mutter-x11-frames is the compositor's own frame around an X11 client, gnome-terminal-server hosts every GNOME terminal window. Printing them as the application tells the model nothing about what was on screen.
-var wrapperProcesses = map[string]bool{"mutter-x11-frames": true, "gnome-terminal-server": true}
-
-// displayAppTitle picks the app name and title to print for one capture. For a wrapper process the real program name is the tail of the window title — "portfolio_vulnerability_scores.xlsx — LibreOffice Calc" is LibreOffice Calc showing that file — so the tail becomes the app and the head stays the title. A title with no such tail keeps the process name, since a wrong guess is worse than an ugly one.
-// Input: the capture's app and title. Output: the app name and title to print.
-func displayAppTitle(app, title string) (string, string) {
-	if !wrapperProcesses[app] {
-		return app, title
-	}
-	for _, sep := range []string{" — ", " - "} {
-		if i := strings.LastIndex(title, sep); i > 0 {
-			return strings.TrimSpace(title[i+len(sep):]), strings.TrimSpace(title[:i])
-		}
-	}
-	return app, title
-}
-
-// oneLineExcerpt collapses every run of whitespace in captured screen text to a single space, then caps it at recallExcerpt runes. A capture carries the newlines and column padding of whatever was on screen, which turns one timeline row into a dozen lines and spends the rune cap on layout instead of content.
-func oneLineExcerpt(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if runes := []rune(s); len(runes) > recallExcerpt {
-		return string(runes[:recallExcerpt])
-	}
-	return s
-}
-
-// formatSpan renders how long a run of consecutive captures of the same window covered, as "1h04m" or "12m". Anything under a minute returns "" so a single capture prints no duration at all.
-func formatSpan(d time.Duration) string {
-	if d < time.Minute {
-		return ""
-	}
-	if h := int(d.Hours()); h > 0 {
-		return fmt.Sprintf("%dh%02dm", h, int(d.Minutes())%60)
-	}
-	return fmt.Sprintf("%dm", int(d.Minutes()))
-}
-
-// episodeHandle splits one capture into the name its row leads with and the machine names that follow it in a parenthetical, so the model reads a row about the work rather than a row about the software.
-// The handle is what the user would call the thing: the capture's own one-phrase activity, since nothing in the store links an episode to the thread it was attributed to. With no activity phrase the app name from displayAppTitle leads instead and only the window title stays in the parenthetical.
-// Input: one episode. Output: the leading handle and the parenthetical contents, either of which can be "".
-func episodeHandle(e db.Episode) (string, string) {
-	app, title := displayAppTitle(e.App, e.Title)
-	machine := make([]string, 0, 2)
-	for _, s := range []string{app, title} {
-		if !blankField(s) {
-			machine = append(machine, strings.TrimSpace(s))
-		}
-	}
-	handle := strings.TrimSpace(e.UserActivity)
-	if handle == "" && len(machine) > 0 {
-		handle, machine = machine[0], machine[1:]
-	}
-	return handle, strings.Join(machine, ", ")
-}
-
-// formatEpisodeTimeline renders episodes (newest first) as one line per window. A run of idle captures collapses to one "nothing on screen for …" line, and consecutive captures of the same app and title collapse to a single line carrying how long that window stayed up — the same window sampled every minute used to print once per sample.
-// Input: the episodes and a function producing the excerpt for one of them (recall shows screen text; get_recent folds in the frame marker). Output: the formatted lines in the order the episodes came in.
-func formatEpisodeTimeline(episodes []db.Episode, excerptFor func(db.Episode) string) []string {
-	var lines []string
-	idleStart := 0
-	idleRun := 0
-	for i := 0; i < len(episodes); {
-		if idleEpisode(episodes[i]) {
-			if idleRun == 0 {
-				idleStart = i
-			}
-			idleRun++
-			i++
-			continue
-		}
-		lines = appendIdleGap(lines, episodes[idleStart:idleStart+idleRun])
-		idleRun = 0
-
-		j := i + 1
-		for j < len(episodes) && !idleEpisode(episodes[j]) && episodes[j].App == episodes[i].App && episodes[j].Title == episodes[i].Title {
-			j++
-		}
-		oldest := episodes[j-1]
-		handle, machine := episodeHandle(episodes[i])
-		if machine != "" {
-			handle += " (" + machine + ")"
-		}
-		span := formatSpan(episodes[i].CreatedAt.Sub(oldest.CreatedAt))
-		if span != "" {
-			span += " "
-		}
-		excerpt := excerptFor(episodes[i])
-		if excerpt == "" {
-			// Nothing captured beyond the window itself: end the row at the handle rather than on a dangling colon.
-			lines = append(lines, fmt.Sprintf("[%s] %s%s",
-				oldest.CreatedAt.In(time.Local).Format("Jan 2 15:04"), span, handle))
-			i = j
-			continue
-		}
-		// Timeline shape: "[Jan 2 15:04] 1h04m the vulnerability scoring (LibreOffice Calc, portfolio.xlsx): …", converted to the user's local zone (episodes are stored in UTC) so what's shown matches their wall clock. The stamp is the run's start, so the duration reads forward from it.
-		lines = append(lines, fmt.Sprintf("[%s] %s%s: %s",
-			oldest.CreatedAt.In(time.Local).Format("Jan 2 15:04"), span, handle, excerpt))
-		i = j
-	}
-	return appendIdleGap(lines, episodes[idleStart:idleStart+idleRun])
-}
-
-// capRealRows truncates lines once limit real moment lines have been emitted, ignoring the "nothing on screen for …" lines — those are accounting, not moments the user asked for.
-// Input: the formatted lines and how many moments the caller asked for. Output: the prefix holding at most that many moments.
-func capRealRows(lines []string, limit int) []string {
-	n := 0
-	for i, l := range lines {
-		if strings.HasPrefix(l, idleGapPrefix) {
-			continue
-		}
-		n++
-		if n > limit {
-			return lines[:i]
-		}
-	}
-	return lines
-}
-
-// recallBounds resolves the "recall" tool's since/until args into a concrete [since, until] range.
-// The model, knowing the current date/time, converts any human phrase ("July 5th", "last week") into ISO-8601 bounds and passes them here; parseInstant additionally accepts the bare words "today" and "yesterday", which the model passes straight through often enough to be worth handling.
-func recallBounds(sinceStr, untilStr string, now time.Time) (time.Time, time.Time, error) {
-	since := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	if strings.TrimSpace(sinceStr) != "" {
-		parsed, err := parseInstant(sinceStr, now, false)
-		if err != nil {
-			return time.Time{}, time.Time{}, err
-		}
-		since = parsed
-	}
-	until := now
-	if strings.TrimSpace(untilStr) != "" {
-		parsed, err := parseInstant(untilStr, now, true)
-		if err != nil {
-			return time.Time{}, time.Time{}, err
-		}
-		until = parsed
-	}
-	if since.After(until) {
-		return time.Time{}, time.Time{}, errSinceAfterUntil
-	}
-	return since, until, nil
-}
-
-// errSinceAfterUntil is a sentinel so callers can distinguish "the range is backwards" from "the timestamp didn't parse" — leading a reversed-range error with the ISO-8601 format hint would be misleading when the format was fine.
-var errSinceAfterUntil = errors.New("since must not be after until")
-
-// parseInstant parses a full RFC3339 timestamp, a zoneless datetime (2006-01-02T15:04:05, read in now's zone), a bare calendar date (2006-01-02), or the words "today" and "yesterday" resolved against now.
-// A bare date or word anchors to the start of that day, or its end (23:59:59) when endOfDay is set — so a bare until date is inclusive of the whole day rather than a zero-width midnight instant.
-// The words are here because the user says them out loud and the model passes them straight through; without them the call errors, or worse, the word reaches the search as a search term and matches things like "India Today".
-func parseInstant(s string, now time.Time, endOfDay bool) (time.Time, error) {
-	loc := now.Location()
-	s = strings.TrimSpace(s)
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
-	}
-	// A zoneless datetime carries a time of day already, so endOfDay doesn't apply to it.
-	if t, err := time.ParseInLocation("2006-01-02T15:04:05", s, loc); err == nil {
-		return t, nil
-	}
-	d, err := time.ParseInLocation("2006-01-02", s, loc)
-	if err != nil {
-		switch strings.ToLower(s) {
-		case "today":
-			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-		case "yesterday":
-			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -1)
-		default:
-			n, ok := parseDaysAgo(s)
-			if !ok {
-				return time.Time{}, err
-			}
-			d = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -n)
-		}
-	}
-	if endOfDay {
-		return time.Date(d.Year(), d.Month(), d.Day(), 23, 59, 59, 0, loc), nil
-	}
-	return d, nil
-}
-
-// parseDaysAgo reads the "N days ago" phrasing the user says out loud and the model passes straight through to since/until. Without it the call fails with a raw Go time-parse error, which a real session read out loud to the user.
-// Input: the raw argument. Output: how many days back it means, and whether it was that shape at all.
-func parseDaysAgo(s string) (int, bool) {
-	f := strings.Fields(strings.ToLower(s))
-	if len(f) != 3 || f[2] != "ago" || (f[1] != "day" && f[1] != "days") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(f[0])
-	if err != nil || n < 0 {
-		return 0, false
-	}
-	return n, true
-}
-
-// dateHint is the one phrasing for a since/until the tool could not read, shared by recall and query_memory so the model gets the same list of forms that work wherever it passes a date.
-const dateHint = "I can only search by a real date — try 'today', 'yesterday', or a date like 2026-07-05"
-
 // toolError renders a failed tool call as one plain sentence. Every failure path in executeTool goes through it, so a Go error string (a time-parse dump, a type name, a wrapped sqlite message) never reaches the model and, from there, never gets read out loud. The real error goes to the log instead.
 // Input: a plain-words sentence saying what went wrong and, where the model can fix it, what to try instead. Output: the tool result string, prefixed "error: " — which is what the model and resultSummary both read as "this call failed".
 func toolError(msg string) string {
@@ -687,7 +40,7 @@ func toolError(msg string) string {
 }
 
 // storeUnavailable is what every failed memory read says. The model can only ever do one thing about it, so naming the store's own error would add nothing it can act on.
-const storeUnavailable = "I couldn't reach your memory just now — try that again in a moment"
+const storeUnavailable = "I couldn't reach your memory just now, try that again in a moment"
 
 // hasArg reports whether name was supplied with a value that isn't an empty string. A non-string value counts as supplied — the model meant something by it, and treating it as absent is how a filter gets dropped without anyone noticing.
 func hasArg(args map[string]any, name string) bool {
@@ -725,8 +78,25 @@ func checkArgs(args map[string]any, valid ...string) string {
 		return ""
 	}
 	slices.Sort(unknown)
-	return fmt.Sprintf("I don't take %s here — what I do take is %s",
+	return fmt.Sprintf("I don't take %s here, what I do take is %s",
 		strings.Join(unknown, ", "), strings.Join(valid, ", "))
+}
+
+// parseRef splits a "[note#12]" or "note#12" style reference — the shape query_memory, recall and action_items hand back — into its kind and numeric id, so revise can dispatch on it without the model having to know which table backs a result.
+// Input: the ref as a result showed it, brackets optional. Output: the kind ("note", "thread" or "task") and the id, or an error naming the shape a ref must have.
+func parseRef(ref string) (string, int64, error) {
+	ref = strings.TrimSpace(ref)
+	ref = strings.TrimPrefix(ref, "[")
+	ref = strings.TrimSuffix(ref, "]")
+	kind, idStr, ok := strings.Cut(ref, "#")
+	if !ok {
+		return "", 0, fmt.Errorf(`ref must look like "note#12", "thread#3" or "task#5"`)
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf(`ref must look like "note#12", "thread#3" or "task#5"`)
+	}
+	return kind, id, nil
 }
 
 // optionalWindow parses since/until when either is given, for tools where no dates means no time filter at all (unlike recall, whose timeline branch defaults to today — see recallBounds).
@@ -812,14 +182,35 @@ func RunShellCommand(command string) string {
 		// The command's own output is the answer to why it failed and the model needs it; only Go's exit-status wrapper is dropped.
 		return toolError("that command didn't run cleanly") + "\noutput: " + string(output)
 	}
-	result := string(output)
-	if len(result) > 2000 {
-		result = result[:2000] + "\n... (truncated)"
-	}
-	return result
+	return util.RunesNote(string(output), 2000, "... (truncated)")
 }
 
-// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the TUI's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the TUI to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
+// openURLCommand builds the command that hands a url to the desktop's browser, per platform. A var so a test can swap it and never launch a real browser. Input: the url, already checked to be http or https. Output: the command, not yet started.
+var openURLCommand = func(url string) *exec.Cmd {
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		return exec.Command("open", url)
+	default:
+		return exec.Command("xdg-open", url)
+	}
+}
+
+// approvalGatedTools are the tools whose handler waits on ToolApprovalChan for a human to approve the call. The terminal UI reads that channel and answers it; the daemon reads it nowhere, so there a call parked until the session ended, the model never got a result for it, and every later call was told another approval was already pending. Where nothing has called SetToolApprovals they are kept out of the tool list the live session declares (liveToolsFor) and refused if a model names one anyway; where an approver is registered they behave as they always did. They are out of the ask's list (askAllowedTools) either way.
+var approvalGatedTools = map[string]bool{"shell_exec": true, "read_clipboard": true, "read_file": true}
+
+// approverRegistered is true while something in this process is reading ToolApprovalChan and will answer what it finds there. Only the terminal UI does (internal/ui, run in-process by cmd/client.go, which calls SetToolApprovals); the daemon reads that channel nowhere, so its asks, voice sessions, routines and act jobs must refuse an approval-gated tool rather than park on it forever.
+// ponytail: one flag for the whole process, not one per Agent, because the tool list is built by package functions (liveToolsFor) that have no Agent in hand; move it onto Agent if a single process ever has to run both an approving and a non-approving session.
+var approverRegistered atomic.Bool
+
+// SetToolApprovals records whether this process has something answering ToolApprovalChan. Input: true when an approver is now reading the channel, false when it stops. Output: none. Called by the terminal UI's process before it connects; a test that turns it on must turn it back off.
+func SetToolApprovals(on bool) { approverRegistered.Store(on) }
+
+// HasApprover reports whether an approval request would reach a human. Output: true only after SetToolApprovals(true).
+func HasApprover() bool { return approverRegistered.Load() }
+
+// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the TUI's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check HasApprover and AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the TUI to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
 func (a *Agent) requestApproval(ctx context.Context, allowKey, description string, execute func() string, editableCommand string) string {
 	resChan := make(chan string, 1)
 	req := ToolRequest{
@@ -833,7 +224,7 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 	case a.ToolApprovalChan <- req:
 	default:
 		// TUI approval queue full — another tool is pending. Reject to unblock.
-		return toolError("I'm already waiting on another approval — ask again in a moment")
+		return toolError("I'm already waiting on another approval, ask again in a moment")
 	}
 
 	select {
@@ -845,14 +236,59 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 	}
 }
 
+// refuseApproval is what a tool returns instead of asking for an approval nobody is listening for. Input: what the tool wanted to do, for the log. Output: one refusal sentence for the model.
+func refuseApproval(what string) string {
+	slog.Warn("refusing a tool that needs approval: nothing in this session can ask for one", "what", what)
+	return toolError("that needs your say-so and " + refuseApprovalMark + ", do it yourself, or tell me exactly what to do instead")
+}
+
 // ExecuteTool is just executeTool but exported, so eval tests outside this package can call the real tool (query_memory, recall, etc) the same way the model does.
 func (a *Agent) ExecuteTool(ctx context.Context, name string, args map[string]any) string {
 	return a.executeTool(ctx, name, args)
 }
 
+// brainRequiredTools are the tool names whose handler reads or writes through a.brain, the memory store. Widening the set of tools the ask gate can reach (askAllowedTools) opened a path where an agent built without a brain — a nil ContextReader, the shape both a not-yet-connected daemon and a test can produce — hit a.brain.SomeMethod(...) and panicked on the nil interface's own method dispatch. Checked once, up front, so every one of them fails the same way every other executeTool error path already does: a plain "error: ..." string, never a panic.
+var brainRequiredTools = map[string]bool{
+	"query_memory": true, "query_store": true, "recall": true,
+	"save_note": true, "add_task": true, "personal_context": true, "revise": true, "action_items": true,
+}
+
 // executeTool runs a tool and returns the result as a string
 // maybe this can be seperated into /agent/tools altogether later and be compiled with OS specific code?
+// executeTool runs one tool and files what it did. Input: the tool's name and arguments. Output: the tool's result string, exactly as runTool produced it.
+// Every path that runs a tool comes through here — the ask loop, the sub-task loop, the computer-use job and the live voice session — which is why the record is written at this one point rather than at each of them. Before this the live session recorded nothing at all, so the tools it used most were invisible to anything reading the store.
 func (a *Agent) executeTool(ctx context.Context, name string, args map[string]any) string {
+	start := time.Now()
+	var result string
+	if busy := a.screenBusy(ctx, name); busy != "" {
+		result = toolError(busy)
+	} else {
+		result = a.runTool(ctx, name, args)
+	}
+	outcome := toolOutcome(result)
+	if outcome == OutcomeOK {
+		a.holdScreen(ctx, name)
+	}
+	if rec := recorderFrom(ctx); rec != nil {
+		rec(ToolRecord{
+			Name:     name,
+			Args:     toolActivitySummary(name, args),
+			Outcome:  outcome,
+			Result:   resultSummary(name, result),
+			Output:   util.UTF8Bytes(result, toolOutputCap),
+			TurnID:   turnIDFrom(ctx),
+			Duration: time.Since(start),
+			Offered:  offeredFrom(ctx),
+		})
+	}
+	return result
+}
+
+// runTool is the tool switch itself: what each tool name does, with no recording or timing around it.
+func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) string {
+	if a.brain == nil && brainRequiredTools[name] {
+		return toolError(storeUnavailable)
+	}
 	switch name {
 	case "shell_exec":
 		command, ok := args["command"].(string)
@@ -866,6 +302,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return RunShellCommand(command)
 		}
 
+		if !HasApprover() {
+			return refuseApproval("shell: " + command)
+		}
 		slog.Warn("intercepting shell command for HITL", "command", command)
 		return a.requestApproval(ctx, command, "shell: "+command, func() string { return RunShellCommand(command) }, command)
 
@@ -873,6 +312,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		// Always gated — a password manager routinely leaves a secret sitting in the clipboard, and there's no way to distinguish that from a benign copy ahead of time.
 		if _, allowed := a.AllowedCmds.Load("read_clipboard"); allowed {
 			return readClipboard()
+		}
+		if !HasApprover() {
+			return refuseApproval("read the clipboard")
 		}
 		slog.Warn("intercepting clipboard read for HITL")
 		return a.requestApproval(ctx, "read_clipboard", "read the clipboard", readClipboard, "")
@@ -886,13 +328,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			data, err := os.ReadFile(path)
 			if err != nil {
 				slog.Warn("read_file failed", "path", path, "error", err)
-				return toolError("I couldn't read that file — check the path")
+				return toolError("I couldn't read that file, check the path")
 			}
-			result := string(data)
-			if len(result) > 4000 {
-				result = result[:4000] + "\n... (truncated, file too large)"
-			}
-			return result
+			return util.RunesNote(string(data), 4000, "... (truncated, file too large)")
 		}
 		if !isSensitivePath(path) {
 			return execute()
@@ -900,6 +338,9 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		allowKey := "read_file:" + path
 		if _, allowed := a.AllowedCmds.Load(allowKey); allowed {
 			return execute()
+		}
+		if !HasApprover() {
+			return refuseApproval("read file: " + path)
 		}
 		slog.Warn("intercepting sensitive file read for HITL", "path", path)
 		return a.requestApproval(ctx, allowKey, "read file: "+path, execute, "")
@@ -912,7 +353,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			slog.Warn("list_files failed", "path", path, "error", err)
-			return toolError("I couldn't list that folder — check the path")
+			return toolError("I couldn't list that folder, check the path")
 		}
 		var lines []string
 		for _, e := range entries {
@@ -928,45 +369,357 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		return strings.Join(lines, "\n")
 
+	case "observe_screen":
+		app, title, nodes, err := a.observe(ctx)
+		if err != nil {
+			slog.Warn("observe_screen failed", "error", err)
+			return toolError("could not look at the screen: " + err.Error())
+		}
+		items := act.Filter(nodes)
+		// Read before the new snapshot is stored, since the answer is this look against the one before it.
+		previous := a.lastScreen(ctx)
+		if len(items) == 0 {
+			a.rememberScreen(ctx, items, screenSnapshot{app: app, title: title})
+			return app + " · " + title + "\n(nothing actionable is showing)" + frameOnlyHint
+		}
+		lines := strings.Split(act.Format(items), "\n")
+		a.rememberScreen(ctx, items, screenSnapshot{app: app, title: title, lines: lines})
+		return observeResult(app, title, lines, previous)
+
+	case "look":
+		if a.capture == nil {
+			return toolError("this session cannot see the screen")
+		}
+		shot, err := a.capture(ctx)
+		if err != nil {
+			slog.Warn("look failed", "error", err)
+			return toolError("could not take a picture of the screen: " + err.Error())
+		}
+		// There is no count of looks: a video, a loading page or a window redrawing itself changes with nothing done in between, and a screen nobody touched does not, so the only look turned away is one at the very picture the model already has.
+		if !recordLook(ctx, shot) {
+			return unchangedLookMarker + ", so the picture you already have is what is showing; act on it, or wait_for a change"
+		}
+		// A channel that cannot be handed a picture with the tool result is given a road of its own here: the Live voice session takes its tool results as text, so without this it took a picture it was never shown and every coordinate it named afterwards was refused. Nothing changes for a text ask, which has no sender and collects the picture through takeLook instead.
+		deliverPicture(ctx, shot)
+		return fmt.Sprintf("here is the picture, %d wide and %d high. Its top-left corner is %d,%d on the screen and one of its pixels is %.2f screen pixels, so point at things in it with its own coordinates and draw will put them back on the screen for you.", shot.W, shot.H, shot.X, shot.Y, shot.Scale)
+
+	case "point_at":
+		it, errText := a.seenItem(ctx, args)
+		if errText != "" {
+			return errText
+		}
+		if a.Point == nil {
+			return toolError("this session cannot draw on the screen")
+		}
+		it, errText = a.stillThere(ctx, it)
+		if errText != "" {
+			return errText
+		}
+		x, y, w, h, errText := a.freshRect(ctx, it)
+		if errText != "" {
+			return errText
+		}
+		label, _ := args["label"].(string)
+		remembered, hadRemembered := a.screenTarget()
+		if err := a.Point(x, y, w, h, label); err != nil {
+			return toolError(err.Error())
+		}
+		a.rememberTarget(ScreenTarget{Label: it.Label, Role: it.Role, Window: a.currentWindow(ctx), HasRect: true, X: x, Y: y, W: w, H: h})
+		note := ""
+		if hadRemembered {
+			note = targetMismatchNote(questionFrom(ctx), &remembered, it.Label)
+		}
+		return fmt.Sprintf("ringed [%d] %s %q", it.N, it.Role, it.Label) + note
+
+	case "show_marks":
+		items := a.seen(ctx)
+		if items == nil {
+			return toolError("call observe_screen first, then show_marks")
+		}
+		if a.Marks == nil {
+			return toolError("this session cannot draw on the screen")
+		}
+		total := len(items)
+		if total > 40 {
+			items = items[:40]
+		}
+		// The marks are drawn where each element is now, not where the listing said it was: after a scroll the numbers would otherwise sit over whatever moved into those rectangles, and the numbers are what the model then clicks by. An element that is no longer showing gets no mark, the same rule point_at follows.
+		fresh := make([]act.Item, 0, len(items))
+		gone := 0
+		for _, it := range items {
+			x, y, w, h, errText := a.freshRect(ctx, it)
+			if errText != "" {
+				gone++
+				continue
+			}
+			it.X, it.Y, it.W, it.H = x, y, w, h
+			fresh = append(fresh, it)
+		}
+		if err := a.Marks(fresh); err != nil {
+			return toolError(err.Error())
+		}
+		switch {
+		case gone > 0:
+			return fmt.Sprintf("marked %d of %d elements on the screen; %d are no longer showing", len(fresh), total, gone)
+		case len(fresh) < total:
+			return fmt.Sprintf("marked %d of %d elements on the screen", len(fresh), total)
+		}
+		return fmt.Sprintf("marked %d element(s) on the screen", len(fresh))
+
+	case "draw":
+		if a.Draw == nil {
+			return toolError("this session cannot draw on the screen")
+		}
+		shapes, errText := drawShapeList(args)
+		remembered, hadRemembered := a.screenTarget()
+		var drawn, refused []string
+		var last *ScreenTarget
+		// Shapes the stream already resolved — drawn or refused — are reported but never acted on again, and they are always the leading ones, because the stream hands them over in the order the call lists them; a refused one still holds its place so the shapes after it are not shifted onto the wrong entries.
+		if early := streamDrawnFrom(ctx); len(early) > 0 {
+			for _, d := range early {
+				if d.Err != "" {
+					refused = append(refused, fmt.Sprintf("shape %d: %s", len(drawn)+len(refused)+1, strings.TrimPrefix(d.Err, "error: ")))
+					continue
+				}
+				drawn = append(drawn, d.Phrase)
+				if d.Target != nil {
+					last = d.Target
+				}
+			}
+			if len(early) >= len(shapes) {
+				shapes = nil
+			} else {
+				shapes = shapes[len(early):]
+			}
+		}
+		// Read after the early block rather than returned bare, so shapes the stream already drew are still reported even when the finished call as a whole is over the cap or carries a bad entry.
+		if errText != "" {
+			refused = append(refused, strings.TrimPrefix(errText, "error: "))
+		}
+		// One name for the whole call, so the overlay keeps its shapes on screen together; when the stream already inked the leading ones it is their name, so the two halves of the call stay one drawing.
+		group := drawGroupFor(ctx)
+		for _, shape := range shapes {
+			phrase, target, errText := a.drawOne(ctx, group, shape)
+			if errText != "" {
+				// One bad shape does not lose the rest of the drawing: the others are drawn and the model is told which entry failed, so it can send that one again rather than the whole diagram.
+				refused = append(refused, fmt.Sprintf("shape %d: %s", len(drawn)+len(refused)+1, strings.TrimPrefix(errText, "error: ")))
+				continue
+			}
+			drawn = append(drawn, phrase)
+			if target != nil {
+				last = target
+			}
+		}
+		// Only the last shape drawn around a numbered element is remembered, so a later bare "draw a circle around it" resolves to the last thing this call drew around rather than to whichever entry happened to come first.
+		note := ""
+		if last != nil {
+			a.rememberTarget(*last)
+			if hadRemembered {
+				note = targetMismatchNote(questionFrom(ctx), &remembered, last.Label)
+			}
+		}
+		switch {
+		case len(drawn) == 0:
+			return toolError(strings.Join(refused, "; "))
+		case len(drawn) == 1 && len(refused) == 0:
+			return "drew " + drawn[0] + note
+		default:
+			result := fmt.Sprintf("drew %d shapes: %s", len(drawn), strings.Join(drawn, "; ")) + note
+			if len(refused) > 0 {
+				result += "\nnot drawn: " + strings.Join(refused, "; ")
+			}
+			return result
+		}
+
+	case "click":
+		return a.click(ctx, args)
+
+	// click_at is no longer declared to the model — click itself takes a bare point now — but it is still answered, so a live session holding the older tool list does not find one of its tools missing mid-task.
+	case "click_at":
+		return a.clickPoint(ctx, args)
+
+	case "wait_for":
+		kind, _ := args["kind"].(string)
+		value, _ := args["value"].(string)
+		return a.waitFor(ctx, act.Check{Kind: kind, Value: value}, waitTimeout(args))
+
+	case "scroll_to":
+		it, errText := a.seenItem(ctx, args)
+		if errText != "" {
+			return errText
+		}
+		// The number came off a list that may be several rounds old, so the element behind it is checked to still be the one the list named, exactly as click and point_at do: a toolkit that has recycled the object path would otherwise have this scroll reported as a scroll to something it never touched.
+		it, errText = a.stillThere(ctx, it)
+		if errText != "" {
+			return errText
+		}
+		if err := a.scrollTo(ctx, it.Ref); err != nil {
+			return toolError(fmt.Sprintf("could not scroll to [%d] %s %q: %v", it.N, it.Role, it.Label, err))
+		}
+		return fmt.Sprintf("scrolled to [%d] %s %q; call observe_screen to see the page now", it.N, it.Role, it.Label)
+
+	case "type_text":
+		text, ok := args["text"].(string)
+		if !ok || text == "" {
+			return toolError("type_text needs text")
+		}
+		enter, _ := args["enter"].(bool)
+		// A newline, tab or backspace inside the text is a real Enter, Tab or BackSpace keystroke once it reaches the keyboard: the newline submits a chat box halfway through the message, and the tab moves the rest of the text into whatever field comes next. The enter argument above stays the one way to press Enter on purpose.
+		if strings.ContainsFunc(text, func(r rune) bool { return r < 0x20 }) {
+			return toolError("type_text will not type control characters; use press_key for Enter, Tab or Backspace, or the enter argument to press Enter after the text")
+		}
+		// The field the last successful click acted on stands in for the one the keyboard is in — "click the field first" is the documented way to reach type_text anyway — and keyboardField then reads who really holds the keys, so the checks below are put against the field the text will actually reach. Before any click, this is the zero act.Item, which matches neither check below.
+		focused, known := a.focus(ctx)
+		landed := ""
+		window := a.currentWindow(ctx)
+		if known {
+			focused, known, landed = a.keyboardField(ctx, focused)
+		} else {
+			// A click at a point, or a focus-moving key, left the click itself saying nothing about the field, so the tree is asked who holds the keyboard now. A readable place to type is the field; a readable control that is no place to type is refused by name below; nothing readable at all (a window without a tree) types on the click alone, and the press check and the next look are what verify it, which is the same unknown keyboardField goes ahead on.
+			if holder, ok := keyboardHolder(ctx); ok {
+				focused, known = act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}, typingPlaces[holder.Role]
+			} else {
+				slog.Warn("nothing readable holds the keyboard after a point click, so typing goes ahead where the focus is")
+				known = true
+			}
+		}
+		if !known && !blindConsent(questionFrom(ctx)) && !goAllowed(ctx) {
+			// press_key is named because it is the only way in that the model itself can take. The other two ways past this line — the phrase in the question and the go field on the request — are both the user's, and a model that has hit this mid-task cannot reach either. On 2026-09-20 a GNOME Clocks run was refused here twice, told to ask for something it could not ask for, and found press_key on its own eighty seconds later.
+			return fmt.Sprintf("Stopped before typing: the keyboard is held by %s %q in %q, which is no place to type. Click the field first. If this window draws its own fields and publishes none of them, send the characters one at a time with press_key instead.", focused.Role, focused.Label, window)
+		}
+		if secretField(focused, window) {
+			return fmt.Sprintf("Stopped before typing into %s %q in %q, I never type passwords, card numbers or other secrets, so say it yourself once the field is focused.", focused.Role, focused.Label, window)
+		}
+		if irreversible(focused, window, true) && !consented(questionFrom(ctx), matchedVerb(focused, window)) && !goAllowed(ctx) {
+			return fmt.Sprintf("Stopped before typing into %s %q in %q. %s", focused.Role, focused.Label, window, consentPrompt(matchedVerb(focused, window)))
+		}
+		if enter {
+			text += "\n"
+		}
+		// The text goes in through the portal keyboard, the same session press_key uses, into whatever has focus: the field the checks above looked at. There is no toolkit path to set a field's text on Wayland, so this is the one way in, opened on first use.
+		dev, errText := a.inputDevice(ctx)
+		if errText != "" {
+			return errText
+		}
+		if err := dev.TypeText(text); err != nil {
+			return toolError("could not type: " + err.Error())
+		}
+		return fmt.Sprintf("typed %d characters%s; call observe_screen to see the result", len([]rune(text)), landed)
+
+	case "press_key":
+		keys, _ := args["keys"].(string)
+		if keys == "" {
+			return toolError("press_key needs keys, like \"Enter\" or \"Ctrl+L\"")
+		}
+		if pressesFocused(keys) {
+			// Enter, Space and the Send chords press whatever has keyboard focus, which is a click by another name, so they go through the same stop line the click tool does — against the control keyboardField says the keys will reach, which is the one the last click focused unless the accessibility read names another.
+			focused, known := a.focus(ctx)
+			if known {
+				focused, known, _ = a.keyboardField(ctx, focused)
+			} else if holder, ok := keyboardHolder(ctx); ok {
+				// After a point click the tree says who holds the keyboard, and the stop line below is put against that control, whatever it is.
+				focused, known = act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}, true
+			}
+			window := a.currentWindow(ctx)
+			if !known {
+				// Nothing readable holds the keyboard and the last click was at a point: the window publishes no tree, so the press goes ahead on the click, checked against the window's own title below.
+				slog.Warn("nothing readable holds the keyboard after a point click, so the key press goes ahead where the focus is", "keys", keys)
+			}
+			if irreversible(focused, window, false) && !consented(questionFrom(ctx), matchedVerb(focused, window)) && !goAllowed(ctx) {
+				return fmt.Sprintf("Stopped before pressing %s on %s %q in %q. %s", keys, focused.Role, focused.Label, window, consentPrompt(matchedVerb(focused, window)))
+			}
+		}
+		dev, errText := a.inputDevice(ctx)
+		if errText != "" {
+			return errText
+		}
+		if err := dev.PressKey(keys); err != nil {
+			return toolError(fmt.Sprintf("could not press %s: %v", keys, err))
+		}
+		// Tab, Shift+Tab and the arrows move the keyboard off whatever the last click focused, and nothing here can say where to, so the next Enter or Space has to be refused rather than checked against a control this session can no longer vouch for.
+		if movesFocus(keys) {
+			a.focusLost(ctx)
+		}
+		return fmt.Sprintf("pressed %s; call observe_screen to see what it did", keys)
+
+	case "scroll_at":
+		x, y, errText := a.picturePoint(ctx, args)
+		if errText != "" {
+			return errText
+		}
+		dy, ok := args["dy"].(float64)
+		if !ok || dy == 0 {
+			return toolError("scroll_at needs dy, how many steps to scroll: positive is down")
+		}
+		dev, errText := a.inputDevice(ctx)
+		if errText != "" {
+			return errText
+		}
+		// Same order as clickPoint: the tap indicator is drawn at the point the camera is about to photograph, so it must land before the camera starts rather than racing it.
+		a.tapAt(x, y, "")
+		before := a.beforePress(ctx)
+		if err := dev.ScrollAt(float64(x), float64(y), int32(dy)); err != nil {
+			return toolError(fmt.Sprintf("could not scroll at %d,%d: %v", x, y, err))
+		}
+		if missed := a.pressCheck(ctx, before, x, y); missed != "" {
+			return missed
+		}
+		return fmt.Sprintf("scrolled %d steps at %d,%d; look or call observe_screen to see the page now", int(dy), x, y)
+
+	// switch_window is no longer declared: open_app raises an already-running window before it starts anything, so it was open_app minus the working launch. Still answered, so a live session holding the older tool list is not left with a tool that returns nothing.
+	case "switch_window", "open_app":
+		app, _ := args["app"].(string)
+		return a.openApp(ctx, strings.TrimSpace(app))
+
 	case "open_url":
-		url, ok := args["url"].(string)
+		raw, ok := args["url"].(string)
 		if !ok {
 			return toolError("open_url needs a url")
 		}
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "windows":
-			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-		case "darwin":
-			cmd = exec.Command("open", url)
-		default:
-			cmd = exec.Command("xdg-open", url)
+		// Only http and https ever reach the opener. The url in a tool call is routinely copied out of screen text or a page the model just read, and the opener is a shell command: file:///home/…/.ssh/id_rsa, a .desktop path, a smb:// share or a javascript: link would all be acted on. ipc.Open makes the same check for the same reason.
+		if parsed, err := neturl.Parse(raw); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			slog.Warn("open_url refused: not an http(s) link", "url", raw)
+			return toolError("I can only open http and https links")
 		}
+		cmd := openURLCommand(raw)
 		if err := cmd.Start(); err != nil {
-			slog.Warn("open_url failed", "url", url, "error", err)
+			slog.Warn("open_url failed", "url", raw, "error", err)
 			return toolError("I couldn't open that link")
 		}
-		return fmt.Sprintf("opened %s in browser", url)
+		// Reaped in the background: the opener exits in milliseconds, and an unwaited child stays a zombie in the daemon's process table for the life of the daemon.
+		go func() { _ = cmd.Wait() }()
+		// Opened is not showing: the shell keeps the new tab behind the window in front unless the browser is raised from inside the shell, so the result says which of the two happened rather than leaving the model to read "opened" as "in front".
+		if how := a.raiseBrowser(ctx); how != "" {
+			return fmt.Sprintf("opened %s in browser and brought the browser to the front (%s)", raw, how)
+		}
+		return fmt.Sprintf("opened %s in browser; the browser window was not brought to the front, so it may be behind the window that was in front, switch_window to it before reading the page", raw)
 
 	case "query_memory":
-		if msg := checkArgs(args, "query", "domain", "app", "since", "until"); msg != "" {
+		if msg := checkArgs(args, "query", "domain", "app", "since", "until", "kind"); msg != "" {
 			return toolError(msg)
 		}
 		query, ok := args["query"].(string)
 		if !ok {
 			return toolError("query_memory needs something to search for")
 		}
+		if kind, _ := args["kind"].(string); kind == "meeting" {
+			since, until, _, err := optionalWindow(args, time.Now())
+			if err != nil {
+				return toolError(dateHint)
+			}
+			return a.listMeetingNotes(ctx, since, until)
+		}
 		// domain is optional: a missing or wrong-typed arg silently becomes "" (search everything, weighted toward the current domain) rather than erroring — since/until below are stricter since a mis-parsed date changes which day the answer comes from.
 		domain, _ := args["domain"].(string)
 		since, until, timed, err := optionalWindow(args, time.Now())
 		if errors.Is(err, errSinceAfterUntil) {
-			return toolError("that range runs backwards — the start has to come before the end")
+			return toolError("that range runs backwards, the start has to come before the end")
 		}
 		if err != nil {
 			slog.Warn("query_memory: unreadable date", "error", err)
 			return toolError(dateHint)
 		}
-		slog.Info("querying long-term memory", "query", query, "domain", domain, "since", since, "until", until)
+		slog.Debug("querying long-term memory", "query", query, "domain", domain, "since", since, "until", until)
 
 		// HybridSearchWindow (FTS5 + vector, fused via reciprocal rank fusion) covers episodes/summaries/notes/threads in one fused, domain-aware ranking, with the since/until window enforced store-side — inside the SQL and the vector candidate pool, before any top-k — so a sparse window still yields its items instead of the old over-fetch-and-post-filter returning nothing.
 		hits, err := a.brain.HybridSearchWindow(ctx, query, domain, since, until, queryMemoryHits)
@@ -1008,14 +761,15 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 				seen[key] = true
 			}
 			// Content is excerpted via db.FormatHit/FormatNoteHit like every other read path — an unformatted hit can inject tens of KB from a single oversized row (see RetrieveRelevant/RecallSubject, which already do this).
-			// Notes are the only source with an update_note/delete_note follow-up tool, so they're the only hits that carry their ref_id in the surfaced line — the model needs it in hand to act on a correction.
+			// Notes are the only source revise can follow up on, so they're the only hits that carry their ref_id in the surfaced line — the model needs it in hand to act on a correction.
+			// The *WithSource variants append a {"source":{...}} tag ask.go's Evidence extraction reads back out — a caller can then show which stored row an answer leaned on, instead of a paraphrase nobody can trace.
 			if h.Source == "note" {
-				lines = append(lines, db.FormatNoteHit(h, 0))
+				lines = append(lines, db.FormatNoteHitWithSource(h, 0))
 			} else {
-				lines = append(lines, db.FormatHit(h, 0))
+				lines = append(lines, db.FormatHitWithSource(h, 0))
 			}
 		}
-		return strings.Join(lines, "\n")
+		return withReviseHint(strings.Join(lines, "\n"))
 
 	case "query_store":
 		if msg := checkArgs(args, "query"); msg != "" {
@@ -1059,7 +813,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			if len(ignored) > 0 {
 				lines = append(lines, fmt.Sprintf("(note: subject recall ignores %s)", strings.Join(ignored, " and ")))
 			}
-			return strings.Join(lines, "\n")
+			return withReviseHint(strings.Join(lines, "\n"))
 		}
 
 		sinceStr, sinceErr := stringArg(args, "since")
@@ -1070,7 +824,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		since, until, err := recallBounds(sinceStr, untilStr, time.Now())
 		if errors.Is(err, errSinceAfterUntil) {
-			return toolError("that range runs backwards — the start has to come before the end")
+			return toolError("that range runs backwards, the start has to come before the end")
 		}
 		if err != nil {
 			slog.Warn("recall: unreadable date", "error", err)
@@ -1101,54 +855,61 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return oneLineExcerpt(e.ScreenText)
 		}), "\n")
 
-	case "get_recent":
-		limit := 10
-		if v, ok := args["limit"].(float64); ok && v > 0 {
-			limit = int(v)
-		}
-		if limit > 50 {
-			limit = 50
-		}
-		app, _ := args["app"].(string)
-		slog.Info("recalling recent moments", "limit", limit, "app", app)
-		// Over-fetch, then cap after the idle rows are dropped: the newest rows in the store are routinely idle captures, so asking for exactly limit rows is how "the last six hours" came back as one real moment plus "(19 idle omitted)".
-		episodes, err := a.brain.ListEpisodes(ctx, db.EpisodeQuery{App: app, Limit: min(limit*4, 200), NewestFirst: true})
-		if err != nil {
-			slog.Error("get_recent: read failed", "error", err)
-			return toolError(storeUnavailable)
-		}
-		if len(episodes) == 0 {
-			return "no recent episodes"
-		}
-		lines := formatEpisodeTimeline(episodes, func(e db.Episode) string {
-			// The tracked activity is the row's handle now (see episodeHandle), so the excerpt is just the screen text — printing the activity here too said the same phrase twice on every line.
-			excerpt := oneLineExcerpt(e.ScreenText)
-			if e.ImagePath != "" {
-				excerpt = strings.TrimSpace(excerpt + " [img]")
-			}
-			return excerpt
-		})
-		return strings.Join(capRealRows(lines, limit), "\n")
-
 	case "branch":
 		task, ok := args["task"].(string)
 		if !ok || strings.TrimSpace(task) == "" {
 			return toolError("branch needs the question to work on")
 		}
-		if !a.tryReserveBranchSlot() {
-			return toolError("I've already run all the background searches I get this session — use query_memory or recall instead")
+		if !takeBranch(ctx) {
+			return toolError(fmt.Sprintf("I have already run %d background searches for this; answer from what they found, or use query_memory or recall", maxBranchesPerAsk))
 		}
-		model, err := a.subtaskModelFactory()
+		// webSearch calls a real search engine directly (Exa, falling back to Tavily) — the cheapest and fastest path. When neither is configured or both fail, the task goes to whichever brain the router says has a web search of its own, the same way a typed ask does, instead of telling the model the web is out of reach.
+		result, err := a.webSearch(ctx, task)
 		if err != nil {
-			slog.Error("branch: could not start", "error", err)
-			return toolError("that background search couldn't start — use query_memory or recall instead")
+			slog.Warn("branch: web search failed, handing the task to a brain with its own web search", "error", err)
+			result, err = a.webAsk(ctx, task)
 		}
-		result, err := a.runSubtask(ctx, model, task)
 		if err != nil {
 			slog.Error("branch: failed", "error", err)
-			return toolError("that background search didn't come back — use query_memory or recall instead")
+			return toolError("that background search didn't come back, use query_memory or recall instead")
 		}
 		return result
+
+	case "do":
+		goal, _ := args["goal"].(string)
+		goal = strings.TrimSpace(goal)
+		if goal == "" {
+			return toolError("do needs the whole job in one goal, in the user's own words")
+		}
+		if a.RunJob == nil {
+			return toolError("this session cannot start a job, so work the screen a step at a time instead")
+		}
+		slog.Info("do: handing a chain of work to the job runner", "goal", goal)
+		said, err := a.RunJob(ctx, goal)
+		if err != nil {
+			slog.Warn("do: the job runner would not take it", "goal", goal, "error", err)
+			return toolError(fmt.Sprintf("that job did not start: %v", err))
+		}
+		return said
+
+	case "add_task":
+		title, _ := args["title"].(string)
+		title = strings.TrimSpace(title)
+		if title == "" {
+			return toolError("add_task needs the task's title")
+		}
+		// A conversation per task, as POST /tasks does it, so the row on the Tasks screen opens somewhere to work on it. A conversation that cannot be opened is not fatal: the task itself is what the user asked for, and it is filed against no conversation rather than not at all.
+		convID, err := a.brain.CreateConversation(ctx, title, "")
+		if err != nil {
+			slog.Warn("add_task: could not open a conversation for the task, filing it without one", "error", err)
+		}
+		id, err := a.brain.AddUserTask(ctx, title, convID)
+		if err != nil {
+			slog.Error("add_task: write failed", "error", err)
+			return toolError("that task didn't save, tell the user it is not on their list")
+		}
+		// The ref goes back with the title so that a correction in the next breath has something to aim at: revise takes "task#N", and without the N the model has to guess, which on 2026-09-12 it did, at a note belonging to something else.
+		return fmt.Sprintf("added to the task list as task#%d: %s", id, title)
 
 	case "save_note":
 		content, ok := args["content"].(string)
@@ -1157,7 +918,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 		}
 		if _, err := a.brain.LogNote(ctx, content, "fact"); err != nil {
 			slog.Error("save_note: write failed", "error", err)
-			return toolError("that didn't save — try saying it again")
+			return toolError("that didn't save, try saying it again")
 		}
 		return "saved"
 
@@ -1189,67 +950,138 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			}
 			if err := a.brain.SetPersonalContext(ctx, subject, content); err != nil {
 				slog.Error("personal_context: write failed", "subject", subject, "error", err)
-				return toolError("that didn't save — try saying it again")
+				return toolError("that didn't save, try saying it again")
 			}
 			return "saved"
 		case "delete":
 			if strings.TrimSpace(subject) == "" {
-				return toolError("personal_context needs the subject to remove — view it first to see which ones there are")
+				return toolError("personal_context needs the subject to remove, view it first to see which ones there are")
 			}
 			if err := a.brain.DeletePersonalContext(ctx, subject); err != nil {
 				slog.Error("personal_context: delete failed", "subject", subject, "error", err)
-				return toolError("nothing was removed — view it first to see which subjects there are")
+				return toolError("nothing was removed, view it first to see which subjects there are")
 			}
 			return "deleted"
 		default:
 			return toolError("personal_context takes view, set or delete")
 		}
 
-	case "update_note":
-		idFloat, ok := args["id"].(float64)
-		if !ok {
-			return toolError("update_note needs the note's id — the number in a [note#N] query_memory result")
+	case "revise":
+		if msg := checkArgs(args, "ref", "content", "state", "priority", "remove"); msg != "" {
+			return toolError(msg)
 		}
-		content, ok := args["content"].(string)
-		if !ok || strings.TrimSpace(content) == "" {
-			return toolError("update_note needs the corrected fact")
+		ref, ok := args["ref"].(string)
+		if !ok || strings.TrimSpace(ref) == "" {
+			return toolError("revise needs a ref, the \"note#N\", \"thread#N\" or \"task#N\" a result showed you")
 		}
-		if err := a.brain.UpdateNote(ctx, int64(idFloat), content); err != nil {
-			slog.Error("update_note: write failed", "id", int64(idFloat), "error", err)
-			return toolError("nothing was updated — look the note up again with query_memory and use the id it shows")
-		}
-		return "updated"
-
-	case "thread_evidence":
-		idFloat, ok := args["id"].(float64)
-		if !ok || idFloat <= 0 {
-			return toolError("thread_evidence needs the thread's id — the number in a [thread#N] result")
-		}
-		limit := 10
-		if l, ok := args["limit"].(float64); ok && l > 0 {
-			limit = int(l)
-		}
-		// A tool result is prompt text. query_memory caps at queryMemoryHits for the same reason: without a ceiling a model that asks for a thousand captures gets them, each now rendered with the raised excerpt budget.
-		if limit > maxToolRows {
-			limit = maxToolRows
-		}
-		eps, err := a.brain.EpisodesForThread(ctx, int64(idFloat), limit)
+		kind, id, err := parseRef(ref)
 		if err != nil {
-			slog.Error("thread_evidence: read failed", "id", int64(idFloat), "error", err)
-			return toolError("could not read this thread's captures")
+			return toolError(err.Error())
 		}
-		if len(eps) == 0 {
-			// Threads attributed before the compiler began recording the edge have none, and saying so plainly stops the model reading an empty result as "nothing happened".
-			return "no captures are linked to that thread — it was summarised before Ora started recording which screens a thread came from"
+		content, hasContent := args["content"].(string)
+		hasContent = hasContent && strings.TrimSpace(content) != ""
+		state, hasState := args["state"].(string)
+		hasState = hasState && strings.TrimSpace(state) != ""
+		priority, hasPriority := args["priority"].(string)
+		hasPriority = hasPriority && strings.TrimSpace(priority) != ""
+		remove, _ := args["remove"].(bool)
+		if remove && (hasContent || hasState || hasPriority) {
+			return toolError("revise can't remove and change something in the same call, pick one")
 		}
-		var b strings.Builder
-		for _, e := range eps {
-			fmt.Fprintf(&b, "%s  %s — %s\n", e.CreatedAt.Local().Format("Mon Jan 2 15:04"), e.App, e.Title)
-			if txt := strings.TrimSpace(e.ScreenText); txt != "" {
-				fmt.Fprintf(&b, "    %s\n", db.FormatHit(db.MemoryHit{Source: "episode", Content: txt}, 0))
+		if !remove && !hasContent && !hasState && !hasPriority {
+			return toolError("revise needs content, a state, a priority, or remove, say what changed")
+		}
+
+		switch kind {
+		case "note":
+			if remove {
+				if err := a.brain.DeleteNote(ctx, id); err != nil {
+					slog.Error("revise: delete failed", "id", id, "error", err)
+					return toolError("nothing was there to delete, look it up again with query_memory and use the id it shows")
+				}
+				return "deleted"
 			}
+			// An action item's state lives as a "[state/priority]" prefix on the same notes row a plain note uses — SetActionStatus rewrites just that prefix and leaves the rest of the line alone.
+			// Priority rides the same "[state/priority]" prefix as the status and is set the same way, so "make that one high priority" has somewhere to land.
+			if hasPriority {
+				p := strings.TrimSpace(priority)
+				if !memory.ValidPriority(p) {
+					return toolError("priority must be high, normal, or low")
+				}
+				if err := a.brain.SetActionPriority(ctx, id, p); err != nil {
+					slog.Error("revise: priority write failed", "id", id, "error", err)
+					return toolError("that priority didn't stick, look the item up again and use the id it shows")
+				}
+				if !hasState && !hasContent {
+					return "updated"
+				}
+			}
+			if hasState {
+				s := strings.TrimSpace(state)
+				if !memory.ValidStatus(s) {
+					return toolError("state must be open, done, or dropped")
+				}
+				if err := a.brain.SetActionStatus(ctx, id, s); err != nil {
+					slog.Error("revise: status write failed", "id", id, "error", err)
+					return toolError("nothing was updated, look it up again with query_memory and use the id it shows")
+				}
+			}
+			if hasContent {
+				// An action item's content is a rendered "[state/priority] Owner: work (Meeting, date)" line, so its text is corrected through SetActionText, which re-renders the line: writing the model's prose straight over it would strip the prefix and drop the item out of every read that goes through ParseAction. An id that names an ordinary note is not an action item, and that one is written whole.
+				err := a.brain.SetActionText(ctx, id, content)
+				if errors.Is(err, db.ErrNotActionItem) {
+					err = a.brain.UpdateNote(ctx, id, content)
+				}
+				if err != nil {
+					slog.Error("revise: content write failed", "id", id, "error", err)
+					return toolError("nothing was updated, look it up again with query_memory and use the id it shows")
+				}
+			}
+			return "updated"
+		case "thread":
+			if remove {
+				return toolError("a thread can't be removed, correct it with content instead")
+			}
+			if hasState || hasPriority {
+				return toolError("a thread has no state or priority, those only apply to an action item")
+			}
+			if err := a.brain.UpdateThreadState(ctx, id, content); err != nil {
+				slog.Error("revise: thread write failed", "id", id, "error", err)
+				return toolError("nothing was fixed, look the thread up again with query_memory and use the id it shows")
+			}
+			return "fixed"
+		case "task":
+			// A row on the Tasks screen is either there or not: user_tasks has a done flag and nothing else to set, so "dropped" means the same thing as remove, and there is no priority to write.
+			if hasPriority {
+				return toolError("a task on the list has no priority, that only applies to an action item")
+			}
+			if remove || strings.TrimSpace(state) == "dropped" {
+				if err := a.brain.DeleteUserTask(ctx, id); err != nil {
+					slog.Error("revise: task delete failed", "id", id, "error", err)
+					return toolError("nothing was there to delete, read user_tasks with query_store and use the id it shows")
+				}
+				return "deleted"
+			}
+			if hasState {
+				s := strings.TrimSpace(state)
+				if s != "done" && s != "open" {
+					return toolError("a task on the list is done, open, or dropped")
+				}
+				if err := a.brain.SetUserTaskDone(ctx, id, s == "done"); err != nil {
+					slog.Error("revise: task state write failed", "id", id, "error", err)
+					return toolError("nothing was updated, read user_tasks with query_store and use the id it shows")
+				}
+			}
+			if hasContent {
+				if err := a.brain.SetUserTaskTitle(ctx, id, content); err != nil {
+					slog.Error("revise: task content write failed", "id", id, "error", err)
+					return toolError("nothing was updated, read user_tasks with query_store and use the id it shows")
+				}
+			}
+			return "updated"
+		default:
+			return toolError(fmt.Sprintf("revise only handles note, thread and task refs, not %q", kind))
 		}
-		return strings.TrimRight(b.String(), "\n")
 
 	case "action_items":
 		items, err := a.brain.OpenActionItems(ctx)
@@ -1258,7 +1090,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			return toolError("could not read the action items")
 		}
 		if len(items) == 0 {
-			return "nothing outstanding — no open action items"
+			return "nothing outstanding, no open action items"
 		}
 		var b strings.Builder
 		// Open items never expire by design — "an owed task does not stop being owed" — so the list only grows, and it is prompt text like any other tool result.
@@ -1266,66 +1098,13 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 			items = items[:maxToolRows]
 		}
 		for _, it := range items {
-			// The id leads so update_action can close one without a second lookup, and the source meeting trails so the model can say where a task came from.
+			// The id leads so revise can close one without a second lookup, and the source meeting trails so the model can say where a task came from.
 			fmt.Fprintf(&b, "[note#%d] %s\n", it.NoteID, it.Note())
 		}
 		return strings.TrimRight(b.String(), "\n")
 
-	case "update_action":
-		idFloat, ok := args["id"].(float64)
-		if !ok {
-			return toolError("update_action needs the action item's id — the number in a [note#N] query_memory result")
-		}
-		status, _ := args["status"].(string)
-		priority, _ := args["priority"].(string)
-		if strings.TrimSpace(status) == "" && strings.TrimSpace(priority) == "" {
-			return toolError("update_action needs a status (open, done, dropped) or a priority (high, normal, low) to change")
-		}
-		if s := strings.TrimSpace(status); s != "" {
-			if !memory.ValidStatus(s) {
-				return toolError("status must be open, done, or dropped")
-			}
-			if err := a.brain.SetActionStatus(ctx, int64(idFloat), s); err != nil {
-				slog.Error("update_action: status write failed", "id", int64(idFloat), "error", err)
-				return toolError("nothing was updated — look the item up again with query_memory and use the id it shows")
-			}
-		}
-		if p := strings.TrimSpace(priority); p != "" {
-			if !memory.ValidPriority(p) {
-				return toolError("priority must be high, normal, or low")
-			}
-			if err := a.brain.SetActionPriority(ctx, int64(idFloat), p); err != nil {
-				slog.Error("update_action: priority write failed", "id", int64(idFloat), "error", err)
-				return toolError("nothing was updated — look the item up again with query_memory and use the id it shows")
-			}
-		}
-		return "updated"
-
-	case "fix_thread":
-		idFloat, ok := args["id"].(float64)
-		if !ok {
-			return toolError("fix_thread needs the thread's id — the number in a [thread#N] result")
-		}
-		correction, ok := args["correction"].(string)
-		if !ok || strings.TrimSpace(correction) == "" {
-			return toolError("fix_thread needs what the thread actually is")
-		}
-		if err := a.brain.UpdateThreadState(ctx, int64(idFloat), correction); err != nil {
-			slog.Error("fix_thread: write failed", "id", int64(idFloat), "error", err)
-			return toolError("nothing was fixed — look the thread up again with query_memory and use the id it shows")
-		}
-		return "fixed"
-
-	case "delete_note":
-		idFloat, ok := args["id"].(float64)
-		if !ok {
-			return toolError("delete_note needs the note's id — the number in a [note#N] query_memory result")
-		}
-		if err := a.brain.DeleteNote(ctx, int64(idFloat)); err != nil {
-			slog.Error("delete_note: write failed", "id", int64(idFloat), "error", err)
-			return toolError("nothing was deleted — look the note up again with query_memory and use the id it shows")
-		}
-		return "deleted"
+	case "delegate":
+		return delegateHandler(ctx, a, args)
 
 	default:
 		slog.Warn("unknown tool called", "tool", name)
@@ -1339,10 +1118,7 @@ const toolArgSummaryRunes = 48
 // quoteArg renders an argument value as a quoted display literal, cut to toolArgSummaryRunes with an ellipsis when it is longer.
 // Input: the raw argument string. Output: the quoted, possibly-truncated literal, e.g. `"ls -la"`.
 func quoteArg(s string) string {
-	if r := []rune(s); len(r) > toolArgSummaryRunes {
-		s = string(r[:toolArgSummaryRunes]) + "\u2026"
-	}
-	return fmt.Sprintf("%q", s)
+	return fmt.Sprintf("%q", util.RunesEllipsis(s, toolArgSummaryRunes))
 }
 
 // toolActivitySummary pre-formats a tool call's primary argument into a short display literal for the UI (e.g. `"Riddler puzzles"` for query_memory), so the UI never needs to know each tool's arg-shape — that knowledge already lives here, next to executeTool/toolDefinitions.
@@ -1353,11 +1129,6 @@ func toolActivitySummary(name string, args map[string]any) string {
 		if q, ok := args["query"].(string); ok {
 			return quoteArg(q)
 		}
-	case "get_recent":
-		if app, ok := args["app"].(string); ok && strings.TrimSpace(app) != "" {
-			return quoteArg(app)
-		}
-		return "recent"
 	case "recall":
 		if subject, ok := args["subject"].(string); ok && strings.TrimSpace(subject) != "" {
 			return quoteArg(subject)
@@ -1392,9 +1163,9 @@ func toolActivitySummary(name string, args map[string]any) string {
 		if content, ok := args["content"].(string); ok {
 			return quoteArg(content)
 		}
-	case "update_note":
-		if content, ok := args["content"].(string); ok {
-			return quoteArg(content)
+	case "revise":
+		if ref, ok := args["ref"].(string); ok {
+			return quoteArg(ref)
 		}
 	case "personal_context":
 		action, _ := args["action"].(string)
@@ -1402,29 +1173,57 @@ func toolActivitySummary(name string, args map[string]any) string {
 			return fmt.Sprintf("%s %s", action, quoteArg(subject))
 		}
 		return quoteArg(action)
-	case "delete_note":
-		if id, ok := args["id"].(float64); ok {
-			return fmt.Sprintf("#%d", int64(id))
-		}
 	case "branch":
 		if task, ok := args["task"].(string); ok {
 			return quoteArg(task)
+		}
+	case "do":
+		if goal, ok := args["goal"].(string); ok {
+			return quoteArg(goal)
 		}
 	case "query_store":
 		if query, ok := args["query"].(string); ok {
 			return quoteArg(query)
 		}
+	case "click", "scroll_to", "point_at":
+		if n, ok := args["n"].(float64); ok {
+			return fmt.Sprintf("element %d", int(n))
+		}
+	case "switch_window", "open_app":
+		if app, ok := args["app"].(string); ok {
+			return quoteArg(app)
+		}
+	case "type_text":
+		if text, ok := args["text"].(string); ok {
+			return quoteArg(text)
+		}
+	case "click_at":
+		x, xok := args["x"].(float64)
+		y, yok := args["y"].(float64)
+		if xok && yok {
+			return fmt.Sprintf("%d,%d", int(x), int(y))
+		}
+	case "scroll_at":
+		x, xok := args["x"].(float64)
+		y, yok := args["y"].(float64)
+		dy, dyok := args["dy"].(float64)
+		if xok && yok && dyok {
+			return fmt.Sprintf("%d steps at %d,%d", int(dy), int(x), int(y))
+		}
 	}
 	return ""
 }
 
-// resultSummary condenses a tool's raw result string into a short status word for the UI's transcript log line — "N hits" for the search-shaped tools, "failed" on any error result (executeTool always prefixes errors with "error"), "0 hits" for the known empty-result sentinels, "done" for any other success.
+// resultSummary condenses a tool's raw result string into a short status word for the UI's transcript log line and for a "tool" event's Detail — "N hits" for the search-shaped tools, "failed" on any error result (executeTool always prefixes errors with "error"), "0 hits" for the known empty-result sentinels, the window line for observe_screen and the window a click landed on (never the accessibility listing itself, only that one line — see toolLogDetail for the separate rule that keeps screen content out of the server's own log file), "done" for any other success.
 func resultSummary(name, result string) string {
 	if strings.HasPrefix(result, "error") {
 		return "failed"
 	}
+	if strings.HasPrefix(result, "Stopped before ") {
+		return "stopped"
+	}
 	switch result {
-	case "no memory matches", "no memory of that subject", "no episodes in that window", "no recent episodes", "no rows matched":
+	case "no memory matches", "no memory of that subject", "no episodes in that window", "no rows matched":
 		return "0 hits"
 	case "saved":
 		return "saved"
@@ -1432,11 +1231,48 @@ func resultSummary(name, result string) string {
 		return "updated"
 	case "deleted":
 		return "deleted"
+	case "fixed":
+		return "fixed"
 	}
-	if name == "query_memory" || name == "recall" || name == "get_recent" {
+	if name == "query_memory" || name == "recall" {
 		return fmt.Sprintf("%d hits", strings.Count(result, "\n")+1)
 	}
+	if name == "observe_screen" {
+		line, _, _ := strings.Cut(result, "\n")
+		return line
+	}
+	if name == "click" {
+		if _, rest, ok := strings.Cut(result, `the window is now "`); ok {
+			if title, _, ok := strings.Cut(rest, `"`); ok {
+				return fmt.Sprintf("window now %q", title)
+			}
+		}
+	}
+	if name == "click_at" || name == "scroll_at" {
+		if line, _, ok := strings.Cut(result, ";"); ok {
+			return line
+		}
+	}
+	if name == "draw" {
+		if label, ok := drawnItemLabel(result); ok {
+			return fmt.Sprintf("drew around %q", label)
+		}
+	}
 	return "done"
+}
+
+// drawnItemLabel reads the item name off a draw result that resolved a numbered item — "drew a circle around [3] push button \"Reload\"" (see the draw case's "box", "circle" branch) — so resultSummary can surface what was actually drawn around instead of the generic "done" a caller reading only the summary would otherwise see; a live "tool" event and a screen eval both read the summary, never the full result text. Output: the label and true, or "" and false for a draw that named no item — an arrow, a line, a path, or a box/circle drawn from a raw rectangle rather than "on" a numbered one.
+func drawnItemLabel(result string) (string, bool) {
+	_, rest, ok := strings.Cut(result, "] ")
+	if !ok {
+		return "", false
+	}
+	_, rest, ok = strings.Cut(rest, `"`)
+	if !ok {
+		return "", false
+	}
+	label, _, ok := strings.Cut(rest, `"`)
+	return label, ok
 }
 
 // filterDescription names the post-filters query_memory applied, in the words the model can repeat back: "in slack since Aug 28 00:00". Returns "" when no filter was set, so the caller can fall back to the plain no-matches answer.
@@ -1470,4 +1306,70 @@ func filterHitsByApp(hits []db.MemoryHit, app string) []db.MemoryHit {
 		}
 	}
 	return out
+}
+
+// listMeetingNotes renders every meeting-minutes note whose creation time falls in [since, until] (a zero bound is open), newest first, each as "[note#ID] date: excerpt". It reads the notes table directly rather than ranking, because minutes are the answer to "what was the meeting about" and no query word reliably ranks them above the screens of the user reading them.
+// maxMeetingNotesListed caps how many meetings query_memory kind=meeting lists in one answer; the rest are counted, and a narrower window or a real query reaches them.
+const maxMeetingNotesListed = 30
+
+// latestMeetingNotesListed is how many meetings are listed when no window was given. A question with no window is "the latest meeting", and listing thirty sets of minutes for it cost one round 178k input tokens on 2026-09-10; the count line says how many older ones a window would reach.
+const latestMeetingNotesListed = 3
+
+func (a *Agent) listMeetingNotes(ctx context.Context, since, until time.Time) string {
+	notes, err := a.brain.NotesOfKindSince(ctx, "meeting", since)
+	if err != nil {
+		slog.Error("query_memory: reading meeting notes failed", "error", err)
+		return toolError(storeUnavailable)
+	}
+	limit := maxMeetingNotesListed
+	if since.IsZero() && until.IsZero() {
+		limit = latestMeetingNotesListed
+	}
+	var lines []string
+	left := 0
+	for _, n := range notes {
+		if !until.IsZero() && n.CreatedAt.After(until) {
+			continue
+		}
+		if len(lines) == limit {
+			left++
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("[note#%d] %s: %s", n.ID, n.CreatedAt.Format("Mon Jan 2 15:04"), db.FormatNoteHitWithSource(db.MemoryHit{Source: "note", RefID: n.ID, Content: n.Content, CreatedAt: n.CreatedAt}, 0)))
+	}
+	if len(lines) == 0 {
+		if desc := filterDescription("", since, until); desc != "" {
+			return "no meeting minutes " + desc
+		}
+		return "no meeting minutes saved yet"
+	}
+	if left > 0 {
+		lines = append(lines, fmt.Sprintf("and %d more, older; narrow the window or ask about one", left))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// typingPlaces are the roles of a control text can legitimately land in, so a field holding the keyboard while another was clicked is somewhere the keys have a place to go rather than proof they would be lost. A password box is one of them on purpose: it is the secret stop line, not this one, that refuses typing into it, and leaving it out here would answer with the wrong refusal. A combo box is not one, because only a combo box holding a box to type in can be typed into and the tracker's read resolves such a one to that child (see tracker.FocusedElement).
+var typingPlaces = map[string]bool{"entry": true, "text": true, "password text": true, "search box": true}
+
+// keyboardHolder reads which element of the window in front holds the keyboard. The tracker's read in production, a stand-in in the tests; it is a package variable rather than a field on Agent because the stop lines it serves are the package's, not one session's.
+var keyboardHolder = tracker.FocusedElement
+
+// keyboardField says which control the keys are about to reach and whether this session can vouch for the answer. Input: the call's context and the item the last numbered click acted on. Output: the control to put the stop lines against, false when the keyboard is provably somewhere the keys have no place to land, and a note naming where they are going when that is not the clicked control.
+// The clicked control still holding the keyboard is the ordinary case and focusHeld answers it, a descendant of it holding the keyboard included, which is how Chromium and Electron publish a focused text input. Only when that read says a definite no is the window in front asked who does hold the keys: another box to type in is a legitimate landing place — a page that moved the focus into its own search box is the case this refused on the user's screen — and a readable holder that is no place to type is the proof this stop line exists for.
+func (a *Agent) keyboardField(ctx context.Context, it act.Item) (act.Item, bool, string) {
+	if a.focusHeld(ctx, it) {
+		return it, true, ""
+	}
+	holder, ok := keyboardHolder(ctx)
+	if !ok {
+		// Nothing readable holds the keyboard, which is not the same as the keys going astray: the window may publish no tree at all. This is the same unknown the failed read of the clicked field is, and it goes ahead on the remembered click.
+		slog.Warn("nothing readable holds the keyboard in the window in front, so typing goes ahead on the remembered click", "ref", it.Ref)
+		return it, true, ""
+	}
+	got := act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}
+	if !typingPlaces[holder.Role] {
+		return got, false, ""
+	}
+	return got, true, fmt.Sprintf(" into the %s %q, which holds the keyboard, not the %s %q that was clicked", got.Role, got.Label, it.Role, it.Label)
 }

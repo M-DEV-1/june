@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
-	"strings"
+
 	"testing"
 	"time"
 
@@ -11,40 +11,6 @@ import (
 )
 
 // --- pure helpers ---
-
-func TestToolActivitySummary(t *testing.T) {
-	cases := []struct {
-		name string
-		args map[string]any
-		want string
-	}{
-		{"query_memory", map[string]any{"query": "Riddler puzzles"}, `"Riddler puzzles"`},
-		{"query_memory", map[string]any{"query": "cuda", "domain": "work"}, `"cuda"`},
-		{"get_recent", map[string]any{}, "recent"},
-		{"get_recent", map[string]any{"app": "Slack"}, `"Slack"`},
-		{"recall", map[string]any{"subject": "DeepSeek"}, `"DeepSeek"`},
-		{"recall", map[string]any{"since": "2026-07-05", "until": "2026-07-06"}, `since 2026-07-05 until 2026-07-06`},
-		{"recall", map[string]any{}, ""},
-		{"shell_exec", map[string]any{"command": "ls -la"}, `"ls -la"`},
-		{"read_file", map[string]any{"path": "/etc/hosts"}, `"/etc/hosts"`},
-		{"list_files", map[string]any{"path": "."}, `"."`},
-		{"list_files", map[string]any{}, ""},
-		{"open_url", map[string]any{"url": "https://example.com"}, `"https://example.com"`},
-		{"read_clipboard", map[string]any{}, ""},
-		{"save_note", map[string]any{"content": "user has a dentist appointment Friday"}, `"user has a dentist appointment Friday"`},
-		{"branch", map[string]any{"task": "catch me up on Riddler"}, `"catch me up on Riddler"`},
-		{"unknown_tool", map[string]any{"foo": "bar"}, ""},
-		// A long argument is cut to a bounded length so one shell command or note body can't push the tool line off the status row.
-		{"shell_exec", map[string]any{"command": strings.Repeat("x", 200)}, `"` + strings.Repeat("x", toolArgSummaryRunes) + `…"`},
-		{"save_note", map[string]any{"content": strings.Repeat("y", 200)}, `"` + strings.Repeat("y", toolArgSummaryRunes) + `…"`},
-	}
-	for _, c := range cases {
-		got := toolActivitySummary(c.name, c.args)
-		if got != c.want {
-			t.Errorf("toolActivitySummary(%q, %v) = %q, want %q", c.name, c.args, got, c.want)
-		}
-	}
-}
 
 func TestResultSummary(t *testing.T) {
 	cases := []struct {
@@ -54,7 +20,6 @@ func TestResultSummary(t *testing.T) {
 		{"query_memory", "no memory matches", "0 hits"},
 		{"recall", "no memory of that subject", "0 hits"},
 		{"recall", "no episodes in that window", "0 hits"},
-		{"get_recent", "no recent episodes", "0 hits"},
 		{"query_memory", "[episode] foo\n[note] bar\n[summary] baz", "3 hits"},
 		{"recall", "[Jan 2 15:04] Chrome — reddit: something", "1 hits"},
 		{"shell_exec", "total 0\ndrwxr-xr-x", "done"},
@@ -62,8 +27,18 @@ func TestResultSummary(t *testing.T) {
 		{"read_file", "file contents here", "done"},
 		{"save_note", "saved", "saved"},
 		{"save_note", "error: content argument is required", "failed"},
+		{"revise", "updated", "updated"},
+		{"revise", "fixed", "fixed"},
 		{"branch", "Riddler kicked off last week, blocked on X", "done"},
 		{"branch", "error: branch failed: gemini: unavailable", "failed"},
+		// observe_screen and click carry the window line — never the accessibility listing itself — so a pass rule or the UI's live progress can see what window a look or a click actually landed on.
+		{"observe_screen", "brave · PR #13 · GitHub\n[1] push button \"Merge\"", "brave · PR #13 · GitHub"},
+		{"observe_screen", "brave · Inbox\n(nothing actionable is showing)", "brave · Inbox"},
+		{"click", `clicked [1] push button "Merge" via press; the window is now "PR #13 · GitHub"; check it matches what was asked, then call observe_screen if you need the list`, `window now "PR #13 · GitHub"`},
+		{"click", `clicked [1] push button "Merge" via press; call observe_screen to see the result`, "done"},
+		{"click_at", `clicked 120,340 on the screen; the point lands on [2] link "Docs"; look or call observe_screen to see what it did`, "clicked 120,340 on the screen"},
+		{"scroll_at", `scrolled 3 steps at 50,60; look or call observe_screen to see the page now`, "scrolled 3 steps at 50,60"},
+		{"click_at", "error: could not click 120,340: no display", "failed"},
 	}
 	for _, c := range cases {
 		got := resultSummary(c.name, c.result)

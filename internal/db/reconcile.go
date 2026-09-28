@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -17,7 +18,7 @@ type ReconcileReport struct {
 	Backfilled int
 }
 
-// ReconcileVectors walks every id currently in the vector index and deletes any whose backing SQL row is gone (or, for episodes, already thinned to empty screen_text) — this is what heals the orphaning left by consolidation (ReplaceAllNotes renumbering notes, ReplaceSummariesWithDigest dropping replaced summaries) for a store that predates targeted vector deletes, without a manual rebuild.
+// ReconcileVectors walks every id currently in the vector index and deletes any whose backing SQL row is gone (or, for episodes, already thinned to empty screen_text) — this is what heals the orphaning left by consolidation (ReplaceAllNotes renumbering notes) for a store that predates targeted vector deletes, without a manual rebuild. ReplaceSummariesWithDigest no longer causes this: it reparents summaries under their digest instead of deleting them, so their vectors stay live.
 // A Store with no vector index configured is a no-op (zero report, no error).
 func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileReport, error) {
 	var report ReconcileReport
@@ -29,11 +30,28 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 		return report, nil
 	}
 
-	existing := make(map[string]bool)
-	for _, id := range vidx.IDs() {
+	// Backing rows are looked up once per source rather than once per vector: since chunking landed one episode is one vector per passage, so an index holding tens of thousands of ids used to mean tens of thousands of round trips (each episode one pulling its whole screen_text into Go) to answer "does this row still exist".
+	ids := vidx.IDs()
+	refsBySource := map[string][]int64{}
+	seen := map[string]bool{}
+	for _, id := range ids {
 		source, refID := splitCandidateID(id)
-		alive, thinned := s.vectorBackingAlive(ctx, source, refID)
-		if alive && !thinned {
+		key := fmt.Sprintf("%s:%d", source, refID)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		refsBySource[source] = append(refsBySource[source], refID)
+	}
+	live := map[string]map[int64]bool{}
+	for source, refs := range refsBySource {
+		live[source] = s.liveVectorRefs(ctx, source, refs)
+	}
+
+	existing := make(map[string]bool)
+	for _, id := range ids {
+		source, refID := splitCandidateID(id)
+		if alive := live[source]; alive == nil || alive[refID] {
 			existing[id] = true
 			continue
 		}
@@ -53,23 +71,73 @@ func (s *Store) ReconcileVectors(ctx context.Context, embedCap int) (ReconcileRe
 	}
 
 	// The candidate builder already drops what the index has for the sources it bounds; this covers the rest, so nothing that already has a vector is embedded twice.
+	batchAdder, hasBatch := vidx.(batchVectorIndex)
+	var batchIDs []string
+	var batchContents []string
+	var batchEmbeddings [][]float32
+	var batchMetadatas []map[string]string
+
+	flushBatch := func() {
+		if len(batchIDs) == 0 {
+			return
+		}
+		if err := batchAdder.AddBatch(ctx, batchIDs, batchContents, batchEmbeddings, batchMetadatas); err != nil {
+			// The embeddings in a failed batch have already been paid for, so each document is offered again on its own rather than dropped. This also closes the hole a half-applied batch leaves in a *vector.ChromemIndex, where a document the batch added but never stamped with a createdAt is invisible to eviction: the single Add stamps it.
+			slog.Error("reconcile: backfill batch add failed, retrying one at a time", "count", len(batchIDs), "error", err)
+			for i, id := range batchIDs {
+				if err := vidx.Add(ctx, id, batchContents[i], batchEmbeddings[i], batchMetadatas[i]); err != nil {
+					slog.Error("reconcile: backfill add after a failed batch failed", "id", id, "error", err)
+					continue
+				}
+				report.Backfilled++
+			}
+		} else {
+			report.Backfilled += len(batchIDs)
+		}
+		batchIDs = batchIDs[:0]
+		batchContents = batchContents[:0]
+		batchEmbeddings = batchEmbeddings[:0]
+		batchMetadatas = batchMetadatas[:0]
+	}
+
 	for _, c := range s.reconcileBackfillCandidates(ctx, existing, embedCap) {
 		if existing[c.id] {
 			continue
 		}
-		if report.Backfilled >= embedCap {
+		if report.Backfilled+len(batchIDs) >= embedCap {
 			break
 		}
 		vec, err := emb.Embed(ctx, "RETRIEVAL_DOCUMENT", c.content)
 		if err != nil {
+			// One bad document is skipped, but an engine that has gone away refuses every candidate, and refuses in microseconds with no I/O. Carrying on through the rest of the list then costs one ERROR line per candidate at several thousand a second: on shutdown, when the root context is cancelled and the engine closed while a sweep started at boot is still running, that was 29,763 of the log's 29,941 error lines in eight days. Nothing is lost by stopping — the next sweep re-derives whatever still has no vector.
+			if engineGone(ctx, err) {
+				slog.Warn("reconcile: backfill stopped, the embedding engine is gone", "backfilled", report.Backfilled, "error", err)
+				if hasBatch {
+					flushBatch()
+				}
+				return report, err
+			}
 			slog.Error("reconcile: backfill embed failed", "id", c.id, "error", err)
 			continue
 		}
-		if err := vidx.Add(ctx, c.id, c.content, vec, c.metadata); err != nil {
-			slog.Error("reconcile: backfill add failed", "id", c.id, "error", err)
-			continue
+		if hasBatch {
+			batchIDs = append(batchIDs, c.id)
+			batchContents = append(batchContents, c.content)
+			batchEmbeddings = append(batchEmbeddings, vec)
+			batchMetadatas = append(batchMetadatas, c.metadata)
+			if len(batchIDs) >= 50 {
+				flushBatch()
+			}
+		} else {
+			if err := vidx.Add(ctx, c.id, c.content, vec, c.metadata); err != nil {
+				slog.Error("reconcile: backfill add failed", "id", c.id, "error", err)
+				continue
+			}
+			report.Backfilled++
 		}
-		report.Backfilled++
+	}
+	if hasBatch {
+		flushBatch()
 	}
 
 	return report, nil
@@ -232,28 +300,61 @@ func (s *Store) reconcileBackfillCandidates(ctx context.Context, existing map[st
 	return out
 }
 
-// vectorBackingAlive reports whether refID's SQL row still exists for the given source, and — for episodes only — whether it's been thinned (screen_text cleared by AgeEpisodes) since that also means the vector should go even though the row itself remains. Unrecognized sources report alive=true so ReconcileVectors leaves them untouched — vector lifecycle for those isn't in scope here.
-func (s *Store) vectorBackingAlive(ctx context.Context, source string, refID int64) (alive, thinned bool) {
+// vectorBackingChunk is how many ids one backing-existence query asks about at a time, keeping the bound-parameter count well inside SQLite's limit for an index holding tens of thousands of vectors.
+const vectorBackingChunk = 500
+
+// liveVectorRefs reports which of one source's ref ids still have a backing row worth keeping a vector for. Input: the source name and the ref ids the vector index holds for it. Output: the set of those ids that are still alive — for an episode, alive also requires a non-empty screen_text, since a thinned capture's vector describes text the row no longer holds. A source whose vector lifecycle this sweep does not own returns nil, and the caller then leaves every one of its vectors alone.
+// A query error reports the whole chunk alive: a sweep that cannot read the backing table must not take that as licence to delete.
+func (s *Store) liveVectorRefs(ctx context.Context, source string, refs []int64) map[int64]bool {
+	var query string
+	var extra []any
 	switch source {
 	case "note":
-		var exists int
-		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM notes WHERE id = ?`, refID).Scan(&exists)
-		return exists == 1, false
+		query = `SELECT id FROM notes WHERE id IN (%s)`
 	case "summary", "digest":
-		var exists int
-		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id = ? AND type = ?`, refID, source).Scan(&exists)
-		return exists == 1, false
+		query = `SELECT id FROM nodes WHERE id IN (%s) AND type = ?`
+		extra = []any{source}
 	case "thread":
-		var exists int
-		_ = s.db.QueryRowContext(ctx, `SELECT 1 FROM threads WHERE id = ?`, refID).Scan(&exists)
-		return exists == 1, false
+		query = `SELECT id FROM threads WHERE id IN (%s)`
 	case "episode":
-		var screenText string
-		if err := s.db.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, refID).Scan(&screenText); err != nil {
-			return false, false
-		}
-		return true, screenText == ""
+		query = `SELECT id FROM episodes WHERE id IN (%s) AND screen_text <> ''`
 	default:
-		return true, false
+		return nil
 	}
+
+	live := make(map[int64]bool, len(refs))
+	for start := 0; start < len(refs); start += vectorBackingChunk {
+		end := start + vectorBackingChunk
+		if end > len(refs) {
+			end = len(refs)
+		}
+		chunk := refs[start:end]
+		placeholders, args := inPlaceholders(chunk)
+		rows, err := s.db.QueryContext(ctx, fmt.Sprintf(query, placeholders), append(args, extra...)...)
+		if err != nil {
+			slog.Error("reconcile: backing-row lookup failed, keeping this chunk's vectors", "source", source, "error", err)
+			for _, id := range chunk {
+				live[id] = true
+			}
+			continue
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err == nil {
+				live[id] = true
+			}
+		}
+		rows.Close()
+	}
+	return live
+}
+
+// engineGone reports whether an embed failure means the engine itself has stopped answering, as against one document it could not embed. Input: the sweep's context and the error the embedder returned. Output: true when carrying on would only repeat the same failure for every remaining candidate.
+// The shapes are the ways the engine stops answering every caller at once: a shutdown cancels the root context first, so calls fail on the way out to the server, and closes the engine a few steps later, after which it refuses in memory; a whisper decode takes the GPU for its whole run, and the engine refuses in memory for that whole time too. All three refuse instantly, which is what turns "keep going" into thousands of log lines a second.
+func engineGone(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, ": closed") || strings.Contains(msg, "the GPU is held")
 }

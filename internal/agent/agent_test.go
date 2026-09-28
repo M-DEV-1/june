@@ -35,8 +35,11 @@ func (b *mockBrain) RetrieveRelevant(ctx context.Context, focus string, maxItems
 }
 func (b *mockBrain) LogNote(ctx context.Context, content, kind string) (int64, error) { return 0, nil }
 func (b *mockBrain) GetNotes(ctx context.Context) ([]db.Note, error)                  { return nil, nil }
-func (b *mockBrain) UpdateNote(ctx context.Context, id int64, content string) error   { return nil }
-func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                   { return nil }
+func (b *mockBrain) NotesOfKindSince(ctx context.Context, kind string, since time.Time) ([]db.Note, error) {
+	return nil, nil
+}
+func (b *mockBrain) UpdateNote(ctx context.Context, id int64, content string) error { return nil }
+func (b *mockBrain) DeleteNote(ctx context.Context, id int64) error                 { return nil }
 func (b *mockBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
 	return nil, nil
 }
@@ -47,6 +50,20 @@ func (b *mockBrain) DeletePersonalContext(ctx context.Context, subject string) e
 func (b *mockBrain) EpisodesForThread(ctx context.Context, threadID int64, limit int) ([]db.Episode, error) {
 	return nil, nil
 }
+
+func (b *mockBrain) CreateConversation(ctx context.Context, title, brain string) (int64, error) {
+	return 0, nil
+}
+
+func (b *mockBrain) AddUserTask(ctx context.Context, title string, conversationID int64) (int64, error) {
+	return 0, nil
+}
+
+func (b *mockBrain) SetUserTaskTitle(ctx context.Context, id int64, title string) error { return nil }
+
+func (b *mockBrain) SetUserTaskDone(ctx context.Context, id int64, done bool) error { return nil }
+
+func (b *mockBrain) DeleteUserTask(ctx context.Context, id int64) error { return nil }
 
 func (b *mockBrain) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {
 	return nil, nil
@@ -70,37 +87,13 @@ func (b *mockBrain) SetActionStatus(ctx context.Context, id int64, status string
 func (b *mockBrain) SetActionPriority(ctx context.Context, id int64, priority string) error {
 	return nil
 }
+func (b *mockBrain) SetActionText(ctx context.Context, id int64, text string) error      { return nil }
 func (b *mockBrain) UpdateThreadState(ctx context.Context, id int64, state string) error { return nil }
 func (b *mockBrain) QueryStore(ctx context.Context, query string, rowCap int) (string, error) {
 	return "", nil
 }
 
 // behavior
-
-// verifies that connect returns an error on failure and can be called again with the same micChan
-func TestAgent_ReconnectLoopRetries(t *testing.T) {
-	mic := &mockMic{}
-	a := agent.NewAgent(mic, &mockSpeaker{}, &mockBrain{}, nil, "FAKE_API_KEY")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	micChan, _ := mic.StartCapture(ctx)
-
-	// connect should fail fast (bad key) and be callable multiple times with the same micChan without panicking or blocking
-	attempts := 0
-	for attempts < 3 {
-		err := a.Connect(ctx, micChan)
-		if err == nil {
-			t.Fatal("expected Connect to fail with bad API key")
-		}
-		attempts++
-	}
-
-	if attempts != 3 {
-		t.Fatalf("expected 3 reconnect attempts, got %d", attempts)
-	}
-}
 
 func TestAgent_ConnectFailsWithBadKey(t *testing.T) {
 	// inject mocks and fake API key

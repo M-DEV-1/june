@@ -31,7 +31,7 @@ func TestSampleTimeline_KeepsBothEndsOfALongMeeting(t *testing.T) {
 
 // The tracker samples every couple of seconds and most samples repeat. Deduplicating before any cap is the point: capping first spends the budget on duplicates and then drops the end of the meeting.
 func TestDedupeEpisodes_CollapsesRepeatsBeforeAnyCapApplies(t *testing.T) {
-	same := db.Episode{App: "Brave", Title: "Value Chain", ScreenText: "the same screen"}
+	same := db.Episode{App: "Brave", Title: "Route Planning", ScreenText: "the same screen"}
 	eps := []db.Episode{same, same, same, {App: "Terminal", Title: "user@host", ScreenText: "a build"}, same}
 
 	got := dedupeEpisodes(eps)

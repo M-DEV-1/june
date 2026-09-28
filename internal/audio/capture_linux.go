@@ -24,6 +24,12 @@ type pulseMic struct {
 }
 
 // NewMic returns an uninitialised mic; hardware is connected lazily in StartCapture.
+// EchoCancelSource and EchoCancelSink name the virtual source and sink PipeWire's echo-cancel module creates when loaded with Ora's config. The mic records from the source and the speaker plays through the sink, which is what gives the canceller its reference signal.
+const (
+	EchoCancelSource = "ora_ec_source"
+	EchoCancelSink   = "ora_ec_sink"
+)
+
 func NewMic() (Microphone, error) {
 	return &pulseMic{}, nil
 }
@@ -56,12 +62,16 @@ func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.mu.Unlock()
 
 	// RecordLatency is required: PipeWire's pulse server delivers no data to a record stream that leaves buffer attributes unset (fragment/latency).
-	stream, err := c.NewRecord(
-		pulse.Int16Writer(m.writeFn),
+	opts := []pulse.RecordOption{
 		pulse.RecordSampleRate(24000),
 		pulse.RecordChannels(proto.ChannelMap{proto.ChannelMono}),
 		pulse.RecordLatency(0.05),
-	)
+	}
+	// The echo-cancelled source, when the audio server has one (see ~/.config/pipewire/pipewire.conf.d/99-ora-echo-cancel.conf). It subtracts whatever is played through EchoCancelSink and suppresses room noise, so the mic stops hearing Ora's own replies and answering them; recording from the default mic instead is what looped a session on 2026-09-07. Absent, the default mic is used as before.
+	if src, err := c.SourceByID(EchoCancelSource); err == nil {
+		opts = append(opts, pulse.RecordSource(src))
+	}
+	stream, err := c.NewRecord(pulse.Int16Writer(m.writeFn), opts...)
 	if err != nil {
 		cancel()
 		c.Close()

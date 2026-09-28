@@ -22,16 +22,22 @@ var (
 	tp *sdktrace.TracerProvider
 )
 
+// maxLogBytes is how large ora.log may grow before it is rolled aside mid-run. The log is written at Debug and carries up to 2048 bytes of every tool result's detail, so on a busy day it grows fast; RotatingWriter keeps at most three rolled-aside generations beyond the live file.
+const maxLogBytes = 20 << 20
+
 // global slog logger, otel traceprovider init
 // returns shutdown, must defer in main.go
 func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) error, error) {
 	// The log goes in config.DataDir(), not a working-directory-relative "ora-db" — the daemon (launched by the autostart entry, cwd = the binary's directory) and a terminal-launched client would otherwise write to two different log files.
 	logDir := config.DataDir()
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	// 0700: the same directory holds the store, the IPC token and this log, and InitTelemetry is usually the first thing to create it.
+	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFile, err := os.OpenFile(filepath.Join(logDir, "ora.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// The log is 0600, readable only by the user who runs Ora. Every tool call writes up to 2048 bytes of its result here, and for observe_screen that is the title and the contents of whatever window was in front — a password manager, an inbox — so nobody else with an account on the machine may read it.
+	logPath := filepath.Join(logDir, "ora.log")
+	logFile, err := NewRotatingWriter(logPath, maxLogBytes, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -71,7 +77,7 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	res, _ := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String("ora"),
-			semconv.ServiceVersionKey.String("0.1.1"),
+			semconv.ServiceVersionKey.String(config.Version),
 		),
 	)
 

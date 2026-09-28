@@ -2,11 +2,17 @@ package brain
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"ora/internal/agent"
 	"ora/internal/config"
 )
 
@@ -44,6 +50,8 @@ func TestClaudeCLI(t *testing.T) {
 		timeout int
 		want    string
 		wantErr string
+		// wantNotErr is text the CLI printed that must never reach the returned error, because callers log these errors at warn and the prompt is a day of the user's screen text.
+		wantNotErr string
 	}{
 		{
 			name: "the result field is the answer",
@@ -51,9 +59,11 @@ func TestClaudeCLI(t *testing.T) {
 			want: "# Meeting minutes\nall good",
 		},
 		{
-			name:    "an is_error run fails with what the CLI said",
-			body:    `printf '%s' '{"is_error":true,"subtype":"error_during_execution","result":"Credit balance is too low"}'`,
-			wantErr: "Credit balance is too low",
+			// The error names the subtype only: res.Result is model output, and these errors are logged at warn by callers such as the evening close.
+			name:       "an is_error run fails with the subtype and not the CLI's own words",
+			body:       `printf '%s' '{"is_error":true,"subtype":"error_during_execution","result":"Credit balance is too low"}'`,
+			wantErr:    "error_during_execution",
+			wantNotErr: "Credit balance is too low",
 		},
 		{
 			name:    "an empty result is not an answer",
@@ -61,20 +71,30 @@ func TestClaudeCLI(t *testing.T) {
 			wantErr: "no text",
 		},
 		{
-			name:    "output that is not JSON fails loudly",
-			body:    `printf '%s' 'Invalid API key · Please run /login'`,
-			wantErr: "parse",
+			name:       "output that is not JSON fails loudly without quoting the output",
+			body:       `printf '%s' 'Invalid API key · Please run /login'`,
+			wantErr:    "parse",
+			wantNotErr: "Please run /login",
 		},
 		{
-			name:    "a non-zero exit carries the exit code and stderr",
-			body:    `echo "not logged in" >&2; exit 1`,
-			wantErr: "not logged in",
+			// The child's stderr can carry an account identifier or a login URL, so it is logged at debug rather than returned.
+			name:       "a non-zero exit carries the exit status and not the child's stderr",
+			body:       `echo "not logged in" >&2; exit 1`,
+			wantErr:    "exit status 1",
+			wantNotErr: "not logged in",
 		},
 		{
 			name:    "a run that outlives the timeout is killed",
 			body:    `sleep 5`,
 			timeout: 1,
 			wantErr: "timed out",
+		},
+		{
+			// On 2026-09-08 a meeting's minutes were lost to "claude timed out after 5m0s" with the answer already printed: the CLI had written its result and not exited. The answer is complete once stdout holds one whole JSON value, and that is when the runner returns.
+			name:    "a run that prints its result and then lingers is not waited for",
+			body:    `printf '%s' '{"is_error":false,"subtype":"success","result":"done"}'; sleep 5`,
+			timeout: 2,
+			want:    "done",
 		},
 	}
 
@@ -93,6 +113,9 @@ func TestClaudeCLI(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				if tt.wantNotErr != "" && strings.Contains(err.Error(), tt.wantNotErr) {
+					t.Fatalf("error = %v, want it not to carry the CLI's own output %q", err, tt.wantNotErr)
 				}
 				return
 			}
@@ -127,22 +150,6 @@ func TestClaudeCLI_invocation(t *testing.T) {
 	}
 }
 
-// A headless hang is cut off by the timeout.
-func TestClaudeCLI_timeout(t *testing.T) {
-	bin := fakeCLI(t, "claude", `sleep 5`)
-	_, err := ClaudeCLI(bin, "", 1)(context.Background(), "summarise this")
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("error = %v, want it to contain %q", err, "timed out")
-	}
-}
-
-func TestClaudeCLI_missingBinary(t *testing.T) {
-	_, err := ClaudeCLI(filepath.Join(t.TempDir(), "not-installed"), "", 10)(context.Background(), "hi")
-	if err == nil {
-		t.Fatal("a missing binary should be an error, not an empty answer")
-	}
-}
-
 // FromConfig is the only thing the daemon calls: an absent or unrecognised brain block must keep ORA on the Gemini API exactly as it was before this package existed.
 func TestFromConfig(t *testing.T) {
 	claudeBin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"from claude"}'`)
@@ -168,6 +175,16 @@ func TestFromConfig(t *testing.T) {
 			cfg:  config.BrainConfig{Provider: config.BrainClaudeCLI, Binary: claudeBin, TimeoutSeconds: 10},
 			want: "from claude",
 		},
+		{
+			name:    "codex with no asker is an error, not a quiet Gemini call",
+			cfg:     config.BrainConfig{Provider: config.BrainCodex},
+			wantErr: "no backend",
+		},
+		{
+			name:    "ollama has no backend yet and says so",
+			cfg:     config.BrainConfig{Provider: config.BrainOllama},
+			wantErr: "no backend",
+		},
 	}
 
 	for _, tt := range tests {
@@ -187,18 +204,6 @@ func TestFromConfig(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-// A configured model rides through to --model, so writing duties can run on a cheaper tier than the login's default; empty keeps the default.
-func TestClaudeCLI_ModelFlag(t *testing.T) {
-	bin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"ok"}'`)
-	if _, err := ClaudeCLI(bin, "sonnet", 10)(context.Background(), "hi"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	args, _ := recorded(t, bin)
-	if !strings.Contains(args, "--model\nsonnet\n") {
-		t.Errorf("argv is missing --model sonnet:\n%s", args)
 	}
 }
 
@@ -231,5 +236,223 @@ func TestAgyCLI_Restored(t *testing.T) {
 	}
 	if _, err := AgyCLI(fakeCLI(t, "agy", `printf '%s' '{"status":"ERROR","response":""}'`), 10)(context.Background(), "x"); err == nil {
 		t.Error("a non-SUCCESS status must be an error")
+	}
+}
+
+// TestGeminiModel_DropsAnotherProvidersModelName pins the fix for the 404 loop of 2026-09-05: the config named provider "codex-direct" with model "gpt-5.5", the meeting summariser built its brain with no asker, and FromConfig's fallback to the Gemini API carried "gpt-5.5" through as the model — so every hourly retry of the 00-53-59 recording failed with "models/gpt-5.5 is not found for API version v1beta". A model name only means anything to the provider it was written for, so the fallback uses the Gemini default instead.
+func TestGeminiModel_DropsAnotherProvidersModelName(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.BrainConfig
+		want string
+	}{
+		{"codex model name", config.BrainConfig{Provider: config.BrainCodex, Model: "gpt-5.5"}, config.TextModel},
+		{"claude cli alias", config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}, config.TextModel},
+		{"ollama model name", config.BrainConfig{Provider: config.BrainOllama, Model: "llama3.1:8b"}, config.TextModel},
+		{"unknown provider", config.BrainConfig{Provider: "made-up", Model: "gpt-5.5"}, config.TextModel},
+		{"a gemini config keeps its own model", config.BrainConfig{Provider: config.BrainGeminiAPI, Model: "gemini-3.5-flash-lite"}, "gemini-3.5-flash-lite"},
+		{"no provider keeps its own model", config.BrainConfig{Model: "gemini-3.5-flash-lite"}, "gemini-3.5-flash-lite"},
+		{"no provider and no model is the text model", config.BrainConfig{}, config.TextModel},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := geminiModel(c.cfg); got != c.want {
+				t.Errorf("geminiModel(%+v) = %q, want %q", c.cfg, got, c.want)
+			}
+		})
+	}
+}
+
+// TestGeminiAPI_TimesOutOnAServerThatNeverAnswers checks that the configured timeout is a real deadline on the Gemini call and not a field only the CLI providers read. A server that accepts the connection and then never replies must fail the call within the configured seconds; before this the genai client had no timeout of its own and the daemon's root context never ends, so one dead connection blocked the proactive scheduler's single goroutine for the life of the process.
+// The stub is reached through GOOGLE_GEMINI_BASE_URL, which is the only seam the genai package offers for pointing a client somewhere else.
+func TestGeminiAPI_TimesOutOnAServerThatNeverAnswers(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer func() { close(release); srv.Close() }()
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", srv.URL)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := GeminiAPI("test-key", config.TextModel, 1)(context.Background(), "hi")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a server that never answers returned no error")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the call never came back, so the configured timeout is not reaching the Gemini call")
+	}
+}
+
+// TestFromConfig_PassesTheConfiguredModelToAgyAndGrok checks that a model pinned for the Antigravity or Grok CLI reaches the child process's argv. BrainConfig.Model is documented as per-provider and both CLIs take a model flag, but FromConfig used to drop it for these two.
+func TestFromConfig_PassesTheConfiguredModelToAgyAndGrok(t *testing.T) {
+	agyBin := fakeCLI(t, "agy", `printf '%s' '{"status":"SUCCESS","response":"ok"}'`)
+	if _, err := FromConfig(config.BrainConfig{Provider: config.BrainAgyCLI, Binary: agyBin, Model: "gemini-3-pro", TimeoutSeconds: 10}, "")(context.Background(), "hi"); err != nil {
+		t.Fatalf("agy: unexpected error: %v", err)
+	}
+	if args, _ := recorded(t, agyBin); !strings.Contains(args, "--model\ngemini-3-pro\n") {
+		t.Errorf("agy argv did not carry the configured model:\n%s", args)
+	}
+
+	grokBin := fakeCLI(t, "grok", `printf '%s' '{"text":"ok"}'`)
+	if _, err := FromConfig(config.BrainConfig{Provider: config.BrainGrokCLI, Binary: grokBin, Model: "grok-4", TimeoutSeconds: 10}, "")(context.Background(), "hi"); err != nil {
+		t.Fatalf("grok: unexpected error: %v", err)
+	}
+	if args, _ := recorded(t, grokBin); !strings.Contains(args, "-m\ngrok-4\n") {
+		t.Errorf("grok argv did not carry the configured model:\n%s", args)
+	}
+}
+
+// TestFromConfig_NoBackendIsAnErrorNotAQuietGeminiCall checks that a provider this package cannot answer for fails every call with ErrNoBackend instead of quietly answering on the Gemini API. The silent substitution spent the metered free tier the user picked another brain to avoid and sent the prompt — a day of screen text — to a provider they did not choose.
+func TestFromConfig_NoBackendIsAnErrorNotAQuietGeminiCall(t *testing.T) {
+	for _, cfg := range []config.BrainConfig{
+		{Provider: config.BrainOllama, Model: "llama3.1:8b"},
+		{Provider: config.BrainCodex, Model: "gpt-5.5"},
+	} {
+		// A real API key is given on purpose: the point is that the call fails even when the Gemini path would have worked.
+		_, err := FromConfig(cfg, "a-real-looking-key")(context.Background(), "hi")
+		if !errors.Is(err, ErrNoBackend) {
+			t.Errorf("FromConfig(%q) error = %v, want ErrNoBackend", cfg.Provider, err)
+		}
+	}
+}
+
+// The outermost value is whichever bracket opens first, so a reply is read the same way whatever shape its caller was expecting — the two hand-written copies this replaced disagreed on exactly that, and a reply holding both an array and an object parsed differently depending on which package read it.
+func TestOutermostJSON(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"object after prose", `Sure! {"a":1}`, `{"a":1}`},
+		{"array after prose", `Here: [1,2] hope that helps`, `[1,2]`},
+		{"array of objects", `[{"a":1},{"b":2}]`, `[{"a":1},{"b":2}]`},
+		{"object containing an array", `{"a":[1,2]}`, `{"a":[1,2]}`},
+		{"no json at all", "I could not answer that", ""},
+		{"opener with no closer", `{"a":1`, ""},
+	} {
+		if got := OutermostJSON(tc.in); got != tc.want {
+			t.Errorf("%s: OutermostJSON(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// A model that mentions a bracket before it answers used to defeat the recovery: taking the first bracket and the last matching closer returned a slice that spanned the prose and ended inside the real answer.
+func TestOutermostJSON_IgnoresABracketInTheProse(t *testing.T) {
+	got := OutermostJSON(`Based on the notes [see above], here is the result: {"items": ["a"]}`)
+	if got != `{"items": ["a"]}` {
+		t.Errorf("got %q, want the object", got)
+	}
+}
+
+// A duty whose first provider is down answers on the next one. Every duty had WithCodexFallback, which hands on for a spent Gemini allowance and hands on only to Codex; with Codex itself at its monthly limit it caught nothing, and on 2026-09-15 every meeting-minutes run died on a broken Antigravity login while Grok and Claude sat signed in and unasked.
+func TestRouted_HandsOnFromAProviderThatCannotAnswer(t *testing.T) {
+	agent.ResetRouter()
+	t.Cleanup(agent.ResetRouter)
+	for _, id := range []string{agent.ProviderAgy, agent.ProviderClaude} {
+		agent.SetProviderReady(id, true)
+	}
+	for _, id := range []string{agent.ProviderGemini, agent.ProviderCodex, agent.ProviderGrok} {
+		agent.SetProviderReady(id, false)
+	}
+
+	asked := []string{}
+	routed := Routed(func(provider string) Brain {
+		return func(context.Context, string) (string, error) {
+			asked = append(asked, provider)
+			if provider == config.BrainAgyCLI {
+				return "", agent.ErrLoggedOut
+			}
+			return "the minutes", nil
+		}
+	})
+
+	got, err := routed(context.Background(), "summarise this meeting")
+	if err != nil {
+		t.Fatalf("every provider refused a duty one of them could answer: %v", err)
+	}
+	if got != "the minutes" {
+		t.Errorf("answer = %q, want the one the second provider gave", got)
+	}
+	if len(asked) != 2 || asked[0] != config.BrainAgyCLI || asked[1] != config.BrainClaudeCLI {
+		t.Errorf("providers asked = %v, want agy then claude", asked)
+	}
+}
+
+// A duty the config names a provider for asks that one first. background_brains exists so a duty can be pinned to the user's own Claude or Antigravity plan, and the daemon treats naming one as the more deliberate act; routing by the global preference instead would answer that duty on a provider the user did not pick, which is the thing ErrNoBackend was introduced to stop. The rest of the router's order still stands behind it, so a pinned provider that is spent or signed out still hands on rather than failing the duty.
+func TestRouted_AsksTheConfiguredProviderFirst(t *testing.T) {
+	agent.ResetRouter()
+	t.Cleanup(agent.ResetRouter)
+	for _, id := range []string{agent.ProviderGemini, agent.ProviderCodex, agent.ProviderAgy, agent.ProviderClaude, agent.ProviderGrok} {
+		agent.SetProviderReady(id, true)
+	}
+	// The global preference is Gemini, and it can answer; the duty's own pin must still win.
+	agent.SetPreferredProvider(config.BrainGeminiAPI)
+
+	asked := []string{}
+	routed := RoutedFor(config.BrainClaudeCLI, func(provider string) Brain {
+		return func(context.Context, string) (string, error) {
+			asked = append(asked, provider)
+			return "the minutes", nil
+		}
+	})
+	if _, err := routed(context.Background(), "summarise this meeting"); err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 || asked[0] != config.BrainClaudeCLI {
+		t.Errorf("providers asked = %v, want the pinned claude-cli alone", asked)
+	}
+}
+
+// A duty that reaches a provider this caller cannot build hands on rather than stopping. The meeting recorder builds its own route with FromConfig and no Codex asker, so Codex answers every call there with ErrNoBackend; ProviderSpent said no to that, and every write-up stopped at Codex with Claude signed in behind it.
+func TestRouted_HandsOnFromACodexThisCallerCannotBuild(t *testing.T) {
+	agent.ResetRouter()
+	t.Cleanup(agent.ResetRouter)
+	for _, id := range []string{agent.ProviderCodex, agent.ProviderClaude} {
+		agent.SetProviderReady(id, true)
+	}
+	for _, id := range []string{agent.ProviderGemini, agent.ProviderAgy, agent.ProviderGrok} {
+		agent.SetProviderReady(id, false)
+	}
+	claude := fakeCLI(t, "claude", `echo '{"result":"the minutes","is_error":false}'`)
+
+	routed := Routed(func(provider string) Brain {
+		if provider == config.BrainClaudeCLI {
+			return FromConfig(config.BrainConfig{Provider: provider, Binary: claude, TimeoutSeconds: 10}, "")
+		}
+		return FromConfig(config.BrainConfig{Provider: provider}, "")
+	})
+	got, err := routed(context.Background(), "summarise this meeting")
+	if err != nil || got != "the minutes" {
+		t.Fatalf("got (%q, %v), want claude's answer after codex had no backend here", got, err)
+	}
+	// Codex was not refused by its provider, so asks must still be offered it.
+	if !slices.Contains(agent.Route(agent.Need{}), agent.ProviderCodex) {
+		t.Error("a caller with no Codex asker opened Codex's breaker for every ask")
+	}
+}
+
+// A duty's own daily band running out is not Gemini refusing. The background band is Limit minus Reserved, so the share kept for asks is still there; opening the shared breaker on this refusal sent every interactive ask past Gemini for an hour.
+func TestRouted_ADutysOwnQuotaRefusalHandsOnWithoutOpeningTheBreaker(t *testing.T) {
+	agent.ResetRouter()
+	t.Cleanup(agent.ResetRouter)
+	for _, id := range []string{agent.ProviderGemini, agent.ProviderClaude} {
+		agent.SetProviderReady(id, true)
+	}
+	for _, id := range []string{agent.ProviderCodex, agent.ProviderAgy, agent.ProviderGrok} {
+		agent.SetProviderReady(id, false)
+	}
+
+	routed := Routed(func(provider string) Brain {
+		return func(context.Context, string) (string, error) {
+			if provider == config.BrainGeminiAPI {
+				return "", &ErrDailyQuota{Model: "gemini-3.5-flash", Limit: 12}
+			}
+			return "the minutes", nil
+		}
+	})
+	if got, err := routed(context.Background(), "summarise this meeting"); err != nil || got != "the minutes" {
+		t.Fatalf("got (%q, %v), want claude's answer after Gemini's background band ran out", got, err)
+	}
+	if !slices.Contains(agent.Route(agent.Need{}), agent.ProviderGemini) {
+		t.Error("the duty's own band refusal opened Gemini's breaker, so asks skip Gemini although their reserved share is untouched")
 	}
 }

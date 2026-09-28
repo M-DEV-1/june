@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"math"
@@ -104,6 +105,11 @@ type vectorIndex interface {
 	IDs() []string
 }
 
+// batchVectorIndex is optionally implemented by vector backends that support bulk additions (such as *vector.ChromemIndex) to avoid per-document disk persistence overhead during reconciliation.
+type batchVectorIndex interface {
+	AddBatch(ctx context.Context, ids []string, contents []string, embeddings [][]float32, metadatas []map[string]string) error
+}
+
 // Result mirrors internal/vector.Result — duplicated here rather than imported, same reason as embedder/vectorIndex above: internal/db must not gain an import-time dependency on internal/vector.
 type Result struct {
 	ID         string
@@ -177,16 +183,38 @@ func splitCandidateID(id string) (source string, refID int64) {
 	return source, refID
 }
 
-// candidateDomain looks up the domain tag for a lexical candidate. Only episodes and nodes (summary/digest) carry a domain column — notes and threads report "" (untagged) here.
-func (s *Store) candidateDomain(ctx context.Context, source string, refID int64) string {
-	var domain string
-	switch source {
-	case "episode":
-		_ = s.db.QueryRowContext(ctx, `SELECT domain FROM episodes WHERE id = ?`, refID).Scan(&domain)
-	case "summary", "digest":
-		_ = s.db.QueryRowContext(ctx, `SELECT domain FROM nodes WHERE id = ?`, refID).Scan(&domain)
+// inPlaceholders renders the "?, ?, ?" list and the matching argument slice for an IN clause over n ids. Input: the ids. Output: the placeholder text and the ids as query arguments, so one query can replace a lookup run once per candidate.
+func inPlaceholders(ids []int64) (string, []any) {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
 	}
-	return domain
+	return strings.TrimSuffix(strings.Repeat("?,", len(ids)), ","), args
+}
+
+// nodeDomains looks up the domain tag of every node named in ids with one query. Input: the node ids of the summary and digest candidates in one fused result. Output: a map from id to domain, holding only the nodes that exist and carry a non-empty domain; an empty id list runs no query at all.
+// This replaces a SELECT run once per candidate: a search filling both FTS limits carries up to twenty lexical candidates, so the per-candidate form issued up to twenty round trips where one now serves.
+func (s *Store) nodeDomains(ctx context.Context, ids []int64) map[int64]string {
+	out := map[int64]string{}
+	if len(ids) == 0 {
+		return out
+	}
+	placeholders, args := inPlaceholders(ids)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, domain FROM nodes WHERE id IN (`+placeholders+`) AND domain <> ''`, args...)
+	if err != nil {
+		slog.Warn("hybrid search: looking up candidate domains failed, candidates stay untagged", "error", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var domain string
+		if err := rows.Scan(&id, &domain); err != nil {
+			continue
+		}
+		out[id] = domain
+	}
+	return out
 }
 
 // currentDomain returns the domain tag of the most recently logged episode — the store's best guess at "what domain is the user in right now", used to boost (not filter) fused results when the caller didn't pass an explicit domainFilter.
@@ -208,6 +236,17 @@ func lexicalTermOverlap(content string, queryTerms []string) int {
 	return n
 }
 
+// domainTaggedSources are the hit sources whose backing table has a domain column, so a domain filter can genuinely narrow them. A note, thread or diary row has no domain at all, and filtering those on exact equality drops every one of them rather than narrowing them.
+var domainTaggedSources = map[string]bool{"episode": true, "summary": true, "digest": true}
+
+// domainMatches reports whether a candidate survives a domain filter. Input: the candidate's source and domain, and the requested domain. Output: true when the source carries no domain to filter on, or when its domain is the requested one.
+func domainMatches(source, domain, filter string) bool {
+	if !domainTaggedSources[source] {
+		return true
+	}
+	return domain == filter
+}
+
 // HybridSearch fuses lexical (FTS5) and vector search over episodes, summaries, notes, and threads via reciprocalRankFusion, and returns the top `limit` as MemoryHit.
 // If domainFilter is "work" or "personal", results are hard-filtered to that domain (both the lexical SQL query and the vector search's `where` clause). If domainFilter is "", no hard filter is applied, but candidates matching the store's inferred current domain (see currentDomain) get domainBoostFactor applied to their fused score before the final sort.
 // If the Store has no embedder/vector index configured (both nil — the default for a bare db.New(":memory:")), HybridSearch degrades gracefully to lexical-only fusion rather than erroring.
@@ -226,7 +265,7 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	windowed := !since.IsZero() || !until.IsZero()
 
 	// lexical candidates: reuse the existing FTS5 paths, don't reimplement.
-	memHits, err := s.searchMemoryWindow(ctx, query, since, until)
+	memHits, err := s.searchMemoryWindow(ctx, query, "", since, until, 10)
 	if err != nil {
 		return nil, err
 	}
@@ -236,11 +275,20 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	}
 
 	// domain is looked up for every lexical candidate up front (not just when domainFilter is set) — it backs both the hard-filter below and the same-domain boost applied later when domainFilter == "". Doing this only inside the filter branch would leave every lexical/FTS5 hit's domain permanently "" for the common no-filter case, silently defeating the boost.
+	// Only summary and digest hits need the lookup: searchMemoryWindow does not select the nodes.domain column, while searchEpisodesWindow already selects episodes.domain, so re-reading an episode's domain could only ever return the empty string it already carries.
+	var nodeIDs []int64
+	for _, h := range memHits {
+		if h.Domain == "" && (h.Source == "summary" || h.Source == "digest") {
+			nodeIDs = append(nodeIDs, h.RefID)
+		}
+	}
+	domains := s.nodeDomains(ctx, nodeIDs)
+
 	lexical := make([]rrfCandidate, 0, len(memHits)+len(episodeHits))
 	for _, h := range memHits {
 		domain := h.Domain
 		if domain == "" {
-			domain = s.candidateDomain(ctx, h.Source, h.RefID)
+			domain = domains[h.RefID]
 		}
 		lexical = append(lexical, rrfCandidate{
 			id:        fmt.Sprintf("%s:%d", h.Source, h.RefID),
@@ -251,15 +299,11 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 		})
 	}
 	for _, h := range episodeHits {
-		domain := h.Domain
-		if domain == "" {
-			domain = s.candidateDomain(ctx, h.Source, h.RefID)
-		}
 		lexical = append(lexical, rrfCandidate{
 			id:        fmt.Sprintf("%s:%d", h.Source, h.RefID),
 			content:   h.Content,
 			source:    h.Source,
-			domain:    domain,
+			domain:    h.Domain,
 			app:       h.App,
 			title:     h.Title,
 			createdAt: h.CreatedAt,
@@ -285,7 +329,7 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	if domainFilter != "" {
 		filtered := lexical[:0:0]
 		for _, c := range lexical {
-			if c.domain == domainFilter {
+			if domainMatches(c.source, c.domain, domainFilter) {
 				filtered = append(filtered, c)
 			}
 		}
@@ -308,12 +352,8 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 		}
 
 		if queryVec != nil {
-			var where map[string]string
-			if domainFilter != "" {
-				where = map[string]string{"domain": domainFilter}
-			}
-
-			results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, where)
+			// The domain filter is applied in Go below rather than through chromem's where clause, for the same reason the time window is: exact-match metadata would drop every note and thread, which are written with no domain key at all.
+			results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, nil)
 			if err != nil {
 				slog.Warn("hybrid search: vector search failed, degrading to lexical-only", "error", err)
 			} else {
@@ -331,6 +371,9 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 						continue
 					}
 					source, _ := splitCandidateID(r.ID)
+					if domainFilter != "" && !domainMatches(source, r.Metadata["domain"], domainFilter) {
+						continue
+					}
 					createdAt := time.Time{}
 					if ts := r.Metadata["created_at"]; ts != "" {
 						createdAt = parseSQLiteTime(ts)
@@ -364,6 +407,8 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	}
 	// Collapsed to one hit per row before anything downstream spends its budget: a screen matching in three passages is three vectors but one moment, and the ten rows the model gets should cover ten moments.
 	fused := bestPassagePerRow(reciprocalRankFusion(rrfK, lists...))
+	// A summary whose day was already rolled into a digest survives compaction (ReplaceSummariesWithDigest reparents rather than deletes it), so it can still surface here alongside its own digest — same day's content counted twice. Drop it when its parent digest is also in this result set; keep it when the digest isn't, since then it's the only record of that day.
+	fused = s.dropSummariesShadowedByDigest(ctx, fused)
 
 	// Kind-aware score shaping after fusion:
 	//  - same-domain soft boost when no explicit domain filter
@@ -429,6 +474,68 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 		}
 	}
 	return out, nil
+}
+
+// dropSummariesShadowedByDigest removes a "summary" candidate from cands when its parent node is a "digest" that is also present in cands — the reparenting in ReplaceSummariesWithDigest keeps a compacted day's summaries alive as children of their digest, so both can otherwise reach the same fused result and describe the same day twice. A summary whose parent digest isn't in this result set is left alone.
+func (s *Store) dropSummariesShadowedByDigest(ctx context.Context, cands []rrfCandidate) []rrfCandidate {
+	digestIDs := make(map[int64]bool)
+	for _, c := range cands {
+		if c.source == "digest" {
+			_, refID := splitCandidateID(c.id)
+			digestIDs[refID] = true
+		}
+	}
+	if len(digestIDs) == 0 {
+		return cands
+	}
+
+	var summaryIDs []int64
+	for _, c := range cands {
+		if c.source == "summary" {
+			_, refID := splitCandidateID(c.id)
+			summaryIDs = append(summaryIDs, refID)
+		}
+	}
+	parents := s.summaryParents(ctx, summaryIDs)
+
+	out := cands[:0:0]
+	for _, c := range cands {
+		if c.source == "summary" {
+			_, refID := splitCandidateID(c.id)
+			if parent, ok := parents[refID]; ok && digestIDs[parent] {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// summaryParents looks up the parent node of every summary named in ids with one query. Input: the node ids of the summary candidates in one fused result. Output: a map from summary id to parent id, holding only the summaries that have a parent; an empty id list runs no query at all.
+// This replaces a SELECT run once per summary candidate, which on a fused result made mostly of summaries was one round trip per row returned.
+func (s *Store) summaryParents(ctx context.Context, ids []int64) map[int64]int64 {
+	out := map[int64]int64{}
+	if len(ids) == 0 {
+		return out
+	}
+	placeholders, args := inPlaceholders(ids)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, parent_id FROM nodes WHERE id IN (`+placeholders+`) AND parent_id IS NOT NULL`, args...)
+	if err != nil {
+		slog.Warn("hybrid search: looking up summary parents failed, no summary is dropped as shadowed", "error", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var parent sql.NullInt64
+		if err := rows.Scan(&id, &parent); err != nil {
+			continue
+		}
+		if parent.Valid {
+			out[id] = parent.Int64
+		}
+	}
+	return out
 }
 
 // recordVectorContribution is the vector-arm contribution counter: for one HybridSearchWindow call, did any of the vector-search candidates survive fusion into the final (post-limit) top-k, and how many. Recorded into the tally table (see db.go's schema comment) as two rows dated today (local): "vector-queries" ticks once per call regardless of outcome, and "vector-hits" ticks once, with the survivor count folded into its total_ms column, only when at least one did. Best-effort — a tally write failure is logged and never surfaces to the caller, same discipline every other accounting write in this package follows.

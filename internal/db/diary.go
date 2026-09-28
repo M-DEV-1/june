@@ -10,6 +10,9 @@ import (
 	"ora/internal/obs"
 )
 
+// TaskNoticeWatermarkKind is the diary kind the proactive loop keeps its task-notice watermark under (internal/proactive/notify.go is the only writer): the highest action-item note id already announced, on the empty day. It lives here rather than there because the diary FTS triggers in store.go name it too — its content is a bare number that the loop rewrites on most ticks, so it is deliberately the one diary kind that is never mirrored into memory_fts and never comes back from a search as if it were something Ora wrote.
+const TaskNoticeWatermarkKind = "task-notice-watermark"
+
 // DiaryDay is one kind='day' diary row: the local calendar day it covers and the entry Ora wrote for it.
 type DiaryDay struct {
 	Day     string
@@ -127,14 +130,14 @@ func (s *Store) DiaryDays(ctx context.Context, from, to string) ([]DiaryDay, err
 	return out, nil
 }
 
-// DiaryEntriesThrough returns the diary rows of one kind whose day is at or before through (a local 'YYYY-MM-DD' string), oldest first. The compaction stage uses it to find the dailies and weeks old enough to collapse; the string comparison works because ISO dates order lexically.
+// DiaryEntriesThrough returns the diary rows of one kind whose day is at or before through (a local 'YYYY-MM-DD' string) and that have not already been rolled up, oldest first. The compaction stage uses it to find the dailies and weeks old enough to collapse; the string comparison works because ISO dates order lexically, and skipping a row with a parent is what stops an already-compacted week being compacted again.
 func (s *Store) DiaryEntriesThrough(ctx context.Context, kind, through string) ([]DiaryDay, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.DiaryEntriesThrough")
 	defer span.End()
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT day, content FROM diary WHERE kind = ? AND day <= ? ORDER BY day ASC`, kind, through)
+		`SELECT day, content FROM diary WHERE kind = ? AND day <= ? AND parent_id IS NULL ORDER BY day ASC`, kind, through)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("query diary entries through: %w", err)

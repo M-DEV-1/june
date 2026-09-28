@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ora</title>
+    <link rel="stylesheet" href="/src/overlay/overlay.css" />
+    <script type="module" src="/src/overlay/main.ts" defer></script>
+  </head>
+
+  <body>
+    <!-- The whole window is this one layer, empty until the daemon sends an overlay event; src/overlay/main.ts fills it with rings and marks and empties it again after the event's ttl. -->
+    <div id="layer">
+      <!-- The ink: every stroke and marker dot the daemon asks for, in one SVG the size of the desk so a path can run from any pixel to any other. -->
+      <svg id="ink"></svg>
+      <div id="shapes"></div>
+      <!-- Ora's buddy: a small solid triangle about 16 pixels tall, drawn with its point at the origin of its own coordinates and tilted 40 degrees to the left the way a cursor sits, so a transform can put that point exactly on a target and turn the triangle about it. It lives for as long as the page does and is only moved, recoloured and faded, never rebuilt. -->
+      <svg id="pointer" viewBox="-28 -28 56 56" width="56" height="56" aria-hidden="true">
+        <g transform="rotate(-40)">
+          <path d="M0 0 L-9.2 16 L9.2 16 Z" />
+        </g>
+      </svg>
+    </div>
+  </body>
+</html>

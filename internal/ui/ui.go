@@ -157,7 +157,7 @@ func NewModel(a *agent.Agent, daemonStatus, buildMismatch string) model {
 		}
 	}
 
-	introContent := "\n\n\n\n\n\n" + banner + "\n\nambient OS companion · v0.1.1-alpha · type /help for commands"
+	introContent := "\n\n\n\n\n\n" + banner + "\n\nambient OS companion · v" + config.Version + "-alpha · type /help for commands"
 	if daemonLine != "" {
 		introContent += "\n" + daemonLine
 	}

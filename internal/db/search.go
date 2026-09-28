@@ -2,14 +2,19 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"go.opentelemetry.io/otel/attribute"
+	"log/slog"
 	"math"
-	"ora/internal/obs"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"ora/internal/obs"
+	"ora/internal/util"
 )
 
 // MemoryHit is one FTS5 row — either a summary or a note.
@@ -29,10 +34,7 @@ func excerptContent(content string, maxRunes int) string {
 	if maxRunes <= 0 {
 		maxRunes = maxEpisodeExcerpt
 	}
-	if runes := []rune(content); len(runes) > maxRunes {
-		return string(runes[:maxRunes])
-	}
-	return content
+	return util.Runes(content, maxRunes)
 }
 
 // FormatHit renders a hit for the model in the established tool/inject shape:
@@ -56,7 +58,7 @@ func FormatHit(h MemoryHit, maxRunes int) string {
 	if src == "" {
 		src = "unknown"
 	}
-	// Threads carry their ref id for the same reason notes do: a thread's summary can be wrong, the model can see that it is, and fix_thread needs an id to name. Nothing else here has a repair tool.
+	// Threads carry their ref id for the same reason notes do: a thread's summary can be wrong, the model can see that it is, and revise needs an id to name. Nothing else here has a repair tool.
 	if h.Source == "thread" && h.RefID > 0 {
 		src = fmt.Sprintf("thread#%d", h.RefID)
 	}
@@ -103,7 +105,45 @@ func formatRelativeAge(t time.Time) string {
 	}
 }
 
-// FormatNoteHit renders a note hit with its ref_id in the "[note#N] …" shape — notes are the only source with an update_note/delete_note follow-up tool, so a caller (query_memory) needs the id in hand to act on a correction. Content is excerpted identically to FormatHit.
+// EvidenceSource is a stable pointer back to the stored row one hit line came from: which kind of row (mirrors MemoryHit.Source — "note", "episode", "summary", "thread", …), its own row id, a title when the row has one, and when it happened (RFC3339, "" if unknown). A caller can show this to the user as the evidence behind an answer, or use it to look the row back up.
+type EvidenceSource struct {
+	Kind  string `json:"kind"`
+	ID    int64  `json:"id"`
+	Title string `json:"title"`
+	When  string `json:"when"`
+}
+
+// evidenceSourceOf builds the EvidenceSource for one hit straight from its own fields.
+func evidenceSourceOf(h MemoryHit) EvidenceSource {
+	when := ""
+	if !h.CreatedAt.IsZero() {
+		when = h.CreatedAt.Format(time.RFC3339)
+	}
+	return EvidenceSource{Kind: h.Source, ID: h.RefID, Title: h.Title, When: when}
+}
+
+// withSourceTag appends a machine-parseable `{"source":{...}}` suffix to an already-rendered hit line, so a caller can trace the line back to the stored row it came from without re-querying. Falls back to the line unchanged if marshalling somehow fails — the tag is provenance, not the content, so its absence must not break the line it was decorating.
+func withSourceTag(line string, h MemoryHit) string {
+	tag, err := json.Marshal(struct {
+		Source EvidenceSource `json:"source"`
+	}{evidenceSourceOf(h)})
+	if err != nil {
+		return line
+	}
+	return line + " " + string(tag)
+}
+
+// FormatHitWithSource is FormatHit plus a source tag (see withSourceTag) — used by tool results that feed the caller's Evidence trail (query_memory, recall). Plain FormatHit stays untouched for context that can reach a spoken reply (handshake inject, focus lookup), which must never carry raw JSON into what gets read aloud.
+func FormatHitWithSource(h MemoryHit, maxRunes int) string {
+	return withSourceTag(FormatHit(h, maxRunes), h)
+}
+
+// FormatNoteHitWithSource is FormatNoteHit plus a source tag (see withSourceTag), for the same reason FormatHitWithSource exists.
+func FormatNoteHitWithSource(h MemoryHit, maxRunes int) string {
+	return withSourceTag(FormatNoteHit(h, maxRunes), h)
+}
+
+// FormatNoteHit renders a note hit with its ref_id in the "[note#N] …" shape — notes are the only source with a revise follow-up tool, so a caller (query_memory) needs the id in hand to act on a correction. Content is excerpted identically to FormatHit.
 func FormatNoteHit(h MemoryHit, maxRunes int) string {
 	if maxRunes <= 0 {
 		// Same budget FormatHit gives a note, and for the same reason. query_memory routes note hits here and everything else to FormatHit, so leaving this on the default meant meeting minutes reached the live agent at 200 runes while the eval — which formats every source through FormatHit — reported the excerpt fix as working.
@@ -161,7 +201,7 @@ func buildFTSMatch(query string) string {
 // SearchMemory runs FTS5 over summaries + notes. Returns top 10 by rank.
 // Empty query -> empty result, no error.
 func (s *Store) SearchMemory(ctx context.Context, query string) ([]MemoryHit, error) {
-	return s.searchMemoryWindow(ctx, query, time.Time{}, time.Time{})
+	return s.searchMemoryWindow(ctx, query, "", time.Time{}, time.Time{}, 10)
 }
 
 // sqliteUTC renders t the way every timestamp column in this store is written (UTC "YYYY-MM-DD HH:MM:SS"), so bound parameters compare correctly against stored values.
@@ -177,8 +217,8 @@ const ftsRowTime = `(CASE source
 	ELSE (SELECT created_at FROM nodes WHERE id = ref_id)
 END)`
 
-// searchMemoryWindow is SearchMemory constrained to rows whose timestamp falls in [since, until]; a zero bound is open on that side. The window is part of the WHERE clause, before the LIMIT, so a sparse window still yields its rows instead of being crowded out by out-of-window rows that rank higher.
-func (s *Store) searchMemoryWindow(ctx context.Context, query string, since, until time.Time) ([]MemoryHit, error) {
+// searchMemoryWindow is SearchMemory constrained to rows whose timestamp falls in [since, until] and, when source is not "", to that one source; limit caps the rows returned. Both the window and the source are part of the WHERE clause, before the LIMIT, so a sparse window or a single-source caller still yields its rows instead of being crowded out by rows that rank higher — filtering after a cross-source LIMIT 10 returned nothing whenever ten other rows outranked the best note.
+func (s *Store) searchMemoryWindow(ctx context.Context, query, source string, since, until time.Time, limit int) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SearchMemory")
 	defer span.End()
@@ -193,6 +233,10 @@ func (s *Store) searchMemoryWindow(ctx context.Context, query string, since, unt
 
 	where := "memory_fts MATCH ?"
 	args := []any{safe}
+	if source != "" {
+		where += " AND source = ?"
+		args = append(args, source)
+	}
 	if !since.IsZero() {
 		where += " AND " + ftsRowTime + " >= ?"
 		args = append(args, sqliteUTC(since))
@@ -213,8 +257,8 @@ func (s *Store) searchMemoryWindow(ctx context.Context, query string, since, unt
 		FROM memory_fts
 		WHERE `+where+`
 		ORDER BY rank
-		LIMIT 10
-	`, args...)
+		LIMIT ?
+	`, append(args, limit)...)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("fts5 search: %w", err)
@@ -325,7 +369,8 @@ func (s *Store) RankedEpisodes(ctx context.Context, focus string, limit int) ([]
 	if focus == "" || limit <= 0 {
 		return nil, nil
 	}
-	safe := `"` + strings.ReplaceAll(focus, `"`, `""`) + `"`
+	// Tokenised and ORed like every other query in this file, not quoted as one contiguous phrase: a natural-language subject rarely appears verbatim in stored prose, so "Riddler project" found nothing while "Riddler" found the episode.
+	safe := buildFTSMatch(focus)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT episodes.id, episodes.screen_text, episodes.created_at, episodes.importance,
@@ -465,9 +510,27 @@ func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int
 	}
 	out := make([]string, 0, len(hits))
 	for _, h := range hits {
-		out = append(out, FormatHit(h, maxEpisodeExcerpt))
+		// Budget 0 means "let excerptBudget decide per source", the same call formatFocusHits and query_memory make. Passing maxEpisodeExcerpt here cut a note to 200 runes on the path that injects memory into every turn, which showed the model a heading where the answer was in the body.
+		out = append(out, FormatHit(h, 0))
 	}
 	return out, nil
+}
+
+// UnderstandingContextCap bounds how much of the standing understanding doc reaches a live session's context block, in runes. The nightly rewrite asks for about 300 words, roughly 1800 characters, so this is the guard against a night that ignored the instruction rather than the working size.
+const UnderstandingContextCap = 2000
+
+// leadWithUnderstanding puts the night's standing understanding of the user at the head of a context block. This is the only place the overnight run's conclusions reach a live session: the dream rewrites the doc while the user is away (internal/dream/diary.go), and without this line a session started the next morning knows nothing the night worked out. Input: the context lines as built. Output: the same lines with one "[understanding] ..." line in front, or unchanged when there is no doc yet or the read failed. Newlines are collapsed because the caller indents each line by two spaces, and the text is cut to UnderstandingContextCap runes.
+func (s *Store) leadWithUnderstanding(ctx context.Context, branch []string) []string {
+	doc, err := s.DiaryEntry(ctx, "", "understanding")
+	if err != nil {
+		slog.Warn("implicit context: reading the standing understanding failed", "error", err)
+		return branch
+	}
+	flat := util.OneLine(doc)
+	if flat == "" {
+		return branch
+	}
+	return append([]string{"[understanding] " + util.RunesEllipsis(flat, UnderstandingContextCap)}, branch...)
 }
 
 func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
@@ -548,7 +611,7 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	}
 	if len(branch) > 0 {
 		span.SetAttributes(attribute.Int("db.node_count", len(branch)))
-		return branch, nil
+		return s.leadWithUnderstanding(ctx, branch), nil
 	}
 
 	// fallback (cold start, nothing synthesized yet): existing recursive summary walk.
@@ -579,5 +642,5 @@ func (s *Store) GetImplicitContext(ctx context.Context) ([]string, error) {
 	}
 
 	span.SetAttributes(attribute.Int("db.node_count", len(branch)))
-	return branch, nil
+	return s.leadWithUnderstanding(ctx, branch), nil
 }

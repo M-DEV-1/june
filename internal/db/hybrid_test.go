@@ -1,9 +1,11 @@
 package db
 
-// hybrid_test.go lives in package db (white-box), not db_test, because it needs direct access to unexported reciprocalRankFusion/rrfCandidate to test the pure fusion function numerically against the deck's worked example. db_test.go stays in package db_test, untouched.
+// hybrid_test.go lives in package db (white-box), not db_test, because it needs the store's own handle and unexported helpers (ensureNode, reconcileBackfillCandidates) to set up and check what HybridSearch and ReconcileVectors do.
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,7 +15,6 @@ import (
 	"ora/internal/memory"
 )
 
-// newStore opens a throwaway in-memory store that is closed when the test ends.
 // newStore opens a throwaway in-memory store, closed when the test ends. Every test in this package uses it; the in-memory pool is pinned to one connection (see New) so concurrent readers see the same database.
 func newStore(t *testing.T) *Store {
 	t.Helper()
@@ -23,66 +24,6 @@ func newStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
-}
-
-// --- reciprocalRankFusion: pure-function tests against the deck's §02 worked example ---
-
-// deckWorkedExampleLists reproduces docs/ora-memory-deck.html §02's worked example verbatim (k=50): lexical ranks "cuda-fix" > "cuda-toolkit" > "gpu-infra-doc"; vector ranks "gpu-rabbit-hole" > "cuda-fix" > "vllm-tuning".
-func deckWorkedExampleLists() (lexical, vector []rrfCandidate) {
-	lexical = []rrfCandidate{
-		{id: "cuda-fix", content: "CUDA out of memory fix", source: "episode"},
-		{id: "cuda-toolkit", content: "cuda toolkit install", source: "episode"},
-		{id: "gpu-infra-doc", content: "gpu infra doc", source: "summary"},
-	}
-	vector = []rrfCandidate{
-		{id: "gpu-rabbit-hole", content: "that GPU rabbit hole", source: "episode"},
-		{id: "cuda-fix", content: "CUDA out of memory fix", source: "episode"},
-		{id: "vllm-tuning", content: "vLLM tuning notes", source: "episode"},
-	}
-	return
-}
-
-// TestReciprocalRankFusion_DeckWorkedExample_FinalOrder asserts the exact fused ordering the deck calls out: the consensus item ("cuda-fix", found by both lists) wins outright over items either list ranked higher on its own.
-func TestReciprocalRankFusion_DeckWorkedExample_FinalOrder(t *testing.T) {
-	lexical, vector := deckWorkedExampleLists()
-	result := reciprocalRankFusion(rrfK, lexical, vector)
-
-	var gotOrder []string
-	for _, c := range result {
-		gotOrder = append(gotOrder, c.id)
-	}
-	wantOrder := []string{"cuda-fix", "gpu-rabbit-hole", "cuda-toolkit", "gpu-infra-doc", "vllm-tuning"}
-
-	if fmt.Sprint(gotOrder) != fmt.Sprint(wantOrder) {
-		t.Errorf("fused order = %v, want %v (the consensus item must win outright; ties broken by id)", gotOrder, wantOrder)
-	}
-}
-
-// TestReciprocalRankFusion_NoListsInput_ReturnsEmptyNotPanic documents that calling reciprocalRankFusion with zero input lists must return an empty slice, not panic.
-func TestReciprocalRankFusion_NoListsInput_ReturnsEmptyNotPanic(t *testing.T) {
-	result := reciprocalRankFusion(rrfK)
-	if len(result) != 0 {
-		t.Errorf("expected empty result for zero input lists, got %d items: %+v", len(result), result)
-	}
-}
-
-// TestReciprocalRankFusion_LargerKCompressesScores proves rrfK is actually wired into the scoring math (not hardcoded elsewhere): a much larger k should compress the top/bottom score ratio toward 1, compared to a lower k.
-func TestReciprocalRankFusion_LargerKCompressesScores(t *testing.T) {
-	lexical, vector := deckWorkedExampleLists()
-
-	resultLowK := reciprocalRankFusion(50, lexical, vector)
-	resultHighK := reciprocalRankFusion(1000, lexical, vector)
-
-	if len(resultLowK) == 0 || len(resultHighK) == 0 {
-		t.Fatalf("expected non-empty results, got low-k=%d high-k=%d", len(resultLowK), len(resultHighK))
-	}
-
-	ratioLowK := resultLowK[0].score / resultLowK[len(resultLowK)-1].score
-	ratioHighK := resultHighK[0].score / resultHighK[len(resultHighK)-1].score
-
-	if ratioHighK >= ratioLowK {
-		t.Errorf("expected top/bottom score ratio to shrink as k grows: ratio(k=50)=%.4f, ratio(k=1000)=%.4f", ratioLowK, ratioHighK)
-	}
 }
 
 // --- HybridSearch: Store-level integration tests, with fake embedder/vectorIndex ---
@@ -106,9 +47,30 @@ type fakeHybridVectorIndex struct {
 	addedIDs      chan string
 	deletedCalled chan string
 
+	// batchErr, when set, makes every AddBatch call fail; batchSizes records the size of each AddBatch call. The fake implements batchVectorIndex so reconcile tests take the same branch production does with a real *vector.ChromemIndex.
+	batchErr error
+
 	mu         sync.Mutex
 	liveIDs    map[string]bool
 	addRecords []addRecord
+	batchSizes []int
+}
+
+// AddBatch records the batch size and then adds each document through Add, so everything Add records (liveIDs, addRecords, addedIDs) stays true of the batch path too. Input: parallel slices of ids, contents, embeddings and metadata. Output: batchErr if the test set one, and nothing is added in that case.
+func (f *fakeHybridVectorIndex) AddBatch(ctx context.Context, ids []string, contents []string, embeddings [][]float32, metadatas []map[string]string) error {
+	f.mu.Lock()
+	f.batchSizes = append(f.batchSizes, len(ids))
+	err := f.batchErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for i, id := range ids {
+		if err := f.Add(ctx, id, contents[i], embeddings[i], metadatas[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addRecord is one recorded Add call's full arguments — addCalls/addedIDs only ever tracked the id; metadata-parity tests (W1) need the content and metadata too.
@@ -271,27 +233,6 @@ func TestHybridSearch_VectorSearchFails_DegradesToLexicalOnly(t *testing.T) {
 	}
 }
 
-// TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm verifies that for a query with 3+ significant terms, a lexical candidate matching only one of them (buildFTSMatch's OR-of-terms means FTS5 alone would return it) is dropped from fusion — without this floor, a query like "hiking docker kubernetes" surfaces any row containing just one of those words, on neither of the other topics.
-func TestHybridSearch_MultiTermQuery_DropsLexicalHitsMatchingOnlyOneTerm(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	if _, err := store.LogNote(ctx, "the user likes hiking on weekends", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	if _, err := store.LogNote(ctx, "the user works with docker containers", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	hits, err := store.HybridSearch(ctx, "hiking docker kubernetes", "", 10)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	if len(hits) != 0 {
-		t.Errorf("expected both single-term-overlap notes to be dropped, got: %+v", hits)
-	}
-}
-
 // TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm is the other side of the floor: a two-word question is how people ask about one thing, not a demand that both words appear. Requiring both turned every two-term query into a strict AND, so "ora daemon" stopped matching "the daemon crashed at startup" — the floor has to scale with the query, not sit at a flat two terms.
 func TestHybridSearch_TwoTermQuery_KeepsHitMatchingOneTerm(t *testing.T) {
 	ctx := context.Background()
@@ -321,6 +262,10 @@ func TestHybridSearch_AbsentTopicQuery_ReturnsNoJunkRows(t *testing.T) {
 	if _, err := store.LogNote(ctx, "the user works with docker containers", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
+	// This note shares exactly one term with the query, so FTS5 really does return it and the term-overlap floor is what removes it. Without a row like this the lexical half of the property is never exercised: no term overlaps at all, FTS5 returns nothing, and the floor is never reached.
+	if _, err := store.LogNote(ctx, "the user pays a quarterly gym membership", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
 
 	store.SetEmbedder(&fakeHybridEmbedder{})
 	store.SetVectorIndex(&fakeHybridVectorIndex{
@@ -335,33 +280,6 @@ func TestHybridSearch_AbsentTopicQuery_ReturnsNoJunkRows(t *testing.T) {
 	}
 	if len(hits) != 0 {
 		t.Errorf("expected zero hits for a topic absent from the store, got %d: %+v", len(hits), hits)
-	}
-}
-
-// TestHybridSearch_LexicalOnly_NoEmbedderConfigured_BaselineNoCrash verifies that a Store with neither SetEmbedder nor SetVectorIndex called degrades gracefully to lexical-only fusion instead of erroring/panicking.
-func TestHybridSearch_LexicalOnly_NoEmbedderConfigured_BaselineNoCrash(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	if _, err := store.LogNote(ctx, "the user likes writing golang", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	hits, err := store.HybridSearch(ctx, "golang", "", 10)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	if len(hits) == 0 {
-		t.Fatalf("expected at least one lexical hit for 'golang'")
-	}
-	found := false
-	for _, h := range hits {
-		if h.Content == "the user likes writing golang" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected the logged note to surface via lexical-only fusion, got: %+v", hits)
 	}
 }
 
@@ -488,50 +406,6 @@ func TestHybridSearch_DomainFilter_ExcludesNonMatchingLexicalResult(t *testing.T
 	}
 }
 
-// TestHybridSearch_LimitHonored verifies HybridSearch never returns more than `limit` items even with many lexical + vector candidates available.
-func TestHybridSearch_LimitHonored(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	for i := 0; i < 5; i++ {
-		if _, err := store.LogNote(ctx, fmt.Sprintf("keyword match item number %d", i), "fact"); err != nil {
-			t.Fatalf("LogNote: %v", err)
-		}
-	}
-	var vecResults []Result
-	for i := 0; i < 5; i++ {
-		vecResults = append(vecResults, Result{
-			ID:      fmt.Sprintf("episode:%d", i),
-			Content: fmt.Sprintf("semantic match item number %d", i),
-		})
-	}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	store.SetVectorIndex(&fakeHybridVectorIndex{results: vecResults})
-
-	const limit = 3
-	hits, err := store.HybridSearch(ctx, "keyword match item", "", limit)
-	if err != nil {
-		t.Fatalf("HybridSearch: %v", err)
-	}
-	if len(hits) > limit {
-		t.Errorf("expected at most %d hits, got %d: %+v", limit, len(hits), hits)
-	}
-}
-
-// TestHybridSearch_EmptyQuery_ReturnsEmptyNoError documents and asserts the chosen behavior for an empty query: an empty result and no error, mirroring SearchMemory's existing "empty query -> empty result, no error" contract elsewhere in this package.
-func TestHybridSearch_EmptyQuery_ReturnsEmptyNoError(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	hits, err := store.HybridSearch(ctx, "", "", 10)
-	if err != nil {
-		t.Fatalf("expected no error for an empty query, got: %v", err)
-	}
-	if len(hits) != 0 {
-		t.Errorf("expected empty result for an empty query, got: %+v", hits)
-	}
-}
-
 // --- vector lifecycle: Delete propagation ---
 
 // TestDeleteNote_DeletesVector verifies removing a note also removes its vector entry — without this, delete_note leaves the old content's vector behind, so a semantic query can still surface a "deleted" fact.
@@ -606,7 +480,7 @@ func TestUpdateNote_DeletesOldVectorAndReAddsNewContent(t *testing.T) {
 	}
 }
 
-// backdateEpisode directly rewrites an episode's created_at into the past, so AgeEpisodes/PruneAncientEpisodes tests don't have to race real wall-clock second boundaries with a tiny/negative keepRawFor (SQLite's datetime() modifier also can't take a negative interval — the "-" || secs string concat produces an invalid double-negative for secs < 0).
+// backdateEpisode directly rewrites an episode's created_at into the past, so tests exercising age-based queries don't have to race real wall-clock second boundaries.
 func backdateEpisode(t *testing.T, store *Store, id int64, age time.Duration) {
 	t.Helper()
 	if _, err := store.db.Exec(`UPDATE episodes SET created_at = datetime('now', '-' || ? || ' seconds') WHERE id = ?`, int64(age.Seconds()), id); err != nil {
@@ -614,89 +488,16 @@ func backdateEpisode(t *testing.T, store *Store, id int64, age time.Duration) {
 	}
 }
 
-// TestAgeEpisodes_DeletesVectorsForAgedEpisodes verifies clearing an episode's screen_text also deletes its vector — otherwise the aged episode's raw text lives on in the vector index even though the SQL row was thinned specifically to reclaim that content.
-func TestAgeEpisodes_DeletesVectorsForAgedEpisodes(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1)}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	store.SetVectorIndex(vidx)
-
-	id, err := store.LogEpisode(ctx, "Code", "main.go", "short capture")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-	backdateEpisode(t, store, id, 24*time.Hour)
-
-	n, err := store.AgeEpisodes(ctx, time.Hour, 1.1) // importanceFloor > any possible score, so this episode always qualifies
-	if err != nil {
-		t.Fatalf("AgeEpisodes: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected 1 aged row, got %d", n)
-	}
-
-	select {
-	case got := <-vidx.deletedCalled:
-		want := fmt.Sprintf("episode:%d", id)
-		if got != want {
-			t.Errorf("expected Delete(%q), got Delete(%q)", want, got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the aged episode's vector Delete call")
-	}
-}
-
-// TestPruneAncientEpisodes_DeletesVectorsForPrunedEpisodes verifies deleting an already-thinned episode row also deletes any leftover vector for it.
-func TestPruneAncientEpisodes_DeletesVectorsForPrunedEpisodes(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2)}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	store.SetVectorIndex(vidx)
-
-	id, err := store.LogEpisode(ctx, "Code", "main.go", "short capture")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-	backdateEpisode(t, store, id, 400*24*time.Hour)
-	if _, err := store.AgeEpisodes(ctx, time.Hour, 1.1); err != nil {
-		t.Fatalf("AgeEpisodes (pre-thin): %v", err)
-	}
-	select {
-	case <-vidx.deletedCalled: // drain AgeEpisodes' own delete before exercising PruneAncientEpisodes
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for AgeEpisodes' vector delete")
-	}
-
-	n, err := store.PruneAncientEpisodes(ctx, 365*24*time.Hour)
-	if err != nil {
-		t.Fatalf("PruneAncientEpisodes: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected 1 pruned row, got %d", n)
-	}
-
-	select {
-	case got := <-vidx.deletedCalled:
-		want := fmt.Sprintf("episode:%d", id)
-		if got != want {
-			t.Errorf("expected Delete(%q), got Delete(%q)", want, got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the pruned episode's vector Delete call")
-	}
-}
-
-// TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries verifies rolling summaries up into a digest also deletes the replaced summaries' vectors — they no longer exist as nodes, so their vectors would otherwise be permanent orphans.
-func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testing.T) {
+// TestReplaceSummariesWithDigest_KeepsVectorsForReparentedSummaries verifies rolling summaries up into a digest does NOT delete the summaries' vectors — the nodes are reparented under the digest, not deleted, so their embeddings still point at live rows.
+func TestReplaceSummariesWithDigest_KeepsVectorsForReparentedSummaries(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
 
 	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 1)}
 	store.SetVectorIndex(vidx)
+	vidx.mu.Lock()
+	vidx.liveIDs = map[string]bool{}
+	vidx.mu.Unlock()
 
 	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
 	if err != nil {
@@ -706,6 +507,10 @@ func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testin
 	if err != nil {
 		t.Fatalf("ensureNode(summary): %v", err)
 	}
+	summaryVecID := fmt.Sprintf("summary:%d", summaryID)
+	vidx.mu.Lock()
+	vidx.liveIDs[summaryVecID] = true
+	vidx.mu.Unlock()
 
 	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{summaryID}, "digest of the day"); err != nil {
 		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
@@ -713,12 +518,84 @@ func TestReplaceSummariesWithDigest_DeletesVectorsForReplacedSummaries(t *testin
 
 	select {
 	case got := <-vidx.deletedCalled:
-		want := fmt.Sprintf("summary:%d", summaryID)
-		if got != want {
-			t.Errorf("expected Delete(%q), got Delete(%q)", want, got)
+		t.Errorf("expected no Delete call for the reparented summary, got Delete(%q)", got)
+	case <-time.After(200 * time.Millisecond):
+		// no delete — as expected
+	}
+
+	vidx.mu.Lock()
+	stillLive := vidx.liveIDs[summaryVecID]
+	vidx.mu.Unlock()
+	if !stillLive {
+		t.Errorf("expected %q to remain in the vector index", summaryVecID)
+	}
+}
+
+// TestReplaceSummariesWithDigest_DeletesVectorsForDroppedDuplicates verifies that when duplicate summary content collapses two summary nodes into one survivor, the dropped node's own vector entry is deleted too — its underlying node is gone from the nodes table, so a stale vidx row left pointing at it would sit there forever, the same problem DeleteNote's async delete already guards against for notes.
+func TestReplaceSummariesWithDigest_DeletesVectorsForDroppedDuplicates(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	vidx := &fakeHybridVectorIndex{deletedCalled: make(chan string, 2)}
+	store.SetVectorIndex(vidx)
+
+	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+	if err != nil {
+		t.Fatalf("ensureNode(day): %v", err)
+	}
+	taskAID, err := store.ensureNode(ctx, dayID, "task", "Task A")
+	if err != nil {
+		t.Fatalf("ensureNode(task A): %v", err)
+	}
+	taskBID, err := store.ensureNode(ctx, dayID, "task", "Task B")
+	if err != nil {
+		t.Fatalf("ensureNode(task B): %v", err)
+	}
+	const dupContent = "fixed the flaky test uniquedup2"
+	sumA, err := store.ensureNode(ctx, taskAID, "summary", dupContent)
+	if err != nil {
+		t.Fatalf("ensureNode(summary A): %v", err)
+	}
+	sumB, err := store.ensureNode(ctx, taskBID, "summary", dupContent)
+	if err != nil {
+		t.Fatalf("ensureNode(summary B): %v", err)
+	}
+
+	vidx.mu.Lock()
+	vidx.liveIDs = map[string]bool{
+		fmt.Sprintf("summary:%d", sumA): true,
+		fmt.Sprintf("summary:%d", sumB): true,
+	}
+	vidx.mu.Unlock()
+
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{sumA, sumB}, "digest covering both tasks"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
+	}
+
+	// dedupeSummaryContent keeps the first of the two and drops the other; find out which survived so the test knows which vector must be gone and which must remain.
+	var survivorID int64
+	if err := store.db.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='summary' AND content=?`, dupContent).Scan(&survivorID); err != nil {
+		t.Fatalf("find surviving summary: %v", err)
+	}
+	dropped, survived := fmt.Sprintf("summary:%d", sumB), fmt.Sprintf("summary:%d", sumA)
+	if survivorID == sumB {
+		dropped, survived = fmt.Sprintf("summary:%d", sumA), fmt.Sprintf("summary:%d", sumB)
+	}
+
+	select {
+	case got := <-vidx.deletedCalled:
+		if got != dropped {
+			t.Errorf("expected Delete(%q) for the dropped duplicate, got Delete(%q)", dropped, got)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the replaced summary's vector Delete call")
+		t.Fatal("timed out waiting for the dropped duplicate's vector Delete call")
+	}
+
+	vidx.mu.Lock()
+	stillLive := vidx.liveIDs[survived]
+	vidx.mu.Unlock()
+	if !stillLive {
+		t.Errorf("expected the surviving summary's vector %q to remain in the index", survived)
 	}
 }
 
@@ -771,6 +648,36 @@ func TestReplaceSummariesWithDigest_AddsVectorForDigest(t *testing.T) {
 	}
 	if _, ok := rec.metadata["domain"]; !ok {
 		t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+	}
+}
+
+// TestHybridSearch_DigestShadowsItsOwnReparentedSummary verifies that when a compacted day's digest and its (now-reparented, still-live) summary both match a query, HybridSearch returns only the digest — otherwise the same day's content would appear twice in a 10-row result.
+func TestHybridSearch_DigestShadowsItsOwnReparentedSummary(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+	if err != nil {
+		t.Fatalf("ensureNode(day): %v", err)
+	}
+	summaryID, err := store.ensureNode(ctx, dayID, "summary", "worked on uniqueshadowterm project")
+	if err != nil {
+		t.Fatalf("ensureNode(summary): %v", err)
+	}
+
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{summaryID}, "uniqueshadowterm day summary"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
+	}
+
+	hits, err := store.HybridSearch(ctx, "uniqueshadowterm", "", 10)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 hit (the digest shadowing its reparented summary), got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Source != "digest" {
+		t.Errorf("expected the surviving hit to be the digest, got source=%s", hits[0].Source)
 	}
 }
 
@@ -831,7 +738,7 @@ func TestReconcileVectors_DeletesOrphanedNoteVector(t *testing.T) {
 	}
 }
 
-// TestReconcileVectors_DeletesVectorForThinnedEpisode verifies a vector for an episode whose screen_text has since been cleared (AgeEpisodes) gets removed even though the episode row itself still exists.
+// TestReconcileVectors_DeletesVectorForThinnedEpisode verifies a vector for an episode whose screen_text has since been cleared gets removed even though the episode row itself still exists.
 func TestReconcileVectors_DeletesVectorForThinnedEpisode(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
@@ -886,122 +793,6 @@ func TestReconcileVectors_LeavesFreshEpisodeVectorAlone(t *testing.T) {
 	}
 }
 
-// TestReconcileVectors_BackfillsMissingNoteVector verifies a note that has no vector entry at all (e.g. from before hybrid search was wired client-side, or a dirty pre-existing store) gets embedded and added.
-func TestReconcileVectors_BackfillsMissingNoteVector(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	// Configure the vector index only AFTER LogNote, so LogNote's own async embed never fires — this note is missing a vector purely because ReconcileVectors needs to backfill it, not because of a race with LogNote's own embed goroutine.
-	id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
-	if err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Errorf("expected 1 backfilled, got %d", report.Backfilled)
-	}
-	wantID := fmt.Sprintf("note:%d", id)
-	found := false
-	for _, got := range vidx.IDs() {
-		if got == wantID {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected %q to be backfilled into the index, got %v", wantID, vidx.IDs())
-	}
-}
-
-// TestReconcileVectors_BackfillsLiveSummaryNode verifies a summary node that survived (not yet rolled into a digest) but has no vector gets backfilled.
-func TestReconcileVectors_BackfillsLiveSummaryNode(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
-	if err != nil {
-		t.Fatalf("ensureNode(day): %v", err)
-	}
-	summaryID, err := store.ensureNode(ctx, dayID, "summary", "worked on the compiler")
-	if err != nil {
-		t.Fatalf("ensureNode(summary): %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Errorf("expected 1 backfilled, got %d", report.Backfilled)
-	}
-	wantID := fmt.Sprintf("summary:%d", summaryID)
-	found := false
-	for _, got := range vidx.IDs() {
-		if got == wantID {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected %q to be backfilled into the index, got %v", wantID, vidx.IDs())
-	}
-}
-
-// TestReconcileVectors_BackfillsRecentEpisode_SkipsOldOne verifies only episodes within the recency window get backfilled — an episode outside it is intentionally left without a vector rather than re-embedding stale raw captures indefinitely.
-func TestReconcileVectors_BackfillsRecentEpisode_SkipsOldOne(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	recentID, err := store.LogEpisode(ctx, "Code", "main.go", "recent capture")
-	if err != nil {
-		t.Fatalf("LogEpisode(recent): %v", err)
-	}
-	oldID, err := store.LogEpisode(ctx, "Code", "old.go", "old capture")
-	if err != nil {
-		t.Fatalf("LogEpisode(old): %v", err)
-	}
-	backdateEpisode(t, store, oldID, 30*24*time.Hour) // well past the 10-day recency window
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Errorf("expected 1 backfilled (recent only), got %d", report.Backfilled)
-	}
-	ids := vidx.IDs()
-	wantRecent := fmt.Sprintf("episode:%d", recentID)
-	dontWantOld := fmt.Sprintf("episode:%d", oldID)
-	foundRecent, foundOld := false, false
-	for _, got := range ids {
-		if got == wantRecent {
-			foundRecent = true
-		}
-		if got == dontWantOld {
-			foundOld = true
-		}
-	}
-	if !foundRecent {
-		t.Errorf("expected the recent episode %q to be backfilled, got %v", wantRecent, ids)
-	}
-	if foundOld {
-		t.Errorf("expected the old episode %q NOT to be backfilled, got %v", dontWantOld, ids)
-	}
-}
-
 // TestReconcileVectors_RespectsEmbedCap verifies the sweep stops backfilling once embedCap is reached, instead of embedding every missing candidate in one pass — protects API quota on a large dirty store.
 func TestReconcileVectors_RespectsEmbedCap(t *testing.T) {
 	ctx := context.Background()
@@ -1031,139 +822,155 @@ func TestReconcileVectors_RespectsEmbedCap(t *testing.T) {
 
 // --- ReconcileVectors: backfill metadata parity with the original write paths (W1) ---
 
-// TestReconcileVectors_BackfillsNote_IncludesCreatedAt verifies note backfill sets created_at metadata, matching LogNote's own async embed goroutine.
-func TestReconcileVectors_BackfillsNote_IncludesCreatedAt(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
+// TestReconcileVectors_BackfillsBySourceType verifies the sweep backfills a vector for a node with none, for every source type the sweep owns — note, summary, digest, episode and thread — matching that type's own async-embed write path (W1): the right embedded text (JSON-extracted for a summary, Document()-framed for an episode, the FTS-trigger text for a thread) and the right source/kind/created_at/domain metadata. A missing field here is not cosmetic: a missing domain silently drops the vector out of every domain-filtered search, and a missing created_at defeats recency decay.
+func TestReconcileVectors_BackfillsBySourceType(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, ctx context.Context, store *Store) (wantID string)
+		check func(t *testing.T, rec *addRecord)
+	}{
+		{
+			name: "note",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				// LogNote runs before the embedder/vector index are wired below, so its own async embed never fires — this note is missing a vector purely because ReconcileVectors needs to backfill it.
+				id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
+				if err != nil {
+					t.Fatalf("LogNote: %v", err)
+				}
+				return fmt.Sprintf("note:%d", id)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if rec.metadata["created_at"] == "" {
+					t.Errorf("expected created_at metadata to be set, got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "summary",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+				if err != nil {
+					t.Fatalf("ensureNode(day): %v", err)
+				}
+				// nodes.content for a summary is the full JSON-marshaled TaskSummary, not the plain summary text — LogSemanticNode's own embed goroutine embeds only summary.Summary, so backfill must extract the same field.
+				summaryID, err := store.ensureNode(ctx, dayID, "summary", `{"same_task":false,"task_name":"debugging session","summary":"fixed the parser edge case"}`)
+				if err != nil {
+					t.Fatalf("ensureNode(summary): %v", err)
+				}
+				if _, err := store.db.Exec(`UPDATE nodes SET domain = 'work' WHERE id = ?`, summaryID); err != nil {
+					t.Fatalf("set domain: %v", err)
+				}
+				return fmt.Sprintf("summary:%d", summaryID)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if rec.content != "fixed the parser edge case" {
+					t.Errorf("expected the embedded content to be the extracted summary text, got %q", rec.content)
+				}
+				if rec.metadata["domain"] != "work" {
+					t.Errorf("expected domain metadata %q, got %+v", "work", rec.metadata)
+				}
+				if rec.metadata["source"] != "summary" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
+					t.Errorf("expected source/kind/created_at metadata matching LogSemanticNode's write path, got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "digest",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
+				if err != nil {
+					t.Fatalf("ensureNode(day): %v", err)
+				}
+				digestID, err := store.ensureNode(ctx, dayID, "digest", "rolled-up digest of the day")
+				if err != nil {
+					t.Fatalf("ensureNode(digest): %v", err)
+				}
+				return fmt.Sprintf("digest:%d", digestID)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if rec.content != "rolled-up digest of the day" {
+					t.Errorf("expected the embedded content to be the digest text, got %q", rec.content)
+				}
+				if rec.metadata["source"] != "digest" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
+					t.Errorf("expected source/kind/created_at metadata matching the digest write path, got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "episode",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				id, err := store.LogEpisode(ctx, "Code", "auth.go", "debugging the token refresh flow")
+				if err != nil {
+					t.Fatalf("LogEpisode: %v", err)
+				}
+				return fmt.Sprintf("episode:%d", id)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				if !strings.Contains(rec.content, "Code") || !strings.Contains(rec.content, "auth.go") {
+					t.Errorf("expected the embedded content to be Document()-framed (app/title header), got %q", rec.content)
+				}
+				if !strings.Contains(rec.content, "debugging the token refresh flow") {
+					t.Errorf("expected the embedded content to still carry the raw substance, got %q", rec.content)
+				}
+				if rec.metadata["source"] != "episode" || rec.metadata["kind"] != string(memory.KindMoment) || rec.metadata["created_at"] == "" {
+					t.Errorf("expected source/kind/created_at metadata matching LogEpisode's write path, got %+v", rec.metadata)
+				}
+				if _, ok := rec.metadata["domain"]; !ok {
+					t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+				}
+			},
+		},
+		{
+			name: "thread",
+			setup: func(t *testing.T, ctx context.Context, store *Store) string {
+				id, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "learning Vulkan", Kind: "learning", State: "working through the triangle tutorial"})
+				if err != nil {
+					t.Fatalf("UpsertThread: %v", err)
+				}
+				return fmt.Sprintf("thread:%d", id)
+			},
+			check: func(t *testing.T, rec *addRecord) {
+				// The embedded text must match what the threads_ai FTS trigger indexes, so the lexical and vector halves of hybrid search see the same thread.
+				if want := "learning Vulkan — working through the triangle tutorial"; rec.content != want {
+					t.Errorf("thread content = %q, want %q", rec.content, want)
+				}
+				if rec.metadata["source"] != "thread" {
+					t.Errorf("thread metadata source = %q, want thread", rec.metadata["source"])
+				}
+				if rec.metadata["kind"] != "arc" {
+					t.Errorf("thread metadata kind = %q, want arc", rec.metadata["kind"])
+				}
+				if rec.metadata["created_at"] == "" {
+					t.Error("thread metadata is missing created_at, which HybridSearch needs for recency")
+				}
+			},
+		},
+	}
 
-	id, err := store.LogNote(ctx, "the user's favorite color is blue", "fact")
-	if err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newStore(t)
+			wantID := c.setup(t, ctx, store)
 
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
+			store.SetEmbedder(&fakeHybridEmbedder{})
+			vidx := &fakeHybridVectorIndex{}
+			store.SetVectorIndex(vidx)
 
-	rec := vidx.addRecordFor(fmt.Sprintf("note:%d", id))
-	if rec == nil {
-		t.Fatal("expected an Add call for the note")
-	}
-	if rec.metadata["created_at"] == "" {
-		t.Errorf("expected created_at metadata to be set, got %+v", rec.metadata)
-	}
-}
+			report, err := store.ReconcileVectors(ctx, 200)
+			if err != nil {
+				t.Fatalf("ReconcileVectors: %v", err)
+			}
+			if report.Backfilled != 1 {
+				t.Errorf("expected 1 backfilled, got %d", report.Backfilled)
+			}
 
-// TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata verifies summary backfill embeds the TaskSummary.Summary text (nodes.content is the full JSON-marshaled TaskSummary, not the plain summary — LogSemanticNode embeds only summary.Summary) with domain/source/kind/created_at all set, matching LogSemanticNode's own async embed goroutine.
-func TestReconcileVectors_BackfillsSummary_ExtractsSummaryTextAndFullMetadata(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
-	if err != nil {
-		t.Fatalf("ensureNode(day): %v", err)
-	}
-	summaryID, err := store.ensureNode(ctx, dayID, "summary", `{"same_task":false,"task_name":"debugging session","summary":"fixed the parser edge case"}`)
-	if err != nil {
-		t.Fatalf("ensureNode(summary): %v", err)
-	}
-	if _, err := store.db.Exec(`UPDATE nodes SET domain = 'work' WHERE id = ?`, summaryID); err != nil {
-		t.Fatalf("set domain: %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("summary:%d", summaryID))
-	if rec == nil {
-		t.Fatal("expected an Add call for the summary")
-	}
-	if rec.content != "fixed the parser edge case" {
-		t.Errorf("expected the embedded content to be the extracted summary text, got %q", rec.content)
-	}
-	if rec.metadata["domain"] != "work" {
-		t.Errorf("expected domain metadata %q, got %+v", "work", rec.metadata)
-	}
-	if rec.metadata["source"] != "summary" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
-		t.Errorf("expected source/kind/created_at metadata matching LogSemanticNode's write path, got %+v", rec.metadata)
-	}
-}
-
-// TestReconcileVectors_BackfillsDigest verifies the reconciliation sweep backfills a digest node that has no vector yet — this is what heals a digest written before the digest-embed fix existed, or one whose async embed goroutine failed.
-func TestReconcileVectors_BackfillsDigest(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	dayID, err := store.ensureNode(ctx, 0, "day", "2026-08-16")
-	if err != nil {
-		t.Fatalf("ensureNode(day): %v", err)
-	}
-	digestID, err := store.ensureNode(ctx, dayID, "digest", "rolled-up digest of the day")
-	if err != nil {
-		t.Fatalf("ensureNode(digest): %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("digest:%d", digestID))
-	if rec == nil {
-		t.Fatal("expected an Add call for the digest")
-	}
-	if rec.content != "rolled-up digest of the day" {
-		t.Errorf("expected the embedded content to be the digest text, got %q", rec.content)
-	}
-	if rec.metadata["source"] != "digest" || rec.metadata["kind"] != string(memory.KindPeriod) || rec.metadata["created_at"] == "" {
-		t.Errorf("expected source/kind/created_at metadata matching the digest write path, got %+v", rec.metadata)
-	}
-}
-
-// TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata verifies episode backfill embeds the same app/title-framed Document() text LogEpisode embeds (not bare screen_text) with domain/source/kind/created_at all set — a missing domain in particular would silently exclude the backfilled vector from every domain-filtered search (chromem's exact-match where fails on a missing key).
-func TestReconcileVectors_BackfillsEpisode_UsesDocumentTextAndFullMetadata(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	id, err := store.LogEpisode(ctx, "Code", "auth.go", "debugging the token refresh flow")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	if _, err := store.ReconcileVectors(ctx, 200); err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("episode:%d", id))
-	if rec == nil {
-		t.Fatal("expected an Add call for the episode")
-	}
-	if !strings.Contains(rec.content, "Code") || !strings.Contains(rec.content, "auth.go") {
-		t.Errorf("expected the embedded content to be Document()-framed (app/title header), got %q", rec.content)
-	}
-	if !strings.Contains(rec.content, "debugging the token refresh flow") {
-		t.Errorf("expected the embedded content to still carry the raw substance, got %q", rec.content)
-	}
-	if rec.metadata["source"] != "episode" || rec.metadata["kind"] != string(memory.KindMoment) || rec.metadata["created_at"] == "" {
-		t.Errorf("expected source/kind/created_at metadata matching LogEpisode's write path, got %+v", rec.metadata)
-	}
-	if _, ok := rec.metadata["domain"]; !ok {
-		t.Errorf("expected a domain key in metadata (even if empty string), got %+v", rec.metadata)
+			rec := vidx.addRecordFor(wantID)
+			if rec == nil {
+				t.Fatalf("expected an Add call for %q, got %v", wantID, vidx.IDs())
+			}
+			c.check(t, rec)
+		})
 	}
 }
 
@@ -1235,47 +1042,6 @@ func TestHybridSearch_RelativeVectorFloor_DropsHitsFarBelowTheBest(t *testing.T)
 	}
 	if len(kept) != 1 || kept[0] != "the genuine match" {
 		t.Errorf("expected only the top vector hit to survive the relative floor, got %v", kept)
-	}
-}
-
-// TestReconcileVectors_BackfillsThread verifies a thread gets a vector. Threads were never embedded by any write path, so the whole arc layer ("what has the user been working on for weeks") was invisible to the semantic half of hybrid search while vectorBackingAlive still claimed thread vectors were alive.
-func TestReconcileVectors_BackfillsThread(t *testing.T) {
-	ctx := context.Background()
-	store := newStore(t)
-
-	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "learning Vulkan", Kind: "learning", State: "working through the triangle tutorial"})
-	if err != nil {
-		t.Fatalf("UpsertThread: %v", err)
-	}
-
-	store.SetEmbedder(&fakeHybridEmbedder{})
-	vidx := &fakeHybridVectorIndex{}
-	store.SetVectorIndex(vidx)
-
-	report, err := store.ReconcileVectors(ctx, 200)
-	if err != nil {
-		t.Fatalf("ReconcileVectors: %v", err)
-	}
-	if report.Backfilled != 1 {
-		t.Fatalf("expected 1 backfilled, got %d", report.Backfilled)
-	}
-
-	rec := vidx.addRecordFor(fmt.Sprintf("thread:%d", id))
-	if rec == nil {
-		t.Fatalf("expected thread:%d in the index, got %v", id, vidx.IDs())
-	}
-	// The embedded text must match what the threads_ai FTS trigger indexes, so the lexical and vector halves of hybrid search see the same thread.
-	if want := "learning Vulkan — working through the triangle tutorial"; rec.content != want {
-		t.Errorf("thread content = %q, want %q", rec.content, want)
-	}
-	if rec.metadata["source"] != "thread" {
-		t.Errorf("thread metadata source = %q, want thread", rec.metadata["source"])
-	}
-	if rec.metadata["kind"] != "arc" {
-		t.Errorf("thread metadata kind = %q, want arc", rec.metadata["kind"])
-	}
-	if rec.metadata["created_at"] == "" {
-		t.Error("thread metadata is missing created_at, which HybridSearch needs for recency")
 	}
 }
 
@@ -1385,16 +1151,6 @@ func TestHybridSearchVectorFloorFollowsTheEmbedder(t *testing.T) {
 	}
 	if len(hits) != 1 {
 		t.Fatalf("expected the 0.44 hit to survive a 0.40 floor, got %d hits", len(hits))
-	}
-}
-
-// TestSetVectorSimilarityFloorIgnoresNonPositive verifies a zero or negative floor leaves the default in place, so a miswired caller cannot turn the floor off entirely and let every nearest neighbour chromem returns into fusion.
-func TestSetVectorSimilarityFloorIgnoresNonPositive(t *testing.T) {
-	store := newStore(t)
-
-	store.SetVectorSimilarityFloor(0)
-	if got := store.vectorFloor(); got != minVectorSimilarity {
-		t.Errorf("floor = %v after SetVectorSimilarityFloor(0), want the %v default", got, float32(minVectorSimilarity))
 	}
 }
 
@@ -1677,5 +1433,167 @@ func TestFormatNoteHit_GetsTheSameBudgetAsFormatHit(t *testing.T) {
 	got := FormatNoteHit(MemoryHit{Source: "note", RefID: 7, Content: long}, 0)
 	if len([]rune(got)) < 2000 {
 		t.Errorf("note excerpted to %d runes; it should get the note budget, not the episode one", len([]rune(got)))
+	}
+}
+
+// A 50-question gold run on 2026-09-04 found answers with no evidence: the user could not see which stored row an answer came from, so a misheard name in a meeting went unnoticed. FormatHitWithSource carries the same line FormatHit renders plus a parseable source tag a caller can trace back to the row.
+func TestFormatHitWithSource_AppendsParseableSourceTag(t *testing.T) {
+	when := time.Date(2026, 9, 1, 10, 30, 0, 0, time.UTC)
+	h := MemoryHit{Source: "episode", RefID: 42, Content: "reviewing the PR", App: "Code", Title: "main.go", CreatedAt: when}
+	got := FormatHitWithSource(h, 0)
+	if !strings.HasPrefix(got, FormatHit(h, 0)) {
+		t.Fatalf("expected FormatHitWithSource to lead with FormatHit's own line, got %q", got)
+	}
+	i := strings.Index(got, `{"source":`)
+	if i < 0 {
+		t.Fatalf("expected a {\"source\":...} tag, got %q", got)
+	}
+	var wrapped struct{ Source EvidenceSource }
+	if err := json.Unmarshal([]byte(got[i:]), &wrapped); err != nil {
+		t.Fatalf("source tag did not parse as JSON: %v (%q)", err, got[i:])
+	}
+	want := EvidenceSource{Kind: "episode", ID: 42, Title: "main.go", When: when.Format(time.RFC3339)}
+	if wrapped.Source != want {
+		t.Errorf("source = %+v, want %+v", wrapped.Source, want)
+	}
+}
+
+// Consolidation merges facts into fewer, better-worded ones, but a merge is a model's summary and the originals are the source. On 2026-09-03 the store held 19 facts after 28 consolidation runs, and nothing on disk could say what those runs had folded away. The replaced facts now move to notes_archive with the time they were archived, so a wrong merge can be traced and undone. Storage is not a concern: every note in the store together is about 115 KB.
+func TestReplaceAllNotes_ArchivesTheOldFacts(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	for _, c := range []string{"the user likes tea", "the user likes coffee"} {
+		if _, err := store.LogNote(ctx, c, "fact"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ReplaceAllNotes(ctx, []string{"the user likes tea and coffee"}); err != nil {
+		t.Fatalf("ReplaceAllNotes: %v", err)
+	}
+	archived, err := store.ArchivedNotes(ctx)
+	if err != nil {
+		t.Fatalf("ArchivedNotes: %v", err)
+	}
+	if len(archived) != 2 {
+		t.Fatalf("archived = %d rows, want the 2 replaced facts", len(archived))
+	}
+	got := map[string]bool{}
+	for _, a := range archived {
+		got[a.Content] = true
+		if a.ArchivedAt.IsZero() {
+			t.Errorf("archived note %q has no archived_at", a.Content)
+		}
+	}
+	if !got["the user likes tea"] || !got["the user likes coffee"] {
+		t.Fatalf("archived contents = %v, want both originals", got)
+	}
+}
+
+// TestHybridSearch_DomainFilter_KeepsUntaggedNote checks that a domain filter narrows the sources that carry a domain instead of emptying the result. Notes, threads and diary rows have no domain column, so filtering them on exact equality dropped every one of them and domain="work" returned nothing but episodes and summaries.
+func TestHybridSearch_DomainFilter_KeepsUntaggedNote(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	if _, err := store.LogNote(ctx, "the user runs the kubernetes migration for the payments team", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	hits, err := store.HybridSearch(ctx, "kubernetes migration payments", "work", 10)
+	if err != nil {
+		t.Fatalf("HybridSearch: %v", err)
+	}
+	found := false
+	for _, h := range hits {
+		if h.Source == "note" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf(`domainFilter="work" dropped the note, which carries no domain at all: %+v`, hits)
+	}
+}
+
+// A sweep against an index that takes batches sends its backfill in one AddBatch rather than one Add per document, and every document still lands in the index and is counted.
+func TestReconcileVectors_BackfillsInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	for _, content := range []string{"the user likes tea", "the user likes coffee", "the user likes cocoa"} {
+		if _, err := store.LogNote(ctx, content, "fact"); err != nil {
+			t.Fatalf("LogNote(%q): %v", content, err)
+		}
+	}
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{}
+	store.SetVectorIndex(vidx)
+
+	report, err := store.ReconcileVectors(ctx, 200)
+	if err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if report.Backfilled != 3 {
+		t.Errorf("Backfilled = %d, want 3", report.Backfilled)
+	}
+	if len(vidx.batchSizes) != 1 || vidx.batchSizes[0] != 3 {
+		t.Errorf("batch sizes = %v, want one batch of 3", vidx.batchSizes)
+	}
+	if len(vidx.IDs()) != 3 {
+		t.Errorf("index holds %v, want all three notes", vidx.IDs())
+	}
+}
+
+// A failed batch must not throw away the embeddings it was already charged for: the sweep re-adds each document on its own and counts the ones that land, so the next sweep does not have to pay for them again.
+func TestReconcileVectors_FailedBatchAddsEachDocumentOnItsOwn(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	for _, content := range []string{"the user likes tea", "the user likes coffee"} {
+		if _, err := store.LogNote(ctx, content, "fact"); err != nil {
+			t.Fatalf("LogNote(%q): %v", content, err)
+		}
+	}
+	store.SetEmbedder(&fakeHybridEmbedder{})
+	vidx := &fakeHybridVectorIndex{batchErr: fmt.Errorf("chromem add batch: disk full")}
+	store.SetVectorIndex(vidx)
+
+	report, err := store.ReconcileVectors(ctx, 200)
+	if err != nil {
+		t.Fatalf("ReconcileVectors: %v", err)
+	}
+	if report.Backfilled != 2 {
+		t.Errorf("Backfilled = %d, want 2 — the retried documents count", report.Backfilled)
+	}
+	if len(vidx.IDs()) != 2 {
+		t.Errorf("index holds %v, want both notes added one at a time after the batch failed", vidx.IDs())
+	}
+}
+
+// deadEmbedder is the embedding engine after Close: every call fails at once, in memory, with no I/O. That speed is what turned one interrupted sweep into a log storm.
+type deadEmbedder struct{ calls int }
+
+func (d *deadEmbedder) Embed(ctx context.Context, task string, text string) ([]float32, error) {
+	d.calls++
+	return nil, errors.New("embed engine: closed")
+}
+
+// A sweep whose embedding engine has shut down under it must stop, not walk the rest of its candidate list one failure at a time.
+// The daemon cancels the root context on SIGTERM and closes the embed engine a few steps later, while a sweep started at boot is still running. Because a closed engine refuses in microseconds with no I/O, the loop got through thousands of candidates per second, logging one ERROR each: 17,596 lines of "embed engine: closed" and 12,082 of "context canceled" in three bursts, 29,763 of the log's 29,941 ERROR lines in eight days, all from this one loop. Nothing was lost — the next sweep re-derives what still has no vector — so the only cost was the noise, and the noise buried everything else.
+func TestReconcileVectors_StopsWhenTheEmbedEngineHasGone(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	for i := 0; i < 25; i++ {
+		if _, err := store.LogNote(ctx, fmt.Sprintf("note number %d", i), "fact"); err != nil {
+			t.Fatalf("LogNote: %v", err)
+		}
+	}
+	emb := &deadEmbedder{}
+	store.SetEmbedder(emb)
+	store.SetVectorIndex(&fakeHybridVectorIndex{})
+
+	if _, err := store.ReconcileVectors(ctx, 100); err == nil {
+		t.Error("the sweep reported success while every embed failed")
+	}
+	if emb.calls != 1 {
+		t.Errorf("the sweep called the dead engine %d times, want 1: it must give up on the first refusal, not once per candidate", emb.calls)
 	}
 }

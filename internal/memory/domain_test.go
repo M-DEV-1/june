@@ -45,6 +45,16 @@ func TestClassify(t *testing.T) {
 			"Slack chat about Netflix later",
 			DomainUnset,
 		},
+
+		// --- short generic work terms in title do not false-positive (workAppOnly) ---
+		{"Wordle in a neutral browser is not work", "firefox", "Wordle - New York Times", DomainUnset},
+		{"a movie review containing 'excellent' is not work", "firefox", "This is an excellent movie review", DomainUnset},
+		{"a password prompt is not work", "firefox", "Enter your password to continue", DomainUnset},
+		{"a Morse code tutorial is not work", "firefox", "How to decode Morse signals", DomainUnset},
+		{"keyword research tool title is not work", "chrome", "keyword research tool", DomainUnset},
+		{"the actual Word app is still work", "word", "Quarterly Report.docx", DomainWork},
+		{"the actual Excel app is still work", "excel", "Budget.xlsx", DomainWork},
+		{"the actual Code app is still work", "code", "main.go", DomainWork},
 	}
 
 	for _, tt := range tests {

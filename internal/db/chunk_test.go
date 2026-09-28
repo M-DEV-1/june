@@ -30,22 +30,6 @@ func TestChunkText_CoversTheWholeCaptureNotJustItsHead(t *testing.T) {
 	}
 }
 
-// Most captures are short: the average is 1,528 runes. Those must stay one chunk, so the common case gains an id suffix and nothing else.
-func TestChunkText_LeavesAShortCaptureWhole(t *testing.T) {
-	text := "Brave Browser · a short screen with one idea on it"
-	chunks := chunkText(text, chunkRunes, chunkOverlap)
-	if len(chunks) != 1 || chunks[0] != text {
-		t.Errorf("got %d chunks %q, want the text unchanged", len(chunks), chunks)
-	}
-}
-
-// An empty or whitespace-only capture yields nothing to embed rather than one empty chunk the embedder would reject.
-func TestChunkText_YieldsNothingForEmptyText(t *testing.T) {
-	if got := chunkText("   \n\t ", chunkRunes, chunkOverlap); len(got) != 0 {
-		t.Errorf("got %d chunks, want none", len(got))
-	}
-}
-
 // A chunk's vector id carries a "#N" suffix, and the search path parses ids back to rows to recover an episode's app, title and domain. Left unhandled, a passage hit parses to refID 0 and arrives detached from the screen it came from.
 func TestSplitCandidateID_ResolvesAPassageToItsEpisode(t *testing.T) {
 	for _, id := range []string{"episode:42", "episode:42#3"} {

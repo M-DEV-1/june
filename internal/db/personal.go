@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"ora/internal/obs"
 )
@@ -18,7 +19,7 @@ type PersonalEntry struct {
 }
 
 // SetPersonalContext writes content under subject, replacing whatever was there before. The subject is the key, so saying the same thing twice edits one row instead of adding a second — that is the whole point of the table.
-// Input: a short plain or kebab-case subject ("identity", "priya-shah") and the entry's prose. Output: an error if either is blank or the write fails.
+// Input: a short plain or kebab-case subject ("identity", "vexil-quorin") and the entry's prose. Output: an error if either is blank or the write fails.
 func (s *Store) SetPersonalContext(ctx context.Context, subject, content string) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.SetPersonalContext")
@@ -86,23 +87,22 @@ func (s *Store) PersonalContext(ctx context.Context) ([]PersonalEntry, error) {
 	return entries, nil
 }
 
-// identityEntry is the clean prose the identity note becomes when it moves into personal context.
-const identityEntry = "The user is Alex Rivera — goes by Alex; git handle M-DEV-1. He is the owner of this computer and the [me] speaker in every meeting recording."
+// nonPersonSubjects are the personal-context subjects that are not somebody: the user themself, and the bucket the meeting updater parks a name it could not stand behind.
+var nonPersonSubjects = map[string]bool{"identity": true, "unsure": true}
 
-// migrateIdentityNote moves the identity fact the memory compiler filed as a note into personal context, where it belongs, and deletes the note. It matches conservatively — kind 'fact', naming both "Alex Rivera" and "owner of this computer" — so no other note can be caught by it.
-// Idempotent in two ways: the note is gone after the first run, and the insert does nothing when an "identity" entry already exists, so a user edit is never overwritten if a similar note is ever written again.
-func (s *Store) migrateIdentityNote() error {
-	const match = `kind = 'fact' AND content LIKE '%Alex Rivera%' AND content LIKE '%owner of this computer%'`
+// IsPersonSubject reports whether a personal-context subject names a person rather than the user, an unconfirmed guess, or an area of preference. Input: the entry's subject. Output: true for a person.
+func IsPersonSubject(subject string) bool {
+	subject = strings.ToLower(strings.TrimSpace(subject))
+	return subject != "" && !nonPersonSubjects[subject] && !strings.HasPrefix(subject, "preference")
+}
 
-	if _, err := s.db.Exec(
-		`INSERT INTO personal_context (subject, content, updated_at)
-		 SELECT 'identity', ?, CURRENT_TIMESTAMP
-		 WHERE EXISTS (SELECT 1 FROM notes WHERE `+match+`)
-		 ON CONFLICT(subject) DO NOTHING`, identityEntry); err != nil {
-		return fmt.Errorf("migrate identity note into personal context: %w", err)
+// PersonSubjectName turns a personal-context subject into the name to show or speak. Input: a hyphenated (or underscore/space separated) lowercase subject such as "vexil-quorin". Output: "Vexil Quorin".
+func PersonSubjectName(subject string) string {
+	words := strings.FieldsFunc(subject, func(r rune) bool { return r == '-' || r == '_' || r == ' ' })
+	for i, word := range words {
+		r := []rune(word)
+		r[0] = unicode.ToUpper(r[0])
+		words[i] = string(r)
 	}
-	if _, err := s.db.Exec(`DELETE FROM notes WHERE ` + match); err != nil {
-		return fmt.Errorf("delete migrated identity note: %w", err)
-	}
-	return nil
+	return strings.Join(words, " ")
 }

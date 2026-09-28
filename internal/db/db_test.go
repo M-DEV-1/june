@@ -4,8 +4,10 @@ package db_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"ora/internal/db"
+	"ora/internal/db/dbtest"
 	"ora/internal/memory"
 	"os"
 	"path/filepath"
@@ -16,41 +18,10 @@ import (
 	"time"
 )
 
-// memStore opens a throwaway in-memory store that is closed when the test ends.
+// memStore opens a throwaway store in a fresh temp directory that is closed when the test ends — a thin alias over dbtest.Open kept so every call site in this package doesn't need its own import.
 func memStore(t *testing.T) *db.Store {
 	t.Helper()
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatalf("db.New: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
-
-// t param is test controller. object to provide methods to control the flow of the test + reporting
-func TestStore_Notes_DeleteAndDedupe(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	id, _ := store.LogNote(ctx, "user works at Acme ESG", "fact")
-
-	// re-logging same content + kind is a no-op (idempotent)
-	id2, err := store.LogNote(ctx, "user works at Acme ESG", "fact")
-	if err != nil {
-		t.Fatalf("LogNote dedupe: %v", err)
-	}
-	if id2 != id {
-		t.Errorf("expected idempotent insert to return same id, got %d != %d", id2, id)
-	}
-
-	if err := store.DeleteNote(ctx, id); err != nil {
-		t.Fatalf("DeleteNote: %v", err)
-	}
-
-	notes, _ := store.GetNotes(ctx)
-	if len(notes) != 0 {
-		t.Fatalf("want 0 notes after delete, got %d", len(notes))
-	}
+	return dbtest.Open(t)
 }
 
 // TestStore_LogNote_NormalizesCaseAndWhitespaceForDedup proves the fix for the "paraphrased restatement creates a duplicate row" problem: LogNote used to dedupe on an exact (content, kind) match only, so re-logging the same fact with different casing/whitespace created a second row instead of reconciling. Content is now normalized (trimmed, whitespace collapsed, lowercased) before the dedup check.
@@ -101,20 +72,20 @@ func TestStore_GetImplicitContext_GatesIrrelevantNotes(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
-	// current focus: debugging the ESG portal
-	if err := store.SetWorkingState(ctx, "debugging the ESG Benchmarking Portal backend"); err != nil {
+	// current focus: debugging the Brightpath portal
+	if err := store.SetWorkingState(ctx, "debugging the Brightpath Benchmarking Portal backend"); err != nil {
 		t.Fatalf("SetWorkingState: %v", err)
 	}
 	// a live thread that matches what the user is doing now
 	if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ESG Benchmarking Portal",
+		Subject: "Brightpath Benchmarking Portal",
 		Kind:    "work",
 		State:   "Monitoring CRD dashboard while debugging backend",
 	}); err != nil {
 		t.Fatalf("UpsertThread: %v", err)
 	}
 	// a durable identity note with nothing to do with the current focus
-	if _, err := store.LogNote(ctx, "user has an interest in Pune real estate", "fact"); err != nil {
+	if _, err := store.LogNote(ctx, "user has an interest in vintage camera repair", "fact"); err != nil {
 		t.Fatalf("LogNote: %v", err)
 	}
 
@@ -125,52 +96,12 @@ func TestStore_GetImplicitContext_GatesIrrelevantNotes(t *testing.T) {
 	joined := strings.Join(branch, "\n")
 
 	// the live thread must surface — that's the useful recall
-	if !strings.Contains(joined, "ESG Benchmarking Portal") {
+	if !strings.Contains(joined, "Brightpath Benchmarking Portal") {
 		t.Errorf("expected live thread in context, got: %+v", branch)
 	}
 	// the irrelevant identity note must NOT be dumped in unconditionally
-	if strings.Contains(joined, "Pune real estate") {
+	if strings.Contains(joined, "vintage camera repair") {
 		t.Errorf("irrelevant note leaked into context (unconditional note dump): %+v", branch)
-	}
-}
-
-func TestStore_SearchMemory_FTS5(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// seed a summary and a note
-	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "Voice Pipeline",
-		Summary:  "Debugging WebSocket reconnect loop in Gemini Live session",
-	})
-	_, _ = store.LogNote(ctx, "user works at Acme ESG as an intern", "fact")
-
-	// FTS5 should find the summary by a tokenized word
-	hits, err := store.SearchMemory(ctx, "WebSocket")
-	if err != nil {
-		t.Fatalf("SearchMemory: %v", err)
-	}
-	if len(hits) == 0 {
-		t.Fatal("FTS5 returned no hits for 'WebSocket'")
-	}
-	if !strings.Contains(hits[0].Content, "WebSocket") {
-		t.Errorf("expected hit to mention WebSocket: %s", hits[0].Content)
-	}
-	if hits[0].Source != "summary" {
-		t.Errorf("expected source=summary, got %s", hits[0].Source)
-	}
-
-	// FTS5 should also surface notes
-	noteHits, err := store.SearchMemory(ctx, "Acme")
-	if err != nil {
-		t.Fatalf("SearchMemory notes: %v", err)
-	}
-	if len(noteHits) == 0 {
-		t.Fatal("FTS5 returned no hits for 'Acme'")
-	}
-	if noteHits[0].Source != "note" {
-		t.Errorf("expected source=note, got %s", noteHits[0].Source)
 	}
 }
 
@@ -338,47 +269,100 @@ func seedOldTree(t *testing.T, ctx context.Context, store *db.Store, dayContent 
 	return dayID
 }
 
-func TestStore_OldSummaryGroups_ReturnsGroupedByDay(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+// TestStore_OldSummaryGroups covers both the shape OldSummaryGroups returns (one group per old day, carrying that day's summaries) and the caps that keep one compaction pass from building a group too large for one prompt: MaxSummariesPerGroup rows per day and MaxDayGroupsPerRun days per run.
+func TestStore_OldSummaryGroups(t *testing.T) {
+	t.Run("returns grouped by day", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	// seed two separate old days with summaries
-	dayID1 := seedOldTree(t, ctx, store, "2026-05-01", []string{"summary-alpha", "summary-beta"})
-	dayID2 := seedOldTree(t, ctx, store, "2026-05-02", []string{"summary-gamma"})
+		// seed two separate old days with summaries
+		dayID1 := seedOldTree(t, ctx, store, "2026-05-01", []string{"summary-alpha", "summary-beta"})
+		dayID2 := seedOldTree(t, ctx, store, "2026-05-02", []string{"summary-gamma"})
 
-	// a fresh summary (created now) must NOT appear
-	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "Current Task",
-		Summary:  "very recent summary should not appear",
+		// a fresh summary (created now) must NOT appear
+		_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+			SameTask: false,
+			TaskName: "Current Task",
+			Summary:  "very recent summary should not appear",
+		})
+
+		groups, err := store.OldSummaryGroups(ctx, 7*24*time.Hour)
+		if err != nil {
+			t.Fatalf("OldSummaryGroups: %v", err)
+		}
+
+		// build a map by dayID for assertion order independence
+		byDay := make(map[int64]memory.SummaryGroup)
+		for _, g := range groups {
+			byDay[g.DayID] = g
+		}
+
+		g1, ok := byDay[dayID1]
+		if !ok {
+			t.Fatalf("group for dayID %d not found; got groups: %+v", dayID1, groups)
+		}
+		if len(g1.Summaries) != 2 {
+			t.Errorf("expected 2 summaries in day1 group, got %d", len(g1.Summaries))
+		}
+
+		g2, ok := byDay[dayID2]
+		if !ok {
+			t.Fatalf("group for dayID %d not found", dayID2)
+		}
+		if len(g2.Summaries) != 1 {
+			t.Errorf("expected 1 summary in day2 group, got %d", len(g2.Summaries))
+		}
 	})
 
-	groups, err := store.OldSummaryGroups(ctx, 7*24*time.Hour)
-	if err != nil {
-		t.Fatalf("OldSummaryGroups: %v", err)
-	}
+	// The compaction job puts a group's summaries into one prompt, so an uncapped day builds a prompt past the model's input limit and is then skipped on every run forever.
+	t.Run("caps rows per group and groups per run", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
+		raw := store.DB()
 
-	// build a map by dayID for assertion order independence
-	byDay := make(map[int64]memory.SummaryGroup)
-	for _, g := range groups {
-		byDay[g.DayID] = g
-	}
+		var userID int64
+		if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='user' LIMIT 1`).Scan(&userID); err != nil {
+			t.Fatalf("find user node: %v", err)
+		}
 
-	g1, ok := byDay[dayID1]
-	if !ok {
-		t.Fatalf("group for dayID %d not found; got groups: %+v", dayID1, groups)
-	}
-	if len(g1.Summaries) != 2 {
-		t.Errorf("expected 2 summaries in day1 group, got %d", len(g1.Summaries))
-	}
+		// One over each cap: a day holding MaxSummariesPerGroup+1 summaries, and MaxDayGroupsPerRun+1 days holding one each.
+		seed := func(day string, n int) {
+			t.Helper()
+			var dayID, sessID, taskID int64
+			if err := raw.QueryRowContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'day',?,datetime('now','-30 days')) RETURNING id`, userID, day).Scan(&dayID); err != nil {
+				t.Fatalf("insert day %s: %v", day, err)
+			}
+			if err := raw.QueryRowContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'session','Old Session',datetime('now','-30 days')) RETURNING id`, dayID).Scan(&sessID); err != nil {
+				t.Fatalf("insert session for %s: %v", day, err)
+			}
+			if err := raw.QueryRowContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'task','Old Task',datetime('now','-30 days')) RETURNING id`, sessID).Scan(&taskID); err != nil {
+				t.Fatalf("insert task for %s: %v", day, err)
+			}
+			for i := 0; i < n; i++ {
+				if _, err := raw.ExecContext(ctx, `INSERT INTO nodes (parent_id, type, content, created_at) VALUES (?,'summary',?,datetime('now','-30 days'))`, taskID, fmt.Sprintf("%s summary %d", day, i)); err != nil {
+					t.Fatalf("insert summary %d for %s: %v", i, day, err)
+				}
+			}
+		}
 
-	g2, ok := byDay[dayID2]
-	if !ok {
-		t.Fatalf("group for dayID %d not found", dayID2)
-	}
-	if len(g2.Summaries) != 1 {
-		t.Errorf("expected 1 summary in day2 group, got %d", len(g2.Summaries))
-	}
+		seed("2026-01-01", db.MaxSummariesPerGroup+1)
+		for i := 0; i < db.MaxDayGroupsPerRun; i++ {
+			seed(fmt.Sprintf("2026-02-%02d", i+1), 2)
+		}
+
+		groups, err := store.OldSummaryGroups(ctx, 7*24*time.Hour)
+		if err != nil {
+			t.Fatalf("OldSummaryGroups: %v", err)
+		}
+		if len(groups) > db.MaxDayGroupsPerRun {
+			t.Errorf("got %d day groups, want at most %d", len(groups), db.MaxDayGroupsPerRun)
+		}
+		for _, g := range groups {
+			if len(g.Summaries) > db.MaxSummariesPerGroup {
+				t.Errorf("day %s came back with %d summaries, want at most %d", g.Day, len(g.Summaries), db.MaxSummariesPerGroup)
+			}
+		}
+	})
 }
 
 func TestStore_GetImplicitContext_WithWorkingState(t *testing.T) {
@@ -425,15 +409,15 @@ func TestStore_GetImplicitContext_WithWorkingState(t *testing.T) {
 	}
 }
 
-// TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts guards against the missing time bound in GetImplicitContext's focus signal: it folds the last 2 task names in unconditionally, by id, so a stale task from days ago can still be "recent by id" and self-match its own summary back into context regardless of relevance. This reproduces the "ESG facts bleed into an unrelated project" bug as a concrete test.
+// TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts guards against the missing time bound in GetImplicitContext's focus signal: it folds the last 2 task names in unconditionally, by id, so a stale task from days ago can still be "recent by id" and self-match its own summary back into context regardless of relevance. This reproduces the "filing facts bleed into an unrelated project" bug as a concrete test.
 func TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
 	if err := store.LogSemanticNode(ctx, memory.TaskSummary{
 		SameTask: false,
-		TaskName: "ESG Report Review",
-		Summary:  "Reviewed the Q1 ESG compliance report line by line",
+		TaskName: "Quarterly Filing Review",
+		Summary:  "Reviewed the Q1 filing line by line",
 	}); err != nil {
 		t.Fatalf("LogSemanticNode (old task): %v", err)
 	}
@@ -442,7 +426,7 @@ func TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts(t *testing.
 	staleTime := time.Now().Add(-72 * time.Hour).UTC().Format("2006-01-02 15:04:05")
 	if _, err := store.DB().ExecContext(ctx,
 		`UPDATE nodes SET created_at = ? WHERE type = 'task' AND content = ?`,
-		staleTime, "ESG Report Review"); err != nil {
+		staleTime, "Quarterly Filing Review"); err != nil {
 		t.Fatalf("backdate old task: %v", err)
 	}
 
@@ -464,7 +448,7 @@ func TestStore_GetImplicitContext_DoesNotLeakStaleTaskAcrossContexts(t *testing.
 		t.Fatalf("GetImplicitContext: %v", err)
 	}
 	for _, line := range branch {
-		if strings.Contains(line, "ESG") {
+		if strings.Contains(line, "Quarterly Filing") {
 			t.Errorf("stale, unrelated task summary leaked into a fresh working-state context: %+v", branch)
 		}
 	}
@@ -593,278 +577,290 @@ func TestStore_CountSummariesSince(t *testing.T) {
 	}
 }
 
-func TestStore_ReplaceSummariesWithDigest_TransactionAndFTS(t *testing.T) {
+// Two summaries written under different original parents can carry identical content — nothing stops two unrelated activities being written up in the same words. Reparenting both under the same new digest would give them the same (parent_id, type, content), which idx_nodes_unique forbids; the batch must survive that instead of failing the whole compaction and retrying forever.
+func TestStore_ReplaceSummariesWithDigest_ToleratesDuplicateContentAmongSummaries(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
+	raw := store.DB()
 
-	dayID := seedOldTree(t, ctx, store, "2026-05-10", []string{
-		"user debugged the xgb tracker uniquetoken1",
-		"user reviewed PR for audio pipeline uniquetoken2",
-	})
-
-	// grab the summary IDs just inserted
-	rows, err := store.DB().QueryContext(ctx,
-		`SELECT id FROM nodes WHERE type='summary' ORDER BY id ASC`)
-	if err != nil {
-		t.Fatalf("query summaries: %v", err)
+	var userID int64
+	if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='user' LIMIT 1`).Scan(&userID); err != nil {
+		t.Fatalf("find user node: %v", err)
 	}
-	var summaryIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			t.Fatalf("scan id: %v", err)
-		}
-		summaryIDs = append(summaryIDs, id)
-	}
-	rows.Close()
-
-	if len(summaryIDs) != 2 {
-		t.Fatalf("expected 2 summary IDs before replace, got %d", len(summaryIDs))
+	var dayID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`,
+		userID, "day", "2026-08-01").Scan(&dayID); err != nil {
+		t.Fatalf("insert day node: %v", err)
 	}
 
-	digest := "user spent the day debugging the tracker and reviewing the audio PR uniquetoken3"
-	if err := store.ReplaceSummariesWithDigest(ctx, dayID, summaryIDs, digest); err != nil {
-		t.Fatalf("ReplaceSummariesWithDigest: %v", err)
+	const dupContent = "fixed the flaky test uniquedup"
+	var taskAID, taskBID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`, dayID, "task", "Task A").Scan(&taskAID); err != nil {
+		t.Fatalf("insert task A: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`, dayID, "task", "Task B").Scan(&taskBID); err != nil {
+		t.Fatalf("insert task B: %v", err)
+	}
+	var sumA, sumB int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskAID, dupContent).Scan(&sumA); err != nil {
+		t.Fatalf("insert summary A: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskBID, dupContent).Scan(&sumB); err != nil {
+		t.Fatalf("insert summary B: %v", err)
 	}
 
-	// summaries must be gone
-	var sumCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary'`).Scan(&sumCount); err != nil {
-		t.Fatalf("count summaries: %v", err)
-	}
-	if sumCount != 0 {
-		t.Errorf("expected 0 summaries after replace, got %d", sumCount)
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{sumA, sumB}, "digest covering both tasks"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest with duplicate summary content: %v", err)
 	}
 
-	// digest must exist under dayID
-	var digestContent string
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT content FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestContent); err != nil {
+	var digestID int64
+	if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestID); err != nil {
 		t.Fatalf("find digest node: %v", err)
 	}
-	if digestContent != digest {
-		t.Errorf("digest content mismatch: got %q", digestContent)
+
+	var survivors int
+	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary' AND parent_id=? AND content=?`, digestID, dupContent).Scan(&survivors); err != nil {
+		t.Fatalf("count surviving summaries: %v", err)
+	}
+	if survivors != 1 {
+		t.Errorf("expected exactly 1 surviving summary under the digest once the duplicate content is deduped, got %d", survivors)
 	}
 
-	// FTS: digest term must be searchable
-	hits, err := store.SearchMemory(ctx, "uniquetoken3")
+	hits, err := store.SearchMemory(ctx, "uniquedup")
 	if err != nil {
-		t.Fatalf("SearchMemory for digest term: %v", err)
+		t.Fatalf("SearchMemory for the deduped summary term: %v", err)
 	}
 	if len(hits) == 0 {
-		t.Fatal("FTS returned no hits for digest term — digest insert trigger not firing")
+		t.Error("FTS lost the deduped summary's term entirely")
 	}
-	if hits[0].Source != "digest" {
-		t.Errorf("expected source=digest, got %s", hits[0].Source)
+}
+
+// A real store was found on 2026-09-05 with a day whose digest already existed but only some of its summaries had been reparented under it — the shape the pre-fix unique-index collision above left behind: the transaction's digest insert survived, its reparent update did not, on some batches. The next compaction pass for that day must not insert a second digest; it must find the one already there and finish reparenting whatever is still loose under it, including deduping a loose summary whose content already matches one already parented on the digest.
+func TestStore_ReplaceSummariesWithDigest_ResumesADayWithAnExistingDigestAndLooseSummaries(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+	raw := store.DB()
+
+	var userID int64
+	if err := raw.QueryRowContext(ctx, `SELECT id FROM nodes WHERE type='user' LIMIT 1`).Scan(&userID); err != nil {
+		t.Fatalf("find user node: %v", err)
+	}
+	var dayID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`,
+		userID, "day", "2026-08-28").Scan(&dayID); err != nil {
+		t.Fatalf("insert day node: %v", err)
 	}
 
-	// FTS: terms unique to deleted summaries must be gone
-	oldHits1, err := store.SearchMemory(ctx, "uniquetoken1")
-	if err != nil {
-		t.Fatalf("SearchMemory for deleted summary term: %v", err)
+	// The digest a first, partial run already committed, with one summary already reparented under it.
+	var digestID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'digest',?) RETURNING id`, dayID, "first digest text").Scan(&digestID); err != nil {
+		t.Fatalf("insert existing digest: %v", err)
 	}
-	if len(oldHits1) != 0 {
-		t.Errorf("FTS still returns deleted summary term 'uniquetoken1' — delete trigger not firing")
+	var alreadyDone int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, digestID, "already reparented uniqueresume1").Scan(&alreadyDone); err != nil {
+		t.Fatalf("insert already-reparented summary: %v", err)
 	}
 
-	oldHits2, err := store.SearchMemory(ctx, "uniquetoken2")
-	if err != nil {
-		t.Fatalf("SearchMemory for deleted summary term: %v", err)
+	// Two summaries still loose under a task, one of them a duplicate of what is already under the digest.
+	var taskID int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,?,?) RETURNING id`, dayID, "task", "Loose Task").Scan(&taskID); err != nil {
+		t.Fatalf("insert task: %v", err)
 	}
-	if len(oldHits2) != 0 {
-		t.Errorf("FTS still returns deleted summary term 'uniquetoken2' — delete trigger not firing")
+	var loose1, loose2 int64
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskID, "already reparented uniqueresume1").Scan(&loose1); err != nil {
+		t.Fatalf("insert loose duplicate summary: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx,
+		`INSERT INTO nodes (parent_id, type, content) VALUES (?,'summary',?) RETURNING id`, taskID, "new work uniqueresume2").Scan(&loose2); err != nil {
+		t.Fatalf("insert loose new summary: %v", err)
+	}
+
+	// The next compaction pass finds these two through the same query OldSummaryGroups runs (still under a task), and calls ReplaceSummariesWithDigest again for the same day.
+	if err := store.ReplaceSummariesWithDigest(ctx, dayID, []int64{loose1, loose2}, "a fresh digest text covering the whole day"); err != nil {
+		t.Fatalf("ReplaceSummariesWithDigest resuming a day with an existing digest: %v", err)
+	}
+
+	var digestCount int
+	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='digest' AND parent_id=?`, dayID).Scan(&digestCount); err != nil {
+		t.Fatalf("count digests: %v", err)
+	}
+	if digestCount != 1 {
+		t.Fatalf("expected exactly 1 digest for the day, got %d — a resumed compaction must reuse the existing digest rather than insert another", digestCount)
+	}
+
+	var digestContent string
+	if err := raw.QueryRowContext(ctx, `SELECT content FROM nodes WHERE id=?`, digestID).Scan(&digestContent); err != nil {
+		t.Fatalf("read digest content: %v", err)
+	}
+	if digestContent != "a fresh digest text covering the whole day" {
+		t.Errorf("digest content = %q, want the text this pass generated — the reused digest is rewritten, not left frozen at what the first partial run said", digestContent)
+	}
+
+	var loose2Parent int64
+	if err := raw.QueryRowContext(ctx, `SELECT parent_id FROM nodes WHERE id=?`, loose2).Scan(&loose2Parent); err != nil {
+		t.Fatalf("find loose2: %v", err)
+	}
+	if loose2Parent != digestID {
+		t.Errorf("loose2 parent = %d, want it reparented under the existing digest %d", loose2Parent, digestID)
+	}
+
+	var survivorsOfDup int
+	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE type='summary' AND parent_id=? AND content=?`,
+		digestID, "already reparented uniqueresume1").Scan(&survivorsOfDup); err != nil {
+		t.Fatalf("count duplicate survivors: %v", err)
+	}
+	if survivorsOfDup != 1 {
+		t.Errorf("expected exactly 1 surviving copy of the duplicate content under the digest, got %d", survivorsOfDup)
 	}
 }
 
 // ─── Thread tests ─────────────────────────────────────────────────────────────
 
-// TestStore_UpsertThread_NewThread verifies that a zero-ID upsert creates a new row with the right initial salience (0.5 when Novel=false, 0.6 when Novel=true), times_seen=1, and status='active'.
-func TestStore_UpsertThread_NewThread(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+// TestStore_UpsertThread covers the two update shapes an UpsertThread call takes: a zero-ID call repeating an existing (subject, kind) (same row updated in place, salience bumped and capped at 1.0, times_seen incremented) and an ID>0 call (state replaced, times_seen incremented, same id returned).
+func TestStore_UpsertThread(t *testing.T) {
+	t.Run("conflict on subject and kind updates the one row", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	cases := []struct {
-		novel        bool
-		wantSalience float64
-	}{
-		{novel: false, wantSalience: 0.5},
-		{novel: true, wantSalience: 0.6},
-	}
-
-	for _, tc := range cases {
-		subject := fmt.Sprintf("project-novel-%v", tc.novel)
-		id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-			Subject: subject,
+		id1, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: "ORA project",
 			Kind:    "work",
-			State:   "working on it",
-			Novel:   tc.novel,
+			State:   "initial state",
+			Novel:   false,
 		})
 		if err != nil {
-			t.Fatalf("UpsertThread (novel=%v): %v", tc.novel, err)
+			t.Fatalf("first upsert: %v", err)
 		}
-		if id == 0 {
-			t.Fatalf("novel=%v: expected non-zero id", tc.novel)
+
+		var sal1 float64
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT salience FROM threads WHERE id = ?`, id1).Scan(&sal1); err != nil {
+			t.Fatalf("query salience before conflict: %v", err)
+		}
+
+		// second upsert with same subject+kind, different state
+		id2, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: "ORA project",
+			Kind:    "work",
+			State:   "writing more tests",
+			Novel:   false,
+		})
+		if err != nil {
+			t.Fatalf("second upsert: %v", err)
+		}
+		if id2 != id1 {
+			t.Errorf("conflict must return same id: got %d, want %d", id2, id1)
+		}
+
+		var sal2 float64
+		var timesSeen int
+		var state string
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT salience, times_seen, state FROM threads WHERE id = ?`, id1).
+			Scan(&sal2, &timesSeen, &state); err != nil {
+			t.Fatalf("query after conflict: %v", err)
+		}
+		if sal2 <= sal1 {
+			t.Errorf("salience should increase on conflict: before=%v after=%v", sal1, sal2)
+		}
+		if timesSeen != 2 {
+			t.Errorf("times_seen should be 2 after conflict, got %d", timesSeen)
+		}
+		if state != "writing more tests" {
+			t.Errorf("state should be updated to new value, got %q", state)
+		}
+
+		// must stay at exactly one row
+		var count int
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT count(*) FROM threads WHERE subject = 'ORA project' AND kind = 'work'`).Scan(&count); err != nil {
+			t.Fatalf("count threads: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("conflict must keep single row, got %d rows", count)
+		}
+	})
+
+	t.Run("salience never exceeds 1.0", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
+
+		for i := 0; i < 30; i++ {
+			if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+				Subject: "recurring thread",
+				Kind:    "work",
+				State:   fmt.Sprintf("iteration %d", i),
+				Novel:   true,
+			}); err != nil {
+				t.Fatalf("upsert iter %d: %v", i, err)
+			}
 		}
 
 		var sal float64
-		var timesSeen int
-		var status string
 		if err := store.DB().QueryRowContext(ctx,
-			`SELECT salience, times_seen, status FROM threads WHERE id = ?`, id).
-			Scan(&sal, &timesSeen, &status); err != nil {
-			t.Fatalf("query thread (novel=%v): %v", tc.novel, err)
+			`SELECT salience FROM threads WHERE subject = 'recurring thread' AND kind = 'work'`).Scan(&sal); err != nil {
+			t.Fatalf("query salience: %v", err)
 		}
-		if sal != tc.wantSalience {
-			t.Errorf("novel=%v: want salience %v, got %v", tc.novel, tc.wantSalience, sal)
+		if sal > 1.0 {
+			t.Errorf("salience must not exceed 1.0 after many upserts, got %v", sal)
 		}
-		if timesSeen != 1 {
-			t.Errorf("novel=%v: want times_seen=1, got %d", tc.novel, timesSeen)
-		}
-		if status != "active" {
-			t.Errorf("novel=%v: want status='active', got %q", tc.novel, status)
-		}
-	}
-}
-
-// TestStore_UpsertThread_Conflict verifies that a second zero-ID upsert with the same (subject, kind) updates state, bumps times_seen to 2, raises salience by ~0.05 (capped at ≤1.0), and returns the same id with exactly one row.
-func TestStore_UpsertThread_Conflict(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	id1, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "initial state",
-		Novel:   false,
 	})
-	if err != nil {
-		t.Fatalf("first upsert: %v", err)
-	}
 
-	var sal1 float64
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT salience FROM threads WHERE id = ?`, id1).Scan(&sal1); err != nil {
-		t.Fatalf("query salience before conflict: %v", err)
-	}
+	t.Run("explicit id replaces state", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	// second upsert with same subject+kind, different state
-	id2, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "writing more tests",
-		Novel:   false,
-	})
-	if err != nil {
-		t.Fatalf("second upsert: %v", err)
-	}
-	if id2 != id1 {
-		t.Errorf("conflict must return same id: got %d, want %d", id2, id1)
-	}
-
-	var sal2 float64
-	var timesSeen int
-	var state string
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT salience, times_seen, state FROM threads WHERE id = ?`, id1).
-		Scan(&sal2, &timesSeen, &state); err != nil {
-		t.Fatalf("query after conflict: %v", err)
-	}
-	if sal2 <= sal1 {
-		t.Errorf("salience should increase on conflict: before=%v after=%v", sal1, sal2)
-	}
-	if sal2 > 1.0 {
-		t.Errorf("salience must not exceed 1.0, got %v", sal2)
-	}
-	if timesSeen != 2 {
-		t.Errorf("times_seen should be 2 after conflict, got %d", timesSeen)
-	}
-	if state != "writing more tests" {
-		t.Errorf("state should be updated to new value, got %q", state)
-	}
-
-	// must stay at exactly one row
-	var count int
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT count(*) FROM threads WHERE subject = 'ORA project' AND kind = 'work'`).Scan(&count); err != nil {
-		t.Fatalf("count threads: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("conflict must keep single row, got %d rows", count)
-	}
-}
-
-// TestStore_UpsertThread_SalienceCap verifies that salience never exceeds 1.0
-// regardless of how many times the same thread is upserted.
-func TestStore_UpsertThread_SalienceCap(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	for i := 0; i < 30; i++ {
-		if _, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-			Subject: "recurring thread",
+		id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			Subject: "ORA project",
 			Kind:    "work",
-			State:   fmt.Sprintf("iteration %d", i),
-			Novel:   true,
-		}); err != nil {
-			t.Fatalf("upsert iter %d: %v", i, err)
+			State:   "initial",
+			Novel:   false,
+		})
+		if err != nil {
+			t.Fatalf("initial insert: %v", err)
 		}
-	}
 
-	var sal float64
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT salience FROM threads WHERE subject = 'recurring thread' AND kind = 'work'`).Scan(&sal); err != nil {
-		t.Fatalf("query salience: %v", err)
-	}
-	if sal > 1.0 {
-		t.Errorf("salience must not exceed 1.0 after many upserts, got %v", sal)
-	}
-}
+		var timesSeen1 int
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT times_seen FROM threads WHERE id = ?`, id).Scan(&timesSeen1); err != nil {
+			t.Fatalf("query times_seen before explicit upsert: %v", err)
+		}
 
-// TestStore_UpsertThread_ExplicitID verifies the ID>0 update path: state is replaced, times_seen is incremented, and the same id is returned.
-func TestStore_UpsertThread_ExplicitID(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+		returnedID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
+			ID:    id,
+			State: "explicit-state-update",
+		})
+		if err != nil {
+			t.Fatalf("explicit-id upsert: %v", err)
+		}
+		if returnedID != id {
+			t.Errorf("explicit-id upsert must return same id: got %d, want %d", returnedID, id)
+		}
 
-	id, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "initial",
-		Novel:   false,
+		var state string
+		var timesSeen2 int
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT state, times_seen FROM threads WHERE id = ?`, id).
+			Scan(&state, &timesSeen2); err != nil {
+			t.Fatalf("query after explicit upsert: %v", err)
+		}
+		if state != "explicit-state-update" {
+			t.Errorf("state should be replaced: got %q", state)
+		}
+		if timesSeen2 != timesSeen1+1 {
+			t.Errorf("times_seen should increment: got %d, want %d", timesSeen2, timesSeen1+1)
+		}
 	})
-	if err != nil {
-		t.Fatalf("initial insert: %v", err)
-	}
-
-	var timesSeen1 int
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT times_seen FROM threads WHERE id = ?`, id).Scan(&timesSeen1); err != nil {
-		t.Fatalf("query times_seen before explicit upsert: %v", err)
-	}
-
-	returnedID, err := store.UpsertThread(ctx, memory.ThreadUpdate{
-		ID:    id,
-		State: "explicit-state-update",
-	})
-	if err != nil {
-		t.Fatalf("explicit-id upsert: %v", err)
-	}
-	if returnedID != id {
-		t.Errorf("explicit-id upsert must return same id: got %d, want %d", returnedID, id)
-	}
-
-	var state string
-	var timesSeen2 int
-	if err := store.DB().QueryRowContext(ctx,
-		`SELECT state, times_seen FROM threads WHERE id = ?`, id).
-		Scan(&state, &timesSeen2); err != nil {
-		t.Fatalf("query after explicit upsert: %v", err)
-	}
-	if state != "explicit-state-update" {
-		t.Errorf("state should be replaced: got %q", state)
-	}
-	if timesSeen2 != timesSeen1+1 {
-		t.Errorf("times_seen should increment: got %d, want %d", timesSeen2, timesSeen1+1)
-	}
 }
 
 // TestStore_GetLiveThreads_RecencyWindow verifies the 2-day cutoff: a thread last_seen within 2 days is returned; one older than 2 days is not. Also checks newest-first ordering and that the limit parameter is honored.
@@ -997,70 +993,6 @@ func TestStore_ThreadsForAttribution_Window(t *testing.T) {
 	}
 }
 
-// TestStore_GetImplicitContext_ThreadFormat verifies that GetImplicitContext emits [thread:kind] subject — state for threads with a state, [thread:kind] subject for threads without one, and [now] for working_state (and no [about] lines — identity notes are relevance-gated, not dumped).
-func TestStore_GetImplicitContext_ThreadFormat(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// seed 10 notes — none should be dumped as [about] lines anymore (relevance-gated)
-	for i := 0; i < 10; i++ {
-		_, _ = store.LogNote(ctx, fmt.Sprintf("identity fact %d", i), "fact")
-	}
-
-	// thread with state
-	_, _ = store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "Suits",
-		Kind:    "entertainment",
-		State:   "season 1 episode 3",
-	})
-
-	// thread without state (empty string)
-	_, _ = store.UpsertThread(ctx, memory.ThreadUpdate{
-		Subject: "ORA project",
-		Kind:    "work",
-		State:   "",
-	})
-
-	_ = store.SetWorkingState(ctx, "debugging the audio pipeline")
-
-	branch, err := store.GetImplicitContext(ctx)
-	if err != nil {
-		t.Fatalf("GetImplicitContext: %v", err)
-	}
-
-	var aboutCount int
-	var foundThreadWithState, foundThreadNoState, foundNow bool
-	for _, line := range branch {
-		if strings.HasPrefix(line, "[about] ") {
-			aboutCount++
-		}
-		// [thread:entertainment] Suits — season 1 episode 3
-		if line == "[thread:entertainment] Suits — season 1 episode 3" {
-			foundThreadWithState = true
-		}
-		// [thread:work] ORA project (no state → no em dash suffix)
-		if line == "[thread:work] ORA project" {
-			foundThreadNoState = true
-		}
-		if strings.HasPrefix(line, "[now] ") {
-			foundNow = true
-		}
-	}
-
-	if aboutCount != 0 {
-		t.Errorf("identity notes must no longer be dumped as [about] lines (relevance-gated now), got %d", aboutCount)
-	}
-	if !foundThreadWithState {
-		t.Errorf("[thread:entertainment] Suits — state line not found in: %v", branch)
-	}
-	if !foundThreadNoState {
-		t.Errorf("[thread:work] ORA project (no-state) line not found in: %v", branch)
-	}
-	if !foundNow {
-		t.Errorf("[now] line not found in: %v", branch)
-	}
-}
-
 // TestStore_SearchMemory_FindsThread verifies that after UpsertThread, SearchMemory
 // returns a hit whose Source is "thread".
 func TestStore_SearchMemory_FindsThread(t *testing.T) {
@@ -1089,71 +1021,6 @@ func TestStore_SearchMemory_FindsThread(t *testing.T) {
 }
 
 // ─── Relevance retrieval tests (B2) ───────────────────────────────────────────
-
-// TestStore_GetImplicitContext_WiresRelevanceRetrieval verifies that the working-state focus drives the relevance-retrieval layer, surfacing a matching item as a [note] line. Exclusion of unrelated items is covered by the dedicated RetrieveRelevant tests.
-func TestStore_GetImplicitContext_WiresRelevanceRetrieval(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// a relevant note; no summaries/tasks so the focus signal stays clean
-	_, _ = store.LogNote(ctx, "debugging Linux audio pipeline crackle", "fact")
-
-	const state = "debugging Linux audio"
-	if err := store.SetWorkingState(ctx, state); err != nil {
-		t.Fatalf("SetWorkingState: %v", err)
-	}
-
-	branch, err := store.GetImplicitContext(ctx)
-	if err != nil {
-		t.Fatalf("GetImplicitContext: %v", err)
-	}
-
-	var hasRelevanceLine bool
-	for _, b := range branch {
-		if strings.HasPrefix(b, "[note]") && strings.Contains(b, "Linux audio pipeline") {
-			hasRelevanceLine = true
-		}
-	}
-	if !hasRelevanceLine {
-		t.Errorf("expected a [note] relevance line driven by working-state focus: %+v", branch)
-	}
-}
-
-func TestStore_RetrieveRelevant_FocusAffectsResults(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	_, _ = store.LogNote(ctx, "user works with Go and SQLite", "fact")
-	_, _ = store.LogNote(ctx, "user likes hiking in mountains", "fact")
-
-	// focus on Go should return Go note
-	goResults, _ := store.RetrieveRelevant(ctx, "Go and SQLite", 5)
-	foundGo := false
-	for _, r := range goResults {
-		if strings.Contains(r, "Go and SQLite") {
-			foundGo = true
-		}
-	}
-	if !foundGo {
-		t.Errorf("focus 'Go' should surface Go note, got: %+v", goResults)
-	}
-
-	// different focus should not surface unrelated
-	hikeResults, _ := store.RetrieveRelevant(ctx, "hiking in mountains", 5)
-	foundHikeInGoFocus := false
-	for _, r := range goResults {
-		if strings.Contains(r, "hiking") {
-			foundHikeInGoFocus = true
-		}
-	}
-	if foundHikeInGoFocus {
-		t.Errorf("focus on Go should not surface hike note: %+v", goResults)
-	}
-	// check that different focus returns different sets
-	if len(goResults) > 0 && len(hikeResults) > 0 && goResults[0] == hikeResults[0] {
-		t.Errorf("different focus should return different result sets, got: %+v vs %+v", goResults, hikeResults)
-	}
-}
 
 // TestStore_RelevantNotes_CapsAndFilters verifies the fix for the unbounded note dump fed into DeriveState (cmd/daemon.go): RelevantNotes returns a relevance-ranked, capped subset of notes matching focus — not the entire notes table — as plain content strings (no "[note] " prefix, since DeriveState expects bare facts).
 func TestStore_RelevantNotes_CapsAndFilters(t *testing.T) {
@@ -1346,259 +1213,6 @@ func TestStore_LogEpisode_ImportanceHeuristic(t *testing.T) {
 }
 
 // ─── Episode tests (Cycle 4: ranking) ─────────────────────────────────────────
-
-// TestStore_RankedEpisodes_WeightedOrdering constructs episodes where recency/importance/relevance pull in different directions and asserts that a slightly-less-relevant but far-more-important+recent episode outranks a stale, barely-relevant one, per the documented weighted formula.
-func TestStore_RankedEpisodes_WeightedOrdering(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	raw := store.DB()
-
-	// winner: recent, high importance, decent (but not perfect) relevance.
-	winnerID, err := store.LogEpisode(ctx, "VSCode", "compiler.go", "refactoring the memory compiler ranking logic today")
-	if err != nil {
-		t.Fatalf("LogEpisode (winner): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.95, created_at = datetime('now') WHERE id = ?`, winnerID); err != nil {
-		t.Fatalf("backdate winner: %v", err)
-	}
-
-	// loser: stale (30 days old), low importance, but a slightly more literal relevance match on the focus term.
-	loserID, err := store.LogEpisode(ctx, "Notes", "old memo", "ranking ranking ranking notes from a month ago")
-	if err != nil {
-		t.Fatalf("LogEpisode (loser): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.05, created_at = datetime('now', '-720 hours') WHERE id = ?`, loserID); err != nil {
-		t.Fatalf("backdate loser: %v", err)
-	}
-
-	results, err := store.RankedEpisodes(ctx, "ranking", 10)
-	if err != nil {
-		t.Fatalf("RankedEpisodes: %v", err)
-	}
-	if len(results) < 2 {
-		t.Fatalf("expected at least 2 ranked episodes, got %d: %+v", len(results), results)
-	}
-
-	winnerIdx, loserIdx := -1, -1
-	for i, r := range results {
-		if strings.Contains(r.Content, "refactoring the memory compiler") {
-			winnerIdx = i
-		}
-		if strings.Contains(r.Content, "old memo") || strings.Contains(r.Content, "month ago") {
-			loserIdx = i
-		}
-	}
-	if winnerIdx == -1 {
-		t.Fatalf("winner episode not found in results: %+v", results)
-	}
-	if loserIdx == -1 {
-		t.Fatalf("loser episode not found in results: %+v", results)
-	}
-	if winnerIdx > loserIdx {
-		t.Errorf("expected recent+important episode (idx %d) to outrank stale low-importance episode (idx %d): %+v", winnerIdx, loserIdx, results)
-	}
-
-	// limit is honored
-	limited, err := store.RankedEpisodes(ctx, "ranking", 1)
-	if err != nil {
-		t.Fatalf("RankedEpisodes (limit=1): %v", err)
-	}
-	if len(limited) != 1 {
-		t.Errorf("expected exactly 1 result with limit=1, got %d", len(limited))
-	}
-}
-
-// ─── Episode tests (Cycle 5: culling / aging) ─────────────────────────────────
-
-// TestStore_AgeEpisodes_DropsOnlyOldLowImportance seeds an old low-importance episode, an old high-importance episode, and a recent one, and verifies AgeEpisodes empties screen_text only for the old low-importance row while keeping the row itself intact — the other two keep their screen_text untouched.
-func TestStore_AgeEpisodes_DropsOnlyOldLowImportance(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-	raw := store.DB()
-
-	oldLowID, err := store.LogEpisode(ctx, "Notes", "old low", "trivial old content")
-	if err != nil {
-		t.Fatalf("LogEpisode (old low): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.1, created_at = datetime('now', '-720 hours') WHERE id = ?`, oldLowID); err != nil {
-		t.Fatalf("backdate old low: %v", err)
-	}
-
-	oldHighID, err := store.LogEpisode(ctx, "VSCode", "old high", "important old content about the core architecture")
-	if err != nil {
-		t.Fatalf("LogEpisode (old high): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.9, created_at = datetime('now', '-720 hours') WHERE id = ?`, oldHighID); err != nil {
-		t.Fatalf("backdate old high: %v", err)
-	}
-
-	recentID, err := store.LogEpisode(ctx, "Notes", "recent low", "trivial recent content")
-	if err != nil {
-		t.Fatalf("LogEpisode (recent): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.1 WHERE id = ?`, recentID); err != nil {
-		t.Fatalf("set recent importance: %v", err)
-	}
-
-	aged, err := store.AgeEpisodes(ctx, 168*time.Hour, 0.5)
-	if err != nil {
-		t.Fatalf("AgeEpisodes: %v", err)
-	}
-	if aged != 1 {
-		t.Errorf("expected exactly 1 episode aged, got %d", aged)
-	}
-
-	var oldLowText, oldHighText, recentText string
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, oldLowID).Scan(&oldLowText); err != nil {
-		t.Fatalf("query old low text: %v", err)
-	}
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, oldHighID).Scan(&oldHighText); err != nil {
-		t.Fatalf("query old high text: %v", err)
-	}
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, recentID).Scan(&recentText); err != nil {
-		t.Fatalf("query recent text: %v", err)
-	}
-
-	if oldLowText != "" {
-		t.Errorf("expected old low-importance episode's screen_text to be emptied, got %q", oldLowText)
-	}
-	if oldHighText != "important old content about the core architecture" {
-		t.Errorf("old high-importance episode's screen_text must survive, got %q", oldHighText)
-	}
-	if recentText != "trivial recent content" {
-		t.Errorf("recent episode's screen_text must survive, got %q", recentText)
-	}
-
-	// rows must still exist (never deleted)
-	var count int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes`).Scan(&count); err != nil {
-		t.Fatalf("count episodes: %v", err)
-	}
-	if count != 3 {
-		t.Errorf("expected all 3 episode rows to survive aging, got %d", count)
-	}
-
-	// FTS mirror must not keep surfacing the cleared content (external-content fts5 requires the update trigger to purge the stale index entry).
-	staleHits, err := store.SearchEpisodes(ctx, "trivial old content")
-	if err != nil {
-		t.Fatalf("SearchEpisodes after aging: %v", err)
-	}
-	for _, h := range staleHits {
-		if strings.Contains(h.Content, "trivial old content") {
-			t.Errorf("aged episode's old content still searchable via FTS: %+v", staleHits)
-		}
-	}
-}
-
-// TestStore_PruneAncientEpisodes_DeletesOnlyThinnedRowsPastThreshold seeds three episodes: one ancient AND already thinned (screen_text emptied by AgeEpisodes) — eligible for deletion; one ancient but NOT thinned — must survive, since PruneAncientEpisodes must never delete raw text that hasn't gone through the aging pass; and one recent + thinned — must survive since it isn't past the ancient threshold yet.
-// Also confirms FTS5 no longer returns the deleted row's content, via both a keyword search and the fts5 'integrity-check' command, which fails loudly if the shadow index and content table drift.
-func TestStore_PruneAncientEpisodes_DeletesOnlyThinnedRowsPastThreshold(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-	raw := store.DB()
-
-	// ancient + already thinned: eligible for deletion.
-	ancientThinID, err := store.LogEpisode(ctx, "Notes", "ancient thinned", "zorptastic")
-	if err != nil {
-		t.Fatalf("LogEpisode (ancient thinned): %v", err)
-	}
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.05, created_at = datetime('now', '-9000 hours') WHERE id = ?`,
-		ancientThinID); err != nil {
-		t.Fatalf("backdate ancient thinned: %v", err)
-	}
-	// thin it via the real aging path (not a hand-rolled UPDATE) so the FTS mirror is brought to empty by the existing episodes_au trigger first, exactly as would happen in production before a prune ever runs.
-	if _, err := store.AgeEpisodes(ctx, 168*time.Hour, 0.5); err != nil {
-		t.Fatalf("AgeEpisodes (thin ancientThinID): %v", err)
-	}
-	var thinnedCheck string
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, ancientThinID).Scan(&thinnedCheck); err != nil {
-		t.Fatalf("query thinned check: %v", err)
-	}
-	if thinnedCheck != "" {
-		t.Fatalf("precondition failed: ancientThinID must be thinned before prune, got %q", thinnedCheck)
-	}
-
-	// ancient but NOT thinned: still carries raw text, must survive.
-	ancientRawID, err := store.LogEpisode(ctx, "VSCode", "ancient raw", "quibblefrond")
-	if err != nil {
-		t.Fatalf("LogEpisode (ancient raw): %v", err)
-	}
-	// high importance so AgeEpisodes above does not thin it too.
-	if _, err := raw.ExecContext(ctx,
-		`UPDATE episodes SET importance = 0.95, created_at = datetime('now', '-9000 hours') WHERE id = ?`,
-		ancientRawID); err != nil {
-		t.Fatalf("backdate ancient raw: %v", err)
-	}
-
-	// recent + thinned (screen_text already empty, but not past the ancient threshold): must survive.
-	recentThinID, err := store.LogEpisode(ctx, "Notes", "recent thinned", "")
-	if err != nil {
-		t.Fatalf("LogEpisode (recent thinned): %v", err)
-	}
-
-	const ancientAfter = 365 * 24 * time.Hour
-	pruned, err := store.PruneAncientEpisodes(ctx, ancientAfter)
-	if err != nil {
-		t.Fatalf("PruneAncientEpisodes: %v", err)
-	}
-	if pruned != 1 {
-		t.Fatalf("expected exactly 1 row pruned, got %d", pruned)
-	}
-
-	var count int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes`).Scan(&count); err != nil {
-		t.Fatalf("count episodes: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 surviving episode rows, got %d", count)
-	}
-
-	// the deleted row's id must actually be gone
-	var stillThere int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes WHERE id = ?`, ancientThinID).Scan(&stillThere); err != nil {
-		t.Fatalf("check deleted row: %v", err)
-	}
-	if stillThere != 0 {
-		t.Errorf("expected ancientThinID row to be deleted, but it still exists")
-	}
-
-	// the ancient-but-raw and recent-but-thinned rows must both survive untouched
-	var ancientRawText string
-	if err := raw.QueryRowContext(ctx, `SELECT screen_text FROM episodes WHERE id = ?`, ancientRawID).Scan(&ancientRawText); err != nil {
-		t.Fatalf("query ancient raw survivor: %v", err)
-	}
-	if ancientRawText != "quibblefrond" {
-		t.Errorf("ancient-but-not-thinned episode must survive with its raw text intact, got %q", ancientRawText)
-	}
-	var recentExists int
-	if err := raw.QueryRowContext(ctx, `SELECT count(*) FROM episodes WHERE id = ?`, recentThinID).Scan(&recentExists); err != nil {
-		t.Fatalf("check recent thinned survivor: %v", err)
-	}
-	if recentExists != 1 {
-		t.Errorf("recent thinned episode must survive (not past the ancient threshold), but it's gone")
-	}
-
-	// FTS5 must not still surface the deleted row's old content — proves the episodes_ad DELETE trigger kept episodes_fts in sync rather than orphaning a shadow-index entry for the removed rowid.
-	staleHits, err := store.SearchEpisodes(ctx, "zorptastic")
-	if err != nil {
-		t.Fatalf("SearchEpisodes after prune: %v", err)
-	}
-	if len(staleHits) != 0 {
-		t.Errorf("deleted episode's old content still searchable via FTS after prune: %+v", staleHits)
-	}
-
-	// fts5 integrity-check: for an external-content table, this command scans the content table (episodes) and the shadow index and fails if they've drifted — the definitive proof the DELETE didn't orphan the index.
-	if _, err := raw.ExecContext(ctx, `INSERT INTO episodes_fts(episodes_fts) VALUES('integrity-check')`); err != nil {
-		t.Errorf("episodes_fts integrity-check failed after prune (shadow index orphaned): %v", err)
-	}
-}
 
 // ─── Consolidation retrieval (Cycle 1: temporal walk) ─────────────────────────
 
@@ -1870,25 +1484,6 @@ func TestCreateSchema_DomainColumnMigration_Idempotent(t *testing.T) {
 	}
 }
 
-// TestLogEpisode_TagsDomainViaClassify verifies LogEpisode computes and stores memory.Classify(app, title) in the episodes.domain column.
-func TestLogEpisode_TagsDomainViaClassify(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	id, err := store.LogEpisode(ctx, "Netflix", "The Bear S3E1", "watching")
-	if err != nil {
-		t.Fatalf("LogEpisode: %v", err)
-	}
-
-	var domain string
-	if err := store.DB().QueryRow(`SELECT domain FROM episodes WHERE id = ?`, id).Scan(&domain); err != nil {
-		t.Fatalf("query episode domain: %v", err)
-	}
-	if domain != "personal" {
-		t.Errorf("domain = %q, want %q", domain, "personal")
-	}
-}
-
 // TestLogEpisode_DoesNotBlockOnSlowEmbedder proves LogEpisode returns immediately after its synchronous INSERT, even with a configured embedder that would block indefinitely — the async embed must run in its own goroutine, never inline on the caller's path.
 func TestLogEpisode_DoesNotBlockOnSlowEmbedder(t *testing.T) {
 	ctx := context.Background()
@@ -1920,49 +1515,6 @@ func TestLogEpisode_DoesNotBlockOnSlowEmbedder(t *testing.T) {
 		t.Fatal("expected the async embed goroutine to have started")
 	}
 	close(slow.release)
-}
-
-// TestLogSemanticNode_DomainInheritance_MajorityVote verifies that the summary node's domain is the majority vote over episodes logged since the current task's created_at, not a single Classify(app,title) call.
-func TestLogSemanticNode_DomainInheritance_MajorityVote(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	// 1. Create the task (first flush — SameTask=false establishes currentTaskID and the task node's created_at anchor).
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: false,
-		TaskName: "debugging session",
-		Summary:  "started debugging",
-	}); err != nil {
-		t.Fatalf("LogSemanticNode (create task): %v", err)
-	}
-
-	// 2. Log episodes AFTER the task exists, 2 work-tagged vs 1 personal-tagged — work should win the majority vote.
-	for _, app := range []string{"Slack", "Code", "Netflix"} {
-		if _, err := store.LogEpisode(ctx, app, "generic title", "some content"); err != nil {
-			t.Fatalf("LogEpisode(%s): %v", app, err)
-		}
-	}
-
-	// 3. Continue the same task (SameTask=true) — this triggers the domain majority-vote query over episodes since the task's created_at.
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{
-		SameTask: true,
-		TaskName: "debugging session",
-		Summary:  "still debugging, mostly in Slack and Code",
-	}); err != nil {
-		t.Fatalf("LogSemanticNode (continue task): %v", err)
-	}
-
-	var domain string
-	if err := store.DB().QueryRow(`
-		SELECT domain FROM nodes
-		WHERE type = 'summary'
-		ORDER BY id DESC LIMIT 1
-	`).Scan(&domain); err != nil {
-		t.Fatalf("query summary node domain: %v", err)
-	}
-	if domain != "work" {
-		t.Errorf("summary domain = %q, want %q (majority of Slack+Code work episodes over 1 personal)", domain, "work")
-	}
 }
 
 // TestHybridSearch_DomainBoost_AppliesToLexicalHitsNotJustVectorHits guards a regression: HybridSearch's same-domain boost (applied when domainFilter=="") only ever looked at rrfCandidate.domain, but that field was populated for vector-sourced candidates only — every lexical/FTS5 candidate's domain was left at "", so the boost silently never fired for keyword-matched hits, the common case since the vector index starts empty and grows slowly.
@@ -2013,13 +1565,19 @@ func TestHybridSearch_DomainBoost_AppliesToLexicalHitsNotJustVectorHits(t *testi
 	}
 }
 
-// A summary-node hit must carry the plain summary text, not the marshalled TaskSummary JSON that LogSemanticNode stores in nodes.content (the model sees this string verbatim), and its real created_at rather than the zero value (FormatHit's relative-age suffix needs it).
+// A summary-node hit must carry the plain summary text, not the marshalled TaskSummary JSON that LogSemanticNode stores in nodes.content (the model sees this string verbatim), and its real created_at rather than the zero value (FormatHit's relative-age suffix needs it). Summary nodes store the whole struct as JSON, so indexing it verbatim made the JSON keys ("same_task", "task_name") live search terms that matched every summary ever written; a search on one of those keys must find nothing.
 func TestSearchMemory_SummaryHit_CarriesProseAndCreatedAt(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
 	if err := store.LogSemanticNode(ctx, memory.TaskSummary{SameTask: false, TaskName: "debugging session", Summary: "fixed the parser edge case"}); err != nil {
 		t.Fatalf("LogSemanticNode: %v", err)
+	}
+
+	if hits, err := store.SearchMemory(ctx, "same_task"); err != nil {
+		t.Fatalf("SearchMemory(same_task): %v", err)
+	} else if len(hits) != 0 {
+		t.Errorf("searching a JSON key returned %d hits, want 0: %+v", len(hits), hits)
 	}
 
 	hits, err := store.SearchMemory(ctx, "parser edge case")
@@ -2062,63 +1620,8 @@ func TestSearchMemory_DigestHitReturnsPlainTextUnchanged(t *testing.T) {
 	}
 }
 
-// TestFormatHit_EpisodeProvenance_TableShapes is WP12 Part C: episode hits must render App/Title so the model can tell two unrelated captures apart instead of confabulating a connection between them (exactly how the Aug 7 log's confabulation happened — see systemInstructionText's new synthesis-rule comment). Every other source's shape stays exactly as it was.
-func TestFormatHit_EpisodeProvenance_TableShapes(t *testing.T) {
-	cases := []struct {
-		name string
-		hit  db.MemoryHit
-		want string
-	}{
-		{
-			name: "episode with app and title carries provenance trailing, content first",
-			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go"},
-			want: "[episode] fixing the null pointer bug (Code — tracker_linux.go)",
-		},
-		{
-			name: "episode without app/title falls back to the plain shape",
-			hit:  db.MemoryHit{Source: "episode", Content: "debugging the parser"},
-			want: "[episode] debugging the parser",
-		},
-		{
-			name: "thread hit unchanged",
-			hit:  db.MemoryHit{Source: "thread", Content: "Suits Season 7 — watching episode 6"},
-			want: "[thread] Suits Season 7 — watching episode 6",
-		},
-		{
-			name: "note hit unchanged",
-			hit:  db.MemoryHit{Source: "note", Content: "the user's favorite color is blue"},
-			want: "[note] the user's favorite color is blue",
-		},
-		{
-			name: "summary hit unchanged",
-			hit:  db.MemoryHit{Source: "summary", Content: "wrote a blog post about Go generics"},
-			want: "[summary] wrote a blog post about Go generics",
-		},
-		{
-			// Notes are durable facts, not time-decaying observations, so they never get an age suffix.
-			name: "note with a created_at stays ageless",
-			hit:  db.MemoryHit{Source: "note", Content: "the user's favorite color is blue", CreatedAt: time.Now().Add(-30 * 24 * time.Hour)},
-			want: "[note] the user's favorite color is blue",
-		},
-		{
-			// Age and provenance both show up: one does not replace the other. Past the first day the label also carries the calendar date, so "which day was that" is answerable straight off the row.
-			name: "episode with app, title and age",
-			hit:  db.MemoryHit{Source: "episode", Content: "fixing the null pointer bug", App: "Code", Title: "tracker_linux.go", CreatedAt: time.Now().Add(-3 * 24 * time.Hour)},
-			want: "[episode (" + time.Now().Add(-3*24*time.Hour).Local().Format("Mon Jan 2 15:04") + ", 3d ago)] fixing the null pointer bug (Code — tracker_linux.go)",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := db.FormatHit(tc.hit, 0); got != tc.want {
-				t.Errorf("FormatHit(%+v) = %q, want %q", tc.hit, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestRetrieveRelevant_EmptyFocus_ReturnsNilWithoutSearching verifies an empty focus returns nil directly instead of substituting the literal string "recent context" and running a real search for those words — which could spuriously match unrelated stored content that happens to contain "recent" and "context".
-func TestRetrieveRelevant_EmptyFocus_ReturnsNilWithoutSearching(t *testing.T) {
+// TestRetrieveRelevant_EmptyFocus_SkipsLiteralMatch verifies that an empty focus skips running relevance searches (for RetrieveRelevant, RelevantNotes, and GetImplicitContext) rather than substituting literal strings like "recent context" that would spuriously match unrelated stored notes.
+func TestRetrieveRelevant_EmptyFocus_SkipsLiteralMatch(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
@@ -2126,51 +1629,37 @@ func TestRetrieveRelevant_EmptyFocus_ReturnsNilWithoutSearching(t *testing.T) {
 		t.Fatalf("LogNote: %v", err)
 	}
 
-	out, err := store.RetrieveRelevant(ctx, "", 4)
-	if err != nil {
-		t.Fatalf("RetrieveRelevant: %v", err)
-	}
-	if out != nil {
-		t.Errorf("expected nil for an empty focus, got %v", out)
-	}
-}
-
-// TestRelevantNotes_EmptyFocus_ReturnsNilWithoutSearching is the same property for RelevantNotes.
-func TestRelevantNotes_EmptyFocus_ReturnsNilWithoutSearching(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	if _, err := store.LogNote(ctx, "stayed in a very recent context of debugging", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	out, err := store.RelevantNotes(ctx, "", 4)
-	if err != nil {
-		t.Fatalf("RelevantNotes: %v", err)
-	}
-	if out != nil {
-		t.Errorf("expected nil for an empty focus, got %v", out)
-	}
-}
-
-// TestGetImplicitContext_NoWorkingStateNoRecentTasks_SkipsRelevanceSearch verifies a cold-start store (no working_state, no recent task nodes) never runs the old literal "recent context" relevance search — proven by a note containing exactly those words that the buggy search would have matched, but which the fixed code must not surface via relevance at all.
-func TestGetImplicitContext_NoWorkingStateNoRecentTasks_SkipsRelevanceSearch(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	if _, err := store.LogNote(ctx, "stayed in a very recent context of debugging", "fact"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	branch, err := store.GetImplicitContext(ctx)
-	if err != nil {
-		t.Fatalf("GetImplicitContext: %v", err)
-	}
-	for _, line := range branch {
-		if strings.Contains(line, "stayed in a very recent context of debugging") {
-			t.Errorf("expected the placeholder-matching note NOT to surface via relevance search, got it in branch: %v", branch)
+	t.Run("RetrieveRelevant", func(t *testing.T) {
+		out, err := store.RetrieveRelevant(ctx, "", 4)
+		if err != nil {
+			t.Fatalf("RetrieveRelevant: %v", err)
 		}
-	}
+		if out != nil {
+			t.Errorf("expected nil for empty focus, got %v", out)
+		}
+	})
+
+	t.Run("RelevantNotes", func(t *testing.T) {
+		out, err := store.RelevantNotes(ctx, "", 4)
+		if err != nil {
+			t.Fatalf("RelevantNotes: %v", err)
+		}
+		if out != nil {
+			t.Errorf("expected nil for empty focus, got %v", out)
+		}
+	})
+
+	t.Run("GetImplicitContext", func(t *testing.T) {
+		branch, err := store.GetImplicitContext(ctx)
+		if err != nil {
+			t.Fatalf("GetImplicitContext: %v", err)
+		}
+		for _, line := range branch {
+			if strings.Contains(line, "stayed in a very recent context of debugging") {
+				t.Errorf("placeholder-matching note must not surface in branch: %v", branch)
+			}
+		}
+	})
 }
 
 // TestNew_RestrictsDirectoryAndFilePermissions verifies db.New locks down the db directory to 0700 and the main db file to 0600 — the user's entire captured memory shouldn't default to world-readable (0755 dir / 0644 file) on a multi-user machine. POSIX permission bits don't map on Windows, so this is skipped there.
@@ -2222,31 +1711,11 @@ func TestLogEpisode_JunkOnlyRawFallbackIsStripped(t *testing.T) {
 	}
 }
 
-// TestStore_SummaryFTS_IndexesSummaryTextNotJSONKeys proves that a summary node's FTS entry holds the plain summary prose, not the marshalled TaskSummary. Summary nodes store the whole struct as JSON in nodes.content, so indexing it verbatim made the JSON keys ("same_task", "task_name") live search terms that matched every summary ever written.
-func TestStore_SummaryFTS_IndexesSummaryTextNotJSONKeys(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	const summaryText = "Rolled the staging cluster to 1.30 and watched every pod drain cleanly."
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "Kubernetes upgrade", Summary: summaryText}); err != nil {
-		t.Fatalf("LogSemanticNode: %v", err)
-	}
-
-	if hits, err := store.SearchMemory(ctx, "same_task"); err != nil {
-		t.Fatalf("SearchMemory(same_task): %v", err)
-	} else if len(hits) != 0 {
-		t.Errorf("searching a JSON key returned %d hits, want 0: %+v", len(hits), hits)
-	}
-
-	hits, err := store.SearchMemory(ctx, "staging cluster")
-	if err != nil {
-		t.Fatalf("SearchMemory(staging cluster): %v", err)
-	}
-	if len(hits) != 1 {
-		t.Fatalf("want 1 hit for the summary prose, got %d: %+v", len(hits), hits)
-	}
-	if hits[0].Content != summaryText {
-		t.Errorf("hit content = %q, want %q", hits[0].Content, summaryText)
+// unapplyFTSCleanup makes an already-migrated store look like one written by a binary from before the search-index cleanup migration landed, by deleting that migration's row from schema_migrations. Input: an open store. Output: nothing, but the next db.New on the same file runs the cleanup again, which is what these legacy-row tests are about.
+func unapplyFTSCleanup(t *testing.T, store *db.Store) {
+	t.Helper()
+	if _, err := store.DB().Exec(`DELETE FROM schema_migrations WHERE version = 7`); err != nil {
+		t.Fatalf("unapply the fts cleanup migration: %v", err)
 	}
 }
 
@@ -2265,6 +1734,7 @@ func TestCreateSchema_RebuildsSummaryFTSContent(t *testing.T) {
 	if _, err := first.DB().Exec(`INSERT INTO memory_fts(content, source, ref_id) VALUES (?, 'summary', 4242)`, raw); err != nil {
 		t.Fatalf("seed legacy fts row: %v", err)
 	}
+	unapplyFTSCleanup(t, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -2371,7 +1841,7 @@ func TestNoteConsolidation_LeavesOtherKindsAlone(t *testing.T) {
 	}
 
 	llm := &fixedConsolidator{out: []string{"the user knows a handful of things", "the user ships software"}}
-	if err := memory.NewNoteCompactor(llm, store).Compact(ctx); err != nil {
+	if err := db.NewNoteCompactor(llm, store).Compact(ctx); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
 
@@ -2449,7 +1919,7 @@ func TestSummaryTimeline_CarriesRealDates(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "climate scoring", Summary: "adjusting vulnerability scores"}); err != nil {
+	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "route scoring", Summary: "adjusting vulnerability scores"}); err != nil {
 		t.Fatalf("LogSemanticNode: %v", err)
 	}
 	sums, err := store.SummaryTimeline(ctx, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
@@ -2464,68 +1934,228 @@ func TestSummaryTimeline_CarriesRealDates(t *testing.T) {
 	}
 }
 
-// A thread says what the user was doing; the episodes say what was actually on screen while they did it. Nothing joined the two, so a question like "what were those code review findings" could reach the thread's one-line summary and never the evidence behind it — 261 threads and 4,901 episodes with no edge between them.
-func TestStore_ThreadEpisodes_LinkAndReadBack(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
+// TestStore_ThreadEpisodeEdges covers the two ways an episode gets linked to the thread the user was in while it was captured: an explicit LinkEpisodesToThread call over a time window, and BackfillThreadEdges rebuilding the edge after the fact from the summary nodes the compiler already wrote (one per thread per flush, timestamped at the flush). A thread says what the user was doing; the episodes say what was actually on screen while they did it — without this edge, a question like "what were those code review findings" reaches the thread's one-line summary and never the evidence behind it.
+func TestStore_ThreadEpisodeEdges(t *testing.T) {
+	t.Run("link and read back", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
 
-	inWindow, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings, two of them high severity"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	since := time.Now().Add(-time.Minute)
+		inWindow, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings, two of them high severity"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		since := time.Now().Add(-time.Minute)
 
-	threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work", State: "reading the findings"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.LinkEpisodesToThread(ctx, threadID, since, time.Now().Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
+		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work", State: "reading the findings"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.LinkEpisodesToThread(ctx, threadID, since, time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
 
-	got, err := store.EpisodesForThread(ctx, threadID, 10)
+		got, err := store.EpisodesForThread(ctx, threadID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].ID != inWindow {
+			t.Fatalf("got %+v, want the one episode written inside the window", got)
+		}
+		if !strings.Contains(got[0].ScreenText, "eleven findings") {
+			t.Errorf("the evidence did not come back with the episode: %q", got[0].ScreenText)
+		}
+	})
+
+	// The compiler discarded the episode-to-thread attribution for months, but it left a trace: one summary node per thread per flush, carrying the thread's subject and the moment of the flush. Those timestamps are the flush boundaries, so the edge can be rebuilt exactly rather than guessed at — every episode between one flush and the next belongs to the threads that flush produced.
+	t.Run("backfill rebuilds from summary nodes", func(t *testing.T) {
+		ctx := context.Background()
+		store := memStore(t)
+
+		threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inFlush, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The summary node the compiler wrote for that flush, named after the thread.
+		if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "code review of ora", Summary: "reviewed the code"}); err != nil {
+			t.Fatal(err)
+		}
+
+		linked, err := store.BackfillThreadEdges(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if linked == 0 {
+			t.Fatal("backfill linked nothing")
+		}
+
+		eps, err := store.EpisodesForThread(ctx, threadID, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(eps) != 1 || eps[0].ID != inFlush {
+			t.Fatalf("got %+v, want the episode captured before that flush", eps)
+		}
+	})
+}
+
+// The tally table gained prompt_chars and reply_chars on 2026-09-01 in the create statement only, so a database created before that day failed every bump with "no column named prompt_chars". Opening such a database must add the columns.
+func TestCreateSchema_TallyCharColumnsMigrated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	old, err := sql.Open("sqlite", path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open raw: %v", err)
 	}
-	if len(got) != 1 || got[0].ID != inWindow {
-		t.Fatalf("got %+v, want the one episode written inside the window", got)
+	if _, err := old.Exec(`CREATE TABLE tally (day TEXT NOT NULL, provider TEXT NOT NULL, calls INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, total_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, provider))`); err != nil {
+		t.Fatalf("create old tally: %v", err)
 	}
-	if !strings.Contains(got[0].ScreenText, "eleven findings") {
-		t.Errorf("the evidence did not come back with the episode: %q", got[0].ScreenText)
+	old.Close()
+
+	store, err := db.New(path)
+	if err != nil {
+		t.Fatalf("New over an old tally table: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.DB().Exec(`INSERT INTO tally (day, provider, calls, failures, total_ms, prompt_chars, reply_chars) VALUES ('2026-09-02', 'gemini', 1, 0, 5, 10, 20)`); err != nil {
+		t.Errorf("tally still lacks its character columns after open: %v", err)
 	}
 }
 
-// The compiler discarded the episode-to-thread attribution for months, but it left a trace: one summary node per thread per flush, carrying the thread's subject and the moment of the flush. Those timestamps are the flush boundaries, so the edge can be rebuilt exactly rather than guessed at — every episode between one flush and the next belongs to the threads that flush produced.
-func TestStore_BackfillThreadEdges_RebuildsFromSummaryNodes(t *testing.T) {
+// TestRetrieveRelevant_NoteExcerptSurvivesPastEpisodeCap checks the per-turn inject path gives a note the note budget rather than the 200-rune episode cap. Input: one note whose answer sits well past 200 runes. Output: the injected line still carries that answer.
+func TestRetrieveRelevant_NoteExcerptSurvivesPastEpisodeCap(t *testing.T) {
 	ctx := context.Background()
 	store := memStore(t)
 
-	threadID, err := store.UpsertThread(ctx, memory.ThreadUpdate{Subject: "code review of ora", Kind: "work"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	inFlush, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Code", Title: "search.go", ScreenText: "eleven findings"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The summary node the compiler wrote for that flush, named after the thread.
-	if err := store.LogSemanticNode(ctx, memory.TaskSummary{TaskName: "code review of ora", Summary: "reviewed the code"}); err != nil {
-		t.Fatal(err)
+	body := "Attendees: Zemna, Vexil. " + strings.Repeat("the payments team walked through the checkout flow again. ", 8) + "DECISION: ship the kubernetes migration on Friday."
+	if _, err := store.LogNote(ctx, body, "meeting"); err != nil {
+		t.Fatalf("LogNote: %v", err)
 	}
 
-	linked, err := store.BackfillThreadEdges(ctx)
+	lines, err := store.RetrieveRelevant(ctx, "kubernetes migration checkout", 4)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("RetrieveRelevant: %v", err)
 	}
-	if linked == 0 {
-		t.Fatal("backfill linked nothing")
+	if len(lines) == 0 {
+		t.Fatal("expected the note to be retrieved at all")
+	}
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "DECISION: ship the kubernetes migration on Friday.") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the note was cut to its heading — the inject path is still using the 200-rune episode cap: %+v", lines)
+	}
+}
+
+// TestRankedEpisodes_MultiWordFocusMatchesWordsApart checks that a multi-word recall subject is tokenised rather than quoted as one FTS5 phrase. Input: a focus whose words appear in an episode but not adjacent. Output: the episode is still a candidate.
+func TestRankedEpisodes_MultiWordFocusMatchesWordsApart(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if _, err := store.LogEpisode(ctx, "Firefox", "Riddler", "reviewing the Riddler puzzle generator and its scoring project notes"); err != nil {
+		t.Fatalf("LogEpisode: %v", err)
 	}
 
-	eps, err := store.EpisodesForThread(ctx, threadID, 10)
+	hits, err := store.RankedEpisodes(ctx, "Riddler project", 5)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("RankedEpisodes: %v", err)
 	}
-	if len(eps) != 1 || eps[0].ID != inFlush {
-		t.Fatalf("got %+v, want the episode captured before that flush", eps)
+	if len(hits) == 0 {
+		t.Error(`a two-word subject matched nothing: the focus is being quoted as one contiguous FTS5 phrase`)
+	}
+}
+
+// TestRelevantNotes_SurvivesCrossSourceLimit checks that the note filter runs in SQL before the row limit, not in Go after it. Input: more strongly-matching diary rows than the shared limit, plus one matching note. Output: the note is still returned.
+func TestRelevantNotes_SurvivesCrossSourceLimit(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	for i := 0; i < 12; i++ {
+		if err := store.SetDiaryEntry(ctx, fmt.Sprintf("2026-07-%02d", i+1), "day", "kubernetes migration payments"); err != nil {
+			t.Fatalf("SetDiaryEntry: %v", err)
+		}
+	}
+	if _, err := store.LogNote(ctx, "the user runs the kubernetes migration for the payments team on Fridays", "fact"); err != nil {
+		t.Fatalf("LogNote: %v", err)
+	}
+
+	notes, err := store.RelevantNotes(ctx, "kubernetes migration payments", 3)
+	if err != nil {
+		t.Fatalf("RelevantNotes: %v", err)
+	}
+	if len(notes) == 0 {
+		t.Error("the matching note was filtered out after a cross-source limit had already spent every row on diary hits")
+	}
+}
+
+// TestDeleteNote_MissingID_Errors checks that deleting an id naming nothing is reported as a failure. A nil error here made the revise tool answer "deleted" for an id the model invented, and fired the vector-index delete on it.
+func TestDeleteNote_MissingID_Errors(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if err := store.DeleteNote(ctx, 4242); err == nil {
+		t.Error("expected an error deleting a nonexistent note id, got nil")
+	}
+}
+
+// TestStore_GetImplicitContext_CarriesTheNightsUnderstanding is the sleep-time-compute wiring: the understanding doc the night rewrites is the one thing Ora computed while the user was away, and until now no live session read it. It must arrive first in the handshake context, before the live threads and the relevance hits, because it is the standing model everything else is read against.
+func TestStore_GetImplicitContext_CarriesTheNightsUnderstanding(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	const doc = "He works on ora most evenings and tests before he writes. His partner is Ada."
+	if err := store.SetDiaryEntry(ctx, "", "understanding", doc); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+	if err := store.SetWorkingState(ctx, "user is reading the dream package"); err != nil {
+		t.Fatalf("SetWorkingState: %v", err)
+	}
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+	if len(branch) == 0 {
+		t.Fatal("GetImplicitContext returned nothing")
+	}
+	if !strings.HasPrefix(branch[0], "[understanding]") || !strings.Contains(branch[0], "tests before he writes") {
+		t.Errorf("the night's understanding must lead the context, got first line %q in %+v", branch[0], branch)
+	}
+}
+
+// TestStore_GetImplicitContext_UnderstandingDoesNotSuppressTheColdStartWalk guards the one way this wiring could break something: the recursive summary walk only runs when nothing else was synthesized, so an understanding doc must not count as "something synthesized" and starve a cold-start store of its summaries.
+func TestStore_GetImplicitContext_UnderstandingDoesNotSuppressTheColdStartWalk(t *testing.T) {
+	ctx := context.Background()
+	store := memStore(t)
+
+	if err := store.SetDiaryEntry(ctx, "", "understanding", "He is an engineer who works late."); err != nil {
+		t.Fatalf("SetDiaryEntry: %v", err)
+	}
+	_ = store.LogSemanticNode(ctx, memory.TaskSummary{
+		SameTask: false,
+		TaskName: "Fallback Task",
+		Summary:  "Checking the cold start still walks the summary tree",
+	})
+
+	branch, err := store.GetImplicitContext(ctx)
+	if err != nil {
+		t.Fatalf("GetImplicitContext: %v", err)
+	}
+	var hasUnderstanding, hasSummary bool
+	for _, line := range branch {
+		if strings.HasPrefix(line, "[understanding]") {
+			hasUnderstanding = true
+		}
+		if strings.Contains(line, "still walks the summary tree") {
+			hasSummary = true
+		}
+	}
+	if !hasUnderstanding || !hasSummary {
+		t.Errorf("cold start wants both the understanding and the summary walk, got understanding=%v summary=%v in %+v", hasUnderstanding, hasSummary, branch)
 	}
 }

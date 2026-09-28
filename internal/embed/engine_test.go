@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+
 	"os"
 	"strconv"
 	"testing"
@@ -30,6 +31,12 @@ func TestEngineHelperProcess(t *testing.T) {
 	if port == "" {
 		t.Skip("not running as the spawned helper")
 	}
+	// llama-server refuses to start on a device it cannot see, which is what a named GPU does once its driver stops loading.
+	for _, a := range os.Args {
+		if a == "--device" {
+			os.Exit(1)
+		}
+	}
 
 	started := time.Now()
 	mux := http.NewServeMux()
@@ -44,6 +51,9 @@ func TestEngineHelperProcess(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]any{{"embedding": []float32{0.5, 0.5}, "index": 0}},
 		})
+	})
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": "the local reply"}}}})
 	})
 	http.ListenAndServe("127.0.0.1:"+port, mux)
 }
@@ -130,18 +140,6 @@ func TestEngineClientPresencePinsTheChild(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 	if !e.running() {
 		t.Fatal("child was reaped while a client was present")
-	}
-}
-
-func TestEngineWarmSpawnsWithoutAnEmbed(t *testing.T) {
-	e := newTestEngine(t, time.Hour, time.Hour)
-	e.MarkClientPresence(context.Background())
-
-	if err := e.ensureUp(context.Background()); err != nil {
-		t.Fatalf("Warm: %v", err)
-	}
-	if !e.running() {
-		t.Fatal("Warm should have spawned the child")
 	}
 }
 
@@ -251,5 +249,20 @@ func TestEngineStopIfIdle(t *testing.T) {
 	}
 	if !e.running() {
 		t.Fatal("the pinned engine was stopped anyway")
+	}
+}
+
+// On 2026-09-23 a driver upgrade left the RTX 3050 out of Vulkan until a reboot, llama-server refused "--device Vulkan1" on every start, and every embedding failed. A device that is not there is dropped so the server starts on whatever it can find, and embeddings keep working.
+func TestEngineStartsWithoutADeviceThatIsNotThere(t *testing.T) {
+	port := freePort(t)
+	e := newEngine(os.Args[0], []string{"-test.run=TestEngineHelperProcess", "embed-helper", fmt.Sprint(port), "0", "--device", "Vulkan1"},
+		fmt.Sprintf("http://127.0.0.1:%d", port), "test-model", time.Hour)
+	e.startupTimeout = 15 * time.Second
+	e.pollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { e.Close() })
+
+	e.Embed(context.Background(), TaskRetrievalQuery, "hello")
+	if _, err := e.Embed(context.Background(), TaskRetrievalQuery, "hello"); err != nil {
+		t.Fatalf("Embed after the device refused = %v, want the server started without it", err)
 	}
 }

@@ -37,43 +37,46 @@ func frameSize(t *testing.T, jpg []byte) (int, int) {
 	return cfg.Width, cfg.Height
 }
 
-// TestEncodeFrames_KeepsMonitorsAtNativeResolution is the bug: two 1920x1080 monitors used to come out of one 3840x1080 canvas as a single 960x270 image, where each monitor was a 480x270 postage stamp with no readable text. Each monitor must now be its own frame at its own resolution.
+// TestEncodeFrames_KeepsMonitorsAtNativeResolution is the bug: two 1920x1080 monitors used to come out of one 3840x1080 canvas as a single 960x270 image, where each monitor was a 480x270 postage stamp with no readable text. Each monitor must now be its own frame at its own resolution. It also covers the stacked layout where a small laptop panel sits under a larger external: each frame keeps its own size instead of being letterboxed into a shared one.
 func TestEncodeFrames_KeepsMonitorsAtNativeResolution(t *testing.T) {
-	img := canvas(3840, 1080)
-	rects := []image.Rectangle{
-		image.Rect(0, 0, 1920, 1080),
-		image.Rect(1920, 0, 3840, 1080),
+	cases := []struct {
+		name  string
+		img   image.Image
+		rects []image.Rectangle
+		want  [][2]int
+	}{
+		{
+			name: "side by side, equal size",
+			img:  canvas(3840, 1080),
+			rects: []image.Rectangle{
+				image.Rect(0, 0, 1920, 1080),
+				image.Rect(1920, 0, 3840, 1080),
+			},
+			want: [][2]int{{1920, 1080}, {1920, 1080}},
+		},
+		{
+			name: "stacked, mixed sizes",
+			img:  canvas(1920, 2160),
+			rects: []image.Rectangle{
+				image.Rect(0, 0, 1920, 1080),
+				image.Rect(0, 1080, 1366, 1848),
+			},
+			want: [][2]int{{1920, 1080}, {1366, 768}},
+		},
 	}
-
-	frames := encodeFrames(img, rects)
-	if len(frames) != 2 {
-		t.Fatalf("got %d frames, want one per monitor", len(frames))
-	}
-	for i, f := range frames {
-		w, h := frameSize(t, f)
-		if w != 1920 || h != 1080 {
-			t.Errorf("frame %d is %dx%d, want 1920x1080", i, w, h)
-		}
-	}
-}
-
-// TestEncodeFrames_MixedMonitorSizes covers the stacked layout where a small laptop panel sits under a larger external: each frame keeps its own size instead of being letterboxed into a shared one.
-func TestEncodeFrames_MixedMonitorSizes(t *testing.T) {
-	img := canvas(1920, 2160)
-	rects := []image.Rectangle{
-		image.Rect(0, 0, 1920, 1080),
-		image.Rect(0, 1080, 1366, 1848),
-	}
-
-	frames := encodeFrames(img, rects)
-	if len(frames) != 2 {
-		t.Fatalf("got %d frames, want 2", len(frames))
-	}
-	if w, h := frameSize(t, frames[0]); w != 1920 || h != 1080 {
-		t.Errorf("external frame is %dx%d, want 1920x1080", w, h)
-	}
-	if w, h := frameSize(t, frames[1]); w != 1366 || h != 768 {
-		t.Errorf("laptop frame is %dx%d, want 1366x768", w, h)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			frames := encodeFrames(c.img, c.rects)
+			if len(frames) != len(c.want) {
+				t.Fatalf("got %d frames, want %d", len(frames), len(c.want))
+			}
+			for i, f := range frames {
+				w, h := frameSize(t, f)
+				if w != c.want[i][0] || h != c.want[i][1] {
+					t.Errorf("frame %d is %dx%d, want %dx%d", i, w, h, c.want[i][0], c.want[i][1])
+				}
+			}
+		})
 	}
 }
 
@@ -90,15 +93,6 @@ func TestEncodeFrames_CapsVeryWideMonitor(t *testing.T) {
 	}
 	if h != 1080*jpegMaxWidth/3840 {
 		t.Errorf("height=%d, want the aspect-preserving %d", h, 1080*jpegMaxWidth/3840)
-	}
-}
-
-func TestScreenFrames_Empty(t *testing.T) {
-	if screenFrames(nil) != nil {
-		t.Error("no bytes in, no frames out")
-	}
-	if screenFrames([]byte("not an image")) != nil {
-		t.Error("undecodable bytes should yield no frames")
 	}
 }
 

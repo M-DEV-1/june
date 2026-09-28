@@ -1,0 +1,601 @@
+// notify.go is how one of Ora's moments reaches the desktop as a notification the user can act on without opening anything: Open in Ora, Done, and three ways to be reminded later. The buttons are the reason this talks to org.freedesktop.Notifications itself rather than shelling out — notify-send can only offer buttons by blocking a whole process for as long as the notification is on screen, and everything here has to survive being answered hours later or not at all.
+package proactive
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/godbus/dbus/v5"
+
+	"ora/internal/db"
+	"ora/internal/memory"
+)
+
+// The keys the desktop reports back when a button is pressed. "default" is the one the notification body itself carries: clicking the banner rather than a button sends it.
+const (
+	actionOpen     = "default"
+	actionDone     = "done"
+	actionHour     = "hour"
+	actionEvening  = "evening"
+	actionTomorrow = "tomorrow"
+)
+
+// noticeActions are the buttons every notice carries, in the order they are offered. One list, so a snooze that comes back can be dealt with exactly like the first posting.
+var noticeActions = []Action{
+	{actionOpen, "Open in Ora"},
+	{actionDone, "Done"},
+	{actionHour, "In an hour"},
+	{actionEvening, "This evening"},
+	{actionTomorrow, "Tomorrow"},
+}
+
+// eveningHour and morningHour are the local clock hours "This evening" and "Tomorrow" bring a notice back at.
+const (
+	eveningHour = 18
+	morningHour = 9
+)
+
+// Action is one button on a notification. Key is what the desktop reports back when it is pressed; Label is what the user reads on it.
+type Action struct {
+	Key   string
+	Label string
+}
+
+// Notifier posts one desktop notification and reports what the user did with it.
+type Notifier interface {
+	// Notify shows the notification and returns as soon as the desktop has taken it. noticeKey identifies which notice this is ("kind|id", see noticeKey) so a later press on the window's own card can dismiss this exact banner through Close. chose is called at most once, later and from another goroutine, with the key of the button the user pressed or "" when the notification was dismissed without one.
+	Notify(noticeKey, title, body string, actions []Action, chose func(buttonKey string)) error
+	// Close dismisses whichever banner Notify most recently posted under noticeKey. A no-op when nothing is posted under that key — the window and the banner can race to deal with the same notice, and the loser here has nothing left to close.
+	Close(noticeKey string) error
+}
+
+// noticeKey identifies one notice to a Notifier: kind and id together are what the window's rail line and its desktop banner both point at, and what ties a window press back to the exact banner it should also dismiss.
+func noticeKey(n Notice) string {
+	// A notice with no row of its own (a brief, the evening close, a routine) is told apart by its title instead, so its banner can still be closed from a window press; two same-titled briefs on one day are the same moment anyway.
+	if n.ID == "" {
+		return n.Kind + "|" + n.Title
+	}
+	return n.Kind + "|" + n.ID
+}
+
+// The desktop notification service every Linux desktop provides, and the icon Ora's own moments are posted with.
+const (
+	notifyDest  = "org.freedesktop.Notifications"
+	notifyIface = "org.freedesktop.Notifications"
+	notifyPath  = dbus.ObjectPath("/org/freedesktop/Notifications")
+	noticeIcon  = "x-office-calendar"
+)
+
+// BusNotifier posts notifications on the session bus and watches it for what the user pressed. Presses arrive as ActionInvoked and dismissals as NotificationClosed, both carrying the id the Notify call returned, which is what ties a press back to the notice that caused it.
+type BusNotifier struct {
+	conn *dbus.Conn
+	// notifyCall posts one notification to the desktop and returns the id it was given. A field because *dbus.Conn is concrete and a test has no session bus to post on; NewBusNotifier sets it to callBus.
+	notifyCall func(title, body string, actions []string) (uint32, error)
+	// mu guards waiting and keyed. It is taken after the Notify call, never across it: godbus's Call has no timeout, and holding this lock through a wedged notification daemon stalled every pending button press and every Close for as long as it took.
+	mu      sync.Mutex
+	waiting map[uint32]func(string)
+	// keyed maps a notice's own key to the D-Bus id Notify posted it under, so Close can find which banner a window press should also dismiss.
+	keyed map[string]uint32
+}
+
+// NewNotifier returns the notifier the daemon should post with: the session bus when there is one, and notify-send when there is not. Input: a context that ends the bus listener. Output: a notifier, always.
+func NewNotifier(ctx context.Context) Notifier {
+	n, err := NewBusNotifier(ctx)
+	if err != nil {
+		slog.Warn("no session bus for notifications, falling back to notify-send", "error", err)
+		return sendNotifier{}
+	}
+	return n
+}
+
+// NewBusNotifier connects to the session bus and starts listening for presses and dismissals. Input: a context that ends the listener. Output: the notifier, or an error when there is no session bus to post on.
+func NewBusNotifier(ctx context.Context) (*BusNotifier, error) {
+	conn, err := dbus.SessionBus()
+	if err != nil {
+		return nil, fmt.Errorf("session bus: %w", err)
+	}
+	for _, member := range []string{"ActionInvoked", "NotificationClosed"} {
+		if err := conn.AddMatchSignal(
+			dbus.WithMatchObjectPath(notifyPath),
+			dbus.WithMatchInterface(notifyIface),
+			dbus.WithMatchMember(member),
+		); err != nil {
+			return nil, fmt.Errorf("subscribe %s: %w", member, err)
+		}
+	}
+	n := &BusNotifier{conn: conn, waiting: map[uint32]func(string){}, keyed: map[string]uint32{}}
+	n.notifyCall = n.callBus
+	sigCh := make(chan *dbus.Signal, 16)
+	conn.Signal(sigCh)
+	go n.listen(ctx, sigCh)
+	return n, nil
+}
+
+// Notify posts one notification with the given buttons, at normal urgency and under the ora desktop entry, and never expires it: a snooze button nobody is there to press is worth nothing, so the banner stays until the user deals with it.
+func (n *BusNotifier) Notify(noticeKey, title, body string, actions []Action, chose func(string)) error {
+	flat := make([]string, 0, len(actions)*2)
+	for _, a := range actions {
+		flat = append(flat, a.Key, a.Label)
+	}
+	id, err := n.notifyCall(title, body, flat)
+	if err != nil {
+		return err
+	}
+	// The lock is taken only once the desktop has answered, so a wedged notification daemon stalls this one post instead of every pending press. The cost is a press that arrives before this line: finish finds nobody waiting on that id and drops it. That window is the microseconds between the desktop assigning the id and this map write, which no user can click inside.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.waiting[id] = chose
+	// A key with nothing behind the kind (no id and no title) would make each such banner overwrite the last one's entry, so it is not remembered for Close.
+	if noticeKey != "" && !strings.HasSuffix(noticeKey, "|") {
+		n.keyed[noticeKey] = id
+	}
+	return nil
+}
+
+// callBus is the real Notify call on the session bus. Input: the notification's title and body and its buttons flattened to key, label pairs. Output: the id the desktop assigned it, or the bus error.
+func (n *BusNotifier) callBus(title, body string, actions []string) (uint32, error) {
+	hints := map[string]dbus.Variant{
+		"urgency":       dbus.MakeVariant(byte(1)),
+		"desktop-entry": dbus.MakeVariant("ora"),
+	}
+	var id uint32
+	// The zero replaces_id posts a new notification rather than replacing an existing one; the zero expire_timeout means it never times out.
+	if err := n.conn.Object(notifyDest, notifyPath).Call(notifyIface+".Notify", 0,
+		"Ora", uint32(0), noticeIcon, title, body, actions, hints, int32(0)).Store(&id); err != nil {
+		return 0, fmt.Errorf("notify: %w", err)
+	}
+	return id, nil
+}
+
+// Close dismisses the banner Notify most recently posted under noticeKey, through the same CloseNotification call the desktop uses to auto-expire one. A key nothing was posted under — the banner already gone, or this notifier never posted it — is not an error: the window and the banner can race to deal with the same notice, and the loser here simply has nothing left to close.
+func (n *BusNotifier) Close(noticeKey string) error {
+	n.mu.Lock()
+	id, ok := n.keyed[noticeKey]
+	if ok {
+		delete(n.keyed, noticeKey)
+	}
+	n.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return n.conn.Object(notifyDest, notifyPath).Call(notifyIface+".CloseNotification", 0, id).Err
+}
+
+// listen turns the bus signals into calls on whoever is waiting for that notification, until ctx ends.
+func (n *BusNotifier) listen(ctx context.Context, sigCh chan *dbus.Signal) {
+	defer n.conn.RemoveSignal(sigCh)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig, ok := <-sigCh:
+			if !ok {
+				return
+			}
+			switch sig.Name {
+			case notifyIface + ".ActionInvoked":
+				if len(sig.Body) < 2 {
+					continue
+				}
+				id, _ := sig.Body[0].(uint32)
+				key, _ := sig.Body[1].(string)
+				n.finish(id, key)
+			case notifyIface + ".NotificationClosed":
+				if len(sig.Body) < 1 {
+					continue
+				}
+				id, _ := sig.Body[0].(uint32)
+				n.finish(id, "")
+			}
+		}
+	}
+}
+
+// finish hands the press to whoever is waiting on that notification id and forgets it, so the NotificationClosed that follows an ActionInvoked for the same notification does nothing a second time. An id nobody is waiting on — another app's notification on the same bus — is ignored.
+func (n *BusNotifier) finish(id uint32, key string) {
+	n.mu.Lock()
+	chose := n.waiting[id]
+	delete(n.waiting, id)
+	// The banner is gone, so the key that pointed at it goes too; otherwise the map grows for the life of the daemon and a later Close aims at a dead id.
+	for k, v := range n.keyed {
+		if v == id {
+			delete(n.keyed, k)
+		}
+	}
+	n.mu.Unlock()
+	if chose != nil {
+		chose(key)
+	}
+}
+
+// sendNotifier is the fallback for a machine with no session bus to reach: notify-send offers the same buttons and prints back the key of whichever was pressed, at the cost of a process sitting there for as long as the notification is on screen.
+type sendNotifier struct{}
+
+// Notify posts through notify-send from its own goroutine, since that command does not return until the notification is answered or gone.
+func (sendNotifier) Notify(noticeKey, title, body string, actions []Action, chose func(string)) error {
+	labels := make([]string, 0, len(actions))
+	for _, a := range actions {
+		labels = append(labels, a.Key+"="+a.Label)
+	}
+	go func() {
+		key, err := NotifySendAsk(title, body, labels)
+		if err != nil {
+			slog.Debug("notify-send could not offer a notice's buttons", "title", title, "error", err)
+			return
+		}
+		chose(key)
+	}()
+	return nil
+}
+
+// Close is a no-op: notify-send is a blocking process per banner with no id this notifier can reach back into, so a window press cannot also dismiss the notify-send fallback's own banner. A machine on this fallback has no session bus, which is the same reason it has no other way to close one either.
+func (sendNotifier) Close(string) error { return nil }
+
+// noticeNotifier and noticeOpen are the desktop notifier and the "Open in Ora" callback the package-level Notify below posts through — wired by SetNotifier and SetOpenWindow alongside the Scheduler's own copies, and guarded by noticeMu, the same lock sendNotice uses. Nil means neither has been wired yet (or the daemon never calls SetNotifier), in which case Notify falls back to raw notify-send.
+var (
+	noticeNotifier Notifier
+	noticeOpen     func()
+)
+
+// SetNotifier wires the desktop notifier every notice is posted through — cmd/daemon.go is the only production caller. Unset, notices fall back to the plain notification func New was built with, which carries no buttons. Also wires the package-level Notify below onto the same notifier, since a meeting's own moments reach this package outside the scheduler entirely.
+func (s *Scheduler) SetNotifier(n Notifier) {
+	s.notifier = n
+	noticeMu.Lock()
+	noticeNotifier = n
+	noticeMu.Unlock()
+}
+
+// SetOpenWindow wires what "Open in Ora", and a click on the notification body itself, does: the same thing the tray's own Open Ora item does. Unset, those clicks do nothing. Also wires the package-level Notify below's own "Open in Ora" button onto the same func.
+func (s *Scheduler) SetOpenWindow(fn func()) {
+	s.openWindow = fn
+	noticeMu.Lock()
+	noticeOpen = fn
+	noticeMu.Unlock()
+}
+
+// SetTaskDone wires the daemon's own task-done path, the one POST /tasks/{id}/done answers through, which "Done" on a task notice calls with that task's id. Unset, Done on a task notice only records the dismissal.
+func (s *Scheduler) SetTaskDone(fn func(ctx context.Context, id string) error) {
+	s.taskDone = fn
+}
+
+// post shows one notice on the desktop with the full set of buttons and applies whatever the user presses. Input: the notice. Output: nothing. Falls back to the plain notification func when no notifier is wired or the desktop refuses the notification, which loses the buttons but never the message.
+//
+// ponytail: the press is applied on a background context, because it arrives long after the tick that posted the notice has returned and there is no longer a request to be cancelled with.
+func (s *Scheduler) post(n Notice) {
+	if s.notifier != nil {
+		if err := s.notifier.Notify(noticeKey(n), n.Title, n.Body, noticeActions, func(key string) {
+			s.chose(context.Background(), n, key)
+		}); err == nil {
+			return
+		} else {
+			slog.Debug("could not post a notification with its buttons", "title", n.Title, "error", err)
+		}
+	}
+	s.notify(n.Title, n.Body)
+}
+
+// chose applies the button the user pressed on a notice. Input: the notice it was posted for, and the pressed button's key — "" for a notification dismissed without pressing anything, which deliberately leaves nothing behind and lets the moment come round again on its own. Output: nothing; a failure is logged, since the notification it would be reported on is already gone.
+// Done and the three snooze buttons go through Act — the exact path POST /notices/{kind}/{id}/action answers through — so a task closed or snoozed from the banner takes the same code, with the same banner-closing side effect, as one closed or snoozed from the window's own rail line. Open has no equivalent on the window's rail line (the window is already open) and a dismissal changes nothing, so both stay here.
+func (s *Scheduler) chose(ctx context.Context, n Notice, key string) {
+	switch key {
+	case "":
+		return
+	case actionOpen:
+		if s.openWindow != nil {
+			s.openWindow()
+		}
+	case actionDone, actionHour, actionEvening, actionTomorrow:
+		if err := s.Act(ctx, n.Kind, n.ID, n.Title, n.Body, key); err != nil {
+			slog.Warn("could not apply a notification's own button", "kind", n.Kind, "id", n.ID, "key", key, "error", err)
+		}
+	default:
+		slog.Debug("a notification came back with a button Ora does not offer", "key", key)
+	}
+}
+
+// snooze puts a notice away until later. Input: the notice and the pressed snooze button's key. Output: the store's error when the snooze could not be written, so the route that asked answers with a failure instead of a 200 that snoozed nothing; nil once it is stored, with n's Action set to "snoozed" and its Until to the moment it comes back, for Act to tell the window.
+func (s *Scheduler) snooze(ctx context.Context, n *Notice, key string) error {
+	due := snoozeUntil(s.now(), key)
+	if _, err := s.store.AddSnooze(ctx, n.Kind, n.ID, n.Title, n.Body, due); err != nil {
+		slog.Warn("could not snooze a notice", "kind", n.Kind, "id", n.ID, "error", err)
+		return err
+	}
+	n.Action = "snoozed"
+	n.Until = due.Format(time.RFC3339)
+	return nil
+}
+
+// markDone applies "Done". A task notice names a task, so it goes through the daemon's own task-done path and is closed for real. Every other kind has nothing to complete — a routine notice or a morning brief is Ora reporting, not work owed — so all this records is that the user cleared it. Either way, any snooze still pending for this notice is cancelled, so a Done pressed while a snooze is in flight — from the original notice or from a re-fired one, both carrying the same kind and id — stops it firing again. Input: the notice. Output: whatever closing the task returned when that failed — ErrTaskGone when the id no longer names one — otherwise nil; cancelling the pending snooze is best-effort and only logged on failure, since the notice itself is already closed by then.
+func (s *Scheduler) markDone(ctx context.Context, n Notice) error {
+	if n.Kind == "task" && n.ID != "" && s.taskDone != nil {
+		if err := s.taskDone(ctx, n.ID); err != nil {
+			return err
+		}
+	}
+	if _, err := s.store.CancelSnoozes(ctx, n.Kind, n.ID); err != nil {
+		slog.Warn("could not cancel a done notice's pending snooze", "kind", n.Kind, "id", n.ID, "error", err)
+	}
+	slog.Info("notice cleared from its notification", "kind", n.Kind, "id", n.ID)
+	return nil
+}
+
+// answers is the in-process registry of notices waiting on an answer from the window's own card, keyed by noticeKey. A notice that asked a question of its own — the stale-item "Still open", so far — registers here before it goes out, and Act consults it before its own switch, which is what lets a card button whose key is none of the five a desktop notification offers reach the goroutine that asked. Guarded by answersMu, since the waiter is registered on the goroutine that raised the notice and the answer arrives on an HTTP handler's.
+var (
+	answersMu sync.Mutex
+	answers   = map[string]*answerWaiter{}
+)
+
+// answerWaiter is one notice waiting on its card. keys are the only action keys this notice will accept, so a key none of its buttons carried falls through to Act's own switch and is refused there exactly as it was before this registry existed. ch carries the accepted key to the waiting goroutine and is buffered, so delivering an answer never blocks the HTTP handler that brought it.
+type answerWaiter struct {
+	keys []string
+	ch   chan string
+}
+
+// awaitAnswer registers one notice as waiting on an answer from the window's card. Input: the notice's key (see noticeKey) and the action keys its buttons carry. Output: the channel the answer arrives on, and a func that unregisters the waiter, which the caller must always call so the map does not grow for the life of the daemon.
+func awaitAnswer(key string, keys []string) (<-chan string, func()) {
+	w := &answerWaiter{keys: keys, ch: make(chan string, 1)}
+	answersMu.Lock()
+	answers[key] = w
+	answersMu.Unlock()
+	return w.ch, func() {
+		answersMu.Lock()
+		if answers[key] == w {
+			delete(answers, key)
+		}
+		answersMu.Unlock()
+	}
+}
+
+// deliverAnswer hands one pressed card button to whoever is waiting on that notice. Input: the notice's key and the pressed button's key. Output: true when a waiter took it, and false when nothing is waiting under that key or the key is not one that notice offered, in which case the caller applies the button the usual way. A waiter that took an answer is unregistered here as well as by its own release func, so a second press on the same card is not taken a second time.
+func deliverAnswer(key, action string) bool {
+	answersMu.Lock()
+	w, ok := answers[key]
+	if ok && slices.Contains(w.keys, action) {
+		delete(answers, key)
+	} else {
+		ok = false
+	}
+	answersMu.Unlock()
+	if !ok {
+		return false
+	}
+	w.ch <- action
+	return true
+}
+
+// ErrBadNoticeAction is what Act returns for an action string that is none of the four buttons a notice offers.
+var ErrBadNoticeAction = errors.New("not a notice action")
+
+// ErrTaskGone is what Act returns for "done" on a task notice whose task no longer exists. The taskDone func wired with SetTaskDone (cmd/daemon.go's loopback call to its own POST /tasks/{id}/done) is what recognises the 404 that route answers with and wraps this in.
+var ErrTaskGone = errors.New("the task this notice named no longer exists")
+
+// Act applies one notice button exactly as pressing it on the desktop notification would. POST /notices/{kind}/{id}/action calls this directly, and chose (a D-Bus press) calls it too, for Done and the three snooze buttons — the one path both surfaces answer through, so a task closed or snoozed from either takes the same code. Input: kind and id name the notice ("" for one with no task or place behind it, such as a brief), title and body are what a snooze needs to re-fire the notice later, and action is "done", "hour", "evening" or "tomorrow". Output: ErrBadNoticeAction for any other action string, whatever markDone returned (ErrTaskGone included) for "done", the store's error when a snooze could not be written, else nil.
+// Once the action is applied, this also closes the notice's own desktop banner, if any: without it, a done or snoozed task answered from the window would leave its notification sitting on screen asking the same question a second time. A D-Bus press closing its own already-closing banner a second time this way is harmless — Close is a no-op once the key is gone.
+// A press that took is also sent back to the window as the same notice with its action set, which is what takes the buttons off the window's card and the hover's. Every path sends it here, once: until 2026-09-23 only Done and the snoozes did, so an answer to a question or a meeting's Start recording left its buttons up, and a second press ran the action again.
+func (s *Scheduler) Act(ctx context.Context, kind, id, title, body, action string) error {
+	n := Notice{Title: title, Body: body, Kind: kind, ID: id}
+	err := s.apply(ctx, &n, action)
+	if errors.Is(err, ErrBadNoticeAction) {
+		return err
+	}
+	s.closeBanner(n)
+	if err == nil {
+		sendNotice(n)
+	}
+	return err
+}
+
+// apply runs one pressed button for Act. Input: the notice, whose Action is set to the pressed key ("snoozed" and Until for a snooze) for Act to send on, and the key. Output: ErrBadNoticeAction for a key nothing answers, otherwise whatever running the button returned.
+func (s *Scheduler) apply(ctx context.Context, n *Notice, action string) error {
+	n.Action = action
+	// A notice that asked a question of its own is answered by the goroutine waiting on it, whatever its button was called: that is what carries "dropped" and "low", neither of them one of the four this switch knows, back to the stale-item question. A key that notice never offered falls through to the switch and is refused there.
+	if deliverAnswer(noticeKey(*n), action) {
+		return nil
+	}
+	// Nobody was waiting, which happens whenever the question's goroutine has already given up, the daemon has restarted since the card was drawn, or the card was drawn on a second surface. The button still has to work, so the notice's own registered action runs instead.
+	if do := noticeActionFor(n.Kind, n.ID, action); do != nil {
+		slog.Info("notice: no goroutine was waiting, doing what the button asks for directly", "kind", n.Kind, "action", action)
+		return do()
+	}
+	slog.Debug("notice: no goroutine is waiting on this press and nothing is registered for it", "key", noticeKey(*n), "action", action, "waiting", waitingKeys())
+	switch action {
+	case actionDone:
+		return s.markDone(ctx, *n)
+	case actionHour, actionEvening, actionTomorrow:
+		return s.snooze(ctx, n, action)
+	default:
+		return ErrBadNoticeAction
+	}
+}
+
+// closeBanner dismisses one notice's own desktop banner once its button has been applied, so a question answered on one surface stops asking itself on the other. Input: the notice. Output: none; a failure is logged and nothing else, since the press it would be reported on has already been dealt with.
+// Called on every path of Act that applied something, and on none that refused: until 2026-09-12 only the fallback switch closed anything, so a press a goroutine was waiting on and a press with a registered action both left their banner sitting on screen. That is the "sometimes notifications do not close" — sometimes, because which of the three paths a press takes is what decided it.
+func (s *Scheduler) closeBanner(n Notice) {
+	if s.notifier == nil {
+		return
+	}
+	if err := s.notifier.Close(noticeKey(n)); err != nil {
+		slog.Debug("could not close a notice's own banner after its button was applied", "kind", n.Kind, "id", n.ID, "error", err)
+	}
+}
+
+// snoozeUntil is when a snoozed notice comes back. Input: the moment the button was pressed and its key. Output: one hour later for "hour"; today at eveningHour for "evening", or tomorrow's when that hour has already gone by; tomorrow at morningHour for "tomorrow"; the zero time for any other key.
+func snoozeUntil(now time.Time, key string) time.Time {
+	day := db.DayStart(now)
+	switch key {
+	case actionHour:
+		return now.Add(time.Hour)
+	case actionEvening:
+		evening := atHour(day, eveningHour)
+		if !now.Before(evening) {
+			evening = atHour(day.AddDate(0, 0, 1), eveningHour)
+		}
+		return evening
+	case actionTomorrow:
+		return atHour(day.AddDate(0, 0, 1), morningHour)
+	}
+	return time.Time{}
+}
+
+// atHour returns that local clock hour on day's calendar date. Built with time.Date rather than by adding hours to midnight, so a day that gains or loses an hour to daylight saving still lands on the right wall clock.
+func atHour(day time.Time, hour int) time.Time {
+	return time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, day.Location())
+}
+
+// maybeSnoozes raises every snooze that has come due, with the same buttons as the first time so it can be pushed back again. Each is stamped as fired before it is raised, so a snooze can only ever come back once per pressing. It goes through say rather than post so a re-fired snooze lands on the same single surface a first-time notice does: the window's card when a window is up, the desktop banner when none is.
+func (s *Scheduler) maybeSnoozes(ctx context.Context) {
+	due, err := s.store.DueSnoozes(ctx, s.now())
+	if err != nil {
+		slog.Warn("snoozes: reading due snoozes failed", "error", err)
+		return
+	}
+	for _, sn := range due {
+		if err := s.store.MarkSnoozeFired(ctx, sn.ID); err != nil {
+			slog.Warn("snoozes: could not stamp one as fired, skipping it", "id", sn.ID, "error", err)
+			continue
+		}
+		// The buttons are named rather than left empty: a notice that names none is filled in as Open alone (see sendNotice), so a snoozed task came back with no way to finish it or push it back again.
+		s.say(Notice{Title: sn.Title, Body: sn.Body, Place: noticePlaces[sn.Kind], ID: sn.NoticeID, Kind: sn.Kind, Actions: noticeActions})
+	}
+}
+
+// noticePlaces says which of the window's own screens a notice of each kind opens. A snooze row carries the kind but not the place, so a re-fired notice's place is derived from it here — without this the card for a snoozed task opened nothing, while the original card opened Tasks. A kind not listed opens nothing in particular, which is what an empty place already means.
+var noticePlaces = map[string]string{
+	"task":    "tasks",
+	"brief":   "tasks",
+	"routine": "routine",
+	"close":   "days",
+}
+
+// taskNoticeWatermarkKind is the diary-table row maybeTaskNotices keeps purely as a marker, on the empty day the same way the understanding doc is: the highest action-item note id already turned into a task notice, so a daemon restart never re-announces work it has already surfaced. The kind itself is declared in the store (db.TaskNoticeWatermarkKind), because the diary's search-index triggers name it too: a bare number rewritten on most ticks is the one diary row that must never come back from a search as if Ora had written it.
+const taskNoticeWatermarkKind = db.TaskNoticeWatermarkKind
+
+// maxTaskNoticesPerMeeting caps how many task notices one meeting's newly-lifted action items raise at once. Five bullets from one meeting would otherwise be five banners in a row; the rest are folded into the last one's body as a count instead.
+const maxTaskNoticesPerMeeting = 3
+
+// maxTaskNoticesPerTick caps how many task notices one tick raises across every meeting, so a day of back-to-back meetings never turns into a wall of cards; whatever is over the cap is counted into the last notice's "and N more in Tasks" line and is found in Tasks, not re-announced.
+const maxTaskNoticesPerTick = 5
+
+// maybeTaskNotices posts one task notice for each of the user's own action items a meeting has newly raised since the last tick, grouped by the meeting that raised them (Source), capped at maxTaskNoticesPerMeeting per meeting and maxTaskNoticesPerTick in all. Input: the tick's context. Output: nothing — a failed read is logged and retried next tick. The very first tick, with no watermark stored yet, announces nothing and only records the highest note id it sees, so a daemon meeting an old store does not raise a notice for every item already open. After that the watermark advances to the highest note id seen among the user's own items, whether or not it was announced, so a closed item is never rescanned; an item another person owned that is later handed to the user by hand (PATCH /tasks/{id}) is already under the watermark and is not announced either.
+func (s *Scheduler) maybeTaskNotices(ctx context.Context) {
+	mark, err := s.store.DiaryEntry(ctx, "", taskNoticeWatermarkKind)
+	if err != nil {
+		slog.Warn("task notices: reading the watermark failed", "error", err)
+		return
+	}
+	watermark, _ := strconv.ParseInt(mark, 10, 64)
+	// The watermark this process last computed wins when it is ahead of the stored one, which is what a failed write leaves behind. Without it a store that will not take the write made the same items be announced again every minute for as long as the disk was full.
+	if s.taskMark > watermark {
+		watermark = s.taskMark
+	}
+	seeding := mark == "" && s.taskMark == 0
+
+	items, err := s.store.ActionItemsByOwner(ctx, memory.OwnerMe)
+	if err != nil {
+		slog.Warn("task notices: reading action items failed", "error", err)
+		return
+	}
+
+	max := watermark
+	var order []string
+	byMeeting := map[string][]memory.ActionItem{}
+	for _, a := range items {
+		if a.NoteID > max {
+			max = a.NoteID
+		}
+		if seeding || a.NoteID <= watermark || a.Status != memory.StatusOpen {
+			continue
+		}
+		if _, ok := byMeeting[a.Source]; !ok {
+			order = append(order, a.Source)
+		}
+		byMeeting[a.Source] = append(byMeeting[a.Source], a)
+	}
+
+	// Every item held back this tick, by either cap, is counted once and named once, on the last notice posted, so nothing is dropped without the user being told how much waited.
+	var out []Notice
+	held := 0
+	for _, meeting := range order {
+		whole := byMeeting[meeting]
+		group := whole
+		if len(group) > maxTaskNoticesPerMeeting {
+			group = group[:maxTaskNoticesPerMeeting]
+		}
+		if room := maxTaskNoticesPerTick - len(out); len(group) > room {
+			group = group[:room]
+		}
+		held += len(whole) - len(group)
+		for _, a := range group {
+			// A task is the one notice that can be completed or pushed to later, so it names the full set of buttons; the window draws what the notice names rather than assuming every notice can answer them.
+			out = append(out, Notice{Title: "New task from " + meeting, Body: a.Text, Place: "tasks", ID: strconv.FormatInt(a.NoteID, 10), Kind: "task", Actions: noticeActions})
+		}
+	}
+	if held > 0 && len(out) > 0 {
+		out[len(out)-1].Body += fmt.Sprintf("\n\nand %d more in Tasks", held)
+	}
+	for _, n := range out {
+		s.say(n)
+	}
+
+	if max != watermark || seeding {
+		s.taskMark = max
+		if err := s.store.SetDiaryEntry(ctx, "", taskNoticeWatermarkKind, strconv.FormatInt(max, 10)); err != nil {
+			slog.Warn("task notices: writing the watermark failed", "error", err)
+		}
+	}
+}
+
+// waitingKeys lists the notices with a goroutine waiting on an answer right now, for the log line above. Output: their keys, in no particular order.
+func waitingKeys() []string {
+	answersMu.Lock()
+	defer answersMu.Unlock()
+	keys := make([]string, 0, len(answers))
+	for k := range answers {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// noticeDoers holds what each notice kind's own buttons do, keyed by kind and action ("meeting"+"record"). It exists because a notice's button must work when it is pressed, not only while some goroutine is still parked waiting for the answer: a press that arrives after that goroutine gave up, after a daemon restart, or on a card drawn on a second surface used to fall through to the four-action switch, which knows only done and the three snoozes, and the card said "Could not do that" while nothing was attempted.
+var (
+	noticeDoersMu sync.Mutex
+	noticeDoers   map[string]func() error
+)
+
+// SetNoticeAction registers what one notice kind's own button does when pressed, whichever notice of that kind it was drawn on. Input: the notice kind, the action key its button sends, and what to do — nil to remove it. Output: none.
+// The registration lives as long as whatever owns the work: the meeting watcher registers "record" while it is running and takes it away when it stops, so a press only ever starts a recording something is still there to stop again.
+func SetNoticeAction(kind, action string, do func() error) {
+	setNoticeActionFor(kind, "", action, do)
+}
+
+// setNoticeActionFor registers what one button does, against one notice or against every notice of a kind. Input: the notice kind, the notice's id — empty to answer for the whole kind — the action key, and what to do, nil to remove it. Output: none.
+// The id is part of the key because a question's answer belongs to the thing it asked about: the stale-item question names a different note every morning, and a press on a card left over from yesterday must not mark today's item dropped. A kind whose button means the same thing whatever it was drawn on (the meeting watcher's "record") registers under the empty id and answers for all of them.
+func setNoticeActionFor(kind, id, action string, do func() error) {
+	noticeDoersMu.Lock()
+	defer noticeDoersMu.Unlock()
+	if do == nil {
+		delete(noticeDoers, kind+"|"+id+"|"+action)
+		return
+	}
+	if noticeDoers == nil {
+		noticeDoers = make(map[string]func() error, 1)
+	}
+	noticeDoers[kind+"|"+id+"|"+action] = do
+}
+
+// noticeActionFor returns what a button does, or nil when nothing has registered it. The notice's own registration wins over the kind's, so a question that registered an answer for the item it asked about is the one that runs.
+func noticeActionFor(kind, id, action string) func() error {
+	noticeDoersMu.Lock()
+	defer noticeDoersMu.Unlock()
+	if do := noticeDoers[kind+"|"+id+"|"+action]; do != nil {
+		return do
+	}
+	return noticeDoers[kind+"||"+action]
+}

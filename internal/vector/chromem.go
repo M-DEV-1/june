@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"ora/internal/util"
+
 	chromem "github.com/philippgille/chromem-go"
 )
 
@@ -55,23 +57,8 @@ func (c *ChromemIndex) persistSidecar() error {
 	if err != nil {
 		return fmt.Errorf("marshal sidecar: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(c.sidecarPath), filepath.Base(c.sidecarPath)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create sidecar temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("write sidecar temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("close sidecar temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, c.sidecarPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename sidecar temp file: %w", err)
+	if err := util.WriteFileAtomic(c.sidecarPath, data, 0o600); err != nil {
+		return fmt.Errorf("write sidecar: %w", err)
 	}
 	return nil
 }
@@ -177,11 +164,39 @@ func (c *ChromemIndex) Add(ctx context.Context, id, content string, embedding []
 	}
 
 	c.createdAt[id] = time.Now()
-	if err := c.persistSidecar(); err != nil {
+	if err := c.evictOverCap(ctx); err != nil {
 		return err
 	}
+	return c.persistSidecar()
+}
 
-	return c.evictOverCap(ctx)
+// AddBatch inserts or overwrites multiple documents in a single locked transaction, evicting over-cap documents and persisting the sidecar once.
+func (c *ChromemIndex) AddBatch(ctx context.Context, ids []string, contents []string, embeddings [][]float32, metadatas []map[string]string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if c.dim > 0 {
+		for i, emb := range embeddings {
+			if len(emb) != c.dim {
+				return fmt.Errorf("chromem add_batch %s: embedding has %d dimensions, index expects %d", ids[i], len(emb), c.dim)
+			}
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.col.Add(ctx, ids, embeddings, metadatas, contents); err != nil {
+		return fmt.Errorf("chromem add batch: %w", err)
+	}
+
+	now := time.Now()
+	for _, id := range ids {
+		c.createdAt[id] = now
+	}
+	if err := c.evictOverCap(ctx); err != nil {
+		return err
+	}
+	return c.persistSidecar()
 }
 
 // evictOverCap removes oldest entries (by c.createdAt) until count is back at or under maxDocs. Caller must hold mu.
@@ -210,7 +225,7 @@ func (c *ChromemIndex) evictOverCap(ctx context.Context) error {
 		}
 		delete(c.createdAt, id)
 	}
-	return c.persistSidecar()
+	return nil
 }
 
 // Search runs a nearest-neighbor query, capped at n and filtered by exact-match where.

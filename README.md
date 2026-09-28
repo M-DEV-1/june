@@ -3,96 +3,91 @@
 
   <p align="center">
     <img alt="Go Version" src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go">
-    <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20|%20Windows-0078D6?style=flat-square">
+    <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-0078D6?style=flat-square">
     <img alt="License" src="https://img.shields.io/badge/license-GPLv3-white?style=flat-square">
   </p>
 
 # ORA
 
-Ora is a thin, Go-native OS companion.
-
-from Latin _Orare_. To speak, to know, to ask of what cannot be seen.
-
-It monitors your workspace activity locally and provides voice-first contextual assistance from your terminal and desktop environment.
-
----
+from Latin _orare_. To speak, to ask.
 
 </div>
 
-If you want general knowledge, use a browser.
+Ora is a memory for the person using this computer. It watches what is on screen, listens to the meetings you record, keeps what happened, and answers questions about it later. It is not a coding assistant and not a search engine: if you want general knowledge, use a browser.
 
-ORA is for:
+It runs as one Go daemon on your own machine, with a SQLite store beside it. Nothing is sent anywhere except the prompts you or its own duties send to whichever model you pick.
 
-- your terminal
-- your windows
-- your active workflow
-- your local context
+## What it does today
 
-## Why?
+**Watches.** A tracker reads the focused window through AT-SPI, the accessibility bus, and falls back to a screenshot and a vision model only when the window will not say what is in it — Electron apps, canvas, anything the bus is blind to. Every read is one episode row: the app, the window title, the text, the time.
 
-Modern assistants know the internet but barely know about your actual working context. The ones that do exist are heavy, and your data is god knows where.
+**Records meetings.** A watcher notices a call is running, records both sides, transcribes with whisper.cpp, and separates the speakers with sherpa diarization. The transcript then goes to a model that writes minutes: what you said, what was said to you, what the meeting covered, what was decided, and who owes what. The owed work becomes tasks.
 
-I experimented with a different model:
-persistent local context, lightweight telemetry, and terminal-native interaction.
+**Remembers.** Episodes, notes, meeting minutes and day pages go into SQLite. Retrieval is hybrid — FTS5 for words, a local vector index for meaning, fused and reranked by importance and recency rather than by similarity alone. Memory is editable: a fact heard wrong can be corrected in the conversation it came up in, instead of sitting there forever.
 
-## Usage
+**Consolidates while idle.** A dreaming pass reads the day back, forms hypotheses about what matters, writes a diary entry in the evening and a brief in the morning.
 
-### Downloads
+**Speaks.** Dictation goes through whisper; a live voice session runs on Gemini Live, with a waveform drawn in braille characters in the hover window.
 
-Prebuilt Windows binaries are available in GitHub Releases.
+**Acts.** A job engine can carry out a screen task — open this, find that, click it — through the portal input APIs, with a verify loop, a budget, and a stop line it will not cross without being asked.
 
-### Nightly
+Rough edges, plainly: diarization still mislabels speakers in a crowded call, the live voice session needs a working `GEMINI_API_KEY` and says nothing useful when it does not have one, and the usage panel only updates when a call spends something.
+
+## The surfaces
+
+| Surface | What it is | How you reach it |
+| --- | --- | --- |
+| Daemon | Go, HTTP on `127.0.0.1:6942`, SQLite store | `ora --daemon`, or the systemd user unit |
+| Window | Tauri + React desktop app: chats, meetings, days, tasks, routines, settings | starts with the daemon |
+| Hover | one small always-there card: ask, dictate, live voice, notices | `Ctrl+Alt+Space` |
+| Overlay | click-through layer the act engine draws on | drawn only while a job runs |
+| Terminal | the original TUI client | `ora --tui` |
+
+## Running it
 
 ```bash
-git clone https://github.com/M-DEV-1/ora.git;
+git clone https://github.com/M-DEV-1/ora.git
 cd ora
 ```
 
-Add your Gemini API key to .env:
+Put your key in `.env` at the repo root:
 
 ```env
 GEMINI_API_KEY=your_key_here
 ```
 
-```
-go run .
-```
-
-### Observability
-
-Run [Jaeger](https://www.jaegertracing.io/) for observing (optional, but recommended):
+Then:
 
 ```bash
- docker run cr.jaegertracing.io/jaegertracing/jaeger:2.17.0 --help
+go build -o ora . && ./ora
 ```
 
-ORA exports OpenTelemetry traces over OTLP/gRPC.
+`ora` brings up the daemon and the window together and says so. The build is CGO-free and Linux-only: the Windows and macOS build files were removed once the target became one machine.
 
-If Jaeger is running locally, traces will automatically appear at http://localhost:16686
+## Which model answers
 
-## Features
+Ora keeps several backends and lets you pick per duty, because they are billed differently and only some of them are metered.
 
-- voice-first terminal interaction
-- switchable voice persona (`/voice list`, `/voice preview <name>`)
-- local workspace activity tracking (Linux AT-SPI · Windows UIA)
-- tiered capture: accessibility text first, screenshot + vision only when blind
-- media-aware capture (MPRIS), sees you're watching or in a call, not just the chrome
-- episodic memory, i.e. raw captures are preserved, then recalled ("walk me through my day" and other stuff like this)
-- hybrid retrieval (FTS5 + vector search over local embeddings), memory is fully CRUD so a misheard/wrong fact can be corrected in the same conversation instead of sticking around forever
-- OpenTelemetry tracing support
-- TUI interface
-- persistent lightweight context tracking
-- fully written in Go (no CGO)
+- **Antigravity** (`agy`) — Gemini under your own Google plan login. Nothing is charged against an API key.
+- **Gemini API** — the metered key in `.env`. Fast, and the only backend the live voice session and the screen agent can use, because they need streaming and tool calls.
+- **Codex** — OpenAI models on your ChatGPT login, through the Codex CLI.
+- **Ollama** — a model on this machine. Nothing leaves the laptop.
+- **Claude** — Anthropic's own CLI on your subscription. Last in the list on purpose: it is the fallback, after Gemini and Codex.
 
-## Notes
+Embeddings are local: EmbeddingGemma-300M served by Ollama, called over HTTP so the build stays CGO-free.
 
-Windows event tracking turned out to be significantly harder than the LLM integration itself. But oh boy, it was fun.
+## Where your data is
 
-Most of the complexity comes from process synchronization, audio pipes, and keeping threads from fighting each other. Hopefully, it was lightweight enough to run continuously without becoming intrusive.
+Everything lives under `~/.local/share/ora`: the SQLite store, the config, recordings, screenshots. Config is `ora-config.json` in that directory. Retention is set there — how many days of audio and images to keep before they are aged out.
 
-## Plans?
+## Tracing
 
-- [x] Linux tracker support
-- [x] Lightweight vector recall (went with chromem + Gemini embeddings, fused with FTS5 instead of hnsw)
-- [ ] Local model support
-- [ ] Sandboxed automation runtime
+Ora exports OpenTelemetry traces over OTLP/gRPC. Run Jaeger and they appear at `http://localhost:16686`:
+
+```bash
+docker run cr.jaegertracing.io/jaegertracing/jaeger:2.17.0
+```
+
+## Status
+
+One machine, one user, no installer. The daemon and the window run all day and the memory answers, but nothing here is packaged for anybody else yet. The tests are the record of what is meant to hold: about 1,600 Go test functions and 680 in the window.

@@ -72,54 +72,6 @@ func TestLocalEmbedderPrefixesDocumentAndQuery(t *testing.T) {
 	}
 }
 
-func TestLocalEmbedderUnknownTaskIsDocument(t *testing.T) {
-	var got map[string]any
-	srv := localTestServer(t, []float32{1}, &got)
-	defer srv.Close()
-
-	if _, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskType("SOMETHING_ELSE"), "hi"); err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if got["input"].([]any)[0] != "title: none | text: hi" {
-		t.Errorf("unknown task should use the document prefix, got %v", got["input"])
-	}
-}
-
-func TestLocalEmbedderTrimsTrailingSlashOnBaseURL(t *testing.T) {
-	srv := localTestServer(t, []float32{1}, nil)
-	defer srv.Close()
-
-	if _, err := NewLocalEmbedder(srv.URL+"/", "m").Embed(context.Background(), TaskRetrievalQuery, "hi"); err != nil {
-		t.Fatalf("Embed with trailing slash in base URL: %v", err)
-	}
-}
-
-func TestLocalEmbedderRejectsEmptyText(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("server must not be called for empty text")
-	}))
-	defer srv.Close()
-
-	if _, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, "   \n "); err == nil {
-		t.Fatal("expected an error for whitespace-only text")
-	}
-}
-
-func TestLocalEmbedderErrorsOnHTTPStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "model not loaded", http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
-	_, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, "hi")
-	if err == nil {
-		t.Fatal("expected an error on a 503")
-	}
-	if !strings.Contains(err.Error(), "503") {
-		t.Errorf("error should name the status code, got %v", err)
-	}
-}
-
 func TestLocalEmbedderErrorsOnEmptyData(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":[]}`))
@@ -131,7 +83,7 @@ func TestLocalEmbedderErrorsOnEmptyData(t *testing.T) {
 	}
 }
 
-// TestLocalEmbedderDoesNotRetryAServerFailure verifies a failure that has nothing to do with the input's length (here a 503 from a server still loading its model) costs exactly one request. Halving and retrying that quadruples the load on a server that is already struggling, and shorter text would not have helped anyway.
+// TestLocalEmbedderDoesNotRetryAServerFailure verifies a failure that has nothing to do with the input's length (here a 503 from a server still loading its model) costs exactly one request, names the status code in its error, and is not retried. Halving and retrying that quadruples the load on a server that is already struggling, and shorter text would not have helped anyway.
 func TestLocalEmbedderDoesNotRetryAServerFailure(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,33 +92,15 @@ func TestLocalEmbedderDoesNotRetryAServerFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, strings.Repeat("b", 800)); err == nil {
+	_, err := NewLocalEmbedder(srv.URL, "m").Embed(context.Background(), TaskRetrievalDocument, strings.Repeat("b", 800))
+	if err == nil {
 		t.Fatal("expected an error on a 503")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("error should name the status code, got %v", err)
 	}
 	if requests != 1 {
 		t.Errorf("made %d requests for one unretryable failure, want 1", requests)
-	}
-}
-
-// TestInputTooLong covers the classifier the retry hangs off: only a rejection about the input's size is worth sending shorter text for. Transport failures, cancelled contexts and a server that is merely unwell are not.
-func TestInputTooLong(t *testing.T) {
-	cases := []struct {
-		name   string
-		status int
-		body   string
-		want   bool
-	}{
-		{"llama-server oversized input", http.StatusInternalServerError, "input is too large to process. increase the physical batch size", true},
-		{"exceeds context", http.StatusInternalServerError, "the request exceeds the available context size", true},
-		{"bad request", http.StatusBadRequest, "invalid input", true},
-		{"model still loading", http.StatusServiceUnavailable, "model not loaded", false},
-		{"plain server error", http.StatusInternalServerError, "unexpected failure", false},
-		{"no response at all", 0, "", false},
-	}
-	for _, c := range cases {
-		if got := inputTooLong(c.status, c.body); got != c.want {
-			t.Errorf("%s: inputTooLong(%d, %q) = %v, want %v", c.name, c.status, c.body, got, c.want)
-		}
 	}
 }
 

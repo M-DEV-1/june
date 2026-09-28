@@ -1,0 +1,199 @@
+// @vitest-environment jsdom
+
+/** Tests for the small pieces more than one screen draws: the Scroller's stick-to-bottom behaviour, and the usage bars the brain picker draws under a row. */
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Provider } from "react-redux";
+import { useState } from "react";
+
+import type { Brain, UsageLimit } from "./api";
+import { windowLabel } from "./format";
+import { Blank, BrainPicker, Nothing, Scroller, UsageBar } from "./parts";
+import { makeStore } from "./store";
+import { stubBrowser } from "./testing";
+
+afterEach(cleanup);
+
+describe("Nothing's face", () => {
+  it("is thinking on the first fetch, holding back the empty line so it cannot flash before the data does", () => {
+    render(<Nothing up empty="Nothing to do." loading />);
+    expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
+    expect(screen.queryByText("Nothing to do.")).toBeNull();
+  });
+});
+
+describe("Blank's face", () => {
+  it("is thinking on the first fetch, holding back the hint so it cannot flash before the data does", () => {
+    render(<Blank up empty="No meetings recorded yet." hint="Ora writes minutes once it has recorded one." loading />);
+    expect(screen.getByRole("img", { name: "ora is thinking" })).toBeDefined();
+    expect(screen.queryByText("No meetings recorded yet.")).toBeNull();
+    expect(screen.queryByText("Ora writes minutes once it has recorded one.")).toBeNull();
+  });
+});
+
+/** Gives the scrolling region the size jsdom will not: a viewport 800px tall holding 4,000px of thread. Mirrors the same helper in chats.test.tsx. Input: the region. Output: nothing; it is mutated in place. */
+function tall(view: HTMLElement): void {
+  Object.defineProperty(view, "scrollHeight", { value: 4000, configurable: true });
+  Object.defineProperty(view, "clientHeight", { value: 800, configurable: true });
+}
+
+describe("Scroller staying put", () => {
+  it("does not undo a reader's scroll-up when the thread re-renders for a reason that added nothing to it", async () => {
+    // A stand-in for what happens on Chats in a wide pane: the rail beside the thread picks a new active reply as the reader scrolls, which re-renders the thread with the very same turns in it.
+    function Harness() {
+      const [tick, setTick] = useState(0);
+      return (
+        <div>
+          <button onClick={() => setTick((t) => t + 1)}>rerender, same content</button>
+          <Scroller newest="c1">
+            <div data-testid="content">turn {tick}</div>
+          </Scroller>
+        </div>
+      );
+    }
+
+    stubBrowser();
+    render(<Harness />);
+    const view = screen
+      .getByTestId("content")
+      .closest("[data-slot=scroll-area-viewport]") as HTMLElement;
+    tall(view);
+
+    // Seed the region at its newest turn, the way a thread opens.
+    await userEvent.click(screen.getByText("rerender, same content"));
+    await waitFor(() => expect(view.scrollTop).toBe(3200));
+
+    // The reader scrolls up a little, staying within the 120px band that is meant only to mean "pull them along if the next answer lands" — not "snap them back on the next unrelated render".
+    view.scrollTop = 3150;
+    view.dispatchEvent(new Event("scroll"));
+    await waitFor(() => expect(view.scrollTop).toBe(3150));
+
+    // Something unrelated re-renders the thread — the rail's active reply, in the real bug — without adding anything to it.
+    await userEvent.click(screen.getByText("rerender, same content"));
+
+    expect(view.scrollTop).toBe(3150);
+  });
+});
+
+describe("UsageBar", () => {
+  const limit = (used_fraction: number, resets_at: string, window = "5h"): UsageLimit => ({ window, used_fraction, resets_at, source: "test" });
+
+  it("names the window in sentence case and gives the relative reset with its percent when it turns over within a day", () => {
+    const now = new Date();
+    const resets = new Date(now.getTime() + (3 * 60 + 3) * 60000);
+    render(<UsageBar limit={limit(0.92, resets.toISOString())} now={now} />);
+    expect(screen.getByText("5-hour")).toBeDefined();
+    expect(screen.getByText("Resets in 3 hr 3 min · 92%")).toBeDefined();
+  });
+});
+
+describe("the brain picker's usage rows", () => {
+  const brains: Brain[] = [
+    {
+      id: "claude",
+      name: "Claude",
+      signed_in: true,
+      account: "max",
+      models: ["opus"],
+      model: "opus",
+      note: "",
+      default: true,
+      limits: [
+        { window: "5h", used_fraction: 0.42, resets_at: new Date(Date.now() + 3600000).toISOString(), source: "test" },
+        { window: "weekly", used_fraction: 0.95, resets_at: new Date(Date.now() + 3600000).toISOString(), source: "test" },
+      ],
+    },
+    { id: "codex", name: "Codex", signed_in: true, account: "plus", models: ["gpt"], model: "gpt", note: "", default: false },
+    { id: "gemini", name: "Gemini", signed_in: false, account: "", models: [], model: "", note: "", default: false },
+  ];
+
+  function renderPickerWith(list: Brain[]) {
+    stubBrowser();
+    const store = makeStore({ ui: { place: "chats" } });
+    return render(
+      <Provider store={store}>
+        <BrainPicker current="claude" brains={list} />
+      </Provider>,
+    );
+  }
+
+  function renderPicker() {
+    return renderPickerWith(brains);
+  }
+
+  it("draws one row per limit under a brain that reports them, labelled in sentence case", async () => {
+    renderPicker();
+    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const claudeItem = (await menu.findByRole("menuitem", { name: /Claude/ })) as HTMLElement;
+    expect(within(claudeItem).getByText("5-hour")).toBeDefined();
+    expect(within(claudeItem).getByText("Weekly")).toBeDefined();
+  });
+
+  it("shows a note's first clause in sentence case for a signed-in brain with no limits, with the full note on the title", async () => {
+    const withNote: Brain[] = [
+      { ...brains[1], limits_note: "grok exposes no usage data: its CLI, config, logs, and session files carry no quota, usage, or rate-limit reading, and it has no command that reports one" },
+      brains[2],
+    ];
+    renderPickerWith(withNote);
+    await userEvent.click(screen.getByRole("button", { name: /Brain: claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const codexItem = (await menu.findByRole("menuitem", { name: /Codex/ })) as HTMLElement;
+    const line = within(codexItem).getByText("Grok exposes no usage data");
+    expect(line.getAttribute("title")).toBe(withNote[0].limits_note);
+  });
+
+  it("keeps 'Not signed in' ahead of a note for a brain that isn't signed in", async () => {
+    const withNote: Brain[] = [brains[1], { ...brains[2], limits_note: "some reason" }];
+    renderPickerWith(withNote);
+    await userEvent.click(screen.getByRole("button", { name: /Brain: claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const geminiItem = (await menu.findByRole("menuitem", { name: /Gemini/ })) as HTMLElement;
+    expect(within(geminiItem).getByText("Not signed in")).toBeDefined();
+    expect(within(geminiItem).queryByText("Some reason")).toBeNull();
+  });
+
+  it("keys each limit row by its index as well as its window, so two limits sharing a window never collide", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sameWindow: Brain[] = [
+      {
+        ...brains[0],
+        limits: [
+          { window: "5h", used_fraction: 0.1, resets_at: new Date(Date.now() + 3600000).toISOString(), source: "test" },
+          { window: "5h", used_fraction: 0.5, resets_at: new Date(Date.now() + 3600000).toISOString(), source: "test" },
+        ],
+      },
+    ];
+    renderPickerWith(sameWindow);
+    await userEvent.click(screen.getByRole("button", { name: /Brain: Claude/ }));
+    const menu = within(await screen.findByRole("menu"));
+    const claudeItem = (await menu.findByRole("menuitem", { name: /Claude/ })) as HTMLElement;
+    expect(within(claudeItem).getAllByText("5-hour").length).toBe(2);
+    const keyWarning = spy.mock.calls.some((c) => String(c[0]).includes("same key"));
+    expect(keyWarning).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("stays keyboard navigable: opening focuses the first row, with the rows adding no focusable stop of their own, and the arrow key walks to the next row", async () => {
+    renderPicker();
+    const trigger = screen.getByRole("button", { name: /Brain: Claude/ });
+    trigger.focus();
+    await userEvent.keyboard("{Enter}");
+    const menu = within(await screen.findByRole("menu"));
+    expect(document.activeElement).toBe(menu.getByRole("menuitem", { name: /Claude/ }));
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(menu.getByRole("menuitem", { name: /Codex/ }));
+  });
+});
+
+describe("windowLabel", () => {
+  // Antigravity reports four windows named "<family>-<window>", and the picker drew them raw: "Gemini-5h" and, worse, "3p-weekly", which names nothing a reader would recognise.
+  it("names Antigravity's two model families and their windows", () => {
+    expect(windowLabel("gemini-5h")).toBe("Gemini · 5-hour");
+    expect(windowLabel("gemini-weekly")).toBe("Gemini · Weekly");
+    expect(windowLabel("3p-5h")).toBe("Other models · 5-hour");
+    expect(windowLabel("3p-weekly")).toBe("Other models · Weekly");
+  });
+});

@@ -8,8 +8,10 @@ import (
 	"image"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/jezek/xgb"
@@ -57,14 +59,11 @@ func screenshotShell(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("%s unavailable (reply %d)", shellScreenshotName, reply)
 	}
 
-	// gnome-shell writes the PNG itself, so we only need a unique path it can create.
-	f, err := os.CreateTemp("", "ora-shot-*.png")
+	path, cleanup, err := shotTempPath()
 	if err != nil {
-		return nil, fmt.Errorf("temp file: %w", err)
+		return nil, err
 	}
-	path := f.Name()
-	f.Close()             //nolint:errcheck
-	defer os.Remove(path) //nolint:errcheck — best-effort cleanup
+	defer cleanup()
 
 	// Signature is (include_cursor, flash, filename) -> (success, filename_used). flash=false is the whole point of this path.
 	var ok bool
@@ -85,6 +84,21 @@ func screenshotShell(ctx context.Context) ([]byte, error) {
 		os.Remove(used) //nolint:errcheck
 	}
 	return data, nil
+}
+
+// shotTempPath makes a private directory for gnome-shell to write one screenshot into. Input: none. Output: the path to hand the shell, a function that removes the file and the directory, and an error when the directory cannot be made.
+// The mode has to sit on the directory rather than the file: gnome-shell creates the PNG itself, under its own umask, so a file we pre-created 0600 can come back 0644 and a picture of the whole desktop is readable by every other account on the machine for as long as it is on disk.
+func shotTempPath() (string, func(), error) {
+	dir, err := os.MkdirTemp("", "ora-shot-")
+	if err != nil {
+		return "", nil, fmt.Errorf("temp dir: %w", err)
+	}
+	// MkdirTemp already makes the directory 0700, but the mode is set again so a change there cannot silently widen it.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		os.RemoveAll(dir) //nolint:errcheck
+		return "", nil, fmt.Errorf("temp dir mode: %w", err)
+	}
+	return filepath.Join(dir, "screen.png"), func() { os.RemoveAll(dir) }, nil //nolint:errcheck — best-effort cleanup
 }
 
 // screenshotGranted reports whether the stored permissions already allow screenshots, so warm-up can skip prompting. Portal stores ["yes"] for allow.
@@ -111,9 +125,15 @@ func screenshotDenied(perms map[string][]string) bool {
 	return false
 }
 
+// warmUpConsentWait is how long the startup warm-up waits for the whole permission check, including the consent dialog. Two minutes is long enough for a person to notice the dialog and answer it; past that the warm-up gives up and the first real vision capture prompts again.
+const warmUpConsentWait = 2 * time.Minute
+
 // WarmUpScreenshotPermission triggers the screenshot consent dialog at daemon startup, so the user grants permission up front instead of the first vision capture silently failing later.
 // No-op if already granted; a stale deny is cleared first so the portal prompts again instead of auto-rejecting. Blocks on the dialog, so callers run it in a goroutine.
 func WarmUpScreenshotPermission(ctx context.Context) {
+	// The warm-up gets its own deadline rather than living on the daemon's root context: the consent dialog is the one call here that waits on a person, and a dialog nobody ever answers used to keep this goroutine and its portal request alive for the life of the process.
+	ctx, cancel := context.WithTimeout(ctx, warmUpConsentWait)
+	defer cancel()
 	// The gnome-shell path asks no permission of anyone, so if it works there is nothing to warm up and popping the portal dialog would be pointless.
 	if _, err := screenshotShell(ctx); err == nil {
 		slog.Info("vision warm-up: gnome-shell screenshot available, no consent needed")
@@ -183,6 +203,7 @@ func screenLayout() ([]image.Rectangle, image.Point) {
 // grabScreen returns a PNG of the current screen for the vision tier.
 // Prefers gnome-shell's direct API because it captures silently and invisibly; falls back to the portal on other compositors, which flashes on GNOME but at least works everywhere.
 func grabScreen(ctx context.Context) ([]byte, error) {
+	defer standAside()()
 	png, err := screenshotShell(ctx)
 	if err == nil {
 		return png, nil
@@ -217,15 +238,24 @@ func screenshotPortal(ctx context.Context) ([]byte, error) {
 	); err != nil {
 		return nil, fmt.Errorf("subscribe response: %w", err)
 	}
-	defer conn.RemoveMatchSignal( //nolint:errcheck
-		dbus.WithMatchObjectPath(handlePath),
-		dbus.WithMatchInterface("org.freedesktop.portal.Request"),
-		dbus.WithMatchMember("Response"),
-	)
 
 	sigCh := make(chan *dbus.Signal, 4)
 	conn.Signal(sigCh)
-	defer conn.RemoveSignal(sigCh)
+	// The unsubscribe is a named function rather than two defers because the timeout path below hands it to a goroutine that outlives this call: removing the match while that goroutine is still waiting would mean it never sees the response and never removes the file.
+	unsubscribe := func() {
+		conn.RemoveSignal(sigCh)
+		conn.RemoveMatchSignal( //nolint:errcheck
+			dbus.WithMatchObjectPath(handlePath),
+			dbus.WithMatchInterface("org.freedesktop.portal.Request"),
+			dbus.WithMatchMember("Response"),
+		)
+	}
+	detached := false
+	defer func() {
+		if !detached {
+			unsubscribe()
+		}
+	}()
 
 	portal := conn.Object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
 	options := map[string]dbus.Variant{
@@ -242,6 +272,12 @@ func screenshotPortal(ctx context.Context) ([]byte, error) {
 	for {
 		select {
 		case <-ctx.Done():
+			// The portal is still working and will write the PNG regardless, so the request is drained in the background and the file it names removed. Without this a picture of the whole desktop stays in /run/user/<uid>/doc for good every time the capture bound wins.
+			detached = true
+			go func() {
+				defer unsubscribe()
+				discardLateShot(sigCh, handlePath, returned, lateShotWait)
+			}()
 			return nil, ctx.Err()
 		case sig := <-sigCh:
 			if sig.Path != handlePath && sig.Path != returned {
@@ -252,6 +288,37 @@ func screenshotPortal(ctx context.Context) ([]byte, error) {
 				return nil, err
 			}
 			return readFileURI(uri)
+		}
+	}
+}
+
+// lateShotWait is how long the background drain waits for a portal screenshot the capture already gave up on. Thirty seconds: a portal that has not answered by then is not going to write a file either.
+const lateShotWait = 30 * time.Second
+
+// discardLateShot waits for the Response of a portal screenshot request the caller abandoned and removes the file it names. Input: the signal channel the request was subscribed on, the two object paths that identify it, and how long to wait. Output: none — a request that answers nothing, or answers a failure, just ends the wait.
+func discardLateShot(sigCh <-chan *dbus.Signal, handlePath, returned dbus.ObjectPath, wait time.Duration) {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return
+		case sig := <-sigCh:
+			if sig == nil {
+				return
+			}
+			if sig.Path != handlePath && sig.Path != returned {
+				continue
+			}
+			uri, err := responseURI(sig.Body)
+			if err != nil {
+				return
+			}
+			path := strings.TrimPrefix(uri, "file://")
+			if err := os.Remove(path); err != nil {
+				slog.Debug("vision: could not remove the screenshot of an abandoned portal request", "path", path, "error", err)
+			}
+			return
 		}
 	}
 }

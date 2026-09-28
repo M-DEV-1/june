@@ -16,6 +16,7 @@ import (
 
 	"ora/internal/db"
 	"ora/internal/tracker"
+	"ora/internal/util"
 )
 
 // Segment is one span of speech from one side of the call, with its start and end measured from the beginning of the recording (not from the beginning of its own stream).
@@ -48,22 +49,30 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	if err := repairWAV(path); err != nil {
 		return nil, fmt.Errorf("repair %s: %w", path, err)
 	}
-	args := []string{"-f", path, "-np", "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext, "-t", strconv.Itoa(transcribeThreads())}
-	if prompt != "" {
-		args = append(args, "--prompt", prompt)
-	}
 	// The model flags mean a real whisper.cpp run, which decodes on the GPU, where only one run fits at a time.
-	if extra := whisperCPPArgs(bin); extra != nil {
-		args = append(args, extra...)
-		gpuRun.Lock()
-		defer gpuRun.Unlock()
+	gpu := whisperCPPArgs(bin)
+	unprimed := []string{"-f", path, "-np", "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext, "-t", strconv.Itoa(whisperThreads(gpu != nil))}
+	unprimed = append(unprimed, gpu...)
+	// The prompt goes on the end and nowhere else, because dropping it again for the unprimed redo below is done by running the arguments without it. Appending anything after it took the model flags away from that redo instead.
+	args := unprimed
+	if prompt != "" {
+		args = append(append([]string{}, unprimed...), "--prompt", prompt)
+	}
+	if gpu != nil {
+		GPURun.Lock()
+		defer GPURun.Unlock()
 		// Under the lock, so the other stream cannot slip its decode in while this one is still waiting for the card.
 		if err := waitForGPU(ctx); err != nil {
 			return nil, err
 		}
 	}
 	started := time.Now()
-	out, errOut, err := run(ctx, bin, args)
+	out, errOut, err := RunWhisper(ctx, bin, args)
+	// A primed run can lock onto a non-speech marker and print it for the whole file: on 2026-09-02 17:32 the call side came back as 308 lines of "[ Silence ]" and one invented sentence, while the same file unprimed gave 42 real lines. The prompt is only a spelling aid, so when the run is that loop it is redone without one.
+	if err == nil && prompt != "" && markerLooped(out) {
+		slog.Warn("whisper looped on a silence marker under the priming prompt, transcribing again without it", "file", filepath.Base(path))
+		out, errOut, err = RunWhisper(ctx, bin, unprimed)
+	}
 	took := time.Since(started)
 	// audio and rate say how long the meeting itself runs and how many times faster than real time this machine transcribes it, so a run's log line is enough to predict how long N hours of meetings will take to catch up on.
 	audio := audioDuration(path)
@@ -79,7 +88,7 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	return stripPromptEcho(parseSegments(out, speaker, offset), prompt), nil
 }
 
-// stripPromptEcho removes the priming prompt from the front of the transcript when whisper reads it back as speech instead of only conditioning on it. In the 2026-08-31 recording the first transcript line was "Participants: Rohit Verma, Claude Artifact." — the tail of the prompt, printed at 00:00:00 as though someone had said it, and then read by the minutes model as evidence about who was in the call.
+// stripPromptEcho removes the priming prompt from the front of the transcript when whisper reads it back as speech instead of only conditioning on it. In the 2026-08-31 recording the first transcript line was "Participants: Yalven Pravik, Claude Artifact." — the tail of the prompt, printed at 00:00:00 as though someone had said it, and then read by the minutes model as evidence about who was in the call.
 // Whisper keeps only the last whisperMaxContext tokens of the prompt, so the echo can be any suffix of it. Sentences are stripped one at a time off the front of the first segment, and a segment left empty is dropped.
 func stripPromptEcho(segs []Segment, prompt string) []Segment {
 	if len(segs) == 0 || prompt == "" {
@@ -109,10 +118,45 @@ func stripPromptEcho(segs []Segment, prompt string) []Segment {
 	return segs
 }
 
+// markerLooped reports whether whisper's output is mostly one non-speech marker repeated — more marker lines than lines with words — which is the decoder conditioning on its own "[ Silence ]" and never leaving it. Input: whisper's stdout. Output: true for the loop, false for normal output (a quiet stream still has words between its markers) and for empty output.
+func markerLooped(out string) bool {
+	markers, words := 0, 0
+	for _, line := range strings.Split(out, "\n") {
+		i := strings.Index(line, "]")
+		if !strings.HasPrefix(line, "[") || i < 0 {
+			continue
+		}
+		text := strings.TrimSpace(line[i+1:])
+		if text == "" {
+			continue
+		}
+		if util.NonSpeechLine.MatchString(text) {
+			markers++
+		} else {
+			words++
+		}
+	}
+	return markers > 0 && markers > words
+}
+
 // promptEchoWindow is how far into a stream the priming prompt may still be echoed. Whisper conditions on the prompt for its first decoding window and prints it, if at all, as the first thing it emits; past this the stream is speech.
 const promptEchoWindow = 5 * time.Second
 
-// transcribeThreads is how many threads one transcription run may use. The two sides of a call are transcribed at the same time, so this is deliberately half of what a single run would take: whisper's own default is half the logical CPUs, and two runs at a quarter each add up to the same load rather than fighting over the same cores. Never less than one.
+// whisperThreads is how many threads one whisper run may use. Input: whether this run decodes on the GPU. Output: the thread count, never less than one.
+//
+// A GPU run holds GPURun for the whole decode, so the two streams of a call run one after the other however they were started — that run has the machine to itself and takes whisper's own default of half the logical CPUs. On the CPU path the two runs really do overlap, and each takes a quarter so they add up to the same load rather than fighting over the same cores.
+// An explicit $ORA_TRANSCRIBE_THREADS wins on either path, since the right number is a property of the machine.
+func whisperThreads(gpu bool) int {
+	if !gpu || os.Getenv("ORA_TRANSCRIBE_THREADS") != "" {
+		return transcribeThreads()
+	}
+	if n := runtime.NumCPU() / 2; n > 0 {
+		return n
+	}
+	return 1
+}
+
+// transcribeThreads is how many threads one background transcription run may use when it shares the machine with the other runs a meeting starts: a quarter of the logical CPUs, since whisper's own default is half and two runs at a quarter each add up to the same load. Never less than one. It is what the diarizer takes, and what a whisper run that decodes on the CPU takes.
 // $ORA_TRANSCRIBE_THREADS overrides it. The right number is a property of the machine and not of the code: on a hybrid CPU the logical count is a poor guide to how many threads actually run at full speed, and the only way to know is to time a real recording both ways.
 // ponytail: a quarter of the logical CPUs is a safe guess that never oversubscribes, not a tuned one. The knob is there so a machine that wants more can have it without a rebuild.
 func transcribeThreads() int {
@@ -165,7 +209,7 @@ func parseSegments(out, speaker string, offset time.Duration) []Segment {
 			continue
 		}
 		text := strings.TrimSpace(m[9])
-		if text == "" || nonSpeech.MatchString(text) {
+		if text == "" || util.NonSpeechLine.MatchString(text) {
 			continue
 		}
 		segs = append(segs, Segment{
@@ -178,18 +222,24 @@ func parseSegments(out, speaker string, offset time.Duration) []Segment {
 	return dropHallucinations(segs)
 }
 
+// cannedLine matches a segment nobody in the meeting said: the video-channel sign-offs and copyright credits whisper invents over silence, and the recorded greeting of a call that went to voicemail. The recording of 2026-09-16 11:29 was 23 seconds of exactly that, a copyright credit and a "no part of this recording may be reproduced" line on the microphone side and a voicemail greeting on the call side, and it got minutes because the no-speech check only saw that the transcript was not empty. The wordings are the ones found in the transcripts on this machine up to 2026-09-17: 21 transcript lines across 12 recordings match them, 17 on the microphone side and 4 on the call side, and none of the 21 is anything a person on the call said.
+// A matching segment is dropped whole. Whisper cuts a segment every few seconds, so the phrases are held to wordings a person in a work call does not say, such as "subscribe to my channel" rather than "subscribe".
+var cannedLine = regexp.MustCompile(`(?i)thanks? (you )?for watching|subscribe (to (my|our|the) channel|for more videos)|like and subscribe|hit the bell icon|copyright ©|all rights reserved|no part of this recording may be reproduced|leave (a|your) message after the (tone|beep)|when you have finished,? please hang up`)
+
 // Thresholds for the repeat rules below, all counted in one stream.
 // minLoopRun is how many identical segments in a row it takes before the run is a loop rather than someone saying the same short thing twice.
 // minScatteredRepeats is how many times one sentence has to appear across the whole stream before it is treated as invented.
 // loopPhraseMinWords and loopPhraseMaxWords bound what counts as a loopable sentence: below the floor it is an acknowledgement people really do repeat all meeting ("Okay.", "Yeah."), above the ceiling nobody produces the same wording by chance and it is more likely a real repeated reading.
+// loopShingleWords is the width of the word window suppressDriftingLoop matches on; see that function for why a loop needs this rather than an exact match.
 const (
 	minLoopRun          = 3
 	minScatteredRepeats = 3
 	loopPhraseMinWords  = 4
 	loopPhraseMaxWords  = 12
+	loopShingleWords    = 4
 )
 
-// dropHallucinations removes whisper's repetition artefacts from one stream's segments, which is most of what makes a transcript of a quiet call unreadable. It does three things, in order, and nothing else: it drops every copy of a sentence that appears minScatteredRepeats times or more across the stream, it collapses a run of minLoopRun or more identical consecutive segments down to the first, and it collapses a sentence repeated minLoopRun times or more inside a single segment's text down to one copy.
+// dropHallucinations removes whisper's repetition artefacts from one stream's segments, which is most of what makes a transcript of a quiet call unreadable. It does four things, in order: it drops every copy of a sentence that appears minScatteredRepeats times or more across the stream, it collapses a run of minLoopRun or more identical consecutive segments down to the first, it collapses a sentence repeated minLoopRun times or more inside a single segment's text down to one copy, and it runs suppressDriftingLoop over what is left to catch the same loop when no two copies of it were byte-identical.
 // The order matters: the scattered pass usually leaves the acknowledgements that were interleaved with the invented sentence sitting next to each other, and the run pass then collapses them.
 func dropHallucinations(segs []Segment) []Segment {
 	counts := make(map[string]int, len(segs))
@@ -218,6 +268,66 @@ func dropHallucinations(segs []Segment) []Segment {
 			out = append(out, kept[i:j]...)
 		}
 		i = j
+	}
+	return suppressDriftingLoop(out)
+}
+
+// suppressDriftingLoop catches the loop the exact-match rules above miss: whisper's self-conditioning does not repeat a sentence byte for byte, it slides a decode window a little further into it each time and sometimes swaps or drops a word ("55%" for "56%", "in a positive mood" for "not in a positive mood"), so no two copies of a real hallucination loop are identical. Two 2026-09 recordings show both kinds of drift, one after the other, for most of a 15-minute and a 90-minute call.
+// It pools every remaining segment's words into one stream and counts each run of loopShingleWords consecutive words (lower-cased, punctuation trimmed). A word covered by a run that recurs minScatteredRepeats times or more anywhere in the stream is dropped outright — a repeat that far apart is the decoder, not someone repeating themselves that many times verbatim — and a segment left with no surviving words is dropped here, not passed back empty for the caller to filter.
+// Input: segments already past the three exact-match rules. Output: the same segments with looped words removed and empty ones gone.
+func suppressDriftingLoop(segs []Segment) []Segment {
+	type word struct {
+		segIdx int
+		raw    string
+		key    string
+	}
+	var words []word
+	for i, s := range segs {
+		for _, w := range strings.Fields(s.Text) {
+			words = append(words, word{i, w, strings.ToLower(strings.Trim(w, ".,!?;:\"'()"))})
+		}
+	}
+	if len(words) < loopShingleWords {
+		return segs
+	}
+
+	shingle := func(i int) string {
+		keys := make([]string, loopShingleWords)
+		for j := range keys {
+			keys[j] = words[i+j].key
+		}
+		return strings.Join(keys, " ")
+	}
+	counts := make(map[string]int, len(words))
+	for i := 0; i+loopShingleWords <= len(words); i++ {
+		counts[shingle(i)]++
+	}
+
+	drop := make([]bool, len(words))
+	for i := 0; i+loopShingleWords <= len(words); i++ {
+		if counts[shingle(i)] >= minScatteredRepeats {
+			for j := i; j < i+loopShingleWords; j++ {
+				drop[j] = true
+			}
+		}
+	}
+
+	bySeg := make(map[int][]string, len(segs))
+	for i, w := range words {
+		if drop[i] {
+			continue
+		}
+		bySeg[w.segIdx] = append(bySeg[w.segIdx], w.raw)
+	}
+
+	var out []Segment
+	for i, s := range segs {
+		surviving, ok := bySeg[i]
+		if !ok {
+			continue
+		}
+		s.Text = strings.Join(surviving, " ")
+		out = append(out, s)
 	}
 	return out
 }
@@ -256,9 +366,6 @@ func collapseRepeatedPhrases(text string) string {
 	}
 	return strings.TrimSpace(strings.Join(kept, ""))
 }
-
-// nonSpeech matches whisper's markers for a stretch with no words in it — "[BLANK_AUDIO]", "(upbeat music)", "[SOUND]". A silent stream is otherwise nothing but these, and the microphone side of a call is silent most of the time.
-var nonSpeech = regexp.MustCompile(`^[\[(][^)\]]*[)\]]$`)
 
 // hmsToDuration turns one whisper timestamp into a duration. frac is the fractional-seconds digits exactly as printed, so its length is its scale: "64" means 640ms, "640" means 640ms, and anything past three digits is finer than this cares about and is cut.
 func hmsToDuration(h, m, s, frac string) time.Duration {
@@ -320,38 +427,75 @@ func breaksTurn(turn []Segment, next Segment) bool {
 // primingPromptBudget caps the priming prompt, in characters. Whisper keeps only the last whisperMaxContext tokens of the text it is primed with, and English averages a little over three characters per token, so a prompt longer than this has its front silently cut off — which is exactly where the participant names sit.
 const primingPromptBudget = 500
 
-// acronymPattern matches an all-capitals token — INFORM, GRDI, ASRS, ESG. These are exactly the words speech recognition mangles ("ND game" for INFORM) and exactly the words a meeting's own screens are full of.
+// acronymPattern matches an all-capitals token — ORVEC, KDNI, VRDS, OPX. These are exactly the words speech recognition mangles ("or vec" for ORVEC) and exactly the words a meeting's own screens are full of.
 var acronymPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,5}\b`)
 
-// properNounPattern matches a run of two or more capitalised words — "Climate Risk Studio", "Acme Essentials", "Priya Shah". One capitalised word on its own is almost always a sentence start, so the run has to be at least two.
+// properNounPattern matches a run of two or more capitalised words — "Brightpath Studio", "Acme Basics", "Vexil Quorin". One capitalised word on its own is almost always a sentence start, so the run has to be at least two.
 var properNounPattern = regexp.MustCompile(`\b[A-Z][a-z]+(?: [A-Z][a-z0-9]+)+\b`)
 
-// chatSenderPattern matches a name written the way a chat window writes it: at the start of its own line, immediately before a colon, as in "Priya Shah: ok sure ping me". The line anchor is what keeps it off the labels an app puts mid-sentence ("Industry Division: Health Care"), which look identical without it.
+// chatSenderPattern matches a name written the way a chat window writes it: at the start of its own line, immediately before a colon, as in "Vexil Quorin: ok sure ping me". The line anchor is what keeps it off the labels an app puts mid-sentence ("Industry Division: Health Care"), which look identical without it.
 var chatSenderPattern = regexp.MustCompile(`(?m)^\s*([A-Z][a-z]+(?: [A-Z][a-z]+| [A-Z]{2,4})+):`)
 
-// promptChrome is the capitalised furniture every browser and app window carries regardless of what the meeting is about. A candidate term is thrown away if any of its words is in here, which is what keeps "Insights Settings Private Branches" and "Datepicker All" out of a prompt that is supposed to be about climate risk scoring.
-// ponytail: a hand-written word list, extended when a new app's furniture shows up in a prompt. The principled version would rank a term by how unusual it is for this user's screens rather than by a fixed list, which needs a corpus of episodes from outside the meeting window to compare against.
-var promptChrome = map[string]bool{
-	"about": true, "actions": true, "activity": true, "add": true, "all": true, "branches": true,
-	"browser": true, "chrome": true, "close": true, "code": true, "commit": true, "commits": true,
-	"contribute": true, "created": true, "custom": true, "datepicker": true, "edit": true,
-	"file": true, "filter": true, "folders": true, "guided": true, "home": true, "insights": true,
-	"into": true, "issues": true, "latest": true, "menu": true, "more": true, "no": true,
-	"open": true, "packages": true, "private": true, "projects": true, "pull": true,
-	"readme": true, "requests": true, "resources": true, "search": true, "security": true,
-	"selected": true, "settings": true, "share": true, "sort": true, "tab": true, "tags": true,
-	"tour": true, "turn": true, "view": true, "wiki": true,
+// chromeWords is the capitalised furniture every browser, app window and meeting-call toolbar carries regardless of what the meeting is about. A candidate term or roster name is thrown away if any of its words is in here, which is what keeps "Insights Settings Private Branches" and "Datepicker All" out of a prompt about route planning scoring, and "Mute", "Share Screen" or "Raise Hand" out of a participant list.
+// ponytail: a hand-written word list, extended when a new app's furniture shows up in a prompt or a roster. The principled version would rank a word by how unusual it is for this user's screens rather than by a fixed list, which needs a corpus of episodes from outside the meeting window to compare against.
+var chromeWords = map[string]bool{
+	"about": true, "actions": true, "activity": true, "add": true, "admit": true, "all": true,
+	"apps": true, "audio": true, "background": true, "branches": true, "breakout": true,
+	"browser": true, "call": true, "camera": true, "captions": true, "chat": true, "chrome": true,
+	"close": true, "code": true, "cohost": true, "commit": true, "commits": true, "contribute": true,
+	"created": true, "custom": true, "datepicker": true, "edit": true, "effects": true, "end": true,
+	"file": true, "filter": true, "folders": true, "gallery": true, "grid": true, "guest": true,
+	"guided": true, "hand": true, "home": true, "host": true, "insights": true, "into": true,
+	"invite": true, "issues": true, "latest": true, "layout": true, "leave": true, "lobby": true,
+	"menu": true, "meeting": true, "microphone": true, "more": true, "mute": true, "no": true, "now": true,
+	"off": true, "on": true, "open": true, "options": true, "organiser": true, "organizer": true,
+	"packages": true, "participants": true, "pin": true, "polls": true, "present": true,
+	"presenting": true, "private": true, "projects": true, "pull": true, "raise": true,
+	"readme": true, "reactions": true, "record": true, "recording": true, "requests": true,
+	"resources": true, "room": true, "rooms": true, "screen": true, "search": true, "security": true,
+	"selected": true, "settings": true, "share": true, "sort": true, "speaker": true, "spotlight": true,
+	"start": true, "stop": true, "tab": true, "tags": true, "tour": true, "turn": true, "unmute": true,
+	"video": true, "view": true, "waiting": true, "whiteboard": true, "wiki": true, "you": true,
 }
 
-// isMeetingWindow reports whether an episode was captured from the window of a call rather than from whatever else was on screen. Everything that claims to name a participant is checked against this first: a screen during a meeting is mostly not the meeting. The tracker owns the test, since it is the same one it uses to decide which window to capture on its own clock.
-func isMeetingWindow(app, title string) bool {
-	return tracker.IsMeetingWindow(app, title)
+// personNamesFromContext turns the store's person subjects into names whisper can be primed with. Input: the personal-context entries. Output: one display name per person subject, hyphens to spaces and each word capitalised, in store order; the identity entry and preference entries are skipped.
+func personNamesFromContext(entries []db.PersonalEntry) []string {
+	var names []string
+	for _, e := range entries {
+		if !db.IsPersonSubject(e.Subject) {
+			continue
+		}
+		names = append(names, db.PersonSubjectName(e.Subject))
+	}
+	return names
 }
 
-// primingPrompt builds the text whisper is primed with, out of what the desktop tracker recorded on screen while the meeting ran. Priming biases whisper's spelling towards the words in the prompt, so feeding it the meeting's own acronyms and proper nouns is what turns "ND game and GRDI" into "INFORM and GDIS".
-// The prompt is deliberately written as capitalised, punctuated English. Whisper continues the prompt's register as well as its vocabulary: primed with a raw lowercase chat log it returns the whole transcript lowercase and unpunctuated, which is worse to read and worse to summarise from.
-// Input: the episodes captured during the recording window. Output: one line of text, capped at primingPromptBudget characters, or "" when there was nothing on screen to learn from.
-func primingPrompt(eps []db.Episode) string {
+// primingPromptFor is primingPrompt with the people the store already knows added after the screen's own terms, within the same budget. Whisper spells a name the way it is primed to: on 2026-09-03 a call primed only with "Terms: API." wrote "Oshveln" for Sorrek, and that guess became a person in memory. People go last because the prompt is cut from the front when it is too long.
+func primingPromptFor(eps []db.Episode, people []string) string {
+	base := primingPromptBody(eps)
+	if len(people) == 0 {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSuffix(base, "."))
+	written := 0
+	for _, name := range people {
+		if b.Len()+len(name)+len(" People: ")+2 > primingPromptBudget {
+			break
+		}
+		if written == 0 {
+			b.WriteString(". People: ")
+		} else {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		written++
+	}
+	b.WriteString(".")
+	return b.String()
+}
+
+func primingPromptBody(eps []db.Episode) string {
 	counts := map[string]int{}
 	first := map[string]string{} // lower-cased term to the spelling it was first seen with
 	var senders []string
@@ -367,9 +511,9 @@ func primingPrompt(eps []db.Episode) string {
 		counts[key]++
 	}
 
-	// A name written immediately before a colon is how a chat window labels who typed something. Only the meeting's own window counts: on 2026-08-31 a WhatsApp tab open during a standup put "Rohit Verma" and "Claude Artifact" into the prompt as the meeting's participants, and whisper printed them back as the first line of the transcript.
+	// A name written immediately before a colon is how a chat window labels who typed something. Only the meeting's own window counts: on 2026-08-31 a WhatsApp tab open during a standup put "Yalven Pravik" and "Claude Artifact" into the prompt as the meeting's participants, and whisper printed them back as the first line of the transcript.
 	for _, e := range eps {
-		inMeeting := isMeetingWindow(e.App, e.Title)
+		inMeeting := tracker.IsMeetingWindow(e.App, e.Title)
 		for _, text := range []string{e.Title, e.UserActivity, e.ScreenText, e.VisibleText} {
 			if !inMeeting {
 				continue
@@ -467,7 +611,7 @@ func primingPrompt(eps []db.Episode) string {
 // hasChromeWord reports whether any word of a candidate term is app furniture rather than something the meeting is about.
 func hasChromeWord(term string) bool {
 	for _, w := range strings.Fields(term) {
-		if promptChrome[strings.ToLower(w)] {
+		if chromeWords[strings.ToLower(w)] {
 			return true
 		}
 	}

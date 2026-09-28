@@ -1,0 +1,2 @@
+/** The localStorage key a clicked notice's target is left under. The hover writes it (see openNotice in src/main.ts) just before it asks the daemon to open the main window. Kept here, rather than inlined in src/main.ts, so the constant has one definition; the vanilla window that used to read this key back out is gone, replaced by the React app at next.html, which does not read it yet. */
+export const OPEN_AT_KEY = "ora-open-at";

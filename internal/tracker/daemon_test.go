@@ -73,3 +73,48 @@ CollectLoop:
 		t.Errorf("Expected second event to be Code.exe, got %s", receivedEvents[1].App)
 	}
 }
+
+// A window the user comes straight back to must still be recorded. The tracker skips Ora's own window, an application on the blocklist, and a window nothing could name; each of those cleared the pending activity, and since the window the user returns to is the one the loop last saw, nothing then counts as changed — and only a pending activity can be emitted. So a window with a steady title was never recorded for as long as the user stayed in it. Hovering Ora fires this, which is the product's main interaction.
+func TestDaemon_ASkippedWindowKeepsThePendingActivity(t *testing.T) {
+	skips := map[string]tracker.Activity{
+		"Ora's own window":            {App: "ora", Title: "Ora"},
+		"a blocked application":       {App: "1Password", Title: "Vault"},
+		"a window nothing could name": {App: "Unknown", Title: "Unknown"},
+	}
+
+	for name, skip := range skips {
+		t.Run(name, func(t *testing.T) {
+			hover := skip
+			code := &tracker.Activity{App: "Code", Title: "daemon.go"}
+			mockEye := &mockTracker{responses: []*tracker.Activity{
+				code,   // tick 1: the user is working, so this becomes the pending activity
+				&hover, // tick 2: they glance at the window that is not their activity
+				code,   // tick 3: back where they were, and the title has not changed
+				code,   // tick 4: past the dwell time, so it must be recorded
+			}}
+
+			eventChan := make(chan tracker.Activity, 10)
+			daemon := tracker.NewDaemon(mockEye, 20*time.Millisecond, 45*time.Millisecond, []string{"1Password"}, eventChan)
+			daemon.SetCapturer(func() string { return "" })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go daemon.Start(ctx)
+
+			var got []tracker.Activity
+			timeout := time.After(400 * time.Millisecond)
+		CollectLoop:
+			for {
+				select {
+				case ev := <-eventChan:
+					got = append(got, ev)
+				case <-timeout:
+					break CollectLoop
+				}
+			}
+
+			if len(got) != 1 || got[0].App != "Code" {
+				t.Fatalf("got %+v, want exactly one Code episode: the window the user was in was never recorded", got)
+			}
+		})
+	}
+}

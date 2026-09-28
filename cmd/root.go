@@ -2,16 +2,23 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"ora/internal/obs"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
+
+	"ora/internal/config"
+	"ora/internal/ipctoken"
+	"ora/internal/obs"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -26,14 +33,35 @@ var rootCmd = &cobra.Command{
 		isDaemon, _ := cmd.Flags().GetBool("daemon")
 		autostart, _ := cmd.Flags().GetString("autostart")
 		workdir, _ := cmd.Flags().GetString("workdir")
-		runRoot(isDaemon, autostart, workdir)
+		forceTUI, _ := cmd.Flags().GetBool("tui")
+		runRoot(isDaemon, autostart, workdir, forceTUI)
 	},
 }
 
+// exitCode is what the process exits with once runRoot has returned and its deferred cleanup — the telemetry shutdown above all — has run. Written by runRoot on the one goroutine cobra calls it from, read by Execute after that call has come back.
+var exitCode int
+
 // Execute runs the root command. Called once by main.main().
+// loadEnvFiles reads the two files a key may live in, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way ora is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
+// It runs for every command, not just the daemon. ora doctor used to read only the environment the shell handed over, so a key in the file the first-run panel tells the user to write was invisible to it, and doctor reported no brain on a machine that had one.
+func loadEnvFiles() {
+	cwdEnv := godotenv.Load()
+	dataEnv := godotenv.Load(filepath.Join(config.DataDir(), "env"))
+	if cwdEnv != nil && dataEnv != nil {
+		slog.Info("no .env file found, reading the environment as it is", "looked_in", []string{".env", filepath.Join(config.DataDir(), "env")})
+	}
+	secureEnvFile(".env")
+	secureEnvFile(filepath.Join(config.DataDir(), "env"))
+}
+
 func Execute() {
+	loadEnvFiles()
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
+	}
+	// os.Exit skips deferred functions, so the code runRoot chose is applied here, after its defers have run, rather than inside it.
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
 
@@ -41,10 +69,11 @@ func init() {
 	rootCmd.PersistentFlags().Bool("daemon", false, "Run as background daemon")
 	rootCmd.PersistentFlags().String("autostart", "", "Turn start-on-login on or off, persist it to the config, and exit (on|off)")
 	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because ORA loads .env relative to the working directory and a session manager launches from an arbitrary one")
+	rootCmd.PersistentFlags().Bool("tui", false, "Force the terminal UI even when a desktop window is available")
 }
 
-// runRoot is the root command's behaviour: with no flags it starts the TUI against a get-or-create daemon, --daemon runs the background daemon itself, and --autostart flips start-on-login and returns.
-func runRoot(isDaemon bool, autostart, workdir string) {
+// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows Ora's desktop window if one is built and wanted, falling back to the terminal UI otherwise; --tui forces the terminal UI regardless; --daemon runs the background daemon itself; --autostart flips start-on-login and returns.
+func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 	// Must happen before anything reads a relative path (.env — every ora-db/data path now resolves through config.DataDir(), independent of cwd).
 	if workdir != "" {
 		if err := os.Chdir(workdir); err != nil {
@@ -60,10 +89,9 @@ func runRoot(isDaemon bool, autostart, workdir string) {
 		return
 	}
 
-	if err := godotenv.Load(); err != nil {
-		slog.Info("No .env file found, read from sys env")
-	}
-	secureEnvFile(".env")
+	// Two places, in precedence order: the repo checkout's own .env for a run started from there, then a fixed file under the data directory for every other way ora is launched. godotenv never overwrites a variable that is already set, so the first one to carry a key wins and the real environment still beats both.
+	// Without the second, the key had exactly one source and it was relative to the process's working directory: start ora from anywhere but the checkout and GEMINI_API_KEY was empty, which is voice failing completely with nothing in the log to say why. The first-run panel has been telling the user to put the key in this file all along, and nothing read it.
+	loadEnvFiles()
 	// global context that listens for sigint
 	// SIGTERM as well as SIGINT: kill, a logout and a system shutdown all send SIGTERM, and catching only SIGINT meant every one of those killed the process outright with no cleanup — abandoning a meeting recording mid-call.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -79,7 +107,10 @@ func runRoot(isDaemon bool, autostart, workdir string) {
 
 	if isDaemon {
 		if err := runDaemon(ctx, shutdownObs); err != nil {
+			// Non-zero, so a supervisor calls the start a failure. The commonest cause is a second daemon finding the port held by the first, and exiting 0 there meant systemd and ora-restart both reported a restart that never happened.
+			// The code is recorded rather than exited on, so the deferred telemetry shutdown and signal-context cancel below still run. os.Exit here skipped both, which was harmless only while the sole error this could return was the port bind, before anything had been traced.
 			slog.Error("daemon crashed", "error", err)
+			exitCode = 1
 		}
 		return
 	}
@@ -119,23 +150,121 @@ func runRoot(isDaemon bool, autostart, workdir string) {
 		}
 	}
 
+	// A live daemon is what a desktop window needs — one that failed to spawn has nothing to show a window in front of, so the terminal UI is the only option left.
+	if !forceTUI && (daemonStatus == "connected" || daemonStatus == "started") {
+		if offerWindow(daemonStatus == "started") {
+			return
+		}
+	}
+
 	// start tui
 	if err := runClient(ctx, shutdownObs, daemonStatus, buildMismatch); err != nil {
 		slog.Error("Client crashed", "error", err)
 	}
 }
 
+// freshDaemonOpenAttempts is how many times offerWindow retries the show instruction when this process just spawned the daemon itself.
+const freshDaemonOpenAttempts = 5
+
+// openRetryInterval is the pause between those retries. A var, not a const, so a test can shrink it instead of actually waiting out four real pauses.
+var openRetryInterval = 400 * time.Millisecond
+
+// offerWindow decides whether this invocation of `ora` should show the desktop window instead of the terminal UI, and does so when it can. Input: freshDaemon is true when this same process just spawned the daemon (as opposed to finding one already running) — its window child, if any, was only just started and needs a moment to launch and subscribe to the daemon's event stream before it can act on the show instruction. Output: true when it took over startup and there is nothing left for the caller to do (it already printed a line explaining what happened); false when the caller should still open the terminal UI, because the config has the window turned off or no window is built.
+func offerWindow(freshDaemon bool) bool {
+	appConfig := config.LoadConfig()
+	if !appConfig.Window {
+		return false
+	}
+	path, tried, err := windowBinary()
+	if err != nil {
+		fmt.Printf("No desktop window binary found (looked at: %s). Set ORA_WINDOW=/path/to/it, or build one in app/, and `ora` will open it instead of the terminal UI.\n", strings.Join(tried, ", "))
+		return false
+	}
+
+	attempts := 1
+	if freshDaemon {
+		// ponytail: a fixed retry budget standing in for a real "the window is listening" signal, which nothing here exposes over IPC yet — upgrade path is a server-side subscriber check the daemon could answer instead of this guess. Comfortably longer than a Tauri window normally takes to launch and open its event stream, and harmless to repeat since the daemon just rebroadcasts "open" to whoever is listening.
+		attempts = freshDaemonOpenAttempts
+	}
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(openRetryInterval)
+		}
+		authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
+	}
+
+	hotkey := formatHotkey(fetchWindowHotkey())
+	if hotkey == "" {
+		hotkey = "your Ora shortcut"
+	}
+	fmt.Printf("Ora is running (window: %s). It starts hidden — showing it now; if it doesn't appear, press %s or run `ora --tui` for the terminal UI instead.\n", path, hotkey)
+	return true
+}
+
+// fetchWindowHotkey asks the daemon's own /settings for the GNOME accelerator that shows the window (see internal/ipc.windowHotkey). Output: the raw accelerator, e.g. "<Control><Alt>space", or "" on any failure — this only ever feeds a hint line, never something startup can block or fail on.
+func fetchWindowHotkey() string {
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+DaemonPort+"/settings", nil)
+	if err != nil {
+		return ""
+	}
+	ipctoken.Attach(req, ipctoken.DefaultPath)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var body struct {
+		Hotkey string `json:"hotkey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ""
+	}
+	return body.Hotkey
+}
+
+// hotkeyModifier matches one "<Name>" modifier segment of a GNOME accelerator string.
+var hotkeyModifier = regexp.MustCompile(`<([^>]+)>`)
+
+// formatHotkey turns a GNOME accelerator like "<Control><Alt>space" into the plain "Ctrl+Alt+Space" a terminal hint can print. Input: the raw accelerator, or "". Output: the formatted string, or "" when there was nothing to format.
+func formatHotkey(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var parts []string
+	for _, m := range hotkeyModifier.FindAllStringSubmatch(raw, -1) {
+		mod := m[1]
+		if mod == "Control" {
+			mod = "Ctrl"
+		}
+		parts = append(parts, mod)
+	}
+	if key := hotkeyModifier.ReplaceAllString(raw, ""); key != "" {
+		parts = append(parts, strings.ToUpper(key[:1])+key[1:])
+	}
+	return strings.Join(parts, "+")
+}
+
 // pingDaemon sends a single /ping with a short timeout.
 // Returns true only if the daemon responds 200 OK.
 var daemonPingClient = &http.Client{Timeout: 300 * time.Millisecond}
 
+// One miss is not an answer. A single 300ms GET is easily outlived by a GC pause or a busy log flush in a perfectly healthy daemon, and a false "not running" makes the caller spawn a second one, which then fails to bind the port and exits loudly — seven times in the log, every one against a daemon that was demonstrably alive and serving. Three tries costs at most 900ms on the genuine cold-start path, where a spawn is about to happen anyway.
 func pingDaemon() bool {
-	resp, err := daemonPingClient.Get("http://127.0.0.1:" + DaemonPort + "/ping")
-	if err != nil {
-		return false
+	for i := 0; ; i++ {
+		resp, err := daemonPingClient.Get("http://127.0.0.1:" + DaemonPort + "/ping")
+		if err == nil {
+			resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		}
+		if i == 2 {
+			return false
+		}
+		time.Sleep(150 * time.Millisecond)
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
 }
 
 // checkDaemonBuildMismatch GETs url (the daemon's /ping) and compares its build identity against this process's own buildIdentity. A daemon and a freshly-launched client always read the same executable path, so the only way they'd disagree is a daemon process that's been running since before the file on disk was last overwritten — i.e. a rebuild happened and the daemon is still running the old code. Returns "" (no warning) on any failure or an empty/matching body — this is a diagnostic, never a reason to block startup.

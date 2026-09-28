@@ -33,20 +33,19 @@ func clusterThreshold() string {
 	return strconv.FormatFloat(t, 'f', -1, 64)
 }
 
-// sherpaBinary returns the path to the diarizer, or an error naming what is missing. $ORA_SHERPA overrides the location.
-func sherpaBinary(dataDir string) (string, error) {
-	dir := filepath.Join(dataDir, "sherpa")
-	bin := filepath.Join(dir, sherpaBinaryName)
+// SherpaBinary returns the path to the diarizer, or an error naming the exact path of each missing file. $ORA_SHERPA overrides the location.
+func SherpaBinary(dataDir string) (string, error) {
+	bin := filepath.Join(dataDir, "sherpa", sherpaBinaryName)
 	if p := os.Getenv("ORA_SHERPA"); p != "" {
 		bin = p
-		dir = filepath.Dir(p)
 	}
+	models := []string{filepath.Join(filepath.Dir(bin), sherpaSegmentation), filepath.Join(filepath.Dir(bin), sherpaEmbedding)}
 	if info, err := os.Stat(bin); err != nil || info.IsDir() {
-		return "", fmt.Errorf("no diarizer at %s", bin)
+		return "", fmt.Errorf("no diarizer at %s, and it needs %s beside it", bin, strings.Join(models, " and "))
 	}
-	for _, m := range []string{sherpaSegmentation, sherpaEmbedding} {
-		if _, err := os.Stat(filepath.Join(dir, m)); err != nil {
-			return "", fmt.Errorf("the diarizer at %s is missing %s beside it", bin, m)
+	for _, m := range models {
+		if _, err := os.Stat(m); err != nil {
+			return "", fmt.Errorf("no %s at %s, beside the diarizer", filepath.Base(m), m)
 		}
 	}
 	return bin, nil

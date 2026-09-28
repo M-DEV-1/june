@@ -10,6 +10,16 @@ import (
 
 // This file is the overnight dreaming loop's storage: the per-night run bookkeeping and the hypotheses table. Both are private working state with no FTS mirror — a deliberate anti-pollution decision, so an unvetted guess can never be retrieved into a prompt. Each stage of a night commits through one method here, in one transaction that writes the stage's outputs and its stages_done token together, which is what makes a preempted stage leave nothing behind.
 
+// The stages_done tokens for the five dream stages, in the order a night runs them. internal/dream reads these same constants to decide which stages a night has already committed, so the token spelled here and the token checked there can never drift apart.
+const (
+	StageHyp        = "hyp"
+	StageUnd        = "und"
+	StageCompact    = "compact"
+	StageReplay     = "replay"
+	StageProcedures = "procedures"
+	StageLessons    = "lessons"
+)
+
 // DreamRun is one night's bookkeeping row: which stages have committed, the one-line report, and whether the night finished.
 type DreamRun struct {
 	Night      string
@@ -205,7 +215,7 @@ func (s *Store) CommitHypothesisStage(ctx context.Context, night string, verdict
 				return err
 			}
 		}
-		return markStageDone(ctx, tx, night, "hyp")
+		return markStageDone(ctx, tx, night, StageHyp)
 	})
 }
 
@@ -219,11 +229,11 @@ func (s *Store) CommitUnderstandingStage(ctx context.Context, night, understandi
 		if err := upsertDiary(ctx, tx, "", "understanding", understanding); err != nil {
 			return err
 		}
-		return markStageDone(ctx, tx, night, "und")
+		return markStageDone(ctx, tx, night, StageUnd)
 	})
 }
 
-// DiaryCompaction is one coarse diary entry replacing a run of finer ones: the (day, kind) to upsert with its content, and the finer-kind constituent days to delete in the same transaction.
+// DiaryCompaction is one coarse diary entry summarising a run of finer ones: the (day, kind) to upsert with its content, and the finer-kind constituent days to reparent under it in the same transaction.
 type DiaryCompaction struct {
 	Day             string
 	Kind            string
@@ -232,7 +242,8 @@ type DiaryCompaction struct {
 	ConstituentDays []string
 }
 
-// CommitCompactStage writes one tier of the night's diary compaction in a single transaction: every coarse entry upserted, its constituents deleted (the diary FTS triggers keep the mirror in sync), and — when done is set — the 'compact' token in stages_done. The runner calls this once per tier and sets done only on the last call, so the token lands exactly once; a night with nothing to compact is one call with no compactions that still commits the token.
+// CommitCompactStage writes one tier of the night's diary compaction in a single transaction: every coarse entry upserted, its constituents reparented under it, and — when done is set — the 'compact' token in stages_done. The runner calls this once per tier and sets done only on the last call, so the token lands exactly once; a night with nothing to compact is one call with no compactions that still commits the token.
+// The constituents are kept, not deleted. The coarse entry is a model rewrite of seven day pages and there is no other copy of what those days said, so this follows ReplaceSummariesWithDigest and ReplaceAllNotes in keeping the source of a compaction. DiaryEntriesThrough skips a reparented row, which is what stops the next night rolling the same week up again.
 func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []DiaryCompaction, done bool) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.CommitCompactStage")
@@ -243,15 +254,20 @@ func (s *Store) CommitCompactStage(ctx context.Context, night string, comps []Di
 			if err := upsertDiary(ctx, tx, c.Day, c.Kind, c.Content); err != nil {
 				return err
 			}
+			var coarseID int64
+			if err := tx.QueryRowContext(ctx,
+				`SELECT id FROM diary WHERE day = ? AND kind = ?`, c.Day, c.Kind).Scan(&coarseID); err != nil {
+				return fmt.Errorf("read compacted diary parent: %w", err)
+			}
 			for _, day := range c.ConstituentDays {
 				if _, err := tx.ExecContext(ctx,
-					`DELETE FROM diary WHERE kind = ? AND day = ?`, c.ConstituentKind, day); err != nil {
-					return fmt.Errorf("delete compacted diary row: %w", err)
+					`UPDATE diary SET parent_id = ? WHERE kind = ? AND day = ?`, coarseID, c.ConstituentKind, day); err != nil {
+					return fmt.Errorf("reparent compacted diary row: %w", err)
 				}
 			}
 		}
 		if done {
-			return markStageDone(ctx, tx, night, "compact")
+			return markStageDone(ctx, tx, night, StageCompact)
 		}
 		return nil
 	})
@@ -264,7 +280,18 @@ func (s *Store) CommitReplayStage(ctx context.Context, night string) error {
 	defer span.End()
 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		return markStageDone(ctx, tx, night, "replay")
+		return markStageDone(ctx, tx, night, StageReplay)
+	})
+}
+
+// CommitProceduresStage marks the night's procedures token done so the stage runs once a night. The procedures stage's deliverable is the "How I did X" notes it writes directly through LogNote, not a row this transaction owns, so like CommitReplayStage there is nothing else to write here — the token alone is what tells the next wake the night's procedures stage is not to be redone.
+func (s *Store) CommitProceduresStage(ctx context.Context, night string) error {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.CommitProceduresStage")
+	defer span.End()
+
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		return markStageDone(ctx, tx, night, StageProcedures)
 	})
 }
 

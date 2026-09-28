@@ -2,11 +2,13 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"go.opentelemetry.io/otel/attribute"
 	"log/slog"
 	"ora/internal/memory"
 	"ora/internal/obs"
+	"ora/internal/util"
 	"strings"
 	"time"
 )
@@ -20,10 +22,39 @@ type Note struct {
 	UpdatedAt time.Time
 }
 
+// ArchivedNote is a fact that consolidation replaced, as it was when it was replaced.
+type ArchivedNote struct {
+	NoteID     int64
+	Content    string
+	Kind       string
+	CreatedAt  time.Time
+	ArchivedAt time.Time
+}
+
+// ArchivedNotes returns every fact consolidation has replaced, oldest archive first. Input: none. Output: the archived rows, or an error from the store.
+func (s *Store) ArchivedNotes(ctx context.Context) ([]ArchivedNote, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT note_id, content, kind, created_at, archived_at FROM notes_archive ORDER BY archived_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("archived notes: %w", err)
+	}
+	defer rows.Close()
+	var out []ArchivedNote
+	for rows.Next() {
+		var a ArchivedNote
+		var created, archived sql.NullTime
+		if err := rows.Scan(&a.NoteID, &a.Content, &a.Kind, &created, &archived); err != nil {
+			return nil, fmt.Errorf("archived notes: scan: %w", err)
+		}
+		a.CreatedAt, a.ArchivedAt = created.Time, archived.Time
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // normalizeNoteContent trims, collapses internal whitespace to single spaces, and lowercases — used by LogNote's dedup check to catch paraphrased restatements.
 // Does not strip punctuation, so "user likes go" and "user likes go." still stay distinct rows.
 func normalizeNoteContent(s string) string {
-	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+	return util.OneLine(strings.ToLower(s))
 }
 
 // LogNote inserts a note. Idempotent on (content, kind) — returns existing id.
@@ -82,7 +113,7 @@ func (s *Store) LogNote(ctx context.Context, content, kind string) (int64, error
 			meta := map[string]string{
 				"source":     "note",
 				"kind":       string(memory.KindFact),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": nowStamp(),
 			}
 			if err := vidx.Add(embedCtx, fmt.Sprintf("note:%d", id), text, vec, meta); err != nil {
 				slog.Error("async note vector index add failed", "note_id", id, "error", err)
@@ -114,6 +145,38 @@ func (s *Store) findNoteByNormalizedContent(ctx context.Context, normalized, kin
 		return 0, false, fmt.Errorf("iterate existing notes: %w", err)
 	}
 	return 0, false, nil
+}
+
+// NotesSince returns the notes touched at or after since, newest first. Input: the context and the bound. Output: every note whose created_at or updated_at is at or after the bound, so a note written days ago and closed today still comes back — that is the day it belongs on. This is what GET /today reads instead of GetNotes, which has no bound at all and grows with the whole store.
+func (s *Store) NotesSince(ctx context.Context, since time.Time) ([]Note, error) {
+	tracer := obs.GetTracer(ctx, "ora.db")
+	ctx, span := tracer.Start(ctx, "DB.NotesSince")
+	defer span.End()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, kind, created_at, updated_at FROM notes WHERE created_at >= ? OR updated_at >= ? ORDER BY id DESC`,
+		sqliteUTC(since), sqliteUTC(since))
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("query notes since: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Note
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Content, &n.Kind, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			span.RecordError(err)
+			return nil, fmt.Errorf("scan note since: %w", err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("iterate notes since: %w", err)
+	}
+	span.SetAttributes(attribute.Int("db.note_count", len(out)))
+	return out, nil
 }
 
 // GetNotes returns all notes ordered newest first.
@@ -149,31 +212,39 @@ func (s *Store) RelevantNotes(ctx context.Context, focus string, limit int) ([]s
 	if focus == "" {
 		return nil, nil
 	}
-	hits, err := s.SearchMemory(ctx, focus)
+	rows := limit
+	if rows <= 0 {
+		rows = 10
+	}
+	hits, err := s.searchMemoryWindow(ctx, focus, "note", time.Time{}, time.Time{}, rows)
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	out := make([]string, 0, len(hits))
 	for _, h := range hits {
-		if h.Source != "note" {
-			continue
-		}
-		if limit > 0 && len(out) >= limit {
-			break
-		}
 		out = append(out, h.Content)
 	}
 	return out, nil
 }
 
-// DeleteNote removes a note by id. FTS5 mirror is dropped via trigger. Its vector (if any) is deleted async/best-effort — same non-blocking pattern as LogNote's embed goroutine — so a vector-index error never fails the SQL delete the model is waiting on.
+// DeleteNote removes a note by id, erroring when no such note exists. FTS5 mirror is dropped via trigger. Its vector (if any) is deleted async/best-effort — same non-blocking pattern as LogNote's embed goroutine — so a vector-index error never fails the SQL delete the model is waiting on.
 func (s *Store) DeleteNote(ctx context.Context, id int64) error {
 	tracer := obs.GetTracer(ctx, "ora.db")
 	ctx, span := tracer.Start(ctx, "DB.DeleteNote")
 	defer span.End()
 
-	_, err := s.db.ExecContext(ctx, `DELETE FROM notes WHERE id = ?`, id)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM notes WHERE id = ?`, id)
 	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+
+	// A no-op DELETE is not success, for the same reason UpdateNote guards its own: the model can hand us an id it invented, and reporting "deleted" tells the user their note is gone when it is not. Returning before the vector work below also stops the "note:<id>" Delete from evicting the vector of some other real note.
+	if n, rerr := res.RowsAffected(); rerr != nil {
+		span.RecordError(rerr)
+		return fmt.Errorf("delete note: %w", rerr)
+	} else if n == 0 {
+		err := fmt.Errorf("no note with id %d", id)
 		span.RecordError(err)
 		return err
 	}
@@ -241,7 +312,7 @@ func (s *Store) UpdateNote(ctx context.Context, id int64, content string) error 
 			meta := map[string]string{
 				"source":     "note",
 				"kind":       string(memory.KindFact),
-				"created_at": time.Now().UTC().Format(time.RFC3339),
+				"created_at": nowStamp(),
 			}
 			if err := vidx.Add(vecCtx, vecID, text, vec, meta); err != nil {
 				slog.Error("async note vector re-add failed", "note_id", id, "error", err)
@@ -322,6 +393,11 @@ func (s *Store) ReplaceAllNotes(ctx context.Context, contents []string) error {
 		return fmt.Errorf("replace notes: iterate old ids: %w", err)
 	}
 
+	// The facts being replaced are the source of the merged ones; keep them where a wrong merge can be traced and undone.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO notes_archive (note_id, content, kind, created_at, updated_at) SELECT id, content, kind, created_at, updated_at FROM notes WHERE kind = 'fact'`); err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("replace notes: archive: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM notes WHERE kind = 'fact'`); err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("replace notes: clear: %w", err)

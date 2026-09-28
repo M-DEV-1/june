@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"ora/internal/util"
 )
 
 // EmbeddingGemma is trained with these instruction prefixes and measurably loses retrieval quality without them, so they are applied here rather than left to callers. Source: the model card's "Prompt instructions" table (Retrieval-query and Retrieval-document rows).
@@ -80,13 +81,7 @@ func inputTooLong(status int, body string) bool {
 	if status < 500 {
 		return false
 	}
-	lower := strings.ToLower(body)
-	for _, s := range tooLongSignals {
-		if strings.Contains(lower, s) {
-			return true
-		}
-	}
-	return false
+	return util.ContainsAny(body, tooLongSignals...)
 }
 
 // embedOnce posts one already-prefixed string to the server and returns the vector it produced. The second return value says whether the failure was the server rejecting the input for its size, which is the only failure Embed retries with shorter text.
@@ -112,8 +107,7 @@ func (l *LocalEmbedder) embedOnce(ctx context.Context, input string) ([]float32,
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		text := strings.TrimSpace(string(snippet))
+		text := util.BodySnippet(resp.Body)
 		return nil, inputTooLong(resp.StatusCode, text), fmt.Errorf("embed: server returned %d: %s", resp.StatusCode, text)
 	}
 
