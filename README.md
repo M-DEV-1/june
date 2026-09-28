@@ -22,12 +22,17 @@ curl -fsSL https://raw.githubusercontent.com/M-DEV-1/june/main/install.sh | bash
 
 ## What June does
 
-- **Screen memory.** Reads the window you're in. Ask about it later and see the lines it used.
-- **Meeting notes.** Records calls and transcribes them on your machine. You get decisions and who owes what.
-- **Tasks.** Promises from calls, with the call they came from.
-- **Voice.** `Ctrl+Alt+Space` opens the bar. Space dictates, Shift+Space talks.
-- **Computer use.** Opens apps and clicks through them. Asks before anything it can't undo.
-- **Local-first.** Data stays in `~/.local/share/june`. Bring your own Gemini, Claude or ChatGPT.
+**Remembers your screen.** June reads the window you're working in through the Linux accessibility bus, and takes a screenshot only when an app won't say what's in it. Ask about it days later and the answer quotes the lines it came from.
+
+**Takes your meeting notes.** It hears the call start, records both sides, and transcribes and separates speakers on your machine with whisper.cpp and sherpa-onnx. When the call ends you get what was decided, what was said and what you owe.
+
+**Turns promises into tasks.** Anything you took on in a call lands in Tasks with the meeting beside it. Each morning brings a brief, and each evening a page on the day.
+
+**Talks back.** `Ctrl+Alt+Space` opens the bar over any app. Type, press Space to dictate, or Shift+Space for a live voice conversation.
+
+**Drives your desktop.** It opens apps, finds the button and clicks it, checking every step, and asks before anything it can't undo.
+
+**Stays yours.** Local-first and open source. Memory search runs on llama.cpp on your own machine. Bring the brain you already pay for: a Gemini key, or a Claude or ChatGPT subscription.
 
 <div align="center">
 
@@ -44,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/M-DEV-1/june/main/install.sh | bash
 
 ## Your data
 
-Everything stays in `~/.local/share/june`: the database, recordings, screenshots and config. Meeting transcription, speaker separation and memory search run on your machine. The only thing sent out is a request to the brain you picked.
+Everything stays on your machine: the database, recordings, screenshots and config. Meeting transcription, speaker separation and memory search run on your machine. The only thing sent out is a request to the brain you picked.
 
 ## Uninstall
 
