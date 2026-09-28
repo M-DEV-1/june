@@ -1,6 +1,4 @@
 <div align="center">
-  <img src="./docs/images/logo.png" width="600" alt="JUNE Logo">
-
   <p align="center">
     <img alt="Go Version" src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go">
     <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-0078D6?style=flat-square">
