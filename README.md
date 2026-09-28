@@ -12,10 +12,6 @@ An open-source, local-first AI assistant that remembers your screen and your mee
   <img alt="License" src="https://img.shields.io/badge/license-GPLv3-white?style=flat-square">
 </p>
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/M-DEV-1/june/main/install.sh | bash
-```
-
 <img src="docs/images/hero.jpg" alt="June answering a question from an email it read that morning, with the lines it used highlighted" width="100%">
 
 </div>
@@ -42,7 +38,11 @@ curl -fsSL https://raw.githubusercontent.com/M-DEV-1/june/main/install.sh | bash
 
 ## Getting started
 
-1. Run the install command above. It names any system libraries that are missing.
+```bash
+curl -fsSL https://raw.githubusercontent.com/M-DEV-1/june/main/install.sh | bash
+```
+
+1. Run the install command. It names any system libraries that are missing.
 2. Log out and back in, so GNOME loads June's window extension.
 3. Add a brain: a Gemini API key, or a Claude or ChatGPT subscription.
 4. Run `june doctor`. It lists anything still missing.
