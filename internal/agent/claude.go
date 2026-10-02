@@ -321,6 +321,7 @@ type claudeRunner func(ctx context.Context, args []string, stdin string) ([]byte
 func runClaudeCLI(binary string) claudeRunner {
 	return func(ctx context.Context, args []string, stdin string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, binary, args...)
+		util.HideConsole(cmd)
 		cmd.Stdin = strings.NewReader(stdin)
 		cmd.Dir = os.TempDir()
 		var out, stderr bytes.Buffer

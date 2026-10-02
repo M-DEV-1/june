@@ -195,8 +195,12 @@ const customKeybindingSchemaPrefix = mediaKeysSchema + ".custom-keybinding:"
 // windowToggleCommand is the command the june-window-hotkey wiring registers, which marks a custom keybinding as ours among however many others GNOME holds.
 const windowToggleCommand = "june-window-toggle"
 
-// windowHotkey reads the GNOME accelerator that opens the window, live off gsettings. Output: the binding string (for example "<Control><Alt>space"), or "" when no keybinding runs june-window-toggle, gsettings is unavailable, or the platform is not Linux — GNOME's custom-keybindings mechanism is what internal/window wires the hotkey through, and there is nothing else to fall back to.
+// windowHotkey reads the GNOME accelerator that opens the window, live off gsettings. Output: the binding string (for example "<Control><Alt>space"), or "" when no keybinding runs june-window-toggle, gsettings is unavailable, or the platform is neither Linux nor Windows (Windows always answers the chord the window registers) — GNOME's custom-keybindings mechanism is what internal/window wires the hotkey through, and there is nothing else to fall back to.
 func windowHotkey() string {
+	// The Windows window registers this chord itself (app/src-tauri/src/lib.rs), so there is nothing to read.
+	if hotkeyGOOS == "windows" {
+		return "<Control><Alt>space"
+	}
 	if hotkeyGOOS != "linux" {
 		return ""
 	}

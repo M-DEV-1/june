@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"june/internal/util"
 )
 
 // agyIdleTimeout is how long a session's process may sit unused before it is killed. A package var so a test can shrink it to pay no real wall-clock cost.
@@ -43,6 +45,7 @@ type agyProcess struct {
 
 func (p *agyProcess) Start(ctx context.Context, env, args []string) error {
 	cmd := exec.Command(agyBinary, args...)
+	util.HideConsole(cmd)
 	cmd.Env = env
 	cmd.Dir = os.TempDir()
 	stdin, err := cmd.StdinPipe()

@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"june/internal/util"
@@ -146,7 +145,7 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 	// Both CLIs read project files, per-directory settings and instruction files out of their working directory, and the daemon's working directory is wherever the user happened to launch it from. An empty temporary directory makes one run look like every other.
 	cmd.Dir = os.TempDir()
 	// Its own process group, so the kill below reaches the children a CLI spawns as well as the CLI, and none of them can hold stdout open after the CLI itself is gone.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	util.OwnProcessGroup(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -157,7 +156,7 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 		return nil, err
 	}
 	name := filepath.Base(binary)
-	kill := func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	kill := func() { util.KillProcessGroup(cmd) }
 
 	// stdout is read on its own goroutine, which hands back the bytes as soon as they form a complete JSON value or the pipe closes, so the wait below can be cut short by either the answer or the clock.
 	type read struct {

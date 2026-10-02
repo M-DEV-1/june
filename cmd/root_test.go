@@ -55,6 +55,9 @@ func TestCheckDaemonBuildMismatch(t *testing.T) {
 // TestSecureEnvFile_RestrictsPermissions verifies .env (which holds the Gemini API key) gets locked down to 0600 — it commonly defaults to 0644 (world-readable) on a multi-user machine.
 func TestSecureEnvFile_RestrictsPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
+		t.Skip("secureEnvFile does nothing on Windows, which has no POSIX permission bits")
+	}
+	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits don't apply on Windows")
 	}
 	path := filepath.Join(t.TempDir(), ".env")

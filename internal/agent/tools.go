@@ -157,7 +157,8 @@ func isSensitivePath(path string) bool {
 func readClipboard() string {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-Command", "Get-Clipboard")
+		cmd = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard")
+		util.HideConsole(cmd)
 	} else {
 		cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
 	}
@@ -172,7 +173,8 @@ func readClipboard() string {
 func RunShellCommand(command string) string {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-Command", command)
+		cmd = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", command)
+		util.HideConsole(cmd)
 	} else {
 		cmd = exec.Command("sh", "-c", command)
 	}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1021,13 +1020,18 @@ func (a *Agent) raiseWindow(ctx context.Context, app string) (bool, string) {
 	return false, ""
 }
 
-// defaultBrowserID is the desktop id of the browser the desktop opens links with, as xdg-settings reports it ("brave_brave.desktop", "firefox.desktop", "org.mozilla.firefox.desktop"), or "" when it cannot say. A variable so a test can name one without the desktop.
-var defaultBrowserID = func() string {
-	out, err := exec.Command("xdg-settings", "get", "default-web-browser").Output()
-	if err != nil {
-		return ""
+// browserFromProgID turns the ProgId Windows records for the default browser into the browser's executable stem, which is what raiseBrowser matches against a window's class there. Input: a ProgId such as "BraveHTML", "MSEdgeHTM" or "FirefoxURL-308046B0AF4A39CB". Output: the lowercased stem ("brave", "msedge", "firefox"), or the lowercased ProgId up to its first dot or dash when it carries none of the usual suffixes.
+func browserFromProgID(progID string) string {
+	id := strings.ToLower(progID)
+	if i := strings.IndexAny(id, ".-"); i >= 0 {
+		id = id[:i]
 	}
-	return strings.TrimSpace(string(out))
+	for _, suffix := range []string{"bhtml", "html", "htm", "url", "stable"} {
+		if stem, ok := strings.CutSuffix(id, suffix); ok && stem != "" {
+			return stem
+		}
+	}
+	return id
 }
 
 // raiseBrowser brings the default browser's window to the front through the shell extension, after open_url has put a page in it: xdg-open hands the browser no activation token, so the shell keeps the new tab behind whatever was in front, and observe_screen then reads the old window and the model opens the page again. The browser's window is the one whose class shares a word with the browser's desktop id, which is how brave_brave.desktop finds wm_class brave-browser and org.mozilla.firefox.desktop finds firefox without a table of browsers. Input: a context bounding the D-Bus calls. Output: how it was raised ("pid 1234"), or "" when there is no extension, no known browser, no window of it open yet, or the raise did not land.

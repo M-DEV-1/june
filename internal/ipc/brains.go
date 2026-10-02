@@ -326,6 +326,7 @@ func agyModels() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), agyModelsTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "agy", "models")
+	util.HideConsole(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -356,7 +357,9 @@ func firstFields(out string, header bool) []string {
 func ollamaList() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), ollamaListTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ollama", "list").Output()
+	cmd := exec.CommandContext(ctx, "ollama", "list")
+	util.HideConsole(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return []string{}
 	}

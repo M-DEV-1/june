@@ -1,4 +1,5 @@
-// Package window brings an already-running window belonging to another application to the front, on GNOME/Wayland, where the shell itself refuses this to any ordinary unprivileged caller. It talks over D-Bus to a small GNOME Shell extension (packaging/gnome-extension/june@june.local) that runs inside the shell's own process and therefore is not subject to that restriction.
+//go:build linux
+
 package window
 
 import (
@@ -42,20 +43,6 @@ func (r *Raiser) object() dbus.BusObject {
 func (r *Raiser) Available(ctx context.Context) (bool, error) {
 	_, err := r.List(ctx)
 	return err == nil, err
-}
-
-// Window is one open window as the extension's List reports it. Input fields, filled from the extension's JSON: ID, the window's own id; Pid, the pid of the process that owns it; WmClass, its WM_CLASS (or app id on a Wayland-native client); Title, its title; Focused, whether it currently has focus.
-type Window struct {
-	ID      int64  `json:"id"`
-	Pid     uint32 `json:"pid"`
-	WmClass string `json:"wm_class"`
-	Title   string `json:"title"`
-	Focused bool   `json:"focused"`
-	// X, Y, W and H are the window's frame in logical screen pixels, as the shell reports it; all zero from an extension older than the one that reports them.
-	X int `json:"x"`
-	Y int `json:"y"`
-	W int `json:"width"`
-	H int `json:"height"`
 }
 
 // List asks the extension for every open window. Input: a context bounding the D-Bus round trip. Output: one Window per open window the extension reported, or an error if the D-Bus call itself failed or its JSON could not be parsed.

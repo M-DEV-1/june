@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,10 @@ func TestWindowBinary_SkipsWhatCannotBeRun(t *testing.T) {
 		"no execute bit":      notExecutable,
 		"nothing of the name": filepath.Join(dir, "missing"),
 	} {
+		// Windows has no execute bit, so there any file counts as runnable.
+		if name == "no execute bit" && runtime.GOOS == "windows" {
+			continue
+		}
 		t.Setenv("JUNE_WINDOW", path)
 		if got, _, err := windowBinary(); err == nil && got == path {
 			t.Errorf("%s: windowBinary returned %q, which cannot be run", name, got)

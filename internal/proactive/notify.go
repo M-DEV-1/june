@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -85,8 +86,11 @@ type BusNotifier struct {
 	keyed map[string]uint32
 }
 
-// NewNotifier returns the notifier the daemon should post with: the session bus when there is one, and notify-send when there is not. Input: a context that ends the bus listener. Output: a notifier, always.
+// NewNotifier returns the notifier the daemon should post with: a text-only toast on Windows, the session bus when there is one, and notify-send when there is not. Input: a context that ends the bus listener. Output: a notifier, always.
 func NewNotifier(ctx context.Context) Notifier {
+	if runtime.GOOS == "windows" {
+		return toastNotifier{}
+	}
 	n, err := NewBusNotifier(ctx)
 	if err != nil {
 		slog.Warn("no session bus for notifications, falling back to notify-send", "error", err)

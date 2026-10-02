@@ -437,30 +437,6 @@ func Verify(ctx context.Context, ref, role, label string, x, y, w, h int) error 
 	return VerifyAgainst(nowRole, nowLabel, role, label)
 }
 
-// Relabelled reports that the element is still there, still the same role, and still answering on the same reference, but carries a different name than the list recorded. It is a distinct type because it is the one difference a caller can carry on through: a Play button that now says Pause is the same button, and the only thing that must change is which name the stop line is judged against.
-type Relabelled struct{ Now, Was string }
-
-func (e *Relabelled) Error() string {
-	return fmt.Sprintf("it is now labelled %q, not %q", e.Now, e.Was)
-}
-
-// VerifyAgainst compares what an element is now with what observe_screen recorded for it. Input: the role and label read from the element just now, then the role and label the numbered list showed. Output: nil when they still describe the same element, a *Relabelled when only the name changed, or an error naming what else changed; an empty label in the list means the list held none, and a content role's label is not compared at all.
-// Exported so an end-to-end test can put a fake accessibility read through the same decision the bus-backed one makes, rather than a second copy of the rule that can drift from it.
-func VerifyAgainst(nowRole, nowLabel string, role, label string) error {
-	// AT-SPI reports a node whose widget was destroyed as role "invalid", which is the element gone, not a new role.
-	if nowRole == "" || nowRole == "invalid" {
-		return errors.New("the element has gone")
-	}
-	if nowRole != role {
-		return fmt.Errorf("it is now a %s, not a %s", nowRole, role)
-	}
-	// A content role's label is the node's own contents — what is typed in an entry, what a run of page text says — not a name anybody chose for it, so it changes whenever the user types and says nothing about whether this is still the same element. The role still does. Comparing it refused a click on a box the user had just typed into, which is the ordinary thing to happen between listing a box and clicking it.
-	if label != "" && !act.ContentRole(role) && nowLabel != label {
-		return &Relabelled{Now: nowLabel, Was: label}
-	}
-	return nil
-}
-
 // Focused reports whether an element holds the keyboard focus right now, so a caller about to type can check that the box it is typing into is the box its guards were applied to: a click that opened a dialog, or an application that moved the focus itself, leaves the remembered element no longer the one the keys reach. Input: a context and the node's Ref from act.Node. Output: true when STATE_FOCUSED is set on that element, false when the element answered and the bit is not set, and an error when the answer says nothing either way — a malformed ref, an unreachable bus, or a GetState that timed out, named an element that has gone, or came back with no state words at all.
 // The empty answer is an error rather than a false because the two are not the same thing to the caller: a toolkit that does not publish the bit on the node the walk listed, which Chromium and Electron often do not, would otherwise read as "some other element has the keyboard" and stop a legitimate typing.
 func Focused(ctx context.Context, ref string) (bool, error) {

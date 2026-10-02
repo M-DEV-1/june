@@ -52,15 +52,12 @@ var namedKeys = map[string]int32{
 	"volumeup": 115, "volumedown": 114, "mute": 113, "playpause": 164, "nexttrack": 163, "previoustrack": 165,
 }
 
-// keyName folds the separators a key name is written with, so Page_Down, "Page Down" and PageDown all reach the one "pagedown" the table holds. The X11 keysym spelling is the one a model reaches for first, and it was refused. No name in the table contains an underscore or a space, so nothing is made ambiguous by dropping them; "-" and "minus" are untouched.
-var keyName = strings.NewReplacer("_", "", " ", "")
-
 // chord splits a key name like "Ctrl+L" into its evdev keycodes, in press order (modifiers first, main key last). A bare key name like "Enter" or "l" returns a single-element slice.
 func chord(name string) ([]int32, error) {
 	parts := strings.Split(name, "+")
 	codes := make([]int32, 0, len(parts))
 	for _, p := range parts {
-		code, ok := namedKeys[keyName.Replace(strings.ToLower(strings.TrimSpace(p)))]
+		code, ok := namedKeys[keyPart(p)]
 		if !ok {
 			return nil, fmt.Errorf("unknown key %q", p)
 		}

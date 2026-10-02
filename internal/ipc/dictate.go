@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -341,12 +342,16 @@ const (
 // The caller holds recorder.GPURun for the whole run (see finish), so this never allocates on the card beside a meeting's decode.
 // recorder.RunWhisper now asks the embedding server off the card before its first attempt, so a dictation no longer walks onto a card the embedder still holds. It asks once rather than polling the way a meeting transcription does, because somebody is waiting on a dictation.
 func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
-	bin := filepath.Join(config.DataDir(), "whispercpp", whisperCPPBinaryName)
+	name := whisperCPPBinaryName
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(config.DataDir(), "whispercpp", name)
 	if p := os.Getenv("JUNE_WHISPER_CPP"); p != "" {
 		bin = p
 	}
 	if info, err := os.Stat(bin); err != nil || info.IsDir() {
-		return "", fmt.Errorf("no whisper.cpp build at %s: put %s and its model there", bin, whisperCPPBinaryName)
+		return "", fmt.Errorf("no whisper.cpp build at %s: put %s and its model there", bin, name)
 	}
 
 	// -nt drops the timestamps, which a dictation has no use for, so stdout is the words and nothing else.

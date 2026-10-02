@@ -22,7 +22,14 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The Linux hotkey reaches the window as SIGHUP from the desktop's own keybinding; see listen_for_toggle_signal in src/lib.rs.
+[target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+
+# Windows delivers a global hotkey to a hidden window, so there the window registers Ctrl+Alt+Space itself; see register_toggle_hotkey in src/lib.rs.
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-global-shortcut = "~2.3"
 
 # Same gtk/gdkx11 major.minor Tauri itself depends on for this target, so Cargo unifies to one copy instead of linking two GTK bindings.
 [target.'cfg(target_os = "linux")'.dependencies]
