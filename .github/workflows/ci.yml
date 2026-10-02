@@ -1,4 +1,4 @@
-# Builds and tests the Go daemon and the Tauri window on Linux and Windows on every push.
+# Builds and tests the Go daemon and the Tauri window on Linux and Windows on every push, and fails on dead code in any of the three languages.
 name: ci
 
 # Push only: a pull request from a branch of this repository is already covered by the push, and both would run every job twice.
@@ -55,5 +55,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/src-tauri
+      # Warnings are errors, which makes an unused function, import or variable in the Rust code fail the build.
       - run: cargo test --locked
         working-directory: app/src-tauri
+        env:
+          RUSTFLAGS: -Dwarnings
+
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go mod tidy -diff
+      - run: |
+          go install golang.org/x/tools/cmd/deadcode@v0.50.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          .github/deadcode.sh
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      # knip runs through npx at a pinned version rather than as a dev dependency: adding any package re-resolves the lockfile, and the trust policy then refuses semver@6.3.1.
+      - working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          npx --yes knip@6.38.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete@0.9.2
+      - run: cargo machete app/src-tauri

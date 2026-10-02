@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/genai"
 	"june/internal/db"
+
+	"google.golang.org/genai"
 )
 
 const (

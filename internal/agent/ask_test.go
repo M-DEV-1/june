@@ -358,7 +358,7 @@ func TestAskText_GateRefusalReachesNoBackendAndReadsAsQuota(t *testing.T) {
 	if err == nil {
 		t.Fatal("askText succeeded with a refusing gate")
 	}
-	if !GeminiCannotAnswer(err) {
+	if !geminiCannotAnswer(err) {
 		t.Errorf("error %v is not the quota shape the hand-over looks for", err)
 	}
 	if requests != 0 {

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"june/internal/agent"
 	"june/internal/config"
 
 	"google.golang.org/genai"
@@ -46,10 +45,6 @@ func TestWithDailyQuota_BackgroundReservesShareForAsks(t *testing.T) {
 	_, err := asks(context.Background(), "q")
 	if !errors.As(err, &q) {
 		t.Fatalf("ask call 3: got err %v, want *ErrDailyQuota once the full daily limit is spent", err)
-	}
-	// The refusal must read as Gemini refusing, so an ask hands over to Codex and Claude the same way it does on a real 429.
-	if !agent.GeminiCannotAnswer(err) {
-		t.Errorf("agent.GeminiCannotAnswer(%v) = false, want the ask handed over", err)
 	}
 }
 

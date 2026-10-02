@@ -214,15 +214,6 @@ func (p *serverProcess) detachLocked() (*exec.Cmd, chan struct{}) {
 	return cmd, exited
 }
 
-func (p *serverProcess) pid() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.aliveLocked() {
-		return 0
-	}
-	return p.cmd.Process.Pid
-}
-
 func (p *serverProcess) Close() error {
 	p.mu.Lock()
 	p.closed = true

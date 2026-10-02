@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -116,11 +115,6 @@ func personalContextBlock(entries []db.PersonalEntry) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// PersonalContextBlock renders the personal context store exactly as the live handshake renders it, for callers outside this package that build the same system prompt — the trajectory eval in evals/. Input: every entry in the store. Output: the block text, or "" when there are no entries.
-func PersonalContextBlock(entries []db.PersonalEntry) string {
-	return personalContextBlock(entries)
-}
-
 // screenPersonalTokenCap bounds how much of the personal-context store a screen round carries, in the token estimate the rest of the codebase already uses for a provider that reports none: four characters to the token (see internal/tally/weekly.go's promptChars/4). A screen round has everything else in its prompt trimmed hard already (see screenTaskInstruction, screenRoundTools); the personal-context store should not be the one thing that still shows up whole.
 const screenPersonalTokenCap = 800
 
@@ -231,14 +225,4 @@ func systemInstructionTail(now time.Time, personal, contextStr string) string {
 		personal += "\n\n"
 	}
 	return fmt.Sprintf("\n\n%sWhere things stand with them right now, from memory:\n%s\n\nRight now it is %s, use this as your anchor for anything time-related (\"yesterday\", \"this morning\"); convert the period they mean into concrete since/until dates yourself.", personal, contextStr, nowAnchor(now))
-}
-
-// SystemInstruction renders the live session's system prompt for a given moment and context block, with this machine's real OS, shell and tool count. The counterfactual replay in evals/ uses it to hand a teacher model the same prompt shape the live model got at handshake. Input: the session's start time, the personal context block ("" for none), and the assembled context string. Output: the prompt text.
-func SystemInstruction(now time.Time, personal, contextStr string) string {
-	tools := liveTools()
-	toolsCount := 0
-	if len(tools) > 0 {
-		toolsCount = len(tools[0].FunctionDeclarations)
-	}
-	return systemInstructionText(now, runtime.GOOS, runtime.GOARCH, shellName(), personal, contextStr, toolsCount)
 }

@@ -44,6 +44,7 @@ $maxText = 100000
 $listed = [System.Collections.Generic.HashSet[int]]::new([int[]](50000, 50002, 50003, 50004, 50005, 50007, 50009, 50011, 50013, 50015, 50016, 50019, 50020, 50024, 50029, 50030, 50031))
 
 # UiaDesc describes one element with the short keys uiaNode in uia.go decodes. Input: the element, whether to read its cached or its live properties, the window handle to build its ref from ($null for none), and the longest value to keep. Output: a hashtable.
+# Callers cast the result to [hashtable]: a function's output arrives wrapped in a PSObject, and JavaScriptSerializer walking that wrapper's members fails with a circular reference.
 # Properties are compared with -eq rather than cast to bool, because an unsupported property comes back as AutomationElement.NotSupported, which casts to true.
 function UiaDesc($el, $c, $hw, $vcap) {
     $m = if ($c) { 'GetCachedPropertyValue' } else { 'GetCurrentPropertyValue' }
@@ -76,7 +77,7 @@ function UiaWalk($el, $d, $text, $hw) {
     # An element whose properties cannot be read, such as one that vanished during the walk, is left out rather than failing the whole read.
     try {
         if ($text -or $listed.Contains($el.GetCachedPropertyValue($Props.ct).Id)) {
-            $h = UiaDesc $el $true $hw $S.vcap
+            $h = [hashtable](UiaDesc $el $true $hw $S.vcap)
             $h.d = $d
             if ($text -and -not $h.pw -and $el.GetCachedPropertyValue($Props.tp) -eq $true) {
                 try {
@@ -133,7 +134,7 @@ function UiaHandle($q) {
         }
         'desc' {
             $ref = [string]$q['ref']
-            $h = UiaDesc (UiaFind $ref) $false $null 500
+            $h = [hashtable](UiaDesc (UiaFind $ref) $false $null 500)
             $h.id = $ref
             return $h
         }
@@ -173,7 +174,7 @@ function UiaHandle($q) {
         'focus' {
             $f = $AE::FocusedElement
             if ($null -eq $f) { return @{ none = $true } }
-            $h = UiaDesc $f $false ([long]$q['hwnd']) 500
+            $h = [hashtable](UiaDesc $f $false ([long]$q['hwnd']) 500)
             $h.p = [int]$f.Current.ProcessId
             if ($h.id) { $S.els[$h.id] = $f }
             return $h
