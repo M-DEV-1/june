@@ -192,7 +192,8 @@ function UiaServe($b64) {
         while ($null -ne $e.InnerException) { $e = $e.InnerException }
         $r = @{ err = [string]$e.Message }
     }
-    $juneOut.WriteLine($js.Serialize($r))
+    # $r holds the function's output, which PowerShell wraps in a PSObject; serializing the wrapper walks its reflection members and fails with a circular reference, so the base object is what goes out.
+    $juneOut.WriteLine($js.Serialize($r.psobject.BaseObject))
 }
 
 $juneOut = [IO.StreamWriter]::new([Console]::OpenStandardOutput(), [Text.UTF8Encoding]::new($false))
