@@ -182,7 +182,7 @@ func TestEngineCloseKillsTheChildAndRefusesFurtherEmbeds(t *testing.T) {
 	}
 }
 
-// TestEngineColdStartSurvivesACallerDeadline is the /embed-under-a-3s-retrieve-budget case: the daemon passes the client's request context into Embed, so a cold start that takes longer than that budget must return the caller its deadline error while the child keeps loading — not kill the child, which turns every retry into another spawn-wait-kill cycle and never reaches a loaded model.
+// TestEngineColdStartSurvivesACallerDeadline is the case of a caller with a 3s retrieve budget: the caller's context goes into Embed, so a cold start that takes longer than that budget must return the caller its deadline error while the child keeps loading — not kill the child, which turns every retry into another spawn-wait-kill cycle and never reaches a loaded model.
 func TestEngineColdStartSurvivesACallerDeadline(t *testing.T) {
 	e := newTestEngineWithHealthDelay(t, time.Hour, time.Hour, 1500*time.Millisecond)
 

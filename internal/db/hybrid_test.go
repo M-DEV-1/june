@@ -181,7 +181,7 @@ func (erroringVectorIndex) Search(ctx context.Context, queryEmbedding []float32,
 func (erroringVectorIndex) Delete(ctx context.Context, id string) error { return nil }
 func (erroringVectorIndex) IDs() []string                               { return nil }
 
-// TestHybridSearch_EmbedFails_DegradesToLexicalOnly verifies an embed error (e.g. the client's daemon-IPC embedder call failing because the daemon is down) doesn't fail the whole HybridSearch call — it degrades to lexical-only fusion instead, since query_memory should still work off FTS5 alone.
+// TestHybridSearch_EmbedFails_DegradesToLexicalOnly verifies an embed error doesn't fail the whole HybridSearch call — it degrades to lexical-only fusion instead, since query_memory should still work off FTS5 alone.
 func TestHybridSearch_EmbedFails_DegradesToLexicalOnly(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)

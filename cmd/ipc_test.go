@@ -2,18 +2,13 @@ package cmd
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
 	"io"
-	"june/internal/embed"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"june/internal/ipctoken"
-	"june/internal/tracker"
 )
 
 // requireIPCToken is the daemon's auth boundary: only the exact token gets through, and the wrapped handler must never run otherwise. The empty-token rows cover a startup where ipctoken.Generate failed — subtle.ConstantTimeCompare("", "") returns 1, so without an explicit guard a request with no header would match and auth would fail open.
@@ -68,121 +63,6 @@ func TestRequireIPCToken(t *testing.T) {
 				t.Errorf("wrapped handler called = %v, want %v", called, want)
 			}
 		})
-	}
-}
-
-// TestBufferProvider_Unreachable_ReturnsNil verifies a dead daemon (connection refused) degrades to nil instead of blocking or erroring — the handshake must proceed without the working-buffer context rather than stall.
-func TestBufferProvider_Unreachable_ReturnsNil(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := srv.URL
-	srv.Close()
-
-	b := &bufferProvider{daemonClient{baseURL: url, client: http.DefaultClient}}
-	if got := b.Get(); got != nil {
-		t.Errorf("expected nil for an unreachable daemon, got %+v", got)
-	}
-}
-
-// TestBufferProvider_AttachesIPCToken verifies the request carries the daemon's IPC auth token — /buffer is protected like every other IPC endpoint except /ping (W2) — and that a 200 response with a JSON activity array decodes correctly, which is what feeds Agent.buildHandshakeContext's "[working]" lines (F2).
-func TestBufferProvider_AttachesIPCToken(t *testing.T) {
-	tokenPath := filepath.Join(t.TempDir(), "ipc-token")
-	token, err := ipctoken.Generate(tokenPath)
-	if err != nil {
-		t.Fatalf("ipctoken.Generate: %v", err)
-	}
-
-	var gotToken, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotToken = r.Header.Get(ipctoken.HeaderName)
-		gotPath = r.URL.Path
-		json.NewEncoder(w).Encode([]tracker.Activity{{App: "Code", Title: "main.go"}})
-	}))
-	defer srv.Close()
-
-	b := &bufferProvider{daemonClient{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}}
-	got := b.Get()
-
-	if gotToken != token {
-		t.Errorf("expected the %s header to carry %q, got %q", ipctoken.HeaderName, token, gotToken)
-	}
-	if gotPath != "/buffer" {
-		t.Errorf("expected GET /buffer, got %s", gotPath)
-	}
-	if len(got) != 1 || got[0].App != "Code" || got[0].Title != "main.go" {
-		t.Errorf("unexpected buffer: %+v", got)
-	}
-}
-
-// TestHTTPVectorIndex_Add_PostsExpectedPayload verifies Add POSTs to /vector/add with the id/content/embedding/metadata fields the daemon handler expects, and that the request carries the daemon's IPC auth token — without it, every /vector/* call now gets 401'd by requireIPCToken (see W2's security fix).
-func TestHTTPVectorIndex_Add_PostsExpectedPayload(t *testing.T) {
-	tokenPath := filepath.Join(t.TempDir(), "ipc-token")
-	token, err := ipctoken.Generate(tokenPath)
-	if err != nil {
-		t.Fatalf("ipctoken.Generate: %v", err)
-	}
-
-	var gotPath, gotToken string
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotToken = r.Header.Get(ipctoken.HeaderName)
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client(), tokenPath: tokenPath}}
-	if err := h.Add(context.Background(), "note:5", "hello", []float32{0.1, 0.2}, map[string]string{"source": "note"}); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-	if gotPath != "/vector/add" {
-		t.Errorf("expected POST to /vector/add, got %q", gotPath)
-	}
-	if gotBody["id"] != "note:5" || gotBody["content"] != "hello" {
-		t.Errorf("unexpected request body: %+v", gotBody)
-	}
-	if gotToken != token {
-		t.Errorf("expected the %s header to carry %q, got %q", ipctoken.HeaderName, token, gotToken)
-	}
-}
-
-// TestHTTPVectorIndex_Search_ServerError_ReturnsError verifies a daemon-side failure (e.g. daemon down, connection refused) surfaces as an error instead of an empty/silent result — this is exactly the failure mode HybridSearch's degrade-to-lexical-only handling (item 5) exists for.
-func TestHTTPVectorIndex_Search_ServerError_ReturnsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	h := &httpVectorIndex{daemonClient{baseURL: srv.URL, client: srv.Client()}}
-	if _, err := h.Search(context.Background(), []float32{0.1}, 10, nil); err == nil {
-		t.Error("expected an error for a 500 daemon response, got nil")
-	}
-}
-
-// TestHTTPEmbedder_PostsTaskAndText verifies the client's embedder reaches the daemon's /embed endpoint with the task and text, and returns the vector the daemon produced. The client cannot run its own llama-server — one process owns the child and the port — so this IPC hop is its only route to a local embedding.
-func TestHTTPEmbedder_PostsTaskAndText(t *testing.T) {
-	var gotPath string
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.25, 0.5}})
-	}))
-	defer srv.Close()
-
-	h := &httpEmbedder{daemonClient{baseURL: srv.URL, client: srv.Client()}}
-	vec, err := h.Embed(context.Background(), embed.TaskRetrievalQuery, "what did i do today")
-	if err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if gotPath != "/embed" {
-		t.Errorf("expected POST to /embed, got %q", gotPath)
-	}
-	if gotBody["task"] != "RETRIEVAL_QUERY" || gotBody["text"] != "what did i do today" {
-		t.Errorf("unexpected request body: %+v", gotBody)
-	}
-	if len(vec) != 2 || vec[0] != 0.25 {
-		t.Errorf("unexpected vector: %v", vec)
 	}
 }
 

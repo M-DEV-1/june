@@ -197,20 +197,20 @@ var openURLCommand = func(url string) *exec.Cmd {
 	}
 }
 
-// approvalGatedTools are the tools whose handler waits on ToolApprovalChan for a human to approve the call. The terminal UI reads that channel and answers it; the daemon reads it nowhere, so there a call parked until the session ended, the model never got a result for it, and every later call was told another approval was already pending. Where nothing has called SetToolApprovals they are kept out of the tool list the live session declares (liveToolsFor) and refused if a model names one anyway; where an approver is registered they behave as they always did. They are out of the ask's list (askAllowedTools) either way.
+// approvalGatedTools are the tools whose handler waits on ToolApprovalChan for a human to approve the call. No production code reads that channel, so a call parked until the session ended, the model never got a result for it, and every later call was told another approval was already pending. Where nothing has called SetToolApprovals they are kept out of the tool list the live session declares (liveToolsFor) and refused if a model names one anyway; where an approver is registered they behave as they always did. They are out of the ask's list (askAllowedTools) either way.
 var approvalGatedTools = map[string]bool{"shell_exec": true, "read_clipboard": true, "read_file": true}
 
-// approverRegistered is true while something in this process is reading ToolApprovalChan and will answer what it finds there. Only the terminal UI does (internal/ui, run in-process by cmd/client.go, which calls SetToolApprovals); the daemon reads that channel nowhere, so its asks, voice sessions, routines and act jobs must refuse an approval-gated tool rather than park on it forever.
+// approverRegistered is true while something in this process is reading ToolApprovalChan and will answer what it finds there. Only tests set it; the daemon reads that channel nowhere, so its asks, voice sessions, routines and act jobs must refuse an approval-gated tool rather than park on it forever.
 // ponytail: one flag for the whole process, not one per Agent, because the tool list is built by package functions (liveToolsFor) that have no Agent in hand; move it onto Agent if a single process ever has to run both an approving and a non-approving session.
 var approverRegistered atomic.Bool
 
-// SetToolApprovals records whether this process has something answering ToolApprovalChan. Input: true when an approver is now reading the channel, false when it stops. Output: none. Called by the terminal UI's process before it connects; a test that turns it on must turn it back off.
+// SetToolApprovals records whether this process has something answering ToolApprovalChan. Input: true when an approver is now reading the channel, false when it stops. Output: none. Called by an approver before it connects; a test that turns it on must turn it back off.
 func SetToolApprovals(on bool) { approverRegistered.Store(on) }
 
 // HasApprover reports whether an approval request would reach a human. Output: true only after SetToolApprovals(true).
 func HasApprover() bool { return approverRegistered.Load() }
 
-// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the TUI's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check HasApprover and AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the TUI to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
+// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the approver's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check HasApprover and AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the approver to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
 func (a *Agent) requestApproval(ctx context.Context, allowKey, description string, execute func() string, editableCommand string) string {
 	resChan := make(chan string, 1)
 	req := ToolRequest{
@@ -223,7 +223,7 @@ func (a *Agent) requestApproval(ctx context.Context, allowKey, description strin
 	select {
 	case a.ToolApprovalChan <- req:
 	default:
-		// TUI approval queue full — another tool is pending. Reject to unblock.
+		// Approval queue full — another tool is pending. Reject to unblock.
 		return toolError("I'm already waiting on another approval, ask again in a moment")
 	}
 

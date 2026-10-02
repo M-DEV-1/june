@@ -442,7 +442,7 @@ func toolDefinitions() []*genai.Tool {
 
 // liveTools returns every tool exposed to the Live API session: June's own FunctionDeclarations (shell_exec, query_memory, save_note, etc.) plus Gemini's native GoogleSearch grounding tool, so June can look something up instead of guessing from memory.
 // Verified live (2026-07-25) that both tool types work together on config.VoiceModel() (gemini-2.5-flash-native-audio-preview-12-2025) — not guaranteed on every Gemini model/endpoint.
-// GoogleSearch calls are grounded server-side by Gemini and never surface as a ToolCall, so they don't show up in the TUI's live tool status line the way the FunctionDeclarations tools do.
+// GoogleSearch calls are grounded server-side by Gemini and never surface as a ToolCall, so they don't show up in ToolActivityChan the way the FunctionDeclarations tools do.
 func liveTools() []*genai.Tool {
 	return liveToolsFor(config.VoiceModel())
 }

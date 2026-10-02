@@ -194,10 +194,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 	compiler := memory.NewCompiler(summarizer, store)
 
-	// vecIndex is nil unless the block below succeeds — declared here (not just inside the block) so the /vector/* IPC handlers further down can serve the client's hybrid search over the same index the daemon itself uses, instead of each opening chromem separately (two processes opening the same chromem dir risks torn reads/corruption).
-	var vecIndex *vector.ChromemIndex
-
-	// embedsFree says the embedder is the local llama-server rather than a metered API. Declared out here for the same reason vecIndex is: it is set inside the block below and read by the reconciliation sweeps further down, which size their budget by it.
+	// embedsFree says the embedder is the local llama-server rather than a metered API. Declared out here because it is set inside the block below and read by the reconciliation sweeps further down, which size their budget by it.
 	embedsFree := false
 
 	// The embedding engine is the local llama-server child process, and only that: there is no API-backed embedder any more. It stays nil when no local embedder is configured, which is what the shutdown path and the /embed IPC handler key off, and means no semantic half at all — HybridSearch already falls back to lexical-only when Store has no embedder/vector index set.
@@ -225,7 +222,6 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		if err != nil {
 			slog.Warn("failed to init vector index, hybrid search degrades to lexical-only", "error", err)
 		} else {
-			vecIndex = index
 			store.SetEmbedder(&embedderAdapter{inner: embedEngine})
 			// The local engine costs CPU rather than API calls, which is what lets reconciliation backfill episodes of any age instead of only the last ten days.
 			store.SetEmbedsAreFree(true)
@@ -233,9 +229,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			store.SetVectorSimilarityFloor(float32(appConfig.Embed.Floor()))
 			// The floor the act run reference block scores past screen questions against, on the same embedder's scale as the one above.
 			store.SetActRunSimilarityFloor(appConfig.Embed.ActRunFloor())
-			store.SetVectorIndex(&vectorIndexAdapter{inner: vecIndex})
+			store.SetVectorIndex(&vectorIndexAdapter{inner: index})
 
-			// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later (e.g. client-side note saves) that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
+			// Startup sweep: heals a store carried over from before targeted vector deletes existed (orphaned notes/summaries/thinned episodes) and backfills anything wired in later that never got a vector. Async — a sweep of a large dirty store can spend real time on embeds and must not delay the rest of startup.
 			go func() {
 				report, err := store.ReconcileVectors(ctx, reconcileCap(embedsFree))
 				if err != nil {
@@ -533,12 +529,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 	go drainEpisodes(ctx, eventChan, store.WriteEpisode, ingestEpisode)
 
-	// IPC token: every handler below except /ping requires it (see requireIPCToken) — without this, any local process (or, since browsers can reach 127.0.0.1, any webpage) could read the live activity buffer, inject/wipe "memories" via /vector/add|delete, or toggle tracking. Regenerated on every startup so a leftover/stale process's copy stops working.
+	// IPC token: every handler below except /ping requires it (see requireIPCToken) — without this, any local process (or, since browsers can reach 127.0.0.1, any webpage) could read the store, ask questions as the user, or toggle tracking. Regenerated on every startup so a leftover/stale process's copy stops working.
 	ipcToken, err := ipctoken.Generate(ipctoken.DefaultPath)
 	if err != nil {
 		slog.Error("failed to generate IPC auth token, daemon IPC will be unreachable", "error", err)
 	}
-	// Every authenticated request is by definition a live TUI client, so the auth wrapper doubles as the presence signal that pins the embedding server in memory and warms it. The daemon has no other notion of a client session, and adding one just for this would be more machinery than a timestamp.
+	// Every authenticated request comes from a live client such as the desktop window, so the auth wrapper doubles as the presence signal that pins the embedding server in memory and warms it. The daemon has no other notion of a client session, and adding one just for this would be more machinery than a timestamp.
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return requireIPCToken(ipcToken, func(w http.ResponseWriter, r *http.Request) {
 			if embedEngine != nil {
@@ -548,7 +544,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		})
 	}
 
-	// The window's read routes draw on the same store the daemon writes, on the compiler's live activity buffer — the one /buffer already serves — for what is on screen this second, and on the tracker's own active-window read for what has focus right now: the buffer only updates on the tracker's sampling interval, so a hotkey pressed between samples would otherwise name a window the user has already left.
+	// The window's read routes draw on the same store the daemon writes, on the compiler's live activity buffer for what is on screen this second, and on the tracker's own active-window read for what has focus right now: the buffer only updates on the tracker's sampling interval, so a hotkey pressed between samples would otherwise name a window the user has already left.
 	// The brain picked in Settings answers first; the router otherwise ranks by cost and left the pick last.
 	agent.SetPreferredProvider(appConfig.Brain.Provider)
 	ipcServer := ipc.New(askAgent, store, func() []tracker.Activity {
@@ -694,7 +690,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		return tr.Answer, err
 	})
 
-	// local http for IPC between the tui and daemon
+	// local http for IPC between the daemon and its clients (window, tray, the june command)
 	mux := http.NewServeMux()
 
 	// One accessor over the config the request goroutines share, so POST /settings writing ClaudeUsageFromLogin and the /brains and /usage handlers reading it are not touching the same struct from several goroutines at once.
@@ -703,10 +699,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	registerDaemonRoutes(mux, routeDependencies{
 		auth:            auth,
-		compiler:        compiler,
 		daemon:          daemon,
-		vecIndex:        vecIndex,
-		embedEngine:     embedEngine,
 		ipcServer:       ipcServer,
 		actJobs:         actJobs,
 		store:           store,

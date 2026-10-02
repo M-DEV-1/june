@@ -27,7 +27,7 @@ import (
 // controlTokenPattern matches the artifacts the Live API occasionally leaves in OutputTranscription text instead of consuming them internally: a literal "<ctrlN>" marker (a real session logged "june said" text of exactly "<ctrl46><ctrl46>"), or a run of the Unicode replacement character U+FFFD produced by the same kind of encoding slip.
 var controlTokenPattern = regexp.MustCompile(`<ctrl\d+>|\x{FFFD}+`)
 
-// stripControlTokens removes control-token artifacts from a chunk of June's own transcribed speech before it is logged or forwarded anywhere else. Applied at receiveLoop's single OutputTranscription choke point, upstream of both the "june said" log and the TUI/voice channel, so every downstream consumer sees the same cleaned text instead of each needing its own filter. Input: one OutputTranscription text chunk. Output: the chunk with control-token artifacts removed, otherwise untouched — spacing around real words is left alone since chunks stream in word-by-word and later get concatenated, so trimming here would merge two chunks together. A chunk that was nothing but such artifacts (or whitespace once they're gone) comes back empty.
+// stripControlTokens removes control-token artifacts from a chunk of June's own transcribed speech before it is logged or forwarded anywhere else. Applied at receiveLoop's single OutputTranscription choke point, upstream of both the "june said" log and the voice channel, so every downstream consumer sees the same cleaned text instead of each needing its own filter. Input: one OutputTranscription text chunk. Output: the chunk with control-token artifacts removed, otherwise untouched — spacing around real words is left alone since chunks stream in word-by-word and later get concatenated, so trimming here would merge two chunks together. A chunk that was nothing but such artifacts (or whitespace once they're gone) comes back empty.
 func stripControlTokens(s string) string {
 	cleaned := controlTokenPattern.ReplaceAllString(s, "")
 	if strings.TrimSpace(cleaned) == "" {
@@ -316,7 +316,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	}
 
 	// config
-	// Voice is configurable via /voice in the TUI (see config.AvailableVoices); falls back to config.DefaultVoice if unset or invalid.
+	// Voice is configurable in the window's settings (see config.AvailableVoices); falls back to config.DefaultVoice if unset or invalid.
 	voiceName := a.GetVoice()
 	if _, ok := config.NormalizeVoice(voiceName); voiceName == "" || !ok {
 		voiceName = config.DefaultVoice
@@ -701,7 +701,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		// OutputTranscription is the text of June's own spoken audio — with ResponseModalities=[Audio], this is the only complete-text form of what June actually said, since ModelTurn text parts are fragments (see below). Also the first sign the model is responding, so it flushes any pending input-transcript first (see flushInputTranscript's doc comment).
 		if msg.ServerContent != nil && msg.ServerContent.OutputTranscription != nil && msg.ServerContent.OutputTranscription.Text != "" {
 			flushInputTranscript()
-			// Strip control-token artifacts here, before the text reaches either consumer below — the log line and the TUI/voice channel both read from this one spot, so cleaning it once here is enough for both. A chunk that was nothing but artifacts comes back empty and is dropped rather than logged or spoken as if it were real content.
+			// Strip control-token artifacts here, before the text reaches either consumer below — the log line and the voice channel both read from this one spot, so cleaning it once here is enough for both. A chunk that was nothing but artifacts comes back empty and is dropped rather than logged or spoken as if it were real content.
 			if text := stripControlTokens(msg.ServerContent.OutputTranscription.Text); text != "" {
 				outputTranscriptBuf.WriteString(text)
 				select {
@@ -822,7 +822,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 
 		// tool calling - check if model wants to use a tool.
 		//
-		// Dispatched to its own goroutine per call: executeTool can block for an arbitrary time (HITL shell_exec waits on TUI approval), and running it inline here used to stall session.Receive() for the duration, backing up the receive buffer and dropping mic frames in audioSendLoop downstream. Now Receive() keeps getting called immediately; the tool's result is sent back later, matched by fc.ID/fc.Name.
+		// Dispatched to its own goroutine per call: executeTool can block for an arbitrary time (HITL shell_exec waits on approval), and running it inline here used to stall session.Receive() for the duration, backing up the receive buffer and dropping mic frames in audioSendLoop downstream. Now Receive() keeps getting called immediately; the tool's result is sent back later, matched by fc.ID/fc.Name.
 		// One goroutine per MESSAGE, not per call: the calls of one model turn are steps of one plan and run in the order the model gave them. Measured 2026-09-09: click(tab) and press_key Ctrl+W arrived together, the key landed after 62 ms and the click after 666 ms, so the wrong tab closed; click(search box) and type_text arrived together three times and the typing finished before the click landed, so the box stayed empty. Receive() is still never blocked, which is what the goroutine is for.
 		if msg.ToolCall != nil {
 			flushInputTranscript()

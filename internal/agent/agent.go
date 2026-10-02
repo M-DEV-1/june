@@ -15,7 +15,7 @@ import (
 // atomic is well, really cool
 // lighter lock-free primitives but only work per-variable and mutex protects blocks but is heavier
 
-// brain interface. Notes ops live here too so the TUI can save user-stated facts via the agent handle.
+// brain interface. Notes ops live here too so tools can save user-stated facts via the agent handle.
 type ContextReader interface {
 	GetImplicitContext(ctx context.Context) ([]string, error)
 	SearchMemory(ctx context.Context, query string) ([]db.MemoryHit, error)
@@ -79,14 +79,14 @@ const (
 	SenderSystem = "system"
 )
 
-// ToolRequest is a generic HITL approval request — not shell-specific, so tools beyond shell_exec (read_file on a sensitive path, read_clipboard) can gate through the same TUI approve/reject/edit flow instead of shipping their result to the model with zero user involvement.
+// ToolRequest is a generic HITL approval request — not shell-specific, so tools beyond shell_exec (read_file on a sensitive path, read_clipboard) can gate through the same approve/reject/edit flow instead of shipping their result to the model with zero user involvement.
 type ToolRequest struct {
 	// Description is shown in the approval prompt, e.g. "shell: ls -la" or "read file: ~/.ssh/id_rsa".
 	Description string
-	// Execute runs the approved action and returns its result — called by the TUI on "Allow once"/"Allow for session", never on reject.
+	// Execute runs the approved action and returns its result — called by the approver on "Allow once"/"Allow for session", never on reject.
 	Execute    func() string
 	ResultChan chan<- string
-	// AllowKey, if non-empty, is what "Allow for session" stores into AllowedCmds so a repeat request for the same resource skips approval for the rest of the session. Callers check AllowedCmds themselves before sending a request; this only tells the TUI what to store on approval.
+	// AllowKey, if non-empty, is what "Allow for session" stores into AllowedCmds so a repeat request for the same resource skips approval for the rest of the session. Callers check AllowedCmds themselves before sending a request; this only tells the approver what to store on approval.
 	AllowKey string
 	// EditableCommand, if non-empty, is the raw command text "Suggest changes" pre-fills into the textarea for editing — only shell-backed requests support this; other tools have no command text to edit.
 	EditableCommand string
@@ -121,7 +121,7 @@ type Agent struct {
 	brain      ContextReader
 	// gate, when set, is asked before every Gemini request an interactive ask or a live voice session makes, so those count against the same daily allowance as the nightly jobs; nil means unmetered.
 	gate RequestGate
-	// bufferProvider is the source of the handshake's "[working]" current-activity context — nil means skip that part of the handshake entirely. NewAgent seeds it from a non-nil compiler (in-process use); the client process (which never has a compiler) wires its own via SetBufferProvider — see cmd/client.go's IPC-backed provider.
+	// bufferProvider is the source of the handshake's "[working]" current-activity context — nil means skip that part of the handshake entirely. NewAgent seeds it from a non-nil compiler; a caller without one wires its own via SetBufferProvider.
 	bufferProvider func() []tracker.Activity
 	// observe reads the window in front for the observe_screen tool: tracker.Observe in production, a fake in tests.
 	observe func(ctx context.Context) (app, title string, nodes []act.Node, err error)
@@ -171,8 +171,8 @@ type Agent struct {
 	voice            atomic.Value
 	isMuted          atomic.Bool
 	writeMu          sync.Mutex         // protects websocket writes
-	TextChan         chan string        // this is for tui text input
-	TextResponseChan chan ResponseChunk // results for tui text resp — tagged with IsThought so the UI never infers it from content
+	TextChan         chan string        // typed text input into the live session
+	TextResponseChan chan ResponseChunk // text responses from the live session — tagged with IsThought so the UI never infers it from content
 	ErrorChan        chan error         // websocket connection crashes
 	ToolApprovalChan chan ToolRequest
 	// ToolActivityChan carries a Started/Finished pair for every tool call, so a UI can show live "tool running" status. Buffered 20 to absorb a burst of concurrent tool calls in one turn; sends are non-blocking like every other Agent channel — a missed event is cosmetic, never a correctness issue.
@@ -235,30 +235,8 @@ func (a *Agent) getResumeHandle() string {
 	return val.(string)
 }
 
-func (a *Agent) GetMic() audio.Microphone {
-	return a.mic
-}
-
-func (a *Agent) GetSpeaker() audio.Speaker {
-	return a.speaker
-}
-
-func (a *Agent) GetBrain() ContextReader {
-	return a.brain
-}
-
 func (a *Agent) SetMute(muted bool) {
 	a.isMuted.Store(muted)
-}
-
-func (a *Agent) ToggleMute() bool {
-	current := a.isMuted.Load()
-	a.isMuted.Store(!current)
-	return !current
-}
-
-func (a *Agent) IsMuted() bool {
-	return a.isMuted.Load()
 }
 
 func (a *Agent) SetModel(name string) {
@@ -274,7 +252,7 @@ func (a *Agent) GetModel() string {
 }
 
 // SetVoice sets the Gemini Live prebuilt voice name to use on the next (re)connect.
-// Does not itself trigger a reconnect — call TriggerReconnect (or let the next natural reconnect pick it up).
+// Does not itself trigger a reconnect; the next reconnect picks it up.
 func (a *Agent) SetVoice(name string) {
 	a.voice.Store(name)
 }
@@ -288,16 +266,7 @@ func (a *Agent) GetVoice() string {
 	return val.(string)
 }
 
-// TriggerReconnect asks the running Connect session to drop and re-dial, so a voice change applies immediately rather than on the next natural reconnect.
-// Non-blocking: if a reconnect is already pending, this is a no-op.
-func (a *Agent) TriggerReconnect() {
-	select {
-	case a.ReconnectChan <- struct{}{}:
-	default:
-	}
-}
-
-// NewAgent keeps the compiler param for signature compatibility — a non-nil compiler seeds bufferProvider for any in-process caller (the client process has no compiler and never did; it wires its own provider afterward via SetBufferProvider — see cmd/client.go's IPC-backed one).
+// NewAgent keeps the compiler param for signature compatibility — a non-nil compiler seeds bufferProvider; a caller without one wires its own afterward via SetBufferProvider.
 // RequestGate decides whether one more Gemini request against a model may go out today. It is the same one-method shape memory.GeminiSummarizer takes, so the daemon hands both the one shared daily count.
 type RequestGate interface {
 	Allow(model string) error
@@ -347,7 +316,7 @@ func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, 
 	return a
 }
 
-// SetBufferProvider wires the source of the handshake's "[working]" current-activity context — the client process (which has no in-process compiler) uses this to plug in an IPC-backed provider instead. nil (the default when no compiler was passed to NewAgent either) skips that part of the handshake entirely.
+// SetBufferProvider wires the source of the handshake's "[working]" current-activity context — a caller with no compiler (the daemon's voice session) uses this to plug in its own provider. nil (the default when no compiler was passed to NewAgent either) skips that part of the handshake entirely.
 func (a *Agent) SetBufferProvider(p func() []tracker.Activity) {
 	a.bufferProvider = p
 }

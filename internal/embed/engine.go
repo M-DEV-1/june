@@ -11,7 +11,7 @@ import (
 )
 
 // Engine is a LocalEmbedder that owns the embedding server as a child process. The daemon holds exactly one of these; nothing else may spawn the server, because two copies would fight over the same port.
-// Lifecycle: spawned on the first embed (or on the first authenticated client request), kept alive as long as a TUI client has been seen inside presenceWindow, otherwise killed once idle for the configured timeout, respawned on the next embed if it died or was reaped, and killed unconditionally on Close.
+// Lifecycle: spawned on the first embed (or on the first authenticated client request), kept alive as long as a client has been seen inside presenceWindow, otherwise killed once idle for the configured timeout, respawned on the next embed if it died or was reaped, and killed unconditionally on Close.
 type Engine struct {
 	*serverProcess
 	inner          *LocalEmbedder
@@ -61,7 +61,7 @@ func newEngine(binary string, args []string, baseURL, model string, idle time.Du
 	return e
 }
 
-// MarkClientPresence records that an authenticated client request just arrived, and starts the server in the background if it is not already up. This is what pins the server in memory while a TUI is running, and what makes the user's first question meet an already-loaded model instead of paying the cold start. The daemon's IPC auth wrapper calls it on every authenticated request, so it never waits on a spawn or a model load — the timestamp write is lock-free and the start runs on its own goroutine.
+// MarkClientPresence records that an authenticated client request just arrived, and starts the server in the background if it is not already up. This is what pins the server in memory while the window is in use, and what makes the user's first question meet an already-loaded model instead of paying the cold start. The daemon's IPC auth wrapper calls it on every authenticated request, so it never waits on a spawn or a model load — the timestamp write is lock-free and the start runs on its own goroutine.
 // Input: a context whose lifetime is the daemon's, used only for the background start. Output: none.
 func (e *Engine) MarkClientPresence(ctx context.Context) {
 	e.lastClient.Store(time.Now().UnixNano())

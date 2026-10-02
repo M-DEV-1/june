@@ -1,4 +1,4 @@
-/** Tests for the hover's braille waveform, ported alongside waveform.ts from internal/ui/waveform_test.go so the smoothing and the render shape stay the ones the terminal client already proved out. */
+/** Tests for the hover's braille waveform: the smoothing and the render shape. */
 
 import { describe, expect, it } from "vitest";
 

@@ -12,22 +12,16 @@ import (
 	"june/internal/brain"
 	"june/internal/config"
 	"june/internal/db"
-	"june/internal/embed"
 	"june/internal/ipc"
-	"june/internal/memory"
 	"june/internal/proactive"
 	"june/internal/recorder"
 	"june/internal/tracker"
 	"june/internal/util"
-	"june/internal/vector"
 )
 
 type routeDependencies struct {
 	auth            func(http.HandlerFunc) http.HandlerFunc
-	compiler        *memory.Compiler
 	daemon          *tracker.Daemon
-	vecIndex        *vector.ChromemIndex
-	embedEngine     *embed.Engine
 	ipcServer       *ipc.Server
 	actJobs         *ipc.ActJobs
 	store           *db.Store
@@ -59,10 +53,7 @@ func withPreflight(mux *http.ServeMux, auth func(http.HandlerFunc) http.HandlerF
 // registerDaemonRoutes wires up the HTTP routes on mux for IPC communication.
 func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	auth := d.auth
-	compiler := d.compiler
 	daemon := d.daemon
-	vecIndex := d.vecIndex
-	embedEngine := d.embedEngine
 	ipcServer := d.ipcServer
 	actJobs := d.actJobs
 	store := d.store
@@ -76,16 +67,6 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 
 	// heartbeat — deliberately unauthenticated: root.go's pre-spawn liveness probe polls this before it can assume the token file even exists yet, and the build identity it returns reveals nothing sensitive.
 	mux.HandleFunc("/ping", pingHandler)
-
-	// data sharing endpoint, get latest tracking data
-	mux.HandleFunc("/buffer", auth(func(w http.ResponseWriter, r *http.Request) {
-		if compiler == nil {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		buf := compiler.GetCurrentBuffer()
-		util.WriteJSON(w, buf)
-	}))
 
 	// The tray asks the window it started to open or to show its hover; the instruction travels on the event stream the window already reads.
 	mux.HandleFunc("/window", auth(ipcServer.Window))
@@ -107,88 +88,6 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 
 	mux.HandleFunc("/status", auth(func(w http.ResponseWriter, r *http.Request) {
 		util.WriteJSON(w, map[string]bool{"paused": daemon.IsPaused()})
-	}))
-
-	// /vector/* let the client process reach the daemon's vector index over IPC instead of opening chromem itself — two processes opening the same chromem dir risks torn reads/corruption (see vecIndex's own doc comment above). All three return 503 with no body if the daemon has no vector index wired (no API key, or init failed) — the client's httpVectorIndex adapter treats any non-200 as an error, which HybridSearch already degrades gracefully from (see internal/db/hybrid.go's resilience handling).
-	mux.HandleFunc("/vector/search", auth(func(w http.ResponseWriter, r *http.Request) {
-		if vecIndex == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			Embedding []float32         `json:"embedding"`
-			N         int               `json:"n"`
-			Where     map[string]string `json:"where"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		results, err := vecIndex.Search(r.Context(), req.Embedding, req.N, req.Where)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		util.WriteJSON(w, map[string]any{"results": results})
-	}))
-
-	mux.HandleFunc("/vector/add", auth(func(w http.ResponseWriter, r *http.Request) {
-		if vecIndex == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			ID        string            `json:"id"`
-			Content   string            `json:"content"`
-			Embedding []float32         `json:"embedding"`
-			Metadata  map[string]string `json:"metadata"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		if err := vecIndex.Add(r.Context(), req.ID, req.Content, req.Embedding, req.Metadata); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	mux.HandleFunc("/vector/delete", auth(func(w http.ResponseWriter, r *http.Request) {
-		if vecIndex == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			ID string `json:"id"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		if err := vecIndex.Delete(r.Context(), req.ID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	// /embed lets the client reach the daemon's embedding engine instead of running one of its own. Only the daemon may own the llama-server child (one process, one port), so this is the client's only route to a local vector. 503 with no body when the daemon is on the Gemini path or has no embedder at all, which the client's httpEmbedder reports as an error and HybridSearch degrades from.
-	mux.HandleFunc("/embed", auth(func(w http.ResponseWriter, r *http.Request) {
-		if embedEngine == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		var req struct {
-			Task string `json:"task"`
-			Text string `json:"text"`
-		}
-		if !ipc.DecodeJSON(w, r, &req) {
-			return
-		}
-		vec, err := embedEngine.Embed(r.Context(), embed.TaskType(req.Task), req.Text)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		util.WriteJSON(w, map[string]any{"embedding": vec})
 	}))
 
 	// /ask and /events let the desktop window pose a question about what's on screen and stream the answer as it comes together — see internal/ipc for the route bodies.
@@ -221,7 +120,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	mux.HandleFunc("/memory/search", auth(ipcServer.MemorySearch))
 	mux.HandleFunc("/people", auth(ipcServer.People))
 
-	// The window's voice: the daemon runs the same Gemini Live loop the terminal client does, and what the session hears, says and calls rides the /events stream above. Route bodies are in internal/ipc/voice.go.
+	// The window's voice: the daemon runs the Gemini Live loop, and what the session hears, says and calls rides the /events stream above. Route bodies are in internal/ipc/voice.go.
 	voiceSession := ipc.NewVoice(ipcServer, store, apiKey, actJobs.Spoken)
 	mux.HandleFunc("/voice/start", auth(voiceSession.Start))
 	mux.HandleFunc("/voice/stop", auth(voiceSession.Stop))

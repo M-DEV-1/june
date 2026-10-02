@@ -632,7 +632,7 @@ func TestToolDefinitions_AllNonBlocking(t *testing.T) {
 
 // --- save_note ---
 //
-// Nothing said IN CONVERSATION reached long-term memory before this tool existed: LogNote was only ever called from the TUI's /note slash command or the background screen-activity compiler, never from the live agent itself. save_note closes that gap.
+// Nothing said IN CONVERSATION reached long-term memory before this tool existed: LogNote was only ever called from a /note slash command or the background screen-activity compiler, never from the live agent itself. save_note closes that gap.
 
 func TestExecuteTool_SaveNote_Success_CallsLogNoteAndReturnsSaved(t *testing.T) {
 	brain := &toolTestBrain{}
@@ -832,7 +832,7 @@ func TestIsSensitivePath(t *testing.T) {
 	}
 }
 
-// TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval verifies a sensitive path blocks on ToolApprovalChan instead of shipping its content straight to the model, once an approver is registered (the terminal UI, which reads that channel — see SetToolApprovals).
+// TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval verifies a sensitive path blocks on ToolApprovalChan instead of shipping its content straight to the model, once an approver is registered (see SetToolApprovals).
 func TestExecuteTool_ReadFile_SensitivePath_BlocksOnApproval(t *testing.T) {
 	SetToolApprovals(true)
 	t.Cleanup(func() { SetToolApprovals(false) })
@@ -2628,7 +2628,7 @@ func TestExecuteTool_OpenURL_RaisesTheBrowserThroughTheExtension(t *testing.T) {
 	}
 }
 
-// TestLiveTools_OmitsApprovalGatedToolsWithoutAnApprover checks a session with nobody reading ToolApprovalChan never declares the tools that wait on it — the daemon reads that channel nowhere, so a voice session that called one of them parked until the session ended and the model never got a result. With an approver registered (the terminal UI) the same tools are declared again.
+// TestLiveTools_OmitsApprovalGatedToolsWithoutAnApprover checks a session with nobody reading ToolApprovalChan never declares the tools that wait on it — the daemon reads that channel nowhere, so a voice session that called one of them parked until the session ended and the model never got a result. With an approver registered the same tools are declared again.
 func TestLiveTools_OmitsApprovalGatedToolsWithoutAnApprover(t *testing.T) {
 	declared := func() map[string]bool {
 		names := map[string]bool{}

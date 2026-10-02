@@ -1,4 +1,4 @@
-/** Live audio-level waveform for the hover's voice session, ported from internal/ui/waveform.go so the desktop window draws the same braille bar the terminal client already has. The hover runs in a separate process from the daemon's microphone and speaker, so it never reads an amplitude itself — the daemon samples both every 50ms while a live session runs and ships {"mic":0-1,"speaker":0-1} as the "level" event's Detail (see internal/ipc/voice.go). This file turns one such reading into the braille rows a Waveform instance draws for one of the two channels. No DOM, no timers, nothing time-based beyond what the caller feeds in: update(amp) advances the smoothing, render() reads the eased value back out as strings. */
+/** Live audio-level waveform for the hover's voice session drawn as a braille bar. The hover runs in a separate process from the daemon's microphone and speaker, so it never reads an amplitude itself — the daemon samples both every 50ms while a live session runs and ships {"mic":0-1,"speaker":0-1} as the "level" event's Detail (see internal/ipc/voice.go). This file turns one such reading into the braille rows a Waveform instance draws for one of the two channels. No DOM, no timers, nothing time-based beyond what the caller feeds in: update(amp) advances the smoothing, render() reads the eased value back out as strings. */
 
 // riseAlpha: how fast amplitude rises (0=no rise, 1=instant).
 // fallAlpha: how fast amplitude falls — 0.26 reaches near-zero in ~500ms (clear pauses, not jumpy).
@@ -36,9 +36,9 @@ export function buildVariation(width: number): number[] {
 }
 
 /**
- * Waveform smooths one audio channel's amplitude readings and renders them as a symmetric braille bar centred on a baseline, the same shape internal/ui/waveform.go draws for one of the terminal client's two Waveforms (mic or speaker).
+ * Waveform smooths one audio channel's amplitude readings and renders them as a symmetric braille bar centred on a baseline, one per channel (mic or speaker).
  *
- * The terminal UI stacks a second "far" braille row above and below its "near" row on each side of centre, so one bar spans four rows and eight dot-levels of amplitude — the near rows fill first, then the far rows fill outward once the near rows are full. This port keeps all four rows, in the same top-to-bottom order as waveform.go's Render: far-top, near-top, near-bottom, far-bottom.
+ * It stacks a second "far" braille row above and below its "near" row on each side of centre, so one bar spans four rows and eight dot-levels of amplitude — the near rows fill first, then the far rows fill outward once the near rows are full. The rows run top to bottom: far-top, near-top, near-bottom, far-bottom.
  *
  *   silent:  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
  *            ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀
